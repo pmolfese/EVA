@@ -394,6 +394,15 @@ struct WaveformView: View {
             }
 
             Menu {
+                if activeSelectionRange(in: signal) != nil,
+                   let defaultChannel = defaultArtifactTemplateChannel(in: signal) {
+                    Button("Define Artifact…") {
+                        openArtifactTemplateSheet(for: signal, clickedChannel: defaultChannel)
+                    }
+
+                    Divider()
+                }
+
                 Toggle("Eye Blink", isOn: $detectsEyeBlinkArtifacts)
                 Toggle("Eye Movement", isOn: $detectsEyeMovementArtifacts)
                 Toggle("ECG", isOn: $detectsECGArtifacts)
@@ -1456,6 +1465,12 @@ struct WaveformView: View {
     }
 
     // MARK: - Artifact template definition
+
+    private func defaultArtifactTemplateChannel(in signal: MFFSignalData) -> Int? {
+        signal.data.indices.first { !channels.hidden.contains($0) && !channels.bad.contains($0) }
+            ?? signal.data.indices.first { !channels.hidden.contains($0) }
+            ?? signal.data.indices.first
+    }
 
     private func openArtifactTemplateSheet(for signal: MFFSignalData, clickedChannel: Int) {
         guard let range = activeSelectionRange(in: signal), signal.samplingRate > 0 else {
@@ -4184,7 +4199,7 @@ private struct ArtifactScanSignature: Equatable {
 /// A toolbar button face that draws its own fixed-size rounded-rect chrome so
 /// that every control — whether a plain Button or a Menu — renders at an
 /// identical size regardless of how the system button/menu styles add padding.
-private struct ToolbarIcon: View {
+struct ToolbarIcon: View {
     let name: String
     var isActive: Bool = false
 
