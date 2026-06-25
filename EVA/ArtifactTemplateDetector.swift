@@ -1,0 +1,542 @@
+//
+//  ArtifactTemplateDetector.swift
+//  SummerEEGDemo
+//
+//  Interactive exemplar/template matching for user-defined EEG artifacts.
+//
+
+import Foundation
+
+struct ArtifactTemplateConfiguration: Sendable {
+    var name: String
+    var eventCode: String
+    var selectedChannelIndices: [Int]
+    var comparisonChannelIndices: [Int]
+    var exemplarRange: ClosedRange<Int>
+    var matchThreshold: Double
+    var windowSizeSeconds: Double
+    var downsampleRate: Double
+    var mergeWindowSeconds: Double
+    var polarity: ArtifactTemplatePolarity
+    var comparisonScopes: [ArtifactTemplateComparisonScope] = []
+}
+
+enum ArtifactTemplatePolarity: String, CaseIterable, Identifiable, Codable, Sendable {
+    case same = "Same"
+    case opposite = "Opposite"
+    case either = "Either"
+
+    var id: String { rawValue }
+}
+
+struct ArtifactTemplateDetectionResult: Sendable {
+    var selectedEvents: [MFFEvent]
+    var comparisonEvents: [MFFEvent]
+    var scopeCounts: [ArtifactTemplateScopeCount]
+    var singleChannelMatchCounts: [Int: Int]
+    var templateAverage: ArtifactTemplateAverage?
+    var savedTemplate: SavedArtifactTemplate
+
+    var additionalComparisonCount: Int {
+        max(comparisonEvents.count - selectedEvents.count, 0)
+    }
+}
+
+struct ArtifactTemplateComparisonScope: Sendable {
+    var name: String
+    var channelIndices: [Int]
+}
+
+struct ArtifactTemplateScopeCount: Identifiable, Sendable {
+    var name: String
+    var channelCount: Int
+    var matchCount: Int
+
+    var id: String { "\(name)-\(channelCount)-\(matchCount)" }
+}
+
+struct ArtifactTemplateAverage: Sendable {
+    var samplingRate: Double
+    var windowSizeSeconds: Double
+    var eventCount: Int
+    var selectedChannelIndices: [Int]
+    var allChannelSamples: [[Float]]
+    var channelSummaries: [ArtifactTemplateChannelSummary]
+}
+
+struct ArtifactTemplateChannelSummary: Identifiable, Sendable {
+    var channelIndex: Int
+    var peakAbsoluteMicrovolts: Float
+    var rmsMicrovolts: Float
+
+    var id: Int { channelIndex }
+}
+
+struct SavedArtifactTemplate: Codable, Sendable {
+    var schemaVersion: Int
+    var name: String
+    var eventCode: String
+    var createdAt: Date
+    var sourceSignalPath: String
+    var sourceSamplingRate: Double
+    var exemplarStartSeconds: Double
+    var exemplarEndSeconds: Double
+    var windowSizeSeconds: Double
+    var channelScope: String
+    var channels: [SavedArtifactTemplateChannel]
+    var preprocessing: SavedArtifactTemplatePreprocessing
+    var matching: SavedArtifactTemplateMatching
+    var exemplarSamples: [[Float]]
+    var averageSamples: [[Float]]?
+    var averageEventCount: Int
+}
+
+struct SavedArtifactTemplateChannel: Codable, Sendable {
+    var index: Int
+    var label: String
+    var peakAbsoluteMicrovolts: Float
+    var rmsMicrovolts: Float
+}
+
+struct SavedArtifactTemplatePreprocessing: Codable, Sendable {
+    var downsampleRate: Double
+    var normalization: String
+}
+
+struct SavedArtifactTemplateMatching: Codable, Sendable {
+    var threshold: Double
+    var mergeWindowSeconds: Double
+    var polarity: ArtifactTemplatePolarity
+}
+
+nonisolated enum ArtifactTemplateDetector {
+    static func detect(
+        in signal: MFFSignalData,
+        configuration: ArtifactTemplateConfiguration
+    ) -> ArtifactTemplateDetectionResult {
+        guard signal.samplingRate > 0,
+              let sampleCount = signal.data.first?.count,
+              sampleCount > 0 else {
+            let emptyTemplate = savedTemplate(
+                signal: signal,
+                configuration: configuration,
+                channelIndices: [],
+                exemplarSamples: [],
+                average: nil
+            )
+            return ArtifactTemplateDetectionResult(
+                selectedEvents: [],
+                comparisonEvents: [],
+                scopeCounts: [],
+                singleChannelMatchCounts: [:],
+                templateAverage: nil,
+                savedTemplate: emptyTemplate
+            )
+        }
+
+        let exemplarRange = clamped(configuration.exemplarRange, upperBound: sampleCount - 1)
+        let windowSamples = max(Int((configuration.windowSizeSeconds * signal.samplingRate).rounded()), 3)
+        let exemplarCenter = (exemplarRange.lowerBound + exemplarRange.upperBound) / 2
+        let exemplarStart = min(max(exemplarCenter - windowSamples / 2, 0), max(sampleCount - windowSamples, 0))
+        let exemplarEnd = min(exemplarStart + windowSamples, sampleCount)
+        let selectedChannels = validChannels(configuration.selectedChannelIndices, in: signal)
+        let comparisonChannels = validChannels(configuration.comparisonChannelIndices, in: signal)
+
+        let selectedEvents = scan(
+            signal: signal,
+            channelIndices: selectedChannels,
+            exemplarStart: exemplarStart,
+            exemplarEnd: exemplarEnd,
+            configuration: configuration
+        )
+        let average = average(
+            signal: signal,
+            events: selectedEvents,
+            selectedChannelIndices: selectedChannels,
+            windowSamples: windowSamples
+        )
+        let comparisonEvents = scan(
+            signal: signal,
+            channelIndices: comparisonChannels,
+            exemplarStart: exemplarStart,
+            exemplarEnd: exemplarEnd,
+            configuration: configuration
+        )
+        let scopeCounts = configuration.comparisonScopes.map { scope in
+            let channels = validChannels(scope.channelIndices, in: signal)
+            let events = scan(
+                signal: signal,
+                channelIndices: channels,
+                exemplarStart: exemplarStart,
+                exemplarEnd: exemplarEnd,
+                configuration: configuration
+            )
+            return ArtifactTemplateScopeCount(
+                name: scope.name,
+                channelCount: channels.count,
+                matchCount: events.count
+            )
+        }
+        let singleChannelMatchCounts = singleChannelCounts(
+            signal: signal,
+            channelIndices: average?.channelSummaries.prefix(8).map(\.channelIndex) ?? [],
+            exemplarStart: exemplarStart,
+            exemplarEnd: exemplarEnd,
+            configuration: configuration
+        )
+        let exemplarSamples = selectedChannels.map { index in
+            Array(signal.data[index][exemplarStart..<exemplarEnd])
+        }
+        let saved = savedTemplate(
+            signal: signal,
+            configuration: configuration,
+            channelIndices: selectedChannels,
+            exemplarSamples: exemplarSamples,
+            average: average
+        )
+
+        return ArtifactTemplateDetectionResult(
+            selectedEvents: selectedEvents,
+            comparisonEvents: comparisonEvents,
+            scopeCounts: scopeCounts,
+            singleChannelMatchCounts: singleChannelMatchCounts,
+            templateAverage: average,
+            savedTemplate: saved
+        )
+    }
+
+    private static func singleChannelCounts(
+        signal: MFFSignalData,
+        channelIndices: [Int],
+        exemplarStart: Int,
+        exemplarEnd: Int,
+        configuration: ArtifactTemplateConfiguration
+    ) -> [Int: Int] {
+        var counts: [Int: Int] = [:]
+        for channelIndex in Array(Set(channelIndices)).sorted() {
+            let events = scan(
+                signal: signal,
+                channelIndices: [channelIndex],
+                exemplarStart: exemplarStart,
+                exemplarEnd: exemplarEnd,
+                configuration: configuration
+            )
+            counts[channelIndex] = events.count
+        }
+        return counts
+    }
+
+    private static func scan(
+        signal: MFFSignalData,
+        channelIndices: [Int],
+        exemplarStart: Int,
+        exemplarEnd: Int,
+        configuration: ArtifactTemplateConfiguration
+    ) -> [MFFEvent] {
+        guard !channelIndices.isEmpty,
+              exemplarEnd > exemplarStart,
+              let sampleCount = signal.data.first?.count else {
+            return []
+        }
+
+        let decimation = max(Int((signal.samplingRate / max(configuration.downsampleRate, 1)).rounded()), 1)
+        let downsampledRate = signal.samplingRate / Double(decimation)
+        let templateStart = exemplarStart / decimation
+        let templateEnd = max(exemplarEnd / decimation, templateStart + 3)
+        let templateLength = templateEnd - templateStart
+        guard templateLength >= 3 else { return [] }
+
+        let downsampledChannels = channelIndices.map { downsample(signal.data[$0], by: decimation) }
+        guard let downsampledCount = downsampledChannels.first?.count,
+              downsampledCount >= templateLength else {
+            return []
+        }
+
+        let templatePairs = downsampledChannels.map { channel in
+            normalized(Array(channel[templateStart..<min(templateEnd, channel.count)]))
+        }
+        guard templatePairs.allSatisfy({ $0.normalized.count == templateLength }) else {
+            return []
+        }
+
+        let templates = templatePairs.map(\.normalized)
+        let weights = templatePairs.map { max(rms($0.original), 0.0001) }
+        let totalWeight = max(weights.reduce(0, +), 0.0001)
+        let candidates = candidateStarts(
+            channels: downsampledChannels,
+            weights: weights,
+            templateLength: templateLength
+        )
+        let mergeSamples = max(Int((configuration.mergeWindowSeconds * downsampledRate).rounded()), 1)
+
+        var hits: [(start: Int, score: Float)] = []
+        for start in candidates where start >= 0 && start + templateLength <= downsampledCount {
+            var weightedScore: Float = 0
+            for channelOffset in downsampledChannels.indices {
+                let channel = downsampledChannels[channelOffset]
+                let window = normalized(Array(channel[start..<(start + templateLength)])).normalized
+                guard !window.isEmpty else { continue }
+                var dot: Float = 0
+                for sample in window.indices {
+                    dot += templates[channelOffset][sample] * window[sample]
+                }
+                let score: Float
+                switch configuration.polarity {
+                case .same:
+                    score = dot
+                case .opposite:
+                    score = -dot
+                case .either:
+                    score = abs(dot)
+                }
+                weightedScore += score * weights[channelOffset]
+            }
+
+            let score = weightedScore / totalWeight
+            if Double(score) >= configuration.matchThreshold {
+                hits.append((start, score))
+            }
+        }
+
+        let merged = merge(hits: hits, mergeSamples: mergeSamples)
+        return merged.enumerated().map { index, hit in
+            let centerSample = min(max((hit.start + templateLength / 2) * decimation, 0), sampleCount - 1)
+            let time = Double(centerSample) / signal.samplingRate
+            return MFFEvent(
+                id: "artifact-template-\(index)-\(centerSample)",
+                code: configuration.eventCode,
+                beginTimeSeconds: time,
+                rawBeginTime: String(format: "%.6f", time),
+                sourceFile: String(format: "Template %.0f%%", configuration.matchThreshold * 100)
+            )
+        }
+    }
+
+    private static func candidateStarts(
+        channels: [[Float]],
+        weights: [Float],
+        templateLength: Int
+    ) -> [Int] {
+        guard let sampleCount = channels.first?.count, sampleCount >= templateLength else { return [] }
+        var projection = [Float](repeating: 0, count: sampleCount)
+        let totalWeight = max(weights.reduce(0, +), 0.0001)
+
+        for channelOffset in channels.indices {
+            let weight = weights[channelOffset] / totalWeight
+            let channel = channels[channelOffset]
+            for sample in channel.indices {
+                projection[sample] += abs(channel[sample]) * weight
+            }
+        }
+
+        let mean = projection.reduce(Float(0), +) / Float(max(projection.count, 1))
+        let variance = projection.reduce(Float(0)) { partial, value in
+            let delta = value - mean
+            return partial + delta * delta
+        } / Float(max(projection.count, 1))
+        let threshold = mean + max(sqrt(variance) * 1.25, 0.0001)
+        let minimumDistance = max(templateLength / 3, 1)
+
+        var candidates: [Int] = []
+        var lastAccepted = -minimumDistance
+        for sample in 1..<(max(projection.count - 1, 1)) {
+            guard projection[sample] >= threshold,
+                  projection[sample] >= projection[sample - 1],
+                  projection[sample] >= projection[sample + 1],
+                  sample - lastAccepted >= minimumDistance else {
+                continue
+            }
+            candidates.append(min(max(sample - templateLength / 2, 0), sampleCount - templateLength))
+            lastAccepted = sample
+        }
+
+        if candidates.count < 12 {
+            let fallbackStride = max(templateLength / 4, 1)
+            candidates = Array(stride(from: 0, through: sampleCount - templateLength, by: fallbackStride))
+        }
+
+        return Array(Set(candidates)).sorted()
+    }
+
+    private static func merge(hits: [(start: Int, score: Float)], mergeSamples: Int) -> [(start: Int, score: Float)] {
+        let sorted = hits.sorted {
+            $0.start == $1.start ? $0.score > $1.score : $0.start < $1.start
+        }
+        var merged: [(start: Int, score: Float)] = []
+
+        for hit in sorted {
+            guard let last = merged.last else {
+                merged.append(hit)
+                continue
+            }
+
+            if hit.start - last.start <= mergeSamples {
+                if hit.score > last.score {
+                    merged[merged.count - 1] = hit
+                }
+            } else {
+                merged.append(hit)
+            }
+        }
+
+        return merged
+    }
+
+    private static func average(
+        signal: MFFSignalData,
+        events: [MFFEvent],
+        selectedChannelIndices: [Int],
+        windowSamples: Int
+    ) -> ArtifactTemplateAverage? {
+        guard !events.isEmpty,
+              windowSamples > 1,
+              let sampleCount = signal.data.first?.count else {
+            return nil
+        }
+
+        var averages = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
+        var accepted = 0
+
+        for event in events {
+            let center = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
+            let start = center - windowSamples / 2
+            let end = start + windowSamples
+            guard start >= 0, end <= sampleCount else { continue }
+
+            for channelIndex in signal.data.indices {
+                let channel = signal.data[channelIndex]
+                guard channel.count >= end else { continue }
+                for offset in 0..<windowSamples {
+                    averages[channelIndex][offset] += channel[start + offset]
+                }
+            }
+            accepted += 1
+        }
+
+        guard accepted > 0 else { return nil }
+        let divisor = Float(accepted)
+        for channelIndex in averages.indices {
+            for sample in averages[channelIndex].indices {
+                averages[channelIndex][sample] /= divisor
+            }
+        }
+
+        var summaries: [ArtifactTemplateChannelSummary] = []
+        for channelIndex in averages.indices {
+            let channelSamples: [Float] = averages[channelIndex]
+            let peak = channelSamples.map { abs($0) }.max() ?? 0
+            let channelRMS = rms(channelSamples)
+            summaries.append(ArtifactTemplateChannelSummary(
+                channelIndex: channelIndex,
+                peakAbsoluteMicrovolts: peak,
+                rmsMicrovolts: channelRMS
+            ))
+        }
+        summaries.sort {
+            $0.peakAbsoluteMicrovolts == $1.peakAbsoluteMicrovolts
+                ? $0.channelIndex < $1.channelIndex
+                : $0.peakAbsoluteMicrovolts > $1.peakAbsoluteMicrovolts
+        }
+
+        return ArtifactTemplateAverage(
+            samplingRate: signal.samplingRate,
+            windowSizeSeconds: Double(windowSamples) / signal.samplingRate,
+            eventCount: accepted,
+            selectedChannelIndices: selectedChannelIndices,
+            allChannelSamples: averages,
+            channelSummaries: summaries
+        )
+    }
+
+    private static func savedTemplate(
+        signal: MFFSignalData,
+        configuration: ArtifactTemplateConfiguration,
+        channelIndices: [Int],
+        exemplarSamples: [[Float]],
+        average: ArtifactTemplateAverage?
+    ) -> SavedArtifactTemplate {
+        let startSeconds = Double(configuration.exemplarRange.lowerBound) / max(signal.samplingRate, 1)
+        let endSeconds = Double(configuration.exemplarRange.upperBound) / max(signal.samplingRate, 1)
+        let summariesByChannel = Dictionary(uniqueKeysWithValues: (average?.channelSummaries ?? []).map { ($0.channelIndex, $0) })
+        let channels = channelIndices.enumerated().map { offset, index in
+            let samples = offset < exemplarSamples.count ? exemplarSamples[offset] : []
+            let summary = summariesByChannel[index]
+            return SavedArtifactTemplateChannel(
+                index: index,
+                label: "Ch \(index + 1)",
+                peakAbsoluteMicrovolts: summary?.peakAbsoluteMicrovolts ?? (samples.map(abs).max() ?? 0),
+                rmsMicrovolts: summary?.rmsMicrovolts ?? rms(samples)
+            )
+        }
+
+        return SavedArtifactTemplate(
+            schemaVersion: 1,
+            name: configuration.name,
+            eventCode: configuration.eventCode,
+            createdAt: Date(),
+            sourceSignalPath: signal.signalURL.path,
+            sourceSamplingRate: signal.samplingRate,
+            exemplarStartSeconds: startSeconds,
+            exemplarEndSeconds: endSeconds,
+            windowSizeSeconds: configuration.windowSizeSeconds,
+            channelScope: channelIndices.count == signal.numberOfChannels ? "all" : "specific",
+            channels: channels,
+            preprocessing: SavedArtifactTemplatePreprocessing(
+                downsampleRate: configuration.downsampleRate,
+                normalization: "per-channel zscore"
+            ),
+            matching: SavedArtifactTemplateMatching(
+                threshold: configuration.matchThreshold,
+                mergeWindowSeconds: configuration.mergeWindowSeconds,
+                polarity: configuration.polarity
+            ),
+            exemplarSamples: exemplarSamples,
+            averageSamples: selectedAverageSamples(from: average),
+            averageEventCount: average?.eventCount ?? 0
+        )
+    }
+
+    private static func selectedAverageSamples(from average: ArtifactTemplateAverage?) -> [[Float]]? {
+        guard let average else { return nil }
+        return average.selectedChannelIndices.compactMap { index in
+            guard index >= 0, index < average.allChannelSamples.count else { return nil }
+            return average.allChannelSamples[index]
+        }
+    }
+
+    private static func validChannels(_ indices: [Int], in signal: MFFSignalData) -> [Int] {
+        let sampleCount = signal.data.first?.count ?? 0
+        return Array(Set(indices))
+            .filter { $0 >= 0 && $0 < signal.data.count && signal.data[$0].count == sampleCount }
+            .sorted()
+    }
+
+    private static func clamped(_ range: ClosedRange<Int>, upperBound: Int) -> ClosedRange<Int> {
+        let lower = min(max(range.lowerBound, 0), upperBound)
+        let upper = min(max(range.upperBound, lower), upperBound)
+        return lower...upper
+    }
+
+    private static func downsample(_ samples: [Float], by decimation: Int) -> [Float] {
+        guard decimation > 1 else { return samples }
+        return stride(from: 0, to: samples.count, by: decimation).map { samples[$0] }
+    }
+
+    private static func normalized(_ samples: [Float]) -> (original: [Float], normalized: [Float]) {
+        guard !samples.isEmpty else { return (samples, []) }
+        let mean = samples.reduce(Float(0), +) / Float(samples.count)
+        var centered = samples.map { $0 - mean }
+        let norm = sqrt(centered.reduce(Float(0)) { $0 + ($1 * $1) })
+        guard norm > 0 else { return (samples, []) }
+        for index in centered.indices {
+            centered[index] /= norm
+        }
+        return (samples, centered)
+    }
+
+    private static func rms(_ samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        let meanSquare = samples.reduce(Float(0)) { $0 + ($1 * $1) } / Float(samples.count)
+        return sqrt(meanSquare)
+    }
+}

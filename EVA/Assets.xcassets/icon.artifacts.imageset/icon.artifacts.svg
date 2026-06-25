@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <g fill="none" stroke="#000000" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 24 Q24 9 42 24 Q24 39 6 24 Z"/>
+    <polyline points="13,24 19,24 22,14 26,34 29,24 36,24"/>
+  </g>
+</svg>
