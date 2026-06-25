@@ -38,11 +38,34 @@ struct EVAApp: App {
             CommandMenu("Channels") {
                 ChannelsCommands()
             }
+
+            CommandGroup(after: .windowArrangement) {
+                OpenDebugLogButton()
+            }
         }
+
+        Window("Debug Log", id: Self.debugLogWindowID) {
+            DebugLogView()
+        }
+        .defaultSize(width: 640, height: 480)
     }
+
+    static let debugLogWindowID = "debug-log"
 
     private static var defaultWindowSize: CGSize {
         let frame = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
         return CGSize(width: frame.width * 2 / 3, height: frame.height / 2)
+    }
+}
+
+/// Window-menu item that opens the Debug Log window.
+private struct OpenDebugLogButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Debug Log") {
+            openWindow(id: EVAApp.debugLogWindowID)
+        }
+        .keyboardShortcut("d", modifiers: [.command, .shift])
     }
 }

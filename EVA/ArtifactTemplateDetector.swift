@@ -19,6 +19,13 @@ struct ArtifactTemplateConfiguration: Sendable {
     var mergeWindowSeconds: Double
     var polarity: ArtifactTemplatePolarity
     var comparisonScopes: [ArtifactTemplateComparisonScope] = []
+    /// When not `.off`, also scans the recording for the scalp topography
+    /// (spatial voltage pattern across all electrodes) of the exemplar window.
+    var topographyMode: ArtifactTopographyMode = .off
+    /// Channels used for the spatial (topography) correlation. When empty, all
+    /// channels are used. Callers should pass good channels only (bad channels
+    /// excluded) and may further restrict to a cluster/region of interest.
+    var topographyChannelIndices: [Int] = []
 }
 
 enum ArtifactTemplatePolarity: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -29,6 +36,19 @@ enum ArtifactTemplatePolarity: String, CaseIterable, Identifiable, Codable, Send
     var id: String { rawValue }
 }
 
+/// How the reference scalp map is derived from the highlighted exemplar window.
+enum ArtifactTopographyMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case off = "Off"
+    case middle = "Window Middle"
+    case peak = "Window Peak"
+    case average = "Window Average"
+
+    var id: String { rawValue }
+
+    /// Whether topography scanning is requested.
+    var isEnabled: Bool { self != .off }
+}
+
 struct ArtifactTemplateDetectionResult: Sendable {
     var selectedEvents: [MFFEvent]
     var comparisonEvents: [MFFEvent]
@@ -36,10 +56,30 @@ struct ArtifactTemplateDetectionResult: Sendable {
     var singleChannelMatchCounts: [Int: Int]
     var templateAverage: ArtifactTemplateAverage?
     var savedTemplate: SavedArtifactTemplate
+    /// Matches found by scalp-topography scanning (empty when topography is off).
+    var topographyEvents: [MFFEvent] = []
+    /// The reference scalp map and its scanning metrics (nil when off).
+    var topographyReference: ArtifactTemplateTopography? = nil
 
     var additionalComparisonCount: Int {
         max(comparisonEvents.count - selectedEvents.count, 0)
     }
+}
+
+/// The reference scalp topography used for spatial matching, plus the result
+/// of scanning the recording for it.
+struct ArtifactTemplateTopography: Sendable {
+    var mode: ArtifactTopographyMode
+    /// Absolute sample whose scalp map was used (window centre, peak GFP sample,
+    /// or — for `.average` — the window centre as a nominal time reference).
+    var referenceSample: Int
+    var referenceTimeSeconds: Double
+    /// Per-channel µV defining the template scalp map, indexed by channel.
+    var channelValues: [Float]
+    /// Channels actually used in the spatial correlation.
+    var channelIndices: [Int]
+    var matchThreshold: Double
+    var matchCount: Int
 }
 
 struct ArtifactTemplateComparisonScope: Sendable {
@@ -195,14 +235,290 @@ nonisolated enum ArtifactTemplateDetector {
             average: average
         )
 
+        var topographyEvents: [MFFEvent] = []
+        var topographyReference: ArtifactTemplateTopography?
+        if configuration.topographyMode.isEnabled {
+            (topographyEvents, topographyReference) = detectTopography(
+                signal: signal,
+                channelIndices: topographyChannels(configuration, in: signal),
+                exemplarStart: exemplarStart,
+                exemplarEnd: exemplarEnd,
+                configuration: configuration
+            )
+        }
+
         return ArtifactTemplateDetectionResult(
             selectedEvents: selectedEvents,
             comparisonEvents: comparisonEvents,
             scopeCounts: scopeCounts,
             singleChannelMatchCounts: singleChannelMatchCounts,
             templateAverage: average,
-            savedTemplate: saved
+            savedTemplate: saved,
+            topographyEvents: topographyEvents,
+            topographyReference: topographyReference
         )
+    }
+
+    // MARK: - Topography (scalp-map) matching
+
+    /// Runs only the scalp-topography scan. Used to refresh the topography
+    /// result live (e.g. when the user switches reference mode) without redoing
+    /// the more expensive per-channel waveform scans.
+    static func detectTopography(
+        in signal: MFFSignalData,
+        configuration: ArtifactTemplateConfiguration
+    ) -> (events: [MFFEvent], reference: ArtifactTemplateTopography?) {
+        guard configuration.topographyMode.isEnabled,
+              signal.samplingRate > 0,
+              let sampleCount = signal.data.first?.count,
+              sampleCount > 0 else {
+            return ([], nil)
+        }
+
+        let exemplarRange = clamped(configuration.exemplarRange, upperBound: sampleCount - 1)
+        let windowSamples = max(Int((configuration.windowSizeSeconds * signal.samplingRate).rounded()), 3)
+        let exemplarCenter = (exemplarRange.lowerBound + exemplarRange.upperBound) / 2
+        let exemplarStart = min(max(exemplarCenter - windowSamples / 2, 0), max(sampleCount - windowSamples, 0))
+        let exemplarEnd = min(exemplarStart + windowSamples, sampleCount)
+
+        return detectTopography(
+            signal: signal,
+            channelIndices: topographyChannels(configuration, in: signal),
+            exemplarStart: exemplarStart,
+            exemplarEnd: exemplarEnd,
+            configuration: configuration
+        )
+    }
+
+    /// Resolves which channels the spatial correlation should use: the explicit
+    /// `topographyChannelIndices` when provided, otherwise all channels.
+    private static func topographyChannels(
+        _ configuration: ArtifactTemplateConfiguration,
+        in signal: MFFSignalData
+    ) -> [Int] {
+        let requested = configuration.topographyChannelIndices.isEmpty
+            ? Array(signal.data.indices)
+            : configuration.topographyChannelIndices
+        return validChannels(requested, in: signal)
+    }
+
+    /// Builds the reference scalp map from the exemplar window and scans the
+    /// recording for samples whose topography spatially correlates with it.
+    private static func detectTopography(
+        signal: MFFSignalData,
+        channelIndices: [Int],
+        exemplarStart: Int,
+        exemplarEnd: Int,
+        configuration: ArtifactTemplateConfiguration
+    ) -> ([MFFEvent], ArtifactTemplateTopography?) {
+        guard channelIndices.count >= 3,
+              exemplarEnd > exemplarStart,
+              signal.samplingRate > 0 else {
+            return ([], nil)
+        }
+
+        let referenceSample = topographyReferenceSample(
+            signal: signal,
+            mode: configuration.topographyMode,
+            exemplarStart: exemplarStart,
+            exemplarEnd: exemplarEnd,
+            channelIndices: channelIndices
+        )
+        let channelValues = topographyVector(
+            signal: signal,
+            mode: configuration.topographyMode,
+            referenceSample: referenceSample,
+            exemplarStart: exemplarStart,
+            exemplarEnd: exemplarEnd
+        )
+
+        // Template restricted to the correlation channels, spatially normalized.
+        let templateRaw = channelIndices.map { channelValues[$0] }
+        let template = normalizedSpatial(templateRaw)
+        guard !template.isEmpty else {
+            return ([], ArtifactTemplateTopography(
+                mode: configuration.topographyMode,
+                referenceSample: referenceSample,
+                referenceTimeSeconds: Double(referenceSample) / signal.samplingRate,
+                channelValues: channelValues,
+                channelIndices: channelIndices,
+                matchThreshold: configuration.matchThreshold,
+                matchCount: 0
+            ))
+        }
+
+        guard let sampleCount = signal.data.first?.count, sampleCount > 0 else {
+            return ([], nil)
+        }
+        let decimation = max(Int((signal.samplingRate / max(configuration.downsampleRate, 1)).rounded()), 1)
+        let mergeSamples = max(Int((configuration.mergeWindowSeconds * signal.samplingRate).rounded()), 1)
+
+        var hits: [(sample: Int, score: Float)] = []
+        var window = [Float](repeating: 0, count: channelIndices.count)
+        var sample = 0
+        while sample < sampleCount {
+            for (offset, channelIndex) in channelIndices.enumerated() {
+                let channel = signal.data[channelIndex]
+                window[offset] = sample < channel.count ? channel[sample] : 0
+            }
+            let normalized = normalizedSpatial(window)
+            if !normalized.isEmpty {
+                var dot: Float = 0
+                for index in normalized.indices {
+                    dot += template[index] * normalized[index]
+                }
+                let score: Float
+                switch configuration.polarity {
+                case .same: score = dot
+                case .opposite: score = -dot
+                case .either: score = abs(dot)
+                }
+                if Double(score) >= configuration.matchThreshold {
+                    hits.append((sample, score))
+                }
+            }
+            sample += decimation
+        }
+
+        let merged = mergeTopography(hits: hits, mergeSamples: mergeSamples)
+        let events = merged.enumerated().map { index, hit -> MFFEvent in
+            let time = Double(hit.sample) / signal.samplingRate
+            return MFFEvent(
+                id: "artifact-topo-\(index)-\(hit.sample)",
+                code: configuration.eventCode,
+                beginTimeSeconds: time,
+                rawBeginTime: String(format: "%.6f", time),
+                sourceFile: String(format: "Topography %.0f%%", configuration.matchThreshold * 100)
+            )
+        }
+
+        let reference = ArtifactTemplateTopography(
+            mode: configuration.topographyMode,
+            referenceSample: referenceSample,
+            referenceTimeSeconds: Double(referenceSample) / signal.samplingRate,
+            channelValues: channelValues,
+            channelIndices: channelIndices,
+            matchThreshold: configuration.matchThreshold,
+            matchCount: events.count
+        )
+        return (events, reference)
+    }
+
+    /// The exemplar sample whose scalp map seeds the template. For `.peak` this
+    /// is the sample of maximum global field power within the window.
+    private static func topographyReferenceSample(
+        signal: MFFSignalData,
+        mode: ArtifactTopographyMode,
+        exemplarStart: Int,
+        exemplarEnd: Int,
+        channelIndices: [Int]
+    ) -> Int {
+        let center = (exemplarStart + exemplarEnd) / 2
+        guard mode == .peak else { return center }
+
+        var bestSample = center
+        var bestGFP: Float = -1
+        for sample in exemplarStart..<exemplarEnd {
+            let gfp = globalFieldPower(signal: signal, sample: sample, channelIndices: channelIndices)
+            if gfp > bestGFP {
+                bestGFP = gfp
+                bestSample = sample
+            }
+        }
+        return bestSample
+    }
+
+    /// Per-channel reference values (indexed by channel) for the whole montage,
+    /// so the result can be drawn as a topomap.
+    private static func topographyVector(
+        signal: MFFSignalData,
+        mode: ArtifactTopographyMode,
+        referenceSample: Int,
+        exemplarStart: Int,
+        exemplarEnd: Int
+    ) -> [Float] {
+        let channelCount = signal.numberOfChannels
+        var values = [Float](repeating: 0, count: channelCount)
+
+        if mode == .average {
+            let count = max(exemplarEnd - exemplarStart, 1)
+            for channelIndex in 0..<channelCount {
+                let channel = signal.data[channelIndex]
+                guard channel.count >= exemplarEnd else { continue }
+                var sum: Float = 0
+                for sample in exemplarStart..<exemplarEnd {
+                    sum += channel[sample]
+                }
+                values[channelIndex] = sum / Float(count)
+            }
+        } else {
+            for channelIndex in 0..<channelCount {
+                let channel = signal.data[channelIndex]
+                guard referenceSample < channel.count else { continue }
+                values[channelIndex] = channel[referenceSample]
+            }
+        }
+        return values
+    }
+
+    private static func globalFieldPower(
+        signal: MFFSignalData,
+        sample: Int,
+        channelIndices: [Int]
+    ) -> Float {
+        var values: [Float] = []
+        values.reserveCapacity(channelIndices.count)
+        for channelIndex in channelIndices {
+            let channel = signal.data[channelIndex]
+            if sample < channel.count {
+                values.append(channel[sample])
+            }
+        }
+        guard values.count > 1 else { return 0 }
+        let mean = values.reduce(Float(0), +) / Float(values.count)
+        let variance = values.reduce(Float(0)) { partial, value in
+            let delta = value - mean
+            return partial + delta * delta
+        } / Float(values.count)
+        return sqrt(variance)
+    }
+
+    /// Mean-centres a topography vector across channels and scales to unit norm,
+    /// so a dot product between two such vectors is their spatial correlation.
+    private static func normalizedSpatial(_ values: [Float]) -> [Float] {
+        guard !values.isEmpty else { return [] }
+        let mean = values.reduce(Float(0), +) / Float(values.count)
+        var centered = values.map { $0 - mean }
+        let norm = sqrt(centered.reduce(Float(0)) { $0 + ($1 * $1) })
+        guard norm > 0 else { return [] }
+        for index in centered.indices {
+            centered[index] /= norm
+        }
+        return centered
+    }
+
+    private static func mergeTopography(
+        hits: [(sample: Int, score: Float)],
+        mergeSamples: Int
+    ) -> [(sample: Int, score: Float)] {
+        let sorted = hits.sorted {
+            $0.sample == $1.sample ? $0.score > $1.score : $0.sample < $1.sample
+        }
+        var merged: [(sample: Int, score: Float)] = []
+        for hit in sorted {
+            guard let last = merged.last else {
+                merged.append(hit)
+                continue
+            }
+            if hit.sample - last.sample <= mergeSamples {
+                if hit.score > last.score {
+                    merged[merged.count - 1] = hit
+                }
+            } else {
+                merged.append(hit)
+            }
+        }
+        return merged
     }
 
     private static func singleChannelCounts(

@@ -36,6 +36,12 @@ struct WaveformView: View {
     @State private var selectedSampleRange: ClosedRange<Int>?
     @State private var dragSelectionStartSample: Int?
     @State private var dragSelectionEndSample: Int?
+    /// Timestamp of the last stationary click, used to detect a double-click
+    /// manually inside the single waveform interaction gesture.
+    @State private var lastWaveformClick: (time: Date, x: CGFloat)?
+    /// Live global x of the scrolling waveform content's leading edge. Used to
+    /// convert a gesture's global x into a scroll-independent content x.
+    @State private var waveformContentMinX: CGFloat = 0
     @State private var detectsEyeBlinkArtifacts = false
     @State private var detectsEyeMovementArtifacts = false
     @State private var detectsECGArtifacts = false
@@ -56,6 +62,9 @@ struct WaveformView: View {
     @State private var artifactTemplateDownsampleRate = 250.0
     @State private var artifactTemplateMergeWindowSeconds = 0.25
     @State private var artifactTemplatePolarity = ArtifactTemplatePolarity.same
+    @State private var artifactTemplateTopographyMode = ArtifactTopographyMode.off
+    @State private var artifactTopographyChannelScope = ArtifactTopographyChannelScope.allGood
+    @State private var isRefreshingTopography = false
     @State private var isApplyingArtifactTemplate = false
     @State private var artifactTemplateResult: ArtifactTemplateDetectionResult?
     @State private var selectedArtifactTemplateChannel: Int?
@@ -312,29 +321,28 @@ struct WaveformView: View {
     // MARK: - Controls
 
     private func controls(for signal: MFFSignalData, base: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
-        HStack(spacing: 24) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Amplitude")
-                    .font(.caption.weight(.semibold))
-                HStack {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Amplitude")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 72, alignment: .leading)
                     Slider(value: $amplitudeScale, in: 10...1000, step: 10)
+                        .frame(width: 170)
                     Text("\(Int(amplitudeScale)) µV")
-                        .monospacedDigit()
-                        .frame(width: 80, alignment: .trailing)
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 64, alignment: .trailing)
                 }
-                .frame(width: 280)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Time Scale")
-                    .font(.caption.weight(.semibold))
-                HStack {
+                HStack(spacing: 8) {
+                    Text("Time Scale")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 72, alignment: .leading)
                     Slider(value: $timeScale, in: 0.2...8, step: 0.1)
+                        .frame(width: 170)
                     Text(String(format: "%.1fx", timeScale))
-                        .monospacedDigit()
-                        .frame(width: 60, alignment: .trailing)
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 64, alignment: .trailing)
                 }
-                .frame(width: 240)
             }
 
             HStack(spacing: 6) {
@@ -366,20 +374,6 @@ struct WaveformView: View {
                 ? "Gradient artifact removed using TREV triggers."
                 : "MR artifact removal")
 
-            if isProcessingMRI {
-                ProgressView(value: mriProgress)
-                    .progressViewStyle(.linear)
-                    .frame(width: 140)
-                Text("\(Int(mriProgress * 100))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            } else if let mriStatusMessage {
-                Text(mriStatusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            }
-
             Button {
                 showsFilterPopover.toggle()
             } label: {
@@ -393,20 +387,6 @@ struct WaveformView: View {
                 : "Apply a band-pass / notch / average-reference filter")
             .popover(isPresented: $showsFilterPopover, arrowEdge: .bottom) {
                 filterPopover(for: base)
-            }
-
-            if isFiltering {
-                ProgressView(value: filterProgress)
-                    .progressViewStyle(.linear)
-                    .frame(width: 140)
-                Text("\(Int(filterProgress * 100))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            } else if let filterStatusMessage {
-                Text(filterStatusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
             }
 
             Menu {
@@ -497,13 +477,6 @@ struct WaveformView: View {
             .accessibilityLabel("Processing")
             .help("Segment the recording into event-locked epochs")
 
-            if let psaStatusMessage {
-                Text(psaStatusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
             Button {
                 showsEventsPanel.toggle()
             } label: {
@@ -519,16 +492,12 @@ struct WaveformView: View {
                 }
                 .help("Save a marker at the current topomap cursor.")
             }
-
-            if let channelStatusMessage {
-                Text(channelStatusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            }
             }
 
-            Spacer()
+            Spacer(minLength: 12)
+
+            statusLog()
+                .frame(width: 240)
 
             Text("\(signal.numberOfChannels) ch · \(Int(signal.samplingRate)) Hz · \(String(format: "%.1f", signal.duration)) s")
                 .font(.caption)
@@ -537,6 +506,88 @@ struct WaveformView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: - Status log
+
+    /// A single line shown in the toolbar log area.
+    private struct LogLine: Hashable {
+        let text: String
+        let isError: Bool
+    }
+
+    /// Messages currently worth surfacing, gathered from each feature's status.
+    private var activeLogMessages: [LogLine] {
+        var lines: [LogLine] = []
+        if !isProcessingMRI, let mriStatusMessage {
+            lines.append(LogLine(text: mriStatusMessage, isError: true))
+        }
+        if !isFiltering, let filterStatusMessage {
+            lines.append(LogLine(text: filterStatusMessage, isError: true))
+        }
+        if let psaStatusMessage {
+            lines.append(LogLine(text: psaStatusMessage, isError: false))
+        }
+        if let channelStatusMessage {
+            lines.append(LogLine(text: channelStatusMessage, isError: true))
+        }
+        return lines
+    }
+
+    /// Consolidated status/progress area shown at the far right of the toolbar,
+    /// so individual buttons no longer push inline messages into the layout.
+    @ViewBuilder
+    private func statusLog() -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if isProcessingMRI {
+                logProgressRow(label: "MRI", value: mriProgress)
+            }
+            if isFiltering {
+                logProgressRow(label: "Filter", value: filterProgress)
+            }
+
+            ForEach(activeLogMessages, id: \.self) { line in
+                Text(line.text)
+                    .font(.caption)
+                    .foregroundStyle(line.isError ? Color.red : Color.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(line.text)
+            }
+
+            if !isProcessingMRI, !isFiltering, activeLogMessages.isEmpty {
+                Text("Ready")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 0.5)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Status log")
+    }
+
+    private func logProgressRow(label: String, value: Double) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ProgressView(value: value)
+                .progressViewStyle(.linear)
+            Text("\(Int(value * 100))%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 36, alignment: .trailing)
+        }
     }
 
     // MARK: - Waveform area
@@ -592,12 +643,25 @@ struct WaveformView: View {
                                 waveformRow(index: index, channel: signal.data[index], plotWidth: plotWidth, signal: signal)
                             }
                         }
-                        .overlay(alignment: .topLeading) {
-                            epochBoundaryOverlay()
-                            selectionOverlay(for: signal)
-                            cursorOverlay()
+                        // Each overlay is its own independent layer so that the
+                        // selection band growing during a drag cannot relayout or
+                        // shift the topomap cursor's rendering.
+                        .overlay(alignment: .topLeading) { epochBoundaryOverlay() }
+                        .overlay(alignment: .topLeading) { selectionOverlay(for: signal) }
+                        .overlay(alignment: .topLeading) { cursorOverlay() }
+                        .contentShape(Rectangle())
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .onChange(of: proxy.frame(in: .global).minX, initial: true) { _, newValue in
+                                        waveformContentMinX = newValue
+                                    }
+                            }
+                        )
+                        .gesture(waveformInteractionGesture(in: signal))
+                        .onChange(of: topomapSample, initial: false) { oldValue, newValue in
+                            debugLog("topomapSample \(oldValue.map(String.init) ?? "nil") -> \(newValue.map(String.init) ?? "nil")")
                         }
-                        .simultaneousGesture(selectionDragGesture(in: signal))
                         .padding(.trailing, 20)
                     }
                     .scrollPosition($horizontalScrollPosition)
@@ -753,13 +817,6 @@ struct WaveformView: View {
         }
         .frame(width: plotWidth, height: channelRowHeight)
         .contentShape(Rectangle())
-        .simultaneousGesture(
-            SpatialTapGesture(count: 2, coordinateSpace: .local)
-                .onEnded { value in
-                    topomapSample = sampleIndex(forContentX: value.location.x, in: signal)
-                    butterflyTopomapRelativeSample = nil
-                }
-        )
         .contextMenu {
             Button("Define Artifact…") {
                 openArtifactTemplateSheet(for: signal, clickedChannel: index)
@@ -770,12 +827,14 @@ struct WaveformView: View {
         .zIndex(1)
     }
 
-    /// Vertical cursor at the topomap sample, drawn once across the channel stack.
+    /// Vertical cursor at the topomap sample, drawn once across the channel
+    /// stack. Vivid orange so it is unmistakably distinct from the blue
+    /// selection band.
     @ViewBuilder
     private func cursorOverlay() -> some View {
         if let topomapSample {
             Rectangle()
-                .fill(Color.yellow)
+                .fill(Color.orange)
                 .frame(width: 2)
                 .frame(maxHeight: .infinity)
                 .offset(x: contentX(forSample: topomapSample) - 1)
@@ -783,24 +842,27 @@ struct WaveformView: View {
         }
     }
 
-    /// Highlighted time selection across the full channel stack.
+    /// Highlighted time selection across the full channel stack. Uses a fixed
+    /// blue (not the system accent) so it can never be confused with the yellow
+    /// topomap cursor, regardless of the user's macOS accent colour.
     @ViewBuilder
     private func selectionOverlay(for signal: MFFSignalData) -> some View {
         if let range = activeSelectionRange(in: signal) {
             let lowerX = contentX(forSample: range.lowerBound)
             let upperX = contentX(forSample: range.upperBound)
+            let selectionColor = Color(nsColor: .systemBlue)
             Rectangle()
-                .fill(Color.accentColor.opacity(0.16))
+                .fill(selectionColor.opacity(0.16))
                 .frame(width: max(upperX - lowerX, 2))
                 .frame(maxHeight: .infinity)
                 .overlay(alignment: .leading) {
                     Rectangle()
-                        .fill(Color.accentColor.opacity(0.8))
+                        .fill(selectionColor.opacity(0.8))
                         .frame(width: 1)
                 }
                 .overlay(alignment: .trailing) {
                     Rectangle()
-                        .fill(Color.accentColor.opacity(0.8))
+                        .fill(selectionColor.opacity(0.8))
                         .frame(width: 1)
                 }
                 .offset(x: lowerX)
@@ -808,30 +870,66 @@ struct WaveformView: View {
         }
     }
 
-    private func selectionDragGesture(in signal: MFFSignalData) -> some Gesture {
-        // DragGesture inside a ScrollView reports coordinates in viewport space
-        // (0…viewportWidth), not content space. Adding horizontalOffset converts
-        // them to content-space x so sampleIndex() maps to the correct sample.
-        DragGesture(minimumDistance: 3, coordinateSpace: .local)
+    /// Distance (pt) a press must travel before it counts as a selection drag
+    /// rather than a click.
+    private static let dragSelectionThreshold: CGFloat = 4
+    /// Max seconds between two clicks to count as a double-click.
+    private static let doubleClickInterval: TimeInterval = 0.5
+
+    /// A single gesture that handles BOTH the selection drag and the
+    /// double-click topomap cursor. Doing it in one gesture avoids SwiftUI's
+    /// gesture arbitration entirely: a press that moves past the threshold is a
+    /// selection; a stationary press is a click, and two clicks in quick
+    /// succession place the topomap cursor. Neither can trigger the other.
+    private func waveformInteractionGesture(in signal: MFFSignalData) -> some Gesture {
+        // Global coordinate space, converted to content x by subtracting the
+        // content's live leading edge (waveformContentMinX). This stays correct
+        // even if the horizontal ScrollView scrolls during the drag.
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
-                let start = sampleIndex(forContentX: value.startLocation.x + horizontalOffset, in: signal)
-                let end = sampleIndex(forContentX: value.location.x + horizontalOffset, in: signal)
-                dragSelectionStartSample = start
-                dragSelectionEndSample = end
+                guard dragDistance(value) >= Self.dragSelectionThreshold else { return }
+                dragSelectionStartSample = sampleIndex(forContentX: contentX(fromGlobalX: value.startLocation.x), in: signal)
+                dragSelectionEndSample = sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
             }
             .onEnded { value in
-                let start = sampleIndex(forContentX: value.startLocation.x + horizontalOffset, in: signal)
-                let end = sampleIndex(forContentX: value.location.x + horizontalOffset, in: signal)
-                let lower = min(start, end)
-                let upper = max(start, end)
-
-                if upper > lower {
-                    selectedSampleRange = lower...upper
+                if dragDistance(value) >= Self.dragSelectionThreshold {
+                    // Treat as a selection drag.
+                    let start = sampleIndex(forContentX: contentX(fromGlobalX: value.startLocation.x), in: signal)
+                    let end = sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
+                    let lower = min(start, end)
+                    let upper = max(start, end)
+                    if upper > lower {
+                        selectedSampleRange = lower...upper
+                    }
+                    dragSelectionStartSample = nil
+                    dragSelectionEndSample = nil
+                    lastWaveformClick = nil
+                    return
                 }
 
-                dragSelectionStartSample = nil
-                dragSelectionEndSample = nil
+                // Otherwise it's a stationary click: detect a double-click by hand.
+                let clickX = contentX(fromGlobalX: value.location.x)
+                let now = Date()
+                if let last = lastWaveformClick,
+                   now.timeIntervalSince(last.time) < Self.doubleClickInterval,
+                   abs(clickX - last.x) < 6 {
+                    topomapSample = sampleIndex(forContentX: clickX, in: signal)
+                    butterflyTopomapRelativeSample = nil
+                    lastWaveformClick = nil
+                } else {
+                    lastWaveformClick = (now, clickX)
+                }
             }
+    }
+
+    private func dragDistance(_ value: DragGesture.Value) -> CGFloat {
+        hypot(value.translation.width, value.translation.height)
+    }
+
+    /// Converts a global-space x into content-space x (0 == first sample),
+    /// independent of the horizontal scroll position.
+    private func contentX(fromGlobalX globalX: CGFloat) -> CGFloat {
+        globalX - waveformContentMinX
     }
 
     private func activeSelectionRange(in signal: MFFSignalData) -> ClosedRange<Int>? {
@@ -1370,6 +1468,8 @@ struct WaveformView: View {
         artifactTemplateThreshold = 0.70
         artifactTemplateMergeWindowSeconds = 0.25
         artifactTemplatePolarity = .same
+        artifactTemplateTopographyMode = .off
+        artifactTopographyChannelScope = .allGood
         artifactTemplateStatusMessage = nil
         artifactTemplateResult = nil
         selectedArtifactTemplateChannel = nil
@@ -1487,6 +1587,40 @@ struct WaveformView: View {
                     TextField("Merge", value: $artifactTemplateMergeWindowSeconds, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 100)
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Topography",
+                        help: "Also scans for the exemplar's scalp voltage map (spatial pattern across all electrodes), independent of the per-channel waveform shape. Window Middle uses the centre sample, Window Peak the highest global field power sample, Window Average the mean map over the window. Match counts are compared against the channel scans below."
+                    )
+                    Picker("Topography", selection: $artifactTemplateTopographyMode) {
+                        ForEach(ArtifactTopographyMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                }
+
+                if artifactTemplateTopographyMode.isEnabled {
+                    GridRow {
+                        ArtifactTemplateFieldLabel(
+                            title: "Topo Channels",
+                            help: "Which channels the scalp-topography correlation uses. Bad channels are always excluded. The fit metric is the Pearson correlation between scalp maps — use Polarity = Either for absolute Pearson. Channel clusters (regions of interest) are coming soon."
+                        )
+                        HStack(spacing: 8) {
+                            Picker("Topo Channels", selection: $artifactTopographyChannelScope) {
+                                ForEach(ArtifactTopographyChannelScope.allCases) { scope in
+                                    Text(scope.label).tag(scope)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 170)
+
+                            Button("New Cluster…") {}
+                                .disabled(true)
+                                .help("Define reusable channel clusters (regions of interest) — coming soon.")
+                        }
+                    }
                 }
             }
 
@@ -1541,6 +1675,40 @@ struct WaveformView: View {
         }
         .padding(20)
         .frame(width: 700)
+        .onChange(of: artifactTemplateTopographyMode) { _, _ in
+            refreshTopographyIfNeeded(for: signal)
+        }
+        .onChange(of: artifactTopographyChannelScope) { _, _ in
+            refreshTopographyIfNeeded(for: signal)
+        }
+    }
+
+    /// Recomputes only the topography result (reference map + matches) when the
+    /// reference mode or channel scope changes, but only after a full detection
+    /// has already been run once. Keeps the displayed topomap in sync without a
+    /// new Apply.
+    private func refreshTopographyIfNeeded(for signal: MFFSignalData) {
+        guard artifactTemplateResult != nil,
+              let range = artifactTemplateSelectionRange else {
+            return
+        }
+
+        guard artifactTemplateTopographyMode.isEnabled else {
+            artifactTemplateResult?.topographyEvents = []
+            artifactTemplateResult?.topographyReference = nil
+            return
+        }
+
+        let configuration = artifactTemplateConfiguration(for: signal, range: range)
+        isRefreshingTopography = true
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) {
+                ArtifactTemplateDetector.detectTopography(in: signal, configuration: configuration)
+            }.value
+            artifactTemplateResult?.topographyEvents = outcome.events
+            artifactTemplateResult?.topographyReference = outcome.reference
+            isRefreshingTopography = false
+        }
     }
 
     private func artifactTemplateResultView(_ result: ArtifactTemplateDetectionResult) -> some View {
@@ -1554,13 +1722,26 @@ struct WaveformView: View {
                 Spacer()
             }
 
-            if let average = result.templateAverage {
-                ArtifactTemplateAveragePlot(
-                    average: average,
-                    highlightedChannels: Set(average.selectedChannelIndices)
-                )
-                .frame(height: 170)
+            HStack(alignment: .top, spacing: 16) {
+                if let average = result.templateAverage {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Average waveform")
+                            .font(.caption.weight(.semibold))
+                        ArtifactTemplateAveragePlot(
+                            average: average,
+                            highlightedChannels: Set(average.selectedChannelIndices)
+                        )
+                        .frame(height: 170)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
 
+                if let topography = result.topographyReference {
+                    artifactTopographyMapView(topography)
+                }
+            }
+
+            if let average = result.templateAverage {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Strongest average channels")
                         .font(.caption.weight(.semibold))
@@ -1637,9 +1818,104 @@ struct WaveformView: View {
                     }
                 }
             }
+            if let topography = result.topographyReference {
+                Divider()
+                artifactTopographyComparisonView(topography, result: result)
+            }
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// The template scalp map, shown beside the average waveform plot. Updates
+    /// live as the reference mode / channel scope change.
+    @ViewBuilder
+    private func artifactTopographyMapView(_ topography: ArtifactTemplateTopography) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Scalp topography")
+                    .font(.caption.weight(.semibold))
+                if isRefreshingTopography {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+                Spacer()
+                Text(topography.mode.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let layout = recording.sensorLayout {
+                TopomapView(
+                    layout: layout,
+                    values: topography.channelValues.map(Double.init),
+                    timeSeconds: topography.referenceTimeSeconds,
+                    fixedScale: nil,
+                    showsHeader: false,
+                    colorBarPlacement: .trailing,
+                    minimumMapHeight: 150
+                )
+                .frame(width: 230, height: 170)
+            } else {
+                Text("No sensor layout — the scalp map can't be drawn, but topography matching still ran.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 230, height: 170, alignment: .topLeading)
+            }
+        }
+    }
+
+    /// The topography vs waveform match-count comparison and the apply button.
+    @ViewBuilder
+    private func artifactTopographyComparisonView(
+        _ topography: ArtifactTemplateTopography,
+        result: ArtifactTemplateDetectionResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 16) {
+                Label("\(topography.matchCount) scalp-topography matches", systemImage: "circle.grid.3x3.fill")
+                    .font(.caption.weight(.semibold))
+                Text("\(topography.channelIndices.count) channels · Pearson r (\(artifactTemplatePolarity.rawValue.lowercased()))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
+                GridRow {
+                    Text("Method").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    Text("Found").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                }
+                GridRow {
+                    Text("Selected channels (waveform)").font(.caption)
+                    Text("\(result.selectedEvents.count)").font(.caption.monospacedDigit())
+                }
+                GridRow {
+                    Text("All-channel waveform model").font(.caption)
+                    Text("\(result.comparisonEvents.count)").font(.caption.monospacedDigit())
+                }
+                GridRow {
+                    Text("Scalp topography (\(topography.mode.rawValue))").font(.caption)
+                    Text("\(topography.matchCount)")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Button("Use topography matches as events") {
+                useTopographyMatches(result)
+            }
+            .font(.caption)
+            .disabled(result.topographyEvents.isEmpty)
+            .help("Replace the current artifact markers with the scalp-topography matches.")
+        }
+    }
+
+    private func useTopographyMatches(_ result: ArtifactTemplateDetectionResult) {
+        artifactEvents = result.topographyEvents
+        selectedEventCodes = [artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines)]
+        showsEventsPanel = true
+        artifactStatusMessage = "\(result.topographyEvents.count) topography matches"
     }
 
     private func artifactTemplateChannelChipColor(
@@ -1669,19 +1945,7 @@ struct WaveformView: View {
             return
         }
 
-        let configuration = ArtifactTemplateConfiguration(
-            name: artifactTemplateName.trimmingCharacters(in: .whitespacesAndNewlines),
-            eventCode: artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines),
-            selectedChannelIndices: selectedChannels,
-            comparisonChannelIndices: Array(signal.data.indices),
-            exemplarRange: range,
-            matchThreshold: artifactTemplateThreshold,
-            windowSizeSeconds: max(artifactTemplateWindowSeconds, 0.01),
-            downsampleRate: min(max(artifactTemplateDownsampleRate, 20), signal.samplingRate),
-            mergeWindowSeconds: max(artifactTemplateMergeWindowSeconds, 0.01),
-            polarity: artifactTemplatePolarity,
-            comparisonScopes: artifactTemplateComparisonScopes(in: signal)
-        )
+        let configuration = artifactTemplateConfiguration(for: signal, range: range)
 
         isApplyingArtifactTemplate = true
         artifactTemplateStatusMessage = nil
@@ -1698,6 +1962,37 @@ struct WaveformView: View {
             showsEventsPanel = true
             artifactStatusMessage = "\(result.selectedEvents.count) template matches"
             isApplyingArtifactTemplate = false
+        }
+    }
+
+    /// Builds the detector configuration from the current sheet controls.
+    private func artifactTemplateConfiguration(
+        for signal: MFFSignalData,
+        range: ClosedRange<Int>
+    ) -> ArtifactTemplateConfiguration {
+        ArtifactTemplateConfiguration(
+            name: artifactTemplateName.trimmingCharacters(in: .whitespacesAndNewlines),
+            eventCode: artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines),
+            selectedChannelIndices: artifactTemplateSelectedChannels(in: signal),
+            comparisonChannelIndices: Array(signal.data.indices),
+            exemplarRange: range,
+            matchThreshold: artifactTemplateThreshold,
+            windowSizeSeconds: max(artifactTemplateWindowSeconds, 0.01),
+            downsampleRate: min(max(artifactTemplateDownsampleRate, 20), signal.samplingRate),
+            mergeWindowSeconds: max(artifactTemplateMergeWindowSeconds, 0.01),
+            polarity: artifactTemplatePolarity,
+            comparisonScopes: artifactTemplateComparisonScopes(in: signal),
+            topographyMode: artifactTemplateTopographyMode,
+            topographyChannelIndices: artifactTopographyChannels(in: signal)
+        )
+    }
+
+    /// Channels used for the scalp-topography correlation: all readable channels
+    /// minus bad channels (and, in future, restricted to a selected cluster).
+    private func artifactTopographyChannels(in signal: MFFSignalData) -> [Int] {
+        switch artifactTopographyChannelScope {
+        case .allGood:
+            return signal.data.indices.filter { !channels.bad.contains($0) }
         }
     }
 
@@ -3809,6 +4104,21 @@ struct WaveformView: View {
 }
 
 // MARK: - Supporting views
+
+/// Which channels the scalp-topography correlation uses. Bad channels are always
+/// excluded. Cluster (region-of-interest) options will be added once channel
+/// clusters are implemented (see [[ChannelCluster]]).
+private enum ArtifactTopographyChannelScope: CaseIterable, Hashable, Identifiable {
+    case allGood
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .allGood: return "All good channels"
+        }
+    }
+}
 
 /// A toolbar button face that draws its own fixed-size rounded-rect chrome so
 /// that every control — whether a plain Button or a Menu — renders at an
