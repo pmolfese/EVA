@@ -26,6 +26,23 @@ struct ArtifactTemplateConfiguration: Sendable {
     /// channels are used. Callers should pass good channels only (bad channels
     /// excluded) and may further restrict to a cluster/region of interest.
     var topographyChannelIndices: [Int] = []
+    /// Cost function for scoring scalp-map similarity. Independent of `polarity`
+    /// (which governs the per-channel waveform scan).
+    var topographyMetric: ArtifactTopographyMetric = .pearson
+}
+
+/// How the similarity between two scalp maps is scored during topography
+/// matching. The maps are mean-centred and unit-normalised, so the dot product
+/// is Pearson's r.
+enum ArtifactTopographyMetric: String, CaseIterable, Identifiable, Codable, Sendable {
+    /// Pearson correlation coefficient (same-polarity maps).
+    case pearson = "Pearson r"
+    /// Absolute Pearson — also matches polarity-inverted maps.
+    case absolutePearson = "|Pearson r|"
+    /// Negative Pearson — matches the inverted map only.
+    case negativePearson = "Opposite (−r)"
+
+    var id: String { rawValue }
 }
 
 enum ArtifactTemplatePolarity: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -368,10 +385,10 @@ nonisolated enum ArtifactTemplateDetector {
                     dot += template[index] * normalized[index]
                 }
                 let score: Float
-                switch configuration.polarity {
-                case .same: score = dot
-                case .opposite: score = -dot
-                case .either: score = abs(dot)
+                switch configuration.topographyMetric {
+                case .pearson: score = dot
+                case .negativePearson: score = -dot
+                case .absolutePearson: score = abs(dot)
                 }
                 if Double(score) >= configuration.matchThreshold {
                     hits.append((sample, score))

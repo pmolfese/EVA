@@ -64,7 +64,11 @@ struct WaveformView: View {
     @State private var artifactTemplatePolarity = ArtifactTemplatePolarity.same
     @State private var artifactTemplateTopographyMode = ArtifactTopographyMode.off
     @State private var artifactTopographyChannelScope = ArtifactTopographyChannelScope.allGood
+    @State private var artifactTopographyMetric = ArtifactTopographyMetric.pearson
     @State private var isRefreshingTopography = false
+    /// Snapshot of the scan-affecting controls at the moment the last full scan
+    /// ran, used to know when the displayed result is stale (→ "Rescan").
+    @State private var lastArtifactScanSignature: ArtifactScanSignature?
     @State private var isApplyingArtifactTemplate = false
     @State private var artifactTemplateResult: ArtifactTemplateDetectionResult?
     @State private var selectedArtifactTemplateChannel: Int?
@@ -1470,8 +1474,10 @@ struct WaveformView: View {
         artifactTemplatePolarity = .same
         artifactTemplateTopographyMode = .off
         artifactTopographyChannelScope = .allGood
+        artifactTopographyMetric = .pearson
         artifactTemplateStatusMessage = nil
         artifactTemplateResult = nil
+        lastArtifactScanSignature = nil
         selectedArtifactTemplateChannel = nil
         artifactDetectionMethod = .template
         showsArtifactTemplateSheet = true
@@ -1605,7 +1611,7 @@ struct WaveformView: View {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "Topo Channels",
-                            help: "Which channels the scalp-topography correlation uses. Bad channels are always excluded. The fit metric is the Pearson correlation between scalp maps — use Polarity = Either for absolute Pearson. Channel clusters (regions of interest) are coming soon."
+                            help: "Which channels the scalp-topography correlation uses. Bad channels are always excluded. Channel clusters (regions of interest) are coming soon."
                         )
                         HStack(spacing: 8) {
                             Picker("Topo Channels", selection: $artifactTopographyChannelScope) {
@@ -1620,6 +1626,18 @@ struct WaveformView: View {
                                 .disabled(true)
                                 .help("Define reusable channel clusters (regions of interest) — coming soon.")
                         }
+
+                        ArtifactTemplateFieldLabel(
+                            title: "Fit Metric",
+                            help: "Cost function for scalp-map similarity, independent of the waveform Polarity. Pearson r matches same-polarity maps; |Pearson r| also matches polarity-inverted maps; Opposite (−r) matches only the inverted map."
+                        )
+                        Picker("Fit Metric", selection: $artifactTopographyMetric) {
+                            ForEach(ArtifactTopographyMetric.allCases) { metric in
+                                Text(metric.rawValue).tag(metric)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 160)
                     }
                 }
             }
@@ -1659,7 +1677,7 @@ struct WaveformView: View {
                     showsArtifactTemplateSheet = false
                 }
 
-                Button("Apply") {
+                Button(artifactTemplateResult == nil ? "Apply" : "Rescan") {
                     applyArtifactTemplate(to: signal)
                 }
                 .keyboardShortcut(.defaultAction)
@@ -1670,6 +1688,8 @@ struct WaveformView: View {
                         || comparisonChannels.isEmpty
                         || artifactTemplateName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        // Once a scan exists, only enable when settings changed.
+                        || (artifactTemplateResult != nil && !artifactTemplateScanIsStale)
                 )
             }
         }
@@ -1679,6 +1699,9 @@ struct WaveformView: View {
             refreshTopographyIfNeeded(for: signal)
         }
         .onChange(of: artifactTopographyChannelScope) { _, _ in
+            refreshTopographyIfNeeded(for: signal)
+        }
+        .onChange(of: artifactTopographyMetric) { _, _ in
             refreshTopographyIfNeeded(for: signal)
         }
     }
@@ -1875,7 +1898,7 @@ struct WaveformView: View {
             HStack(spacing: 16) {
                 Label("\(topography.matchCount) scalp-topography matches", systemImage: "circle.grid.3x3.fill")
                     .font(.caption.weight(.semibold))
-                Text("\(topography.channelIndices.count) channels · Pearson r (\(artifactTemplatePolarity.rawValue.lowercased()))")
+                Text("\(topography.channelIndices.count) channels · \(artifactTopographyMetric.rawValue)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -1950,12 +1973,14 @@ struct WaveformView: View {
         isApplyingArtifactTemplate = true
         artifactTemplateStatusMessage = nil
 
+        let signature = artifactScanSignature
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 ArtifactTemplateDetector.detect(in: signal, configuration: configuration)
             }.value
 
             artifactTemplateResult = result
+            lastArtifactScanSignature = signature
             selectedArtifactTemplateChannel = nil
             artifactEvents = result.selectedEvents
             selectedEventCodes = [configuration.eventCode]
@@ -1963,6 +1988,27 @@ struct WaveformView: View {
             artifactStatusMessage = "\(result.selectedEvents.count) template matches"
             isApplyingArtifactTemplate = false
         }
+    }
+
+    /// Current values of the scan-affecting controls.
+    private var artifactScanSignature: ArtifactScanSignature {
+        ArtifactScanSignature(
+            eventCode: artifactTemplateEventCode,
+            channelScope: artifactTemplateChannelScope,
+            customChannels: artifactTemplateCustomChannels,
+            threshold: artifactTemplateThreshold,
+            windowSeconds: artifactTemplateWindowSeconds,
+            downsampleRate: artifactTemplateDownsampleRate,
+            mergeWindowSeconds: artifactTemplateMergeWindowSeconds,
+            polarity: artifactTemplatePolarity,
+            range: artifactTemplateSelectionRange
+        )
+    }
+
+    /// True when settings have changed since the displayed result was produced
+    /// (or no scan has run yet).
+    private var artifactTemplateScanIsStale: Bool {
+        lastArtifactScanSignature != artifactScanSignature
     }
 
     /// Builds the detector configuration from the current sheet controls.
@@ -1983,7 +2029,8 @@ struct WaveformView: View {
             polarity: artifactTemplatePolarity,
             comparisonScopes: artifactTemplateComparisonScopes(in: signal),
             topographyMode: artifactTemplateTopographyMode,
-            topographyChannelIndices: artifactTopographyChannels(in: signal)
+            topographyChannelIndices: artifactTopographyChannels(in: signal),
+            topographyMetric: artifactTopographyMetric
         )
     }
 
@@ -4118,6 +4165,20 @@ private enum ArtifactTopographyChannelScope: CaseIterable, Hashable, Identifiabl
         case .allGood: return "All good channels"
         }
     }
+}
+
+/// Snapshot of the artifact-template controls that affect a full scan. Topography
+/// mode/scope are excluded because they refresh live without a rescan.
+private struct ArtifactScanSignature: Equatable {
+    var eventCode: String
+    var channelScope: ArtifactTemplateChannelScope
+    var customChannels: String
+    var threshold: Double
+    var windowSeconds: Double
+    var downsampleRate: Double
+    var mergeWindowSeconds: Double
+    var polarity: ArtifactTemplatePolarity
+    var range: ClosedRange<Int>?
 }
 
 /// A toolbar button face that draws its own fixed-size rounded-rect chrome so
