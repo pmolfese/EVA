@@ -1,5 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
-  <!-- Copyright (C) 2026 Peter Molfese. SPDX-License-Identifier: GPL-3.0-only -->
+  <!--
+  Developed by P. Molfese, National Institutes of Health (NIH).
+
+  This software is a "work of the United States Government" prepared by a federal
+  employee as part of official duties. As such, it is not subject to copyright
+  protection within the United States (17 U.S.C. § 105). International copyrights
+  may apply.
+
+  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+  The U.S. Government authorizes the distribution and modification of this software
+  subject to the copyleft requirements of the GPL-3.0.
+  SPDX-License-Identifier: GPL-3.0-only
+  -->
   <g fill="none" stroke="#000000" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
     <path d="M6 24 Q24 9 42 24 Q24 39 6 24 Z"/>
     <polyline points="13,24 19,24 22,14 26,34 29,24 36,24"/>
