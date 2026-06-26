@@ -2,6 +2,9 @@
 //  SignalImportReader.swift
 //  EVA
 //
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  Native importers for common EEG exchange formats.
 //
 //  Attribution: the BrainVision, EDF/EDF+, EEGLAB, Persyst, and BESA reader
@@ -11,7 +14,8 @@
 //  mne/io/persyst/persyst.py, mne/io/besa/besa.py, and the montage helpers in
 //  mne/channels/_standard_montage_utils.py. BESA .avr/.mul/.generic structure
 //  was also checked against the public BESA "Working With Additional Files"
-//  documentation.
+//  documentation. See THIRD_PARTY_NOTICES.md for the MNE-Python BSD-3-Clause
+//  notice.
 //
 
 import Foundation

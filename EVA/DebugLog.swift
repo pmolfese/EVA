@@ -2,6 +2,9 @@
 //  DebugLog.swift
 //  EVA
 //
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  A lightweight, app-wide debug log. Anything can append lines via
 //  `DebugLog.shared.log(...)`, and the `DebugLogView` window (opened from the
 //  Window menu) shows them live with copy-to-clipboard for easy sharing.

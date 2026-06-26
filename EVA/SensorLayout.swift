@@ -1,6 +1,9 @@
 //
 //  SensorLayout.swift
-//  EEGView
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Parses an EGI `sensorLayout.xml` file into 2D electrode positions for
 //  drawing a top-down topographic map.

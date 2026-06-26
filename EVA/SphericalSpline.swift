@@ -1,6 +1,9 @@
 //
 //  SphericalSpline.swift
-//  SummerEEGDemo
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Spherical-spline interpolation of scalp potentials (Perrin et al., 1989,
 //  "Spherical splines for scalp potential and current density mapping").

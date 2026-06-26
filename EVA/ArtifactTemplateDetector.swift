@@ -1,6 +1,9 @@
 //
 //  ArtifactTemplateDetector.swift
-//  SummerEEGDemo
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Interactive exemplar/template matching for user-defined EEG artifacts.
 //

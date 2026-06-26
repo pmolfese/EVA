@@ -2,6 +2,9 @@
 //  MFFRecording.swift
 //  EVA
 //
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  Non-document app model for opening and viewing EEG recordings.
 //
 

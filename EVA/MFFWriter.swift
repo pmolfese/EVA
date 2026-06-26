@@ -2,12 +2,16 @@
 //  MFFWriter.swift
 //  EVA
 //
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  Native MFF export for EVA-processed signals.
 //
 //  Attribution: the signal block and epoch XML writer structure follows the
 //  public mffpy writer implementation by the MFFPy contributors
-//  (Apache-2.0), especially mffpy/bin_writer.py, mffpy/header_block/
-//  header_block.py, and mffpy/epoch.py.
+//  (Apache-2.0; Copyright 2019 Brain Electrophysiology Laboratory Company LLC),
+//  especially mffpy/bin_writer.py, mffpy/header_block/header_block.py, and
+//  mffpy/epoch.py. See THIRD_PARTY_NOTICES.md.
 //
 
 import Foundation

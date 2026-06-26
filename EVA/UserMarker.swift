@@ -1,6 +1,9 @@
 //
 //  UserMarker.swift
-//  SummerEEGDemo
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  SwiftData sidecar model. MFF packages are read-only, so anything the user
 //  *creates* — like a marked time point — lives here in the app's own store,

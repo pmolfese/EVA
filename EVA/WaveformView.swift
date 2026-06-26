@@ -1,10 +1,12 @@
 //
 //  WaveformView.swift
-//  SummerEEGDemo
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Recording content view: scrolling multi-channel EEG waveforms, an event
-//  track, a double-click-to-open scalp topomap, and an events panel. Adapted
-//  from EEGView's WaveformWindowView, trimmed to the demo's core concepts.
+//  track, a double-click-to-open scalp topomap, and an events panel.
 //
 
 import Accelerate

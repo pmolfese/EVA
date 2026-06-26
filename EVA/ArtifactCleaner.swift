@@ -2,6 +2,9 @@
 //  ArtifactCleaner.swift
 //  EVA
 //
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  Reversible artifact-cleaning methods built from user-defined artifact
 //  templates and their detected event windows.
 //

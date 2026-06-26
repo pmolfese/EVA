@@ -2,9 +2,14 @@
 //  ICLabelClassifier.swift
 //  EVA
 //
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  Runs the official ICLabel neural network through Core ML. The network
 //  consumes the same three feature families as EEGLAB/MNE-ICALabel: a 32x32
 //  scalp map, a 100-bin relative PSD, and a 100-lag autocorrelation trace.
+//  ICLabel is attributed to SCCN and Luca Pion-Tonachini, Ken Kreutz-Delgado,
+//  and Scott Makeig. No upstream license was found; see THIRD_PARTY_NOTICES.md.
 //
 
 import CoreML

@@ -1,6 +1,9 @@
 //
 //  TopomapView.swift
-//  EEGView
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Top-down scalp topography for a single time point. Draws a head outline
 //  (circle + nose + ears) with an inverse-distance-weighted interpolation of

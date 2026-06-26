@@ -1,6 +1,9 @@
 //
 //  ICAComponentAutoLabeler.swift
-//  SummerEEGDemo
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  ICA component labeling entry point. It prefers the bundled ICLabel Core ML
 //  classifier and fills any gaps with transparent scalp-map/time-course rules.

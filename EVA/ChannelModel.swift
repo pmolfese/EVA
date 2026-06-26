@@ -1,6 +1,9 @@
 //
 //  ChannelModel.swift
-//  SummerEEGDemo
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Per-window channel state (hidden / bad / interpolated). Lifted out of the
 //  view so the menu-bar "Channels" commands can read and mutate the active

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Peter Molfese
 """Convert the official ICLabel MatConvNet weights to Core ML.
 
 Usage:
@@ -8,6 +10,10 @@ Usage:
 
 The source `.mat` file is the default ICLabel network from:
 https://github.com/sccn/ICLabel
+
+ICLabel is attributed to SCCN and Luca Pion-Tonachini, Ken
+Kreutz-Delgado, and Scott Makeig. No upstream license was found; see
+THIRD_PARTY_NOTICES.md.
 """
 
 from __future__ import annotations

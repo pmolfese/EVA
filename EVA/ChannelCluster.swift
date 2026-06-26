@@ -2,6 +2,9 @@
 //  ChannelCluster.swift
 //  EVA
 //
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  A named subset of channels for region-restricted analysis (e.g. limiting
 //  scalp-topography matching to a region of interest).
 //

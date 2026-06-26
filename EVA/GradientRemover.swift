@@ -1,8 +1,14 @@
 //
 //  GradientRemover.swift
-//  SummerEEGDemo
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Swift translation of nimh-sfim/gradient_remover (GradientRemover.py).
+//  Upstream author: Joshua Teves. No upstream license was found; see
+//  THIRD_PARTY_NOTICES.md.
+//
 //  Removes MR gradient artifact from simultaneous EEG/fMRI recordings using a
 //  per-TR template: each TR-length segment is linearly detrended, a template is
 //  built from a weighted average of neighboring detrended TRs, and that template

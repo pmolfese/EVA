@@ -1,8 +1,9 @@
 //
 //  EEGSignalFilter.swift
-//  EEGView
+//  EVA
 //
-//  Created by Codex on 3/19/26.
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 
 import Accelerate

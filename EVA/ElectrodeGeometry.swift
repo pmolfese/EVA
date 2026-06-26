@@ -1,6 +1,9 @@
 //
 //  ElectrodeGeometry.swift
-//  SummerEEGDemo
+//  EVA
+//
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Parses an EGI `coordinates.xml` file into 3D electrode positions (unit
 //  vectors on a sphere), used for spherical-spline channel interpolation.

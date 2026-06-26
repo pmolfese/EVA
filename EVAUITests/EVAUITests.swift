@@ -2,7 +2,8 @@
 //  EVAUITests.swift
 //  EVAUITests
 //
-//  Created by Molfese, Peter  [E] on 6/25/26.
+//  Copyright (C) 2026 Peter Molfese
+//  SPDX-License-Identifier: GPL-3.0-only
 //
 
 import XCTest
