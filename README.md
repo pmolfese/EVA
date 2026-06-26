@@ -6,7 +6,7 @@ The goal is (mostly) simple: keep the signal visible, make the processing steps 
 
 EVA stands for **Electrophysiology Viewer and Analysis**.
 
-![Waveform view](Figures/1_WaveformView.png)
+![Waveform view](Figures/1_WaveformView_sm.png)
 
 ## What EVA Does
 
