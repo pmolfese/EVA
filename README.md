@@ -62,7 +62,7 @@ ICA is available for component-based cleanup. EVA includes a Core ML path for **
 
 ![ICA with ICLabel](Figures/7_ICAwithICLabel_sm.png)
 
-Channel health is an explainable metric, and a training-data path for a future Core ML models in the future. EVA can score channels using finite sample rate, amplitude typicality, burst peaks, flatline/clipping, fast noise, slow drift, line-noise proxy, and neighbor agreement when sensor geometry is present.
+Channel health is an explainable metric, and a training-data path for a future Core ML models. EVA can score channels using finite sample rate, amplitude typicality, burst peaks, flatline/clipping, fast noise, slow drift, line-noise proxy, and neighbor agreement when sensor geometry is present.
 
 ![Per-channel health](Figures/8_PerChannelHealth_sm.png)
 
