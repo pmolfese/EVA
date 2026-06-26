@@ -324,12 +324,76 @@ struct WaveformView: View {
     }
 
     /// The signal's own events plus user markers and generated in-memory artifact events, time-sorted.
-    private func displayedEvents(for signal: MFFSignalData, includeContinuousOverlays: Bool = true) -> [MFFEvent] {
-        if includeContinuousOverlays {
-            return (signal.events + userMarkerEvents + artifactEvents).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+    private func displayedEvents(
+        for signal: MFFSignalData,
+        includeContinuousOverlays: Bool = true,
+        mapContinuousOverlaysIntoEpochs: Bool = false
+    ) -> [MFFEvent] {
+        guard includeContinuousOverlays else {
+            return signal.events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
         }
 
-        return signal.events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+        let overlays = mapContinuousOverlaysIntoEpochs
+            ? epochedContinuousOverlayEvents(for: signal)
+            : continuousOverlayEventsForDisplay()
+        return (signal.events + overlays).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+    }
+
+    private func continuousOverlayEventsForDisplay() -> [MFFEvent] {
+        var events = userMarkerEvents
+        var seen = Set(events)
+
+        for event in definedArtifacts.flatMap(\.events) where seen.insert(event).inserted {
+            events.append(event)
+        }
+        for event in artifactEvents where seen.insert(event).inserted {
+            events.append(event)
+        }
+
+        return events
+    }
+
+    private func epochedContinuousOverlayEvents(for signal: MFFSignalData) -> [MFFEvent] {
+        guard epochedSignal != nil,
+              signal.samplingRate > 0,
+              !epochSegments.isEmpty else {
+            return []
+        }
+
+        return continuousOverlayEventsForDisplay()
+            .flatMap { event in
+                epochSegments.compactMap { segment in
+                    epochedOverlayEvent(event, in: segment, samplingRate: signal.samplingRate)
+                }
+            }
+            .sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+    }
+
+    private func epochedOverlayEvent(
+        _ event: MFFEvent,
+        in segment: EpochSegment,
+        samplingRate: Double
+    ) -> MFFEvent? {
+        let epochSampleCount = segment.endSample - segment.startSample + 1
+        guard epochSampleCount > 0 else { return nil }
+
+        let epochStartSeconds = segment.sourceTimeSeconds - Double(segment.stimulusOffsetSamples) / samplingRate
+        let epochEndSeconds = epochStartSeconds + Double(epochSampleCount) / samplingRate
+        guard event.beginTimeSeconds >= epochStartSeconds,
+              event.beginTimeSeconds < epochEndSeconds else {
+            return nil
+        }
+
+        let offsetSamples = Int(((event.beginTimeSeconds - epochStartSeconds) * samplingRate).rounded())
+        let displaySample = min(max(segment.startSample + offsetSamples, segment.startSample), segment.endSample)
+        let displayTime = Double(displaySample) / samplingRate
+        return MFFEvent(
+            id: "epoched-overlay-\(segment.id)-\(event.id)",
+            code: event.code,
+            beginTimeSeconds: displayTime,
+            rawBeginTime: event.rawBeginTime,
+            sourceFile: event.sourceFile
+        )
     }
 
     @ViewBuilder
@@ -340,7 +404,11 @@ struct WaveformView: View {
         continuousSignal: MFFSignalData
     ) -> some View {
         let isShowingEpochs = epochedSignal != nil
-        let events = displayedEvents(for: signal, includeContinuousOverlays: !isShowingEpochs)
+        let events = displayedEvents(
+            for: signal,
+            includeContinuousOverlays: true,
+            mapContinuousOverlaysIntoEpochs: isShowingEpochs
+        )
 
         HStack(spacing: 0) {
             VStack(spacing: 0) {
@@ -3645,10 +3713,10 @@ struct WaveformView: View {
     private func openPSASheet(for signal: MFFSignalData) {
         reconcilePSADefinedArtifactRejectionSelections()
         let events = segmentableEvents(for: signal)
-        if psaSelectedEventCodes.isEmpty, let firstCode = groupedEventSummaries(events).first?.code {
-            psaSelectedEventCodes.insert(firstCode)
-        }
-        for summary in groupedEventSummaries(events) where psaCategoryNames[summary.code] == nil {
+        let summaries = groupedEventSummaries(events)
+        let availableCodes = Set(summaries.map(\.code))
+        psaSelectedEventCodes = psaSelectedEventCodes.intersection(availableCodes)
+        for summary in summaries where psaCategoryNames[summary.code] == nil {
             psaCategoryNames[summary.code] = summary.code
         }
         psaStatusMessage = nil
