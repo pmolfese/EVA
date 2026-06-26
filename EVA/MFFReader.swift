@@ -8,7 +8,7 @@
 
 import Foundation
 
-struct MFFPackage {
+nonisolated struct MFFPackage: Sendable {
     let sourceURL: URL
     let xmlFiles: [String]
     let binFiles: [String]
@@ -16,7 +16,7 @@ struct MFFPackage {
     let metrics: [String: String]
 }
 
-struct MFFSignalData {
+nonisolated struct MFFSignalData: Sendable {
     let signalURL: URL
     let signalType: String
     let numberOfChannels: Int
@@ -25,9 +25,32 @@ struct MFFSignalData {
     let recordingStartTime: Date?
     let events: [MFFEvent]
     let data: [[Float]]
+    let channelNames: [String]?
+
+    init(
+        signalURL: URL,
+        signalType: String,
+        numberOfChannels: Int,
+        samplingRate: Double,
+        duration: TimeInterval,
+        recordingStartTime: Date?,
+        events: [MFFEvent],
+        data: [[Float]],
+        channelNames: [String]? = nil
+    ) {
+        self.signalURL = signalURL
+        self.signalType = signalType
+        self.numberOfChannels = numberOfChannels
+        self.samplingRate = samplingRate
+        self.duration = duration
+        self.recordingStartTime = recordingStartTime
+        self.events = events
+        self.data = data
+        self.channelNames = channelNames
+    }
 }
 
-struct MFFEvent: Identifiable, Hashable {
+nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
     let id: String
     let code: String
     let beginTimeSeconds: Double
@@ -107,7 +130,8 @@ nonisolated final class MFFReader {
             duration: Double(signalData.totalSamples) / signalData.samplingRate,
             recordingStartTime: try parseRecordingStartTime(in: packageURL),
             events: try parseEvents(in: packageURL),
-            data: signalData.samples
+            data: signalData.samples,
+            channelNames: try parseChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
         )
     }
 
@@ -275,6 +299,51 @@ nonisolated final class MFFReader {
         }
 
         return parseMFFDate(rawValue)
+    }
+
+    private func parseChannelNames(in packageURL: URL, expectedCount: Int) throws -> [String]? {
+        let layoutURL = packageURL.appendingPathComponent("sensorLayout.xml")
+        guard expectedCount > 0, FileManager.default.fileExists(atPath: layoutURL.path) else {
+            return nil
+        }
+
+        let document = try loadXMLDocument(at: layoutURL)
+        guard let root = document.rootElement() else {
+            throw MFFReaderError.invalidXML(layoutURL, "missing XML root element")
+        }
+
+        var names = Array(repeating: "", count: expectedCount)
+        for sensor in descendants(named: "sensor", in: root) {
+            let children = (sensor.children ?? []).compactMap { $0 as? XMLElement }
+            let number = children
+                .first(where: { sanitizedTagName($0.name) == "number" })?
+                .stringValue
+                .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let type = children
+                .first(where: { sanitizedTagName($0.name) == "type" })?
+                .stringValue
+                .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let name = children
+                .first(where: { sanitizedTagName($0.name) == "name" || sanitizedTagName($0.name) == "label" })?
+                .stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard (type == nil || type == 0),
+                  let number,
+                  (1...expectedCount).contains(number),
+                  let name,
+                  !name.isEmpty else {
+                continue
+            }
+            names[number - 1] = name
+        }
+
+        guard names.contains(where: { !$0.isEmpty }) else {
+            return nil
+        }
+        return names.enumerated().map { index, name in
+            name.isEmpty ? "Ch \(index + 1)" : name
+        }
     }
 
     private func parseEvents(in packageURL: URL) throws -> [MFFEvent] {
@@ -560,6 +629,20 @@ nonisolated final class MFFReader {
         }
 
         return nil
+    }
+
+    private func descendants(named name: String, in element: XMLElement) -> [XMLElement] {
+        var matches: [XMLElement] = []
+        if sanitizedTagName(element.name) == name {
+            matches.append(element)
+        }
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement else {
+                continue
+            }
+            matches.append(contentsOf: descendants(named: name, in: childElement))
+        }
+        return matches
     }
 
     private func sanitizedTagName(_ name: String?) -> String {

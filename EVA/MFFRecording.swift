@@ -2,7 +2,7 @@
 //  MFFRecording.swift
 //  EVA
 //
-//  Non-document app model for opening and viewing EGI `.mff` packages.
+//  Non-document app model for opening and viewing EEG recordings.
 //
 
 import Combine
@@ -16,7 +16,7 @@ extension UTType {
     }
 }
 
-/// A loaded or loading MFF recording used by EVA's normal WindowGroup app flow.
+/// A loaded or loading EEG recording used by EVA's normal WindowGroup app flow.
 final class MFFRecording: ObservableObject, Identifiable {
     nonisolated let objectWillChange = ObservableObjectPublisher()
 
@@ -68,11 +68,13 @@ final class MFFRecording: ObservableObject, Identifiable {
         }
 
         do {
-            let reader = MFFReader()
-            let signal = try reader.loadSignal(from: packageURL)
-            let layout = SensorLayout.load(fromPackageContaining: signal.signalURL)
-            let geometry = ElectrodeGeometry.load(fromPackageContaining: signal.signalURL)
-            return LoadResult(signal: signal, layout: layout, geometry: geometry, error: nil)
+            let imported = try SignalImportReader.load(from: packageURL)
+            return LoadResult(
+                signal: imported.signal,
+                layout: imported.layout,
+                geometry: imported.geometry,
+                error: nil
+            )
         } catch {
             return LoadResult(signal: nil, layout: nil, geometry: nil, error: error.localizedDescription)
         }

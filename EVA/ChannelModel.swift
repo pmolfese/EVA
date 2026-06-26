@@ -114,6 +114,15 @@ extension FocusedValues {
     private struct PSAViewControlsKey: FocusedValueKey {
         typealias Value = PSAViewControls
     }
+
+    var mffExportRequest: Binding<Int>? {
+        get { self[MFFExportRequestKey.self] }
+        set { self[MFFExportRequestKey.self] = newValue }
+    }
+
+    private struct MFFExportRequestKey: FocusedValueKey {
+        typealias Value = Binding<Int>
+    }
 }
 
 /// Menu-bar "Artifacts" commands, acting on the focused waveform window.
@@ -149,6 +158,18 @@ struct PSAViewControls {
     var showButterfly: Binding<Bool>
     var showOverlaidCategories: Binding<Bool>
     var isAveraged: Bool
+}
+
+/// File-menu export commands for the focused waveform window.
+struct FileExportCommands: View {
+    @FocusedValue(\.mffExportRequest) private var mffExportRequest
+
+    var body: some View {
+        Button("Export to MFF...") {
+            mffExportRequest?.wrappedValue += 1
+        }
+        .disabled(mffExportRequest == nil)
+    }
 }
 
 /// Menu-bar View commands for the focused waveform window.

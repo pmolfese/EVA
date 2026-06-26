@@ -11,12 +11,12 @@
 import Foundation
 import simd
 
-struct ElectrodeGeometry {
+nonisolated struct ElectrodeGeometry: Sendable {
     let name: String
     /// channelIndex (number − 1) → unit position vector on the sphere.
     let positions: [Int: SIMD3<Double>]
 
-    static func load(fromPackageContaining signalURL: URL) -> ElectrodeGeometry? {
+    nonisolated static func load(fromPackageContaining signalURL: URL) -> ElectrodeGeometry? {
         let url = signalURL
             .deletingLastPathComponent()
             .appendingPathComponent("coordinates.xml")

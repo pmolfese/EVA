@@ -362,7 +362,8 @@ nonisolated enum ICAArtifactDetector {
             duration: signal.duration,
             recordingStartTime: signal.recordingStartTime,
             events: signal.events,
-            data: cleaned
+            data: cleaned,
+            channelNames: signal.channelNames
         )
     }
 

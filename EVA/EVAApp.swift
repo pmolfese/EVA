@@ -25,10 +25,14 @@ struct EVAApp: App {
         .defaultSize(Self.defaultWindowSize)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Open MFF...") {
+                Button("Open Recording...") {
                     openRecordingRequest += 1
                 }
                 .keyboardShortcut("o", modifiers: .command)
+            }
+
+            CommandGroup(after: .newItem) {
+                FileExportCommands()
             }
 
             CommandGroup(after: .toolbar) {

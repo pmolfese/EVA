@@ -40,7 +40,7 @@ struct ContentView: View {
         }
         .fileImporter(
             isPresented: $showsFileImporter,
-            allowedContentTypes: [.mff],
+            allowedContentTypes: [.mff, .data, .plainText],
             allowsMultipleSelection: false
         ) { result in
             handleImportResult(result)
@@ -151,14 +151,14 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Button("Open MFF...") {
+            Button("Open Recording...") {
                 showsFileImporter = true
             }
             .keyboardShortcut("o", modifiers: .command)
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
 
-            Text("Drop an .mff package anywhere in this window")
+            Text("Drop .mff, BrainVision, EDF, Persyst, or BESA .avr/.mul recordings here")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
@@ -192,7 +192,7 @@ struct ContentView: View {
     @discardableResult
     private func open(_ url: URL) -> Bool {
         guard isSupportedRecordingURL(url) else {
-            openError = "EVA can open EGI .mff packages right now."
+            openError = "EVA can open .mff, BrainVision, EDF, Persyst, and BESA .avr/.mul recordings."
             return false
         }
 
@@ -202,7 +202,7 @@ struct ContentView: View {
     }
 
     private func isSupportedRecordingURL(_ url: URL) -> Bool {
-        url.pathExtension.caseInsensitiveCompare("mff") == .orderedSame
+        SignalImportReader.isSupportedRecordingURL(url)
     }
 }
 

@@ -99,6 +99,7 @@ struct OBSPCAVarianceReport: Sendable {
 enum ArtifactCleaningProgressPhase: String, Sendable {
     case preparing = "Preparing"
     case cleaning = "Cleaning"
+    case finalizing = "Finalizing"
 }
 
 struct ArtifactCleaningProgress: Sendable {
@@ -111,6 +112,7 @@ struct ArtifactCleaningProgress: Sendable {
     var artifactName: String
     var method: ArtifactCleaningMethod
     var phase: ArtifactCleaningProgressPhase
+    var detail: String?
 
     var fraction: Double {
         guard total > 0 else { return 0 }
@@ -160,32 +162,20 @@ nonisolated enum ArtifactCleaner {
             repeating: [Double](repeating: 0, count: sampledEventCount),
             count: sampledEventCount
         )
-        var contributingChannels = 0
-
-        for channel in channels where sampledEventCount > 1 {
-            let windows = sampledRanges.map { Array(signal.data[channel][$0]) }
-            guard windows.count > 1 else { continue }
-
-            let mean = meanWindow(windows)
-            let residuals = windows.map { zip($0, mean).map { Double($0.0 - $0.1) } }
-
-            var channelEnergy = 0.0
-            for row in residuals.indices {
-                for column in row..<residuals.count {
-                    let value = dot(residuals[row], residuals[column])
-                    aggregateGram[row][column] += value
-                    if row != column {
-                        aggregateGram[column][row] += value
-                    }
-                    if row == column {
-                        channelEnergy += value
-                    }
+        let varianceContributions = obsVarianceContributions(
+            data: signal.data,
+            channels: channels,
+            sampledRanges: sampledRanges,
+            workerCount: workerCount(for: channels.count)
+        )
+        for contribution in varianceContributions {
+            for row in contribution.gram.indices {
+                for column in contribution.gram[row].indices {
+                    aggregateGram[row][column] += contribution.gram[row][column]
                 }
             }
-
-            guard channelEnergy > 1e-12 else { continue }
-            contributingChannels += 1
         }
+        let contributingChannels = varianceContributions.count
 
         let eigenvalues = principalComponentEigenvalues(fromGram: aggregateGram, maximumCount: max(sampledEventCount - 1, componentLimit))
         let totalResidualVariance = eigenvalues.reduce(0, +)
@@ -227,6 +217,75 @@ nonisolated enum ArtifactCleaner {
         )
     }
 
+    private static func obsVarianceContributions(
+        data: [[Float]],
+        channels: [Int],
+        sampledRanges: [Range<Int>],
+        workerCount: Int
+    ) -> [OBSVarianceContribution] {
+        guard sampledRanges.count > 1, !channels.isEmpty else { return [] }
+        let boundedWorkerCount = min(max(workerCount, 1), channels.count)
+        guard boundedWorkerCount > 1 else {
+            return channels.compactMap {
+                obsVarianceContribution(channelData: data[$0], sampledRanges: sampledRanges)
+            }
+        }
+
+        var contributions: [OBSVarianceContribution] = []
+        contributions.reserveCapacity(channels.count)
+        let lock = NSLock()
+
+        for batchStart in stride(from: 0, to: channels.count, by: boundedWorkerCount) {
+            let batchEnd = min(batchStart + boundedWorkerCount, channels.count)
+            let batchChannels = Array(channels[batchStart..<batchEnd])
+            DispatchQueue.concurrentPerform(iterations: batchChannels.count) { batchIndex in
+                let channel = batchChannels[batchIndex]
+                guard let contribution = obsVarianceContribution(
+                    channelData: data[channel],
+                    sampledRanges: sampledRanges
+                ) else {
+                    return
+                }
+
+                lock.lock()
+                contributions.append(contribution)
+                lock.unlock()
+            }
+        }
+
+        return contributions
+    }
+
+    private static func obsVarianceContribution(
+        channelData: [Float],
+        sampledRanges: [Range<Int>]
+    ) -> OBSVarianceContribution? {
+        let windows = sampledRanges.map { Array(channelData[$0]) }
+        guard windows.count > 1 else { return nil }
+
+        let mean = meanWindow(windows)
+        let residuals = windows.map { zip($0, mean).map { Double($0.0 - $0.1) } }
+        var gram = Array(
+            repeating: [Double](repeating: 0, count: residuals.count),
+            count: residuals.count
+        )
+        var channelEnergy = 0.0
+
+        for row in residuals.indices {
+            for column in row..<residuals.count {
+                let value = dot(residuals[row], residuals[column])
+                gram[row][column] = value
+                gram[column][row] = value
+                if row == column {
+                    channelEnergy += value
+                }
+            }
+        }
+
+        guard channelEnergy > 1e-12 else { return nil }
+        return OBSVarianceContribution(gram: gram)
+    }
+
     static func cleanedSignal(
         from signal: MFFSignalData,
         artifacts: [DefinedArtifact],
@@ -241,21 +300,11 @@ nonisolated enum ArtifactCleaner {
         var completedEvents = 0
 
         for (index, artifact) in artifactsToClean.enumerated() {
-            progress?(ArtifactCleaningProgress(
-                completed: completedEvents,
-                total: totalEvents,
-                artifactCompleted: 0,
-                artifactTotal: artifact.events.count,
-                artifactIndex: index + 1,
-                artifactCount: artifactCount,
-                artifactName: artifact.name,
-                method: artifact.cleaningMethod,
-                phase: .preparing
-            ))
             let startingCompletedEvents = completedEvents
-            let reportEventProgress: (Int) -> Void = { artifactCompletedEvents in
+
+            let reportProgress: (ArtifactCleaningProgressPhase, Int, String?) -> Void = { phase, artifactCompletedEvents, detail in
                 let boundedArtifactCompleted = min(max(artifactCompletedEvents, 0), artifact.events.count)
-                completedEvents = startingCompletedEvents + boundedArtifactCompleted
+                completedEvents = max(completedEvents, startingCompletedEvents + boundedArtifactCompleted)
                 progress?(ArtifactCleaningProgress(
                     completed: completedEvents,
                     total: totalEvents,
@@ -265,15 +314,29 @@ nonisolated enum ArtifactCleaner {
                     artifactCount: artifactCount,
                     artifactName: artifact.name,
                     method: artifact.cleaningMethod,
-                    phase: .cleaning
+                    phase: phase,
+                    detail: detail
                 ))
             }
+            let reportSetupProgress: (String) -> Void = { detail in
+                reportProgress(.preparing, 0, detail)
+            }
+            let reportEventProgress: (Int) -> Void = { artifactCompletedEvents in
+                reportProgress(.cleaning, artifactCompletedEvents, nil)
+            }
+            let reportFinalizingProgress: (String) -> Void = { detail in
+                let artifactCompleted = min(max(completedEvents - startingCompletedEvents, 0), artifact.events.count)
+                reportProgress(.finalizing, artifactCompleted, detail)
+            }
+
+            reportSetupProgress("Checking events and readable channels")
 
             let channelCount: Int
             switch artifact.cleaningMethod {
             case .doNothing:
                 channelCount = 0
             case .regression:
+                reportSetupProgress("Preparing saved average waveform templates")
                 channelCount = applyTemplateRegression(
                     artifact: artifact,
                     signal: signal,
@@ -285,6 +348,8 @@ nonisolated enum ArtifactCleaner {
                     artifact: artifact,
                     signal: signal,
                     data: &data,
+                    setupProgress: reportSetupProgress,
+                    finalizingProgress: reportFinalizingProgress,
                     eventProgress: reportEventProgress
                 )
             case .sspPCA:
@@ -293,6 +358,8 @@ nonisolated enum ArtifactCleaner {
                     signal: signal,
                     data: &data,
                     excluding: badChannels,
+                    setupProgress: reportSetupProgress,
+                    finalizingProgress: reportFinalizingProgress,
                     eventProgress: reportEventProgress
                 )
             }
@@ -320,7 +387,8 @@ nonisolated enum ArtifactCleaner {
             duration: signal.duration,
             recordingStartTime: signal.recordingStartTime,
             events: signal.events,
-            data: data
+            data: data,
+            channelNames: signal.channelNames
         )
         return (cleaned, summaries)
     }
@@ -378,6 +446,8 @@ nonisolated enum ArtifactCleaner {
         artifact: DefinedArtifact,
         signal: MFFSignalData,
         data: inout [[Float]],
+        setupProgress: (String) -> Void,
+        finalizingProgress: (String) -> Void,
         eventProgress: (Int) -> Void
     ) -> Int {
         guard let sampleCount = data.first?.count, sampleCount > 0 else { return 0 }
@@ -385,6 +455,9 @@ nonisolated enum ArtifactCleaner {
         let coreWindowSamples = windowSamples(for: artifact, signal: signal)
         let edgeTaperSamples = obsEdgeTaperSamples(for: artifact, signal: signal, windowSamples: coreWindowSamples)
         let windowSamples = coreWindowSamples + 2 * edgeTaperSamples
+        let coreWindowMilliseconds = milliseconds(for: coreWindowSamples, samplingRate: signal.samplingRate)
+        let edgeTaperMilliseconds = milliseconds(for: edgeTaperSamples, samplingRate: signal.samplingRate)
+        setupProgress("Resolving event windows (\(coreWindowMilliseconds) ms core, \(edgeTaperMilliseconds) ms edge taper)")
         let eventRanges = artifact.events.map {
             eventWindow(
                 event: $0,
@@ -397,26 +470,22 @@ nonisolated enum ArtifactCleaner {
         guard !ranges.isEmpty else { return 0 }
 
         let channels = validChannels(in: data, sampleCount: sampleCount)
+        let workerCount = workerCount(for: channels.count)
+        setupProgress("Fitting OBS bases from \(min(ranges.count, 80)) sampled windows across \(channels.count) channels on \(workerCount) worker\(workerCount == 1 ? "" : "s")")
         var cleanedChannels = Set<Int>()
-        var channelBases: [(channel: Int, basis: [[Double]])] = []
         let componentLimit = max(artifact.obsPCAComponentCount, 0)
         let taper = raisedCosineTaper(count: windowSamples, edgeSamples: edgeTaperSamples)
-
-        for channel in channels {
-            let windows = sampledWindows(from: data[channel], ranges: ranges, maximumCount: 80)
-            guard !windows.isEmpty else { continue }
-
-            let mean = meanWindow(windows)
-            var basis = [centeredUnitVector(mean)].filter { !$0.isEmpty }
-            if windows.count > 1, componentLimit > 0 {
-                let residuals = windows.map { zip($0, mean).map { Double($0.0 - $0.1) } }
-                basis += principalComponents(from: residuals, maximumCount: min(componentLimit, windows.count - 1))
-            }
-            guard !basis.isEmpty else { continue }
-            channelBases.append((channel, basis))
-        }
+        let channelBases = fitOBSChannelBases(
+            data: data,
+            ranges: ranges,
+            channels: channels,
+            componentLimit: componentLimit,
+            workerCount: workerCount,
+            setupProgress: setupProgress
+        )
 
         guard !channelBases.isEmpty else { return 0 }
+        setupProgress("Prepared \(channelBases.count) channel bases; starting per-event subtraction")
 
         if artifact.obsUsesOverlapAdd {
             let accumulators = Dictionary(
@@ -443,6 +512,7 @@ nonisolated enum ArtifactCleaner {
                 }
             }
 
+            finalizingProgress("Combining overlapping OBS corrections")
             for channelBasis in channelBases {
                 guard let accumulator = accumulators[channelBasis.channel] else { continue }
                 accumulator.apply(to: &data[channelBasis.channel])
@@ -469,11 +539,87 @@ nonisolated enum ArtifactCleaner {
         return cleanedChannels.count
     }
 
+    private static func fitOBSChannelBases(
+        data: [[Float]],
+        ranges: [Range<Int>],
+        channels: [Int],
+        componentLimit: Int,
+        workerCount: Int,
+        setupProgress: (String) -> Void
+    ) -> [OBSChannelBasis] {
+        guard !channels.isEmpty else { return [] }
+        let boundedWorkerCount = min(max(workerCount, 1), channels.count)
+        guard boundedWorkerCount > 1 else {
+            return channels.compactMap { channel in
+                fitOBSChannelBasis(
+                    channel: channel,
+                    channelData: data[channel],
+                    ranges: ranges,
+                    componentLimit: componentLimit
+                )
+            }
+        }
+
+        var bases: [OBSChannelBasis] = []
+        bases.reserveCapacity(channels.count)
+        let lock = NSLock()
+        let batchSize = boundedWorkerCount
+        var completedChannels = 0
+
+        for batchStart in stride(from: 0, to: channels.count, by: batchSize) {
+            let batchEnd = min(batchStart + batchSize, channels.count)
+            let batchChannels = Array(channels[batchStart..<batchEnd])
+            DispatchQueue.concurrentPerform(iterations: batchChannels.count) { batchIndex in
+                let channel = batchChannels[batchIndex]
+                guard let basis = fitOBSChannelBasis(
+                    channel: channel,
+                    channelData: data[channel],
+                    ranges: ranges,
+                    componentLimit: componentLimit
+                ) else {
+                    return
+                }
+
+                lock.lock()
+                bases.append(basis)
+                lock.unlock()
+            }
+
+            completedChannels = batchEnd
+            if completedChannels < channels.count {
+                setupProgress("Fitting OBS bases \(completedChannels) of \(channels.count) channels on \(boundedWorkerCount) workers")
+            }
+        }
+
+        return bases.sorted { $0.channel < $1.channel }
+    }
+
+    private static func fitOBSChannelBasis(
+        channel: Int,
+        channelData: [Float],
+        ranges: [Range<Int>],
+        componentLimit: Int
+    ) -> OBSChannelBasis? {
+        let windows = sampledWindows(from: channelData, ranges: ranges, maximumCount: 80)
+        guard !windows.isEmpty else { return nil }
+
+        let mean = meanWindow(windows)
+        var basis = [centeredUnitVector(mean)].filter { !$0.isEmpty }
+        if windows.count > 1, componentLimit > 0 {
+            let residuals = windows.map { zip($0, mean).map { Double($0.0 - $0.1) } }
+            basis += principalComponents(from: residuals, maximumCount: min(componentLimit, windows.count - 1))
+        }
+        guard !basis.isEmpty else { return nil }
+        return OBSChannelBasis(channel: channel, basis: basis)
+    }
+
     private static func applySSPPCA(
         artifact: DefinedArtifact,
         signal: MFFSignalData,
         data: inout [[Float]],
         excluding badChannels: Set<Int>,
+        setupProgress: (String) -> Void,
+        finalizingProgress: (String) -> Void,
         eventProgress: (Int) -> Void
     ) -> Int {
         guard let sampleCount = data.first?.count, sampleCount > 0 else { return 0 }
@@ -481,6 +627,9 @@ nonisolated enum ArtifactCleaner {
         let coreWindowSamples = windowSamples(for: artifact, signal: signal)
         let edgeTaperSamples = obsEdgeTaperSamples(for: artifact, signal: signal, windowSamples: coreWindowSamples)
         let windowSamples = coreWindowSamples + 2 * edgeTaperSamples
+        let coreWindowMilliseconds = milliseconds(for: coreWindowSamples, samplingRate: signal.samplingRate)
+        let edgeTaperMilliseconds = milliseconds(for: edgeTaperSamples, samplingRate: signal.samplingRate)
+        setupProgress("Resolving event windows (\(coreWindowMilliseconds) ms core, \(edgeTaperMilliseconds) ms edge taper)")
         let eventRanges = artifact.events.map {
             eventWindow(
                 event: $0,
@@ -495,7 +644,9 @@ nonisolated enum ArtifactCleaner {
         guard channels.count > 1, !ranges.isEmpty else { return 0 }
         let taper = raisedCosineTaper(count: windowSamples, edgeSamples: edgeTaperSamples)
 
+        setupProgress("Computing spatial covariance from \(ranges.count) windows across \(channels.count) channels")
         let covariance = spatialCovariance(data: data, ranges: ranges, channels: channels)
+        setupProgress("Solving SSP/PCA projection components")
         let eigen = symmetricEigenDecomposition(covariance)
         guard eigen.values.count == channels.count,
               eigen.vectors.count == channels.count else {
@@ -510,6 +661,7 @@ nonisolated enum ArtifactCleaner {
             (0..<channels.count).map { row in eigen.vectors[row][component] }
         }
 
+        setupProgress("Prepared \(componentCount) spatial components; starting per-event projection")
         var cleanedChannels = Set<Int>()
         if artifact.obsUsesOverlapAdd {
             let accumulators = Dictionary(
@@ -539,6 +691,7 @@ nonisolated enum ArtifactCleaner {
                 }
             }
 
+            finalizingProgress("Combining overlapping SSP/PCA corrections")
             for channel in channels {
                 guard let accumulator = accumulators[channel] else { continue }
                 accumulator.apply(to: &data[channel])
@@ -718,6 +871,17 @@ nonisolated enum ArtifactCleaner {
             return count
         }
         return max(Int((artifact.windowSizeSeconds * signal.samplingRate).rounded()), 3)
+    }
+
+    private static func workerCount(for itemCount: Int) -> Int {
+        guard itemCount > 1 else { return 1 }
+        let availableCores = max(ProcessInfo.processInfo.activeProcessorCount, 1)
+        return min(itemCount, max(availableCores - 1, 1))
+    }
+
+    private static func milliseconds(for sampleCount: Int, samplingRate: Double) -> Int {
+        guard samplingRate > 0 else { return 0 }
+        return Int((Double(sampleCount) / samplingRate * 1000).rounded())
     }
 
     private static func obsPaddedWindowSamples(for artifact: DefinedArtifact, signal: MFFSignalData) -> Int {
@@ -1181,6 +1345,15 @@ nonisolated enum ArtifactCleaner {
 nonisolated private struct OBSCorrection {
     var weightedValues: [Double]
     var weights: [Double]
+}
+
+nonisolated private struct OBSChannelBasis: Sendable {
+    var channel: Int
+    var basis: [[Double]]
+}
+
+nonisolated private struct OBSVarianceContribution: Sendable {
+    var gram: [[Double]]
 }
 
 nonisolated private final class OBSCorrectionAccumulator {
