@@ -2,9 +2,8 @@
 //  ICAComponentAutoLabeler.swift
 //  SummerEEGDemo
 //
-//  Lightweight ICLabel-inspired component labeling heuristics for classroom
-//  artifact exploration. This is not the ICLabel trained classifier; it uses
-//  transparent scalp-map and time-course rules to suggest editable labels.
+//  ICA component labeling entry point. It prefers the bundled ICLabel Core ML
+//  classifier and fills any gaps with transparent scalp-map/time-course rules.
 //
 
 import Accelerate
@@ -15,9 +14,13 @@ nonisolated enum ICAComponentAutoLabeler {
         for decomposition: ICADecomposition,
         layout: SensorLayout?
     ) -> [Int: ICAComponentSuggestion] {
-        var suggestions: [Int: ICAComponentSuggestion] = [:]
+        var suggestions = ICLabelClassifier.suggestions(
+            for: decomposition,
+            layout: layout
+        )
 
         for component in 0..<decomposition.componentCount {
+            if suggestions[component] != nil { continue }
             let map = decomposition.componentMaps.indices.contains(component)
                 ? normalizedTopography(decomposition.componentMaps[component])
                 : []

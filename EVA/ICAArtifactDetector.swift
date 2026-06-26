@@ -90,6 +90,7 @@ struct ICAComponentSuggestion: Sendable {
     var label: String
     var confidence: Double
     var reason: String
+    var probabilities: [String: Double] = [:]
 }
 
 struct ICADecomposition: Sendable {
@@ -1694,4 +1695,3 @@ nonisolated private func inverse(_ matrix: [[Double]]) -> [[Double]] {
 
     return inv
 }
-
