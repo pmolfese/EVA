@@ -10,14 +10,20 @@ import Foundation
 
 enum EEGSignalFilterError: LocalizedError {
     case invalidSamplingRate
-    case invalidBandpassRange
+    /// Carries the actual cutoffs and Nyquist so the message reflects what the
+    /// user asked for rather than a hardcoded range.
+    case invalidBandpassRange(lowCutoff: Double, highCutoff: Double, nyquist: Double)
 
     var errorDescription: String? {
         switch self {
         case .invalidSamplingRate:
             return "The signal sampling rate is invalid for filtering."
-        case .invalidBandpassRange:
-            return "The 0.1-30 Hz filter range is not valid for this signal."
+        case let .invalidBandpassRange(lowCutoff, highCutoff, nyquist):
+            return String(
+                format: "The %.2f–%.2f Hz band-pass range is not valid for this signal "
+                    + "(must be 0 < low < high < Nyquist = %.2f Hz).",
+                lowCutoff, highCutoff, nyquist
+            )
         }
     }
 }
@@ -39,7 +45,11 @@ struct EEGSignalFilter {
 
         let nyquist = samplingRate / 2
         guard lowCutoff > 0, highCutoff > lowCutoff, highCutoff < nyquist else {
-            throw EEGSignalFilterError.invalidBandpassRange
+            throw EEGSignalFilterError.invalidBandpassRange(
+                lowCutoff: lowCutoff,
+                highCutoff: highCutoff,
+                nyquist: nyquist
+            )
         }
 
         return try await withThrowingTaskGroup(of: (Int, [Float]).self) { group in

@@ -75,7 +75,7 @@ nonisolated enum MFFWriter {
 
         do {
             try writeInfoXML(signal: signal, kind: kind, to: packageURL)
-            try writeSignalInfoXML(to: packageURL)
+            try writeSignalInfoXML(signal: signal, to: packageURL)
             try writeSignalBinary(
                 blocks: blocks.map { $0.withSignalData(signal.data) },
                 channelCount: signal.numberOfChannels,
@@ -84,7 +84,10 @@ nonisolated enum MFFWriter {
             )
             try writeEpochsXML(blocks: blocks, sampleRate: sampleRate, to: packageURL)
             try writeEventsXML(signal: signal, blocks: blocks, sampleRate: sampleRate, kind: kind, to: packageURL)
-            try writeChannelNamesXML(signal: signal, to: packageURL)
+            try writeSensorLayoutXML(signal: signal, to: packageURL)
+            // Carry over the original electrode coordinates (3-D montage) verbatim.
+            copyOriginalFileIfPresent(named: "coordinates.xml", sourceSignalURL: signal.signalURL, to: packageURL)
+            try writeSubjectXML(packageURL: packageURL)
         } catch {
             try? FileManager.default.removeItem(at: packageURL)
             throw error
@@ -159,6 +162,14 @@ nonisolated enum MFFWriter {
     }
 
     private static func writeInfoXML(signal: MFFSignalData, kind: MFFExportKind, to packageURL: URL) throws {
+        // Carry over the original info.xml verbatim when the source is an MFF
+        // package — it holds the real recordTime, amplifier type/serial/firmware,
+        // and acquisition version. Only synthesize when there is no source
+        // info.xml (e.g. exporting data imported from a non-MFF format).
+        if copyOriginalFileIfPresent(named: "info.xml", sourceSignalURL: signal.signalURL, to: packageURL) {
+            return
+        }
+
         let recordTime = mffDateString(signal.recordingStartTime ?? Date())
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
@@ -173,7 +184,15 @@ nonisolated enum MFFWriter {
         try xml.write(to: packageURL.appendingPathComponent("info.xml"), atomically: true, encoding: .utf8)
     }
 
-    private static func writeSignalInfoXML(to packageURL: URL) throws {
+    private static func writeSignalInfoXML(signal: MFFSignalData, to packageURL: URL) throws {
+        // Reuse the selected source infoN.xml when available, but strip
+        // calibration metadata. EVA stores calibrated physical samples after
+        // import, so carrying GCAL/ICAL into the export would make readers such
+        // as MNE or mffpy scale the data a second time.
+        if writeOriginalSignalInfoWithoutCalibrationsIfPresent(signal: signal, to: packageURL) {
+            return
+        }
+
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
 <dataInfo>
@@ -185,6 +204,41 @@ nonisolated enum MFFWriter {
 </dataInfo>
 """
         try xml.write(to: packageURL.appendingPathComponent("info1.xml"), atomically: true, encoding: .utf8)
+    }
+
+    /// Synthesizes a minimal EGI subject.xml, seeding the Patient ID from the
+    /// export's package name. EGI's subject.xml is a flat list of named fields;
+    /// we populate Patient ID and leave the rest blank.
+    private static func writeSubjectXML(packageURL: URL) throws {
+        let patientID = packageURL.deletingPathExtension().lastPathComponent
+        let fieldNames = [
+            "Last (Family) Name", "First (Given) Name", "Date of Birth", "Age",
+            "Gender", "Handedness", "Session Number", "Comments"
+        ]
+        var fields = """
+    <field>
+      <name>Patient ID</name>
+      <data dataType="string">\(xmlEscape(patientID))</data>
+      <choices></choices>
+    </field>
+"""
+        for name in fieldNames {
+            fields += """
+    <field>
+      <name>\(xmlEscape(name))</name>
+      <data dataType="string"></data>
+      <choices></choices>
+    </field>
+"""
+        }
+        let xml = """
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<patient xmlns="http://www.egi.com/subject_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <fields>
+\(fields)  </fields>
+</patient>
+"""
+        try xml.write(to: packageURL.appendingPathComponent("subject.xml"), atomically: true, encoding: .utf8)
     }
 
     private static func writeSignalBinary(
@@ -257,13 +311,21 @@ nonisolated enum MFFWriter {
         to packageURL: URL
     ) throws {
         let events = exportEvents(signal: signal, blocks: blocks, sampleRate: sampleRate, kind: kind)
+        // EGI MFF event <beginTime> is an ABSOLUTE ISO-8601 datetime (same format
+        // as info.xml recordTime), not an offset in seconds. MNE parses it as a
+        // datetime and computes the sample as round((beginTime - recordTime) *
+        // sfreq), so a bare float like "12.500000" breaks the reader. Anchor each
+        // event's relative offset to the recording start. (EVA's own reader still
+        // accepts both forms — see resolveEventBeginTimeSeconds.)
+        let recordStart = signal.recordingStartTime ?? Date()
         var body = ""
         for event in events {
+            let beginTime = mffDateString(recordStart.addingTimeInterval(event.beginTimeSeconds))
             body += """
   <event>
-    <code>\(xmlEscape(event.code))</code>
-    <beginTime>\(String(format: "%.6f", event.beginTimeSeconds))</beginTime>
+    <beginTime>\(xmlEscape(beginTime))</beginTime>
     <duration>0</duration>
+    <code>\(xmlEscape(event.code))</code>
     <description>\(xmlEscape(event.description))</description>
   </event>
 """
@@ -277,10 +339,33 @@ nonisolated enum MFFWriter {
         try xml.write(to: packageURL.appendingPathComponent("Events_EVA.xml"), atomically: true, encoding: .utf8)
     }
 
-    private static func writeChannelNamesXML(signal: MFFSignalData, to packageURL: URL) throws {
-        guard let names = signal.channelNames, names.count == signal.numberOfChannels else { return }
+    private static func writeSensorLayoutXML(signal: MFFSignalData, to packageURL: URL) throws {
+        let destination = packageURL.appendingPathComponent("sensorLayout.xml")
+
+        // Preferred: re-emit the ORIGINAL sensorLayout.xml verbatim so the real
+        // electrode positions, device name and sensor numbering survive a
+        // read → process → write round-trip. `signalURL` still points at the
+        // source signal even after filtering/averaging (all current processing
+        // preserves the channel count), so the original montage still matches.
+        // We only reuse it when its EEG (type 0/1) sensor count equals the
+        // exported channel count, to avoid emitting a mismatched layout.
+        if let original = originalMontageData(
+            named: "sensorLayout.xml",
+            requiringChannelCount: signal.numberOfChannels,
+            sourceSignalURL: signal.signalURL
+        ) {
+            try original.write(to: destination, options: .atomic)
+            return
+        }
+
+        // Fallback: synthesize a minimal layout. MNE requires the file and a
+        // type-0 <sensor> per channel (mne/io/egi/egimff.py:_read_mff_header),
+        // counted against the signal's channel count. Use channel names when
+        // available, otherwise generic E{n}.
+        let names = signal.channelNames
         var body = ""
-        for (index, name) in names.enumerated() {
+        for index in 0..<signal.numberOfChannels {
+            let name = (names != nil && index < names!.count) ? names![index] : "E\(index + 1)"
             body += """
   <sensor>
     <number>\(index + 1)</number>
@@ -292,10 +377,121 @@ nonisolated enum MFFWriter {
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
 <sensorLayout>
-  <name>EVA Channel Names</name>
+  <name>EVA Export</name>
 \(body)</sensorLayout>
 """
-        try xml.write(to: packageURL.appendingPathComponent("sensorLayout.xml"), atomically: true, encoding: .utf8)
+        try xml.write(to: destination, atomically: true, encoding: .utf8)
+    }
+
+    /// Copies a sidecar file verbatim from the source MFF package into the
+    /// export when it exists, so original metadata such as info.xml and
+    /// coordinates.xml survives a read → process → write round-trip. The
+    /// `signalURL` still points at the source package after processing. Returns
+    /// whether a file was copied; best-effort (silently skips when absent).
+    @discardableResult
+    private static func copyOriginalFileIfPresent(
+        named fileName: String,
+        sourceSignalURL: URL,
+        to packageURL: URL
+    ) -> Bool {
+        let source = sourceSignalURL.deletingLastPathComponent().appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: source.path) else { return false }
+        let destination = packageURL.appendingPathComponent(fileName)
+        try? FileManager.default.removeItem(at: destination)
+        do {
+            try FileManager.default.copyItem(at: source, to: destination)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    @discardableResult
+    private static func writeOriginalSignalInfoWithoutCalibrationsIfPresent(
+        signal: MFFSignalData,
+        to packageURL: URL
+    ) -> Bool {
+        let sourceFileName = sourceSignalInfoFileName(for: signal.signalURL)
+        let source = signal.signalURL.deletingLastPathComponent().appendingPathComponent(sourceFileName)
+        guard FileManager.default.fileExists(atPath: source.path) else { return false }
+
+        let destination = packageURL.appendingPathComponent("info1.xml")
+        do {
+            let data = try Data(contentsOf: source)
+            let document = try XMLDocument(data: data, options: [.documentTidyXML])
+            if let root = document.rootElement() {
+                removeDescendants(named: "calibrations", from: root)
+            }
+            try? FileManager.default.removeItem(at: destination)
+            try document.xmlData(options: [.nodePrettyPrint]).write(to: destination, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func sourceSignalInfoFileName(for signalURL: URL) -> String {
+        let signalName = signalURL.deletingPathExtension().lastPathComponent
+        let signalNumber = signalName.replacingOccurrences(of: "signal", with: "")
+        return signalNumber.isEmpty ? "info1.xml" : "info\(signalNumber).xml"
+    }
+
+    @discardableResult
+    private static func removeDescendants(named name: String, from element: XMLElement) -> Bool {
+        var removed = false
+        for (index, child) in (element.children ?? []).enumerated().reversed() {
+            guard let childElement = child as? XMLElement else { continue }
+            if localName(childElement.name) == name {
+                element.removeChild(at: index)
+                removed = true
+            } else if removeDescendants(named: name, from: childElement) {
+                removed = true
+            }
+        }
+        return removed
+    }
+
+    /// Returns the raw bytes of a montage file from the source package only when
+    /// its EEG (type 0/1) sensor count matches `requiringChannelCount`.
+    private static func originalMontageData(
+        named fileName: String,
+        requiringChannelCount channelCount: Int,
+        sourceSignalURL: URL
+    ) -> Data? {
+        let url = sourceSignalURL.deletingLastPathComponent().appendingPathComponent(fileName)
+        guard let data = try? Data(contentsOf: url),
+              let document = try? XMLDocument(data: data),
+              let root = document.rootElement(),
+              eegSensorCount(in: root) == channelCount else {
+            return nil
+        }
+        return data
+    }
+
+    /// Counts <sensor> elements whose <type> is 0 or 1 (EEG / reference), the
+    /// same set MNE treats as data channels. Namespace-agnostic.
+    private static func eegSensorCount(in root: XMLElement) -> Int {
+        var count = 0
+        func walk(_ element: XMLElement) {
+            if localName(element.name) == "sensor" {
+                let type = (element.children?.compactMap { $0 as? XMLElement } ?? [])
+                    .first { localName($0.name) == "type" }?
+                    .stringValue?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let value = type.flatMap(Int.init), value == 0 || value == 1 {
+                    count += 1
+                }
+            }
+            for case let child as XMLElement in element.children ?? [] {
+                walk(child)
+            }
+        }
+        walk(root)
+        return count
+    }
+
+    private static func localName(_ name: String?) -> String {
+        (name ?? "").components(separatedBy: ":").last ?? ""
     }
 
     private static func exportEvents(
@@ -347,8 +543,16 @@ nonisolated enum MFFWriter {
     }
 
     private static func mffDateString(_ date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        // EGI MFF `recordTime` must use microsecond (6-digit) fractional seconds
+        // and a NUMERIC timezone offset. ISO8601DateFormatter only emits 3-digit
+        // milliseconds and a "Z" suffix for UTC, which fails strict readers —
+        // notably MNE's regex (mne/io/egi/egimff.py) requires
+        //   \.\d{6}(?:\d{3})?[+-]\d{2}:\d{2}
+        // so ".129Z" is rejected. Use a fixed POSIX formatter with 6 fractional
+        // digits and the "xxx" offset token (always numeric, e.g. +00:00/-04:00).
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSxxx"
         return formatter.string(from: date)
     }
 }

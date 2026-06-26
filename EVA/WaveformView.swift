@@ -68,6 +68,9 @@ struct WaveformView: View {
     @State private var artifactTopographyChannelScope = ArtifactTopographyChannelScope.allGood
     @State private var artifactTopographyMetric = ArtifactTopographyMetric.pearson
     @State private var isRefreshingTopography = false
+    /// Monotonic token so out-of-order live topography refreshes can be ignored
+    /// (only the most recently started refresh is allowed to apply its result).
+    @State private var topographyRefreshGeneration = 0
     /// Snapshot of the scan-affecting controls at the moment the last full scan
     /// ran, used to know when the displayed result is stale (→ "Rescan").
     @State private var lastArtifactScanSignature: ArtifactScanSignature?
@@ -748,9 +751,6 @@ struct WaveformView: View {
                             }
                         )
                         .gesture(waveformInteractionGesture(in: signal))
-                        .onChange(of: topomapSample, initial: false) { oldValue, newValue in
-                            debugLog("topomapSample \(oldValue.map(String.init) ?? "nil") -> \(newValue.map(String.init) ?? "nil")")
-                        }
                         .padding(.trailing, 20)
                     }
                     .scrollPosition($horizontalScrollPosition)
@@ -1867,11 +1867,16 @@ struct WaveformView: View {
         }
 
         let configuration = artifactTemplateConfiguration(for: signal, range: range)
+        topographyRefreshGeneration += 1
+        let generation = topographyRefreshGeneration
         isRefreshingTopography = true
         Task {
             let outcome = await Task.detached(priority: .userInitiated) {
                 ArtifactTemplateDetector.detectTopography(in: signal, configuration: configuration)
             }.value
+            // Ignore stale completions: a newer refresh has superseded this one
+            // and will publish its own result (and clear the spinner).
+            guard generation == topographyRefreshGeneration else { return }
             artifactTemplateResult?.topographyEvents = outcome.events
             artifactTemplateResult?.topographyReference = outcome.reference
             isRefreshingTopography = false
@@ -4129,7 +4134,9 @@ struct WaveformView: View {
                 var sum = 0.0
                 for sample in preStart..<preEnd { sum += Double(data[channel][sample]) }
                 let baseline = Float(sum / Double(preCount))
-                guard baseline.isFinite, baseline != 0 else { continue }
+                // Skip only non-finite baselines (e.g. NaN from corrupt data);
+                // a baseline of exactly 0 is valid and subtracting it is a no-op.
+                guard baseline.isFinite else { continue }
                 for sample in segment.startSample...segment.endSample {
                     data[channel][sample] -= baseline
                 }

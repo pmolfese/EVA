@@ -160,7 +160,14 @@ struct GradientRemover {
             let start = offset + n * spacing
 
             // Edge TRs get no template (Python `get_tr_template`): detrended only.
-            if n < window.before || n > (nTR - window.after) {
+            //
+            // Upstream guard was `n > (n_tr - window.after)`, which paired with
+            // the original (buggy) narrow "after" range. We widen the "after"
+            // range below to be symmetric with "before", so the last templated TR
+            // now reaches detrended[n + window.after]; the guard is tightened to
+            // `n > nTR - window.after - 1` to keep that access in bounds.
+            // See the correctness note on the "after" accumulation below.
+            if n < window.before || n > (nTR - window.after - 1) {
                 row.replaceSubrange(start..<(start + spacing), with: detrended[n])
                 continue
             }
@@ -168,12 +175,23 @@ struct GradientRemover {
             // template = weightBefore * mean(before TRs) + weightAfter * mean(after TRs)
             for i in 0..<spacing { template[i] = 0 }
             if window.before > 0 {
+                // range(n - window.before ..< n) → window.before TRs (matches Python).
                 accumulateMean(of: detrended, range: (n - window.before)..<n, scale: weightBefore, into: &template)
             }
-            // NOTE: faithfully mirrors the Python `range(n + 1, n + window.after - 1)`
-            // for the "after" part, which averages window.after - 2 TRs.
+            // CORRECTNESS FIX (diverges from upstream Python on purpose):
+            // The reference gradient_remover computes the "after" part as
+            //   self._get_tr_template_part(n + 1, n + self.window[1] - 1)
+            // i.e. range(n+1, n+window.after-1), which averages only
+            // window.after - 2 TRs (just 2 of the intended 4 with the default
+            // window). That is an off-by-one: weight_after is window.after /
+            // (window.before + window.after) = 0.5, sized for window.after TRs,
+            // and the "before" side uses the full window.before TRs — so the
+            // template is asymmetric and under-counts post-volumes.
+            // We use range(n+1 ..< n+window.after+1) → the full window.after TRs,
+            // symmetric with "before". (Verified against
+            // github.com/nimh-sfim/gradient_remover GradientRemover.py, main.)
             if window.after > 0 {
-                accumulateMean(of: detrended, range: (n + 1)..<(n + window.after - 1), scale: weightAfter, into: &template)
+                accumulateMean(of: detrended, range: (n + 1)..<(n + window.after + 1), scale: weightAfter, into: &template)
             }
 
             // corrected = detrended[n] - template

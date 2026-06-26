@@ -122,6 +122,16 @@ nonisolated final class MFFReader {
             throw MFFReaderError.emptySignal
         }
 
+        var samples = signalData.samples
+        if let gcal = try parseCalibrationFactors(
+            named: "GCAL",
+            in: packageURL,
+            infoFileName: signalDescriptor.infoFileName,
+            expectedCount: signalData.numberOfChannels
+        ) {
+            applyCalibrationFactors(gcal, to: &samples)
+        }
+
         return MFFSignalData(
             signalURL: signalDescriptor.signalURL,
             signalType: signalDescriptor.signalType,
@@ -130,7 +140,7 @@ nonisolated final class MFFReader {
             duration: Double(signalData.totalSamples) / signalData.samplingRate,
             recordingStartTime: try parseRecordingStartTime(in: packageURL),
             events: try parseEvents(in: packageURL),
-            data: signalData.samples,
+            data: samples,
             channelNames: try parseChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
         )
     }
@@ -233,7 +243,10 @@ nonisolated final class MFFReader {
         }
     }
 
-    private func selectSignal(in packageURL: URL, preferredSignalFile: String?) throws -> (signalURL: URL, signalType: String) {
+    private func selectSignal(
+        in packageURL: URL,
+        preferredSignalFile: String?
+    ) throws -> (signalURL: URL, infoFileName: String, signalType: String) {
         let signalFiles = try binFiles(in: packageURL)
 
         if let preferredSignalFile {
@@ -242,13 +255,17 @@ nonisolated final class MFFReader {
                 throw MFFReaderError.missingSignalFile(signalURL)
             }
             let signalType = try parseSignalType(for: signalURL, in: packageURL) ?? "Unknown"
-            return (signalURL, signalType)
+            return (signalURL, signalInfoFileName(for: signalURL), signalType)
         }
 
         let descriptors = try signalFiles.map { fileName in
             let signalURL = packageURL.appendingPathComponent(fileName)
             let signalType = try parseSignalType(for: signalURL, in: packageURL) ?? "Unknown"
-            return (signalURL: signalURL, signalType: signalType)
+            return (
+                signalURL: signalURL,
+                infoFileName: signalInfoFileName(for: signalURL),
+                signalType: signalType
+            )
         }
 
         if let eegSignal = descriptors.first(where: { $0.signalType.caseInsensitiveCompare("EEG") == .orderedSame }) {
@@ -262,9 +279,7 @@ nonisolated final class MFFReader {
     }
 
     private func parseSignalType(for signalURL: URL, in packageURL: URL) throws -> String? {
-        let signalName = signalURL.deletingPathExtension().lastPathComponent
-        let signalNumber = signalName.replacingOccurrences(of: "signal", with: "")
-        let infoURL = packageURL.appendingPathComponent("info\(signalNumber).xml")
+        let infoURL = packageURL.appendingPathComponent(signalInfoFileName(for: signalURL))
         guard FileManager.default.fileExists(atPath: infoURL.path) else {
             return nil
         }
@@ -282,6 +297,111 @@ nonisolated final class MFFReader {
         }
 
         return nil
+    }
+
+    private func signalInfoFileName(for signalURL: URL) -> String {
+        let signalName = signalURL.deletingPathExtension().lastPathComponent
+        let signalNumber = signalName.replacingOccurrences(of: "signal", with: "")
+        return "info\(signalNumber).xml"
+    }
+
+    private func parseCalibrationFactors(
+        named calibrationType: String,
+        in packageURL: URL,
+        infoFileName: String,
+        expectedCount: Int
+    ) throws -> [Float]? {
+        guard expectedCount > 0 else { return nil }
+
+        let infoURL = packageURL.appendingPathComponent(infoFileName)
+        guard FileManager.default.fileExists(atPath: infoURL.path) else {
+            return nil
+        }
+
+        let document = try loadXMLDocument(at: infoURL)
+        guard let root = document.rootElement() else {
+            throw MFFReaderError.invalidXML(infoURL, "missing XML root element")
+        }
+
+        for calibration in descendants(named: "calibration", in: root) {
+            let children = (calibration.children ?? []).compactMap { $0 as? XMLElement }
+            let type = children
+                .first(where: { sanitizedTagName($0.name) == "type" })?
+                .stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard type?.caseInsensitiveCompare(calibrationType) == .orderedSame else {
+                continue
+            }
+
+            if let rawBeginTime = children
+                .first(where: { sanitizedTagName($0.name) == "beginTime" })?
+                .stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               let beginTime = Double(rawBeginTime),
+               abs(beginTime) > 0.000001 {
+                continue
+            }
+
+            let channelElements = descendants(named: "ch", in: calibration)
+            guard !channelElements.isEmpty else {
+                continue
+            }
+
+            var factors = Array(repeating: Float(1), count: expectedCount)
+            var sequentialChannelNumber = 1
+            var appliedAnyFactor = false
+
+            for channelElement in channelElements {
+                defer { sequentialChannelNumber += 1 }
+
+                guard let rawValue = channelElement.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      let value = Float(rawValue),
+                      value.isFinite else {
+                    continue
+                }
+
+                let channelNumber = calibrationChannelNumber(from: channelElement) ?? sequentialChannelNumber
+                guard (1...expectedCount).contains(channelNumber) else {
+                    continue
+                }
+
+                factors[channelNumber - 1] = value
+                appliedAnyFactor = true
+            }
+
+            if appliedAnyFactor {
+                return factors
+            }
+        }
+
+        return nil
+    }
+
+    private func calibrationChannelNumber(from element: XMLElement) -> Int? {
+        for attribute in element.attributes ?? [] {
+            let name = sanitizedTagName(attribute.name).lowercased()
+            guard name == "n" || name == "number" || name == "channel",
+                  let rawValue = attribute.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let number = Int(rawValue) else {
+                continue
+            }
+            return number
+        }
+        return nil
+    }
+
+    private func applyCalibrationFactors(_ factors: [Float], to samples: inout [[Float]]) {
+        let channelCount = min(samples.count, factors.count)
+        guard channelCount > 0 else { return }
+
+        for channel in 0..<channelCount {
+            let factor = factors[channel]
+            guard factor.isFinite, factor != 1 else { continue }
+            for sample in samples[channel].indices {
+                samples[channel][sample] *= factor
+            }
+        }
     }
 
     private func parseRecordingStartTime(in packageURL: URL) throws -> Date? {
