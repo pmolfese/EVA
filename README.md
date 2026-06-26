@@ -6,7 +6,9 @@ The goal is (mostly) simple: keep the signal visible, make the processing steps 
 
 EVA stands for **Electrophysiology Viewer and Analysis**.
 
-![Waveform view](Figures/1_WaveformView_sm.png)
+<p align="center">
+  <img src="Figures/readme_waveform_overview.png" alt="EVA waveform overview" width="900">
+</p>
 
 ## What EVA Does
 
@@ -40,35 +42,35 @@ EVA is also not _intended_ as a replacement for your vendor's EEG software. We r
 
 EVA keeps topographies next to the waveform instead of making them a separate mental mode. Double-clicking a sample can bring up a scalp map, which is especially useful when checking whether a burst looks spatially plausible or artifact-like.
 
-![Topomap of artifacts](Figures/2_TopomapOfArtifacts_sm.png)
+<p align="center">
+  <img src="Figures/readme_topography_artifacts.png" alt="Waveform-linked topography for artifact review" width="860">
+</p>
 
 For event-related work, EVA can segment around events and average by category. Baseline correction and average reference can be toggled after segmentation, so you can compare choices without rebuilding the whole view.
 
-![Segment averages](Figures/3_SegmentAverage_sm.png)
-
 Category averages can also be inspected as butterfly plots. Confirm your evoked responses, while checking whether an effect is broadly distributed, channel-specific, or being driven by a few suspicious traces.
 
-![Butterfly plots](Figures/4_ButterflyPlots_sm.png)
+<p align="center">
+  <img src="Figures/readme_epoching_averages.png" alt="Segmentation controls and category butterfly plots" width="900">
+</p>
 
 Artifact handling is built around the idea that the user often knows what the artifact looks like before software does. You can highlight a waveform region, define an artifact template, choose the channels and matching behavior, and let EVA scan for similar events.
 
-![Define artifacts](Figures/5_DefineArtifacts_sm.png)
-
 Once artifacts are defined, EVA can preview and apply cleaning methods. The app currently supports regression, OBS, and SSP/PCA removal
 
-![Clean artifacts](Figures/6_CleanArtifacts_sm.png)
+<p align="center">
+  <img src="Figures/readme_artifact_workflow.png" alt="Artifact definition, preview, and cleaning workflow" width="900">
+</p>
 
 ICA is available for component-based cleanup. EVA includes a Core ML path for **ICLabel**, using the bundled `ICLabel.mlpackage`, providing useful labels and confidence for data cleaning.
 
-![ICA with ICLabel](Figures/7_ICAwithICLabel_sm.png)
-
 Channel health is an explainable metric, and a training-data path for a future Core ML models. EVA can score channels using finite sample rate, amplitude typicality, burst peaks, flatline/clipping, fast noise, slow drift, line-noise proxy, and neighbor agreement when sensor geometry is present.
-
-![Per-channel health](Figures/8_PerChannelHealth_sm.png)
 
 Segment health applies the same idea across time. EVA can color segments as good, watch, or poor, then show the underlying reasons in a details panel. Labeled artifact overlap is included as a major signal, and the metrics can be exported as JSON for later model training.
 
-![Per-segment health](Figures/9_PerSegmentHealth_sm.png)
+<p align="center">
+  <img src="Figures/readme_ica_health_workflow.png" alt="ICA component labeling with channel and segment health review" width="900">
+</p>
 
 ## Built For macOS
 
@@ -117,4 +119,3 @@ xcodebuild -project EVA.xcodeproj -scheme EVA -destination platform=macOS build
 The app is GPL-3.0-only. Some reader behavior and format details were implemented with reference to MNE-Python and related public documentation; see source comments and third-party notices.
 
 The authors of EVA are domain experts in EEG/ERP and other neuroimaging techniques with *decent* programming chops.  However, the codebase stems from years of C, C++, Objective-C tools written by P. Molfese, and as such was translated, improved, and implemented with a combination of human and LLM skills. The code has been used internally for months and iterated on by the authors/developers before we published it to GitHub, so we are reasonably confident in the correctness of the systems. 
-
