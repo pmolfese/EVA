@@ -159,6 +159,21 @@ struct WaveformView: View {
     @State private var channels = ChannelModel()
     @State private var electrodeGeometry: ElectrodeGeometry?
     @State private var channelStatusMessage: String?
+    @State private var channelHealthStatusMessage: String?
+    @State private var channelHealthSignature: String?
+    @State private var channelHealthTask: Task<Void, Never>?
+    @State private var channelLabelMetricsExportRequest = 0
+    @State private var showsSegmentHealth = false
+    @State private var showsSegmentHealthMouseOver = false
+    @State private var showsSegmentHealthDetails = false
+    @State private var segmentHealthAnalysis: SegmentHealthAnalysis?
+    @State private var isAnalyzingSegmentHealth = false
+    @State private var segmentHealthProgress: Double = 0
+    @State private var segmentHealthStatusMessage: String?
+    @State private var segmentHealthSignature: String?
+    @State private var segmentHealthTask: Task<Void, Never>?
+    @State private var segmentHealthDetailsRequest = 0
+    @State private var segmentHealthRefreshRequest = 0
     @State private var resetToOriginalRequest = 0
     @State private var mffExportRequest = 0
     @State private var isExportingMFF = false
@@ -213,6 +228,7 @@ struct WaveformView: View {
         }
         .navigationTitle(recording.packageName)
         .focusedSceneValue(\.channelModel, channels)
+        .focusedSceneValue(\.channelLabelMetricsExportRequest, $channelLabelMetricsExportRequest)
         .focusedSceneValue(\.artifactMenuControls, ArtifactMenuControls(
             artifacts: definedArtifacts,
             deleteRequest: $artifactDeletionRequest,
@@ -225,12 +241,27 @@ struct WaveformView: View {
             showOverlaidCategories: $showsOverlaidCategories,
             isAveraged: psaIsAveraged
         ))
+        .focusedSceneValue(\.segmentHealthViewControls, SegmentHealthViewControls(
+            showsHealth: $showsSegmentHealth,
+            showsMouseOverHealth: $showsSegmentHealthMouseOver,
+            detailsRequest: $segmentHealthDetailsRequest,
+            refreshRequest: $segmentHealthRefreshRequest,
+            isAnalyzing: isAnalyzingSegmentHealth,
+            progress: segmentHealthProgress
+        ))
         .focusedSceneValue(\.mffExportRequest, $mffExportRequest)
         .onChange(of: resetToOriginalRequest) { _, _ in
             resetToOriginalData()
         }
         .onChange(of: mffExportRequest) { _, _ in
             exportCurrentSignalToMFF()
+        }
+        .onChange(of: channelLabelMetricsExportRequest) { _, _ in
+            saveChannelLabelMetricsJSON()
+        }
+        .onChange(of: segmentHealthDetailsRequest) { _, _ in
+            showsSegmentHealth = true
+            showsSegmentHealthDetails = true
         }
         .onChange(of: artifactDeletionRequest) { _, artifactID in
             guard let artifactID else { return }
@@ -270,6 +301,10 @@ struct WaveformView: View {
         }
         .onDisappear {
             removeCommandKeyMonitor()
+            channelHealthTask?.cancel()
+            channelHealthTask = nil
+            segmentHealthTask?.cancel()
+            segmentHealthTask = nil
         }
     }
 
@@ -363,6 +398,9 @@ struct WaveformView: View {
         .sheet(isPresented: $showsICASheet) {
             icaSheet(for: base)
         }
+        .sheet(isPresented: $showsSegmentHealthDetails) {
+            segmentHealthDetailsSheet()
+        }
         .onChange(of: artifactDetectionMethod) { _, method in
             if method == .ica {
                 DispatchQueue.main.async {
@@ -372,6 +410,12 @@ struct WaveformView: View {
         }
         .task(id: artifactDetectionRequestID(for: continuousSignal)) {
             await updateArtifactEvents(for: continuousSignal)
+        }
+        .task(id: channelHealthRequestID(for: continuousSignal)) {
+            refreshChannelHealthIfNeeded(for: continuousSignal)
+        }
+        .task(id: segmentHealthRequestID(for: signal)) {
+            refreshSegmentHealthIfNeeded(for: signal)
         }
     }
 
@@ -613,6 +657,12 @@ struct WaveformView: View {
         if let channelStatusMessage {
             lines.append(LogLine(text: channelStatusMessage, isError: true))
         }
+        if let channelHealthStatusMessage {
+            lines.append(LogLine(text: channelHealthStatusMessage, isError: false))
+        }
+        if let segmentHealthStatusMessage {
+            lines.append(LogLine(text: segmentHealthStatusMessage, isError: false))
+        }
         if let artifactCleaningStatusMessage {
             lines.append(LogLine(text: artifactCleaningStatusMessage, isError: false))
         }
@@ -636,6 +686,12 @@ struct WaveformView: View {
             if let artifactCleaningProgress {
                 logProgressRow(label: "Artifact", value: artifactCleaningProgress.fraction)
             }
+            if channels.isAnalyzingHealth {
+                logProgressRow(label: "Health", value: channels.healthProgress)
+            }
+            if isAnalyzingSegmentHealth {
+                logProgressRow(label: "Segments", value: segmentHealthProgress)
+            }
             if isExportingMFF {
                 logProgressRow(label: "MFF", value: 0.5)
             }
@@ -649,7 +705,11 @@ struct WaveformView: View {
                     .help(line.text)
             }
 
-            if !isProcessingMRI, !isFiltering, activeLogMessages.isEmpty {
+            if !isProcessingMRI,
+               !isFiltering,
+               !channels.isAnalyzingHealth,
+               !isAnalyzingSegmentHealth,
+               activeLogMessages.isEmpty {
                 Text("Ready")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -740,6 +800,7 @@ struct WaveformView: View {
                         // Each overlay is its own independent layer so that the
                         // selection band growing during a drag cannot relayout or
                         // shift the topomap cursor's rendering.
+                        .overlay(alignment: .topLeading) { segmentHealthOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { epochBoundaryOverlay() }
                         .overlay(alignment: .topLeading) { selectionOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { cursorOverlay() }
@@ -839,21 +900,33 @@ struct WaveformView: View {
         let label = signal.channelNames?.indices.contains(index) == true
             ? signal.channelNames?[index].nilIfEmpty ?? "Ch \(index + 1)"
             : "Ch \(index + 1)"
-        return HStack(spacing: 4) {
-            Text(label)
-                .font(.system(.body, design: .monospaced))
-            if isHidden {
-                Image(systemName: "eye.slash")
-                    .font(.caption2)
-            } else if channels.interpolated[index] != nil {
-                Image(systemName: "wand.and.stars")
-                    .font(.caption2)
-            } else if channels.bad.contains(index) {
-                Image(systemName: "xmark.circle")
-                    .font(.caption2)
+        return HStack(spacing: 6) {
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if isHidden {
+                    Image(systemName: "eye.slash")
+                        .font(.caption2)
+                } else if channels.interpolated[index] != nil {
+                    Image(systemName: "wand.and.stars")
+                        .font(.caption2)
+                } else if channels.bad.contains(index) {
+                    Image(systemName: "xmark.circle")
+                        .font(.caption2)
+                }
+            }
+            .foregroundStyle(channelColor(index))
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if channels.showsHealth {
+                ChannelHealthBadge(
+                    result: channels.healthResults[index],
+                    isAnalyzing: channels.isAnalyzingHealth
+                )
             }
         }
-        .foregroundStyle(channelColor(index))
         .opacity(isHidden ? 0.4 : 1)
         .frame(maxWidth: .infinity, minHeight: channelRowHeight, alignment: .leading)
         .contentShape(Rectangle())
@@ -961,6 +1034,30 @@ struct WaveformView: View {
                 }
                 .offset(x: lowerX)
                 .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private func segmentHealthOverlay(for signal: MFFSignalData) -> some View {
+        if showsSegmentHealth,
+           let results = segmentHealthAnalysis?.results,
+           let sampleCount = signal.data.first?.count,
+           sampleCount > 0 {
+            ZStack(alignment: .topLeading) {
+                ForEach(results) { result in
+                    let start = min(max(result.startSample, 0), sampleCount - 1)
+                    let end = min(max(result.endSample + 1, start + 1), sampleCount)
+                    let startX = contentX(forSample: start)
+                    let endX = contentX(forSample: end)
+                    SegmentHealthBand(
+                        result: result,
+                        showsMouseOverHealth: showsSegmentHealthMouseOver
+                    )
+                        .frame(width: max(endX - startX, 2))
+                        .frame(maxHeight: .infinity)
+                        .offset(x: startX)
+                }
+            }
         }
     }
 
@@ -4235,6 +4332,12 @@ struct WaveformView: View {
         showsButterflyPlot = false
         selectedEventCodes.removeAll()
         psaStatusMessage = nil
+        segmentHealthTask?.cancel()
+        segmentHealthTask = nil
+        segmentHealthAnalysis = nil
+        segmentHealthSignature = nil
+        isAnalyzingSegmentHealth = false
+        segmentHealthProgress = 0
         horizontalScrollPosition.scrollTo(x: 0)
     }
 
@@ -4617,7 +4720,7 @@ struct WaveformView: View {
     }
 
     private func artifactDetectionRequestID(for signal: MFFSignalData) -> String {
-        [
+        return [
             signal.signalURL.path,
             "\(signal.numberOfChannels)",
             "\(signal.data.first?.count ?? 0)",
@@ -4690,6 +4793,635 @@ struct WaveformView: View {
             parts.append("\(movementCount) eye movements")
         }
         return parts.joined(separator: ", ")
+    }
+
+    // MARK: - Channel health
+
+    private func channelHealthRequestID(for signal: MFFSignalData) -> String {
+        [
+            "\(channels.showsHealth)",
+            "\(channels.healthRefreshToken)",
+            channelHealthSignature(for: signal)
+        ].joined(separator: "|")
+    }
+
+    private func channelHealthSignature(for signal: MFFSignalData) -> String {
+        return [
+            signal.signalURL.path,
+            signal.signalType,
+            "\(signal.numberOfChannels)",
+            "\(signal.data.first?.count ?? 0)",
+            "\(signal.samplingRate)",
+            "\(gradientCorrectedSignal != nil)",
+            "\(icaCleanedSignal != nil)",
+            "\(filteredSignal != nil)",
+            "\(artifactCleanedSignal != nil)",
+            "\(artifactCleaningIsEnabled)",
+            channels.interpolated.keys.sorted().map(String.init).joined(separator: ",")
+        ].joined(separator: "|")
+    }
+
+    @MainActor
+    private func refreshChannelHealthIfNeeded(for signal: MFFSignalData) {
+        let signature = channelHealthSignature(for: signal)
+
+        guard channels.showsHealth else {
+            channelHealthTask?.cancel()
+            channelHealthTask = nil
+            channelHealthSignature = nil
+            channels.clearHealthResults()
+            channelHealthStatusMessage = nil
+            return
+        }
+
+        guard channelHealthSignature != signature || channels.healthResults.isEmpty else {
+            return
+        }
+
+        channelHealthTask?.cancel()
+        channelHealthSignature = signature
+        channels.healthResults = [:]
+        channels.isAnalyzingHealth = true
+        channels.healthProgress = 0
+        channelHealthStatusMessage = nil
+
+        let layout = recording.sensorLayout
+        let sourceSignal = signal
+        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
+        let progressTask = Task { @MainActor in
+            for await fraction in progressStream {
+                channels.healthProgress = min(max(fraction, 0), 1)
+            }
+        }
+
+        channelHealthTask = Task { @MainActor in
+            let worker = Task.detached(priority: .utility) {
+                ChannelHealthAnalyzer.analyze(
+                    signal: sourceSignal,
+                    layout: layout,
+                    progress: { fraction in
+                        progressContinuation.yield(fraction)
+                    }
+                )
+            }
+
+            let analysis = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
+
+            progressContinuation.finish()
+            progressTask.cancel()
+
+            guard !Task.isCancelled,
+                  channels.showsHealth,
+                  channelHealthSignature == signature else {
+                return
+            }
+
+            channels.healthResults = analysis.resultsByChannel
+            channels.isAnalyzingHealth = false
+            channels.healthProgress = 1
+            channelHealthStatusMessage = analysis.resultsByChannel.isEmpty
+                ? "No channel health metrics available."
+                : "Channel health scored \(analysis.resultsByChannel.count) channels."
+        }
+    }
+
+    private func saveChannelLabelMetricsJSON() {
+        guard !channels.bad.isEmpty else {
+            channelHealthStatusMessage = "Mark at least one bad channel before saving labels."
+            return
+        }
+        guard let signal = currentChannelLabelMetricsSignal() else {
+            channelHealthStatusMessage = "No signal is ready for channel-label export."
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = defaultChannelLabelMetricsExportName()
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        channelHealthTask?.cancel()
+        channels.isAnalyzingHealth = true
+        channels.healthProgress = 0
+        channelHealthStatusMessage = "Saving channel label metrics..."
+
+        let packageName = recording.packageName
+        let layout = recording.sensorLayout
+        let processing = channelHealthProcessingSnapshot()
+        let hiddenChannels = channels.hidden
+
+        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
+        let progressTask = Task { @MainActor in
+            for await fraction in progressStream {
+                channels.healthProgress = min(max(fraction, 0), 1)
+            }
+        }
+
+        channelHealthTask = Task { @MainActor in
+            let result = await Task.detached(priority: .utility) {
+                do {
+                    let analysis = ChannelHealthAnalyzer.analyze(
+                        signal: signal,
+                        layout: layout,
+                        progress: { fraction in
+                            progressContinuation.yield(0.85 * fraction)
+                        }
+                    )
+                    let export = SavedChannelHealthDataset.make(
+                        packageName: packageName,
+                        signal: signal,
+                        processing: processing,
+                        hiddenChannelIndices: hiddenChannels,
+                        analysis: analysis
+                    )
+                    progressContinuation.yield(0.92)
+
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    encoder.dateEncodingStrategy = .iso8601
+                    let data = try encoder.encode(export)
+                    progressContinuation.yield(0.97)
+                    try data.write(to: url, options: .atomic)
+                    return Result<Int, Error>.success(export.channels.count)
+                } catch {
+                    return Result<Int, Error>.failure(error)
+                }
+            }.value
+
+            progressContinuation.finish()
+            progressTask.cancel()
+            channels.isAnalyzingHealth = false
+
+            switch result {
+            case .success(let channelCount):
+                channels.healthProgress = 1
+                channelHealthStatusMessage = "Saved labels and metrics for \(channelCount) channels: \(url.lastPathComponent)"
+            case .failure(let error):
+                channels.healthProgress = 0
+                channelHealthStatusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func currentChannelLabelMetricsSignal() -> MFFSignalData? {
+        guard let rawSignal = recording.signal else { return nil }
+        let base = icaCleanedSignal ?? gradientCorrectedSignal ?? rawSignal
+        let preArtifact = filteredSignal ?? base
+        return artifactCleaningIsEnabled ? (artifactCleanedSignal ?? preArtifact) : preArtifact
+    }
+
+    private func channelHealthProcessingSnapshot() -> SavedChannelHealthProcessing {
+        SavedChannelHealthProcessing(
+            gradientCorrected: gradientCorrectedSignal != nil,
+            icaCleaned: icaCleanedSignal != nil,
+            filtered: filteredSignal != nil,
+            filterLowCutoffHz: filteredSignal == nil ? nil : filterLowCutoff,
+            filterHighCutoffHz: filteredSignal == nil ? nil : filterHighCutoff,
+            notch60HzEnabled: filteredSignal == nil ? nil : notch60HzEnabled,
+            averageReferenced: filteredSignal == nil ? nil : filterAverageReference,
+            artifactCleaned: artifactCleanedSignal != nil,
+            artifactCleaningVisible: artifactCleanedSignal != nil && artifactCleaningIsEnabled,
+            interpolatedChannelIndices: channels.interpolated.keys.sorted(),
+            markedBadChannelIndices: channels.bad.sorted()
+        )
+    }
+
+    private func defaultChannelLabelMetricsExportName() -> String {
+        let baseName = (recording.packageName as NSString).deletingPathExtension
+        return "\(baseName)-channel-labels.json"
+    }
+
+    // MARK: - Segment health
+
+    private func segmentHealthRequestID(for signal: MFFSignalData) -> String {
+        [
+            "\(showsSegmentHealth)",
+            "\(segmentHealthRefreshRequest)",
+            segmentHealthSignature(for: signal)
+        ].joined(separator: "|")
+    }
+
+    private func segmentHealthSignature(for signal: MFFSignalData) -> String {
+        let badChannelSignature = channels.bad.sorted().map(String.init).joined(separator: ",")
+        let interpolationSignature = channels.interpolated.keys.sorted().map(String.init).joined(separator: ",")
+        let epochSignature = epochSegments.map(\.id).joined(separator: ",")
+        let definedArtifactSignature = definedArtifacts.map { artifact in
+            [
+                artifact.id.uuidString,
+                artifact.eventCode,
+                "\(artifact.events.count)",
+                "\(artifact.windowSizeSeconds)"
+            ].joined(separator: ":")
+        }.joined(separator: ",")
+        let artifactEventSignature = artifactEvents.map { event in
+            [
+                event.id,
+                event.code,
+                "\(event.beginTimeSeconds)"
+            ].joined(separator: ":")
+        }.joined(separator: ",")
+
+        return [
+            signal.signalURL.path,
+            signal.signalType,
+            "\(signal.numberOfChannels)",
+            "\(signal.data.first?.count ?? 0)",
+            "\(signal.samplingRate)",
+            "\(gradientCorrectedSignal != nil)",
+            "\(icaCleanedSignal != nil)",
+            "\(filteredSignal != nil)",
+            "\(artifactCleanedSignal != nil)",
+            "\(artifactCleaningIsEnabled)",
+            "\(epochedSignal != nil)",
+            "\(psaIsAveraged)",
+            "\(psaBaselineCorrected)",
+            "\(psaAverageReference)",
+            badChannelSignature,
+            interpolationSignature,
+            epochSignature,
+            definedArtifactSignature,
+            artifactEventSignature
+        ].joined(separator: "|")
+    }
+
+    private func segmentHealthInputSegments(for signal: MFFSignalData) -> [SegmentHealthInputSegment] {
+        SegmentHealthAnalyzer.analysisSegments(
+            for: signal,
+            epochSegments: epochedSignal == nil ? [] : epochSegments
+        )
+    }
+
+    private func segmentHealthArtifactIntervals(for signal: MFFSignalData) -> [SegmentHealthArtifactInterval] {
+        guard signal.samplingRate > 0,
+              let sampleCount = signal.data.first?.count,
+              sampleCount > 0 else {
+            return []
+        }
+
+        let sourceWindows = segmentHealthArtifactSourceWindows()
+        guard !sourceWindows.isEmpty else { return [] }
+
+        if epochedSignal != nil, !epochSegments.isEmpty {
+            return segmentHealthEpochedArtifactIntervals(
+                sourceWindows: sourceWindows,
+                samplingRate: signal.samplingRate,
+                sampleCount: sampleCount
+            )
+        }
+
+        return sourceWindows.compactMap { window in
+            segmentHealthArtifactInterval(
+                id: window.id,
+                code: window.code,
+                sourceFile: window.sourceFile,
+                startSeconds: window.startSeconds,
+                endSeconds: window.endSeconds,
+                samplingRate: signal.samplingRate,
+                sampleCount: sampleCount
+            )
+        }
+        .sorted { $0.startSample < $1.startSample }
+    }
+
+    private func segmentHealthArtifactSourceWindows() -> [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double)] {
+        let defaultWindowSeconds = 0.25
+        var windows: [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double)] = []
+        var definedEvents = Set<MFFEvent>()
+
+        for artifact in definedArtifacts {
+            let windowSeconds = max(artifact.windowSizeSeconds, defaultWindowSeconds)
+            for event in artifact.events {
+                definedEvents.insert(event)
+                let halfWindow = windowSeconds / 2
+                windows.append((
+                    id: "\(artifact.id.uuidString)-\(event.id)",
+                    code: event.code,
+                    sourceFile: artifact.name,
+                    startSeconds: event.beginTimeSeconds - halfWindow,
+                    endSeconds: event.beginTimeSeconds + halfWindow
+                ))
+            }
+        }
+
+        for event in artifactEvents where !definedEvents.contains(event) {
+            let halfWindow = defaultWindowSeconds / 2
+            windows.append((
+                id: event.id,
+                code: event.code,
+                sourceFile: event.sourceFile,
+                startSeconds: event.beginTimeSeconds - halfWindow,
+                endSeconds: event.beginTimeSeconds + halfWindow
+            ))
+        }
+
+        return windows
+    }
+
+    private func segmentHealthEpochedArtifactIntervals(
+        sourceWindows: [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double)],
+        samplingRate: Double,
+        sampleCount: Int
+    ) -> [SegmentHealthArtifactInterval] {
+        var intervals: [SegmentHealthArtifactInterval] = []
+        for segment in epochSegments {
+            let epochStartSeconds = segment.sourceTimeSeconds - Double(segment.stimulusOffsetSamples) / samplingRate
+            let epochDurationSeconds = Double(segment.endSample - segment.startSample + 1) / samplingRate
+            let epochEndSeconds = epochStartSeconds + epochDurationSeconds
+
+            for window in sourceWindows {
+                let overlapStart = max(window.startSeconds, epochStartSeconds)
+                let overlapEnd = min(window.endSeconds, epochEndSeconds)
+                guard overlapEnd >= overlapStart else { continue }
+
+                let displayStartSeconds = Double(segment.startSample) / samplingRate + (overlapStart - epochStartSeconds)
+                let displayEndSeconds = Double(segment.startSample) / samplingRate + (overlapEnd - epochStartSeconds)
+                if let interval = segmentHealthArtifactInterval(
+                    id: "\(segment.id)-\(window.id)",
+                    code: window.code,
+                    sourceFile: window.sourceFile,
+                    startSeconds: displayStartSeconds,
+                    endSeconds: displayEndSeconds,
+                    samplingRate: samplingRate,
+                    sampleCount: sampleCount
+                ) {
+                    intervals.append(interval)
+                }
+            }
+        }
+
+        return intervals.sorted { $0.startSample < $1.startSample }
+    }
+
+    private func segmentHealthArtifactInterval(
+        id: String,
+        code: String,
+        sourceFile: String,
+        startSeconds: Double,
+        endSeconds: Double,
+        samplingRate: Double,
+        sampleCount: Int
+    ) -> SegmentHealthArtifactInterval? {
+        guard samplingRate > 0, sampleCount > 0 else { return nil }
+        let lowerSeconds = min(startSeconds, endSeconds)
+        let upperSeconds = max(startSeconds, endSeconds)
+        let start = min(max(Int((lowerSeconds * samplingRate).rounded(.down)), 0), sampleCount - 1)
+        let end = min(max(Int((upperSeconds * samplingRate).rounded(.up)), start), sampleCount - 1)
+        guard end >= start else { return nil }
+        return SegmentHealthArtifactInterval(
+            artifactID: id,
+            code: code,
+            startSample: start,
+            endSample: end,
+            sourceFile: sourceFile
+        )
+    }
+
+    @MainActor
+    private func refreshSegmentHealthIfNeeded(for signal: MFFSignalData) {
+        let signature = segmentHealthSignature(for: signal)
+
+        guard showsSegmentHealth else {
+            segmentHealthTask?.cancel()
+            segmentHealthTask = nil
+            segmentHealthSignature = nil
+            segmentHealthAnalysis = nil
+            isAnalyzingSegmentHealth = false
+            segmentHealthProgress = 0
+            segmentHealthStatusMessage = nil
+            return
+        }
+
+        guard segmentHealthSignature != signature || segmentHealthAnalysis?.results.isEmpty != false else {
+            return
+        }
+
+        let segments = segmentHealthInputSegments(for: signal)
+        guard !segments.isEmpty else {
+            segmentHealthAnalysis = nil
+            segmentHealthStatusMessage = "No segments are available to score."
+            return
+        }
+
+        segmentHealthTask?.cancel()
+        segmentHealthSignature = signature
+        segmentHealthAnalysis = nil
+        isAnalyzingSegmentHealth = true
+        segmentHealthProgress = 0
+        segmentHealthStatusMessage = nil
+
+        let excludedChannels = channels.bad
+        let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
+        let sourceSignal = signal
+        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
+        let progressTask = Task { @MainActor in
+            for await fraction in progressStream {
+                segmentHealthProgress = min(max(fraction, 0), 1)
+            }
+        }
+
+        segmentHealthTask = Task { @MainActor in
+            let worker = Task.detached(priority: .utility) {
+                SegmentHealthAnalyzer.analyze(
+                    signal: sourceSignal,
+                    segments: segments,
+                    excludedChannelIndices: excludedChannels,
+                    artifactIntervals: artifactIntervals,
+                    progress: { fraction in
+                        progressContinuation.yield(fraction)
+                    }
+                )
+            }
+
+            let analysis = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
+
+            progressContinuation.finish()
+            progressTask.cancel()
+
+            guard !Task.isCancelled,
+                  showsSegmentHealth,
+                  segmentHealthSignature == signature else {
+                return
+            }
+
+            segmentHealthAnalysis = analysis
+            isAnalyzingSegmentHealth = false
+            segmentHealthProgress = 1
+            segmentHealthStatusMessage = analysis.results.isEmpty
+                ? "No segment health metrics available."
+                : "Segment health scored \(analysis.results.count) segments."
+        }
+    }
+
+    private func segmentHealthDetailsSheet() -> some View {
+        SegmentHealthDetailsView(
+            results: segmentHealthAnalysis?.results ?? [],
+            isAnalyzing: isAnalyzingSegmentHealth,
+            progress: segmentHealthProgress,
+            statusMessage: segmentHealthStatusMessage,
+            onRefresh: {
+                showsSegmentHealth = true
+                segmentHealthRefreshRequest += 1
+            },
+            onSave: {
+                saveSegmentHealthMetricsJSON()
+            },
+            onJump: { result in
+                jumpToSegment(result)
+            },
+            onClose: {
+                showsSegmentHealthDetails = false
+            }
+        )
+    }
+
+    private func saveSegmentHealthMetricsJSON() {
+        guard let signal = currentSegmentHealthSignal() else {
+            segmentHealthStatusMessage = "No signal is ready for segment-metrics export."
+            return
+        }
+
+        let segments = segmentHealthInputSegments(for: signal)
+        guard !segments.isEmpty else {
+            segmentHealthStatusMessage = "No segments are available to export."
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = defaultSegmentHealthExportName()
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        segmentHealthTask?.cancel()
+        showsSegmentHealth = true
+        isAnalyzingSegmentHealth = true
+        segmentHealthProgress = 0
+        segmentHealthStatusMessage = "Saving segment health metrics..."
+
+        let signature = segmentHealthSignature(for: signal)
+        let reusableAnalysis = segmentHealthSignature == signature ? segmentHealthAnalysis : nil
+        let packageName = recording.packageName
+        let processing = segmentHealthProcessingSnapshot()
+        let excludedChannels = channels.bad
+        let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
+
+        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
+        let progressTask = Task { @MainActor in
+            for await fraction in progressStream {
+                segmentHealthProgress = min(max(fraction, 0), 1)
+            }
+        }
+
+        segmentHealthTask = Task { @MainActor in
+            let result = await Task.detached(priority: .utility) {
+                do {
+                    let analysis: SegmentHealthAnalysis
+                    if let reusableAnalysis {
+                        analysis = reusableAnalysis
+                        progressContinuation.yield(0.85)
+                    } else {
+                        analysis = SegmentHealthAnalyzer.analyze(
+                            signal: signal,
+                            segments: segments,
+                            excludedChannelIndices: excludedChannels,
+                            artifactIntervals: artifactIntervals,
+                            progress: { fraction in
+                                progressContinuation.yield(0.85 * fraction)
+                            }
+                        )
+                    }
+
+                    let export = SavedSegmentHealthDataset.make(
+                        packageName: packageName,
+                        signal: signal,
+                        processing: processing,
+                        analysis: analysis
+                    )
+                    progressContinuation.yield(0.92)
+
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    encoder.dateEncodingStrategy = .iso8601
+                    let data = try encoder.encode(export)
+                    progressContinuation.yield(0.97)
+                    try data.write(to: url, options: .atomic)
+                    return Result<(Int, SegmentHealthAnalysis), Error>.success((export.segments.count, analysis))
+                } catch {
+                    return Result<(Int, SegmentHealthAnalysis), Error>.failure(error)
+                }
+            }.value
+
+            progressContinuation.finish()
+            progressTask.cancel()
+            isAnalyzingSegmentHealth = false
+
+            switch result {
+            case .success(let payload):
+                segmentHealthProgress = 1
+                segmentHealthSignature = signature
+                segmentHealthAnalysis = payload.1
+                segmentHealthStatusMessage = "Saved metrics for \(payload.0) segments: \(url.lastPathComponent)"
+            case .failure(let error):
+                segmentHealthProgress = 0
+                segmentHealthStatusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func currentSegmentHealthSignal() -> MFFSignalData? {
+        guard let rawSignal = recording.signal else { return nil }
+        let base = icaCleanedSignal ?? gradientCorrectedSignal ?? rawSignal
+        let preArtifact = filteredSignal ?? base
+        let processed = artifactCleaningIsEnabled ? (artifactCleanedSignal ?? preArtifact) : preArtifact
+        let continuousSignal = applyInterpolations(to: processed)
+        return epochedSignal ?? continuousSignal
+    }
+
+    private func segmentHealthProcessingSnapshot() -> SavedSegmentHealthProcessing {
+        SavedSegmentHealthProcessing(
+            gradientCorrected: gradientCorrectedSignal != nil,
+            icaCleaned: icaCleanedSignal != nil,
+            filtered: filteredSignal != nil,
+            filterLowCutoffHz: filteredSignal == nil ? nil : filterLowCutoff,
+            filterHighCutoffHz: filteredSignal == nil ? nil : filterHighCutoff,
+            notch60HzEnabled: filteredSignal == nil ? nil : notch60HzEnabled,
+            averageReferenced: filteredSignal == nil ? nil : filterAverageReference,
+            artifactCleaned: artifactCleanedSignal != nil,
+            artifactCleaningVisible: artifactCleanedSignal != nil && artifactCleaningIsEnabled,
+            epoched: epochedSignal != nil,
+            psaAveraged: psaIsAveraged,
+            psaBaselineCorrected: psaBaselineCorrected,
+            psaAverageReferenced: psaAverageReference,
+            hiddenChannelIndices: channels.hidden.sorted(),
+            interpolatedChannelIndices: channels.interpolated.keys.sorted(),
+            markedBadChannelIndices: channels.bad.sorted()
+        )
+    }
+
+    private func defaultSegmentHealthExportName() -> String {
+        let baseName = (recording.packageName as NSString).deletingPathExtension
+        return "\(baseName)-segment-health.json"
     }
 
     // MARK: - Channel interpolation
@@ -4796,10 +5528,20 @@ struct WaveformView: View {
         mriStatusMessage = nil
         psaStatusMessage = nil
         channelStatusMessage = nil
+        channelHealthStatusMessage = nil
+        segmentHealthStatusMessage = nil
         lastICAReconstructionDebugReport = nil
 
         // Interpolations, epochs, and the dependent selection/topomap state.
         invalidateInterpolations()
+        channels.clearHealthResults()
+        channelHealthSignature = nil
+        segmentHealthTask?.cancel()
+        segmentHealthTask = nil
+        segmentHealthAnalysis = nil
+        segmentHealthSignature = nil
+        isAnalyzingSegmentHealth = false
+        segmentHealthProgress = 0
         invalidateEpochsForSignalChange()
 
         // Force artifact overlays and downstream views to rebuild from the base.
@@ -4819,6 +5561,12 @@ struct WaveformView: View {
         butterflyTopomapRelativeSample = nil
         showsButterflyPlot = false
         showsOverlaidCategories = false
+        segmentHealthTask?.cancel()
+        segmentHealthTask = nil
+        segmentHealthAnalysis = nil
+        segmentHealthSignature = nil
+        isAnalyzingSegmentHealth = false
+        segmentHealthProgress = 0
     }
 
     // MARK: - SwiftData markers
@@ -4887,6 +5635,32 @@ struct WaveformView: View {
         let viewportCenter = max(horizontalViewportWidth / 2, 1)
         let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
         let clampedOffset = min(max(targetX - viewportCenter, 0), maxOffset)
+
+        isSyncingSliderFromScroll = true
+        horizontalJumpValue = maxOffset > 0 ? Double(clampedOffset / maxOffset) : 0
+        isSyncingSliderFromScroll = false
+        horizontalScrollPosition.scrollTo(x: clampedOffset)
+    }
+
+    private func jumpToSegment(_ result: SegmentHealthResult) {
+        guard let signal = currentSegmentHealthSignal(),
+              let sampleCount = signal.data.first?.count,
+              sampleCount > 0 else {
+            return
+        }
+
+        let lower = min(max(result.startSample, 0), sampleCount - 1)
+        let upper = min(max(result.endSample, lower), sampleCount - 1)
+        selectedSampleRange = lower...upper
+        dragSelectionStartSample = nil
+        dragSelectionEndSample = nil
+        selectedEventID = nil
+
+        let plotWidth = plotWidth(for: signal)
+        let segmentCenterX = (contentX(forSample: lower) + contentX(forSample: upper + 1)) / 2
+        let viewportCenter = max(horizontalViewportWidth / 2, 1)
+        let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
+        let clampedOffset = min(max(segmentCenterX - viewportCenter, 0), maxOffset)
 
         isSyncingSliderFromScroll = true
         horizontalJumpValue = maxOffset > 0 ? Double(clampedOffset / maxOffset) : 0
@@ -5151,6 +5925,498 @@ private struct ICADebugSignalStats {
 private struct HorizontalViewport: Equatable {
     let offsetX: CGFloat
     let width: CGFloat
+}
+
+private struct SegmentHealthBand: View {
+    let result: SegmentHealthResult
+    let showsMouseOverHealth: Bool
+    @State private var showsDetails = false
+
+    var body: some View {
+        Rectangle()
+            .fill(result.grade.color.opacity(result.grade.segmentOverlayOpacity))
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(result.grade.color.opacity(0.28))
+                    .frame(width: result.grade == .good ? 0 : 1)
+            }
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                guard showsMouseOverHealth else {
+                    showsDetails = false
+                    return
+                }
+                showsDetails = hovering
+            }
+            .popover(isPresented: $showsDetails, arrowEdge: .top) {
+                SegmentHealthPopover(result: result)
+            }
+            .onChange(of: showsMouseOverHealth) { _, isEnabled in
+                if !isEnabled {
+                    showsDetails = false
+                }
+            }
+            .accessibilityLabel("Segment health \(result.goodPercentage) percent good")
+    }
+}
+
+private struct SegmentHealthDetailsView: View {
+    let results: [SegmentHealthResult]
+    let isAnalyzing: Bool
+    let progress: Double
+    let statusMessage: String?
+    let onRefresh: () -> Void
+    let onSave: () -> Void
+    let onJump: (SegmentHealthResult) -> Void
+    let onClose: () -> Void
+
+    private var gradeCounts: [(ChannelHealthGrade, Int)] {
+        ChannelHealthGrade.allHealthGrades.map { grade in
+            (grade, results.filter { $0.grade == grade }.count)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Segment Health")
+                        .font(.title3.weight(.semibold))
+                    Text("\(results.count) segments")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 8) {
+                    ForEach(gradeCounts, id: \.0) { grade, count in
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(grade.color)
+                                .frame(width: 8, height: 8)
+                            Text("\(count)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                if isAnalyzing {
+                    ProgressView(value: progress)
+                        .frame(width: 120)
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    onRefresh()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(isAnalyzing)
+
+                Button {
+                    onSave()
+                } label: {
+                    Label("Save Metrics JSON...", systemImage: "square.and.arrow.down")
+                }
+                .disabled(results.isEmpty || isAnalyzing)
+
+                Button("Close") {
+                    onClose()
+                }
+            }
+
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            VStack(spacing: 0) {
+                SegmentHealthTableHeader()
+
+                Divider()
+
+                if results.isEmpty {
+                    ContentUnavailableView(
+                        "No Segment Health",
+                        systemImage: "rectangle.split.3x1",
+                        description: Text(isAnalyzing ? "Scoring segments..." : "Refresh to score the current signal.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(results) { result in
+                                SegmentHealthTableRow(
+                                    result: result,
+                                    onJump: {
+                                        onJump(result)
+                                    }
+                                )
+                                Divider()
+                            }
+                        }
+                    }
+                }
+            }
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.secondary.opacity(0.16), lineWidth: 1)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 880, minHeight: 520)
+    }
+}
+
+private struct SegmentHealthTableHeader: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Segment")
+                .frame(width: 78, alignment: .leading)
+            Text("Category")
+                .frame(width: 145, alignment: .leading)
+            Text("Time")
+                .frame(width: 170, alignment: .leading)
+            Text("Health")
+                .frame(width: 96, alignment: .leading)
+            Text("Summary")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Jump")
+                .frame(width: 64, alignment: .trailing)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+}
+
+private struct SegmentHealthTableRow: View {
+    let result: SegmentHealthResult
+    let onJump: () -> Void
+    @State private var showsDetails = false
+    @State private var pinsDetails = false
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("#\(result.segmentIndex + 1)")
+                .font(.caption.monospacedDigit())
+                .frame(width: 78, alignment: .leading)
+
+            Text(result.category)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 145, alignment: .leading)
+
+            Text(segmentTimeText(result))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 170, alignment: .leading)
+
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(result.grade.color)
+                    .frame(width: 9, height: 9)
+                Text("\(result.goodPercentage)%")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(result.grade.color)
+            }
+            .frame(width: 96, alignment: .leading)
+
+            Text(result.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                onJump()
+            } label: {
+                Label("Jump", systemImage: "arrow.right.to.line")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.borderless)
+            .help("Jump to this segment in the waveform viewer")
+            .frame(width: 64, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(isHovered || pinsDetails ? result.grade.color.opacity(0.10) : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                showsDetails = true
+            } else if !pinsDetails {
+                showsDetails = false
+            }
+        }
+        .onTapGesture {
+            pinsDetails.toggle()
+            showsDetails = pinsDetails
+        }
+        .popover(isPresented: $showsDetails, arrowEdge: .trailing) {
+            SegmentHealthPopover(result: result)
+        }
+        .onChange(of: showsDetails) { _, isShowing in
+            if !isShowing {
+                pinsDetails = false
+            }
+        }
+    }
+
+    private func segmentTimeText(_ result: SegmentHealthResult) -> String {
+        let start = Self.formatSeconds(result.startTimeSeconds)
+        let end = Self.formatSeconds(result.endTimeSeconds)
+        return "\(start)-\(end)"
+    }
+
+    private static func formatSeconds(_ seconds: Double) -> String {
+        if seconds >= 60 {
+            let minutes = Int(seconds) / 60
+            let remaining = seconds.truncatingRemainder(dividingBy: 60)
+            return String(format: "%d:%05.2f", minutes, remaining)
+        }
+        return String(format: "%.2fs", seconds)
+    }
+}
+
+private struct SegmentHealthPopover: View {
+    let result: SegmentHealthResult
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Segment \(result.segmentIndex + 1)")
+                        .font(.headline)
+                    Text(result.category)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(result.goodPercentage)% good")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(result.grade.color)
+            }
+
+            HStack(spacing: 8) {
+                Text(segmentWindowText(result))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if result.contributingEpochCount > 1 {
+                    Text("\(result.contributingEpochCount) epochs")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text(result.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(result.metrics) { metric in
+                    SegmentHealthMetricRow(metric: metric)
+                }
+            }
+        }
+        .padding(12)
+        .frame(width: 340)
+    }
+
+    private func segmentWindowText(_ result: SegmentHealthResult) -> String {
+        String(
+            format: "%.2fs-%.2fs (%.2fs)",
+            result.startTimeSeconds,
+            result.endTimeSeconds,
+            result.durationSeconds
+        )
+    }
+}
+
+private struct SegmentHealthMetricRow: View {
+    let metric: SegmentHealthMetric
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle()
+                .fill(metric.grade.color)
+                .frame(width: 9, height: 9)
+                .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(metric.name)
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(metric.grade.displayName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(metric.grade.color)
+                }
+                Text(metric.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+private struct ChannelHealthBadge: View {
+    let result: ChannelHealthResult?
+    let isAnalyzing: Bool
+    @State private var showsDetails = false
+    @State private var pinsDetails = false
+
+    var body: some View {
+        Group {
+            if let result {
+                Circle()
+                    .fill(result.grade.color)
+                    .frame(width: 10, height: 10)
+                    .overlay {
+                        Circle()
+                            .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
+                    }
+            } else if isAnalyzing {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 14, height: 14)
+            } else {
+                Circle()
+                    .strokeBorder(Color.secondary.opacity(0.45), lineWidth: 1)
+                    .frame(width: 10, height: 10)
+            }
+        }
+        .frame(width: 22, height: 22)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill((result?.grade.color ?? Color.secondary).opacity(result == nil ? 0.06 : 0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .strokeBorder((result?.grade.color ?? Color.secondary).opacity(result == nil ? 0.20 : 0.35), lineWidth: 0.75)
+        )
+        .onHover { hovering in
+            guard result != nil else { return }
+            if hovering {
+                showsDetails = true
+            } else if !pinsDetails {
+                showsDetails = false
+            }
+        }
+        .onTapGesture {
+            guard result != nil else { return }
+            pinsDetails.toggle()
+            showsDetails = pinsDetails
+        }
+        .popover(isPresented: $showsDetails, arrowEdge: .trailing) {
+            if let result {
+                ChannelHealthPopover(result: result)
+            }
+        }
+        .onChange(of: showsDetails) { _, isShowing in
+            if !isShowing {
+                pinsDetails = false
+            }
+        }
+        .accessibilityLabel(result.map { "Channel health \($0.goodPercentage) percent good" } ?? "Channel health pending")
+    }
+}
+
+private struct ChannelHealthPopover: View {
+    let result: ChannelHealthResult
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Ch \(result.channelIndex + 1)")
+                    .font(.headline)
+                Spacer()
+                Text("\(result.goodPercentage)% good")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(result.grade.color)
+            }
+
+            Text(result.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(result.metrics) { metric in
+                    ChannelHealthMetricRow(metric: metric)
+                }
+            }
+        }
+        .padding(12)
+        .frame(width: 320)
+    }
+}
+
+private struct ChannelHealthMetricRow: View {
+    let metric: ChannelHealthMetric
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle()
+                .fill(metric.grade.color)
+                .frame(width: 9, height: 9)
+                .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(metric.name)
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(metric.grade.displayName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(metric.grade.color)
+                }
+                Text(metric.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+private extension ChannelHealthGrade {
+    static var allHealthGrades: [ChannelHealthGrade] {
+        [.good, .watch, .poor]
+    }
+
+    var color: Color {
+        switch self {
+        case .good: return .green
+        case .watch: return .yellow
+        case .poor: return .red
+        }
+    }
+
+    var segmentOverlayOpacity: Double {
+        switch self {
+        case .good: return 0.08
+        case .watch: return 0.11
+        case .poor: return 0.12
+        }
+    }
 }
 
 private struct EventSummary: Identifiable {

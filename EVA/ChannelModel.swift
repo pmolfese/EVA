@@ -20,6 +20,22 @@ final class ChannelModel {
     var bad = Set<Int>()
     /// channelIndex → spherical-spline-interpolated replacement series.
     var interpolated = [Int: [Float]]()
+    /// Whether the waveform should lazily compute and display channel quality.
+    var showsHealth = false
+    /// Latest channel-health scores, keyed by channel index.
+    var healthResults = [Int: ChannelHealthResult]()
+    /// True while a channel-health scan is running for the active waveform.
+    var isAnalyzingHealth = false
+    /// Progress for the current health scan.
+    var healthProgress = 0.0
+    /// Incremented by menu commands to force a new health scan.
+    var healthRefreshToken = 0
+
+    func clearHealthResults() {
+        healthResults.removeAll()
+        isAnalyzingHealth = false
+        healthProgress = 0
+    }
 }
 
 extension FocusedValues {
@@ -31,14 +47,49 @@ extension FocusedValues {
     private struct ChannelModelKey: FocusedValueKey {
         typealias Value = ChannelModel
     }
+
+    var channelLabelMetricsExportRequest: Binding<Int>? {
+        get { self[ChannelLabelMetricsExportRequestKey.self] }
+        set { self[ChannelLabelMetricsExportRequestKey.self] = newValue }
+    }
+
+    private struct ChannelLabelMetricsExportRequestKey: FocusedValueKey {
+        typealias Value = Binding<Int>
+    }
 }
 
 /// Menu-bar "Channels" commands, acting on the focused window's `ChannelModel`.
 struct ChannelsCommands: View {
     @FocusedValue(\.channelModel) private var model
+    @FocusedValue(\.channelLabelMetricsExportRequest) private var labelMetricsExportRequest
 
     var body: some View {
         if let model {
+            Toggle("Show Channel Health", isOn: Binding(
+                get: { model.showsHealth },
+                set: { model.showsHealth = $0 }
+            ))
+
+            if model.showsHealth {
+                Button("Refresh Channel Health") {
+                    model.healthRefreshToken += 1
+                }
+                .disabled(model.isAnalyzingHealth)
+
+                if model.isAnalyzingHealth {
+                    Text("Analyzing \(Int((model.healthProgress * 100).rounded()))%")
+                }
+            }
+
+            Divider()
+
+            Button("Save Channel Labels + Metrics…") {
+                labelMetricsExportRequest?.wrappedValue += 1
+            }
+            .disabled(model.bad.isEmpty || model.isAnalyzingHealth || labelMetricsExportRequest == nil)
+
+            Divider()
+
             Button("Show All Traces") { model.hidden.removeAll() }
                 .disabled(model.hidden.isEmpty)
             Button("Unmark All Bad") { model.bad.removeAll() }
@@ -118,6 +169,15 @@ extension FocusedValues {
         typealias Value = PSAViewControls
     }
 
+    var segmentHealthViewControls: SegmentHealthViewControls? {
+        get { self[SegmentHealthViewControlsKey.self] }
+        set { self[SegmentHealthViewControlsKey.self] = newValue }
+    }
+
+    private struct SegmentHealthViewControlsKey: FocusedValueKey {
+        typealias Value = SegmentHealthViewControls
+    }
+
     var mffExportRequest: Binding<Int>? {
         get { self[MFFExportRequestKey.self] }
         set { self[MFFExportRequestKey.self] = newValue }
@@ -163,6 +223,16 @@ struct PSAViewControls {
     var isAveraged: Bool
 }
 
+/// Segment-health display controls exposed to the View menu.
+struct SegmentHealthViewControls {
+    var showsHealth: Binding<Bool>
+    var showsMouseOverHealth: Binding<Bool>
+    var detailsRequest: Binding<Int>
+    var refreshRequest: Binding<Int>
+    var isAnalyzing: Bool
+    var progress: Double
+}
+
 /// File-menu export commands for the focused waveform window.
 struct FileExportCommands: View {
     @FocusedValue(\.mffExportRequest) private var mffExportRequest
@@ -180,8 +250,35 @@ struct ViewCommands: View {
     @FocusedValue(\.icaDebugReportRequest) private var reportRequest
     @FocusedValue(\.resetToOriginalRequest) private var resetRequest
     @FocusedValue(\.psaViewControls) private var psaControls
+    @FocusedValue(\.segmentHealthViewControls) private var segmentHealthControls
 
     var body: some View {
+        Toggle("Show Segment Health", isOn: Binding(
+            get: { segmentHealthControls?.showsHealth.wrappedValue ?? false },
+            set: { segmentHealthControls?.showsHealth.wrappedValue = $0 }
+        ))
+        .disabled(segmentHealthControls == nil)
+
+        Button("Segment Health Details...") {
+            segmentHealthControls?.detailsRequest.wrappedValue += 1
+        }
+        .disabled(segmentHealthControls == nil)
+
+        if let segmentHealthControls, segmentHealthControls.showsHealth.wrappedValue {
+            Toggle("Show Mouse Over Health", isOn: segmentHealthControls.showsMouseOverHealth)
+
+            Button("Refresh Segment Health") {
+                segmentHealthControls.refreshRequest.wrappedValue += 1
+            }
+            .disabled(segmentHealthControls.isAnalyzing)
+
+            if segmentHealthControls.isAnalyzing {
+                Text("Analyzing \(Int((segmentHealthControls.progress * 100).rounded()))%")
+            }
+        }
+
+        Divider()
+
         Button((psaControls?.showButterfly.wrappedValue ?? false) ? "Hide Butterfly" : "Show Butterfly") {
             psaControls?.showButterfly.wrappedValue.toggle()
         }
