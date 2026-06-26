@@ -34,6 +34,8 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
 struct DefinedArtifact: Identifiable, Sendable {
     nonisolated static let defaultOBSComponentCount = 2
     nonisolated static let maximumOBSComponentCount = 8
+    nonisolated static let defaultOBSEdgeTaperSeconds = 0.10
+    nonisolated static let maximumOBSEdgeTaperSeconds = 0.50
 
     var id = UUID()
     var type: DefinedArtifactType
@@ -46,6 +48,9 @@ struct DefinedArtifact: Identifiable, Sendable {
     var topography: ArtifactTemplateTopography?
     var cleaningMethod: ArtifactCleaningMethod
     var obsPCAComponentCount = Self.defaultOBSComponentCount
+    var obsEdgeTaperSeconds = Self.defaultOBSEdgeTaperSeconds
+    var obsPreservesLocalBaseline = true
+    var obsUsesOverlapAdd = true
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
 
@@ -121,7 +126,7 @@ nonisolated enum ArtifactCleaner {
     ) -> OBSPCAVarianceReport? {
         guard let sampleCount = signal.data.first?.count, sampleCount > 0 else { return nil }
 
-        let windowSamples = windowSamples(for: artifact, signal: signal)
+        let windowSamples = obsPaddedWindowSamples(for: artifact, signal: signal)
         let ranges = artifact.events.compactMap {
             eventWindow(
                 event: $0,
@@ -377,7 +382,9 @@ nonisolated enum ArtifactCleaner {
     ) -> Int {
         guard let sampleCount = data.first?.count, sampleCount > 0 else { return 0 }
 
-        let windowSamples = windowSamples(for: artifact, signal: signal)
+        let coreWindowSamples = windowSamples(for: artifact, signal: signal)
+        let edgeTaperSamples = obsEdgeTaperSamples(for: artifact, signal: signal, windowSamples: coreWindowSamples)
+        let windowSamples = coreWindowSamples + 2 * edgeTaperSamples
         let eventRanges = artifact.events.map {
             eventWindow(
                 event: $0,
@@ -393,6 +400,7 @@ nonisolated enum ArtifactCleaner {
         var cleanedChannels = Set<Int>()
         var channelBases: [(channel: Int, basis: [[Double]])] = []
         let componentLimit = max(artifact.obsPCAComponentCount, 0)
+        let taper = raisedCosineTaper(count: windowSamples, edgeSamples: edgeTaperSamples)
 
         for channel in channels {
             let windows = sampledWindows(from: data[channel], ranges: ranges, maximumCount: 80)
@@ -410,13 +418,51 @@ nonisolated enum ArtifactCleaner {
 
         guard !channelBases.isEmpty else { return 0 }
 
-        for (eventIndex, maybeRange) in eventRanges.enumerated() {
-            defer { eventProgress(eventIndex + 1) }
-            guard let range = maybeRange else { continue }
+        if artifact.obsUsesOverlapAdd {
+            let accumulators = Dictionary(
+                uniqueKeysWithValues: channelBases.map {
+                    ($0.channel, OBSCorrectionAccumulator(sampleCount: sampleCount))
+                }
+            )
+
+            for (eventIndex, maybeRange) in eventRanges.enumerated() {
+                defer { eventProgress(eventIndex + 1) }
+                guard let range = maybeRange else { continue }
+
+                for channelBasis in channelBases {
+                    guard let correction = fittedCorrection(
+                        basis: channelBasis.basis,
+                        from: data[channelBasis.channel],
+                        in: range,
+                        taper: taper,
+                        preservesLocalBaseline: artifact.obsPreservesLocalBaseline,
+                        edgeTaperSamples: edgeTaperSamples
+                    ) else { continue }
+                    accumulators[channelBasis.channel]?.add(correction, in: range)
+                    cleanedChannels.insert(channelBasis.channel)
+                }
+            }
 
             for channelBasis in channelBases {
-                subtractBasis(channelBasis.basis, from: &data[channelBasis.channel], in: range)
-                cleanedChannels.insert(channelBasis.channel)
+                guard let accumulator = accumulators[channelBasis.channel] else { continue }
+                accumulator.apply(to: &data[channelBasis.channel])
+            }
+        } else {
+            for (eventIndex, maybeRange) in eventRanges.enumerated() {
+                defer { eventProgress(eventIndex + 1) }
+                guard let range = maybeRange else { continue }
+
+                for channelBasis in channelBases {
+                    subtractBasis(
+                        channelBasis.basis,
+                        from: &data[channelBasis.channel],
+                        in: range,
+                        taper: taper,
+                        preservesLocalBaseline: artifact.obsPreservesLocalBaseline,
+                        edgeTaperSamples: edgeTaperSamples
+                    )
+                    cleanedChannels.insert(channelBasis.channel)
+                }
             }
         }
 
@@ -432,7 +478,9 @@ nonisolated enum ArtifactCleaner {
     ) -> Int {
         guard let sampleCount = data.first?.count, sampleCount > 0 else { return 0 }
 
-        let windowSamples = windowSamples(for: artifact, signal: signal)
+        let coreWindowSamples = windowSamples(for: artifact, signal: signal)
+        let edgeTaperSamples = obsEdgeTaperSamples(for: artifact, signal: signal, windowSamples: coreWindowSamples)
+        let windowSamples = coreWindowSamples + 2 * edgeTaperSamples
         let eventRanges = artifact.events.map {
             eventWindow(
                 event: $0,
@@ -445,6 +493,7 @@ nonisolated enum ArtifactCleaner {
         let channels = validChannels(in: data, sampleCount: sampleCount)
             .filter { !badChannels.contains($0) }
         guard channels.count > 1, !ranges.isEmpty else { return 0 }
+        let taper = raisedCosineTaper(count: windowSamples, edgeSamples: edgeTaperSamples)
 
         let covariance = spatialCovariance(data: data, ranges: ranges, channels: channels)
         let eigen = symmetricEigenDecomposition(covariance)
@@ -461,52 +510,135 @@ nonisolated enum ArtifactCleaner {
             (0..<channels.count).map { row in eigen.vectors[row][component] }
         }
 
-        for (eventIndex, maybeRange) in eventRanges.enumerated() {
-            defer { eventProgress(eventIndex + 1) }
-            guard let range = maybeRange else { continue }
-
-            for sample in range {
-                var values = channels.map { Double(data[$0][sample]) }
-                let mean = values.reduce(0, +) / Double(max(values.count, 1))
-                for index in values.indices {
-                    values[index] -= mean
+        var cleanedChannels = Set<Int>()
+        if artifact.obsUsesOverlapAdd {
+            let accumulators = Dictionary(
+                uniqueKeysWithValues: channels.map {
+                    ($0, OBSCorrectionAccumulator(sampleCount: sampleCount))
                 }
+            )
 
-                var removal = [Double](repeating: 0, count: channels.count)
-                for component in components {
-                    let coefficient = dot(values, component)
-                    for index in removal.indices {
-                        removal[index] += coefficient * component[index]
-                    }
-                }
-
+            for (eventIndex, maybeRange) in eventRanges.enumerated() {
+                defer { eventProgress(eventIndex + 1) }
+                guard let range = maybeRange else { continue }
+                let corrections = sspCorrections(
+                    data: data,
+                    range: range,
+                    channels: channels,
+                    components: components
+                )
                 for (offset, channel) in channels.enumerated() {
-                    data[channel][sample] -= Float(removal[offset])
+                    guard let correction = smoothedWindowCorrection(
+                        corrections[offset],
+                        taper: taper,
+                        preservesLocalBaseline: artifact.obsPreservesLocalBaseline,
+                        edgeTaperSamples: edgeTaperSamples
+                    ) else { continue }
+                    accumulators[channel]?.add(correction, in: range)
+                    cleanedChannels.insert(channel)
+                }
+            }
+
+            for channel in channels {
+                guard let accumulator = accumulators[channel] else { continue }
+                accumulator.apply(to: &data[channel])
+            }
+        } else {
+            for (eventIndex, maybeRange) in eventRanges.enumerated() {
+                defer { eventProgress(eventIndex + 1) }
+                guard let range = maybeRange else { continue }
+                let corrections = sspCorrections(
+                    data: data,
+                    range: range,
+                    channels: channels,
+                    components: components
+                )
+                for (offset, channel) in channels.enumerated() {
+                    guard let correction = smoothedWindowCorrection(
+                        corrections[offset],
+                        taper: taper,
+                        preservesLocalBaseline: artifact.obsPreservesLocalBaseline,
+                        edgeTaperSamples: edgeTaperSamples
+                    ) else { continue }
+                    for sampleOffset in 0..<range.count {
+                        data[channel][range.lowerBound + sampleOffset] -= Float(correction.weightedValues[sampleOffset])
+                    }
+                    cleanedChannels.insert(channel)
                 }
             }
         }
 
-        return channels.count
+        return cleanedChannels.count
     }
 
     // MARK: - Basis fitting
 
     private static func subtractBasis(_ basis: [[Double]], from channel: inout [Float], in range: Range<Int>) {
+        let taper = [Double](repeating: 1, count: range.count)
+        subtractBasis(
+            basis,
+            from: &channel,
+            in: range,
+            taper: taper,
+            preservesLocalBaseline: false,
+            edgeTaperSamples: 0
+        )
+    }
+
+    private static func subtractBasis(
+        _ basis: [[Double]],
+        from channel: inout [Float],
+        in range: Range<Int>,
+        taper: [Double],
+        preservesLocalBaseline: Bool,
+        edgeTaperSamples: Int
+    ) {
+        guard let correction = fittedCorrection(
+            basis: basis,
+            from: channel,
+            in: range,
+            taper: taper,
+            preservesLocalBaseline: preservesLocalBaseline,
+            edgeTaperSamples: edgeTaperSamples
+        ) else { return }
+
+        for offset in 0..<range.count {
+            channel[range.lowerBound + offset] -= Float(correction.weightedValues[offset])
+        }
+    }
+
+    private static func fittedCorrection(
+        basis: [[Double]],
+        from channel: [Float],
+        in range: Range<Int>,
+        taper: [Double],
+        preservesLocalBaseline: Bool,
+        edgeTaperSamples: Int
+    ) -> OBSCorrection? {
         let basis = basis.filter { $0.count == range.count && vectorEnergy($0) > 1e-12 }
-        guard !basis.isEmpty else { return }
+        guard !basis.isEmpty, taper.count == range.count else { return nil }
 
         let samples = range.map { channel[$0] }
         let y = centeredVector(samples)
         let coefficients = coefficientsForBasis(basis, y: y)
-        guard coefficients.count == basis.count else { return }
+        guard coefficients.count == basis.count else { return nil }
 
+        var correction = [Double](repeating: 0, count: range.count)
         for offset in 0..<range.count {
-            var fitted = 0.0
             for basisIndex in basis.indices {
-                fitted += coefficients[basisIndex] * basis[basisIndex][offset]
+                correction[offset] += coefficients[basisIndex] * basis[basisIndex][offset]
             }
-            channel[range.lowerBound + offset] -= Float(fitted)
         }
+
+        if preservesLocalBaseline {
+            preserveLocalBaseline(in: &correction, edgeTaperSamples: edgeTaperSamples)
+        }
+        return smoothedWindowCorrection(
+            correction,
+            taper: taper,
+            preservesLocalBaseline: false,
+            edgeTaperSamples: edgeTaperSamples
+        )
     }
 
     private static func coefficientsForBasis(_ basis: [[Double]], y: [Double]) -> [Double] {
@@ -529,6 +661,56 @@ nonisolated enum ArtifactCleaner {
         return solveLinearSystem(gram, rhs) ?? []
     }
 
+    private static func sspCorrections(
+        data: [[Float]],
+        range: Range<Int>,
+        channels: [Int],
+        components: [[Double]]
+    ) -> [[Double]] {
+        var corrections = Array(
+            repeating: [Double](repeating: 0, count: range.count),
+            count: channels.count
+        )
+
+        for (sampleOffset, sample) in range.enumerated() {
+            var values = channels.map { Double(data[$0][sample]) }
+            let mean = values.reduce(0, +) / Double(max(values.count, 1))
+            for index in values.indices {
+                values[index] -= mean
+            }
+
+            var removal = [Double](repeating: 0, count: channels.count)
+            for component in components {
+                let coefficient = dot(values, component)
+                for index in removal.indices {
+                    removal[index] += coefficient * component[index]
+                }
+            }
+
+            for channelOffset in channels.indices {
+                corrections[channelOffset][sampleOffset] = removal[channelOffset]
+            }
+        }
+
+        return corrections
+    }
+
+    private static func smoothedWindowCorrection(
+        _ values: [Double],
+        taper: [Double],
+        preservesLocalBaseline: Bool,
+        edgeTaperSamples: Int
+    ) -> OBSCorrection? {
+        guard values.count == taper.count, !values.isEmpty else { return nil }
+        var correction = values
+        if preservesLocalBaseline {
+            preserveLocalBaseline(in: &correction, edgeTaperSamples: edgeTaperSamples)
+        }
+        forceZeroAtBoundaries(&correction)
+        let weighted = correction.indices.map { correction[$0] * taper[$0] }
+        return OBSCorrection(weightedValues: weighted, weights: taper)
+    }
+
     // MARK: - Window helpers
 
     private static func windowSamples(for artifact: DefinedArtifact, signal: MFFSignalData) -> Int {
@@ -536,6 +718,26 @@ nonisolated enum ArtifactCleaner {
             return count
         }
         return max(Int((artifact.windowSizeSeconds * signal.samplingRate).rounded()), 3)
+    }
+
+    private static func obsPaddedWindowSamples(for artifact: DefinedArtifact, signal: MFFSignalData) -> Int {
+        let windowSamples = windowSamples(for: artifact, signal: signal)
+        let edgeSamples = obsEdgeTaperSamples(for: artifact, signal: signal, windowSamples: windowSamples)
+        return max(windowSamples + 2 * edgeSamples, windowSamples)
+    }
+
+    private static func obsEdgeTaperSamples(
+        for artifact: DefinedArtifact,
+        signal: MFFSignalData,
+        windowSamples: Int
+    ) -> Int {
+        guard signal.samplingRate > 0 else { return 0 }
+        let seconds = min(
+            max(artifact.obsEdgeTaperSeconds, 0),
+            DefinedArtifact.maximumOBSEdgeTaperSeconds
+        )
+        let requested = Int((seconds * signal.samplingRate).rounded())
+        return min(max(requested, 0), max(windowSamples / 2 - 1, 0))
     }
 
     private static func eventWindow(
@@ -565,6 +767,54 @@ nonisolated enum ArtifactCleaner {
             let rangeIndex = index * ranges.count / maximumCount
             return ranges[rangeIndex]
         }
+    }
+
+    private static func raisedCosineTaper(count: Int, edgeSamples: Int) -> [Double] {
+        guard count > 0 else { return [] }
+        guard edgeSamples > 0 else { return [Double](repeating: 1, count: count) }
+
+        return (0..<count).map { index in
+            let distanceFromEdge = min(index, count - 1 - index)
+            guard distanceFromEdge < edgeSamples else { return 1 }
+            let phase = Double(distanceFromEdge) / Double(edgeSamples)
+            return 0.5 - 0.5 * cos(.pi * phase)
+        }
+    }
+
+    private static func preserveLocalBaseline(in correction: inout [Double], edgeTaperSamples: Int) {
+        guard correction.count > 2 else { return }
+        let anchorCount = min(max(edgeTaperSamples, 1), max(correction.count / 4, 1))
+        let leftMean = mean(correction.prefix(anchorCount))
+        let rightMean = mean(correction.suffix(anchorCount))
+        let denominator = Double(max(correction.count - 1, 1))
+
+        for index in correction.indices {
+            let fraction = Double(index) / denominator
+            let localBaseline = leftMean + (rightMean - leftMean) * fraction
+            correction[index] -= localBaseline
+        }
+    }
+
+    private static func forceZeroAtBoundaries(_ correction: inout [Double]) {
+        guard correction.count > 1 else { return }
+        let start = correction.first ?? 0
+        let end = correction.last ?? 0
+        let denominator = Double(max(correction.count - 1, 1))
+
+        for index in correction.indices {
+            let fraction = Double(index) / denominator
+            correction[index] -= start + (end - start) * fraction
+        }
+    }
+
+    private static func mean<S: Sequence>(_ values: S) -> Double where S.Element == Double {
+        var total = 0.0
+        var count = 0.0
+        for value in values {
+            total += value
+            count += 1
+        }
+        return count > 0 ? total / count : 0
     }
 
     private static func validChannels(in data: [[Float]], sampleCount: Int) -> [Int] {
@@ -924,6 +1174,43 @@ nonisolated enum ArtifactCleaner {
     private static func identity(_ n: Int) -> [[Double]] {
         (0..<n).map { row in
             (0..<n).map { column in row == column ? 1.0 : 0.0 }
+        }
+    }
+}
+
+nonisolated private struct OBSCorrection {
+    var weightedValues: [Double]
+    var weights: [Double]
+}
+
+nonisolated private final class OBSCorrectionAccumulator {
+    private var weightedValues: [Double]
+    private var weights: [Double]
+
+    init(sampleCount: Int) {
+        weightedValues = [Double](repeating: 0, count: sampleCount)
+        weights = [Double](repeating: 0, count: sampleCount)
+    }
+
+    func add(_ correction: OBSCorrection, in range: Range<Int>) {
+        guard correction.weightedValues.count == range.count,
+              correction.weights.count == range.count,
+              range.upperBound <= weightedValues.count else {
+            return
+        }
+
+        for offset in 0..<range.count {
+            let sample = range.lowerBound + offset
+            weightedValues[sample] += correction.weightedValues[offset]
+            weights[sample] += correction.weights[offset]
+        }
+    }
+
+    func apply(to channel: inout [Float]) {
+        let count = min(channel.count, weightedValues.count)
+        for sample in 0..<count where weights[sample] > 0 {
+            let divisor = max(weights[sample], 1)
+            channel[sample] -= Float(weightedValues[sample] / divisor)
         }
     }
 }

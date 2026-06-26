@@ -2133,9 +2133,15 @@ struct WaveformView: View {
         if let index = definedArtifacts.firstIndex(where: { $0.id == artifact.id }) {
             let previousMethod = definedArtifacts[index].cleaningMethod
             let previousOBSComponentCount = definedArtifacts[index].obsPCAComponentCount
+            let previousOBSEdgeTaperSeconds = definedArtifacts[index].obsEdgeTaperSeconds
+            let previousOBSPreservesLocalBaseline = definedArtifacts[index].obsPreservesLocalBaseline
+            let previousOBSUsesOverlapAdd = definedArtifacts[index].obsUsesOverlapAdd
             definedArtifacts[index] = artifact
             definedArtifacts[index].cleaningMethod = previousMethod
             definedArtifacts[index].obsPCAComponentCount = previousOBSComponentCount
+            definedArtifacts[index].obsEdgeTaperSeconds = previousOBSEdgeTaperSeconds
+            definedArtifacts[index].obsPreservesLocalBaseline = previousOBSPreservesLocalBaseline
+            definedArtifacts[index].obsUsesOverlapAdd = previousOBSUsesOverlapAdd
         } else {
             definedArtifacts.append(artifact)
         }
@@ -2326,7 +2332,7 @@ struct WaveformView: View {
             .frame(width: 130)
             .help(artifactTreatmentHelpText)
 
-            if artifact.wrappedValue.cleaningMethod == .obs {
+            if artifact.wrappedValue.cleaningMethod == .obs || artifact.wrappedValue.cleaningMethod == .sspPCA {
                 ArtifactOBSOptionsButton(
                     artifact: artifact,
                     signal: signal,
@@ -2362,7 +2368,7 @@ struct WaveformView: View {
         """
         Do Nothing: keep the artifact definition but do not alter the data.
         Regress: subtracts the average artifact waveform; useful as a historical/simple comparison.
-        OBS: subtracts the mean artifact plus residual PCA components inside detected event windows; good for repeated blinks, ECG, and BCG-like artifacts.
+        OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; good for repeated blinks, ECG, and BCG-like artifacts.
         SSP/PCA: projects out stable spatial artifact patterns across channels; useful for consistent topographies, but more global.
         """
     }
@@ -5028,7 +5034,6 @@ private struct ArtifactOBSOptionsButton: View {
             showsOptions = true
         }
         .font(.caption)
-        .disabled(artifact.eventCount < 2)
         .sheet(isPresented: $showsOptions) {
             ArtifactOBSOptionsSheet(
                 artifact: $artifact,
@@ -5050,6 +5055,10 @@ private struct ArtifactOBSOptionsSheet: View {
     @State private var report: OBSPCAVarianceReport?
     @State private var isLoadingReport = false
 
+    private var showsOBSVarianceOptions: Bool {
+        artifact.cleaningMethod == .obs
+    }
+
     private var componentCountBinding: Binding<Int> {
         Binding {
             artifact.obsPCAComponentCount
@@ -5065,13 +5074,46 @@ private struct ArtifactOBSOptionsSheet: View {
         report?.cumulativeVariance(for: artifact.obsPCAComponentCount) ?? 0
     }
 
+    private var edgeTaperBinding: Binding<Double> {
+        Binding {
+            artifact.obsEdgeTaperSeconds
+        } set: { newValue in
+            let bounded = min(max(newValue, 0), DefinedArtifact.maximumOBSEdgeTaperSeconds)
+            guard abs(artifact.obsEdgeTaperSeconds - bounded) > 0.0001 else { return }
+            artifact.obsEdgeTaperSeconds = bounded
+            onSettingsChange()
+        }
+    }
+
+    private var preservesLocalBaselineBinding: Binding<Bool> {
+        Binding {
+            artifact.obsPreservesLocalBaseline
+        } set: { newValue in
+            guard artifact.obsPreservesLocalBaseline != newValue else { return }
+            artifact.obsPreservesLocalBaseline = newValue
+            onSettingsChange()
+        }
+    }
+
+    private var usesOverlapAddBinding: Binding<Bool> {
+        Binding {
+            artifact.obsUsesOverlapAdd
+        } set: { newValue in
+            guard artifact.obsUsesOverlapAdd != newValue else { return }
+            artifact.obsUsesOverlapAdd = newValue
+            onSettingsChange()
+        }
+    }
+
     private var reportCacheKey: String {
         [
             artifact.id.uuidString,
+            artifact.cleaningMethod.rawValue,
             "\(artifact.eventCount)",
             "\(artifact.events.first?.beginTimeSeconds ?? -1)",
             "\(artifact.events.last?.beginTimeSeconds ?? -1)",
             "\(artifact.windowSizeSeconds)",
+            "\(artifact.obsEdgeTaperSeconds)",
             "\(signal.signalURL.path)",
             "\(signal.samplingRate)",
             "\(signal.duration)",
@@ -5083,7 +5125,7 @@ private struct ArtifactOBSOptionsSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("OBS Options")
+                    Text("\(artifact.cleaningMethod.rawValue) Options")
                         .font(.title3.weight(.semibold))
                     Text(artifact.name)
                         .font(.caption)
@@ -5095,36 +5137,76 @@ private struct ArtifactOBSOptionsSheet: View {
                     .foregroundStyle(.secondary)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Stepper(value: componentCountBinding, in: 0...DefinedArtifact.maximumOBSComponentCount) {
-                    Text("PCA components: \(artifact.obsPCAComponentCount)")
-                        .font(.callout.weight(.medium))
-                }
+            if showsOBSVarianceOptions {
+                VStack(alignment: .leading, spacing: 8) {
+                    Stepper(value: componentCountBinding, in: 0...DefinedArtifact.maximumOBSComponentCount) {
+                        Text("PCA components: \(artifact.obsPCAComponentCount)")
+                            .font(.callout.weight(.medium))
+                    }
 
-                Text("OBS always removes the mean artifact waveform; PCA components model the remaining event-to-event residual shape.")
+                    Text("OBS always removes the mean artifact waveform; PCA components model the remaining event-to-event residual shape.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text("SSP/PCA uses the edge settings below to fade the spatial projection in and out around each event.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if isLoadingReport {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Fitting residual PCA to artifact windows...")
-                        .font(.caption)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Edge handling")
+                    .font(.callout.weight(.medium))
+
+                HStack(spacing: 10) {
+                    Text("Edge taper")
+                        .frame(width: 88, alignment: .leading)
+                    Slider(
+                        value: edgeTaperBinding,
+                        in: 0...DefinedArtifact.maximumOBSEdgeTaperSeconds,
+                        step: 0.01
+                    )
+                    Text("\(Int((artifact.obsEdgeTaperSeconds * 1000).rounded())) ms")
+                        .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
+                        .frame(width: 58, alignment: .trailing)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else if let report {
-                obsVarianceReportView(report)
-            } else {
-                ContentUnavailableView(
-                    "No OBS PCA Estimate",
-                    systemImage: "chart.bar.xaxis",
-                    description: Text("There were not enough valid artifact windows to estimate residual PCA variance.")
-                )
-                .frame(height: 180)
+                .help("Adds this much padding before and after each event, then ramps the OBS correction smoothly from zero at the padded edges.")
+
+                Toggle("Preserve local baseline", isOn: preservesLocalBaselineBinding)
+                    .help("Removes local DC/slope from the correction so the cleaned segment keeps the surrounding slow baseline.")
+
+                Toggle("Weighted overlap-add for nearby events", isOn: usesOverlapAddBinding)
+                    .help("Combines overlapping OBS correction windows with weights so close events do not get over-subtracted where they overlap.")
+
+                Text("Windowed corrections are forced to zero at the padded boundaries before tapering, which helps avoid step-like edges.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if showsOBSVarianceOptions {
+                if isLoadingReport {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Fitting residual PCA to artifact windows...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else if let report {
+                    obsVarianceReportView(report)
+                } else {
+                    ContentUnavailableView(
+                        "No OBS PCA Estimate",
+                        systemImage: "chart.bar.xaxis",
+                        description: Text("There were not enough valid artifact windows to estimate residual PCA variance.")
+                    )
+                    .frame(height: 180)
+                }
             }
 
             HStack {
@@ -5205,6 +5287,12 @@ private struct ArtifactOBSOptionsSheet: View {
 
     @MainActor
     private func loadReport() async {
+        guard showsOBSVarianceOptions else {
+            report = nil
+            isLoadingReport = false
+            return
+        }
+
         let key = reportCacheKey
         if let cachedReport = reportCache[key] {
             report = cachedReport
