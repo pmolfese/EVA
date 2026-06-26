@@ -72,7 +72,22 @@ struct ChannelsCommands: View {
     }
 }
 
+struct ArtifactMenuControls {
+    var artifacts: [DefinedArtifact]
+    var deleteRequest: Binding<DefinedArtifact.ID?>
+    var deleteAllRequest: Binding<Int>
+}
+
 extension FocusedValues {
+    var artifactMenuControls: ArtifactMenuControls? {
+        get { self[ArtifactMenuControlsKey.self] }
+        set { self[ArtifactMenuControlsKey.self] = newValue }
+    }
+
+    private struct ArtifactMenuControlsKey: FocusedValueKey {
+        typealias Value = ArtifactMenuControls
+    }
+
     var icaDebugReportRequest: Binding<Int>? {
         get { self[ICADebugReportRequestKey.self] }
         set { self[ICADebugReportRequestKey.self] = newValue }
@@ -98,6 +113,34 @@ extension FocusedValues {
 
     private struct PSAViewControlsKey: FocusedValueKey {
         typealias Value = PSAViewControls
+    }
+}
+
+/// Menu-bar "Artifacts" commands, acting on the focused waveform window.
+struct ArtifactsCommands: View {
+    @FocusedValue(\.artifactMenuControls) private var controls
+
+    var body: some View {
+        if let controls {
+            Button("Delete All Defined Artifacts") {
+                controls.deleteAllRequest.wrappedValue += 1
+            }
+            .disabled(controls.artifacts.isEmpty)
+
+            Divider()
+
+            Menu("Delete Defined Artifact") {
+                ForEach(controls.artifacts) { artifact in
+                    Button("\(artifact.name) (\(artifact.eventCount) events)") {
+                        controls.deleteRequest.wrappedValue = artifact.id
+                    }
+                }
+            }
+            .disabled(controls.artifacts.isEmpty)
+        } else {
+            Button("No Recording Open") {}
+                .disabled(true)
+        }
     }
 }
 

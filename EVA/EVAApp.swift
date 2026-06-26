@@ -39,6 +39,10 @@ struct EVAApp: App {
                 ChannelsCommands()
             }
 
+            CommandMenu("Artifacts") {
+                ArtifactsCommands()
+            }
+
             CommandGroup(after: .windowArrangement) {
                 OpenDebugLogButton()
             }

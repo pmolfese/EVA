@@ -53,6 +53,8 @@ struct WaveformView: View {
     @State private var showsArtifactTemplateSheet = false
     @State private var artifactTemplateSelectionRange: ClosedRange<Int>?
     @State private var artifactTemplateClickedChannel: Int?
+    @State private var artifactTemplateType = DefinedArtifactType.ocular
+    @State private var artifactTemplateDefinedArtifactID: DefinedArtifact.ID?
     @State private var artifactTemplateName = "Eye Blink"
     @State private var artifactTemplateEventCode = "Eye Blink"
     @State private var artifactTemplateChannelScope = ArtifactTemplateChannelScope.clickedChannel
@@ -73,6 +75,15 @@ struct WaveformView: View {
     @State private var artifactTemplateResult: ArtifactTemplateDetectionResult?
     @State private var selectedArtifactTemplateChannel: Int?
     @State private var artifactTemplateStatusMessage: String?
+    @State private var definedArtifacts: [DefinedArtifact] = []
+    @State private var showsArtifactCleaningSheet = false
+    @State private var isCleaningArtifacts = false
+    @State private var artifactCleaningStatusMessage: String?
+    @State private var artifactCleaningSummaries: [ArtifactCleaningSummary] = []
+    @State private var artifactCleaningProgress: ArtifactCleaningProgress?
+    @State private var artifactDeletionRequest: DefinedArtifact.ID?
+    @State private var deleteAllArtifactsRequest = 0
+    @State private var obsVarianceReportCache = [String: OBSPCAVarianceReport]()
     @State private var showsICASheet = false
     @State private var isRunningICA = false
     @State private var icaProgress = 0.0
@@ -119,6 +130,8 @@ struct WaveformView: View {
     // Band-pass / notch filtering (applied to the active base signal).
     @State private var icaCleanedSignal: MFFSignalData?
     @State private var filteredSignal: MFFSignalData?
+    @State private var artifactCleanedSignal: MFFSignalData?
+    @State private var artifactCleaningIsEnabled = true
     @State private var isFiltering = false
     @State private var filterProgress: Double = 0
     @State private var filterStatusMessage: String?
@@ -167,14 +180,19 @@ struct WaveformView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let rawSignal = recording.signal {
                 // Processing pipeline: raw → gradient-corrected → ICA-cleaned →
-                // band-pass → interpolated-channel overlay. `base` is what
-                // filtering and the topomap build on; the displayed signal is
-                // the filtered base when a filter is active, with interpolated
-                // channels swapped in.
+                // band-pass → artifact-cleaned → interpolated-channel overlay.
+                // `base` is what filtering builds on; `preArtifact` is the
+                // reversible source used by Clean Artifacts.
                 let base = icaCleanedSignal ?? gradientCorrectedSignal ?? rawSignal
-                let processed = filteredSignal ?? base
+                let preArtifact = filteredSignal ?? base
+                let processed = artifactCleaningIsEnabled ? (artifactCleanedSignal ?? preArtifact) : preArtifact
                 let continuousSignal = applyInterpolations(to: processed)
-                content(for: epochedSignal ?? continuousSignal, base: base, continuousSignal: continuousSignal)
+                content(
+                    for: epochedSignal ?? continuousSignal,
+                    base: base,
+                    cleaningBase: preArtifact,
+                    continuousSignal: continuousSignal
+                )
             } else {
                 ContentUnavailableView(
                     "Couldn't Read Recording",
@@ -185,6 +203,11 @@ struct WaveformView: View {
         }
         .navigationTitle(recording.packageName)
         .focusedSceneValue(\.channelModel, channels)
+        .focusedSceneValue(\.artifactMenuControls, ArtifactMenuControls(
+            artifacts: definedArtifacts,
+            deleteRequest: $artifactDeletionRequest,
+            deleteAllRequest: $deleteAllArtifactsRequest
+        ))
         .focusedSceneValue(\.icaDebugReportRequest, $icaDebugReportRequest)
         .focusedSceneValue(\.resetToOriginalRequest, $resetToOriginalRequest)
         .focusedSceneValue(\.psaViewControls, PSAViewControls(
@@ -194,6 +217,14 @@ struct WaveformView: View {
         ))
         .onChange(of: resetToOriginalRequest) { _, _ in
             resetToOriginalData()
+        }
+        .onChange(of: artifactDeletionRequest) { _, artifactID in
+            guard let artifactID else { return }
+            deleteDefinedArtifact(id: artifactID)
+            artifactDeletionRequest = nil
+        }
+        .onChange(of: deleteAllArtifactsRequest) { _, _ in
+            deleteAllDefinedArtifacts()
         }
         .onChange(of: psaBaselineCorrected) { _, _ in
             refreshEpochDisplay()
@@ -253,7 +284,12 @@ struct WaveformView: View {
     }
 
     @ViewBuilder
-    private func content(for signal: MFFSignalData, base: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
+    private func content(
+        for signal: MFFSignalData,
+        base: MFFSignalData,
+        cleaningBase: MFFSignalData,
+        continuousSignal: MFFSignalData
+    ) -> some View {
         let isShowingEpochs = epochedSignal != nil
         let events = displayedEvents(for: signal, includeContinuousOverlays: !isShowingEpochs)
 
@@ -306,6 +342,9 @@ struct WaveformView: View {
         }
         .sheet(isPresented: $showsArtifactTemplateSheet) {
             artifactTemplateSheet(for: continuousSignal)
+        }
+        .sheet(isPresented: $showsArtifactCleaningSheet) {
+            artifactCleaningSheet(for: cleaningBase)
         }
         .sheet(isPresented: $showsICASheet) {
             icaSheet(for: base)
@@ -402,6 +441,22 @@ struct WaveformView: View {
 
                     Divider()
                 }
+
+                Button("Clean Artifacts…") {
+                    showsArtifactCleaningSheet = true
+                }
+                .disabled(definedArtifacts.isEmpty)
+
+                Toggle("Show Applied Correction", isOn: Binding(
+                    get: { artifactCleaningIsEnabled },
+                    set: { setArtifactCleaningEnabled($0) }
+                ))
+                .disabled(artifactCleanedSignal == nil)
+                .help(artifactCleanedSignal == nil
+                    ? "Apply artifact cleaning before toggling the corrected signal."
+                    : "Switch between the artifact-corrected signal and the uncorrected signal.")
+
+                Divider()
 
                 Toggle("Eye Blink", isOn: $detectsEyeBlinkArtifacts)
                 Toggle("Eye Movement", isOn: $detectsEyeMovementArtifacts)
@@ -544,6 +599,9 @@ struct WaveformView: View {
         if let channelStatusMessage {
             lines.append(LogLine(text: channelStatusMessage, isError: true))
         }
+        if let artifactCleaningStatusMessage {
+            lines.append(LogLine(text: artifactCleaningStatusMessage, isError: false))
+        }
         return lines
     }
 
@@ -557,6 +615,9 @@ struct WaveformView: View {
             }
             if isFiltering {
                 logProgressRow(label: "Filter", value: filterProgress)
+            }
+            if let artifactCleaningProgress {
+                logProgressRow(label: "Artifact", value: artifactCleaningProgress.fraction)
             }
 
             ForEach(activeLogMessages, id: \.self) { line in
@@ -1472,6 +1533,20 @@ struct WaveformView: View {
             ?? signal.data.indices.first
     }
 
+    private func inferredArtifactType(name: String, eventCode: String) -> DefinedArtifactType {
+        let text = "\(name) \(eventCode)".lowercased()
+        if text.contains("ecg") || text.contains("heart") || text.contains("cardiac") {
+            return .ecg
+        }
+        if text.contains("bcg") || text.contains("ballisto") {
+            return .bcg
+        }
+        if text.contains("eye") || text.contains("blink") || text.contains("ocular") || text.contains("eog") {
+            return .ocular
+        }
+        return .other
+    }
+
     private func openArtifactTemplateSheet(for signal: MFFSignalData, clickedChannel: Int) {
         guard let range = activeSelectionRange(in: signal), signal.samplingRate > 0 else {
             artifactTemplateStatusMessage = "Highlight a waveform region before defining an artifact."
@@ -1480,6 +1555,8 @@ struct WaveformView: View {
 
         artifactTemplateSelectionRange = range
         artifactTemplateClickedChannel = clickedChannel
+        artifactTemplateDefinedArtifactID = nil
+        artifactTemplateType = inferredArtifactType(name: artifactTemplateName, eventCode: artifactTemplateEventCode)
         artifactTemplateChannelScope = .clickedChannel
         artifactTemplateCustomChannels = "\(clickedChannel + 1)"
         artifactTemplateWindowSeconds = max(Double(range.upperBound - range.lowerBound + 1) / signal.samplingRate, 0.02)
@@ -1515,6 +1592,25 @@ struct WaveformView: View {
             }
 
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Type",
+                        help: "Used by Clean Artifacts to group ocular, ECG, BCG, and other artifact definitions."
+                    )
+                    Picker("Type", selection: $artifactTemplateType) {
+                        ForEach(DefinedArtifactType.allCases) { type in
+                            Text(type.rawValue).tag(type)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
+
+                    Color.clear
+                        .frame(width: 0, height: 0)
+                    Color.clear
+                        .frame(width: 0, height: 0)
+                }
+
                 GridRow {
                     ArtifactTemplateFieldLabel(
                         title: "Name",
@@ -1950,7 +2046,14 @@ struct WaveformView: View {
     }
 
     private func useTopographyMatches(_ result: ArtifactTemplateDetectionResult) {
-        artifactEvents = result.topographyEvents
+        if let artifactID = artifactTemplateDefinedArtifactID,
+           let index = definedArtifacts.firstIndex(where: { $0.id == artifactID }) {
+            definedArtifacts[index].events = result.topographyEvents
+            definedArtifacts[index].topography = result.topographyReference
+            invalidateOBSVarianceCache(for: artifactID)
+            clearAppliedArtifactCleaning()
+        }
+        artifactEvents = definedArtifacts.isEmpty ? result.topographyEvents : definedArtifacts.flatMap(\.events)
         selectedEventCodes = [artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines)]
         showsEventsPanel = true
         artifactStatusMessage = "\(result.topographyEvents.count) topography matches"
@@ -1997,12 +2100,387 @@ struct WaveformView: View {
             artifactTemplateResult = result
             lastArtifactScanSignature = signature
             selectedArtifactTemplateChannel = nil
-            artifactEvents = result.selectedEvents
+            upsertDefinedArtifact(from: result, configuration: configuration)
+            artifactEvents = definedArtifacts.flatMap(\.events)
             selectedEventCodes = [configuration.eventCode]
             showsEventsPanel = true
             artifactStatusMessage = "\(result.selectedEvents.count) template matches"
             isApplyingArtifactTemplate = false
         }
+    }
+
+    private func upsertDefinedArtifact(
+        from result: ArtifactTemplateDetectionResult,
+        configuration: ArtifactTemplateConfiguration
+    ) {
+        let name = configuration.name.nilIfEmpty ?? "Artifact"
+        let eventCode = configuration.eventCode.nilIfEmpty ?? name
+        let artifact = DefinedArtifact(
+            id: artifactTemplateDefinedArtifactID ?? UUID(),
+            type: artifactTemplateType,
+            name: name,
+            eventCode: eventCode,
+            events: result.selectedEvents,
+            selectedChannelIndices: configuration.selectedChannelIndices,
+            windowSizeSeconds: configuration.windowSizeSeconds,
+            average: result.templateAverage,
+            topography: result.topographyReference,
+            cleaningMethod: .obs,
+            appliedMethod: nil,
+            cleanedAt: nil
+        )
+
+        if let index = definedArtifacts.firstIndex(where: { $0.id == artifact.id }) {
+            let previousMethod = definedArtifacts[index].cleaningMethod
+            let previousOBSComponentCount = definedArtifacts[index].obsPCAComponentCount
+            definedArtifacts[index] = artifact
+            definedArtifacts[index].cleaningMethod = previousMethod
+            definedArtifacts[index].obsPCAComponentCount = previousOBSComponentCount
+        } else {
+            definedArtifacts.append(artifact)
+        }
+        invalidateOBSVarianceCache(for: artifact.id)
+        artifactTemplateDefinedArtifactID = artifact.id
+        clearAppliedArtifactCleaning()
+    }
+
+    private func deleteDefinedArtifact(id: DefinedArtifact.ID) {
+        guard let index = definedArtifacts.firstIndex(where: { $0.id == id }) else { return }
+        let name = definedArtifacts[index].name
+        definedArtifacts.remove(at: index)
+
+        if artifactTemplateDefinedArtifactID == id {
+            artifactTemplateDefinedArtifactID = nil
+            artifactTemplateResult = nil
+            lastArtifactScanSignature = nil
+            selectedArtifactTemplateChannel = nil
+        }
+
+        invalidateOBSVarianceCache(for: id)
+        refreshAfterDeletingArtifacts(message: "Deleted \(name).")
+    }
+
+    private func deleteAllDefinedArtifacts() {
+        guard !definedArtifacts.isEmpty else { return }
+        definedArtifacts.removeAll()
+        artifactTemplateDefinedArtifactID = nil
+        artifactTemplateResult = nil
+        lastArtifactScanSignature = nil
+        selectedArtifactTemplateChannel = nil
+        invalidateOBSVarianceCache()
+        refreshAfterDeletingArtifacts(message: "Deleted all defined artifacts.")
+    }
+
+    private func invalidateOBSVarianceCache(for artifactID: DefinedArtifact.ID? = nil) {
+        guard let artifactID else {
+            obsVarianceReportCache.removeAll()
+            return
+        }
+        let prefix = "\(artifactID.uuidString)|"
+        obsVarianceReportCache = obsVarianceReportCache.filter { !$0.key.hasPrefix(prefix) }
+    }
+
+    private func refreshAfterDeletingArtifacts(message: String) {
+        clearAppliedArtifactCleaning()
+        artifactEvents = definedArtifacts.flatMap(\.events)
+        artifactDetectionRefreshToken += 1
+        artifactStatusMessage = definedArtifacts.isEmpty ? nil : "\(definedArtifacts.count) artifact definitions"
+        artifactCleaningStatusMessage = message
+    }
+
+    private func artifactCleaningSheet(for signal: MFFSignalData) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Clean Artifacts")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text("\(definedArtifacts.count) defined")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            if definedArtifacts.isEmpty {
+                ContentUnavailableView(
+                    "No Artifacts Defined",
+                    systemImage: "scope",
+                    description: Text("Use Define Artifact first, then return here to choose a cleanup method.")
+                )
+                .frame(minHeight: 220)
+            } else {
+                ScrollView {
+                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                        GridRow {
+                            Text("")
+                                .frame(width: 24)
+                            Text("Type")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text("Name")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text("Treatment")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Divider()
+                            .gridCellColumns(4)
+
+                        ForEach($definedArtifacts) { $artifact in
+                            GridRow {
+                                Button {
+                                    deleteDefinedArtifact(id: artifact.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(isCleaningArtifacts)
+                                .help("Delete this artifact definition.")
+                                .frame(width: 24)
+
+                                Picker("Type", selection: $artifact.type) {
+                                    ForEach(DefinedArtifactType.allCases) { type in
+                                        Text(type.rawValue).tag(type)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(width: 150)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(artifact.name)
+                                        .font(.callout.weight(.medium))
+                                        .lineLimit(1)
+                                    Text("\(artifact.eventCount) events · \(artifact.eventCode)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(width: 210, alignment: .leading)
+
+                                artifactTreatmentControl(
+                                    artifact: $artifact,
+                                    signal: signal,
+                                    cleanedSignal: artifactCleanedSignal,
+                                    layout: recording.sensorLayout
+                                )
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(minHeight: 220, maxHeight: 340)
+            }
+
+            if isCleaningArtifacts {
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: artifactCleaningProgress?.fraction ?? 0)
+                        .progressViewStyle(.linear)
+                    Text(artifactCleaningProgressText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let artifactCleaningStatusMessage {
+                Text(artifactCleaningStatusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            HStack {
+                Button("Restore Original") {
+                    restoreArtifactCleaning()
+                }
+                .disabled(artifactCleanedSignal == nil && definedArtifacts.allSatisfy { $0.appliedMethod == nil })
+
+                Spacer()
+
+                Button("Close") {
+                    showsArtifactCleaningSheet = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Apply") {
+                    applyArtifactCleaning(to: signal)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isCleaningArtifacts || !definedArtifacts.contains { $0.cleaningMethod.removesArtifact })
+            }
+        }
+        .padding(18)
+        .frame(width: 760)
+    }
+
+    private func artifactTreatmentControl(
+        artifact: Binding<DefinedArtifact>,
+        signal: MFFSignalData,
+        cleanedSignal: MFFSignalData?,
+        layout: SensorLayout?
+    ) -> some View {
+        HStack(spacing: 8) {
+            Picker("Treatment", selection: artifact.cleaningMethod) {
+                ForEach(ArtifactCleaningMethod.allCases) { method in
+                    Text(method.rawValue).tag(method)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 130)
+            .help(artifactTreatmentHelpText)
+
+            if artifact.wrappedValue.cleaningMethod == .obs {
+                ArtifactOBSOptionsButton(
+                    artifact: artifact,
+                    signal: signal,
+                    reportCache: $obsVarianceReportCache,
+                    onSettingsChange: clearAppliedArtifactCleaning
+                )
+            }
+
+            if let appliedMethod = artifact.wrappedValue.appliedMethod {
+                if appliedMethod == artifact.wrappedValue.cleaningMethod {
+                    HStack(spacing: 6) {
+                        Label("Applied", systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                        ArtifactCleaningPreviewButton(
+                            artifact: artifact.wrappedValue,
+                            beforeSignal: signal,
+                            afterSignal: cleanedSignal,
+                            layout: layout
+                        )
+                    }
+                } else {
+                    Text("Applied: \(appliedMethod.rawValue)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(width: 340, alignment: .leading)
+    }
+
+    private var artifactTreatmentHelpText: String {
+        """
+        Do Nothing: keep the artifact definition but do not alter the data.
+        Regress: subtracts the average artifact waveform; useful as a historical/simple comparison.
+        OBS: subtracts the mean artifact plus residual PCA components inside detected event windows; good for repeated blinks, ECG, and BCG-like artifacts.
+        SSP/PCA: projects out stable spatial artifact patterns across channels; useful for consistent topographies, but more global.
+        """
+    }
+
+    private var artifactCleaningProgressText: String {
+        guard let progress = artifactCleaningProgress else {
+            return "Preparing artifact cleanup..."
+        }
+        switch progress.phase {
+        case .preparing:
+            return "Setting up \(progress.artifactName) (\(progress.artifactTotal) events) with \(progress.method.rawValue)"
+        case .cleaning:
+            let current = min(progress.artifactCompleted, progress.artifactTotal)
+            let overall = progress.total > progress.artifactTotal
+                ? " · \(progress.completed) of \(progress.total) overall"
+                : ""
+            return "Cleaning \(current) of \(progress.artifactTotal) \(progress.artifactName) events with \(progress.method.rawValue)\(overall)"
+        }
+    }
+
+    private func setArtifactCleaningEnabled(_ isEnabled: Bool) {
+        guard artifactCleanedSignal != nil,
+              artifactCleaningIsEnabled != isEnabled else {
+            return
+        }
+        artifactCleaningIsEnabled = isEnabled
+        invalidateEpochsForSignalChange()
+        invalidateInterpolations()
+    }
+
+    private func applyArtifactCleaning(to signal: MFFSignalData) {
+        let artifacts = definedArtifacts
+        guard artifacts.contains(where: { $0.cleaningMethod.removesArtifact }) else {
+            restoreArtifactCleaning()
+            return
+        }
+
+        isCleaningArtifacts = true
+        artifactCleaningStatusMessage = nil
+        artifactCleaningProgress = nil
+        let badChannels = channels.bad
+        let (progressStream, progressContinuation) = AsyncStream<ArtifactCleaningProgress>.makeStream()
+        let progressTask = Task { @MainActor in
+            for await progress in progressStream {
+                artifactCleaningProgress = progress
+            }
+        }
+
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) {
+                ArtifactCleaner.cleanedSignal(
+                    from: signal,
+                    artifacts: artifacts,
+                    excluding: badChannels
+                ) { progress in
+                    progressContinuation.yield(progress)
+                }
+            }.value
+            progressContinuation.finish()
+            progressTask.cancel()
+
+            artifactCleanedSignal = outcome.signal
+            artifactCleaningIsEnabled = true
+            artifactCleaningSummaries = outcome.summaries
+            let summariesByID = Dictionary(uniqueKeysWithValues: outcome.summaries.map { ($0.artifactID, $0) })
+            let now = Date()
+            for index in definedArtifacts.indices {
+                if summariesByID[definedArtifacts[index].id] != nil,
+                   definedArtifacts[index].cleaningMethod.removesArtifact {
+                    definedArtifacts[index].appliedMethod = definedArtifacts[index].cleaningMethod
+                    definedArtifacts[index].cleanedAt = now
+                } else {
+                    definedArtifacts[index].appliedMethod = nil
+                    definedArtifacts[index].cleanedAt = nil
+                }
+            }
+
+            artifactCleaningStatusMessage = artifactCleaningSummaryText(outcome.summaries)
+            artifactStatusMessage = artifactCleaningStatusMessage
+            artifactDetectionRefreshToken += 1
+            invalidateEpochsForSignalChange()
+            invalidateInterpolations()
+            artifactCleaningProgress = nil
+            isCleaningArtifacts = false
+        }
+    }
+
+    private func artifactCleaningSummaryText(_ summaries: [ArtifactCleaningSummary]) -> String {
+        guard !summaries.isEmpty else {
+            return "No artifact cleanup was applied."
+        }
+        if summaries.count == 1, let summary = summaries.first {
+            return "\(summary.method.rawValue) cleaned \(summary.name) across \(summary.channelCount) channels."
+        }
+        return "Cleaned \(summaries.count) artifacts."
+    }
+
+    private func restoreArtifactCleaning() {
+        clearAppliedArtifactCleaning()
+        artifactCleaningStatusMessage = "Artifact cleaning restored to the current uncleaned signal."
+        artifactStatusMessage = artifactCleaningStatusMessage
+    }
+
+    private func clearAppliedArtifactCleaning() {
+        let hadCleaning = artifactCleanedSignal != nil || definedArtifacts.contains { $0.appliedMethod != nil }
+        artifactCleanedSignal = nil
+        artifactCleaningIsEnabled = true
+        artifactCleaningSummaries = []
+        artifactCleaningProgress = nil
+        artifactCleaningStatusMessage = nil
+        for index in definedArtifacts.indices {
+            definedArtifacts[index].appliedMethod = nil
+            definedArtifacts[index].cleanedAt = nil
+        }
+        guard hadCleaning else { return }
+        artifactDetectionRefreshToken += 1
+        invalidateEpochsForSignalChange()
+        invalidateInterpolations()
     }
 
     /// Current values of the scan-affecting controls.
@@ -2740,6 +3218,7 @@ struct WaveformView: View {
 
             icaCleanedSignal = cleaned
             filteredSignal = restoredFilteredSignal
+            clearAppliedArtifactCleaning()
             lastICAReconstructionDebugReport = icaReconstructionDebugReport(
                 beforeBase: signal,
                 beforeDisplay: beforeDisplaySignal,
@@ -3741,6 +4220,7 @@ struct WaveformView: View {
                     events: events,
                     data: filteredData
                 )
+                clearAppliedArtifactCleaning()
                 artifactDetectionRefreshToken += 1
                 invalidateEpochsForSignalChange()
                 invalidateInterpolations()
@@ -3756,6 +4236,7 @@ struct WaveformView: View {
 
     private func clearBandpassFilter() {
         filteredSignal = nil
+        clearAppliedArtifactCleaning()
         filterStatusMessage = nil
         artifactDetectionRefreshToken += 1
         invalidateEpochsForSignalChange()
@@ -3823,6 +4304,7 @@ struct WaveformView: View {
                 icaCleanedSignal = nil
                 icaDecomposition = nil
                 filteredSignal = nil
+                clearAppliedArtifactCleaning()
                 mriStatusMessage = nil
                 artifactDetectionRefreshToken += 1
                 invalidateEpochsForSignalChange()
@@ -3842,6 +4324,7 @@ struct WaveformView: View {
         icaCleanedSignal = nil
         icaDecomposition = nil
         filteredSignal = nil
+        clearAppliedArtifactCleaning()
         mriStatusMessage = nil
         artifactDetectionRefreshToken += 1
         invalidateEpochsForSignalChange()
@@ -3851,16 +4334,37 @@ struct WaveformView: View {
     // MARK: - Artifact detection
 
     private var artifactsAreActive: Bool {
-        detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts || detectsECGArtifacts || !artifactEvents.isEmpty
+        detectsEyeBlinkArtifacts
+            || detectsEyeMovementArtifacts
+            || detectsECGArtifacts
+            || !artifactEvents.isEmpty
+            || !definedArtifacts.isEmpty
+            || artifactCleanedSignal != nil
     }
 
     private var artifactHelpText: String {
+        if isCleaningArtifacts {
+            return "Artifact cleaning\nCleaning artifacts..."
+        }
+
         if isDetectingArtifacts {
             return "Artifact detection\nDetecting artifacts..."
         }
 
+        if artifactCleanedSignal != nil, !artifactCleaningIsEnabled {
+            return "Artifact cleaning\nApplied correction hidden for comparison."
+        }
+
+        if artifactCleanedSignal != nil {
+            return "Artifact cleaning\n\(artifactCleaningStatusMessage ?? "Artifact cleanup applied.")"
+        }
+
         if let artifactStatusMessage {
             return "Artifact detection\n\(artifactStatusMessage)"
+        }
+
+        if !definedArtifacts.isEmpty {
+            return "Artifact detection\n\(definedArtifacts.count) artifact definitions"
         }
 
         return "Artifact detection"
@@ -4016,22 +4520,30 @@ struct WaveformView: View {
         icaCleanedSignal = nil
         icaDecomposition = nil
         gradientCorrectedSignal = nil
+        artifactCleanedSignal = nil
+        artifactCleaningIsEnabled = true
 
         // Artifact detection + templates.
         artifactEvents = []
         artifactTemplateResult = nil
+        definedArtifacts = []
+        artifactCleaningSummaries = []
+        artifactCleaningProgress = nil
+        obsVarianceReportCache.removeAll()
         detectsEyeBlinkArtifacts = false
         detectsEyeMovementArtifacts = false
         detectsECGArtifacts = false
         selectedArtifactTemplateChannel = nil
         artifactTemplateClickedChannel = nil
         artifactTemplateSelectionRange = nil
+        artifactTemplateDefinedArtifactID = nil
 
         // Status messages and progress.
         filterStatusMessage = nil
         icaStatusMessage = nil
         artifactStatusMessage = nil
         artifactTemplateStatusMessage = nil
+        artifactCleaningStatusMessage = nil
         mriStatusMessage = nil
         psaStatusMessage = nil
         channelStatusMessage = nil
@@ -4468,6 +4980,544 @@ private struct ArtifactTemplateFieldLabel: View {
                     .frame(width: 260, alignment: .leading)
             }
         }
+    }
+}
+
+private struct ArtifactCleaningPreviewButton: View {
+    let artifact: DefinedArtifact
+    let beforeSignal: MFFSignalData
+    let afterSignal: MFFSignalData?
+    let layout: SensorLayout?
+
+    @State private var showsPreview = false
+
+    var body: some View {
+        Button {
+            showsPreview.toggle()
+        } label: {
+            Image(systemName: "eye")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Preview artifact cleanup")
+        .onHover { hovering in
+            showsPreview = hovering
+        }
+        .popover(isPresented: $showsPreview, arrowEdge: .trailing) {
+            ArtifactCleaningPreview(
+                artifact: artifact,
+                beforeSignal: beforeSignal,
+                afterSignal: afterSignal,
+                layout: layout
+            )
+        }
+    }
+}
+
+private struct ArtifactOBSOptionsButton: View {
+    @Binding var artifact: DefinedArtifact
+    let signal: MFFSignalData
+    @Binding var reportCache: [String: OBSPCAVarianceReport]
+    let onSettingsChange: () -> Void
+
+    @State private var showsOptions = false
+
+    var body: some View {
+        Button("Options...") {
+            showsOptions = true
+        }
+        .font(.caption)
+        .disabled(artifact.eventCount < 2)
+        .sheet(isPresented: $showsOptions) {
+            ArtifactOBSOptionsSheet(
+                artifact: $artifact,
+                signal: signal,
+                reportCache: $reportCache,
+                onSettingsChange: onSettingsChange
+            )
+        }
+    }
+}
+
+private struct ArtifactOBSOptionsSheet: View {
+    @Binding var artifact: DefinedArtifact
+    let signal: MFFSignalData
+    @Binding var reportCache: [String: OBSPCAVarianceReport]
+    let onSettingsChange: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var report: OBSPCAVarianceReport?
+    @State private var isLoadingReport = false
+
+    private var componentCountBinding: Binding<Int> {
+        Binding {
+            artifact.obsPCAComponentCount
+        } set: { newValue in
+            let bounded = min(max(newValue, 0), DefinedArtifact.maximumOBSComponentCount)
+            guard artifact.obsPCAComponentCount != bounded else { return }
+            artifact.obsPCAComponentCount = bounded
+            onSettingsChange()
+        }
+    }
+
+    private var selectedCumulativeVariance: Double {
+        report?.cumulativeVariance(for: artifact.obsPCAComponentCount) ?? 0
+    }
+
+    private var reportCacheKey: String {
+        [
+            artifact.id.uuidString,
+            "\(artifact.eventCount)",
+            "\(artifact.events.first?.beginTimeSeconds ?? -1)",
+            "\(artifact.events.last?.beginTimeSeconds ?? -1)",
+            "\(artifact.windowSizeSeconds)",
+            "\(signal.signalURL.path)",
+            "\(signal.samplingRate)",
+            "\(signal.duration)",
+            "\(DefinedArtifact.maximumOBSComponentCount)"
+        ].joined(separator: "|")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("OBS Options")
+                        .font(.title3.weight(.semibold))
+                    Text(artifact.name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(artifact.eventCount) events")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Stepper(value: componentCountBinding, in: 0...DefinedArtifact.maximumOBSComponentCount) {
+                    Text("PCA components: \(artifact.obsPCAComponentCount)")
+                        .font(.callout.weight(.medium))
+                }
+
+                Text("OBS always removes the mean artifact waveform; PCA components model the remaining event-to-event residual shape.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if isLoadingReport {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Fitting residual PCA to artifact windows...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let report {
+                obsVarianceReportView(report)
+            } else {
+                ContentUnavailableView(
+                    "No OBS PCA Estimate",
+                    systemImage: "chart.bar.xaxis",
+                    description: Text("There were not enough valid artifact windows to estimate residual PCA variance.")
+                )
+                .frame(height: 180)
+            }
+
+            HStack {
+                Spacer()
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 560)
+        .task(id: reportCacheKey) {
+            await loadReport()
+        }
+    }
+
+    private func obsVarianceReportView(_ report: OBSPCAVarianceReport) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Selected components account for \(Self.percent(selectedCumulativeVariance)) of residual variance.")
+                    .font(.callout.weight(.medium))
+                ProgressView(value: selectedCumulativeVariance)
+                    .progressViewStyle(.linear)
+                Text("\(Self.percent(max(1 - selectedCumulativeVariance, 0))) residual variance remains after the selected PCA components.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 12) {
+                obsReportChip(title: "Valid", value: "\(report.validEventCount)/\(report.eventCount)")
+                obsReportChip(title: "Sampled", value: "\(report.sampledEventCount)")
+                obsReportChip(title: "Channels", value: "\(report.channelCount)")
+                obsReportChip(title: "Window", value: "\(report.windowSampleCount)")
+            }
+
+            if report.components.isEmpty {
+                Text("The residual windows have no measurable PCA variance after subtracting the mean artifact waveform.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 7) {
+                    GridRow {
+                        Text("Component")
+                        Text("Adds")
+                        Text("Cumulative")
+                        Text("Remaining")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                    ForEach(report.components) { component in
+                        GridRow {
+                            Label("\(component.componentIndex)", systemImage: component.componentIndex <= artifact.obsPCAComponentCount ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(component.componentIndex <= artifact.obsPCAComponentCount ? .green : .secondary)
+                            Text(Self.percent(component.explainedVariance))
+                            Text(Self.percent(component.cumulativeVariance))
+                            Text(Self.percent(component.remainingVariance))
+                        }
+                        .font(.caption.monospacedDigit())
+                    }
+                }
+            }
+        }
+    }
+
+    private func obsReportChip(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.monospacedDigit())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @MainActor
+    private func loadReport() async {
+        let key = reportCacheKey
+        if let cachedReport = reportCache[key] {
+            report = cachedReport
+            isLoadingReport = false
+            return
+        }
+
+        isLoadingReport = true
+        report = nil
+        let artifact = artifact
+        let signal = signal
+        let fittedReport = await Task.detached(priority: .userInitiated) {
+            ArtifactCleaner.obsVarianceReport(for: artifact, in: signal)
+        }.value
+        guard !Task.isCancelled else { return }
+        report = fittedReport
+        if let fittedReport {
+            reportCache[key] = fittedReport
+        }
+        isLoadingReport = false
+    }
+
+    private static func percent(_ value: Double) -> String {
+        String(format: "%.1f%%", value * 100)
+    }
+}
+
+private struct ArtifactCleaningPreviewData: Sendable {
+    var beforeAverage: ArtifactTemplateAverage?
+    var afterAverage: ArtifactTemplateAverage?
+    var beforeTopographyValues: [Double]?
+    var afterTopographyValues: [Double]?
+    var topographyScale: Double?
+}
+
+private struct ArtifactCleaningPreview: View {
+    let artifact: DefinedArtifact
+    let beforeSignal: MFFSignalData
+    let afterSignal: MFFSignalData?
+    let layout: SensorLayout?
+
+    @State private var previewData: ArtifactCleaningPreviewData?
+    @State private var isLoadingPreview = false
+
+    private var previewLoadID: String {
+        [
+            artifact.id.uuidString,
+            artifact.appliedMethod?.rawValue ?? artifact.cleaningMethod.rawValue,
+            afterSignal?.signalType ?? "no-after",
+            String(afterSignal?.duration ?? 0)
+        ].joined(separator: "-")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(artifact.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer()
+                Text(artifact.appliedMethod?.rawValue ?? artifact.cleaningMethod.rawValue)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            if artifact.topography != nil, let layout {
+                if let previewData,
+                   let beforeValues = previewData.beforeTopographyValues,
+                   let afterValues = previewData.afterTopographyValues {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Topography")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 10) {
+                            topographyPreview(title: "Before", layout: layout, values: beforeValues, scale: previewData.topographyScale)
+                            topographyPreview(title: "After", layout: layout, values: afterValues, scale: previewData.topographyScale)
+                        }
+                    }
+                } else if isLoadingPreview {
+                    loadingPreview(title: "Topography", height: 180)
+                }
+            }
+
+            if let beforeAverage = previewData?.beforeAverage {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Average Waveform")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        waveformPreview(title: "Before", average: beforeAverage)
+                        if let afterAverage = previewData?.afterAverage {
+                            waveformPreview(title: "After", average: afterAverage)
+                        } else {
+                            missingPreview(title: "After")
+                        }
+                    }
+                }
+            } else if isLoadingPreview {
+                loadingPreview(title: "Average Waveform", height: 110)
+            } else {
+                Text("No preview average available.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 320, alignment: .leading)
+            }
+        }
+        .padding(14)
+        .frame(width: 520)
+        .task(id: previewLoadID) {
+            await loadPreview()
+        }
+    }
+
+    @MainActor
+    private func loadPreview() async {
+        isLoadingPreview = true
+        previewData = nil
+        let artifact = artifact
+        let beforeSignal = beforeSignal
+        let afterSignal = afterSignal
+        let data = await Task.detached(priority: .userInitiated) {
+            Self.makePreviewData(
+                artifact: artifact,
+                beforeSignal: beforeSignal,
+                afterSignal: afterSignal
+            )
+        }.value
+        guard !Task.isCancelled else { return }
+        previewData = data
+        isLoadingPreview = false
+    }
+
+    private func waveformPreview(title: String, average: ArtifactTemplateAverage) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ArtifactTemplateAveragePlot(
+                average: average,
+                highlightedChannels: Set(artifact.selectedChannelIndices)
+            )
+            .frame(height: 110)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func missingPreview(title: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.08))
+                .overlay {
+                    Text("Not applied")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(height: 110)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func topographyPreview(title: String, layout: SensorLayout, values: [Double], scale: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            TopomapView(
+                layout: layout,
+                values: values,
+                timeSeconds: artifact.topography?.referenceTimeSeconds ?? 0,
+                fixedScale: scale,
+                showsHeader: false,
+                colorBarPlacement: .bottom,
+                minimumMapHeight: 130
+            )
+            .frame(height: 180)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func loadingPreview(title: String, height: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.08))
+                .overlay {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Preparing preview...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(height: height)
+        }
+    }
+
+    nonisolated private static func makePreviewData(
+        artifact: DefinedArtifact,
+        beforeSignal: MFFSignalData,
+        afterSignal: MFFSignalData?
+    ) -> ArtifactCleaningPreviewData {
+        let beforeAverage = artifact.average ?? average(in: beforeSignal, artifact: artifact)
+        let afterAverage = afterSignal.flatMap { average(in: $0, artifact: artifact) }
+        let beforeTopographyValues: [Double]?
+        if let topography = artifact.topography, !topography.channelValues.isEmpty {
+            beforeTopographyValues = topography.channelValues.map(Double.init)
+        } else {
+            beforeTopographyValues = beforeAverage.flatMap(centerValues(from:))
+        }
+        let afterTopographyValues = afterAverage.flatMap(centerValues(from:))
+
+        return ArtifactCleaningPreviewData(
+            beforeAverage: beforeAverage,
+            afterAverage: afterAverage,
+            beforeTopographyValues: beforeTopographyValues,
+            afterTopographyValues: afterTopographyValues,
+            topographyScale: topographyScale(beforeTopographyValues, afterTopographyValues)
+        )
+    }
+
+    nonisolated private static func topographyScale(_ before: [Double]?, _ after: [Double]?) -> Double? {
+        guard let before, let after else { return nil }
+        let maxAbs = (before + after).map(abs).max() ?? 0
+        return maxAbs > 0 ? maxAbs : nil
+    }
+
+    nonisolated private static func centerValues(from average: ArtifactTemplateAverage) -> [Double]? {
+        guard let sampleCount = average.allChannelSamples.first?.count, sampleCount > 0 else { return nil }
+        let center = sampleCount / 2
+        return average.allChannelSamples.map { samples in
+            center < samples.count ? Double(samples[center]) : 0
+        }
+    }
+
+    nonisolated private static func average(in signal: MFFSignalData, artifact: DefinedArtifact) -> ArtifactTemplateAverage? {
+        guard signal.samplingRate > 0,
+              let sampleCount = signal.data.first?.count,
+              sampleCount > 0,
+              !artifact.events.isEmpty else {
+            return nil
+        }
+
+        let windowSamples = artifact.average?.allChannelSamples.first?.count
+            ?? max(Int((artifact.windowSizeSeconds * signal.samplingRate).rounded()), 3)
+        guard windowSamples > 1, sampleCount >= windowSamples else { return nil }
+
+        var averages = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
+        var accepted = 0
+        for event in artifact.events {
+            let center = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
+            let start = center - windowSamples / 2
+            let end = start + windowSamples
+            guard start >= 0, end <= sampleCount else { continue }
+
+            for channelIndex in signal.data.indices where signal.data[channelIndex].count >= end {
+                for offset in 0..<windowSamples {
+                    averages[channelIndex][offset] += signal.data[channelIndex][start + offset]
+                }
+            }
+            accepted += 1
+        }
+
+        guard accepted > 0 else { return nil }
+        let divisor = Float(accepted)
+        for channelIndex in averages.indices {
+            for sample in averages[channelIndex].indices {
+                averages[channelIndex][sample] /= divisor
+            }
+        }
+
+        var summaries: [ArtifactTemplateChannelSummary] = []
+        summaries.reserveCapacity(averages.count)
+        for channelIndex in averages.indices {
+            let samples = averages[channelIndex]
+            var peak: Float = 0
+            var squareSum: Float = 0
+            for value in samples {
+                peak = max(peak, abs(value))
+                squareSum += value * value
+            }
+            let divisor = Float(samples.isEmpty ? 1 : samples.count)
+            let meanSquare = squareSum / divisor
+            summaries.append(ArtifactTemplateChannelSummary(
+                channelIndex: channelIndex,
+                peakAbsoluteMicrovolts: peak,
+                rmsMicrovolts: sqrt(meanSquare)
+            ))
+        }
+        summaries.sort {
+            $0.peakAbsoluteMicrovolts == $1.peakAbsoluteMicrovolts
+                ? $0.channelIndex < $1.channelIndex
+                : $0.peakAbsoluteMicrovolts > $1.peakAbsoluteMicrovolts
+        }
+
+        return ArtifactTemplateAverage(
+            samplingRate: signal.samplingRate,
+            windowSizeSeconds: Double(windowSamples) / signal.samplingRate,
+            eventCount: accepted,
+            selectedChannelIndices: artifact.selectedChannelIndices,
+            allChannelSamples: averages,
+            channelSummaries: summaries
+        )
     }
 }
 
