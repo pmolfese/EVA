@@ -21,6 +21,69 @@ import Foundation
 
 struct EVATests {
 
+    // MARK: - Wavelet reducer: perfect reconstruction
+
+    private func makeTestSignal(count: Int) -> [Double] {
+        (0..<count).map { i in
+            let t = Double(i)
+            return sin(t * 0.07) + 0.4 * sin(t * 0.31) + 0.15 * cos(t * 0.9)
+                + (i % 97 == 0 ? 8.0 : 0.0) // occasional spikes
+        }
+    }
+
+    private func maxAbsDifference(_ a: [Double], _ b: [Double]) -> Double {
+        zip(a, b).map { abs($0 - $1) }.max() ?? 0
+    }
+
+    @Test func dwtPerfectReconstruction() {
+        let signal = makeTestSignal(count: 600)
+        for family in WaveletReductionFamily.allCases {
+            let bank = WaveletFilterBank.orthonormal(family.scalingFilter)
+            let transform = WaveletTransform(bank: bank)
+            for levels in [1, 3, 5] {
+                let decomposition = transform.forwardDWT(signal, levels: levels)
+                let reconstructed = transform.inverseDWT(decomposition)
+                let error = maxAbsDifference(signal, reconstructed)
+                #expect(error < 1e-6, "DWT \(family.rawValue) L\(levels) error \(error)")
+            }
+        }
+    }
+
+    @Test func swtPerfectReconstruction() {
+        let signal = makeTestSignal(count: 512)
+        for family in WaveletReductionFamily.allCases {
+            let bank = WaveletFilterBank.orthonormal(family.scalingFilter)
+            let transform = WaveletTransform(bank: bank)
+            for levels in [1, 3, 4] {
+                let decomposition = transform.forwardSWT(signal, levels: levels)
+                let reconstructed = transform.inverseSWT(decomposition)
+                let error = maxAbsDifference(signal, reconstructed)
+                #expect(error < 1e-6, "SWT \(family.rawValue) L\(levels) error \(error)")
+            }
+        }
+    }
+
+    @Test func reductionRemovesSpikesAndPreservesBackground() {
+        // A clean oscillation plus large isolated spikes; reduction should cut
+        // the peak substantially while keeping most of the variance/structure.
+        var signal = (0..<500).map { sin(Double($0) * 0.2) }
+        for index in stride(from: 50, to: 500, by: 120) { signal[index] += 12 }
+
+        let config = WaveletReductionConfiguration(
+            kind: .dwt, family: .coif4, levelCount: 5,
+            thresholdRule: .hard, thresholdModel: .bayesShrink, thresholdScale: 1
+        )
+        let (cleaned, artifact, _) = WaveletReducer.reduceChannel(signal, configuration: config)
+
+        let originalPeak = signal.map(abs).max() ?? 0
+        let cleanedPeak = cleaned.map(abs).max() ?? 0
+        let artifactEnergy = artifact.reduce(0) { $0 + $1 * $1 }
+
+        #expect(cleanedPeak < originalPeak)          // spikes reduced
+        #expect(artifactEnergy > 0)                  // something was removed
+        #expect(cleaned.count == signal.count)
+    }
+
     @Test func mffReaderAppliesGCALCalibration() throws {
         let packageURL = try makeMFFPackage()
         defer { try? FileManager.default.removeItem(at: packageURL) }

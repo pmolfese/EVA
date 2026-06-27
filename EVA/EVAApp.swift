@@ -23,6 +23,7 @@ import SwiftUI
 struct EVAApp: App {
     @State private var recording: MFFRecording?
     @State private var openRecordingRequest = 0
+    @State private var goodnessSettings = ChannelGoodnessSettings()
 
     var body: some Scene {
         WindowGroup {
@@ -30,6 +31,7 @@ struct EVAApp: App {
                 recording: $recording,
                 openRecordingRequest: $openRecordingRequest
             )
+            .environment(goodnessSettings)
         }
         .modelContainer(for: UserMarker.self)
         .defaultSize(Self.defaultWindowSize)

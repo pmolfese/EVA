@@ -379,7 +379,7 @@ nonisolated enum ArtifactTemplateDetector {
         guard let sampleCount = signal.data.first?.count, sampleCount > 0 else {
             return ([], nil)
         }
-        let decimation = max(Int((signal.samplingRate / max(configuration.downsampleRate, 1)).rounded()), 1)
+        let decimation = Downsampler.factor(sourceRate: signal.samplingRate, targetRate: configuration.downsampleRate)
         let mergeSamples = max(Int((configuration.mergeWindowSeconds * signal.samplingRate).rounded()), 1)
 
         var hits: [(sample: Int, score: Float)] = []
@@ -584,14 +584,14 @@ nonisolated enum ArtifactTemplateDetector {
             return []
         }
 
-        let decimation = max(Int((signal.samplingRate / max(configuration.downsampleRate, 1)).rounded()), 1)
+        let decimation = Downsampler.factor(sourceRate: signal.samplingRate, targetRate: configuration.downsampleRate)
         let downsampledRate = signal.samplingRate / Double(decimation)
         let templateStart = exemplarStart / decimation
         let templateEnd = max(exemplarEnd / decimation, templateStart + 3)
         let templateLength = templateEnd - templateStart
         guard templateLength >= 3 else { return [] }
 
-        let downsampledChannels = channelIndices.map { downsample(signal.data[$0], by: decimation) }
+        let downsampledChannels = channelIndices.map { Downsampler.strided(signal.data[$0], by: decimation) }
         guard let downsampledCount = downsampledChannels.first?.count,
               downsampledCount >= templateLength else {
             return []
@@ -862,10 +862,6 @@ nonisolated enum ArtifactTemplateDetector {
         return lower...upper
     }
 
-    private static func downsample(_ samples: [Float], by decimation: Int) -> [Float] {
-        guard decimation > 1 else { return samples }
-        return stride(from: 0, to: samples.count, by: decimation).map { samples[$0] }
-    }
 
     private static func normalized(_ samples: [Float]) -> (original: [Float], normalized: [Float]) {
         guard !samples.isEmpty else { return (samples, []) }

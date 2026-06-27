@@ -71,6 +71,7 @@ extension FocusedValues {
 struct ChannelsCommands: View {
     @FocusedValue(\.channelModel) private var model
     @FocusedValue(\.channelLabelMetricsExportRequest) private var labelMetricsExportRequest
+    @FocusedValue(\.channelHealthViewControls) private var healthControls
 
     var body: some View {
         if let model {
@@ -79,9 +80,23 @@ struct ChannelsCommands: View {
                 set: { model.showsHealth = $0 }
             ))
 
+            Button("Channel Goodness Details...") {
+                healthControls?.detailsRequest.wrappedValue += 1
+            }
+            .disabled(healthControls == nil)
+
+            Button("Channel Goodness Settings...") {
+                healthControls?.settingsRequest.wrappedValue += 1
+            }
+            .disabled(healthControls == nil)
+
             if model.showsHealth {
                 Button("Refresh Channel Health") {
-                    model.healthRefreshToken += 1
+                    if let healthControls {
+                        healthControls.refreshRequest.wrappedValue += 1
+                    } else {
+                        model.healthRefreshToken += 1
+                    }
                 }
                 .disabled(model.isAnalyzingHealth)
 
@@ -187,6 +202,15 @@ extension FocusedValues {
         typealias Value = SegmentHealthViewControls
     }
 
+    var channelHealthViewControls: ChannelHealthViewControls? {
+        get { self[ChannelHealthViewControlsKey.self] }
+        set { self[ChannelHealthViewControlsKey.self] = newValue }
+    }
+
+    private struct ChannelHealthViewControlsKey: FocusedValueKey {
+        typealias Value = ChannelHealthViewControls
+    }
+
     var mffExportRequest: Binding<Int>? {
         get { self[MFFExportRequestKey.self] }
         set { self[MFFExportRequestKey.self] = newValue }
@@ -238,6 +262,16 @@ struct SegmentHealthViewControls {
     var showsMouseOverHealth: Binding<Bool>
     var detailsRequest: Binding<Int>
     var refreshRequest: Binding<Int>
+    var isAnalyzing: Bool
+    var progress: Double
+}
+
+/// Channel-health display controls exposed to menu commands.
+struct ChannelHealthViewControls {
+    var showsHealth: Binding<Bool>
+    var detailsRequest: Binding<Int>
+    var refreshRequest: Binding<Int>
+    var settingsRequest: Binding<Int>
     var isAnalyzing: Bool
     var progress: Double
 }

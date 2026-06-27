@@ -57,6 +57,22 @@ nonisolated struct MFFSignalData: Sendable {
         self.data = data
         self.channelNames = channelNames
     }
+
+    /// Returns a copy with the sample data replaced, preserving all metadata.
+    /// Optionally annotates the signal type to record the transform applied.
+    func replacingData(_ newData: [[Float]], signalTypeSuffix: String? = nil) -> MFFSignalData {
+        MFFSignalData(
+            signalURL: signalURL,
+            signalType: signalTypeSuffix.map { "\(signalType) \($0)" } ?? signalType,
+            numberOfChannels: numberOfChannels,
+            samplingRate: samplingRate,
+            duration: duration,
+            recordingStartTime: recordingStartTime,
+            events: events,
+            data: newData,
+            channelNames: channelNames
+        )
+    }
 }
 
 nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {

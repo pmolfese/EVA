@@ -15,6 +15,7 @@
 //  SPDX-License-Identifier: GPL-3.0-only
 //
 
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -58,6 +59,7 @@ struct ContentView: View {
         .onChange(of: openRecordingRequest) { _, _ in
             showsFileImporter = true
         }
+        .background(WindowAccessor(autosaveName: "EVAMainWindow"))
     }
 
     private var launchScreen: some View {
@@ -213,6 +215,23 @@ struct ContentView: View {
 
     private func isSupportedRecordingURL(_ url: URL) -> Bool {
         SignalImportReader.isSupportedRecordingURL(url)
+    }
+}
+
+/// Sets an AppKit frame-autosave name on the hosting window so its size and
+/// position are remembered in user defaults and restored on the next launch.
+private struct WindowAccessor: NSViewRepresentable {
+    let autosaveName: String
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = nsView.window else { return }
+            if window.frameAutosaveName != autosaveName {
+                window.setFrameAutosaveName(autosaveName)
+            }
+        }
     }
 }
 

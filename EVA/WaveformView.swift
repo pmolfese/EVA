@@ -28,6 +28,7 @@ struct WaveformView: View {
     @ObservedObject var recording: MFFRecording
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(ChannelGoodnessSettings.self) private var goodnessSettings
     @Query private var markers: [UserMarker]
 
     @State private var amplitudeScale: Double = 100
@@ -75,6 +76,8 @@ struct WaveformView: View {
     @State private var artifactTemplateDownsampleRate = 250.0
     @State private var artifactTemplateMergeWindowSeconds = 0.25
     @State private var artifactTemplatePolarity = ArtifactTemplatePolarity.same
+    @State private var artifactDefinitionPanel = ArtifactDefinitionPanel.waveforms
+    @State private var artifactTemplateConfirmedSource: ArtifactDefinitionResultSource?
     @State private var artifactTemplateTopographyMode = ArtifactTopographyMode.off
     @State private var artifactTopographyChannelScope = ArtifactTopographyChannelScope.allGood
     @State private var artifactTopographyMetric = ArtifactTopographyMetric.pearson
@@ -98,6 +101,28 @@ struct WaveformView: View {
     @State private var artifactDeletionRequest: DefinedArtifact.ID?
     @State private var deleteAllArtifactsRequest = 0
     @State private var obsVarianceReportCache = [String: OBSPCAVarianceReport]()
+    @State private var showsWaveletArtifactExplorer = false
+    @State private var isRunningWaveletArtifactExplorer = false
+    @State private var waveletExplorerProgress = 0.0
+    @State private var waveletExplorerStatusTitle = ""
+    @State private var waveletExplorerStatusDetail = ""
+    @State private var waveletExplorerStatusMessage: String?
+    @State private var waveletExplorerLog: [WaveletArtifactExplorerLogLine] = []
+    @State private var waveletExplorerResult: WaveletArtifactExplorerResult?
+    @State private var waveletExplorerRunGeneration = 0
+    @State private var waveletExplorerPipeline = WaveletCleaningPipeline.eeg
+    @State private var waveletExplorerCleaningMode = WaveletCleaningMode.conservativeLocal
+    @State private var waveletExplorerIntensity = WaveletCleaningMode.conservativeLocal.defaultIntensity
+    @State private var waveletExplorerChannelScope = WaveletExplorerChannelScope.visibleGood
+    @State private var waveletExplorerDownsampleRate = 250.0
+    @State private var waveletExplorerLevelCount = 8
+    @State private var waveletExplorerThresholdScale = 1.0
+    @State private var waveletExplorerWaveletFamily = WaveletCleaningFamily.bior44
+    @State private var waveletExplorerThresholdRule = WaveletCleaningThresholdRule.hard
+    @State private var waveletExplorerThresholdModel = WaveletCleaningThresholdModel.bayesShrink
+    @State private var waveletExplorerMergeWindowSeconds = 0.10
+    @State private var waveletExplorerMinimumDurationSeconds = 0.02
+    @State private var waveletExplorerMaximumCandidates = 80
     @State private var showsICASheet = false
     @State private var isRunningICA = false
     @State private var icaProgress = 0.0
@@ -148,13 +173,41 @@ struct WaveformView: View {
     @State private var filteredSignal: MFFSignalData?
     @State private var artifactCleanedSignal: MFFSignalData?
     @State private var artifactCleaningIsEnabled = true
+    // Wavelet artifact reduction (HAPPE-style) pipeline stage.
+    @State private var waveletReducedSignal: MFFSignalData?
+    @State private var waveletReductionArtifact: MFFSignalData?
+    @State private var waveletReductionIsEnabled = true
+    @State private var waveletReductionResult: WaveletReductionResult?
+    @State private var waveletReductionMode = WaveletReductionMode.continuousEEG
+    @State private var waveletReductionConfig = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: 250)
+    @State private var isRunningWaveletReduction = false
+    @State private var waveletReductionProgress = 0.0
+    @State private var waveletReductionStatusMessage: String?
+    @State private var waveletReductionBandVarianceRetained: Double?
+    @State private var waveletReductionCoreCount = WaveletReducer.defaultCoreCount
+    @State private var waveletReductionCandidates: [WaveletReductionCandidate] = []
+    @State private var selectedWaveletCandidateID: String?
+    @State private var showsWaveletReductionSheet = false
     @State private var isFiltering = false
     @State private var filterProgress: Double = 0
     @State private var filterStatusMessage: String?
+    @State private var filterStatusIsError = false
+    @State private var mriStatusIsError = false
+    @State private var channelStatusIsError = false
+    // Scrollable status history (newest first), shown when the status area is clicked.
+    @State private var statusHistory: [StatusHistoryEntry] = []
+    @State private var lastRecordedStatusBySource: [String: String] = [:]
+    @State private var showsStatusHistory = false
     @State private var showsFilterPopover = false
     @State private var filterLowCutoff = 0.1
     @State private var filterHighCutoff = 30.0
     @State private var notch60HzEnabled = false
+    @State private var filterLineNoiseMode = FilterLineNoiseMode.off
+    @State private var filterLineNoiseFrequency = 60.0
+    @State private var filterLineNoiseHarmonics = 2
+    @State private var filterLineNoiseWindowSeconds = 4.0
+    @State private var filterLineNoiseStrength = 1.0
+    @State private var showsFilterLineNoiseOptions = false
     @State private var filterAverageReference = false
 
     // MRI artifact removal. The gradient-corrected signal becomes the base that
@@ -172,6 +225,10 @@ struct WaveformView: View {
     @State private var channelHealthSignature: String?
     @State private var channelHealthTask: Task<Void, Never>?
     @State private var channelLabelMetricsExportRequest = 0
+    @State private var showsChannelHealthDetails = false
+    @State private var channelHealthDetailsRequest = 0
+    @State private var showsChannelGoodnessSettings = false
+    @State private var channelGoodnessSettingsRequest = 0
     @State private var showsSegmentHealth = false
     @State private var showsSegmentHealthMouseOver = false
     @State private var showsSegmentHealthDetails = false
@@ -199,6 +256,50 @@ struct WaveformView: View {
     private let butterflyPanelWidth: CGFloat = 360
     private let overlaidCategoriesPanelWidth: CGFloat = 380
 
+    private var artifactMenuControls: ArtifactMenuControls {
+        ArtifactMenuControls(
+            artifacts: definedArtifacts,
+            deleteRequest: $artifactDeletionRequest,
+            deleteAllRequest: $deleteAllArtifactsRequest
+        )
+    }
+
+    private var psaControls: PSAViewControls {
+        PSAViewControls(
+            showButterfly: $showsButterflyPlot,
+            showOverlaidCategories: $showsOverlaidCategories,
+            isAveraged: psaIsAveraged
+        )
+    }
+
+    private var segmentHealthControls: SegmentHealthViewControls {
+        SegmentHealthViewControls(
+            showsHealth: $showsSegmentHealth,
+            showsMouseOverHealth: $showsSegmentHealthMouseOver,
+            detailsRequest: $segmentHealthDetailsRequest,
+            refreshRequest: $segmentHealthRefreshRequest,
+            isAnalyzing: isAnalyzingSegmentHealth,
+            progress: segmentHealthProgress
+        )
+    }
+
+    private var channelHealthControls: ChannelHealthViewControls {
+        ChannelHealthViewControls(
+            showsHealth: Binding(
+                get: { channels.showsHealth },
+                set: { channels.showsHealth = $0 }
+            ),
+            detailsRequest: $channelHealthDetailsRequest,
+            refreshRequest: Binding(
+                get: { channels.healthRefreshToken },
+                set: { channels.healthRefreshToken = $0 }
+            ),
+            settingsRequest: $channelGoodnessSettingsRequest,
+            isAnalyzing: channels.isAnalyzingHealth,
+            progress: channels.healthProgress
+        )
+    }
+
     var body: some View {
         Group {
             if recording.isLoading {
@@ -220,11 +321,15 @@ struct WaveformView: View {
                 let base = icaCleanedSignal ?? gradientCorrectedSignal ?? rawSignal
                 let preArtifact = filteredSignal ?? base
                 let processed = artifactCleaningIsEnabled ? (artifactCleanedSignal ?? preArtifact) : preArtifact
-                let continuousSignal = applyInterpolations(to: processed)
+                // Wavelet reduction stage: computed from `processed`, applied
+                // before interpolation. Toggleable and revertible like cleaning.
+                let waveletStage = waveletReductionIsEnabled ? (waveletReducedSignal ?? processed) : processed
+                let continuousSignal = applyInterpolations(to: waveletStage)
                 content(
                     for: epochedSignal ?? continuousSignal,
                     base: base,
                     cleaningBase: preArtifact,
+                    waveletInput: processed,
                     continuousSignal: continuousSignal
                 )
             } else {
@@ -238,26 +343,12 @@ struct WaveformView: View {
         .navigationTitle(recording.packageName)
         .focusedSceneValue(\.channelModel, channels)
         .focusedSceneValue(\.channelLabelMetricsExportRequest, $channelLabelMetricsExportRequest)
-        .focusedSceneValue(\.artifactMenuControls, ArtifactMenuControls(
-            artifacts: definedArtifacts,
-            deleteRequest: $artifactDeletionRequest,
-            deleteAllRequest: $deleteAllArtifactsRequest
-        ))
+        .focusedSceneValue(\.artifactMenuControls, artifactMenuControls)
         .focusedSceneValue(\.icaDebugReportRequest, $icaDebugReportRequest)
         .focusedSceneValue(\.resetToOriginalRequest, $resetToOriginalRequest)
-        .focusedSceneValue(\.psaViewControls, PSAViewControls(
-            showButterfly: $showsButterflyPlot,
-            showOverlaidCategories: $showsOverlaidCategories,
-            isAveraged: psaIsAveraged
-        ))
-        .focusedSceneValue(\.segmentHealthViewControls, SegmentHealthViewControls(
-            showsHealth: $showsSegmentHealth,
-            showsMouseOverHealth: $showsSegmentHealthMouseOver,
-            detailsRequest: $segmentHealthDetailsRequest,
-            refreshRequest: $segmentHealthRefreshRequest,
-            isAnalyzing: isAnalyzingSegmentHealth,
-            progress: segmentHealthProgress
-        ))
+        .focusedSceneValue(\.psaViewControls, psaControls)
+        .focusedSceneValue(\.segmentHealthViewControls, segmentHealthControls)
+        .focusedSceneValue(\.channelHealthViewControls, channelHealthControls)
         .focusedSceneValue(\.mffExportRequest, $mffExportRequest)
         .onChange(of: resetToOriginalRequest) { _, _ in
             resetToOriginalData()
@@ -271,6 +362,13 @@ struct WaveformView: View {
         .onChange(of: segmentHealthDetailsRequest) { _, _ in
             showsSegmentHealth = true
             showsSegmentHealthDetails = true
+        }
+        .onChange(of: channelHealthDetailsRequest) { _, _ in
+            channels.showsHealth = true
+            showsChannelHealthDetails = true
+        }
+        .onChange(of: channelGoodnessSettingsRequest) { _, _ in
+            showsChannelGoodnessSettings = true
         }
         .onChange(of: artifactDeletionRequest) { _, artifactID in
             guard let artifactID else { return }
@@ -300,10 +398,7 @@ struct WaveformView: View {
             copyICADebugReportToPasteboard()
         }
         .task {
-            await recording.loadIfNeeded()
-            if electrodeGeometry == nil {
-                electrodeGeometry = recording.electrodeGeometry
-            }
+            await loadRecordingIfNeeded()
         }
         .onAppear {
             installCommandKeyMonitor()
@@ -314,6 +409,13 @@ struct WaveformView: View {
             channelHealthTask = nil
             segmentHealthTask?.cancel()
             segmentHealthTask = nil
+        }
+    }
+
+    private func loadRecordingIfNeeded() async {
+        await recording.loadIfNeeded()
+        if electrodeGeometry == nil {
+            electrodeGeometry = recording.electrodeGeometry
         }
     }
 
@@ -410,6 +512,7 @@ struct WaveformView: View {
         for signal: MFFSignalData,
         base: MFFSignalData,
         cleaningBase: MFFSignalData,
+        waveletInput: MFFSignalData,
         continuousSignal: MFFSignalData
     ) -> some View {
         let isShowingEpochs = epochedSignal != nil
@@ -421,7 +524,7 @@ struct WaveformView: View {
 
         HStack(spacing: 0) {
             VStack(spacing: 0) {
-                controls(for: signal, base: base, continuousSignal: continuousSignal)
+                controls(for: signal, base: base, waveletInput: waveletInput, continuousSignal: continuousSignal)
 
                 Divider()
 
@@ -472,8 +575,21 @@ struct WaveformView: View {
         .sheet(isPresented: $showsArtifactCleaningSheet) {
             artifactCleaningSheet(for: cleaningBase)
         }
+        .sheet(isPresented: $showsWaveletArtifactExplorer) {
+            waveletArtifactExplorerSheet(for: continuousSignal)
+        }
+        .sheet(isPresented: $showsWaveletReductionSheet) {
+            waveletReductionSheet(input: waveletInput)
+        }
         .sheet(isPresented: $showsICASheet) {
             icaSheet(for: base)
+        }
+        .sheet(isPresented: $showsChannelHealthDetails) {
+            channelHealthDetailsSheet(for: continuousSignal)
+        }
+        .sheet(isPresented: $showsChannelGoodnessSettings) {
+            ChannelGoodnessSettingsView()
+                .environment(goodnessSettings)
         }
         .sheet(isPresented: $showsSegmentHealthDetails) {
             segmentHealthDetailsSheet()
@@ -498,7 +614,7 @@ struct WaveformView: View {
 
     // MARK: - Controls
 
-    private func controls(for signal: MFFSignalData, base: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
+    private func controls(for signal: MFFSignalData, base: MFFSignalData, waveletInput: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
@@ -561,7 +677,7 @@ struct WaveformView: View {
             .accessibilityLabel("Filter")
             .disabled(isFiltering)
             .help(filteredSignal != nil
-                ? "Active: Butterworth \(String(format: "%.1f", filterLowCutoff))–\(String(format: "%.1f", filterHighCutoff)) Hz\(notch60HzEnabled ? " + 60 Hz notch" : "")\(filterAverageReference ? " + avg ref" : "")"
+                ? "Active: Butterworth \(String(format: "%.1f", filterLowCutoff))–\(String(format: "%.1f", filterHighCutoff)) Hz\(filterLineNoiseSummary)\(filterAverageReference ? " + avg ref" : "")"
                 : "Apply a band-pass / notch / average-reference filter")
             .popover(isPresented: $showsFilterPopover, arrowEdge: .bottom) {
                 filterPopover(for: base)
@@ -581,6 +697,31 @@ struct WaveformView: View {
                     showsArtifactCleaningSheet = true
                 }
                 .disabled(definedArtifacts.isEmpty)
+
+                Button("Wavelet Artifact Explorer…") {
+                    openWaveletArtifactExplorer(for: continuousSignal)
+                }
+                .disabled(isRunningWaveletArtifactExplorer)
+
+                Button("Wavelet Reduction…") {
+                    openWaveletReductionSheet(input: waveletInput)
+                }
+
+                Toggle("Show Wavelet Reduction", isOn: Binding(
+                    get: { waveletReductionIsEnabled },
+                    set: { setWaveletReductionEnabled($0) }
+                ))
+                .disabled(waveletReducedSignal == nil)
+                .help(waveletReducedSignal == nil
+                    ? "Run wavelet reduction before toggling the reduced signal."
+                    : "Switch between the wavelet-reduced signal and the input signal.")
+
+                Button("Revert Wavelet Reduction") {
+                    revertWaveletReduction()
+                }
+                .disabled(waveletReducedSignal == nil)
+
+                Divider()
 
                 Toggle("Show Applied Correction", isOn: Binding(
                     get: { artifactCleaningIsEnabled },
@@ -715,96 +856,193 @@ struct WaveformView: View {
 
     /// A single line shown in the toolbar log area.
     private struct LogLine: Hashable {
+        let source: String
         let text: String
         let isError: Bool
+    }
+
+    /// A timestamped entry kept in the scrollable status history.
+    struct StatusHistoryEntry: Identifiable, Hashable {
+        let id = UUID()
+        let source: String
+        let text: String
+        let isError: Bool
+        let date: Date
     }
 
     /// Messages currently worth surfacing, gathered from each feature's status.
     private var activeLogMessages: [LogLine] {
         var lines: [LogLine] = []
         if !isProcessingMRI, let mriStatusMessage {
-            lines.append(LogLine(text: mriStatusMessage, isError: true))
+            lines.append(LogLine(source: "MRI", text: mriStatusMessage, isError: mriStatusIsError))
         }
         if !isFiltering, let filterStatusMessage {
-            lines.append(LogLine(text: filterStatusMessage, isError: true))
+            lines.append(LogLine(source: "Filter", text: filterStatusMessage, isError: filterStatusIsError))
         }
         if let psaStatusMessage {
-            lines.append(LogLine(text: psaStatusMessage, isError: false))
+            lines.append(LogLine(source: "Segment", text: psaStatusMessage, isError: false))
         }
         if let channelStatusMessage {
-            lines.append(LogLine(text: channelStatusMessage, isError: true))
+            lines.append(LogLine(source: "Channel", text: channelStatusMessage, isError: channelStatusIsError))
         }
         if let channelHealthStatusMessage {
-            lines.append(LogLine(text: channelHealthStatusMessage, isError: false))
+            lines.append(LogLine(source: "Channel Health", text: channelHealthStatusMessage, isError: false))
         }
         if let segmentHealthStatusMessage {
-            lines.append(LogLine(text: segmentHealthStatusMessage, isError: false))
+            lines.append(LogLine(source: "Segment Health", text: segmentHealthStatusMessage, isError: false))
         }
         if let artifactCleaningStatusMessage {
-            lines.append(LogLine(text: artifactCleaningStatusMessage, isError: false))
+            lines.append(LogLine(source: "Artifact", text: artifactCleaningStatusMessage, isError: false))
+        }
+        if let waveletExplorerStatusMessage {
+            lines.append(LogLine(source: "Wavelet", text: waveletExplorerStatusMessage, isError: false))
+        }
+        if let waveletReductionStatusMessage {
+            lines.append(LogLine(source: "Wavelet Reduction", text: waveletReductionStatusMessage, isError: false))
         }
         if let mffExportStatusMessage {
-            lines.append(LogLine(text: mffExportStatusMessage, isError: false))
+            lines.append(LogLine(source: "Export", text: mffExportStatusMessage, isError: false))
         }
         return lines
+    }
+
+    /// Appends any newly-changed status messages to the scrollable history.
+    private func recordStatusHistory(_ lines: [LogLine]) {
+        for line in lines where lastRecordedStatusBySource[line.source] != line.text {
+            lastRecordedStatusBySource[line.source] = line.text
+            statusHistory.append(StatusHistoryEntry(
+                source: line.source,
+                text: line.text,
+                isError: line.isError,
+                date: Date()
+            ))
+        }
+        if statusHistory.count > 200 {
+            statusHistory.removeFirst(statusHistory.count - 200)
+        }
     }
 
     /// Consolidated status/progress area shown at the far right of the toolbar,
     /// so individual buttons no longer push inline messages into the layout.
     @ViewBuilder
     private func statusLog() -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            if isProcessingMRI {
-                logProgressRow(label: "MRI", value: mriProgress)
+        Button {
+            showsStatusHistory = true
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                if isProcessingMRI {
+                    logProgressRow(label: "MRI", value: mriProgress)
+                }
+                if isFiltering {
+                    logProgressRow(label: "Filter", value: filterProgress)
+                }
+                if let artifactCleaningProgress {
+                    logProgressRow(label: "Artifact", value: artifactCleaningProgress.fraction)
+                }
+                if isRunningWaveletArtifactExplorer {
+                    logProgressRow(label: "Wavelet", value: waveletExplorerProgress)
+                }
+                if isRunningWaveletReduction {
+                    logProgressRow(label: "Reduction", value: waveletReductionProgress)
+                }
+                if channels.isAnalyzingHealth {
+                    logProgressRow(label: "Health", value: channels.healthProgress)
+                }
+                if isAnalyzingSegmentHealth {
+                    logProgressRow(label: "Segments", value: segmentHealthProgress)
+                }
+                if isExportingMFF {
+                    logProgressRow(label: "MFF", value: 0.5)
+                }
+
+                ForEach(activeLogMessages, id: \.self) { line in
+                    StatusLogLineView(line: line)
+                }
+
+                if !isProcessingMRI,
+                   !isFiltering,
+                   !isRunningWaveletArtifactExplorer,
+                   !isRunningWaveletReduction,
+                   !channels.isAnalyzingHealth,
+                   !isAnalyzingSegmentHealth,
+                   activeLogMessages.isEmpty {
+                    Text(statusHistory.isEmpty ? "Ready" : "Ready · click for history")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             }
-            if isFiltering {
-                logProgressRow(label: "Filter", value: filterProgress)
-            }
-            if let artifactCleaningProgress {
-                logProgressRow(label: "Artifact", value: artifactCleaningProgress.fraction)
-            }
-            if channels.isAnalyzingHealth {
-                logProgressRow(label: "Health", value: channels.healthProgress)
-            }
-            if isAnalyzingSegmentHealth {
-                logProgressRow(label: "Segments", value: segmentHealthProgress)
-            }
-            if isExportingMFF {
-                logProgressRow(label: "MFF", value: 0.5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Click to see the full status history")
+        .onChange(of: activeLogMessages) { _, lines in
+            recordStatusHistory(lines)
+        }
+        .popover(isPresented: $showsStatusHistory, arrowEdge: .bottom) {
+            statusHistoryPopover()
+        }
+        .accessibilityLabel("Status log")
+    }
+
+    @ViewBuilder
+    private func statusHistoryPopover() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Status History")
+                    .font(.headline)
+                Spacer()
+                Button("Clear") {
+                    statusHistory.removeAll()
+                }
+                .disabled(statusHistory.isEmpty)
             }
 
-            ForEach(activeLogMessages, id: \.self) { line in
-                Text(line.text)
-                    .font(.caption)
-                    .foregroundStyle(line.isError ? Color.red : Color.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(line.text)
-            }
+            Divider()
 
-            if !isProcessingMRI,
-               !isFiltering,
-               !channels.isAnalyzingHealth,
-               !isAnalyzingSegmentHealth,
-               activeLogMessages.isEmpty {
-                Text("Ready")
+            if statusHistory.isEmpty {
+                Text("No status messages yet.")
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(statusHistory.reversed()) { entry in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(entry.source.uppercased())
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(entry.isError ? Color.red : Color.secondary)
+                                    Spacer()
+                                    Text(entry.date, format: .dateTime.hour().minute().second())
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.tertiary)
+                                }
+                                Text(entry.text)
+                                    .font(.callout)
+                                    .foregroundStyle(entry.isError ? Color.red : Color.primary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 0.5)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Status log")
+        .padding(12)
+        .frame(width: 420, height: 380, alignment: .topLeading)
     }
 
     private func logProgressRow(label: String, value: Double) -> some View {
@@ -818,6 +1056,20 @@ struct WaveformView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 36, alignment: .trailing)
+        }
+    }
+
+    private struct StatusLogLineView: View {
+        let line: LogLine
+
+        var body: some View {
+            Text(line.text)
+                .font(.caption)
+                .foregroundStyle(line.isError ? Color.red : Color.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel(line.text)
         }
     }
 
@@ -1719,6 +1971,993 @@ struct WaveformView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: - Wavelet artifact explorer
+
+    private func openWaveletArtifactExplorer(for signal: MFFSignalData) {
+        waveletExplorerDownsampleRate = min(max(waveletExplorerDownsampleRate, 20), signal.samplingRate)
+        waveletExplorerStatusMessage = nil
+        if waveletExplorerStatusTitle.isEmpty {
+            applyWaveletExplorerPipelineDefaults(waveletExplorerPipeline, samplingRate: signal.samplingRate, updatesStatus: false)
+            waveletExplorerStatusTitle = "Wavelet artifact explorer ready"
+            waveletExplorerStatusDetail = "\(waveletExplorerChannels(in: signal).count) channels selected for exploratory multiscale scanning."
+        }
+        showsWaveletArtifactExplorer = true
+    }
+
+    @ViewBuilder
+    private func waveletReductionSheet(input: MFFSignalData) -> some View {
+        let reduceCount = input.data.indices.filter { !channels.bad.contains($0) }.count
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Wavelet Artifact Reduction")
+                        .font(.title3.weight(.semibold))
+                    Text("Subtracts a wavelet reconstruction of the large coefficients (HAPPE-style), leaving the low-amplitude signal.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(reduceCount) channels · \(Int(input.samplingRate.rounded())) Hz")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(alignment: .top, spacing: 16) {
+                waveletReductionSettingsColumn(input: input, reduceCount: reduceCount)
+                    .frame(width: 320)
+
+                Divider()
+
+                waveletReductionInspector(input: input)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+
+            Divider()
+
+            HStack {
+                if waveletReducedSignal != nil {
+                    Toggle("Show reduction", isOn: Binding(
+                        get: { waveletReductionIsEnabled },
+                        set: { setWaveletReductionEnabled($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    Button("Revert") { revertWaveletReduction() }
+                }
+                Spacer()
+                Button(waveletReducedSignal == nil ? "Run" : "Re-run") {
+                    runWaveletReduction(on: input)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isRunningWaveletReduction || reduceCount == 0)
+                Button("Close") { showsWaveletReductionSheet = false }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 840, height: 640)
+    }
+
+    @ViewBuilder
+    private func waveletReductionSettingsColumn(input: MFFSignalData, reduceCount: Int) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Mode", selection: $waveletReductionMode) {
+                    ForEach(WaveletReductionMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .onChange(of: waveletReductionMode) { _, newMode in
+                    waveletReductionConfig = newMode.defaultConfiguration(samplingRate: input.samplingRate)
+                }
+
+                Text(waveletReductionMode.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                    GridRow {
+                        Text("Transform")
+                        Picker("", selection: $waveletReductionConfig.kind) {
+                            ForEach(WaveletTransformKind.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .labelsHidden().frame(width: 140)
+                    }
+                    GridRow {
+                        Text("Wavelet")
+                        Picker("", selection: $waveletReductionConfig.family) {
+                            ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .labelsHidden().frame(width: 140)
+                    }
+                    GridRow {
+                        Text("Threshold rule")
+                        Picker("", selection: $waveletReductionConfig.thresholdRule) {
+                            ForEach(WaveletCleaningThresholdRule.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .labelsHidden().frame(width: 140)
+                    }
+                    GridRow {
+                        Text("Threshold model")
+                        Picker("", selection: $waveletReductionConfig.thresholdModel) {
+                            ForEach(WaveletCleaningThresholdModel.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .labelsHidden().frame(width: 140)
+                    }
+                    GridRow {
+                        Text("Levels")
+                        Stepper("\(waveletReductionConfig.levelCount)", value: $waveletReductionConfig.levelCount, in: 1...WaveletReducer.maximumLevelCount)
+                            .frame(width: 120)
+                    }
+                    GridRow {
+                        Text("Strength")
+                        TextField("x", value: $waveletReductionConfig.thresholdScale, format: .number.precision(.fractionLength(2)))
+                            .frame(width: 80)
+                    }
+                    GridRow {
+                        Text("Downsample")
+                        Picker("", selection: $waveletReductionConfig.downsampleFactor) {
+                            ForEach(downsampleFactorOptions(for: input.samplingRate), id: \.self) { factor in
+                                Text(downsampleFactorLabel(factor: factor, rate: input.samplingRate)).tag(factor)
+                            }
+                        }
+                        .labelsHidden().frame(width: 150)
+                    }
+                    GridRow {
+                        Text("CPU cores")
+                        Stepper("\(waveletReductionCoreCount) of \(WaveletReducer.maximumCoreCount)", value: $waveletReductionCoreCount, in: 1...WaveletReducer.maximumCoreCount)
+                            .frame(width: 140)
+                    }
+                }
+                .font(.callout)
+
+                if isRunningWaveletReduction {
+                    ProgressView(value: waveletReductionProgress)
+                    Text("\(Int((waveletReductionProgress * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                if let result = waveletReductionResult {
+                    Divider()
+                    waveletReductionQCView(result: result)
+                } else if let message = waveletReductionStatusMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func waveletReductionInspector(input: MFFSignalData) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Inspect Changes")
+                .font(.headline)
+
+            if waveletReductionCandidates.isEmpty {
+                Spacer()
+                Text("Run a reduction to see the largest changes it made, channel by channel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .multilineTextAlignment(.center)
+                Spacer()
+            } else {
+                if let candidate = selectedWaveletCandidate {
+                    waveletCandidatePlot(candidate: candidate, input: input)
+                        .frame(height: 160)
+                    Text("Ch \(candidate.channelIndex + 1) · peak \(String(format: "%.2f", candidate.peakTimeSeconds))s · removed \(String(format: "%.2f", candidate.peakRemovedMicrovolts)) µV")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                if let result = waveletReductionResult {
+                    waveletPerLevelBars(result: result)
+                }
+
+                Divider()
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(waveletReductionCandidates) { candidate in
+                            Button {
+                                selectedWaveletCandidateID = candidate.id
+                            } label: {
+                                HStack {
+                                    Text("#\(candidate.rank)")
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 28, alignment: .leading)
+                                    Text("Ch \(candidate.channelIndex + 1)")
+                                        .font(.caption.weight(.medium))
+                                        .frame(width: 56, alignment: .leading)
+                                    Text("\(String(format: "%.1f", candidate.peakTimeSeconds))s")
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("\(String(format: "%.1f", candidate.peakRemovedMicrovolts)) µV")
+                                        .font(.caption.monospacedDigit())
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .fill(candidate.id == selectedWaveletCandidateID
+                                            ? Color.accentColor.opacity(0.18)
+                                            : Color.clear)
+                                )
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Downsample factors that keep the decimated rate usable (≥ ~100 Hz),
+    /// always including the currently-selected factor so the picker stays valid.
+    private func downsampleFactorOptions(for rate: Double) -> [Int] {
+        var options = [1, 2, 4, 8].filter { $0 == 1 || rate / Double($0) >= 100 }
+        if !options.contains(waveletReductionConfig.downsampleFactor) {
+            options.append(waveletReductionConfig.downsampleFactor)
+        }
+        return options.sorted()
+    }
+
+    private func downsampleFactorLabel(factor: Int, rate: Double) -> String {
+        let decimatedRate = Int((rate / Double(max(factor, 1))).rounded())
+        return factor == 1 ? "Full (\(decimatedRate) Hz)" : "\(decimatedRate) Hz"
+    }
+
+    private var selectedWaveletCandidate: WaveletReductionCandidate? {
+        waveletReductionCandidates.first { $0.id == selectedWaveletCandidateID }
+            ?? waveletReductionCandidates.first
+    }
+
+    @ViewBuilder
+    private func waveletCandidatePlot(candidate: WaveletReductionCandidate, input: MFFSignalData) -> some View {
+        let channel = candidate.channelIndex
+        let start = candidate.startSample
+        let end = min(candidate.endSample, input.data[safe: channel]?.count ?? 0)
+        let original = input.data[safe: channel].map { Array($0[start..<max(start, end)]) } ?? []
+        let cleaned = waveletReducedSignal?.data[safe: channel].map { Array($0[start..<min(end, $0.count)]) } ?? []
+        let removed = waveletReductionArtifact?.data[safe: channel].map { Array($0[start..<min(end, $0.count)]) } ?? []
+        let scale = (original.map(abs).max() ?? 1)
+
+        ZStack {
+            RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor))
+            GeometryReader { geo in
+                ZStack {
+                    tracePath(original, in: geo.size, scale: scale).stroke(Color.secondary, lineWidth: 1)
+                    tracePath(removed, in: geo.size, scale: scale).stroke(Color.red.opacity(0.85), lineWidth: 1)
+                    tracePath(cleaned, in: geo.size, scale: scale).stroke(Color.accentColor, lineWidth: 1.3)
+                }
+                .padding(6)
+            }
+            VStack {
+                Spacer()
+                HStack(spacing: 12) {
+                    legendDot(.secondary, "Original")
+                    legendDot(.red.opacity(0.85), "Removed")
+                    legendDot(.accentColor, "Cleaned")
+                }
+                .font(.caption2)
+                .padding(.bottom, 4)
+            }
+        }
+    }
+
+    private func legendDot(_ color: Color, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(label).foregroundStyle(.secondary)
+        }
+    }
+
+    private func tracePath(_ samples: [Float], in size: CGSize, scale: Float) -> Path {
+        Path { path in
+            guard samples.count > 1, scale > 0 else { return }
+            let midY = size.height / 2
+            let amp = Double(size.height) / 2 * 0.9
+            for index in samples.indices {
+                let x = size.width * CGFloat(index) / CGFloat(samples.count - 1)
+                let y = midY - CGFloat(Double(samples[index]) / Double(scale) * amp)
+                if index == 0 { path.move(to: CGPoint(x: x, y: y)) }
+                else { path.addLine(to: CGPoint(x: x, y: y)) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func waveletPerLevelBars(result: WaveletReductionResult) -> some View {
+        let metrics = Array(result.perChannel.values)
+        let levelCount = metrics.map(\.removedEnergyByLevel.count).max() ?? 0
+        if levelCount > 0 {
+            let averages: [Double] = (0..<levelCount).map { level in
+                let values = metrics.compactMap { $0.removedEnergyByLevel[safe: level] }
+                return values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Removed energy by level (fine → coarse)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                HStack(alignment: .bottom, spacing: 3) {
+                    ForEach(averages.indices, id: \.self) { level in
+                        VStack(spacing: 2) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color.red.opacity(0.7))
+                                .frame(height: max(2, CGFloat(averages[level]) * 44))
+                            Text("\(level + 1)")
+                                .font(.system(size: 8).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: 56, alignment: .bottom)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func waveletReductionQCView(result: WaveletReductionResult) -> some View {
+        let metrics = Array(result.perChannel.values)
+        let meanPeak = metrics.isEmpty ? 0 : metrics.map(\.peakReductionPercent).reduce(0, +) / Double(metrics.count)
+        let meanRemoved = metrics.isEmpty ? 0 : metrics.map(\.removedRMSMicrovolts).reduce(0, +) / Double(metrics.count)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Quality").font(.headline)
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
+                GridRow {
+                    Text("Variance retained").foregroundStyle(.secondary)
+                    Text(String(format: "%.1f%%", result.varianceRetainedPercent)).monospacedDigit()
+                }
+                if let band = waveletReductionBandVarianceRetained {
+                    GridRow {
+                        Text("In-band retained").foregroundStyle(.secondary)
+                        Text(String(format: "%.1f%%", band)).monospacedDigit()
+                    }
+                }
+                GridRow {
+                    Text("Mean correlation").foregroundStyle(.secondary)
+                    Text(String(format: "%.3f", result.meanCorrelation)).monospacedDigit()
+                }
+                GridRow {
+                    Text("Avg peak reduction").foregroundStyle(.secondary)
+                    Text(String(format: "%.1f%%", meanPeak)).monospacedDigit()
+                }
+                GridRow {
+                    Text("Avg removed RMS").foregroundStyle(.secondary)
+                    Text(String(format: "%.2f µV", meanRemoved)).monospacedDigit()
+                }
+            }
+            .font(.callout)
+            Text("Higher variance/correlation = more of the original signal preserved; larger peak reduction/removed RMS = more artifact taken out.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func waveletArtifactExplorerSheet(for signal: MFFSignalData) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Wavelet Artifact Explorer")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text("\(waveletExplorerChannels(in: signal).count) channels · \(Int(signal.samplingRate.rounded())) Hz")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    waveletExplorerConfigurationSection(signal: signal)
+                    waveletExplorerProgressSection
+
+                    if let waveletExplorerResult {
+                        waveletExplorerResultView(waveletExplorerResult, signal: signal)
+                    } else {
+                        artifactDefinitionEmptyPreview(
+                            title: "No wavelet explorer scan yet",
+                            detail: "Run a broad multiscale scan to rank transient artifact candidates, noisy channels, and dominant wavelet levels."
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .frame(maxHeight: .infinity)
+
+            HStack {
+                Button("Clear Results") {
+                    waveletExplorerResult = nil
+                    waveletExplorerLog.removeAll()
+                    waveletExplorerProgress = 0
+                    waveletExplorerStatusTitle = "Wavelet artifact explorer ready"
+                    waveletExplorerStatusDetail = "\(waveletExplorerChannels(in: signal).count) channels selected for exploratory multiscale scanning."
+                    waveletExplorerStatusMessage = nil
+                }
+                .disabled(isRunningWaveletArtifactExplorer && waveletExplorerResult == nil && waveletExplorerLog.isEmpty)
+
+                Spacer()
+
+                Button("Close") {
+                    showsWaveletArtifactExplorer = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(waveletExplorerResult == nil ? "Run Wavelet Scan" : "Rescan Wavelets") {
+                    runWaveletArtifactExplorer(in: signal)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isRunningWaveletArtifactExplorer || waveletExplorerChannels(in: signal).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 860)
+        .frame(minHeight: 640, idealHeight: 760, maxHeight: 820)
+    }
+
+    private func waveletExplorerConfigurationSection(signal: MFFSignalData) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Pipeline",
+                        help: "Preset defaults for HAPPE-inspired wavelet cleaning. EEG emphasizes stronger transient rejection; ERP keeps a smoother, gentler residual."
+                    )
+                    Picker(
+                        "Pipeline",
+                        selection: Binding {
+                            waveletExplorerPipeline
+                        } set: { pipeline in
+                            waveletExplorerPipeline = pipeline
+                            applyWaveletExplorerPipelineDefaults(pipeline, samplingRate: signal.samplingRate)
+                        }
+                    ) {
+                        ForEach(WaveletCleaningPipeline.allCases) { pipeline in
+                            Text(pipeline.rawValue).tag(pipeline)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 150)
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Wavelet",
+                        help: "bior4.4 is the non-ERP HAPPE-style choice; coif4 is the ERP-oriented choice."
+                    )
+                    Picker("Wavelet", selection: $waveletExplorerWaveletFamily) {
+                        ForEach(WaveletCleaningFamily.allCases) { family in
+                            Text(family.rawValue).tag(family)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 120)
+                }
+
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Mode",
+                        help: "Cleaning profile layered on top of the EEG/ERP pipeline."
+                    )
+                    Picker(
+                        "Mode",
+                        selection: Binding {
+                            waveletExplorerCleaningMode
+                        } set: { mode in
+                            waveletExplorerCleaningMode = mode
+                            applyWaveletExplorerCleaningModeDefaults(mode)
+                        }
+                    ) {
+                        ForEach(WaveletCleaningMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(width: 180)
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Intensity",
+                        help: "Higher values lower the effective coefficient gate and show stronger preview removal."
+                    )
+                    HStack {
+                        Slider(value: $waveletExplorerIntensity, in: 0.25...2.50, step: 0.05)
+                        Text(String(format: "%.2fx", waveletExplorerIntensity))
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 46, alignment: .trailing)
+                    }
+                    .frame(width: 190)
+                }
+
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Channels",
+                        help: "Channels included in the broad wavelet artifact scan."
+                    )
+                    Picker("Channels", selection: $waveletExplorerChannelScope) {
+                        ForEach(WaveletExplorerChannelScope.allCases) { scope in
+                            Text(scope.rawValue).tag(scope)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Downsample Hz",
+                        help: "Temporary sampling rate for exploratory scanning. Lower rates are faster and usually enough for broad artifacts."
+                    )
+                    TextField("Hz", value: $waveletExplorerDownsampleRate, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                }
+
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Levels",
+                        help: "Number of undecimated wavelet detail levels to inspect."
+                    )
+                    Stepper(value: $waveletExplorerLevelCount, in: 1...WaveletArtifactAnalyzer.maximumLevelCount) {
+                        Text("\(waveletExplorerLevelCount)")
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 30, alignment: .leading)
+                    }
+                    .frame(width: 180, alignment: .leading)
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Model",
+                        help: "Universal uses a robust MAD threshold per level. BayesShrink adapts each level's threshold from estimated noise and signal variance."
+                    )
+                    Picker("Model", selection: $waveletExplorerThresholdModel) {
+                        ForEach(WaveletCleaningThresholdModel.allCases) { model in
+                            Text(model.rawValue).tag(model)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                }
+
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Rule",
+                        help: "Hard thresholding removes retained coefficients directly; soft thresholding shrinks retained coefficients for smoother ERP-style cleanup."
+                    )
+                    Picker("Rule", selection: $waveletExplorerThresholdRule) {
+                        ForEach(WaveletCleaningThresholdRule.allCases) { rule in
+                            Text(rule.rawValue).tag(rule)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 120)
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Coeff Gate",
+                        help: "Multiplier on each channel/level's coefficient threshold after the selected model estimates it."
+                    )
+                    HStack {
+                        Slider(value: $waveletExplorerThresholdScale, in: 0.50...3.00, step: 0.05)
+                        Text(String(format: "%.2fx", waveletExplorerThresholdScale))
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 46, alignment: .trailing)
+                    }
+                    .frame(width: 190)
+                }
+
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Merge (s)",
+                        help: "Nearby wavelet bursts closer than this interval are merged into one candidate."
+                    )
+                    TextField("Merge", value: $waveletExplorerMergeWindowSeconds, format: .number.precision(.fractionLength(3)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Min Dur (s)",
+                        help: "Shortest over-threshold wavelet burst to keep as a candidate."
+                    )
+                    TextField("Duration", value: $waveletExplorerMinimumDurationSeconds, format: .number.precision(.fractionLength(3)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                }
+
+                GridRow {
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Candidates",
+                        help: "Maximum number of ranked wavelet artifact candidates retained for review."
+                    )
+                    Stepper(value: $waveletExplorerMaximumCandidates, in: 10...300, step: 10) {
+                        Text("\(waveletExplorerMaximumCandidates)")
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 42, alignment: .leading)
+                    }
+                    .frame(width: 180, alignment: .leading)
+
+                    Text("")
+                        .gridCellColumns(2)
+                }
+
+                GridRow {
+                    Text("\(waveletExplorerChannels(in: signal).count) readable channels · \(waveletExplorerThresholdModel.rawValue) · effective gate \(String(format: "%.2fx", effectiveWaveletExplorerThresholdScale)) · bad channels excluded where applicable")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .gridCellColumns(4)
+                }
+            }
+        }
+        .disabled(isRunningWaveletArtifactExplorer)
+    }
+
+    private var waveletExplorerProgressSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(waveletExplorerStatusTitle.nilIfEmpty ?? "Wavelet scan idle")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text("\(Int((waveletExplorerProgress * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            ProgressView(value: waveletExplorerProgress)
+                .progressViewStyle(.linear)
+
+            Text(waveletExplorerStatusDetail.nilIfEmpty ?? "Configure the scan and run the explorer.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if isRunningWaveletArtifactExplorer && !waveletExplorerLog.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(waveletExplorerLog.suffix(80))) { line in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(line.title)
+                                    .font(.caption2.weight(.semibold))
+                                Text(line.detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(height: 118)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func waveletExplorerResultView(_ result: WaveletArtifactExplorerResult, signal: MFFSignalData) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                waveletExplorerMetricChip(title: "Candidates", value: "\(result.candidates.count)")
+                waveletExplorerMetricChip(title: "Artifact energy", value: waveletExplorerPercent(result.summary.artifactEnergyFraction))
+                waveletExplorerMetricChip(title: "Effective Hz", value: String(format: "%.1f", result.effectiveSamplingRate))
+                waveletExplorerMetricChip(title: "Threshold", value: String(format: "%.3f", result.candidateThreshold))
+            }
+
+            HStack(alignment: .top, spacing: 16) {
+                waveletExplorerChannelSummary(result.summary)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                waveletExplorerLevelSummary(result.summary)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+
+            waveletExplorerCandidateTable(result.candidates, signal: signal)
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func waveletExplorerMetricChip(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.monospacedDigit())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
+    }
+
+    private func waveletExplorerChannelSummary(_ summary: WaveletArtifactFeatureSummary) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Strongest channels")
+                .font(.caption.weight(.semibold))
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                GridRow {
+                    Text("Ch")
+                    Text("Energy")
+                    Text("Peak")
+                    Text("Level")
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+                ForEach(summary.strongestChannels.prefix(8)) { channel in
+                    GridRow {
+                        Text("\(channel.channelIndex + 1)")
+                        Text(waveletExplorerPercent(channel.artifactEnergyFraction))
+                        Text(waveletExplorerMicrovolts(channel.peakArtifactMagnitude))
+                        Text("L\(channel.dominantLevel)")
+                    }
+                    .font(.caption.monospacedDigit())
+                }
+            }
+        }
+    }
+
+    private func waveletExplorerLevelSummary(_ summary: WaveletArtifactFeatureSummary) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Dominant levels")
+                .font(.caption.weight(.semibold))
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                GridRow {
+                    Text("Level")
+                    Text("Center Hz")
+                    Text("Energy")
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+                ForEach(summary.levelSummaries) { level in
+                    GridRow {
+                        Text("L\(level.level)")
+                        Text(String(format: "%.1f", level.centerFrequencyHz))
+                        Text(waveletExplorerPercent(level.artifactEnergyFraction))
+                    }
+                    .font(.caption.monospacedDigit())
+                }
+            }
+        }
+    }
+
+    private func waveletExplorerCandidateTable(_ candidates: [WaveletArtifactCandidate], signal: MFFSignalData) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Ranked candidates")
+                .font(.caption.weight(.semibold))
+
+            if candidates.isEmpty {
+                Text("No over-threshold wavelet bursts met the current duration and merge settings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
+                        GridRow {
+                            Text("#")
+                            Text("Peak")
+                            Text("Duration")
+                            Text("Score")
+                            Text("Peak Ch")
+                            Text("Level")
+                            Text("Contrib")
+                            Text("Preview")
+                            Text("")
+                        }
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                        ForEach(candidates) { candidate in
+                            GridRow {
+                                Text("\(candidate.rank)")
+                                Text(formattedEventTime(candidate.peakTimeSeconds))
+                                Text(String(format: "%.3fs", candidate.durationSeconds))
+                                Text(String(format: "%.3f", candidate.score))
+                                Text("Ch \(candidate.channelIndex + 1)")
+                                Text("L\(candidate.dominantLevel)")
+                                Text("\(candidate.contributingChannelCount)")
+                                WaveletCleaningPreviewButton(
+                                    candidate: candidate,
+                                    signal: signal,
+                                    configuration: waveletCleaningConfiguration(for: signal, candidate: candidate)
+                                )
+                                Button("Jump") {
+                                    jumpToWaveletCandidate(candidate, in: signal)
+                                }
+                                .font(.caption)
+                            }
+                            .font(.caption.monospacedDigit())
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(height: 190)
+            }
+        }
+    }
+
+    private func applyWaveletExplorerPipelineDefaults(
+        _ pipeline: WaveletCleaningPipeline,
+        samplingRate: Double,
+        updatesStatus: Bool = true
+    ) {
+        waveletExplorerWaveletFamily = pipeline.defaultFamily
+        waveletExplorerThresholdRule = pipeline.defaultThresholdRule
+        waveletExplorerThresholdModel = pipeline.defaultThresholdModel
+        waveletExplorerThresholdScale = pipeline.defaultThresholdScale
+        let defaultMode: WaveletCleaningMode = pipeline == .erp ? .erpGentle : .conservativeLocal
+        waveletExplorerCleaningMode = defaultMode
+        waveletExplorerIntensity = defaultMode.defaultIntensity
+        waveletExplorerLevelCount = min(
+            max(pipeline.defaultLevelCount(samplingRate: samplingRate), 1),
+            WaveletArtifactAnalyzer.maximumLevelCount
+        )
+
+        guard updatesStatus else { return }
+        waveletExplorerStatusTitle = "\(pipeline.rawValue) wavelet defaults applied"
+        waveletExplorerStatusDetail = "\(pipeline.defaultFamily.rawValue), \(pipeline.defaultThresholdModel.rawValue), \(pipeline.defaultThresholdRule.rawValue.lowercased()) threshold, \(defaultMode.rawValue), \(waveletExplorerLevelCount) levels, and a \(String(format: "%.2f", effectiveWaveletExplorerThresholdScale))x effective coefficient gate. You can still edit every value."
+        waveletExplorerStatusMessage = nil
+    }
+
+    private func applyWaveletExplorerCleaningModeDefaults(
+        _ mode: WaveletCleaningMode,
+        updatesStatus: Bool = true
+    ) {
+        waveletExplorerIntensity = mode.defaultIntensity
+        guard updatesStatus else { return }
+        waveletExplorerStatusTitle = "\(mode.rawValue) mode applied"
+        waveletExplorerStatusDetail = "Intensity \(String(format: "%.2f", waveletExplorerIntensity))x gives a \(String(format: "%.2f", effectiveWaveletExplorerThresholdScale))x effective coefficient gate with the current pipeline settings."
+        waveletExplorerStatusMessage = nil
+    }
+
+    private var effectiveWaveletExplorerThresholdScale: Double {
+        max(
+            0.05,
+            waveletExplorerThresholdScale
+                * waveletExplorerCleaningMode.thresholdMultiplier
+                / max(waveletExplorerIntensity, 0.10)
+        )
+    }
+
+    private func waveletCleaningConfiguration(
+        for signal: MFFSignalData,
+        candidate: WaveletArtifactCandidate
+    ) -> WaveletCleaningConfiguration {
+        let channels = Array(Set(waveletExplorerChannels(in: signal) + [candidate.channelIndex])).sorted()
+        return WaveletCleaningConfiguration(
+            pipeline: waveletExplorerPipeline,
+            mode: waveletExplorerCleaningMode,
+            channelIndices: channels,
+            waveletFamily: waveletExplorerWaveletFamily,
+            thresholdRule: waveletExplorerThresholdRule,
+            thresholdModel: waveletExplorerThresholdModel,
+            levelCount: waveletExplorerLevelCount,
+            thresholdScale: effectiveWaveletExplorerThresholdScale,
+            intensity: waveletExplorerIntensity,
+            paddingSeconds: min(max(candidate.durationSeconds, 0.08), 0.30)
+        )
+    }
+
+    private func runWaveletArtifactExplorer(in signal: MFFSignalData) {
+        guard !isRunningWaveletArtifactExplorer else { return }
+        let channelIndices = waveletExplorerChannels(in: signal)
+        guard !channelIndices.isEmpty else {
+            waveletExplorerStatusMessage = "Wavelet explorer has no readable channels to scan."
+            return
+        }
+
+        waveletExplorerRunGeneration += 1
+        let generation = waveletExplorerRunGeneration
+        waveletExplorerResult = nil
+        waveletExplorerLog.removeAll()
+        waveletExplorerProgress = 0
+        waveletExplorerStatusTitle = "Starting wavelet artifact explorer"
+        waveletExplorerStatusDetail = "Preparing \(channelIndices.count) channels for broad multiscale artifact discovery."
+        waveletExplorerStatusMessage = nil
+        isRunningWaveletArtifactExplorer = true
+
+        let configuration = WaveletArtifactExplorerConfiguration(
+            channelIndices: channelIndices,
+            downsampleRate: min(max(waveletExplorerDownsampleRate, 20), signal.samplingRate),
+            levelCount: waveletExplorerLevelCount,
+            thresholdScale: effectiveWaveletExplorerThresholdScale,
+            cleaningMode: waveletExplorerCleaningMode,
+            intensity: waveletExplorerIntensity,
+            waveletFamily: waveletExplorerWaveletFamily,
+            thresholdRule: waveletExplorerThresholdRule,
+            thresholdModel: waveletExplorerThresholdModel,
+            mergeWindowSeconds: max(waveletExplorerMergeWindowSeconds, 0.001),
+            minimumDurationSeconds: max(waveletExplorerMinimumDurationSeconds, 0.001),
+            maximumCandidates: waveletExplorerMaximumCandidates
+        )
+
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                WaveletArtifactAnalyzer.explore(in: signal, configuration: configuration) { update in
+                    Task { @MainActor in
+                        publishWaveletExplorerProgress(update, generation: generation)
+                    }
+                }
+            }.value
+
+            guard generation == waveletExplorerRunGeneration else { return }
+            waveletExplorerResult = result
+            waveletExplorerProgress = 1
+            waveletExplorerStatusTitle = "Wavelet artifact explorer scan complete"
+            waveletExplorerStatusDetail = "\(result.candidates.count) candidates across \(result.channelCount) channels over \(String(format: "%.1f", result.analyzedDurationSeconds)) seconds."
+            waveletExplorerStatusMessage = "\(result.candidates.count) wavelet candidates found"
+            isRunningWaveletArtifactExplorer = false
+        }
+    }
+
+    @MainActor
+    private func publishWaveletExplorerProgress(_ update: WaveletArtifactExplorerProgress, generation: Int) {
+        guard generation == waveletExplorerRunGeneration else { return }
+        waveletExplorerProgress = update.fraction
+        waveletExplorerStatusTitle = update.title
+        waveletExplorerStatusDetail = update.detail
+        waveletExplorerLog.append(WaveletArtifactExplorerLogLine(
+            title: "\(Int((update.fraction * 100).rounded()))% · \(update.title)",
+            detail: update.detail
+        ))
+        if waveletExplorerLog.count > 240 {
+            waveletExplorerLog.removeFirst(waveletExplorerLog.count - 240)
+        }
+    }
+
+    private func waveletExplorerChannels(in signal: MFFSignalData) -> [Int] {
+        switch waveletExplorerChannelScope {
+        case .visibleGood:
+            return signal.data.indices.filter { !channels.hidden.contains($0) && !channels.bad.contains($0) }
+        case .allGood:
+            return signal.data.indices.filter { !channels.bad.contains($0) }
+        case .all:
+            return Array(signal.data.indices)
+        case .ocular:
+            return ocularTemplateChannels(channelCount: signal.numberOfChannels)
+                .filter { signal.data.indices.contains($0) && !channels.bad.contains($0) }
+        }
+    }
+
+    private func jumpToWaveletCandidate(_ candidate: WaveletArtifactCandidate, in signal: MFFSignalData) {
+        guard let sampleCount = signal.data.first?.count, sampleCount > 0 else { return }
+        let lower = min(max(candidate.startSample, 0), sampleCount - 1)
+        let upper = min(max(candidate.endSample, lower), sampleCount - 1)
+        selectedSampleRange = lower...upper
+        dragSelectionStartSample = nil
+        dragSelectionEndSample = nil
+        selectedEventID = nil
+
+        let plotWidth = plotWidth(for: signal)
+        let centerX = (contentX(forSample: lower) + contentX(forSample: upper + 1)) / 2
+        let viewportCenter = max(horizontalViewportWidth / 2, 1)
+        let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
+        let clampedOffset = min(max(centerX - viewportCenter, 0), maxOffset)
+
+        isSyncingSliderFromScroll = true
+        horizontalJumpValue = maxOffset > 0 ? Double(clampedOffset / maxOffset) : 0
+        isSyncingSliderFromScroll = false
+        horizontalScrollPosition.scrollTo(x: clampedOffset)
+    }
+
+    private func waveletExplorerPercent(_ value: Double) -> String {
+        String(format: "%.1f%%", value * 100)
+    }
+
+    private func waveletExplorerMicrovolts(_ value: Float) -> String {
+        if value >= 100 {
+            return String(format: "%.0f µV", value)
+        }
+        if value >= 10 {
+            return String(format: "%.1f µV", value)
+        }
+        return String(format: "%.2f µV", value)
+    }
+
     // MARK: - Artifact template definition
 
     private func defaultArtifactTemplateChannel(in signal: MFFSignalData) -> Int? {
@@ -1776,6 +3015,8 @@ struct WaveformView: View {
         artifactTemplateTopographyMode = .off
         artifactTopographyChannelScope = .allGood
         artifactTopographyMetric = .pearson
+        artifactDefinitionPanel = .waveforms
+        artifactTemplateConfirmedSource = nil
         artifactTemplateStatusMessage = nil
         artifactTemplateResult = nil
         lastArtifactScanSignature = nil
@@ -1800,190 +3041,19 @@ struct WaveformView: View {
                 }
             }
 
-            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
-                GridRow {
-                    ArtifactTemplateFieldLabel(
-                        title: "Type",
-                        help: "Used by Clean Artifacts to group ocular, ECG, BCG, and other artifact definitions."
-                    )
-                    Picker("Type", selection: $artifactTemplateType) {
-                        ForEach(DefinedArtifactType.allCases) { type in
-                            Text(type.rawValue).tag(type)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 180)
+            artifactIdentitySection
 
-                    Color.clear
-                        .frame(width: 0, height: 0)
-                    Color.clear
-                        .frame(width: 0, height: 0)
-                }
-
-                GridRow {
-                    ArtifactTemplateFieldLabel(
-                        title: "Name",
-                        help: "A human-readable label for this artifact template. This is saved in the JSON so you can recognize the exemplar later."
-                    )
-                    TextField("Artifact name", text: $artifactTemplateName)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 180)
-
-                    ArtifactTemplateFieldLabel(
-                        title: "Event Code",
-                        help: "The event marker name inserted for each match. These generated markers appear in the Events panel and can be used by PSA artifact rejection."
-                    )
-                    TextField("Event code", text: $artifactTemplateEventCode)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 160)
-                }
-
-                GridRow {
-                    ArtifactTemplateFieldLabel(
-                        title: "Channels",
-                        help: "Chooses which channels define the template score. Clicked Channel is fastest and easiest to interpret; Ocular Channels is useful for blinks; All Channels uses a weighted spatial template."
-                    )
-                    Picker("Channels", selection: $artifactTemplateChannelScope) {
-                        ForEach(ArtifactTemplateChannelScope.allCases) { scope in
-                            Text(scope.rawValue).tag(scope)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 180)
-
-                    ArtifactTemplateFieldLabel(
-                        title: "Specific",
-                        help: "A comma- or space-separated list of 1-based channel numbers, such as 8, 25, 126. Used only when Channels is set to Specific Channels."
-                    )
-                    TextField("1, 8, 25", text: $artifactTemplateCustomChannels)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 160)
-                        .disabled(artifactTemplateChannelScope != .specificChannels)
-                }
-
-                GridRow {
-                    ArtifactTemplateFieldLabel(
-                        title: "Threshold",
-                        help: "Minimum normalized cross-correlation required to count a match. 70% is a permissive starting point; higher values find fewer, more template-like events."
-                    )
-                    HStack {
-                        Slider(value: $artifactTemplateThreshold, in: 0.30...0.98, step: 0.01)
-                        Text("\(Int((artifactTemplateThreshold * 100).rounded()))%")
-                            .font(.caption.monospacedDigit())
-                            .frame(width: 40, alignment: .trailing)
-                    }
-                    .frame(width: 180)
-
-                    ArtifactTemplateFieldLabel(
-                        title: "Polarity",
-                        help: "Controls whether matches must have the same direction as the exemplar, the opposite direction, or either direction. Either is useful when channel reference or artifact direction varies."
-                    )
-                    Picker("Polarity", selection: $artifactTemplatePolarity) {
-                        ForEach(ArtifactTemplatePolarity.allCases) { polarity in
-                            Text(polarity.rawValue).tag(polarity)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 160)
-                }
-
-                GridRow {
-                    ArtifactTemplateFieldLabel(
-                        title: "Window (s)",
-                        help: "Duration of the template window centered on the highlighted exemplar. Larger windows capture more context but can make matching more specific."
-                    )
-                    TextField("Window", value: $artifactTemplateWindowSeconds, format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
-
-                    ArtifactTemplateFieldLabel(
-                        title: "Search Hz",
-                        help: "Temporary downsample rate used while searching. Lower values are faster; 250 Hz is usually enough for slow artifacts like blinks."
-                    )
-                    TextField("Hz", value: $artifactTemplateDownsampleRate, format: .number.precision(.fractionLength(0)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
-                }
-
-                GridRow {
-                    ArtifactTemplateFieldLabel(
-                        title: "Merge (s)",
-                        help: "Minimum spacing between reported matches. Nearby high-scoring windows are merged so a single blink or artifact becomes one event."
-                    )
-                    TextField("Merge", value: $artifactTemplateMergeWindowSeconds, format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
-
-                    ArtifactTemplateFieldLabel(
-                        title: "Topography",
-                        help: "Also scans for the exemplar's scalp voltage map (spatial pattern across all electrodes), independent of the per-channel waveform shape. Window Middle uses the centre sample, Window Peak the highest global field power sample, Window Average the mean map over the window. Match counts are compared against the channel scans below."
-                    )
-                    Picker("Topography", selection: $artifactTemplateTopographyMode) {
-                        ForEach(ArtifactTopographyMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 160)
-                }
-
-                if artifactTemplateTopographyMode.isEnabled {
-                    GridRow {
-                        ArtifactTemplateFieldLabel(
-                            title: "Topo Channels",
-                            help: "Which channels the scalp-topography correlation uses. Bad channels are always excluded. Channel clusters (regions of interest) are coming soon."
-                        )
-                        HStack(spacing: 8) {
-                            Picker("Topo Channels", selection: $artifactTopographyChannelScope) {
-                                ForEach(ArtifactTopographyChannelScope.allCases) { scope in
-                                    Text(scope.label).tag(scope)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(width: 170)
-
-                            Button("New Cluster…") {}
-                                .disabled(true)
-                                .help("Define reusable channel clusters (regions of interest) — coming soon.")
-                        }
-
-                        ArtifactTemplateFieldLabel(
-                            title: "Fit Metric",
-                            help: "Cost function for scalp-map similarity, independent of the waveform Polarity. Pearson r matches same-polarity maps; |Pearson r| also matches polarity-inverted maps; Opposite (−r) matches only the inverted map."
-                        )
-                        Picker("Fit Metric", selection: $artifactTopographyMetric) {
-                            ForEach(ArtifactTopographyMetric.allCases) { metric in
-                                Text(metric.rawValue).tag(metric)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 160)
-                    }
+            Picker("Artifact definition section", selection: $artifactDefinitionPanel) {
+                ForEach(ArtifactDefinitionPanel.allCases) { panel in
+                    Text(panel.rawValue).tag(panel)
                 }
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
 
-            Text("\(selectedChannels.count) selected channels · all-channel comparison enabled")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            artifactDefinitionPanelContent(signal: signal, selectedChannels: selectedChannels)
 
-            if isApplyingArtifactTemplate {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("Scanning template matches...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if let artifactTemplateStatusMessage {
-                Text(artifactTemplateStatusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-
-            if let artifactTemplateResult {
-                artifactTemplateResultView(artifactTemplateResult)
-            }
+            artifactDefinitionComparisonSection(signal: signal)
 
             HStack {
                 Button("Save JSON…") {
@@ -1993,12 +3063,13 @@ struct WaveformView: View {
 
                 Spacer()
 
-                Button("Close") {
+                Button(artifactDefinitionCloseTitle) {
                     showsArtifactTemplateSheet = false
                 }
+                .keyboardShortcut(.cancelAction)
 
-                Button(artifactTemplateResult == nil ? "Apply" : "Rescan") {
-                    applyArtifactTemplate(to: signal)
+                Button(artifactDefinitionApplyTitle) {
+                    applyActiveArtifactDefinitionPanel(to: signal)
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(
@@ -2008,13 +3079,17 @@ struct WaveformView: View {
                         || comparisonChannels.isEmpty
                         || artifactTemplateName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        // Once a scan exists, only enable when settings changed.
-                        || (artifactTemplateResult != nil && !artifactTemplateScanIsStale)
+                        || !activeArtifactDefinitionPanelCanRun
                 )
             }
         }
         .padding(20)
-        .frame(width: 700)
+        .frame(width: 760)
+        .onChange(of: artifactDefinitionPanel) { _, panel in
+            if panel == .topography, !artifactTemplateTopographyMode.isEnabled {
+                artifactTemplateTopographyMode = .peak
+            }
+        }
         .onChange(of: artifactTemplateTopographyMode) { _, _ in
             refreshTopographyIfNeeded(for: signal)
         }
@@ -2024,6 +3099,415 @@ struct WaveformView: View {
         .onChange(of: artifactTopographyMetric) { _, _ in
             refreshTopographyIfNeeded(for: signal)
         }
+    }
+
+    private var artifactIdentitySection: some View {
+        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+            GridRow {
+                ArtifactTemplateFieldLabel(
+                    title: "Type",
+                    help: "Used by Clean Artifacts to group ocular, ECG, BCG, and other artifact definitions."
+                )
+                Picker("Type", selection: $artifactTemplateType) {
+                    ForEach(DefinedArtifactType.allCases) { type in
+                        Text(type.rawValue).tag(type)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 180)
+
+                ArtifactTemplateFieldLabel(
+                    title: "Event Code",
+                    help: "The event marker name inserted for each match. These generated markers appear in the Events panel and can be used by PSA artifact rejection."
+                )
+                TextField("Event code", text: $artifactTemplateEventCode)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+            }
+
+            GridRow {
+                ArtifactTemplateFieldLabel(
+                    title: "Name",
+                    help: "A human-readable label for this artifact template. This is saved in the JSON so you can recognize the exemplar later."
+                )
+                TextField("Artifact name", text: $artifactTemplateName)
+                    .textFieldStyle(.roundedBorder)
+                    .gridCellColumns(3)
+            }
+        }
+    }
+
+    private func artifactWaveformConfigurationSection(selectedChannels: [Int]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                waveformChannelGridRows
+                waveformThresholdGridRows
+                waveformWindowGridRows
+            }
+
+            Text("\(selectedChannels.count) selected channels · all-channel comparison enabled")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var waveformChannelGridRows: some View {
+        Group {
+            GridRow {
+                ArtifactTemplateFieldLabel(
+                    title: "Channels",
+                    help: "Chooses which channels define the template score. Clicked Channel is fastest and easiest to interpret; Ocular Channels is useful for blinks; All Channels uses a weighted spatial template."
+                )
+                Picker("Channels", selection: $artifactTemplateChannelScope) {
+                    ForEach(ArtifactTemplateChannelScope.allCases) { scope in
+                        Text(scope.rawValue).tag(scope)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 180)
+
+                ArtifactTemplateFieldLabel(
+                    title: "Specific",
+                    help: "A comma- or space-separated list of 1-based channel numbers, such as 8, 25, 126. Used only when Channels is set to Specific Channels."
+                )
+                TextField("1, 8, 25", text: $artifactTemplateCustomChannels)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+                    .disabled(artifactTemplateChannelScope != .specificChannels)
+            }
+        }
+    }
+
+    private var waveformThresholdGridRows: some View {
+        Group {
+            GridRow {
+                ArtifactTemplateFieldLabel(
+                    title: "Threshold",
+                    help: "Minimum normalized cross-correlation required to count a match. 70% is a permissive starting point; higher values find fewer, more template-like events."
+                )
+                HStack {
+                    Slider(value: $artifactTemplateThreshold, in: 0.30...0.98, step: 0.01)
+                    Text("\(Int((artifactTemplateThreshold * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 40, alignment: .trailing)
+                }
+                .frame(width: 180)
+
+                ArtifactTemplateFieldLabel(
+                    title: "Polarity",
+                    help: "Controls whether matches must have the same direction as the exemplar, the opposite direction, or either direction. Either is useful when channel reference or artifact direction varies."
+                )
+                Picker("Polarity", selection: $artifactTemplatePolarity) {
+                    ForEach(ArtifactTemplatePolarity.allCases) { polarity in
+                        Text(polarity.rawValue).tag(polarity)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 180)
+            }
+        }
+    }
+
+    private var waveformWindowGridRows: some View {
+        Group {
+            GridRow {
+                ArtifactTemplateFieldLabel(
+                    title: "Window (s)",
+                    help: "Duration of the template window centered on the highlighted exemplar. Larger windows capture more context but can make matching more specific."
+                )
+                TextField("Window", value: $artifactTemplateWindowSeconds, format: .number.precision(.fractionLength(3)))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+
+                ArtifactTemplateFieldLabel(
+                    title: "Search Hz",
+                    help: "Temporary downsample rate used while searching. Lower values are faster; 250 Hz is usually enough for slow artifacts like blinks."
+                )
+                HStack(spacing: 10) {
+                    TextField("Hz", value: $artifactTemplateDownsampleRate, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                    Text("Merge")
+                        .font(.caption.weight(.semibold))
+                    TextField("Merge", value: $artifactTemplateMergeWindowSeconds, format: .number.precision(.fractionLength(3)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                }
+            }
+        }
+    }
+
+    private func artifactTopographyConfigurationSection(signal: MFFSignalData) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Reference",
+                        help: "Scans for the exemplar's scalp voltage map (spatial pattern across electrodes). Window Middle uses the centre sample, Window Peak the highest global field power sample, and Window Average the mean map over the window."
+                    )
+                    Picker("Reference", selection: $artifactTemplateTopographyMode) {
+                        ForEach(ArtifactTopographyMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Fit Metric",
+                        help: "Cost function for scalp-map similarity, independent of the waveform polarity. Pearson r matches same-polarity maps; |Pearson r| also matches polarity-inverted maps; Opposite (-r) matches only the inverted map."
+                    )
+                    Picker("Fit Metric", selection: $artifactTopographyMetric) {
+                        ForEach(ArtifactTopographyMetric.allCases) { metric in
+                            Text(metric.rawValue).tag(metric)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
+                }
+
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Topo Channels",
+                        help: "Which channels the scalp-topography correlation uses. Bad channels are always excluded. Channel clusters (regions of interest) are coming soon."
+                    )
+                    HStack(spacing: 8) {
+                        Picker("Topo Channels", selection: $artifactTopographyChannelScope) {
+                            ForEach(ArtifactTopographyChannelScope.allCases) { scope in
+                                Text(scope.label).tag(scope)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 170)
+
+                        Button("New Cluster...") {}
+                            .disabled(true)
+                            .help("Define reusable channel clusters (regions of interest) - coming soon.")
+                    }
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Threshold",
+                        help: "Minimum spatial correlation required to count a scalp-map match."
+                    )
+                    HStack {
+                        Slider(value: $artifactTemplateThreshold, in: 0.30...0.98, step: 0.01)
+                        Text("\(Int((artifactTemplateThreshold * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                    .frame(width: 180)
+                }
+
+                waveformWindowGridRows
+            }
+
+            Text("\(artifactTopographyChannels(in: signal).count) topography channels · bad channels excluded")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var artifactDefinitionCloseTitle: String {
+        guard let artifactTemplateConfirmedSource else {
+            return "Close"
+        }
+        return "Confirm \(artifactTemplateConfirmedSource.confirmationName) Selection"
+    }
+
+    private var artifactDefinitionApplyTitle: String {
+        switch artifactDefinitionPanel {
+        case .waveforms:
+            return artifactTemplateResult == nil ? "Run Waveform Scan" : "Rescan Waveforms"
+        case .topography:
+            return artifactTemplateResult?.topographyReference == nil ? "Run Topography Scan" : "Rescan Topography"
+        }
+    }
+
+    private var activeArtifactDefinitionPanelCanRun: Bool {
+        switch artifactDefinitionPanel {
+        case .waveforms:
+            return artifactTemplateResult == nil || artifactTemplateScanIsStale
+        case .topography:
+            return artifactTemplateTopographyMode.isEnabled
+        }
+    }
+
+    private func applyActiveArtifactDefinitionPanel(to signal: MFFSignalData) {
+        switch artifactDefinitionPanel {
+        case .waveforms:
+            applyArtifactTemplate(to: signal, preferredSource: .waveform)
+        case .topography:
+            applyArtifactTemplate(to: signal, preferredSource: .topography)
+        }
+    }
+
+    @ViewBuilder
+    private func artifactDefinitionPanelContent(signal: MFFSignalData, selectedChannels: [Int]) -> some View {
+        switch artifactDefinitionPanel {
+        case .waveforms:
+            artifactWaveformsPanel(signal: signal, selectedChannels: selectedChannels)
+        case .topography:
+            artifactTopographyPanel(signal: signal)
+        }
+    }
+
+    private func artifactWaveformsPanel(signal: MFFSignalData, selectedChannels: [Int]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            artifactWaveformConfigurationSection(selectedChannels: selectedChannels)
+            artifactDefinitionActivityView(
+                isRunning: isApplyingArtifactTemplate,
+                runningText: "Scanning waveform matches..."
+            )
+
+            if let artifactTemplateResult {
+                artifactWaveformResultView(artifactTemplateResult, signal: signal)
+            } else {
+                artifactDefinitionEmptyPreview(
+                    title: "No waveform scan yet",
+                    detail: "Run waveform matching to inspect the exemplar average and channel-scope behavior."
+                )
+            }
+        }
+    }
+
+    private func artifactTopographyPanel(signal: MFFSignalData) -> some View {
+        let isRunning = isApplyingArtifactTemplate || isRefreshingTopography
+        let runningText = isRefreshingTopography
+            ? "Refreshing topography matches..."
+            : "Scanning topography matches..."
+
+        return VStack(alignment: .leading, spacing: 12) {
+            artifactTopographyConfigurationSection(signal: signal)
+            artifactDefinitionActivityView(isRunning: isRunning, runningText: runningText)
+
+            if let topography = artifactTemplateResult?.topographyReference {
+                artifactTopographyResultView(topography)
+            } else {
+                artifactDefinitionEmptyPreview(
+                    title: "No topography scan yet",
+                    detail: "Run a topography scan to inspect the scalp map and spatial match settings."
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func artifactDefinitionActivityView(isRunning: Bool, runningText: String) -> some View {
+        if isRunning {
+            HStack(spacing: 10) {
+                ProgressView()
+                Text(runningText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if let artifactTemplateStatusMessage {
+            Text(artifactTemplateStatusMessage)
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+    }
+
+    private func artifactDefinitionEmptyPreview(title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private func artifactDefinitionComparisonSection(signal: MFFSignalData) -> some View {
+        if artifactTemplateResult != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Run Comparison")
+                    .font(.caption.weight(.semibold))
+
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 7) {
+                    GridRow {
+                        Text("Selection")
+                        Text("Found")
+                        Text("Evidence")
+                        Text("")
+                    }
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                    if let result = artifactTemplateResult {
+                        artifactDefinitionComparisonRow(
+                            source: .waveform,
+                            count: result.selectedEvents.count,
+                            detail: waveformComparisonDetail(result, signal: signal),
+                            score: nil
+                        ) {
+                            useWaveformMatches(result, signal: signal)
+                        }
+
+                        if let topography = result.topographyReference {
+                            artifactDefinitionComparisonRow(
+                                source: .topography,
+                                count: topography.matchCount,
+                                detail: "\(topography.channelIndices.count) channels · \(artifactTopographyMetric.rawValue)",
+                                score: nil
+                            ) {
+                                useTopographyMatches(result, signal: signal)
+                            }
+                        }
+                    }
+
+                }
+
+                Text("The selected row becomes the artifact event set used by Clean Artifacts and PSA rejection.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func artifactDefinitionComparisonRow(
+        source: ArtifactDefinitionResultSource,
+        count: Int,
+        detail: String,
+        score: Double?,
+        action: @escaping () -> Void
+    ) -> some View {
+        GridRow {
+            Label(source.displayName, systemImage: artifactTemplateConfirmedSource == source ? "checkmark.circle.fill" : source.systemImage)
+                .font(.caption)
+                .foregroundStyle(artifactTemplateConfirmedSource == source ? .green : .primary)
+            Text("\(count)")
+                .font(.caption.monospacedDigit().weight(.semibold))
+            HStack(spacing: 6) {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let score {
+                    Text(String(format: "best %.2f", score))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Button(artifactTemplateConfirmedSource == source ? "Selected" : "Use") {
+                action()
+            }
+            .font(.caption)
+            .disabled(count == 0 || artifactTemplateConfirmedSource == source)
+        }
+    }
+
+    private func waveformComparisonDetail(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData) -> String {
+        let allChannelText = result.comparisonEvents.count == result.selectedEvents.count
+            ? "all-channel same"
+            : "all-channel \(result.comparisonEvents.count)"
+        return "\(artifactTemplateSelectedChannels(in: signal).count) selected · \(allChannelText)"
     }
 
     /// Recomputes only the topography result (reference map + matches) when the
@@ -2059,35 +3543,20 @@ struct WaveformView: View {
         }
     }
 
-    private func artifactTemplateResultView(_ result: ArtifactTemplateDetectionResult) -> some View {
+    private func artifactWaveformResultView(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 16) {
-                Label("\(result.selectedEvents.count) matches", systemImage: "scope")
-                    .font(.caption.weight(.semibold))
-                Label("+\(result.additionalComparisonCount) with all-channel model", systemImage: "waveform.path")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(result.additionalComparisonCount > 0 ? .orange : .secondary)
-                Spacer()
-            }
-
-            HStack(alignment: .top, spacing: 16) {
-                if let average = result.templateAverage {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Average waveform")
-                            .font(.caption.weight(.semibold))
-                        ArtifactTemplateAveragePlot(
-                            average: average,
-                            primaryChannel: artifactTemplateClickedChannel,
-                            highlightedChannels: Set(average.selectedChannelIndices)
-                        )
-                        .frame(height: 170)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            if let average = result.templateAverage {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Average waveform")
+                        .font(.caption.weight(.semibold))
+                    ArtifactTemplateAveragePlot(
+                        average: average,
+                        primaryChannel: artifactTemplateClickedChannel,
+                        highlightedChannels: Set(average.selectedChannelIndices)
+                    )
+                    .frame(height: 170)
                 }
-
-                if let topography = result.topographyReference {
-                    artifactTopographyMapView(topography)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             if let average = result.templateAverage {
@@ -2097,7 +3566,7 @@ struct WaveformView: View {
                     HStack(spacing: 8) {
                         ForEach(average.channelSummaries.prefix(8)) { summary in
                             Button {
-                                selectArtifactTemplateChannel(summary.channelIndex)
+                                selectArtifactTemplateChannel(summary.channelIndex, autoApplyIn: signal)
                             } label: {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Ch \(summary.channelIndex + 1)")
@@ -2167,17 +3636,30 @@ struct WaveformView: View {
                     }
                 }
             }
-            if let topography = result.topographyReference {
-                Divider()
-                artifactTopographyComparisonView(topography, result: result)
-            }
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    /// The template scalp map, shown beside the average waveform plot. Updates
-    /// live as the reference mode / channel scope change.
+    private func artifactTopographyResultView(_ topography: ArtifactTemplateTopography) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 16) {
+                Label("Scalp-topography template", systemImage: "circle.grid.3x3.fill")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text("\(topography.channelIndices.count) channels · \(artifactTopographyMetric.rawValue)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            artifactTopographyMapView(topography)
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// The template scalp map. Updates live as the reference mode / channel
+    /// scope change.
     @ViewBuilder
     private func artifactTopographyMapView(_ topography: ArtifactTemplateTopography) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2214,55 +3696,24 @@ struct WaveformView: View {
         }
     }
 
-    /// The topography vs waveform match-count comparison and the apply button.
-    @ViewBuilder
-    private func artifactTopographyComparisonView(
-        _ topography: ArtifactTemplateTopography,
-        result: ArtifactTemplateDetectionResult
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 16) {
-                Label("\(topography.matchCount) scalp-topography matches", systemImage: "circle.grid.3x3.fill")
-                    .font(.caption.weight(.semibold))
-                Text("\(topography.channelIndices.count) channels · \(artifactTopographyMetric.rawValue)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
-                GridRow {
-                    Text("Method").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                    Text("Found").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                }
-                GridRow {
-                    Text("Selected channels (waveform)").font(.caption)
-                    Text("\(result.selectedEvents.count)").font(.caption.monospacedDigit())
-                }
-                GridRow {
-                    Text("All-channel waveform model").font(.caption)
-                    Text("\(result.comparisonEvents.count)").font(.caption.monospacedDigit())
-                }
-                GridRow {
-                    Text("Scalp topography (\(topography.mode.rawValue))").font(.caption)
-                    Text("\(topography.matchCount)")
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(.orange)
-                }
-            }
-
-            Button("Use topography matches as events") {
-                useTopographyMatches(result)
-            }
-            .font(.caption)
-            .disabled(result.topographyEvents.isEmpty)
-            .help("Replace the current artifact markers with the scalp-topography matches.")
-        }
+    private func useWaveformMatches(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData) {
+        guard let range = artifactTemplateSelectionRange else { return }
+        let configuration = artifactTemplateConfiguration(for: signal, range: range)
+        upsertDefinedArtifact(from: result, configuration: configuration, source: .waveform)
+        artifactEvents = definedArtifacts.flatMap(\.events)
+        selectedEventCodes = [configuration.eventCode]
+        showsEventsPanel = true
+        artifactTemplateConfirmedSource = .waveform
+        artifactStatusMessage = "\(result.selectedEvents.count) waveform matches"
     }
 
-    private func useTopographyMatches(_ result: ArtifactTemplateDetectionResult) {
-        if let artifactID = artifactTemplateDefinedArtifactID,
-           let index = definedArtifacts.firstIndex(where: { $0.id == artifactID }) {
+    private func useTopographyMatches(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData? = nil) {
+        if let range = artifactTemplateSelectionRange,
+           let signalForConfiguration = signal ?? recording.signal {
+            let configuration = artifactTemplateConfiguration(for: signalForConfiguration, range: range)
+            upsertDefinedArtifact(from: result, configuration: configuration, source: .topography)
+        } else if let artifactID = artifactTemplateDefinedArtifactID,
+                  let index = definedArtifacts.firstIndex(where: { $0.id == artifactID }) {
             definedArtifacts[index].events = result.topographyEvents
             definedArtifacts[index].topography = result.topographyReference
             invalidateOBSVarianceCache(for: artifactID)
@@ -2271,6 +3722,7 @@ struct WaveformView: View {
         artifactEvents = definedArtifacts.isEmpty ? result.topographyEvents : definedArtifacts.flatMap(\.events)
         selectedEventCodes = [artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines)]
         showsEventsPanel = true
+        artifactTemplateConfirmedSource = .topography
         artifactStatusMessage = "\(result.topographyEvents.count) topography matches"
     }
 
@@ -2293,14 +3745,24 @@ struct WaveformView: View {
         return Color.secondary.opacity(0.08)
     }
 
-    private func selectArtifactTemplateChannel(_ channelIndex: Int) {
+    private func selectArtifactTemplateChannel(_ channelIndex: Int, autoApplyIn signal: MFFSignalData? = nil) {
         artifactTemplateClickedChannel = channelIndex
         selectedArtifactTemplateChannel = channelIndex
         artifactTemplateChannelScope = .clickedChannel
         artifactTemplateCustomChannels = "\(channelIndex + 1)"
+        guard let signal,
+              !isApplyingArtifactTemplate else {
+            return
+        }
+        if artifactTemplateResult != nil {
+            applyArtifactTemplate(to: signal, preferredSource: .waveform)
+        }
     }
 
-    private func applyArtifactTemplate(to signal: MFFSignalData) {
+    private func applyArtifactTemplate(
+        to signal: MFFSignalData,
+        preferredSource: ArtifactDefinitionResultSource = .waveform
+    ) {
         guard let range = artifactTemplateSelectionRange else {
             artifactTemplateStatusMessage = "Highlight a waveform region before applying."
             return
@@ -2326,31 +3788,37 @@ struct WaveformView: View {
             artifactTemplateResult = result
             lastArtifactScanSignature = signature
             selectedArtifactTemplateChannel = nil
-            upsertDefinedArtifact(from: result, configuration: configuration)
+            let source: ArtifactDefinitionResultSource = preferredSource == .topography ? .topography : .waveform
+            upsertDefinedArtifact(from: result, configuration: configuration, source: source)
             artifactEvents = definedArtifacts.flatMap(\.events)
             selectedEventCodes = [configuration.eventCode]
             showsEventsPanel = true
-            artifactStatusMessage = "\(result.selectedEvents.count) template matches"
+            artifactTemplateConfirmedSource = source
+            artifactStatusMessage = source == .topography
+                ? "\(result.topographyEvents.count) topography matches"
+                : "\(result.selectedEvents.count) template matches"
             isApplyingArtifactTemplate = false
         }
     }
 
     private func upsertDefinedArtifact(
         from result: ArtifactTemplateDetectionResult,
-        configuration: ArtifactTemplateConfiguration
+        configuration: ArtifactTemplateConfiguration,
+        source: ArtifactDefinitionResultSource = .waveform
     ) {
         let name = configuration.name.nilIfEmpty ?? "Artifact"
         let eventCode = configuration.eventCode.nilIfEmpty ?? name
+        let selectedEvents = source == .topography ? result.topographyEvents : result.selectedEvents
         let artifact = DefinedArtifact(
             id: artifactTemplateDefinedArtifactID ?? UUID(),
             type: artifactTemplateType,
             name: name,
             eventCode: eventCode,
-            events: result.selectedEvents,
+            events: selectedEvents,
             selectedChannelIndices: configuration.selectedChannelIndices,
             windowSizeSeconds: configuration.windowSizeSeconds,
             average: result.templateAverage,
-            topography: result.topographyReference,
+            topography: source == .topography ? result.topographyReference : nil,
             cleaningMethod: .obs,
             appliedMethod: nil,
             cleanedAt: nil
@@ -2385,6 +3853,7 @@ struct WaveformView: View {
         if artifactTemplateDefinedArtifactID == id {
             artifactTemplateDefinedArtifactID = nil
             artifactTemplateResult = nil
+            artifactTemplateConfirmedSource = nil
             lastArtifactScanSignature = nil
             selectedArtifactTemplateChannel = nil
         }
@@ -2399,6 +3868,7 @@ struct WaveformView: View {
         definedArtifacts.removeAll()
         artifactTemplateDefinedArtifactID = nil
         artifactTemplateResult = nil
+        artifactTemplateConfirmedSource = nil
         lastArtifactScanSignature = nil
         selectedArtifactTemplateChannel = nil
         invalidateOBSVarianceCache()
@@ -2655,6 +4125,151 @@ struct WaveformView: View {
         artifactCleaningIsEnabled = isEnabled
         invalidateEpochsForSignalChange()
         invalidateInterpolations()
+    }
+
+    // MARK: - Wavelet reduction
+
+    private func openWaveletReductionSheet(input: MFFSignalData) {
+        // Initialize the config from the current mode's defaults for this rate
+        // unless a run already established settings.
+        if waveletReductionResult == nil {
+            waveletReductionConfig = waveletReductionMode.defaultConfiguration(samplingRate: input.samplingRate)
+        }
+        showsWaveletReductionSheet = true
+    }
+
+    private func setWaveletReductionEnabled(_ isEnabled: Bool) {
+        guard waveletReducedSignal != nil, waveletReductionIsEnabled != isEnabled else { return }
+        waveletReductionIsEnabled = isEnabled
+        invalidateEpochsForSignalChange()
+        invalidateInterpolations()
+    }
+
+    private func revertWaveletReduction() {
+        guard waveletReducedSignal != nil else { return }
+        waveletReducedSignal = nil
+        waveletReductionArtifact = nil
+        waveletReductionResult = nil
+        waveletReductionBandVarianceRetained = nil
+        waveletReductionStatusMessage = "Reverted wavelet reduction."
+        waveletReductionCandidates = []
+        selectedWaveletCandidateID = nil
+        invalidateEpochsForSignalChange()
+        invalidateInterpolations()
+        artifactDetectionRefreshToken += 1
+    }
+
+    private func runWaveletReduction(on input: MFFSignalData) {
+        guard !isRunningWaveletReduction else { return }
+        let config = waveletReductionConfig
+        let mode = waveletReductionMode
+        let cores = waveletReductionCoreCount
+        let analysisBand = (low: filterLowCutoff, high: filterHighCutoff)
+        // Leave bad channels untouched; reduce everything else.
+        let reduceIndices = input.data.indices.filter { !channels.bad.contains($0) }
+
+        isRunningWaveletReduction = true
+        waveletReductionProgress = 0
+        waveletReductionStatusMessage = "Running wavelet reduction…"
+        waveletReductionBandVarianceRetained = nil
+
+        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
+        let progressTask = Task { @MainActor in
+            for await fraction in progressStream {
+                waveletReductionProgress = min(max(fraction, 0), 1)
+            }
+        }
+
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) {
+                WaveletReducer.reduce(
+                    signal: input,
+                    channelIndices: Array(reduceIndices),
+                    configuration: config,
+                    coreCount: cores
+                ) { fraction in
+                    progressContinuation.yield(fraction * (mode.assessesInBand ? 0.8 : 1.0))
+                }
+            }.value
+
+            // ERP path: assess variance retained within the analysis band, as HAPPE does.
+            var bandRetained: Double?
+            if mode.assessesInBand,
+               analysisBand.high > analysisBand.low,
+               analysisBand.high < input.samplingRate / 2 {
+                bandRetained = await Task.detached(priority: .utility) {
+                    await bandLimitedVarianceRetained(
+                        original: input,
+                        cleaned: result.cleaned,
+                        channelIndices: Array(reduceIndices),
+                        band: analysisBand
+                    )
+                }.value
+            }
+
+            progressContinuation.finish()
+            progressTask.cancel()
+
+            waveletReducedSignal = result.cleaned
+            waveletReductionArtifact = result.artifact
+            waveletReductionResult = result
+            waveletReductionBandVarianceRetained = bandRetained
+            waveletReductionCandidates = WaveletReducer.findCandidates(
+                artifact: result.artifact,
+                channelIndices: Array(reduceIndices),
+                maxCount: 40
+            )
+            selectedWaveletCandidateID = waveletReductionCandidates.first?.id
+            waveletReductionIsEnabled = true
+            isRunningWaveletReduction = false
+            waveletReductionProgress = 1
+            let varianceText = String(format: "%.1f%%", result.varianceRetainedPercent)
+            waveletReductionStatusMessage = "Reduced \(reduceIndices.count) channels · \(varianceText) variance retained · r \(String(format: "%.2f", result.meanCorrelation))"
+            invalidateEpochsForSignalChange()
+            invalidateInterpolations()
+            artifactDetectionRefreshToken += 1
+        }
+    }
+
+    /// Filters original and cleaned signals to the analysis band and returns the
+    /// variance retained = var(cleaned_band)/var(original_band) over the reduced
+    /// channels, mirroring HAPPE's in-band ERP quality assessment.
+    private nonisolated func bandLimitedVarianceRetained(
+        original: MFFSignalData,
+        cleaned: MFFSignalData,
+        channelIndices: [Int],
+        band: (low: Double, high: Double)
+    ) async -> Double? {
+        do {
+            let originalBand = try await EEGSignalFilter.bandPass(
+                channels: channelIndices.map { original.data[$0] },
+                samplingRate: original.samplingRate,
+                lowCutoff: band.low,
+                highCutoff: band.high
+            )
+            let cleanedBand = try await EEGSignalFilter.bandPass(
+                channels: channelIndices.map { cleaned.data[$0] },
+                samplingRate: cleaned.samplingRate,
+                lowCutoff: band.low,
+                highCutoff: band.high
+            )
+            var originalVariance = 0.0
+            var cleanedVariance = 0.0
+            for index in originalBand.indices {
+                originalVariance += variance(of: originalBand[index])
+                cleanedVariance += variance(of: cleanedBand[index])
+            }
+            guard originalVariance > 1e-12 else { return nil }
+            return cleanedVariance / originalVariance * 100
+        } catch {
+            return nil
+        }
+    }
+
+    private nonisolated func variance(of values: [Float]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let mean = values.reduce(0.0) { $0 + Double($1) } / Double(values.count)
+        return values.reduce(0.0) { $0 + (Double($1) - mean) * (Double($1) - mean) } / Double(values.count)
     }
 
     private func applyArtifactCleaning(to signal: MFFSignalData) {
@@ -3442,6 +5057,7 @@ struct WaveformView: View {
                     )
                 } catch {
                     filterStatusMessage = error.localizedDescription
+                    filterStatusIsError = true
                 }
             }
 
@@ -3481,6 +5097,7 @@ struct WaveformView: View {
                     )
                 } catch {
                     filterStatusMessage = error.localizedDescription
+                    filterStatusIsError = true
                 }
             }
 
@@ -4526,8 +6143,38 @@ struct WaveformView: View {
 
     // MARK: - Filtering
 
+    private var activeFilterLineNoiseMode: FilterLineNoiseMode {
+        if filterLineNoiseMode == .adaptiveCleanLine {
+            return .adaptiveCleanLine
+        }
+        return notch60HzEnabled ? .notch : filterLineNoiseMode
+    }
+
+    private var filterLineNoiseSummary: String {
+        switch activeFilterLineNoiseMode {
+        case .off:
+            return ""
+        case .notch:
+            return " + \(String(format: "%.1f", filterLineNoiseFrequency)) Hz notch"
+        case .adaptiveCleanLine:
+            let harmonics = filterLineNoiseHarmonics > 1 ? " x\(filterLineNoiseHarmonics)" : ""
+            return " + CleanLine \(String(format: "%.1f", filterLineNoiseFrequency)) Hz\(harmonics)"
+        }
+    }
+
     private func filterPopover(for signal: MFFSignalData) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let lineNoiseMode = activeFilterLineNoiseMode
+        let lineNoiseBinding = Binding<FilterLineNoiseMode> {
+            activeFilterLineNoiseMode
+        } set: { mode in
+            filterLineNoiseMode = mode
+            notch60HzEnabled = mode == .notch
+            if mode != .off {
+                showsFilterLineNoiseOptions = true
+            }
+        }
+
+        return VStack(alignment: .leading, spacing: 14) {
             Text("Band-pass Filter")
                 .font(.headline)
 
@@ -4555,7 +6202,73 @@ struct WaveformView: View {
                 }
             }
 
-            Toggle("Apply 60 Hz IIR notch", isOn: $notch60HzEnabled)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Line Noise")
+                    .font(.caption.weight(.semibold))
+                Picker("Line Noise", selection: lineNoiseBinding) {
+                    ForEach(FilterLineNoiseMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                DisclosureGroup("Line Noise Options", isExpanded: $showsFilterLineNoiseOptions) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Frequency")
+                                .font(.caption)
+                                .frame(width: 76, alignment: .leading)
+                            TextField("Hz", value: $filterLineNoiseFrequency, format: .number.precision(.fractionLength(1)))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 70)
+                            Stepper("", value: $filterLineNoiseFrequency, in: 45...65, step: 0.5)
+                                .labelsHidden()
+                        }
+
+                        HStack {
+                            Text("Harmonics")
+                                .font(.caption)
+                                .frame(width: 76, alignment: .leading)
+                            Stepper(value: $filterLineNoiseHarmonics, in: 1...4) {
+                                Text("\(filterLineNoiseHarmonics)")
+                                    .font(.caption.monospacedDigit())
+                                    .frame(width: 32, alignment: .leading)
+                            }
+                        }
+                        .disabled(lineNoiseMode != .adaptiveCleanLine)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text("Window")
+                                    .font(.caption)
+                                Spacer()
+                                Text(String(format: "%.1fs", filterLineNoiseWindowSeconds))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Slider(value: $filterLineNoiseWindowSeconds, in: 1...10, step: 0.5)
+                        }
+                        .disabled(lineNoiseMode != .adaptiveCleanLine)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text("Strength")
+                                    .font(.caption)
+                                Spacer()
+                                Text(String(format: "%.2fx", filterLineNoiseStrength))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Slider(value: $filterLineNoiseStrength, in: 0.25...1.50, step: 0.05)
+                        }
+                        .disabled(lineNoiseMode != .adaptiveCleanLine)
+                    }
+                    .padding(.top, 6)
+                }
+                .font(.caption)
+                .disabled(lineNoiseMode == .off)
+            }
 
             Toggle("Average reference", isOn: $filterAverageReference)
                 .help("Re-reference to the common average: subtract the mean across all channels at each time point. Removes shared reference signal.")
@@ -4565,6 +6278,11 @@ struct WaveformView: View {
                     filterLowCutoff = 0.1
                     filterHighCutoff = 30
                     notch60HzEnabled = false
+                    filterLineNoiseMode = .off
+                    filterLineNoiseFrequency = 60
+                    filterLineNoiseHarmonics = 2
+                    filterLineNoiseWindowSeconds = 4
+                    filterLineNoiseStrength = 1
                     filterAverageReference = false
                 }
 
@@ -4585,13 +6303,14 @@ struct WaveformView: View {
             }
         }
         .padding(16)
-        .frame(width: 300)
+        .frame(width: 330)
     }
 
     private func applyBandpassFilter(to signal: MFFSignalData) {
         isFiltering = true
         filterProgress = 0
         filterStatusMessage = nil
+        filterStatusIsError = false
 
         let signalURL = signal.signalURL
         let signalType = signal.signalType
@@ -4603,8 +6322,17 @@ struct WaveformView: View {
         let sourceData = signal.data
         let lowCutoff = filterLowCutoff
         let highCutoff = filterHighCutoff
-        let notch60HzEnabled = notch60HzEnabled
+        let lineNoiseMode = activeFilterLineNoiseMode
+        let notch60HzEnabled = lineNoiseMode == .notch
+        let lineNoiseFrequency = filterLineNoiseFrequency
+        let lineNoiseHarmonics = filterLineNoiseHarmonics
+        let lineNoiseWindowSeconds = filterLineNoiseWindowSeconds
+        let lineNoiseStrength = filterLineNoiseStrength
         let averageReference = filterAverageReference
+        if lineNoiseMode == .adaptiveCleanLine {
+            filterStatusMessage = "Filtering, then applying adaptive CleanLine..."
+            filterStatusIsError = false
+        }
 
         // Stream per-channel completion fractions to the UI.
         let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
@@ -4624,8 +6352,22 @@ struct WaveformView: View {
                         lowCutoff: lowCutoff,
                         highCutoff: highCutoff,
                         notch60HzEnabled: notch60HzEnabled,
-                        progress: { fraction in progressContinuation.yield(fraction) }
+                        notchFrequency: lineNoiseFrequency,
+                        progress: { fraction in
+                            progressContinuation.yield(lineNoiseMode == .adaptiveCleanLine ? 0.62 * fraction : fraction)
+                        }
                     )
+                    if lineNoiseMode == .adaptiveCleanLine {
+                        bandPassed = await EEGSignalFilter.adaptiveLineNoiseReduction(
+                            channels: bandPassed,
+                            samplingRate: samplingRate,
+                            baseFrequency: lineNoiseFrequency,
+                            harmonicCount: lineNoiseHarmonics,
+                            windowSeconds: lineNoiseWindowSeconds,
+                            strength: lineNoiseStrength,
+                            progress: { fraction in progressContinuation.yield(0.62 + 0.38 * fraction) }
+                        )
+                    }
                     if averageReference {
                         EEGSignalFilter.averageReferenceInPlace(&bandPassed, excluding: badChannels)
                     }
@@ -4649,6 +6391,8 @@ struct WaveformView: View {
                 artifactDetectionRefreshToken += 1
                 invalidateEpochsForSignalChange()
                 invalidateInterpolations()
+                filterStatusMessage = "Applied Butterworth \(String(format: "%.1f", lowCutoff))-\(String(format: "%.1f", highCutoff)) Hz\(filterLineNoiseSummary)\(averageReference ? " + average reference" : "")."
+                filterStatusIsError = false
             } catch {
                 progressContinuation.finish()
                 progressTask.cancel()
@@ -4662,7 +6406,8 @@ struct WaveformView: View {
     private func clearBandpassFilter() {
         filteredSignal = nil
         clearAppliedArtifactCleaning()
-        filterStatusMessage = nil
+        filterStatusMessage = "Removed band-pass filter."
+        filterStatusIsError = false
         artifactDetectionRefreshToken += 1
         invalidateEpochsForSignalChange()
         invalidateInterpolations()
@@ -4731,7 +6476,8 @@ struct WaveformView: View {
                 icaDecomposition = nil
                 filteredSignal = nil
                 clearAppliedArtifactCleaning()
-                mriStatusMessage = nil
+                mriStatusMessage = "Applied MRI gradient artifact correction (TR = \(trSamples) samples)."
+                mriStatusIsError = false
                 artifactDetectionRefreshToken += 1
                 invalidateEpochsForSignalChange()
                 invalidateInterpolations()
@@ -4739,6 +6485,7 @@ struct WaveformView: View {
                 progressContinuation.finish()
                 progressTask.cancel()
                 mriStatusMessage = error.localizedDescription
+                mriStatusIsError = true
             }
 
             isProcessingMRI = false
@@ -4751,7 +6498,8 @@ struct WaveformView: View {
         icaDecomposition = nil
         filteredSignal = nil
         clearAppliedArtifactCleaning()
-        mriStatusMessage = nil
+        mriStatusMessage = "Removed MRI gradient correction."
+        mriStatusIsError = false
         artifactDetectionRefreshToken += 1
         invalidateEpochsForSignalChange()
         invalidateInterpolations()
@@ -4765,10 +6513,15 @@ struct WaveformView: View {
             || detectsECGArtifacts
             || !artifactEvents.isEmpty
             || !definedArtifacts.isEmpty
+            || isRunningWaveletArtifactExplorer
             || artifactCleanedSignal != nil
     }
 
     private var artifactHelpText: String {
+        if isRunningWaveletArtifactExplorer {
+            return "Wavelet artifact explorer\n\(waveletExplorerStatusTitle.nilIfEmpty ?? "Scanning wavelet artifact evidence...")"
+        }
+
         if isCleaningArtifacts {
             return "Artifact cleaning\nCleaning artifacts..."
         }
@@ -4898,6 +6651,135 @@ struct WaveformView: View {
         ].joined(separator: "|")
     }
 
+    private func channelHealthDetailsSheet(for signal: MFFSignalData) -> some View {
+        @Bindable var goodnessSettings = goodnessSettings
+        return ChannelHealthDetailsView(
+            results: Array(channels.healthResults.values),
+            isAnalyzing: channels.isAnalyzingHealth,
+            progress: channels.healthProgress,
+            statusMessage: channelHealthStatusMessage,
+            onRefresh: {
+                channels.showsHealth = true
+                channels.healthRefreshToken += 1
+            },
+            waveletFamily: $goodnessSettings.wavelet.family,
+            waveletLevelCount: $goodnessSettings.wavelet.levelCount,
+            waveletThresholdModel: $goodnessSettings.wavelet.thresholdModel,
+            waveletThresholdRule: $goodnessSettings.wavelet.thresholdRule,
+            waveletDownsampleRate: $goodnessSettings.wavelet.downsampleRate,
+            waveletCleaningMode: $goodnessSettings.wavelet.cleaningMode,
+            waveletIntensity: $goodnessSettings.wavelet.intensity,
+            onRunWavelets: {
+                runWaveletChannelGoodness(for: signal)
+            },
+            onClose: {
+                showsChannelHealthDetails = false
+            }
+        )
+    }
+
+    @MainActor
+    private func runWaveletChannelGoodness(for signal: MFFSignalData) {
+        guard !channels.isAnalyzingHealth else { return }
+        let signature = channelHealthSignature(for: signal)
+        let shouldRefreshBase = channelHealthSignature != signature || channels.healthResults.isEmpty
+        let existingResults = channels.healthResults
+        let layout = recording.sensorLayout
+        let baseConfig = goodnessSettings.base
+        let spectralConfig = goodnessSettings.spectral
+        let ransacConfig = goodnessSettings.ransac
+        let wavelet = goodnessSettings.wavelet
+        let configuration = WaveletChannelGoodnessConfiguration(
+            channelIndices: Array(signal.data.indices),
+            downsampleRate: min(max(wavelet.downsampleRate, 20), signal.samplingRate),
+            levelCount: wavelet.levelCount,
+            thresholdScale: max(0.05, wavelet.cleaningMode.thresholdMultiplier / max(wavelet.intensity, 0.10)),
+            cleaningMode: wavelet.cleaningMode,
+            intensity: wavelet.intensity,
+            waveletFamily: wavelet.family,
+            thresholdRule: wavelet.thresholdRule,
+            thresholdModel: wavelet.thresholdModel
+        )
+
+        channelHealthTask?.cancel()
+        channelHealthSignature = signature
+        if shouldRefreshBase {
+            channels.healthResults = [:]
+        }
+        channels.showsHealth = true
+        channels.isAnalyzingHealth = true
+        channels.healthProgress = 0
+        channelHealthStatusMessage = "Running wavelet channel goodness..."
+
+        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
+        let progressTask = Task { @MainActor in
+            for await fraction in progressStream {
+                channels.healthProgress = min(max(fraction, 0), 1)
+            }
+        }
+
+        channelHealthTask = Task { @MainActor in
+            let worker = Task.detached(priority: .utility) {
+                let baseAnalysis: ChannelHealthAnalysis
+                if shouldRefreshBase {
+                    baseAnalysis = ChannelHealthAnalyzer.analyze(
+                        signal: signal,
+                        layout: layout,
+                        base: baseConfig,
+                        spectral: spectralConfig,
+                        ransac: ransacConfig,
+                        progress: { fraction in
+                            progressContinuation.yield(0.42 * fraction)
+                        }
+                    )
+                } else {
+                    progressContinuation.yield(0.08)
+                    baseAnalysis = ChannelHealthAnalysis(resultsByChannel: existingResults)
+                }
+
+                let waveletStart = shouldRefreshBase ? 0.42 : 0.08
+                let waveletSpan = shouldRefreshBase ? 0.55 : 0.89
+                let waveletResults = WaveletArtifactAnalyzer.channelGoodness(
+                    in: signal,
+                    configuration: configuration
+                ) { update in
+                    progressContinuation.yield(waveletStart + waveletSpan * update.fraction)
+                }
+                progressContinuation.yield(0.98)
+                return ChannelHealthAnalyzer.addingWaveletMetrics(
+                    to: baseAnalysis,
+                    waveletResults: waveletResults
+                )
+            }
+
+            let analysis = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
+
+            progressContinuation.finish()
+            progressTask.cancel()
+
+            guard !Task.isCancelled,
+                  channels.showsHealth,
+                  channelHealthSignature == signature else {
+                return
+            }
+
+            channels.healthResults = analysis.resultsByChannel
+            channels.isAnalyzingHealth = false
+            channels.healthProgress = 1
+            channelHealthStatusMessage = analysis.resultsByChannel.isEmpty
+                ? "No wavelet channel-goodness metrics available."
+                : "Wavelet channel goodness updated \(analysis.resultsByChannel.count) channels."
+        }
+    }
+
     @MainActor
     private func refreshChannelHealthIfNeeded(for signal: MFFSignalData) {
         let signature = channelHealthSignature(for: signal)
@@ -4924,6 +6806,9 @@ struct WaveformView: View {
 
         let layout = recording.sensorLayout
         let sourceSignal = signal
+        let baseConfig = goodnessSettings.base
+        let spectralConfig = goodnessSettings.spectral
+        let ransacConfig = goodnessSettings.ransac
         let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
         let progressTask = Task { @MainActor in
             for await fraction in progressStream {
@@ -4936,6 +6821,9 @@ struct WaveformView: View {
                 ChannelHealthAnalyzer.analyze(
                     signal: sourceSignal,
                     layout: layout,
+                    base: baseConfig,
+                    spectral: spectralConfig,
+                    ransac: ransacConfig,
                     progress: { fraction in
                         progressContinuation.yield(fraction)
                     }
@@ -4997,6 +6885,9 @@ struct WaveformView: View {
         let layout = recording.sensorLayout
         let processing = channelHealthProcessingSnapshot()
         let hiddenChannels = channels.hidden
+        let baseConfig = goodnessSettings.base
+        let spectralConfig = goodnessSettings.spectral
+        let ransacConfig = goodnessSettings.ransac
 
         let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
         let progressTask = Task { @MainActor in
@@ -5011,6 +6902,9 @@ struct WaveformView: View {
                     let analysis = ChannelHealthAnalyzer.analyze(
                         signal: signal,
                         layout: layout,
+                        base: baseConfig,
+                        spectral: spectralConfig,
+                        ransac: ransacConfig,
                         progress: { fraction in
                             progressContinuation.yield(0.85 * fraction)
                         }
@@ -5527,8 +7421,10 @@ struct WaveformView: View {
     /// good channels of the currently displayed signal.
     private func interpolate(_ index: Int, in signal: MFFSignalData) {
         channelStatusMessage = nil
+        channelStatusIsError = false
         guard let geometry = electrodeGeometry, geometry.positions[index] != nil else {
             channelStatusMessage = "No 3D coordinates for Ch \(index + 1); can't interpolate."
+            channelStatusIsError = true
             return
         }
 
@@ -5542,6 +7438,7 @@ struct WaveformView: View {
             positions: geometry.positions
         ) else {
             channelStatusMessage = "Couldn't compute interpolation weights for Ch \(index + 1)."
+            channelStatusIsError = true
             return
         }
 
@@ -5556,6 +7453,8 @@ struct WaveformView: View {
 
         channels.interpolated[index] = series
         channels.bad.remove(index)
+        channelStatusMessage = "Interpolated Ch \(index + 1) from \(indices.count) neighbors."
+        channelStatusIsError = false
         artifactDetectionRefreshToken += 1
         invalidateEpochsForSignalChange()
     }
@@ -5578,6 +7477,14 @@ struct WaveformView: View {
         gradientCorrectedSignal = nil
         artifactCleanedSignal = nil
         artifactCleaningIsEnabled = true
+        waveletReducedSignal = nil
+        waveletReductionArtifact = nil
+        waveletReductionResult = nil
+        waveletReductionIsEnabled = true
+        waveletReductionBandVarianceRetained = nil
+        waveletReductionStatusMessage = nil
+        waveletReductionCandidates = []
+        selectedWaveletCandidateID = nil
 
         // Artifact detection + templates.
         artifactEvents = []
@@ -5598,6 +7505,7 @@ struct WaveformView: View {
 
         // Status messages and progress.
         filterStatusMessage = nil
+        filterStatusIsError = false
         icaStatusMessage = nil
         artifactStatusMessage = nil
         artifactTemplateStatusMessage = nil
@@ -5792,6 +7700,62 @@ private enum ArtifactTopographyChannelScope: CaseIterable, Hashable, Identifiabl
         case .allGood: return "All good channels"
         }
     }
+}
+
+private enum ArtifactDefinitionPanel: String, CaseIterable, Identifiable {
+    case waveforms = "Waveforms"
+    case topography = "Topography"
+
+    var id: String { rawValue }
+}
+
+private enum ArtifactDefinitionResultSource: Equatable {
+    case waveform
+    case topography
+
+    var displayName: String {
+        switch self {
+        case .waveform: return "Waveform"
+        case .topography: return "Topography"
+        }
+    }
+
+    var confirmationName: String {
+        switch self {
+        case .waveform: return "Waveform"
+        case .topography: return "Topography"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .waveform: return "waveform.path"
+        case .topography: return "circle.grid.3x3.fill"
+        }
+    }
+}
+
+private enum WaveletExplorerChannelScope: String, CaseIterable, Identifiable {
+    case visibleGood = "Visible Good"
+    case allGood = "All Good"
+    case all = "All Channels"
+    case ocular = "Ocular"
+
+    var id: String { rawValue }
+}
+
+private enum FilterLineNoiseMode: String, CaseIterable, Identifiable, Sendable {
+    case off = "Off"
+    case notch = "IIR Notch"
+    case adaptiveCleanLine = "CleanLine"
+
+    var id: String { rawValue }
+}
+
+private struct WaveletArtifactExplorerLogLine: Identifiable {
+    let id = UUID()
+    var title: String
+    var detail: String
 }
 
 /// Snapshot of the artifact-template controls that affect a full scan. Topography
@@ -6414,6 +8378,284 @@ private struct ChannelHealthBadge: View {
     }
 }
 
+private enum ChannelHealthSort: String, CaseIterable, Identifiable {
+    case lowestGoodness = "Lowest First"
+    case highestGoodness = "Highest First"
+    case channel = "Channel"
+
+    var id: String { rawValue }
+}
+
+private struct ChannelHealthDetailsView: View {
+    let results: [ChannelHealthResult]
+    let isAnalyzing: Bool
+    let progress: Double
+    let statusMessage: String?
+    let onRefresh: () -> Void
+    @Binding var waveletFamily: WaveletCleaningFamily
+    @Binding var waveletLevelCount: Int
+    @Binding var waveletThresholdModel: WaveletCleaningThresholdModel
+    @Binding var waveletThresholdRule: WaveletCleaningThresholdRule
+    @Binding var waveletDownsampleRate: Double
+    @Binding var waveletCleaningMode: WaveletCleaningMode
+    @Binding var waveletIntensity: Double
+    let onRunWavelets: () -> Void
+    let onClose: () -> Void
+
+    @State private var sort = ChannelHealthSort.lowestGoodness
+    @State private var showsWaveletOptions = false
+
+    private var sortedResults: [ChannelHealthResult] {
+        switch sort {
+        case .lowestGoodness:
+            return results.sorted {
+                if $0.goodPercentage == $1.goodPercentage {
+                    return $0.channelIndex < $1.channelIndex
+                }
+                return $0.goodPercentage < $1.goodPercentage
+            }
+        case .highestGoodness:
+            return results.sorted {
+                if $0.goodPercentage == $1.goodPercentage {
+                    return $0.channelIndex < $1.channelIndex
+                }
+                return $0.goodPercentage > $1.goodPercentage
+            }
+        case .channel:
+            return results.sorted { $0.channelIndex < $1.channelIndex }
+        }
+    }
+
+    private var gradeCounts: [(ChannelHealthGrade, Int)] {
+        ChannelHealthGrade.allHealthGrades.map { grade in
+            (grade, results.filter { $0.grade == grade }.count)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Channel Goodness")
+                        .font(.title3.weight(.semibold))
+                    Text("\(results.count) channels scored")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Picker("Sort", selection: $sort) {
+                    ForEach(ChannelHealthSort.allCases) { sort in
+                        Text(sort.rawValue).tag(sort)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 145)
+
+                Button("Refresh", action: onRefresh)
+                    .disabled(isAnalyzing)
+
+                Button("Wavelet...") { showsWaveletOptions = true }
+                    .disabled(isAnalyzing)
+                    .popover(isPresented: $showsWaveletOptions, arrowEdge: .bottom) {
+                        WaveletRunPopover(
+                            family: $waveletFamily,
+                            levelCount: $waveletLevelCount,
+                            thresholdModel: $waveletThresholdModel,
+                            thresholdRule: $waveletThresholdRule,
+                            downsampleRate: $waveletDownsampleRate,
+                            cleaningMode: $waveletCleaningMode,
+                            intensity: $waveletIntensity,
+                            isAnalyzing: isAnalyzing,
+                            onRun: {
+                                showsWaveletOptions = false
+                                onRunWavelets()
+                            }
+                        )
+                    }
+
+                Button("Close", action: onClose)
+                    .keyboardShortcut(.cancelAction)
+            }
+
+            HStack(spacing: 8) {
+                ForEach(gradeCounts, id: \.0) { grade, count in
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(grade.color)
+                            .frame(width: 8, height: 8)
+                        Text("\(grade.displayName) \(count)")
+                            .font(.caption.monospacedDigit())
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(grade.color.opacity(0.10))
+                    )
+                }
+
+                Spacer()
+            }
+
+            if isAnalyzing {
+                VStack(alignment: .leading, spacing: 5) {
+                    ProgressView(value: progress)
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            if sortedResults.isEmpty {
+                Spacer()
+                Text("No channel goodness metrics yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                Spacer()
+            } else {
+                ScrollView {
+                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 7) {
+                        GridRow {
+                            Text("Ch")
+                            Text("Good")
+                            Text("Grade")
+                            Text("Summary")
+                            Text("Weakest Metrics")
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                        ForEach(sortedResults) { result in
+                            GridRow {
+                                Text("\(result.channelIndex + 1)")
+                                    .font(.caption.monospacedDigit().weight(.semibold))
+                                Text("\(result.goodPercentage)%")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(result.grade.color)
+                                Text(result.grade.displayName)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(result.grade.color)
+                                Text(result.summary)
+                                    .font(.caption)
+                                    .lineLimit(2)
+                                Text(weakestMetricText(result))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 760, idealWidth: 880, minHeight: 520, idealHeight: 640)
+    }
+
+    private func weakestMetricText(_ result: ChannelHealthResult) -> String {
+        result.metrics.prefix(3).map {
+            "\($0.name) \(Int(($0.score * 100).rounded()))%"
+        }
+        .joined(separator: " | ")
+    }
+}
+
+private struct WaveletRunPopover: View {
+    @Binding var family: WaveletCleaningFamily
+    @Binding var levelCount: Int
+    @Binding var thresholdModel: WaveletCleaningThresholdModel
+    @Binding var thresholdRule: WaveletCleaningThresholdRule
+    @Binding var downsampleRate: Double
+    @Binding var cleaningMode: WaveletCleaningMode
+    @Binding var intensity: Double
+    let isAnalyzing: Bool
+    let onRun: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Wavelet Channel Burden")
+                .font(.headline)
+            Text("Scores each channel by its multiscale transient (artifact) burden using an undecimated wavelet decomposition.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("Wavelet")
+                    Picker("", selection: $family) {
+                        ForEach(WaveletCleaningFamily.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                }
+                GridRow {
+                    Text("Cleaning mode")
+                    Picker("", selection: $cleaningMode) {
+                        ForEach(WaveletCleaningMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                }
+                GridRow {
+                    Text("Threshold model")
+                    Picker("", selection: $thresholdModel) {
+                        ForEach(WaveletCleaningThresholdModel.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                }
+                GridRow {
+                    Text("Threshold rule")
+                    Picker("", selection: $thresholdRule) {
+                        ForEach(WaveletCleaningThresholdRule.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                }
+                GridRow {
+                    Text("Levels")
+                    Stepper("\(levelCount)", value: $levelCount, in: 1...WaveletArtifactAnalyzer.maximumLevelCount)
+                        .frame(width: 110)
+                }
+                GridRow {
+                    Text("Intensity")
+                    TextField("x", value: $intensity, format: .number.precision(.fractionLength(2)))
+                        .frame(width: 80)
+                }
+                GridRow {
+                    Text("Downsample (Hz)")
+                    TextField("Hz", value: $downsampleRate, format: .number.precision(.fractionLength(0)))
+                        .frame(width: 80)
+                }
+            }
+            .font(.caption)
+
+            HStack {
+                Spacer()
+                Button("Run", action: onRun)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isAnalyzing)
+            }
+        }
+        .padding(14)
+        .frame(width: 320)
+    }
+}
+
 private struct ChannelHealthPopover: View {
     let result: ChannelHealthResult
 
@@ -6651,6 +8893,391 @@ private struct ArtifactCleaningPreviewButton: View {
             guard !Task.isCancelled else { return }
             showsPreview = isButtonHovered || isPopoverHovered
         }
+    }
+}
+
+private struct WaveletCleaningPreviewButton: View {
+    let candidate: WaveletArtifactCandidate
+    let signal: MFFSignalData
+    let configuration: WaveletCleaningConfiguration
+
+    @State private var showsPreview = false
+    @State private var isPreviewPinned = false
+    @State private var isButtonHovered = false
+    @State private var isPopoverHovered = false
+    @State private var hoverTask: Task<Void, Never>?
+
+    private var previewPresentation: Binding<Bool> {
+        Binding {
+            showsPreview
+        } set: { isPresented in
+            showsPreview = isPresented
+            if !isPresented {
+                isPreviewPinned = false
+                isPopoverHovered = false
+            }
+        }
+    }
+
+    var body: some View {
+        Button {
+            isPreviewPinned.toggle()
+            showsPreview = isPreviewPinned
+            if !showsPreview {
+                hoverTask?.cancel()
+            }
+        } label: {
+            Image(systemName: "eye")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Preview wavelet cleanup")
+        .onHover { hovering in
+            isButtonHovered = hovering
+            schedulePreviewVisibility()
+        }
+        .popover(isPresented: previewPresentation, arrowEdge: .trailing) {
+            WaveletCleaningPreview(
+                candidate: candidate,
+                signal: signal,
+                configuration: configuration
+            )
+            .onHover { hovering in
+                isPopoverHovered = hovering
+                schedulePreviewVisibility()
+            }
+        }
+        .onDisappear {
+            hoverTask?.cancel()
+        }
+    }
+
+    private func schedulePreviewVisibility() {
+        hoverTask?.cancel()
+        guard !isPreviewPinned else { return }
+        let shouldShow = isButtonHovered || isPopoverHovered
+        let delay: UInt64 = shouldShow ? 80_000_000 : 220_000_000
+        hoverTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            showsPreview = isButtonHovered || isPopoverHovered
+        }
+    }
+}
+
+private struct WaveletCleaningPreview: View {
+    let candidate: WaveletArtifactCandidate
+    let signal: MFFSignalData
+    let configuration: WaveletCleaningConfiguration
+
+    @State private var preview: WaveletCleaningPreviewResult?
+    @State private var isLoadingPreview = false
+
+    private var previewLoadID: String {
+        [
+            candidate.id,
+            configuration.pipeline.rawValue,
+            configuration.mode.rawValue,
+            configuration.waveletFamily.rawValue,
+            configuration.thresholdModel.rawValue,
+            configuration.thresholdRule.rawValue,
+            "\(configuration.levelCount)",
+            String(format: "%.3f", configuration.thresholdScale),
+            String(format: "%.3f", configuration.intensity),
+            configuration.channelIndices.map(String.init).joined(separator: ","),
+            String(format: "%.3f", configuration.paddingSeconds),
+            String(format: "%.3f", signal.duration)
+        ].joined(separator: "|")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Wavelet Cleaning Preview")
+                        .font(.headline)
+                    Text("Candidate \(candidate.rank) · Ch \(candidate.channelIndex + 1) · \(Self.timeString(candidate.peakTimeSeconds))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(configuration.pipeline.rawValue) · \(configuration.mode.rawValue) · \(configuration.waveletFamily.rawValue) · \(configuration.thresholdModel.rawValue) · \(configuration.thresholdRule.rawValue)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            if let preview {
+                let sharedScale = Self.waveformScale([
+                    preview.beforeAverage,
+                    preview.artifactAverage,
+                    preview.afterAverage
+                ])
+                let removedScale = Self.waveformScale([preview.artifactAverage])
+                let removedSubtitle = Self.removedScaleSubtitle(
+                    sharedScale: sharedScale,
+                    removedScale: removedScale
+                )
+                let removedPlotScale = removedSubtitle == nil ? sharedScale : removedScale
+
+                metricsView(preview.metrics)
+
+                HStack(spacing: 10) {
+                    waveformPreview(
+                        title: "Before",
+                        average: preview.beforeAverage,
+                        scale: sharedScale
+                    )
+                    waveformPreview(
+                        title: "Removed",
+                        subtitle: removedSubtitle,
+                        average: preview.artifactAverage,
+                        scale: removedPlotScale
+                    )
+                    waveformPreview(
+                        title: "After",
+                        average: preview.afterAverage,
+                        scale: sharedScale
+                    )
+                }
+
+                removedEnergyHeatmap(preview.channelRemovedEnergy)
+
+                Text("Preview window \(Self.timeString(preview.startTimeSeconds))-\(Self.timeString(preview.endTimeSeconds)); \(configuration.channelIndices.count) channels cleaned with \(configuration.levelCount) undecimated levels, \(configuration.thresholdModel.rawValue), \(String(format: "%.2f", configuration.intensity))x intensity, and a \(String(format: "%.2f", configuration.thresholdScale))x effective gate.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if isLoadingPreview {
+                loadingPreview
+            } else {
+                Text("No valid wavelet cleanup preview could be computed for this candidate.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(width: 700, height: 430, alignment: .topLeading)
+        .task(id: previewLoadID) {
+            await loadPreview()
+        }
+    }
+
+    @MainActor
+    private func loadPreview() async {
+        isLoadingPreview = true
+        preview = nil
+        let signal = signal
+        let candidate = candidate
+        let configuration = configuration
+        let result = await Task.detached(priority: .userInitiated) {
+            WaveletArtifactAnalyzer.cleaningPreview(
+                in: signal,
+                candidate: candidate,
+                configuration: configuration
+            )
+        }.value
+        guard !Task.isCancelled else { return }
+        preview = result
+        isLoadingPreview = false
+    }
+
+    private func metricsView(_ metrics: WaveletCleaningPreviewMetrics) -> some View {
+        HStack(spacing: 8) {
+            metricChip(
+                title: "Variance kept",
+                value: String(format: "%.0f%%", metrics.varianceRetainedPercent),
+                detail: "Remaining variance"
+            )
+            metricChip(
+                title: "Shape r",
+                value: String(format: "%.3f", metrics.correlation),
+                detail: "Before/after similarity"
+            )
+            metricChip(
+                title: "Removed RMS",
+                value: Self.microvoltString(Float(metrics.removedRMSMicrovolts)),
+                detail: "Mean removed amplitude"
+            )
+            metricChip(
+                title: "Peak drop",
+                value: String(format: "%.0f%%", metrics.peakReductionPercent),
+                detail: "Peak amplitude reduction"
+            )
+        }
+    }
+
+    private func metricChip(title: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.monospacedDigit())
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.secondary.opacity(0.08))
+        )
+    }
+
+    private func removedEnergyHeatmap(_ channels: [WaveletCleaningChannelEnergy]) -> some View {
+        let sortedChannels = channels.sorted { $0.channelIndex < $1.channelIndex }
+        let columns = Array(repeating: GridItem(.fixed(22), spacing: 4), count: 24)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Removed energy by channel")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(strongestRemovedEnergyText(sortedChannels))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 4) {
+                ForEach(sortedChannels) { channel in
+                    let intensity = min(max(channel.normalizedRemovedEnergy, 0), 1)
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(removedEnergyColor(intensity))
+                        .frame(width: 22, height: 14)
+                        .overlay {
+                            Text("\(channel.channelIndex + 1)")
+                                .font(.system(size: 6, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(intensity > 0.60 ? Color.white : Color.primary.opacity(0.65))
+                        }
+                        .help(removedEnergyHelp(channel))
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.secondary.opacity(0.06))
+        )
+    }
+
+    private func removedEnergyColor(_ intensity: Double) -> Color {
+        let value = min(max(intensity, 0), 1)
+        return Color(
+            red: 0.18 + 0.78 * value,
+            green: 0.42 - 0.16 * value,
+            blue: 0.72 - 0.58 * value,
+            opacity: 0.22 + 0.76 * value
+        )
+    }
+
+    private func strongestRemovedEnergyText(_ channels: [WaveletCleaningChannelEnergy]) -> String {
+        let strongest = channels.sorted {
+            if $0.normalizedRemovedEnergy == $1.normalizedRemovedEnergy {
+                return $0.channelIndex < $1.channelIndex
+            }
+            return $0.normalizedRemovedEnergy > $1.normalizedRemovedEnergy
+        }
+        .prefix(3)
+        .map { "Ch \($0.channelIndex + 1) \(Self.microvoltString(Float($0.removedRMSMicrovolts)))" }
+
+        return strongest.isEmpty ? "No removed energy" : strongest.joined(separator: " · ")
+    }
+
+    private func removedEnergyHelp(_ channel: WaveletCleaningChannelEnergy) -> String {
+        [
+            "Ch \(channel.channelIndex + 1)",
+            "removed RMS \(Self.microvoltString(Float(channel.removedRMSMicrovolts)))",
+            "peak \(Self.microvoltString(channel.peakRemovedMicrovolts))",
+            String(format: "energy %.1f%% of local signal", min(max(channel.removedEnergyFraction, 0), 9.99) * 100)
+        ].joined(separator: "\n")
+    }
+
+    private func waveformPreview(
+        title: String,
+        subtitle: String? = nil,
+        average: ArtifactTemplateAverage,
+        scale: Float?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(title)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            ArtifactTemplateAveragePlot(
+                average: average,
+                primaryChannel: candidate.channelIndex,
+                highlightedChannels: [candidate.channelIndex],
+                fixedScaleMicrovolts: scale,
+                maximumBackgroundChannels: 18,
+                usesAmplitudeWeightedOpacity: true
+            )
+            .frame(height: 112)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var loadingPreview: some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(Color.secondary.opacity(0.08))
+            .overlay {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Computing local wavelet reconstruction...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(height: 170)
+    }
+
+    nonisolated private static func waveformScale(_ averages: [ArtifactTemplateAverage]) -> Float? {
+        let maxAbs = averages
+            .flatMap { $0.allChannelSamples }
+            .flatMap { $0.map(abs) }
+            .max() ?? 0
+        return maxAbs > 0 ? maxAbs : nil
+    }
+
+    nonisolated private static func removedScaleSubtitle(sharedScale: Float?, removedScale: Float?) -> String? {
+        guard let sharedScale,
+              let removedScale,
+              sharedScale > 0,
+              removedScale > 0,
+              sharedScale > removedScale * 1.5 else {
+            return nil
+        }
+        return String(format: "%.1fx", sharedScale / removedScale)
+    }
+
+    nonisolated private static func microvoltString(_ value: Float) -> String {
+        if value >= 100 {
+            return String(format: "%.0f µV", value)
+        }
+        if value >= 10 {
+            return String(format: "%.1f µV", value)
+        }
+        return String(format: "%.2f µV", value)
+    }
+
+    nonisolated private static func timeString(_ seconds: Double) -> String {
+        if seconds >= 60 {
+            let minutes = Int(seconds) / 60
+            let remainingSeconds = seconds.truncatingRemainder(dividingBy: 60)
+            return String(format: "%d:%06.3f", minutes, remainingSeconds)
+        }
+        return String(format: "%.3fs", seconds)
     }
 }
 

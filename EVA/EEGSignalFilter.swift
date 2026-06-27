@@ -47,6 +47,7 @@ struct EEGSignalFilter {
         lowCutoff: Double,
         highCutoff: Double,
         notch60HzEnabled: Bool = false,
+        notchFrequency: Double = 60,
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> [[Float]] {
         guard samplingRate > 0 else {
@@ -74,7 +75,7 @@ struct EEGSignalFilter {
                 q: butterworthQ
             )
             let notchFilter = BiquadCoefficients.notch(
-                centerFrequency: 60,
+                centerFrequency: Float(notchFrequency),
                 samplingRate: Float(samplingRate),
                 q: 30
             )
@@ -90,7 +91,7 @@ struct EEGSignalFilter {
                     let bandPassed = zeroPhaseFilter(highPassed, coefficients: lowPass, paddingCount: paddingCount)
                     let finalSamples: [Float]
 
-                    if notch60HzEnabled, 60 < (samplingRate / 2) {
+                    if notch60HzEnabled, notchFrequency < (samplingRate / 2) {
                         finalSamples = zeroPhaseFilter(bandPassed, coefficients: notchFilter, paddingCount: paddingCount)
                     } else {
                         finalSamples = bandPassed
@@ -113,6 +114,61 @@ struct EEGSignalFilter {
             }
 
             return filteredChannels
+        }
+    }
+
+    nonisolated static func adaptiveLineNoiseReduction(
+        channels: [[Float]],
+        samplingRate: Double,
+        baseFrequency: Double = 60,
+        harmonicCount: Int = 2,
+        windowSeconds: Double = 4,
+        strength: Double = 1,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async -> [[Float]] {
+        guard samplingRate > 0,
+              baseFrequency > 0,
+              !channels.isEmpty else {
+            return channels
+        }
+
+        let nyquist = samplingRate / 2
+        let frequencies = (1...max(harmonicCount, 1))
+            .map { baseFrequency * Double($0) }
+            .filter { $0 > 0 && $0 < nyquist * 0.98 }
+        guard !frequencies.isEmpty else {
+            progress?(1)
+            return channels
+        }
+
+        return await withTaskGroup(of: (Int, [Float]).self) { group in
+            let boundedWindow = max(windowSeconds, 0.5)
+            let boundedStrength = min(max(strength, 0.1), 1.5)
+            for (index, channel) in channels.enumerated() {
+                group.addTask {
+                    let cleaned = adaptiveLineNoiseChannel(
+                        channel,
+                        samplingRate: samplingRate,
+                        frequencies: frequencies,
+                        windowSeconds: boundedWindow,
+                        strength: boundedStrength
+                    )
+                    return (index, cleaned)
+                }
+            }
+
+            var cleanedChannels = Array(repeating: [Float](), count: channels.count)
+            let total = max(channels.count, 1)
+            let reportEvery = max(1, total / 100)
+            var completed = 0
+            for await (index, cleanedChannel) in group {
+                cleanedChannels[index] = cleanedChannel
+                completed += 1
+                if let progress, completed % reportEvery == 0 || completed == total {
+                    progress(Double(completed) / Double(total))
+                }
+            }
+            return cleanedChannels
         }
     }
 
@@ -195,6 +251,121 @@ struct EEGSignalFilter {
         }
 
         return Array(restored[paddingCount..<(restored.count - paddingCount)])
+    }
+
+    private nonisolated static func adaptiveLineNoiseChannel(
+        _ samples: [Float],
+        samplingRate: Double,
+        frequencies: [Double],
+        windowSeconds: Double,
+        strength: Double
+    ) -> [Float] {
+        guard samples.count > 8 else { return samples }
+        var cleaned = samples
+        for frequency in frequencies {
+            cleaned = subtractAdaptiveSinusoid(
+                from: cleaned,
+                samplingRate: samplingRate,
+                frequency: frequency,
+                windowSeconds: windowSeconds,
+                strength: strength
+            )
+        }
+        return cleaned
+    }
+
+    private nonisolated static func subtractAdaptiveSinusoid(
+        from samples: [Float],
+        samplingRate: Double,
+        frequency: Double,
+        windowSeconds: Double,
+        strength: Double
+    ) -> [Float] {
+        let sampleCount = samples.count
+        let windowSamples = min(
+            max(Int((windowSeconds * samplingRate).rounded()), 32),
+            sampleCount
+        )
+        guard windowSamples >= 16 else { return samples }
+        let stepSamples = max(windowSamples / 2, 1)
+        let taper = hannWindow(count: windowSamples)
+        let omega = 2 * Double.pi * frequency / samplingRate
+        let minimumExplainedFraction = max(0.0002, 0.002 / max(strength, 0.1))
+
+        var correctionSum = [Double](repeating: 0, count: sampleCount)
+        var weightSum = [Double](repeating: 0, count: sampleCount)
+
+        var starts = Array(stride(from: 0, to: max(sampleCount - windowSamples + 1, 1), by: stepSamples))
+        let finalStart = max(sampleCount - windowSamples, 0)
+        if starts.last != finalStart {
+            starts.append(finalStart)
+        }
+
+        for start in starts {
+            let end = min(start + windowSamples, sampleCount)
+            guard end - start >= 16 else { continue }
+            var mean = 0.0
+            for index in start..<end {
+                mean += Double(samples[index])
+            }
+            mean /= Double(end - start)
+
+            var cc = 0.0
+            var ss = 0.0
+            var cs = 0.0
+            var yc = 0.0
+            var ys = 0.0
+            var energy = 0.0
+            for local in 0..<(end - start) {
+                let sampleIndex = start + local
+                let centered = Double(samples[sampleIndex]) - mean
+                let phase = omega * Double(sampleIndex)
+                let cosine = cos(phase)
+                let sine = sin(phase)
+                cc += cosine * cosine
+                ss += sine * sine
+                cs += cosine * sine
+                yc += centered * cosine
+                ys += centered * sine
+                energy += centered * centered
+            }
+
+            let determinant = cc * ss - cs * cs
+            guard determinant > 1e-12, energy > 1e-12 else { continue }
+            let cosineCoefficient = (yc * ss - ys * cs) / determinant
+            let sineCoefficient = (ys * cc - yc * cs) / determinant
+
+            var fittedEnergy = 0.0
+            for local in 0..<(end - start) {
+                let sampleIndex = start + local
+                let phase = omega * Double(sampleIndex)
+                let fitted = cosineCoefficient * cos(phase) + sineCoefficient * sin(phase)
+                fittedEnergy += fitted * fitted
+            }
+            guard fittedEnergy / energy >= minimumExplainedFraction else { continue }
+
+            for local in 0..<(end - start) {
+                let sampleIndex = start + local
+                let phase = omega * Double(sampleIndex)
+                let fitted = cosineCoefficient * cos(phase) + sineCoefficient * sin(phase)
+                let weight = taper[local]
+                correctionSum[sampleIndex] += fitted * weight
+                weightSum[sampleIndex] += weight
+            }
+        }
+
+        var cleaned = samples
+        for index in cleaned.indices where weightSum[index] > 1e-12 {
+            cleaned[index] = Float(Double(samples[index]) - strength * correctionSum[index] / weightSum[index])
+        }
+        return cleaned
+    }
+
+    private nonisolated static func hannWindow(count: Int) -> [Double] {
+        guard count > 1 else { return [1] }
+        return (0..<count).map { index in
+            0.5 - 0.5 * cos(2 * Double.pi * Double(index) / Double(count - 1))
+        }
     }
 
     private nonisolated static func reflectedPadding(for samples: [Float], count: Int) -> [Float] {

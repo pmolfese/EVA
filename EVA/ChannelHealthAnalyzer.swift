@@ -19,6 +19,7 @@
 //  ML ranker, while today's UI already has useful reasons for every score.
 //
 
+import Accelerate
 import Foundation
 
 nonisolated enum ChannelHealthGrade: String, Codable, Sendable {
@@ -107,10 +108,96 @@ nonisolated struct ChannelHealthBaselines: Codable, Sendable {
     }
 }
 
+// MARK: - Spectral outlier detection (HAPPE pop_rejchan 'spec')
+
+nonisolated struct ChannelSpectralConfiguration: Codable, Sendable {
+    /// Low edge of the power band examined, in Hz.
+    var lowFrequencyHz: Double = 1
+    /// High edge of the power band examined, in Hz (clamped to Nyquist).
+    var highFrequencyHz: Double = 100
+    /// Channels with a band-power z-score above this are flagged as noisy.
+    var upperZThreshold: Double = 1.8935
+    /// Channels with a band-power z-score below the negative of this are
+    /// flagged as abnormally quiet. HAPPE keeps this lenient (5.0).
+    var lowerZThreshold: Double = 5
+
+    static let happeStandard = ChannelSpectralConfiguration()
+}
+
+nonisolated struct ChannelSpectralResult: Identifiable, Sendable {
+    var channelIndex: Int
+    var zScore: Double
+    var logBandPower: Double
+    var isOutlier: Bool
+    var score: Double
+
+    var id: Int { channelIndex }
+}
+
+// MARK: - Neighbor-prediction detection (HAPPE clean_rawdata ChannelCriterion)
+
+nonisolated struct ChannelRansacConfiguration: Codable, Sendable {
+    /// Minimum acceptable correlation between a channel and its
+    /// neighbor-based reconstruction. Below this, the channel is flagged.
+    var minimumCorrelation: Double = 0.485
+    /// Number of nearest neighbors used to reconstruct each channel.
+    var neighborCount: Int = 6
+    /// Length, in seconds, of the sliding window over which correlation is
+    /// measured. The median window correlation drives the decision.
+    var windowSeconds: Double = 4
+
+    static let happeStandard = ChannelRansacConfiguration()
+}
+
+nonisolated struct ChannelRansacResult: Identifiable, Sendable {
+    var channelIndex: Int
+    var medianCorrelation: Double
+    var badWindowFraction: Double
+    var neighborCount: Int
+    var isBad: Bool
+    var score: Double
+
+    var id: Int { channelIndex }
+}
+
+// MARK: - Base (core health) metric thresholds
+
+/// Green/red thresholds for the always-on core health metrics. "Green" is the
+/// value scoring 1.0 (fully good); "red" scores 0.0 (fully poor); values in
+/// between interpolate.
+nonisolated struct ChannelBaseMetricSettings: Codable, Sendable {
+    /// Finite-sample fraction (lower bound: higher is better).
+    var finiteGreen: Double = 0.995
+    var finiteRed: Double = 0.90
+    /// p95 amplitude vs. recording median (two-sided ratio: nearer 1x is better).
+    var amplitudeGreen: Double = 2.5
+    var amplitudeRed: Double = 6.0
+    /// Peak vs. median p99 (upper ratio: lower is better).
+    var burstGreen: Double = 8.0
+    var burstRed: Double = 24.0
+    /// Flatline fraction (upper: lower is better).
+    var flatlineGreen: Double = 0.005
+    var flatlineRed: Double = 0.15
+    /// Clipping fraction (upper: lower is better).
+    var clippingGreen: Double = 0.002
+    var clippingRed: Double = 0.08
+    /// Sample-to-sample change vs. typical (upper: lower is better).
+    var fastNoiseGreen: Double = 2.0
+    var fastNoiseRed: Double = 5.0
+    /// Block-mean drift vs. typical (upper: lower is better).
+    var slowDriftGreen: Double = 2.5
+    var slowDriftRed: Double = 6.0
+
+    static let defaults = ChannelBaseMetricSettings()
+}
+
 nonisolated enum ChannelHealthAnalyzer {
     static func analyze(
         signal: MFFSignalData,
         layout: SensorLayout?,
+        base: ChannelBaseMetricSettings = ChannelBaseMetricSettings(),
+        spectral: ChannelSpectralConfiguration? = nil,
+        ransac: ChannelRansacConfiguration? = nil,
         progress: (@Sendable (Double) -> Void)? = nil
     ) -> ChannelHealthAnalysis {
         guard signal.samplingRate > 0,
@@ -142,7 +229,7 @@ nonisolated enum ChannelHealthAnalyzer {
         features.reserveCapacity(summaries.count)
         for summary in summaries {
             let neighborScore = neighborScores[summary.channelIndex]
-            let result = result(for: summary, baselines: baselines, neighborScore: neighborScore)
+            let result = result(for: summary, baselines: baselines, base: base, neighborScore: neighborScore)
             results[summary.channelIndex] = result
             features[summary.channelIndex] = channelFeatures(
                 for: summary,
@@ -150,9 +237,7 @@ nonisolated enum ChannelHealthAnalyzer {
                 neighborScore: neighborScore
             )
         }
-        progress?(1)
-
-        return ChannelHealthAnalysis(
+        var analysis = ChannelHealthAnalysis(
             resultsByChannel: results,
             featuresByChannel: features,
             baselines: baselines,
@@ -160,10 +245,364 @@ nonisolated enum ChannelHealthAnalyzer {
             effectiveSamplingRate: signal.samplingRate / Double(max(sampleStride, 1)),
             analyzedSampleCount: max(sampleCount / max(sampleStride, 1), 1)
         )
+
+        if let spectral {
+            let spectralResults = spectralDetection(signal: signal, configuration: spectral)
+            analysis = addingSpectralMetrics(to: analysis, spectralResults: spectralResults)
+        }
+        if let ransac {
+            let ransacResults = ransacDetection(signal: signal, layout: layout, configuration: ransac)
+            analysis = addingRansacMetrics(to: analysis, ransacResults: ransacResults)
+        }
+        progress?(1)
+
+        return analysis
+    }
+
+    static func addingWaveletMetrics(
+        to analysis: ChannelHealthAnalysis,
+        waveletResults: [Int: WaveletChannelGoodnessResult]
+    ) -> ChannelHealthAnalysis {
+        guard !waveletResults.isEmpty else { return analysis }
+        var analysis = analysis
+        for (channelIndex, wavelet) in waveletResults {
+            guard var result = analysis.resultsByChannel[channelIndex] else { continue }
+            let waveletMetric = metric(
+                name: "Wavelet Burden",
+                score: wavelet.goodnessScore,
+                detail: [
+                    "energy \(formatPercent(wavelet.artifactEnergyFraction))",
+                    "bursts \(formatPercent(wavelet.burstFraction))",
+                    "peak \(formatMicrovolts(Double(wavelet.peakArtifactMagnitude)))",
+                    "L\(wavelet.dominantLevel)"
+                ].joined(separator: ", "),
+                weight: 1.4
+            )
+            let metrics = result.metrics.filter { $0.name != waveletMetric.name } + [waveletMetric]
+            result = recomputedResult(channelIndex: channelIndex, metrics: metrics)
+            analysis.resultsByChannel[channelIndex] = result
+        }
+        return analysis
+    }
+
+    // MARK: - Spectral outlier detection
+
+    /// Computes a band-power z-score per channel (mirroring EEGLAB's
+    /// `pop_rejchan` with `'measure','spec'`): the mean log power over the
+    /// configured frequency band is standardized across channels, and channels
+    /// outside the z-threshold band are flagged.
+    static func spectralDetection(
+        signal: MFFSignalData,
+        configuration: ChannelSpectralConfiguration,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) -> [Int: ChannelSpectralResult] {
+        guard signal.samplingRate > 0,
+              let sampleCount = signal.data.first?.count,
+              sampleCount > 32,
+              !signal.data.isEmpty else {
+            return [:]
+        }
+
+        let nyquist = signal.samplingRate / 2
+        let low = max(configuration.lowFrequencyHz, 0.1)
+        let high = min(configuration.highFrequencyHz, nyquist * 0.95)
+        guard high > low else { return [:] }
+
+        var logPowers: [Int: Double] = [:]
+        logPowers.reserveCapacity(signal.data.count)
+        for (index, channel) in signal.data.enumerated() {
+            if Task.isCancelled { return [:] }
+            let power = welchBandPower(channel, samplingRate: signal.samplingRate, low: low, high: high)
+            if power > 0 {
+                logPowers[index] = log10(power)
+            }
+            progress?(0.9 * Double(index + 1) / Double(max(signal.data.count, 1)))
+        }
+
+        let values = Array(logPowers.values)
+        guard values.count > 2 else { return [:] }
+        let mean = values.reduce(0, +) / Double(values.count)
+        let variance = values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(values.count)
+        let standardDeviation = sqrt(max(variance, 0))
+        guard standardDeviation > 1e-12 else { return [:] }
+
+        var results: [Int: ChannelSpectralResult] = [:]
+        results.reserveCapacity(logPowers.count)
+        let greenZ = configuration.upperZThreshold * 0.6
+        for (channelIndex, logPower) in logPowers {
+            let z = (logPower - mean) / standardDeviation
+            let isOutlier = z > configuration.upperZThreshold || z < -configuration.lowerZThreshold
+            let upperScore = scoreUpperRatio(z, green: greenZ, red: configuration.upperZThreshold)
+            let lowerScore = scoreUpperRatio(-z, green: configuration.lowerZThreshold * 0.6, red: configuration.lowerZThreshold)
+            results[channelIndex] = ChannelSpectralResult(
+                channelIndex: channelIndex,
+                zScore: z,
+                logBandPower: logPower,
+                isOutlier: isOutlier,
+                score: min(upperScore, lowerScore)
+            )
+        }
+        progress?(1)
+        return results
+    }
+
+    static func addingSpectralMetrics(
+        to analysis: ChannelHealthAnalysis,
+        spectralResults: [Int: ChannelSpectralResult]
+    ) -> ChannelHealthAnalysis {
+        guard !spectralResults.isEmpty else { return analysis }
+        var analysis = analysis
+        for (channelIndex, spectral) in spectralResults {
+            guard var result = analysis.resultsByChannel[channelIndex] else { continue }
+            let detail = spectral.isOutlier
+                ? "z \(formatSigned(spectral.zScore)) - spectral power outlier"
+                : "z \(formatSigned(spectral.zScore)) - within typical band"
+            let spectralMetric = metric(
+                name: "Spectral Outlier",
+                score: spectral.score,
+                detail: detail,
+                weight: 1.3
+            )
+            let metrics = result.metrics.filter { $0.name != spectralMetric.name } + [spectralMetric]
+            result = recomputedResult(channelIndex: channelIndex, metrics: metrics)
+            analysis.resultsByChannel[channelIndex] = result
+        }
+        return analysis
+    }
+
+    private static func welchBandPower(
+        _ samples: [Float],
+        samplingRate: Double,
+        low: Double,
+        high: Double
+    ) -> Double {
+        let count = samples.count
+        guard count > 32 else { return 0 }
+
+        // Segment length: a power of two near two seconds, bounded for speed.
+        let target = min(max(Int(samplingRate * 2), 64), 4096)
+        var segment = 16
+        while segment * 2 <= target { segment *= 2 }
+        guard count >= segment,
+              let dft = vDSP.DFT(
+                count: segment,
+                direction: .forward,
+                transformType: .complexComplex,
+                ofType: Float.self
+              ) else {
+            return 0
+        }
+
+        let window = vDSP.window(
+            ofType: Float.self,
+            usingSequence: .hanningDenormalized,
+            count: segment,
+            isHalfWindow: false
+        )
+        let imaginaryInput = [Float](repeating: 0, count: segment)
+        let half = segment / 2
+        var averagePower = [Double](repeating: 0, count: half)
+        var segmentCount = 0
+        let step = max(segment / 2, 1)
+
+        var start = 0
+        while start + segment <= count {
+            var realInput = Array(samples[start..<start + segment])
+            let mean = vDSP.mean(realInput)
+            realInput = vDSP.add(-mean, realInput)
+            realInput = vDSP.multiply(realInput, window)
+
+            var realOutput = [Float](repeating: 0, count: segment)
+            var imaginaryOutput = [Float](repeating: 0, count: segment)
+            dft.transform(
+                inputReal: realInput,
+                inputImaginary: imaginaryInput,
+                outputReal: &realOutput,
+                outputImaginary: &imaginaryOutput
+            )
+            for bin in 0..<half {
+                let re = Double(realOutput[bin])
+                let im = Double(imaginaryOutput[bin])
+                averagePower[bin] += re * re + im * im
+            }
+            segmentCount += 1
+            start += step
+        }
+
+        guard segmentCount > 0 else { return 0 }
+        let binHz = samplingRate / Double(segment)
+        let lowBin = max(Int((low / binHz).rounded(.down)), 1)
+        let highBin = min(Int((high / binHz).rounded(.up)), half - 1)
+        guard highBin >= lowBin else { return 0 }
+
+        var sum = 0.0
+        for bin in lowBin...highBin { sum += averagePower[bin] }
+        return sum / Double((highBin - lowBin + 1) * segmentCount)
+    }
+
+    // MARK: - Neighbor-prediction (RANSAC-style) detection
+
+    /// Reconstructs each channel from an inverse-distance-weighted blend of its
+    /// nearest neighbors and measures the median sliding-window correlation
+    /// between the channel and its reconstruction. This is the spirit of
+    /// EEGLAB clean_rawdata's `ChannelCriterion` (predictability from
+    /// neighbors), using a deterministic neighbor blend in place of the random
+    /// spherical-spline RANSAC sampling.
+    static func ransacDetection(
+        signal: MFFSignalData,
+        layout: SensorLayout?,
+        configuration: ChannelRansacConfiguration,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) -> [Int: ChannelRansacResult] {
+        guard let layout,
+              signal.samplingRate > 0,
+              let sampleCount = signal.data.first?.count,
+              sampleCount > 32 else {
+            return [:]
+        }
+
+        let stride = analysisStride(sampleCount: sampleCount, samplingRate: signal.samplingRate)
+        let effectiveRate = signal.samplingRate / Double(max(stride, 1))
+        var seriesByChannel: [Int: [Double]] = [:]
+        seriesByChannel.reserveCapacity(signal.data.count)
+        for index in signal.data.indices {
+            seriesByChannel[index] = downsampledSeries(signal.data[index], stride: stride)
+        }
+
+        let positions = layout.positions.filter { seriesByChannel[$0.channelIndex] != nil }
+        let windowSamples = max(Int((configuration.windowSeconds * effectiveRate).rounded()), 16)
+        let neighborCount = max(configuration.neighborCount, 1)
+
+        var results: [Int: ChannelRansacResult] = [:]
+        results.reserveCapacity(positions.count)
+        for (offset, position) in positions.enumerated() {
+            if Task.isCancelled { return results }
+            guard let actual = seriesByChannel[position.channelIndex] else { continue }
+
+            let neighbors = positions
+                .filter { $0.channelIndex != position.channelIndex }
+                .sorted { squaredDistance($0, position) < squaredDistance($1, position) }
+                .prefix(neighborCount)
+
+            let weightedNeighbors = neighbors.compactMap { neighbor -> (series: [Double], weight: Double)? in
+                guard let series = seriesByChannel[neighbor.channelIndex] else { return nil }
+                let distance = sqrt(squaredDistance(neighbor, position))
+                return (series, 1.0 / max(distance, 1e-6))
+            }
+            guard !weightedNeighbors.isEmpty else { continue }
+
+            let predicted = reconstruct(from: weightedNeighbors, length: actual.count)
+            let correlations = windowedCorrelations(
+                actual,
+                predicted,
+                windowSamples: windowSamples
+            )
+            guard !correlations.isEmpty else { continue }
+
+            let medianCorrelation = median(correlations.map { max($0, 0) })
+            let badWindows = correlations.filter { $0 < configuration.minimumCorrelation }.count
+            let badFraction = Double(badWindows) / Double(correlations.count)
+            results[position.channelIndex] = ChannelRansacResult(
+                channelIndex: position.channelIndex,
+                medianCorrelation: medianCorrelation,
+                badWindowFraction: badFraction,
+                neighborCount: weightedNeighbors.count,
+                isBad: medianCorrelation < configuration.minimumCorrelation,
+                score: scoreLowerBound(
+                    medianCorrelation,
+                    green: min(configuration.minimumCorrelation + 0.2, 0.95),
+                    red: configuration.minimumCorrelation
+                )
+            )
+            progress?(Double(offset + 1) / Double(max(positions.count, 1)))
+        }
+        return results
+    }
+
+    static func addingRansacMetrics(
+        to analysis: ChannelHealthAnalysis,
+        ransacResults: [Int: ChannelRansacResult]
+    ) -> ChannelHealthAnalysis {
+        guard !ransacResults.isEmpty else { return analysis }
+        var analysis = analysis
+        for (channelIndex, ransac) in ransacResults {
+            guard var result = analysis.resultsByChannel[channelIndex] else { continue }
+            let ransacMetric = metric(
+                name: "Neighbor Prediction",
+                score: ransac.score,
+                detail: "median r \(String(format: "%.2f", ransac.medianCorrelation)), \(formatPercent(ransac.badWindowFraction)) bad windows",
+                weight: 1.4
+            )
+            let metrics = result.metrics.filter { $0.name != ransacMetric.name } + [ransacMetric]
+            result = recomputedResult(channelIndex: channelIndex, metrics: metrics)
+            analysis.resultsByChannel[channelIndex] = result
+        }
+        return analysis
+    }
+
+    private static func downsampledSeries(_ channel: [Float], stride: Int) -> [Double] {
+        guard !channel.isEmpty else { return [] }
+        var values: [Double] = []
+        values.reserveCapacity(channel.count / max(stride, 1) + 1)
+        var previous = 0.0
+        for sample in Swift.stride(from: 0, to: channel.count, by: max(stride, 1)) {
+            let value = Double(channel[sample])
+            if value.isFinite {
+                previous = value
+                values.append(value)
+            } else {
+                values.append(previous)
+            }
+        }
+        return values
+    }
+
+    private static func reconstruct(
+        from weightedNeighbors: [(series: [Double], weight: Double)],
+        length: Int
+    ) -> [Double] {
+        guard length > 0 else { return [] }
+        var predicted = [Double](repeating: 0, count: length)
+        var totalWeight = 0.0
+        for neighbor in weightedNeighbors {
+            totalWeight += neighbor.weight
+            let count = min(length, neighbor.series.count)
+            for index in 0..<count {
+                predicted[index] += neighbor.series[index] * neighbor.weight
+            }
+        }
+        guard totalWeight > 1e-12 else { return predicted }
+        for index in predicted.indices {
+            predicted[index] /= totalWeight
+        }
+        return predicted
+    }
+
+    private static func windowedCorrelations(
+        _ lhs: [Double],
+        _ rhs: [Double],
+        windowSamples: Int
+    ) -> [Double] {
+        let count = min(lhs.count, rhs.count)
+        guard count >= windowSamples, windowSamples >= 8 else {
+            return count > 8 ? [correlation(lhs, rhs)] : []
+        }
+        var values: [Double] = []
+        values.reserveCapacity(count / windowSamples + 1)
+        for start in Swift.stride(from: 0, to: count - windowSamples + 1, by: windowSamples) {
+            let end = start + windowSamples
+            values.append(correlation(Array(lhs[start..<end]), Array(rhs[start..<end])))
+        }
+        return values
+    }
+
+    private static func formatSigned(_ value: Double) -> String {
+        guard value.isFinite else { return "nan" }
+        return String(format: "%+.2f", value)
     }
 
     private static func analysisStride(sampleCount: Int, samplingRate: Double) -> Int {
-        let targetRateStride = max(Int((samplingRate / 250.0).rounded()), 1)
+        let targetRateStride = Downsampler.factor(sourceRate: samplingRate, targetRate: 250)
         let sampleBudgetStride = max(Int((Double(sampleCount) / 30_000.0).rounded(.up)), 1)
         return max(targetRateStride, sampleBudgetStride)
     }
@@ -260,13 +699,14 @@ nonisolated enum ChannelHealthAnalyzer {
     private static func result(
         for summary: ChannelSummary,
         baselines: ChannelHealthBaselines,
+        base: ChannelBaseMetricSettings,
         neighborScore: Double?
     ) -> ChannelHealthResult {
         var metrics: [ChannelHealthMetric] = []
 
         metrics.append(metric(
             name: "Finite Samples",
-            score: scoreLowerBound(summary.finiteFraction, green: 0.995, red: 0.90),
+            score: scoreLowerBound(summary.finiteFraction, green: base.finiteGreen, red: base.finiteRed),
             detail: "\(formatPercent(summary.finiteFraction)) finite samples",
             weight: 1.4
         ))
@@ -282,7 +722,7 @@ nonisolated enum ChannelHealthAnalyzer {
             let ratio = summary.p95Abs / baselines.medianP95AbsMicrovolts
             metrics.append(metric(
                 name: "Signal Amplitude",
-                score: scoreTwoSidedRatio(ratio, green: 2.5, red: 6.0),
+                score: scoreTwoSidedRatio(ratio, green: base.amplitudeGreen, red: base.amplitudeRed),
                 detail: "p95 \(formatMicrovolts(summary.p95Abs)), \(formatRatio(ratio)) typical",
                 weight: 1.4
             ))
@@ -291,27 +731,30 @@ nonisolated enum ChannelHealthAnalyzer {
         let burstRatio = summary.maxAbs / max(baselines.medianP99AbsMicrovolts, 1e-9)
         metrics.append(metric(
             name: "Burst Peaks",
-            score: scoreUpperRatio(burstRatio, green: 8.0, red: 24.0),
+            score: scoreUpperRatio(burstRatio, green: base.burstGreen, red: base.burstRed),
             detail: "max \(formatMicrovolts(summary.maxAbs)), \(formatRatio(burstRatio)) median p99",
             weight: 1.0
         ))
 
-        let dropoutScore = min(
-            scoreUpperFraction(summary.flatlineFraction, green: 0.005, red: 0.15),
-            scoreUpperFraction(summary.clippingFraction, green: 0.002, red: 0.08)
-        )
         metrics.append(metric(
-            name: "Flatline / Clipping",
-            score: dropoutScore,
-            detail: "\(formatPercent(summary.flatlineFraction)) flat, \(formatPercent(summary.clippingFraction)) clipped",
+            name: "Flatline",
+            score: scoreUpperFraction(summary.flatlineFraction, green: base.flatlineGreen, red: base.flatlineRed),
+            detail: "\(formatPercent(summary.flatlineFraction)) near-zero / no-change samples",
             weight: 1.3
+        ))
+
+        metrics.append(metric(
+            name: "Clipping",
+            score: scoreUpperFraction(summary.clippingFraction, green: base.clippingGreen, red: base.clippingRed),
+            detail: "\(formatPercent(summary.clippingFraction)) samples pinned at rail",
+            weight: 1.1
         ))
 
         let derivativeRatio = summary.differenceRMS / max(summary.rms, 1e-9)
         let derivativeTypicality = derivativeRatio / baselines.medianDerivativeRatio
         metrics.append(metric(
             name: "Fast Noise",
-            score: scoreUpperRatio(derivativeTypicality, green: 2.0, red: 5.0),
+            score: scoreUpperRatio(derivativeTypicality, green: base.fastNoiseGreen, red: base.fastNoiseRed),
             detail: "sample-to-sample change \(formatRatio(derivativeTypicality)) typical",
             weight: 1.0
         ))
@@ -320,7 +763,7 @@ nonisolated enum ChannelHealthAnalyzer {
         let driftTypicality = driftRatio / baselines.medianDriftRatio
         metrics.append(metric(
             name: "Slow Drift",
-            score: scoreUpperRatio(driftTypicality, green: 2.5, red: 6.0),
+            score: scoreUpperRatio(driftTypicality, green: base.slowDriftGreen, red: base.slowDriftRed),
             detail: "block-mean drift \(formatRatio(driftTypicality)) typical",
             weight: 0.8
         ))
@@ -335,14 +778,10 @@ nonisolated enum ChannelHealthAnalyzer {
             ))
         }
 
-        if let neighborScore {
-            metrics.append(metric(
-                name: "Neighbor Agreement",
-                score: scoreLowerBound(neighborScore, green: 0.45, red: 0.15),
-                detail: "best nearby correlation \(String(format: "%.2f", neighborScore))",
-                weight: 1.2
-            ))
-        }
+        // Neighbor Agreement is intentionally not emitted as a scored metric:
+        // the stronger Neighbor Prediction (RANSAC) metric supersedes it. The
+        // value is still retained in features for the ML ranker.
+        _ = neighborScore
 
         let weightedTotal = metrics.reduce(0) { $0 + $1.score * $1.weight }
         let weightTotal = metrics.reduce(0) { $0 + $1.weight }
@@ -364,6 +803,30 @@ nonisolated enum ChannelHealthAnalyzer {
             grade: grade,
             summary: summaryText,
             metrics: metrics.sorted { $0.score < $1.score }
+        )
+    }
+
+    private static func recomputedResult(channelIndex: Int, metrics: [ChannelHealthMetric]) -> ChannelHealthResult {
+        let sortedMetrics = metrics.sorted { $0.score < $1.score }
+        let weightedTotal = sortedMetrics.reduce(0) { $0 + $1.score * $1.weight }
+        let weightTotal = sortedMetrics.reduce(0) { $0 + $1.weight }
+        let goodFraction = weightTotal > 0 ? weightedTotal / weightTotal : 0
+        let percentage = Int((min(max(goodFraction, 0), 1) * 100).rounded())
+        let grade = grade(for: goodFraction)
+        let weakMetrics = sortedMetrics
+            .filter { $0.score < 0.78 }
+            .prefix(2)
+            .map(\.name)
+        let summaryText = weakMetrics.isEmpty
+            ? "Metrics look typical for this recording."
+            : "\(weakMetrics.joined(separator: " and ")) need review."
+
+        return ChannelHealthResult(
+            channelIndex: channelIndex,
+            goodPercentage: percentage,
+            grade: grade,
+            summary: summaryText,
+            metrics: sortedMetrics
         )
     }
 

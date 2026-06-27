@@ -172,9 +172,9 @@ nonisolated enum ICAArtifactDetector {
         }
 
         progress?(0.02)
-        let decimation = max(Int((signal.samplingRate / max(configuration.downsampleRate, 1)).rounded()), 1)
-        let analysisSamplingRate = signal.samplingRate / Double(decimation)
-        let downsampled = signal.data.map { downsample($0, by: decimation).map(Double.init) }
+        let decimation = Downsampler.factor(sourceRate: signal.samplingRate, targetRate: configuration.downsampleRate)
+        let analysisSamplingRate = Downsampler.effectiveRate(sourceRate: signal.samplingRate, factor: decimation)
+        let downsampled = signal.data.map { Downsampler.strided($0, by: decimation).map(Double.init) }
         let prepared = configuration.averageReference ? averageReferenced(downsampled) : downsampled
         guard let sampleCount = prepared.first?.count, sampleCount > 2 else {
             throw ICAError.emptySignal
@@ -421,11 +421,6 @@ enum ICAError: LocalizedError {
             return "ICA produced a singular matrix."
         }
     }
-}
-
-nonisolated private func downsample(_ samples: [Float], by decimation: Int) -> [Float] {
-    guard decimation > 1 else { return samples }
-    return stride(from: 0, to: samples.count, by: decimation).map { samples[$0] }
 }
 
 nonisolated private func averageReferenced(_ data: [[Double]]) -> [[Double]] {
