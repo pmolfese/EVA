@@ -4173,11 +4173,8 @@ struct WaveformView: View {
         waveletReductionStatusMessage = "Running wavelet reduction…"
         waveletReductionBandVarianceRetained = nil
 
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                waveletReductionProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            waveletReductionProgress = min(max(fraction, 0), 1)
         }
 
         Task { @MainActor in
@@ -4283,11 +4280,8 @@ struct WaveformView: View {
         artifactCleaningStatusMessage = nil
         artifactCleaningProgress = nil
         let badChannels = channels.bad
-        let (progressStream, progressContinuation) = AsyncStream<ArtifactCleaningProgress>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await progress in progressStream {
-                artifactCleaningProgress = progress
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { progress in
+            artifactCleaningProgress = progress
         }
 
         Task {
@@ -4886,12 +4880,9 @@ struct WaveformView: View {
             minimumIterations: min(max(icaMinimumIterations, 0), max(icaMaxIterations, 1))
         )
 
-        let (progressStream, progressContinuation) = AsyncStream<ICAProgressUpdate>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await update in progressStream {
-                icaProgress = min(max(update.fraction, 0), 1)
-                icaProgressMessage = update.message
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { (update: ICAProgressUpdate) in
+            icaProgress = min(max(update.fraction, 0), 1)
+            icaProgressMessage = update.message
         }
 
         Task {
@@ -6335,11 +6326,8 @@ struct WaveformView: View {
         }
 
         // Stream per-channel completion fractions to the UI.
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                filterProgress = fraction
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            filterProgress = fraction
         }
 
         Task {
@@ -6442,11 +6430,8 @@ struct WaveformView: View {
         let sourceData = signal.data
 
         // Stream completion fractions from the worker threads to the UI.
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                mriProgress = fraction
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            mriProgress = fraction
         }
 
         Task {
@@ -6711,11 +6696,8 @@ struct WaveformView: View {
         channels.healthProgress = 0
         channelHealthStatusMessage = "Running wavelet channel goodness..."
 
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                channels.healthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            channels.healthProgress = min(max(fraction, 0), 1)
         }
 
         channelHealthTask = Task { @MainActor in
@@ -6809,11 +6791,8 @@ struct WaveformView: View {
         let baseConfig = goodnessSettings.base
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                channels.healthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            channels.healthProgress = min(max(fraction, 0), 1)
         }
 
         channelHealthTask = Task { @MainActor in
@@ -6889,11 +6868,8 @@ struct WaveformView: View {
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
 
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                channels.healthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            channels.healthProgress = min(max(fraction, 0), 1)
         }
 
         channelHealthTask = Task { @MainActor in
@@ -7194,11 +7170,8 @@ struct WaveformView: View {
         let excludedChannels = channels.bad
         let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
         let sourceSignal = signal
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                segmentHealthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            segmentHealthProgress = min(max(fraction, 0), 1)
         }
 
         segmentHealthTask = Task { @MainActor in
@@ -7297,11 +7270,8 @@ struct WaveformView: View {
         let excludedChannels = channels.bad
         let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
 
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                segmentHealthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            segmentHealthProgress = min(max(fraction, 0), 1)
         }
 
         segmentHealthTask = Task { @MainActor in
@@ -7933,22 +7903,12 @@ private struct ICADebugSignalStats {
             sampledValueCount: count,
             mean: sum / Double(count),
             rms: sqrt(sumSquares / Double(count)),
-            p50Abs: percentile(sampledAbsValues, fraction: 0.50),
-            p95Abs: percentile(sampledAbsValues, fraction: 0.95),
-            p99Abs: percentile(sampledAbsValues, fraction: 0.99),
+            p50Abs: SignalStatistics.percentile(sampledAbsValues, fraction: 0.50),
+            p95Abs: SignalStatistics.percentile(sampledAbsValues, fraction: 0.95),
+            p99Abs: SignalStatistics.percentile(sampledAbsValues, fraction: 0.99),
             maxAbs: maxAbs,
             maxAbsChannel: maxAbsChannel
         )
-    }
-
-    private static func percentile(_ sortedValues: [Double], fraction: Double) -> Double {
-        guard let first = sortedValues.first else { return 0 }
-        guard sortedValues.count > 1 else { return first }
-        let position = min(max(fraction, 0), 1) * Double(sortedValues.count - 1)
-        let lower = Int(position.rounded(.down))
-        let upper = min(lower + 1, sortedValues.count - 1)
-        let weight = position - Double(lower)
-        return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight
     }
 
     private static func format(_ value: Double) -> String {
@@ -8744,21 +8704,6 @@ private struct EventSummary: Identifiable {
     var id: String { code }
 }
 
-nonisolated struct EpochSegment: Identifiable, Sendable {
-    let startSample: Int
-    let endSample: Int
-    let stimulusOffsetSamples: Int
-    let category: String
-    let sourceCode: String
-    let sourceTimeSeconds: Double
-    let colorIndex: Int
-    let contributingEpochCount: Int
-
-    var id: String {
-        "\(startSample)-\(endSample)-\(category)-\(sourceCode)-\(sourceTimeSeconds)-\(contributingEpochCount)"
-    }
-}
-
 private struct EpochCategorySummary: Identifiable {
     let category: String
     let count: Int
@@ -8824,11 +8769,9 @@ private struct ArtifactTemplateFieldLabel: View {
     }
 }
 
-private struct ArtifactCleaningPreviewButton: View {
-    let artifact: DefinedArtifact
-    let beforeSignal: MFFSignalData
-    let afterSignal: MFFSignalData?
-    let layout: SensorLayout?
+private struct HoverPinnedPreviewButton<PreviewContent: View>: View {
+    let helpText: String
+    @ViewBuilder var previewContent: () -> PreviewContent
 
     @State private var showsPreview = false
     @State private var isPreviewPinned = false
@@ -8861,22 +8804,17 @@ private struct ArtifactCleaningPreviewButton: View {
                 .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
-        .help("Preview artifact cleanup")
+        .help(helpText)
         .onHover { hovering in
             isButtonHovered = hovering
             schedulePreviewVisibility()
         }
         .popover(isPresented: previewPresentation, arrowEdge: .trailing) {
-            ArtifactCleaningPreview(
-                artifact: artifact,
-                beforeSignal: beforeSignal,
-                afterSignal: afterSignal,
-                layout: layout
-            )
-            .onHover { hovering in
-                isPopoverHovered = hovering
-                schedulePreviewVisibility()
-            }
+            previewContent()
+                .onHover { hovering in
+                    isPopoverHovered = hovering
+                    schedulePreviewVisibility()
+                }
         }
         .onDisappear {
             hoverTask?.cancel()
@@ -8896,72 +8834,36 @@ private struct ArtifactCleaningPreviewButton: View {
     }
 }
 
+private struct ArtifactCleaningPreviewButton: View {
+    let artifact: DefinedArtifact
+    let beforeSignal: MFFSignalData
+    let afterSignal: MFFSignalData?
+    let layout: SensorLayout?
+
+    var body: some View {
+        HoverPinnedPreviewButton(helpText: "Preview artifact cleanup") {
+            ArtifactCleaningPreview(
+                artifact: artifact,
+                beforeSignal: beforeSignal,
+                afterSignal: afterSignal,
+                layout: layout
+            )
+        }
+    }
+}
+
 private struct WaveletCleaningPreviewButton: View {
     let candidate: WaveletArtifactCandidate
     let signal: MFFSignalData
     let configuration: WaveletCleaningConfiguration
 
-    @State private var showsPreview = false
-    @State private var isPreviewPinned = false
-    @State private var isButtonHovered = false
-    @State private var isPopoverHovered = false
-    @State private var hoverTask: Task<Void, Never>?
-
-    private var previewPresentation: Binding<Bool> {
-        Binding {
-            showsPreview
-        } set: { isPresented in
-            showsPreview = isPresented
-            if !isPresented {
-                isPreviewPinned = false
-                isPopoverHovered = false
-            }
-        }
-    }
-
     var body: some View {
-        Button {
-            isPreviewPinned.toggle()
-            showsPreview = isPreviewPinned
-            if !showsPreview {
-                hoverTask?.cancel()
-            }
-        } label: {
-            Image(systemName: "eye")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .help("Preview wavelet cleanup")
-        .onHover { hovering in
-            isButtonHovered = hovering
-            schedulePreviewVisibility()
-        }
-        .popover(isPresented: previewPresentation, arrowEdge: .trailing) {
+        HoverPinnedPreviewButton(helpText: "Preview wavelet cleanup") {
             WaveletCleaningPreview(
                 candidate: candidate,
                 signal: signal,
                 configuration: configuration
             )
-            .onHover { hovering in
-                isPopoverHovered = hovering
-                schedulePreviewVisibility()
-            }
-        }
-        .onDisappear {
-            hoverTask?.cancel()
-        }
-    }
-
-    private func schedulePreviewVisibility() {
-        hoverTask?.cancel()
-        guard !isPreviewPinned else { return }
-        let shouldShow = isButtonHovered || isPopoverHovered
-        let delay: UInt64 = shouldShow ? 80_000_000 : 220_000_000
-        hoverTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: delay)
-            guard !Task.isCancelled else { return }
-            showsPreview = isButtonHovered || isPopoverHovered
         }
     }
 }
@@ -10753,26 +10655,11 @@ private struct ICATimeCoursePlot: View {
         }
 
         scaledValues.sort()
-        let low = percentile(sortedValues: scaledValues, fraction: 0.02)
-        let high = percentile(sortedValues: scaledValues, fraction: 0.98)
-        let center = percentile(sortedValues: scaledValues, fraction: 0.50)
+        let low = SignalStatistics.percentile(scaledValues, fraction: 0.02)
+        let high = SignalStatistics.percentile(scaledValues, fraction: 0.98)
+        let center = SignalStatistics.percentile(scaledValues, fraction: 0.50)
         let amplitude = max(abs(high - center), abs(low - center), 1e-9)
         return (center, amplitude)
-    }
-
-    private func percentile(sortedValues: [Double], fraction: Double) -> Double {
-        guard let first = sortedValues.first else {
-            return 0
-        }
-        guard sortedValues.count > 1 else {
-            return first
-        }
-
-        let position = min(max(fraction, 0), 1) * Double(sortedValues.count - 1)
-        let lowerIndex = Int(position.rounded(.down))
-        let upperIndex = min(lowerIndex + 1, sortedValues.count - 1)
-        let weight = position - Double(lowerIndex)
-        return sortedValues[lowerIndex] * (1 - weight) + sortedValues[upperIndex] * weight
     }
 
     private func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {

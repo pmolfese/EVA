@@ -224,7 +224,7 @@ nonisolated enum ICAComponentAutoLabeler {
                 }
             }
         }
-        guard let coefficients = solveLinearSystem(ata, atv) else { return 0 }
+        guard let coefficients = LinearAlgebra.solveLinearSystem(ata, atv) else { return 0 }
 
         let mean = values.reduce(0, +) / Double(count)
         var residual = 0.0
@@ -237,30 +237,6 @@ nonisolated enum ICAComponentAutoLabeler {
         }
         guard totalVariance > 1e-12 else { return 0 }
         return clamp01(1 - residual / totalVariance)
-    }
-
-    private static func solveLinearSystem(_ matrix: [[Double]], _ rhs: [Double]) -> [Double]? {
-        let n = rhs.count
-        var a = matrix
-        var b = rhs
-        for column in 0..<n {
-            var pivot = column
-            var pivotValue = abs(a[column][column])
-            for row in (column + 1)..<n where abs(a[row][column]) > pivotValue {
-                pivot = row
-                pivotValue = abs(a[row][column])
-            }
-            if pivotValue < 1e-12 { return nil }
-            if pivot != column { a.swapAt(pivot, column); b.swapAt(pivot, column) }
-            let diagonal = a[column][column]
-            for row in 0..<n where row != column {
-                let factor = a[row][column] / diagonal
-                if factor == 0 { continue }
-                for c in column..<n { a[row][c] -= factor * a[column][c] }
-                b[row] -= factor * b[column]
-            }
-        }
-        return (0..<n).map { b[$0] / a[$0][$0] }
     }
 
     private static func timeFeatures(source: [Double], samplingRate: Double) -> TimeFeatures {

@@ -54,14 +54,9 @@ struct SensorLayout: Sendable {
             return nil
         }
 
-        let parser = XMLParser(data: data)
-        let delegate = SensorLayoutParserDelegate()
-        parser.delegate = delegate
-        guard parser.parse() else {
-            return nil
-        }
+        guard let parsed = EGISensorXMLParser.parse(data: data, requiresZ: false) else { return nil }
 
-        let eegSensors = delegate.sensors.filter { $0.type == 0 }
+        let eegSensors = parsed.sensors.filter { $0.type == 0 }
         guard !eegSensors.isEmpty else {
             return nil
         }
@@ -86,93 +81,6 @@ struct SensorLayout: Sendable {
         }
         .sorted { $0.channelIndex < $1.channelIndex }
 
-        return SensorLayout(name: delegate.layoutName, positions: positions)
-    }
-}
-
-private struct RawSensor {
-    var number: Int
-    var type: Int
-    var x: Double
-    var y: Double
-}
-
-private nonisolated final class SensorLayoutParserDelegate: NSObject, XMLParserDelegate {
-    private(set) var sensors: [RawSensor] = []
-    private(set) var layoutName = ""
-
-    private var currentElement = ""
-    private var insideSensor = false
-    private var insideTopName = false
-    private var text = ""
-
-    private var pendingNumber: Int?
-    private var pendingType: Int?
-    private var pendingX: Double?
-    private var pendingY: Double?
-
-    func parser(
-        _ parser: XMLParser,
-        didStartElement elementName: String,
-        namespaceURI: String?,
-        qualifiedName qName: String?,
-        attributes attributeDict: [String: String] = [:]
-    ) {
-        currentElement = elementName
-        text = ""
-
-        switch elementName {
-        case "sensor":
-            insideSensor = true
-            pendingNumber = nil
-            pendingType = nil
-            pendingX = nil
-            pendingY = nil
-        case "name" where !insideSensor:
-            insideTopName = true
-        default:
-            break
-        }
-    }
-
-    func parser(_ parser: XMLParser, foundCharacters string: String) {
-        text += string
-    }
-
-    func parser(
-        _ parser: XMLParser,
-        didEndElement elementName: String,
-        namespaceURI: String?,
-        qualifiedName qName: String?
-    ) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        switch elementName {
-        case "number":
-            pendingNumber = Int(trimmed)
-        case "type":
-            pendingType = Int(trimmed)
-        case "x":
-            pendingX = Double(trimmed)
-        case "y":
-            pendingY = Double(trimmed)
-        case "name" where insideTopName:
-            if layoutName.isEmpty {
-                layoutName = trimmed
-            }
-            insideTopName = false
-        case "sensor":
-            if let number = pendingNumber,
-               let type = pendingType,
-               let x = pendingX,
-               let y = pendingY {
-                sensors.append(RawSensor(number: number, type: type, x: x, y: y))
-            }
-            insideSensor = false
-        default:
-            break
-        }
-
-        text = ""
+        return SensorLayout(name: parsed.layoutName, positions: positions)
     }
 }

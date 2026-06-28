@@ -313,11 +313,11 @@ nonisolated enum SegmentHealthAnalyzer {
         let derivativeRatio = derivativeRMS / max(rms, 1e-9)
 
         return SegmentHealthBaselines(
-            p95AbsMicrovolts: max(percentile(absValues, fraction: 0.95), 1e-9),
-            p99AbsMicrovolts: max(percentile(absValues, fraction: 0.99), 1e-9),
-            gfpMedianMicrovolts: max(percentile(gfpValues, fraction: 0.50), 1e-9),
-            gfpP95Microvolts: max(percentile(gfpValues, fraction: 0.95), 1e-9),
-            gfpP99Microvolts: max(percentile(gfpValues, fraction: 0.99), 1e-9),
+            p95AbsMicrovolts: max(SignalStatistics.percentile(absValues, fraction: 0.95), 1e-9),
+            p99AbsMicrovolts: max(SignalStatistics.percentile(absValues, fraction: 0.99), 1e-9),
+            gfpMedianMicrovolts: max(SignalStatistics.percentile(gfpValues, fraction: 0.50), 1e-9),
+            gfpP95Microvolts: max(SignalStatistics.percentile(gfpValues, fraction: 0.95), 1e-9),
+            gfpP99Microvolts: max(SignalStatistics.percentile(gfpValues, fraction: 0.99), 1e-9),
             derivativeRatio: max(derivativeRatio, 1e-9)
         )
     }
@@ -420,7 +420,7 @@ nonisolated enum SegmentHealthAnalyzer {
 
         absValues.sort()
         let maxAbs = absValues.last ?? 0
-        let clippingFraction = clippingFraction(absValues: absValues, maxAbs: maxAbs)
+        let clippingFraction = HealthScoring.clippingFraction(absValues: absValues, maxAbs: maxAbs)
         gfpValues.sort()
 
         var driftValues: [Double] = []
@@ -443,17 +443,17 @@ nonisolated enum SegmentHealthAnalyzer {
             sampleCount: segmentSampleCount,
             analyzedTimePointCount: gfpValues.count,
             rms: rms,
-            p95Abs: percentile(absValues, fraction: 0.95),
-            p99Abs: percentile(absValues, fraction: 0.99),
+            p95Abs: SignalStatistics.percentile(absValues, fraction: 0.95),
+            p99Abs: SignalStatistics.percentile(absValues, fraction: 0.99),
             maxAbs: maxAbs,
-            gfpMedian: percentile(gfpValues, fraction: 0.50),
-            gfpP95: percentile(gfpValues, fraction: 0.95),
+            gfpMedian: SignalStatistics.percentile(gfpValues, fraction: 0.50),
+            gfpP95: SignalStatistics.percentile(gfpValues, fraction: 0.95),
             gfpMax: gfpValues.last ?? 0,
             derivativeRMS: derivativeRMS,
             derivativeRatio: derivativeRatio,
             flatlineFraction: differenceCount > 0 ? Double(flatlineCount) / Double(differenceCount) : 1,
             clippingFraction: clippingFraction,
-            driftRMS: rootMeanSquare(driftValues),
+            driftRMS: SignalStatistics.rootMeanSquare(driftValues),
             artifactOverlapFraction: segmentSampleCount > 0
                 ? Double(min(artifactOverlap.samples, segmentSampleCount)) / Double(segmentSampleCount)
                 : 0,
@@ -472,82 +472,82 @@ nonisolated enum SegmentHealthAnalyzer {
 
         metrics.append(metric(
             name: "Finite Samples",
-            score: scoreLowerBound(summary.finiteFraction, green: 0.995, red: 0.92),
-            detail: "\(formatPercent(summary.finiteFraction)) finite values",
+            score: HealthScoring.scoreLowerBound(summary.finiteFraction, green: 0.995, red: 0.92),
+            detail: "\(HealthScoring.formatPercent(summary.finiteFraction)) finite values",
             weight: 1.2
         ))
 
         metrics.append(metric(
             name: "Channel Coverage",
-            score: scoreLowerBound(summary.includedChannelFraction, green: 0.80, red: 0.45),
+            score: HealthScoring.scoreLowerBound(summary.includedChannelFraction, green: 0.80, red: 0.45),
             detail: "\(summary.includedChannelCount) of \(signal.numberOfChannels) channels scored",
             weight: 0.6
         ))
 
         metrics.append(metric(
             name: "Global Field Power",
-            score: scoreUpperRatio(features.gfpTypicality, green: 2.0, red: 5.0),
-            detail: "GFP p95 \(formatMicrovolts(summary.gfpP95)), \(formatRatio(features.gfpTypicality)) typical",
+            score: HealthScoring.scoreUpperRatio(features.gfpTypicality, green: 2.0, red: 5.0),
+            detail: "GFP p95 \(HealthScoring.formatMicrovolts(summary.gfpP95)), \(HealthScoring.formatRatio(features.gfpTypicality)) typical",
             weight: 1.5
         ))
 
         metrics.append(metric(
             name: "Segment Amplitude",
-            score: scoreUpperRatio(features.amplitudeTypicality, green: 3.0, red: 8.0),
-            detail: "p95 \(formatMicrovolts(summary.p95Abs)), \(formatRatio(features.amplitudeTypicality)) typical",
+            score: HealthScoring.scoreUpperRatio(features.amplitudeTypicality, green: 3.0, red: 8.0),
+            detail: "p95 \(HealthScoring.formatMicrovolts(summary.p95Abs)), \(HealthScoring.formatRatio(features.amplitudeTypicality)) typical",
             weight: 1.2
         ))
 
         metrics.append(metric(
             name: "Burst Peaks",
-            score: scoreUpperRatio(features.burstTypicality, green: 8.0, red: 24.0),
-            detail: "max \(formatMicrovolts(summary.maxAbs)), \(formatRatio(features.burstTypicality)) median p99",
+            score: HealthScoring.scoreUpperRatio(features.burstTypicality, green: 8.0, red: 24.0),
+            detail: "max \(HealthScoring.formatMicrovolts(summary.maxAbs)), \(HealthScoring.formatRatio(features.burstTypicality)) median p99",
             weight: 1.0
         ))
 
         metrics.append(metric(
             name: "GFP Bursts",
-            score: scoreUpperRatio(features.gfpBurstTypicality, green: 6.0, red: 18.0),
-            detail: "max GFP \(formatMicrovolts(summary.gfpMax)), \(formatRatio(features.gfpBurstTypicality)) typical",
+            score: HealthScoring.scoreUpperRatio(features.gfpBurstTypicality, green: 6.0, red: 18.0),
+            detail: "max GFP \(HealthScoring.formatMicrovolts(summary.gfpMax)), \(HealthScoring.formatRatio(features.gfpBurstTypicality)) typical",
             weight: 1.0
         ))
 
         let dropoutScore = min(
-            scoreUpperFraction(summary.flatlineFraction, green: 0.01, red: 0.20),
-            scoreUpperFraction(summary.clippingFraction, green: 0.002, red: 0.08)
+            HealthScoring.scoreUpperFraction(summary.flatlineFraction, green: 0.01, red: 0.20),
+            HealthScoring.scoreUpperFraction(summary.clippingFraction, green: 0.002, red: 0.08)
         )
         metrics.append(metric(
             name: "Flatline / Clipping",
             score: dropoutScore,
-            detail: "\(formatPercent(summary.flatlineFraction)) flat, \(formatPercent(summary.clippingFraction)) clipped",
+            detail: "\(HealthScoring.formatPercent(summary.flatlineFraction)) flat, \(HealthScoring.formatPercent(summary.clippingFraction)) clipped",
             weight: 1.1
         ))
 
         metrics.append(metric(
             name: "Fast Noise",
-            score: scoreUpperRatio(features.derivativeTypicality, green: 2.0, red: 5.0),
-            detail: "sample-to-sample change \(formatRatio(features.derivativeTypicality)) typical",
+            score: HealthScoring.scoreUpperRatio(features.derivativeTypicality, green: 2.0, red: 5.0),
+            detail: "sample-to-sample change \(HealthScoring.formatRatio(features.derivativeTypicality)) typical",
             weight: 1.0
         ))
 
         if summary.sampleCount >= max(Int((signal.samplingRate * 0.25).rounded()), 2) {
             metrics.append(metric(
                 name: "Slow Drift",
-                score: scoreUpperRatio(features.driftTypicality, green: 0.8, red: 2.5),
-                detail: "early-to-late shift \(formatMicrovolts(summary.driftRMS))",
+                score: HealthScoring.scoreUpperRatio(features.driftTypicality, green: 0.8, red: 2.5),
+                detail: "early-to-late shift \(HealthScoring.formatMicrovolts(summary.driftRMS))",
                 weight: 0.8
             ))
         }
 
         let artifactScore = summary.artifactCount == 0
             ? 1
-            : min(scoreUpperFraction(summary.artifactOverlapFraction, green: 0.02, red: 0.15), 0.15)
+            : min(HealthScoring.scoreUpperFraction(summary.artifactOverlapFraction, green: 0.02, red: 0.15), 0.15)
         metrics.append(metric(
             name: "Labeled Artifacts",
             score: artifactScore,
             detail: summary.artifactCount == 0
                 ? "No labeled artifacts in segment"
-                : "\(summary.artifactCount) artifact\(summary.artifactCount == 1 ? "" : "s"), \(formatPercent(summary.artifactOverlapFraction)) window coverage",
+                : "\(summary.artifactCount) artifact\(summary.artifactCount == 1 ? "" : "s"), \(HealthScoring.formatPercent(summary.artifactOverlapFraction)) window coverage",
             weight: 2.4
         ))
 
@@ -555,7 +555,7 @@ nonisolated enum SegmentHealthAnalyzer {
         let weightTotal = metrics.reduce(0) { $0 + $1.weight }
         let goodFraction = weightTotal > 0 ? weightedTotal / weightTotal : 0
         let percentage = Int((min(max(goodFraction, 0), 1) * 100).rounded())
-        let grade = grade(for: goodFraction)
+        let grade = HealthScoring.grade(for: goodFraction)
         let weakMetrics = metrics
             .filter { $0.score < 0.78 }
             .sorted { $0.score < $1.score }
@@ -627,17 +627,10 @@ nonisolated enum SegmentHealthAnalyzer {
         return SegmentHealthMetric(
             name: name,
             score: boundedScore,
-            grade: grade(for: boundedScore),
+            grade: HealthScoring.grade(for: boundedScore),
             detail: detail,
             weight: weight
         )
-    }
-
-    private static func clippingFraction(absValues: [Double], maxAbs: Double) -> Double {
-        guard absValues.count > 3, maxAbs > 20 else { return 0 }
-        let tolerance = max(maxAbs * 0.001, 0.01)
-        let clipped = absValues.filter { abs($0 - maxAbs) <= tolerance }.count
-        return Double(clipped) / Double(absValues.count)
     }
 
     private static func artifactOverlapSamples(
@@ -656,64 +649,6 @@ nonisolated enum SegmentHealthAnalyzer {
         return (overlapSamples, overlapCount)
     }
 
-    private static func rootMeanSquare(_ values: [Double]) -> Double {
-        guard !values.isEmpty else { return 0 }
-        return sqrt(values.reduce(0) { $0 + $1 * $1 } / Double(values.count))
-    }
-
-    private static func percentile(_ sortedValues: [Double], fraction: Double) -> Double {
-        guard let first = sortedValues.first else { return 0 }
-        guard sortedValues.count > 1 else { return first }
-        let position = min(max(fraction, 0), 1) * Double(sortedValues.count - 1)
-        let lower = Int(position.rounded(.down))
-        let upper = min(lower + 1, sortedValues.count - 1)
-        let weight = position - Double(lower)
-        return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight
-    }
-
-    private static func scoreUpperRatio(_ ratio: Double, green: Double, red: Double) -> Double {
-        guard ratio.isFinite else { return 0 }
-        if ratio <= green { return 1 }
-        if ratio >= red { return 0 }
-        return 1 - (ratio - green) / max(red - green, 1e-9)
-    }
-
-    private static func scoreUpperFraction(_ fraction: Double, green: Double, red: Double) -> Double {
-        scoreUpperRatio(fraction, green: green, red: red)
-    }
-
-    private static func scoreLowerBound(_ value: Double, green: Double, red: Double) -> Double {
-        guard value.isFinite else { return 0 }
-        if value >= green { return 1 }
-        if value <= red { return 0 }
-        return (value - red) / max(green - red, 1e-9)
-    }
-
-    private static func grade(for score: Double) -> ChannelHealthGrade {
-        if score >= 0.78 { return .good }
-        if score >= 0.50 { return .watch }
-        return .poor
-    }
-
-    private static func formatPercent(_ fraction: Double) -> String {
-        String(format: "%.1f%%", min(max(fraction, 0), 1) * 100)
-    }
-
-    private static func formatRatio(_ ratio: Double) -> String {
-        guard ratio.isFinite else { return "nanx" }
-        return String(format: "%.1fx", ratio)
-    }
-
-    private static func formatMicrovolts(_ value: Double) -> String {
-        guard value.isFinite else { return "nan uV" }
-        if abs(value) >= 100 {
-            return String(format: "%.0f uV", value)
-        }
-        if abs(value) >= 10 {
-            return String(format: "%.1f uV", value)
-        }
-        return String(format: "%.2f uV", value)
-    }
 }
 
 private nonisolated struct SegmentSummary: Sendable {

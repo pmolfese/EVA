@@ -186,7 +186,7 @@ nonisolated enum ICAArtifactDetector {
         progress?(0.10)
         let covariance = covarianceMatrix(centered.samples, sampleCount: sampleCount)
         progress?(0.18)
-        let eigen = symmetricEigenDecomposition(covariance)
+        let eigen = LinearAlgebra.symmetricEigenDecomposition(covariance)
         progress?(0.34)
         let ordered = eigen.values.indices.sorted { eigen.values[$0] > eigen.values[$1] }
         let selected = selectedPCAIndices(
@@ -220,7 +220,7 @@ nonisolated enum ICAArtifactDetector {
         let inverseRotation = pseudoInverse(infomax.unmixing)
         let mixing = multiply(dewhitening, inverseRotation)
         let unmixing = multiply(infomax.unmixing, whitening)
-        let componentMaps = transpose(mixing)
+        let componentMaps = LinearAlgebra.transpose(mixing)
         let explained = componentContributions(mixingMatrix: mixing, sources: sources)
         progress?(1.0)
 
@@ -663,7 +663,7 @@ nonisolated private func solveICA(
     let samples = data.first?.count ?? 0
     guard features > 0, samples > 1 else {
         progress?(1.0)
-        return (identity(features), 0, 0)
+        return (LinearAlgebra.identity(features), 0, 0)
     }
 
     // Pack whitened data into one contiguous row-major Float buffer.
@@ -770,7 +770,7 @@ nonisolated private func symmetricDecorrelate(_ weights: inout [Float], features
     let gramDouble = (0..<features).map { row in
         (0..<features).map { Double(gram[row * features + $0]) }
     }
-    let eigen = symmetricEigenDecomposition(gramDouble)
+    let eigen = LinearAlgebra.symmetricEigenDecomposition(gramDouble)
     guard eigen.values.count == features, eigen.vectors.count == features else { return }
 
     // P = E diag(1/sqrt(λ)) Eᵀ
@@ -1096,7 +1096,7 @@ nonisolated private func fastICAFloat(
 ) -> (unmixing: [[Double]], iterations: Int, finalChange: Double) {
     guard features > 0, samples > 1 else {
         progress?(1.0)
-        return (identity(features), 0, 0)
+        return (LinearAlgebra.identity(features), 0, 0)
     }
 
     // Deterministic pseudo-random orthonormal start.
@@ -1187,7 +1187,7 @@ nonisolated private func picardFloat(
 ) -> (unmixing: [[Double]], iterations: Int, finalChange: Double) {
     guard features > 0, samples > 1 else {
         progress?(1.0)
-        return (identity(features), 0, 0)
+        return (LinearAlgebra.identity(features), 0, 0)
     }
 
     let n = features
@@ -1456,137 +1456,6 @@ nonisolated func normalizedTopography(_ values: [Double]) -> [Double] {
     return centered.map { $0 / scale }
 }
 
-nonisolated private func symmetricEigenDecomposition(_ matrix: [[Double]]) -> (values: [Double], vectors: [[Double]]) {
-    let n = matrix.count
-    guard n > 0, matrix.allSatisfy({ $0.count == n }) else {
-        return ([], [])
-    }
-
-    var columnMajor = Array(repeating: 0.0, count: n * n)
-    for row in 0..<n {
-        for column in 0..<n {
-            columnMajor[column * n + row] = matrix[row][column]
-        }
-    }
-
-    var eigenvalues = Array(repeating: 0.0, count: n)
-    var jobz = Int8(UnicodeScalar("V").value)
-    var uplo = Int8(UnicodeScalar("U").value)
-    var dimension = __CLPK_integer(n)
-    var leadingDimension = __CLPK_integer(n)
-    var queryWork = 0.0
-    var querySize = __CLPK_integer(-1)
-    var info = __CLPK_integer(0)
-
-    dsyev_(
-        &jobz,
-        &uplo,
-        &dimension,
-        &columnMajor,
-        &leadingDimension,
-        &eigenvalues,
-        &queryWork,
-        &querySize,
-        &info
-    )
-
-    guard info == 0 else {
-        return jacobiEigenDecomposition(matrix)
-    }
-
-    var workSize = __CLPK_integer(max(Int(queryWork.rounded(.up)), 3 * n - 1))
-    var work = Array(repeating: 0.0, count: Int(workSize))
-    info = 0
-
-    dsyev_(
-        &jobz,
-        &uplo,
-        &dimension,
-        &columnMajor,
-        &leadingDimension,
-        &eigenvalues,
-        &work,
-        &workSize,
-        &info
-    )
-
-    guard info == 0 else {
-        return jacobiEigenDecomposition(matrix)
-    }
-
-    let eigenvectors = (0..<n).map { row in
-        (0..<n).map { column in
-            columnMajor[column * n + row]
-        }
-    }
-    return (eigenvalues, eigenvectors)
-}
-
-nonisolated private func jacobiEigenDecomposition(_ matrix: [[Double]]) -> (values: [Double], vectors: [[Double]]) {
-    let n = matrix.count
-    var a = matrix
-    var v = identity(n)
-    let maxIterations = max(100, n * n * 8)
-
-    for _ in 0..<maxIterations {
-        var p = 0
-        var q = 1
-        var maxValue = 0.0
-        for i in 0..<n {
-            for j in (i + 1)..<n {
-                let value = abs(a[i][j])
-                if value > maxValue {
-                    maxValue = value
-                    p = i
-                    q = j
-                }
-            }
-        }
-        if maxValue < 1e-10 { break }
-
-        let theta = 0.5 * atan2(2 * a[p][q], a[q][q] - a[p][p])
-        let c = cos(theta)
-        let s = sin(theta)
-        let app = c * c * a[p][p] - 2 * s * c * a[p][q] + s * s * a[q][q]
-        let aqq = s * s * a[p][p] + 2 * s * c * a[p][q] + c * c * a[q][q]
-
-        for i in 0..<n where i != p && i != q {
-            let aip = a[i][p]
-            let aiq = a[i][q]
-            a[i][p] = c * aip - s * aiq
-            a[p][i] = a[i][p]
-            a[i][q] = s * aip + c * aiq
-            a[q][i] = a[i][q]
-        }
-        a[p][p] = app
-        a[q][q] = aqq
-        a[p][q] = 0
-        a[q][p] = 0
-
-        for i in 0..<n {
-            let vip = v[i][p]
-            let viq = v[i][q]
-            v[i][p] = c * vip - s * viq
-            v[i][q] = s * vip + c * viq
-        }
-    }
-
-    return ((0..<n).map { a[$0][$0] }, v)
-}
-
-nonisolated private func identity(_ size: Int) -> [[Double]] {
-    (0..<size).map { row in
-        (0..<size).map { row == $0 ? 1.0 : 0.0 }
-    }
-}
-
-nonisolated private func transpose(_ matrix: [[Double]]) -> [[Double]] {
-    guard let columns = matrix.first?.count else { return [] }
-    return (0..<columns).map { column in
-        matrix.map { $0[column] }
-    }
-}
-
 nonisolated private func multiply(_ lhs: [[Double]], _ rhs: [[Double]]) -> [[Double]] {
     guard let lhsColumns = lhs.first?.count,
           lhsColumns == rhs.count,
@@ -1645,9 +1514,9 @@ nonisolated private func pseudoInverse(_ matrix: [[Double]], relativeTolerance: 
         return []
     }
 
-    let matrixT = transpose(matrix)
+    let matrixT = LinearAlgebra.transpose(matrix)
     let gram = multiply(matrixT, matrix)
-    let eigen = symmetricEigenDecomposition(gram)
+    let eigen = LinearAlgebra.symmetricEigenDecomposition(gram)
     guard eigen.values.count == columns, eigen.vectors.count == columns else {
         return inverse(matrix)
     }
@@ -1674,7 +1543,7 @@ nonisolated private func pseudoInverse(_ matrix: [[Double]], relativeTolerance: 
 nonisolated private func inverse(_ matrix: [[Double]]) -> [[Double]] {
     let n = matrix.count
     var a = matrix
-    var inv = identity(n)
+    var inv = LinearAlgebra.identity(n)
 
     for i in 0..<n {
         var pivot = i

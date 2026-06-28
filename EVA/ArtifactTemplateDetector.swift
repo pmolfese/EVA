@@ -208,8 +208,8 @@ nonisolated enum ArtifactTemplateDetector {
         let exemplarCenter = (exemplarRange.lowerBound + exemplarRange.upperBound) / 2
         let exemplarStart = min(max(exemplarCenter - windowSamples / 2, 0), max(sampleCount - windowSamples, 0))
         let exemplarEnd = min(exemplarStart + windowSamples, sampleCount)
-        let selectedChannels = validChannels(configuration.selectedChannelIndices, in: signal)
-        let comparisonChannels = validChannels(configuration.comparisonChannelIndices, in: signal)
+        let selectedChannels = SignalSelection.validChannels(configuration.selectedChannelIndices, in: signal)
+        let comparisonChannels = SignalSelection.validChannels(configuration.comparisonChannelIndices, in: signal)
 
         let selectedEvents = scan(
             signal: signal,
@@ -232,7 +232,7 @@ nonisolated enum ArtifactTemplateDetector {
             configuration: configuration
         )
         let scopeCounts = configuration.comparisonScopes.map { scope in
-            let channels = validChannels(scope.channelIndices, in: signal)
+            let channels = SignalSelection.validChannels(scope.channelIndices, in: signal)
             let events = scan(
                 signal: signal,
                 channelIndices: channels,
@@ -328,7 +328,7 @@ nonisolated enum ArtifactTemplateDetector {
         let requested = configuration.topographyChannelIndices.isEmpty
             ? Array(signal.data.indices)
             : configuration.topographyChannelIndices
-        return validChannels(requested, in: signal)
+        return SignalSelection.validChannels(requested, in: signal)
     }
 
     /// Builds the reference scalp map from the exemplar window and scans the
@@ -643,7 +643,7 @@ nonisolated enum ArtifactTemplateDetector {
             }
         }
 
-        let merged = merge(hits: hits, mergeSamples: mergeSamples)
+        let merged = SignalSelection.mergeNearbyStarts(hits, mergeSamples: mergeSamples)
         return merged.enumerated().map { index, hit in
             let centerSample = min(max((hit.start + templateLength / 2) * decimation, 0), sampleCount - 1)
             let time = Double(centerSample) / signal.samplingRate
@@ -701,30 +701,6 @@ nonisolated enum ArtifactTemplateDetector {
         }
 
         return Array(Set(candidates)).sorted()
-    }
-
-    private static func merge(hits: [(start: Int, score: Float)], mergeSamples: Int) -> [(start: Int, score: Float)] {
-        let sorted = hits.sorted {
-            $0.start == $1.start ? $0.score > $1.score : $0.start < $1.start
-        }
-        var merged: [(start: Int, score: Float)] = []
-
-        for hit in sorted {
-            guard let last = merged.last else {
-                merged.append(hit)
-                continue
-            }
-
-            if hit.start - last.start <= mergeSamples {
-                if hit.score > last.score {
-                    merged[merged.count - 1] = hit
-                }
-            } else {
-                merged.append(hit)
-            }
-        }
-
-        return merged
     }
 
     private static func average(
@@ -847,13 +823,6 @@ nonisolated enum ArtifactTemplateDetector {
             guard index >= 0, index < average.allChannelSamples.count else { return nil }
             return average.allChannelSamples[index]
         }
-    }
-
-    private static func validChannels(_ indices: [Int], in signal: MFFSignalData) -> [Int] {
-        let sampleCount = signal.data.first?.count ?? 0
-        return Array(Set(indices))
-            .filter { $0 >= 0 && $0 < signal.data.count && signal.data[$0].count == sampleCount }
-            .sorted()
     }
 
     private static func clamped(_ range: ClosedRange<Int>, upperBound: Int) -> ClosedRange<Int> {

@@ -71,7 +71,7 @@ enum SphericalSpline {
         a[n * size + n] = 0
         rhs[n] = 1
 
-        guard let solution = solveLinearSystem(a: &a, b: &rhs, size: size) else { return nil }
+        guard let solution = LinearAlgebra.solveLinearSystem(a: &a, b: &rhs, size: size) else { return nil }
         return (indices, Array(solution[0..<n]))
     }
 
@@ -99,42 +99,4 @@ enum SphericalSpline {
         return sum / (4 * Double.pi)
     }
 
-    /// Solves `a · x = b` (row-major `a`, size×size) via Gaussian elimination
-    /// with partial pivoting. Mutates `a` and `b`; returns `x` or `nil` if
-    /// singular.
-    private static func solveLinearSystem(a: inout [Double], b: inout [Double], size: Int) -> [Double]? {
-        for col in 0..<size {
-            // Partial pivot.
-            var pivotRow = col
-            var pivotMag = abs(a[col * size + col])
-            for r in (col + 1)..<size {
-                let mag = abs(a[r * size + col])
-                if mag > pivotMag { pivotMag = mag; pivotRow = r }
-            }
-            guard pivotMag > 1e-12 else { return nil }
-
-            if pivotRow != col {
-                for c in 0..<size {
-                    a.swapAt(pivotRow * size + c, col * size + c)
-                }
-                b.swapAt(pivotRow, col)
-            }
-
-            let pivot = a[col * size + col]
-            for r in 0..<size where r != col {
-                let factor = a[r * size + col] / pivot
-                if factor == 0 { continue }
-                for c in col..<size {
-                    a[r * size + c] -= factor * a[col * size + c]
-                }
-                b[r] -= factor * b[col]
-            }
-        }
-
-        var x = [Double](repeating: 0, count: size)
-        for i in 0..<size {
-            x[i] = b[i] / a[i * size + i]
-        }
-        return x
-    }
 }
