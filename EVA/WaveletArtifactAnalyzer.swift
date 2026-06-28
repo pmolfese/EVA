@@ -161,136 +161,6 @@ nonisolated struct WaveletChannelGoodnessResult: Identifiable, Sendable {
     var id: Int { channelIndex }
 }
 
-nonisolated enum WaveletCleaningPipeline: String, CaseIterable, Identifiable, Sendable {
-    case eeg = "EEG"
-    case erp = "ERP"
-
-    var id: String { rawValue }
-
-    var defaultFamily: WaveletCleaningFamily {
-        switch self {
-        case .eeg: return .bior44
-        case .erp: return .coif4
-        }
-    }
-
-    var defaultThresholdRule: WaveletCleaningThresholdRule {
-        switch self {
-        case .eeg: return .hard
-        case .erp: return .soft
-        }
-    }
-
-    var defaultThresholdModel: WaveletCleaningThresholdModel {
-        .bayesShrink
-    }
-
-    var defaultThresholdScale: Double {
-        switch self {
-        case .eeg: return 1.0
-        case .erp: return 0.85
-        }
-    }
-
-    func defaultLevelCount(samplingRate: Double) -> Int {
-        switch self {
-        case .eeg:
-            if samplingRate > 500 { return 10 }
-            if samplingRate > 250 { return 9 }
-            return 8
-        case .erp:
-            if samplingRate > 500 { return 11 }
-            if samplingRate > 250 { return 10 }
-            return 9
-        }
-    }
-}
-
-nonisolated enum WaveletCleaningMode: String, CaseIterable, Identifiable, Codable, Sendable {
-    case conservativeLocal = "Conservative Local"
-    case happeLikeGlobal = "HAPPE-like Global"
-    case erpGentle = "ERP Gentle"
-
-    var id: String { rawValue }
-
-    var defaultIntensity: Double {
-        switch self {
-        case .conservativeLocal: return 1.0
-        case .happeLikeGlobal: return 1.6
-        case .erpGentle: return 0.75
-        }
-    }
-
-    var thresholdMultiplier: Double {
-        switch self {
-        case .conservativeLocal: return 1.0
-        case .happeLikeGlobal: return 0.72
-        case .erpGentle: return 1.15
-        }
-    }
-}
-
-nonisolated enum WaveletCleaningFamily: String, CaseIterable, Identifiable, Codable, Sendable {
-    case bior44 = "bior4.4"
-    case coif4 = "coif4"
-
-    var id: String { rawValue }
-}
-
-nonisolated enum WaveletCleaningThresholdRule: String, CaseIterable, Identifiable, Codable, Sendable {
-    case hard = "Hard"
-    case soft = "Soft"
-
-    var id: String { rawValue }
-}
-
-nonisolated enum WaveletCleaningThresholdModel: String, CaseIterable, Identifiable, Codable, Sendable {
-    case robustUniversal = "Universal"
-    case bayesShrink = "BayesShrink"
-
-    var id: String { rawValue }
-}
-
-nonisolated struct WaveletCleaningConfiguration: Sendable {
-    var pipeline: WaveletCleaningPipeline
-    var mode: WaveletCleaningMode
-    var channelIndices: [Int]
-    var waveletFamily: WaveletCleaningFamily
-    var thresholdRule: WaveletCleaningThresholdRule
-    var thresholdModel: WaveletCleaningThresholdModel
-    var levelCount: Int
-    var thresholdScale: Double
-    var intensity: Double
-    var paddingSeconds: Double
-}
-
-nonisolated struct WaveletCleaningPreviewResult: Sendable {
-    var beforeAverage: ArtifactTemplateAverage
-    var artifactAverage: ArtifactTemplateAverage
-    var afterAverage: ArtifactTemplateAverage
-    var metrics: WaveletCleaningPreviewMetrics
-    var channelRemovedEnergy: [WaveletCleaningChannelEnergy]
-    var startTimeSeconds: Double
-    var endTimeSeconds: Double
-}
-
-nonisolated struct WaveletCleaningPreviewMetrics: Sendable {
-    var varianceRetainedPercent: Double
-    var correlation: Double
-    var removedRMSMicrovolts: Double
-    var peakReductionPercent: Double
-}
-
-nonisolated struct WaveletCleaningChannelEnergy: Identifiable, Sendable {
-    var channelIndex: Int
-    var removedRMSMicrovolts: Double
-    var removedEnergyFraction: Double
-    var peakRemovedMicrovolts: Float
-    var normalizedRemovedEnergy: Double
-
-    var id: Int { channelIndex }
-}
-
 nonisolated enum WaveletArtifactAnalyzer {
     static let defaultLevelCount = 5
     static let maximumLevelCount = 11
@@ -310,7 +180,7 @@ nonisolated enum WaveletArtifactAnalyzer {
 
         let decimation = decimationFactor(samplingRate: signal.samplingRate, targetRate: downsampleRate)
         let effectiveRate = signal.samplingRate / Double(decimation)
-        let channels = validChannels(requestedChannels, in: signal)
+        let channels = SignalSelection.validChannels(requestedChannels, in: signal)
         let levelCount = boundedLevelCount(requestedLevelCount, sampleCount: max(sampleCount / decimation, 1))
         let data = prepareChannels(
             signal: signal,
@@ -349,8 +219,8 @@ nonisolated enum WaveletArtifactAnalyzer {
             targetRate: configuration.downsampleRate
         )
         let effectiveRate = signal.samplingRate / Double(decimation)
-        let selectedChannels = validChannels(configuration.selectedChannelIndices, in: signal)
-        let topographyChannels = validChannels(configuration.topographyChannelIndices, in: signal)
+        let selectedChannels = SignalSelection.validChannels(configuration.selectedChannelIndices, in: signal)
+        let topographyChannels = SignalSelection.validChannels(configuration.topographyChannelIndices, in: signal)
         let analysisChannels = Array(Set(selectedChannels + topographyChannels)).sorted()
         let levelCount = boundedLevelCount(
             configuration.levelCount,
@@ -460,7 +330,7 @@ nonisolated enum WaveletArtifactAnalyzer {
             targetRate: configuration.downsampleRate
         )
         let effectiveRate = signal.samplingRate / Double(decimation)
-        let channels = validChannels(configuration.channelIndices, in: signal)
+        let channels = SignalSelection.validChannels(configuration.channelIndices, in: signal)
         let levelCount = boundedLevelCount(
             configuration.levelCount,
             sampleCount: max(sampleCount / decimation, 1)
@@ -560,7 +430,7 @@ nonisolated enum WaveletArtifactAnalyzer {
             samplingRate: signal.samplingRate,
             targetRate: configuration.downsampleRate
         )
-        let channels = validChannels(configuration.channelIndices, in: signal)
+        let channels = SignalSelection.validChannels(configuration.channelIndices, in: signal)
         let levelCount = boundedLevelCount(
             configuration.levelCount,
             sampleCount: max(sampleCount / decimation, 1)
@@ -608,9 +478,9 @@ nonisolated enum WaveletArtifactAnalyzer {
             let artifactFraction = energyFractions[offset]
             let peak = peaks[offset]
             let burstFraction = bursts[offset]
-            let energyScore = scoreUpperRatio(artifactFraction / medianEnergy, green: 2.0, red: 8.0)
-            let peakScore = scoreUpperRatio(Double(peak) / medianPeak, green: 2.5, red: 9.0)
-            let burstScore = scoreUpperRatio(burstFraction / medianBurst, green: 2.0, red: 8.0)
+            let energyScore = HealthScoring.scoreUpperRatio(artifactFraction / medianEnergy, green: 2.0, red: 8.0)
+            let peakScore = HealthScoring.scoreUpperRatio(Double(peak) / medianPeak, green: 2.5, red: 9.0)
+            let burstScore = HealthScoring.scoreUpperRatio(burstFraction / medianBurst, green: 2.0, red: 8.0)
             let goodness = 0.46 * energyScore + 0.30 * burstScore + 0.24 * peakScore
             let dominantLevel = channel.artifactEnergyByLevel.indices.max {
                 channel.artifactEnergyByLevel[$0] < channel.artifactEnergyByLevel[$1]
@@ -647,7 +517,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         let windowSamples = endSample - startSample + 1
         guard windowSamples > 2 else { return nil }
 
-        let channels = validChannels(configuration.channelIndices, in: signal)
+        let channels = SignalSelection.validChannels(configuration.channelIndices, in: signal)
         let levelCount = boundedLevelCount(configuration.levelCount, sampleCount: windowSamples)
         var beforeSamples = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
         var artifactSamples = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
@@ -1094,7 +964,7 @@ nonisolated enum WaveletArtifactAnalyzer {
             }
         }
 
-        let merged = merge(hits: hits, mergeSamples: mergeSamples)
+        let merged = SignalSelection.mergeNearbyStarts(hits, mergeSamples: mergeSamples)
         let events = eventsFromHits(
             merged,
             templateLength: exemplar.length,
@@ -1184,7 +1054,7 @@ nonisolated enum WaveletArtifactAnalyzer {
             }
         }
 
-        let merged = merge(hits: hits, mergeSamples: mergeSamples)
+        let merged = SignalSelection.mergeNearbyStarts(hits, mergeSamples: mergeSamples)
         let events = eventsFromHits(
             merged,
             templateLength: exemplar.length,
@@ -1472,13 +1342,6 @@ nonisolated enum WaveletArtifactAnalyzer {
         let upper = min(lower + 1, finite.count - 1)
         let weight = position - Double(lower)
         return max(finite[lower] * (1 - weight) + finite[upper] * weight, fallback)
-    }
-
-    private static func scoreUpperRatio(_ ratio: Double, green: Double, red: Double) -> Double {
-        guard ratio.isFinite else { return 0 }
-        if ratio <= green { return 1 }
-        if ratio >= red { return 0 }
-        return 1 - (ratio - green) / max(red - green, 1e-9)
     }
 
     private static func explorerCandidateThreshold(for projection: [Float]) -> Float {
@@ -1784,30 +1647,6 @@ nonisolated enum WaveletArtifactAnalyzer {
         return Array(Set(candidates)).sorted()
     }
 
-    private static func merge(
-        hits: [(start: Int, score: Float)],
-        mergeSamples: Int
-    ) -> [(start: Int, score: Float)] {
-        let sorted = hits.sorted {
-            $0.start == $1.start ? $0.score > $1.score : $0.start < $1.start
-        }
-        var merged: [(start: Int, score: Float)] = []
-        for hit in sorted {
-            guard let last = merged.last else {
-                merged.append(hit)
-                continue
-            }
-            if hit.start - last.start <= mergeSamples {
-                if hit.score > last.score {
-                    merged[merged.count - 1] = hit
-                }
-            } else {
-                merged.append(hit)
-            }
-        }
-        return merged
-    }
-
     private static func scoreSummary(
         candidates: [Int],
         hits: [(start: Int, score: Float)]
@@ -1822,13 +1661,6 @@ nonisolated enum WaveletArtifactAnalyzer {
     }
 
     // MARK: - Small math helpers
-
-    private static func validChannels(_ indices: [Int], in signal: MFFSignalData) -> [Int] {
-        let sampleCount = signal.data.first?.count ?? 0
-        return Array(Set(indices))
-            .filter { $0 >= 0 && $0 < signal.data.count && signal.data[$0].count == sampleCount }
-            .sorted()
-    }
 
     private static func decimationFactor(samplingRate: Double, targetRate: Double) -> Int {
         Downsampler.factor(sourceRate: samplingRate, targetRate: targetRate)

@@ -219,6 +219,23 @@ extension FocusedValues {
     private struct MFFExportRequestKey: FocusedValueKey {
         typealias Value = Binding<Int>
     }
+
+    var physioViewControls: PhysioViewControls? {
+        get { self[PhysioViewControlsKey.self] }
+        set { self[PhysioViewControlsKey.self] = newValue }
+    }
+
+    private struct PhysioViewControlsKey: FocusedValueKey {
+        typealias Value = PhysioViewControls
+    }
+}
+
+/// Physio (PNS) channel display controls exposed to the View menu.
+struct PhysioViewControls {
+    var showsPhysio: Binding<Bool>
+    /// Whether the focused recording actually contains physio channels.
+    var hasPhysio: Bool
+    var channelCount: Int
 }
 
 /// Menu-bar "Artifacts" commands, acting on the focused waveform window.
@@ -294,8 +311,19 @@ struct ViewCommands: View {
     @FocusedValue(\.resetToOriginalRequest) private var resetRequest
     @FocusedValue(\.psaViewControls) private var psaControls
     @FocusedValue(\.segmentHealthViewControls) private var segmentHealthControls
+    @FocusedValue(\.physioViewControls) private var physioControls
 
     var body: some View {
+        if let physioControls, physioControls.hasPhysio {
+            Button(physioControls.showsPhysio.wrappedValue
+                   ? "Hide Physio Channels"
+                   : "Show Physio Channels (\(physioControls.channelCount))") {
+                physioControls.showsPhysio.wrappedValue.toggle()
+            }
+
+            Divider()
+        }
+
         Toggle("Show Segment Health", isOn: Binding(
             get: { segmentHealthControls?.showsHealth.wrappedValue ?? false },
             set: { segmentHealthControls?.showsHealth.wrappedValue = $0 }

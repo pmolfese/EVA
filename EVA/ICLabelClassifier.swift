@@ -100,11 +100,16 @@ nonisolated enum ICLabelClassifier {
     }
 
     private static func predict(features: ICLabelFeatures, model: MLModel) -> [Double]? {
+        // The SCCN ICLabel network expects the topoplot image row order used by
+        // its MATLAB training path, where frontal/ocular activity lands in
+        // lower image rows. EVA keeps SensorLayout +y anterior for drawing and
+        // heuristics, so flip rows only at the Core ML input boundary.
+        let orientedImage = verticallyFlipped(features.image)
         let imageVariants = [
-            features.image,
-            features.image.map { -$0 },
-            horizontallyFlipped(features.image),
-            horizontallyFlipped(features.image).map { -$0 }
+            orientedImage,
+            orientedImage.map { -$0 },
+            horizontallyFlipped(orientedImage),
+            horizontallyFlipped(orientedImage).map { -$0 }
         ]
 
         var averaged = [Double](repeating: 0, count: classLabels.count)
@@ -343,6 +348,17 @@ nonisolated enum ICLabelClassifier {
         for row in 0..<gridSize {
             for column in 0..<gridSize {
                 flipped[row * gridSize + column] = image[row * gridSize + (gridSize - 1 - column)]
+            }
+        }
+        return flipped
+    }
+
+    private static func verticallyFlipped(_ image: [Float]) -> [Float] {
+        let gridSize = 32
+        var flipped = [Float](repeating: 0, count: image.count)
+        for row in 0..<gridSize {
+            for column in 0..<gridSize {
+                flipped[row * gridSize + column] = image[(gridSize - 1 - row) * gridSize + column]
             }
         }
         return flipped

@@ -24,6 +24,32 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 
+/// Selectable MR gradient-artifact removal algorithm.
+enum MRIGradientMethod: String, CaseIterable, Identifiable {
+    /// Average artifact subtraction — the per-TR template in `GradientRemover`.
+    case aas = "AAS"
+    /// FMRIB Artifact Slice Template Removal (Niazy 2005) with OBS/ANC.
+    case fastr = "FASTR"
+    /// FASTR with Moosmann (2009) realignment-parameter-informed averaging.
+    case moosmann = "Moosmann"
+    /// FASTR with FARM (van der Meer 2010) most-correlated-epoch averaging.
+    case farm = "FARM"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .aas: return "AAS"
+        case .fastr: return "FASTR"
+        case .moosmann: return "Moosmann"
+        case .farm: return "FARM"
+        }
+    }
+
+    /// Whether this method runs the FASTR pipeline (slice/OBS/ANC options apply).
+    var isFASTR: Bool { self == .fastr || self == .moosmann || self == .farm }
+}
+
 struct WaveformView: View {
     @ObservedObject var recording: MFFRecording
 
@@ -57,6 +83,17 @@ struct WaveformView: View {
     @State private var detectsEyeBlinkArtifacts = false
     @State private var detectsEyeMovementArtifacts = false
     @State private var detectsECGArtifacts = false
+    @State private var showsECGDetectionSheet = false
+    @State private var ecgDetectionSelectedPNSChannels = Set<Int>()
+    @State private var ecgDetectionProxyChannels = ""
+    @State private var ecgDetectionAlgorithm = ECGDetectionAlgorithm.simple
+    @State private var ecgDetectionThresholdSD = 4.0
+    @State private var ecgDetectionMinimumRRSeconds = 0.30
+    @State private var ecgDetectionPolarity = ECGDetectionPolarity.either
+    @State private var isEstimatingECGDetection = false
+    @State private var ecgDetectionEstimatedCount: Int?
+    @State private var ecgDetectionEstimatedBPM: Double?
+    @State private var ecgDetectionEstimateMessage: String?
     @State private var artifactDetectionMethod = ArtifactDetectionMethod.threshold
     @State private var artifactEvents: [MFFEvent] = []
     @State private var isDetectingArtifacts = false
@@ -129,7 +166,7 @@ struct WaveformView: View {
     @State private var icaProgressMessage = ""
     @State private var icaMethod: ICAMethod = .picard
     @State private var icaComponentCount = 20
-    @State private var icaVarianceThreshold = 0.99
+    @State private var icaVarianceThreshold = 0.999
     @State private var icaUsesAverageReference = true
     @State private var icaDownsampleRate = 100.0
     @State private var icaMaxIterations = 200
@@ -146,11 +183,15 @@ struct WaveformView: View {
     @State private var icaDebugReportSerial = 0
     @State private var lastICAReconstructionDebugReport: String?
     @State private var showsPSASheet = false
+    @State private var psaSegmentField = PSASegmentField.code
+    @State private var psaEventSearchText = ""
     @State private var psaSelectedEventCodes = Set<String>()
     @State private var psaPreStimulus = 0.2
     @State private var psaPostStimulus = 0.8
     @State private var psaOffset = 0.0
     @State private var psaCategoryNames = [String: String]()
+    @State private var psaTimingMarkerEnabledValues = Set<String>()
+    @State private var psaTimingMarkerValuesBySegmentValue = [String: String]()
     @State private var psaSkipIfContainsArtifact = false
     @State private var psaSkipEyeBlinks = true
     @State private var psaSkipEyeMovements = true
@@ -171,6 +212,9 @@ struct WaveformView: View {
     // Band-pass / notch filtering (applied to the active base signal).
     @State private var icaCleanedSignal: MFFSignalData?
     @State private var filteredSignal: MFFSignalData?
+    @State private var filteredPNSSignal: MFFSignalData?
+    @State private var filteredPNSInputSignalType: String?
+    @State private var filterPNSChannels = true
     @State private var artifactCleanedSignal: MFFSignalData?
     @State private var artifactCleaningIsEnabled = true
     // Wavelet artifact reduction (HAPPE-style) pipeline stage.
@@ -198,6 +242,14 @@ struct WaveformView: View {
     @State private var statusHistory: [StatusHistoryEntry] = []
     @State private var lastRecordedStatusBySource: [String: String] = [:]
     @State private var showsStatusHistory = false
+    // Physio (PNS) channel display. Shown by default when present; pinned below
+    // the EEG channels and synced to the EEG time axis.
+    @State private var showsPhysioChannels = true
+    @State private var physioRanges: [ClosedRange<Float>] = []
+    @State private var physioScaleFactors: [Int: Double] = [:]
+    @State private var physioMaxScaledChannels = Set<Int>()
+    @State private var physioFlippedPolarity = Set<Int>()
+
     @State private var showsFilterPopover = false
     @State private var filterLowCutoff = 0.1
     @State private var filterHighCutoff = 30.0
@@ -213,9 +265,38 @@ struct WaveformView: View {
     // MRI artifact removal. The gradient-corrected signal becomes the base that
     // filtering and display build on.
     @State private var gradientCorrectedSignal: MFFSignalData?
+    @State private var gradientCorrectedPNSSignal: MFFSignalData?
+    @State private var mriAppliesToPNS = true
     @State private var isProcessingMRI = false
     @State private var mriStatusMessage: String?
     @State private var mriProgress: Double = 0
+    @State private var showsMRIPopover = false
+    // Number of neighboring TRs averaged into the template before/after the
+    // current TR. Exposed in the MRI popover; defaults mirror GradientRemover.
+    @State private var mriWindowBefore = GradientRemover.Window.default.before
+    @State private var mriWindowAfter = GradientRemover.Window.default.after
+    // Event code whose occurrences mark the TR (volume) onsets. Defaults to
+    // "TREV" when present in the recording.
+    @State private var mriTRMarkerCode = "TREV"
+    // Head-motion configuration for fMRI-gradient correction (FASTR et al.).
+    @State private var showsMotionConfig = false
+    @State private var motionParameters: MotionParameters?
+    @State private var motionFDThreshold = 0.5
+    @State private var motionRadiusMm = 50.0
+    // Gradient-removal method selection and FASTR parameters.
+    @State private var mriMethod = MRIGradientMethod.aas
+    @State private var showsMRIMethodHelp = false
+    @State private var fastrSlices = 1
+    @State private var fastrOBSAuto = true
+    @State private var fastrANC = false
+    @State private var fastrSubSample = true
+    // Optional: drop volumes whose FD exceeds the threshold from templates.
+    @State private var mriExcludeHighMotion = false
+    // TR-marker alignment: trim TREV events from the start/end of the recording
+    // to match the motion file, and a sanity-check TR (seconds between events).
+    @State private var mriSkipStart = 0
+    @State private var mriSkipEnd = 0
+    @State private var mriTRSeconds = 0.0
 
     // Per-channel state, shared with the menu-bar Channels commands.
     @State private var channels = ChannelModel()
@@ -255,6 +336,8 @@ struct WaveformView: View {
     private let topomapPanelWidth: CGFloat = 320
     private let butterflyPanelWidth: CGFloat = 360
     private let overlaidCategoriesPanelWidth: CGFloat = 380
+    private let physioScaleOptions: [Double] = [8, 16, 32, 64]
+    private let physioScaleBounds: ClosedRange<Double> = 1...64
 
     private var artifactMenuControls: ArtifactMenuControls {
         ArtifactMenuControls(
@@ -283,6 +366,15 @@ struct WaveformView: View {
         )
     }
 
+    private var physioViewControls: PhysioViewControls {
+        let count = recording.pnsSignal?.numberOfChannels ?? 0
+        return PhysioViewControls(
+            showsPhysio: $showsPhysioChannels,
+            hasPhysio: count > 0,
+            channelCount: count
+        )
+    }
+
     private var channelHealthControls: ChannelHealthViewControls {
         ChannelHealthViewControls(
             showsHealth: Binding(
@@ -303,12 +395,21 @@ struct WaveformView: View {
     var body: some View {
         Group {
             if recording.isLoading {
+                let progress = recording.loadProgress ?? 0
                 VStack(spacing: 16) {
-                    ProgressView()
-                        .controlSize(.large)
                     Text("Opening \(recording.packageName)…")
                         .font(.headline)
-                    Text("Reading EEG channels and events")
+
+                    VStack(spacing: 6) {
+                        ProgressView(value: progress, total: 1)
+                            .progressViewStyle(.linear)
+                            .frame(width: 320)
+                        Text("\(Int((progress * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text(recording.loadStatusMessage)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -350,6 +451,7 @@ struct WaveformView: View {
         .focusedSceneValue(\.segmentHealthViewControls, segmentHealthControls)
         .focusedSceneValue(\.channelHealthViewControls, channelHealthControls)
         .focusedSceneValue(\.mffExportRequest, $mffExportRequest)
+        .focusedSceneValue(\.physioViewControls, physioViewControls)
         .onChange(of: resetToOriginalRequest) { _, _ in
             resetToOriginalData()
         }
@@ -501,6 +603,9 @@ struct WaveformView: View {
         return MFFEvent(
             id: "epoched-overlay-\(segment.id)-\(event.id)",
             code: event.code,
+            label: event.label,
+            eventDescription: event.eventDescription,
+            cell: event.cell,
             beginTimeSeconds: displayTime,
             rawBeginTime: event.rawBeginTime,
             sourceFile: event.sourceFile
@@ -575,6 +680,9 @@ struct WaveformView: View {
         .sheet(isPresented: $showsArtifactCleaningSheet) {
             artifactCleaningSheet(for: cleaningBase)
         }
+        .sheet(isPresented: $showsECGDetectionSheet) {
+            ecgDetectionSheet(for: continuousSignal)
+        }
         .sheet(isPresented: $showsWaveletArtifactExplorer) {
             waveletArtifactExplorerSheet(for: continuousSignal)
         }
@@ -593,6 +701,25 @@ struct WaveformView: View {
         }
         .sheet(isPresented: $showsSegmentHealthDetails) {
             segmentHealthDetailsSheet()
+        }
+        .sheet(isPresented: $showsMotionConfig) {
+            MotionConfigView(
+                parameters: $motionParameters,
+                fdThreshold: $motionFDThreshold,
+                radiusMm: $motionRadiusMm,
+                skipStart: $mriSkipStart,
+                skipEnd: $mriSkipEnd,
+                trSeconds: $mriTRSeconds,
+                trMarkerCode: mriTRMarkerCode,
+                trMarkerSamples: recording.signal.map { trMarkerSamples(in: $0, code: mriTRMarkerCode) } ?? [],
+                samplingRate: recording.signal?.samplingRate ?? 0,
+                windowBefore: mriWindowBefore,
+                windowAfter: mriWindowAfter,
+                onClose: {
+                    showsMotionConfig = false
+                    showsMRIPopover = true
+                }
+            )
         }
         .onChange(of: artifactDetectionMethod) { _, method in
             if method == .ica {
@@ -640,33 +767,20 @@ struct WaveformView: View {
             }
 
             HStack(spacing: 6) {
-            Menu {
-                Button("Gradient Artifact Removal") {
-                    removeGradientArtifact(from: recording.signal)
-                }
-                .disabled(isProcessingMRI || recording.signal == nil)
-
-                if gradientCorrectedSignal != nil {
-                    Button("Restore Original (Undo Gradient Removal)", role: .destructive) {
-                        clearGradientCorrection()
-                    }
-                }
-
-                Divider()
-
-                Button("BCG Removal") {}
-                    .disabled(true)
-                    .help("Ballistocardiogram removal — coming soon.")
+            Button {
+                showsMRIPopover.toggle()
             } label: {
                 ToolbarIcon(name: "icon.mri", isActive: gradientCorrectedSignal != nil)
             }
-            .menuIndicator(.hidden)
             .buttonStyle(.plain)
             .accessibilityLabel("MRI")
             .disabled(isProcessingMRI)
             .help(gradientCorrectedSignal != nil
-                ? "Gradient artifact removed using TREV triggers."
+                ? "Gradient artifact removed using \(mriTRMarkerCode) triggers."
                 : "MR artifact removal")
+            .popover(isPresented: $showsMRIPopover, arrowEdge: .bottom) {
+                mriPopover(for: recording.signal)
+            }
 
             Button {
                 showsFilterPopover.toggle()
@@ -736,9 +850,15 @@ struct WaveformView: View {
 
                 Toggle("Eye Blink", isOn: $detectsEyeBlinkArtifacts)
                 Toggle("Eye Movement", isOn: $detectsEyeMovementArtifacts)
-                Toggle("ECG", isOn: $detectsECGArtifacts)
-                    .disabled(true)
-                    .help("ECG artifact detection is not implemented yet.")
+                Button(detectsECGArtifacts ? "Configure ECG / R-wave Detection…" : "ECG / R-wave Detection…") {
+                    openECGDetectionSheet(for: continuousSignal)
+                }
+                if detectsECGArtifacts {
+                    Button("Turn Off ECG Detection") {
+                        detectsECGArtifacts = false
+                        artifactDetectionRefreshToken += 1
+                    }
+                }
 
                 Divider()
 
@@ -1169,6 +1289,14 @@ struct WaveformView: View {
                 .padding(.bottom, 16)
             }
 
+            // Pinned physio (PNS) pane: always visible below the EEG channels
+            // (separated by a gap), sharing the EEG time axis. Like the events
+            // bar, it stays put while the EEG channels scroll vertically.
+            if showsPhysioChannels,
+               let pns = displayedPhysioSignal(), !pns.data.isEmpty {
+                physioPane(pns, eegSamplingRate: signal.samplingRate)
+            }
+
             if isCommandKeyPressed || selectedSampleRange != nil || isShowingEpochs {
                 Divider()
 
@@ -1209,6 +1337,254 @@ struct WaveformView: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    // MARK: - Physio (PNS) pane
+
+    private func pnsFilterBaseSignal() -> MFFSignalData? {
+        guard let raw = recording.pnsSignal else { return nil }
+        if mriAppliesToPNS, let gradientCorrectedPNSSignal {
+            return gradientCorrectedPNSSignal
+        }
+        return raw
+    }
+
+    private func displayedPhysioSignal() -> MFFSignalData? {
+        guard let base = pnsFilterBaseSignal() else { return nil }
+        if filterPNSChannels,
+           let filteredPNSSignal,
+           filteredPNSInputSignalType == base.signalType {
+            return filteredPNSSignal
+        }
+        return base
+    }
+
+    /// Per-channel display range (min...max over a strided scan) for the physio
+    /// channels, so each trace (ECG, EMG, …) is auto-scaled to its own amplitude.
+    nonisolated private static func computePhysioRanges(_ signal: MFFSignalData?) -> [ClosedRange<Float>] {
+        guard let signal else { return [] }
+        return signal.data.map { channel in
+            guard !channel.isEmpty else { return Float(-1)...Float(1) }
+            let stride = max(1, channel.count / 4000)
+            var lo = Float.greatestFiniteMagnitude
+            var hi = -Float.greatestFiniteMagnitude
+            var i = 0
+            while i < channel.count {
+                let v = channel[i]
+                if v.isFinite { lo = min(lo, v); hi = max(hi, v) }
+                i += stride
+            }
+            if !(lo < hi) { return (hi - 1)...(hi + 1) }   // flat channel
+            return lo...hi
+        }
+    }
+
+    @ViewBuilder
+    private func physioPane(_ pns: MFFSignalData, eegSamplingRate: Double) -> some View {
+        let rowHeight: CGFloat = 36
+        let names = pns.channelNames
+            ?? (0..<pns.numberOfChannels).map { "PNS \($0 + 1)" }
+
+        VStack(spacing: 0) {
+            Divider()
+            HStack(alignment: .top, spacing: 12) {
+                // Channel labels, aligned to the trace rows.
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Physio")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(height: 16, alignment: .leading)
+                    ForEach(0..<pns.numberOfChannels, id: \.self) { i in
+                        let name = physioChannelName(index: i, names: names)
+                        HStack(spacing: 5) {
+                            Text(name)
+                                .font(.system(.caption, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+
+                            if let scaleBadge = physioScaleBadge(for: i) {
+                                Text(scaleBadge)
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            if physioFlippedPolarity.contains(i) {
+                                Text("flip")
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(height: rowHeight, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .help("Right-click to adjust physio scaling and polarity.")
+                        .contextMenu {
+                            physioChannelContextMenu(index: i, name: name)
+                        }
+                    }
+                }
+                .frame(width: labelColumnWidth, alignment: .topLeading)
+
+                ZStack(alignment: .topLeading) {
+                    PhysioTrackView(
+                        signal: pns,
+                        ranges: physioRanges,
+                        scaleFactors: physioScaleFactors,
+                        maxScaledChannels: physioMaxScaledChannels,
+                        flippedPolarity: physioFlippedPolarity,
+                        rowHeight: rowHeight,
+                        eegSamplingRate: eegSamplingRate,
+                        sampleStride: sampleStride,
+                        timeScale: timeScale,
+                        contentOffset: horizontalOffset,
+                        viewportWidth: horizontalViewportWidth
+                    )
+                    .padding(.top, 16)   // align below the "Physio" header
+
+                    physioContextMenuOverlay(
+                        channelCount: pns.numberOfChannels,
+                        names: names,
+                        rowHeight: rowHeight
+                    )
+                    .padding(.top, 16)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .task(id: physioRangeTaskID(for: pns)) {
+            physioRanges = Self.computePhysioRanges(pns)
+            physioScaleFactors = physioScaleFactors.filter { $0.key < pns.numberOfChannels }
+            physioMaxScaledChannels = physioMaxScaledChannels.filter { $0 < pns.numberOfChannels }
+            physioFlippedPolarity = physioFlippedPolarity.filter { $0 < pns.numberOfChannels }
+        }
+    }
+
+    private func physioRangeTaskID(for signal: MFFSignalData) -> String {
+        [
+            signal.signalURL.path,
+            signal.signalType,
+            "\(signal.numberOfChannels)",
+            "\(signal.data.first?.count ?? 0)",
+            filterPNSChannels ? "filterPNS" : "rawPNS",
+            mriAppliesToPNS ? "mriPNS" : "rawMRI"
+        ].joined(separator: "|")
+    }
+
+    private func physioChannelName(index: Int, names: [String]) -> String {
+        index < names.count ? names[index] : "PNS \(index + 1)"
+    }
+
+    private func physioScaleFactor(for index: Int) -> Double {
+        physioScaleFactors[index] ?? 1
+    }
+
+    private func physioScaleBadge(for index: Int) -> String? {
+        if physioMaxScaledChannels.contains(index) {
+            return "Max"
+        }
+        let scale = physioScaleFactor(for: index)
+        return scale == 1 ? nil : physioScaleLabel(scale)
+    }
+
+    private func physioScaleBinding(for index: Int) -> Binding<Double> {
+        Binding(
+            get: { physioScaleFactor(for: index) },
+            set: { setPhysioScale($0, for: index) }
+        )
+    }
+
+    private func setPhysioScale(_ scale: Double, for index: Int) {
+        physioMaxScaledChannels.remove(index)
+        let clamped = min(max(scale, physioScaleBounds.lowerBound), physioScaleBounds.upperBound)
+        if abs(clamped - 1) < 0.0001 {
+            physioScaleFactors[index] = nil
+        } else {
+            physioScaleFactors[index] = clamped
+        }
+    }
+
+    private func setPhysioScaleToMax(for index: Int) {
+        physioScaleFactors[index] = nil
+        physioMaxScaledChannels.insert(index)
+    }
+
+    private func togglePhysioPolarity(for index: Int) {
+        if physioFlippedPolarity.contains(index) {
+            physioFlippedPolarity.remove(index)
+        } else {
+            physioFlippedPolarity.insert(index)
+        }
+    }
+
+    private func physioScaleLabel(_ scale: Double) -> String {
+        let rounded = (scale * 100).rounded() / 100
+        if abs(rounded - rounded.rounded()) < 0.0001 {
+            return "\(Int(rounded.rounded()))x"
+        }
+        if abs(rounded * 10 - (rounded * 10).rounded()) < 0.0001 {
+            return String(format: "%.1fx", rounded)
+        }
+        return String(format: "%.2fx", rounded)
+    }
+
+    @ViewBuilder
+    private func physioChannelContextMenu(index: Int, name: String) -> some View {
+        let currentScale = physioScaleFactor(for: index)
+        let isMaxScaled = physioMaxScaledChannels.contains(index)
+        let isFlipped = physioFlippedPolarity.contains(index)
+        Text("\(name): \(isMaxScaled ? "Max" : physioScaleLabel(currentScale))\(isFlipped ? ", flipped" : "")")
+
+        Divider()
+
+        if !isMaxScaled {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Scale \(physioScaleLabel(currentScale))")
+                    .font(.caption)
+                Slider(value: physioScaleBinding(for: index), in: physioScaleBounds, step: 1)
+                    .frame(width: 180)
+            }
+            .padding(.vertical, 2)
+
+            Divider()
+        }
+
+        Button(isFlipped ? "Restore Polarity" : "Flip Polarity") {
+            togglePhysioPolarity(for: index)
+        }
+
+        Divider()
+
+        Button("Auto") {
+            setPhysioScale(1, for: index)
+        }
+        .disabled(!isMaxScaled && currentScale == 1)
+
+        ForEach(physioScaleOptions, id: \.self) { scale in
+            Button(physioScaleLabel(scale)) {
+                setPhysioScale(scale, for: index)
+            }
+        }
+
+        Button("Max") {
+            setPhysioScaleToMax(for: index)
+        }
+        .disabled(isMaxScaled)
+    }
+
+    private func physioContextMenuOverlay(channelCount: Int, names: [String], rowHeight: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            ForEach(0..<channelCount, id: \.self) { index in
+                let name = physioChannelName(index: index, names: names)
+                Color.clear
+                    .frame(height: rowHeight)
+                    .contentShape(Rectangle())
+                    .contextMenu {
+                        physioChannelContextMenu(index: index, name: name)
+                    }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Channels
@@ -1925,24 +2301,41 @@ struct WaveformView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(visibleEvents) { event in
+                let numberWidth = max(28, CGFloat(String(max(visibleEvents.count, 1)).count) * 8 + 14)
+                List(Array(visibleEvents.enumerated()), id: \.element.id) { offset, event in
                     Button {
                         jumpToEvent(event, in: signal)
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(event.code)
-                                .font(.system(.body, design: .monospaced).weight(.semibold))
-                            Text(formattedEventTime(event.beginTimeSeconds))
-                                .font(.caption)
+                        HStack(alignment: .top, spacing: 10) {
+                            Text("\(offset + 1)")
+                                .font(.system(.caption, design: .monospaced).weight(.semibold))
                                 .foregroundStyle(.secondary)
-                            Text(event.sourceFile)
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                .frame(width: numberWidth, alignment: .trailing)
+                                .padding(.top, 2)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(event.code)
+                                    .font(.system(.body, design: .monospaced).weight(.semibold))
+                                ForEach(eventMetadataRows(for: event), id: \.self) { row in
+                                    Text(row)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                                Text(formattedEventTime(event.beginTimeSeconds))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(event.sourceFile)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 4)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Event \(offset + 1), \(eventAccessibilitySummary(event)), \(formattedEventTime(event.beginTimeSeconds))")
                     .listRowBackground(
                         selectedEventID == event.id ? Color.accentColor.opacity(0.14) : Color.clear
                     )
@@ -4173,11 +4566,8 @@ struct WaveformView: View {
         waveletReductionStatusMessage = "Running wavelet reduction…"
         waveletReductionBandVarianceRetained = nil
 
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                waveletReductionProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            waveletReductionProgress = min(max(fraction, 0), 1)
         }
 
         Task { @MainActor in
@@ -4283,11 +4673,8 @@ struct WaveformView: View {
         artifactCleaningStatusMessage = nil
         artifactCleaningProgress = nil
         let badChannels = channels.bad
-        let (progressStream, progressContinuation) = AsyncStream<ArtifactCleaningProgress>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await progress in progressStream {
-                artifactCleaningProgress = progress
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { progress in
+            artifactCleaningProgress = progress
         }
 
         Task {
@@ -4488,11 +4875,32 @@ struct WaveformView: View {
 
     private func parseChannelList(_ text: String, channelCount: Int) -> [Int] {
         let separators = CharacterSet(charactersIn: ",; ").union(.newlines)
-        return Array(Set(text.components(separatedBy: separators).compactMap { token in
-            guard let oneBased = Int(token.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
-            let zeroBased = oneBased - 1
-            return zeroBased >= 0 && zeroBased < channelCount ? zeroBased : nil
-        })).sorted()
+        var indices = Set<Int>()
+        for rawToken in text.components(separatedBy: separators) {
+            let token = rawToken
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "–", with: "-")
+                .replacingOccurrences(of: "—", with: "-")
+            guard !token.isEmpty else { continue }
+
+            let bounds = token.split(separator: "-", maxSplits: 1).compactMap { Int($0) }
+            if bounds.count == 2 {
+                let lower = min(bounds[0], bounds[1])
+                let upper = max(bounds[0], bounds[1])
+                for oneBased in lower...upper {
+                    let zeroBased = oneBased - 1
+                    if zeroBased >= 0 && zeroBased < channelCount {
+                        indices.insert(zeroBased)
+                    }
+                }
+            } else if let oneBased = Int(token) {
+                let zeroBased = oneBased - 1
+                if zeroBased >= 0 && zeroBased < channelCount {
+                    indices.insert(zeroBased)
+                }
+            }
+        }
+        return indices.sorted()
     }
 
     private func saveArtifactTemplateJSON(_ template: SavedArtifactTemplate?) {
@@ -4585,9 +4993,9 @@ struct WaveformView: View {
                 GridRow {
                     ArtifactTemplateFieldLabel(
                         title: "Keep Var",
-                        help: "PCA variance target used to choose how many components to keep, capped by the Components field. 99% is a practical default for avoiding near-zero variance components."
+                        help: "PCA variance target used to choose how many components to keep, capped by the Components field. 99.9% is a practical default for preserving blink components while still avoiding near-zero noisy directions."
                     )
-                    TextField("Fraction", value: $icaVarianceThreshold, format: .number.precision(.fractionLength(2)))
+                    TextField("Fraction", value: $icaVarianceThreshold, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
 
@@ -4637,7 +5045,7 @@ struct WaveformView: View {
                         title: "Tolerance",
                         help: "MNE-style early stopping threshold for summed squared ICA weight change between iterations. Smaller values may run longer."
                     )
-                    TextField("Tolerance", value: $icaConvergenceTolerance, format: .number.precision(.significantDigits(2...4)))
+                    TextField("Tolerance", value: $icaConvergenceTolerance, format: .number.notation(.scientific).precision(.significantDigits(2...4)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
 
@@ -4886,12 +5294,9 @@ struct WaveformView: View {
             minimumIterations: min(max(icaMinimumIterations, 0), max(icaMaxIterations, 1))
         )
 
-        let (progressStream, progressContinuation) = AsyncStream<ICAProgressUpdate>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await update in progressStream {
-                icaProgress = min(max(update.fraction, 0), 1)
-                icaProgressMessage = update.message
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { (update: ICAProgressUpdate) in
+            icaProgress = min(max(update.fraction, 0), 1)
+            icaProgressMessage = update.message
         }
 
         Task {
@@ -5194,13 +5599,13 @@ struct WaveformView: View {
             "## ICA Settings",
             "Method field: \(icaMethod.displayName)",
             "Components field: \(icaComponentCount)",
-            "Keep variance field: \(String(format: "%.2f", icaVarianceThreshold))",
+            "Keep variance field: \(String(format: "%.3f", icaVarianceThreshold))",
             "Average reference field: \(icaUsesAverageReference ? "on" : "off")",
             "Search Hz field: \(String(format: "%.1f", icaDownsampleRate))",
             "Iterations field: \(icaMaxIterations)",
             "Fit filter field: \(icaUsesFitFilter ? "on" : "off")",
             "Fit Hz field: \(String(format: "%.2f", icaFitLowCutoff))-\(String(format: "%.2f", icaFitHighCutoff)), notch \(icaFitNotch60HzEnabled ? "on" : "off")",
-            "Tolerance field: \(icaConvergenceTolerance)",
+            "Tolerance field: \(String(format: "%.3e", icaConvergenceTolerance))",
             "Minimum iterations field: \(icaMinimumIterations)"
         ]
 
@@ -5213,10 +5618,10 @@ struct WaveformView: View {
                 "Analysis sampling rate: \(String(format: "%.1f", decomposition.analysisSamplingRate)) Hz",
                 "Decimation: \(decomposition.decimation)",
                 "Iterations: \(decomposition.iterations)",
-                "Final change: \(decomposition.finalChange)",
+                "Final change: \(String(format: "%.3e", decomposition.finalChange))",
                 "Converged by tolerance: \(decomposition.finalChange.isFinite && decomposition.finalChange <= decomposition.convergenceTolerance ? "yes" : "no")",
                 "Average reference: \(decomposition.averageReference ? "yes" : "no")",
-                "PCA variance target: \(String(format: "%.2f", decomposition.varianceThreshold))",
+                "PCA variance target: \(String(format: "%.3f", decomposition.varianceThreshold))",
                 "Selected PCA variance: \(String(format: "%.1f", decomposition.pcaVarianceRetained * 100))%",
                 "Fit filter: \(decomposition.fitFilter.map { "\(String(format: "%.2f", $0.lowCutoff))-\(String(format: "%.2f", $0.highCutoff)) Hz, notch \($0.notch60HzEnabled ? "on" : "off")" } ?? "none")",
                 "Excluded components: \(decomposition.excludedComponents.sorted().map { "IC \($0 + 1) \(decomposition.labels[$0] ?? "")" }.joined(separator: ", ").nilIfEmpty ?? "none")"
@@ -5339,14 +5744,41 @@ struct WaveformView: View {
     private func openPSASheet(for signal: MFFSignalData) {
         reconcilePSADefinedArtifactRejectionSelections()
         let events = segmentableEvents(for: signal)
-        let summaries = groupedEventSummaries(events)
-        let availableCodes = Set(summaries.map(\.code))
-        psaSelectedEventCodes = psaSelectedEventCodes.intersection(availableCodes)
+        reconcilePSAEventSelection(for: events)
+        psaStatusMessage = nil
+        showsPSASheet = true
+    }
+
+    private func reconcilePSAEventSelection(for events: [MFFEvent]) {
+        let summaries = groupedPSAEventSummaries(events)
+        let availableValues = Set(summaries.map(\.code))
+        psaSelectedEventCodes = psaSelectedEventCodes.intersection(availableValues)
         for summary in summaries where psaCategoryNames[summary.code] == nil {
             psaCategoryNames[summary.code] = summary.code
         }
-        psaStatusMessage = nil
-        showsPSASheet = true
+        var enabledTimingValues = psaTimingMarkerEnabledValues.intersection(availableValues)
+        var timingMarkerValues = psaTimingMarkerValuesBySegmentValue.filter { segmentValue, timingValue in
+            availableValues.contains(segmentValue)
+                && availableValues.contains(timingValue)
+                && segmentValue != timingValue
+        }
+        var timingValuesWithoutOptions = Set<String>()
+        for segmentValue in enabledTimingValues {
+            let options = psaTimingMarkerOptions(in: summaries, excluding: segmentValue)
+            if let currentValue = timingMarkerValues[segmentValue],
+               options.contains(where: { $0.code == currentValue }) {
+                continue
+            }
+            if let defaultValue = options.first?.code {
+                timingMarkerValues[segmentValue] = defaultValue
+            } else {
+                timingValuesWithoutOptions.insert(segmentValue)
+                timingMarkerValues[segmentValue] = nil
+            }
+        }
+        enabledTimingValues.subtract(timingValuesWithoutOptions)
+        psaTimingMarkerEnabledValues = enabledTimingValues
+        psaTimingMarkerValuesBySegmentValue = timingMarkerValues
     }
 
     private func segmentableEvents(for signal: MFFSignalData) -> [MFFEvent] {
@@ -5355,7 +5787,15 @@ struct WaveformView: View {
 
     private func psaSheet(for signal: MFFSignalData) -> some View {
         let events = segmentableEvents(for: signal)
-        let summaries = groupedEventSummaries(events)
+        let allSummaries = groupedPSAEventSummaries(events)
+        let summaries = filteredPSAEventSummaries(allSummaries)
+        let segmentFieldBinding = Binding<PSASegmentField>(
+            get: { psaSegmentField },
+            set: { newField in
+                psaSegmentField = newField
+                reconcilePSAEventSelection(for: events)
+            }
+        )
 
         return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
@@ -5368,36 +5808,56 @@ struct WaveformView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Segment On")
-                    .font(.caption.weight(.semibold))
+                HStack {
+                    Text("Segment On")
+                        .font(.caption.weight(.semibold))
+                    Picker("Segment On", selection: segmentFieldBinding) {
+                        ForEach(PSASegmentField.allCases) { field in
+                            Text(field.rawValue).tag(field)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 150)
 
-                if summaries.isEmpty {
+                    Spacer(minLength: 12)
+
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Filter events", text: $psaEventSearchText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                    if !psaEventSearchText.isEmpty {
+                        Button {
+                            psaEventSearchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Clear filter")
+                    }
+                }
+
+                if allSummaries.isEmpty {
                     ContentUnavailableView(
                         "No Events",
                         systemImage: "list.bullet.rectangle",
                         description: Text("This recording has no events to segment on.")
                     )
                     .frame(height: 120)
+                } else if summaries.isEmpty {
+                    ContentUnavailableView(
+                        "No Matches",
+                        systemImage: "magnifyingglass",
+                        description: Text("No event \(psaSegmentField.rawValue.lowercased()) values match the filter.")
+                    )
+                    .frame(height: 120)
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(summaries) { summary in
-                                HStack(spacing: 12) {
-                                    Toggle(isOn: psaEventCodeBinding(summary.code)) {
-                                        Text(summary.code)
-                                            .font(.system(.body, design: .monospaced))
-                                    }
-                                    .frame(width: 150, alignment: .leading)
-
-                                    Text("\(summary.count)")
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
-                                        .frame(width: 44, alignment: .trailing)
-
-                                    TextField("Category", text: psaCategoryBinding(summary.code))
-                                        .textFieldStyle(.roundedBorder)
-                                        .disabled(!psaSelectedEventCodes.contains(summary.code))
-                                }
+                                psaSegmentEventRow(summary: summary, allSummaries: allSummaries)
                             }
                         }
                         .padding(10)
@@ -5428,6 +5888,7 @@ struct WaveformView: View {
                     TextField("Offset", value: $psaOffset, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 100)
+                        .help("Ignored for categories that use a DIN timing marker.")
                 }
             }
 
@@ -5487,7 +5948,59 @@ struct WaveformView: View {
             }
         }
         .padding(20)
-        .frame(width: 560)
+        .frame(width: 760)
+    }
+
+    private func psaSegmentEventRow(summary: EventSummary, allSummaries: [EventSummary]) -> some View {
+        let timingOptions = psaTimingMarkerOptions(in: allSummaries, excluding: summary.code)
+        let isSelected = psaSelectedEventCodes.contains(summary.code)
+        let usesTimingMarker = psaTimingMarkerEnabledValues.contains(summary.code)
+
+        return HStack(spacing: 12) {
+            Toggle(isOn: psaEventCodeBinding(summary.code)) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(summary.code)
+                        .font(.system(.body, design: .monospaced))
+                    if let detail = summary.detail {
+                        Text(detail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .frame(width: 150, alignment: .leading)
+
+            Text("\(summary.count)")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
+
+            TextField("Category", text: psaCategoryBinding(summary.code))
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 170)
+                .disabled(!isSelected)
+
+            Toggle("DIN", isOn: psaTimingMarkerEnabledBinding(summary.code, options: timingOptions))
+                .toggleStyle(.checkbox)
+                .disabled(!isSelected || timingOptions.isEmpty)
+                .help("Use the nearest selected timing marker as this category's onset.")
+
+            Picker("Timing Marker", selection: psaTimingMarkerSelectionBinding(summary.code, options: timingOptions)) {
+                if timingOptions.isEmpty {
+                    Text("No markers").tag("")
+                } else {
+                    ForEach(timingOptions) { option in
+                        Text(option.code).tag(option.code)
+                    }
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 128)
+            .disabled(!isSelected || !usesTimingMarker || timingOptions.isEmpty)
+            .help("Marker group whose nearest event supplies the true onset time.")
+        }
     }
 
     private func psaArtifactRejectionRow(
@@ -5535,6 +6048,7 @@ struct WaveformView: View {
                     }
                 } else {
                     psaSelectedEventCodes.remove(code)
+                    psaTimingMarkerEnabledValues.remove(code)
                 }
             }
         )
@@ -5547,12 +6061,53 @@ struct WaveformView: View {
         )
     }
 
+    private func psaTimingMarkerEnabledBinding(_ segmentValue: String, options: [EventSummary]) -> Binding<Bool> {
+        Binding(
+            get: { psaTimingMarkerEnabledValues.contains(segmentValue) },
+            set: { isEnabled in
+                if isEnabled {
+                    psaTimingMarkerEnabledValues.insert(segmentValue)
+                    if let currentValue = psaTimingMarkerValuesBySegmentValue[segmentValue],
+                       options.contains(where: { $0.code == currentValue }) {
+                        return
+                    }
+                    psaTimingMarkerValuesBySegmentValue[segmentValue] = options.first?.code
+                } else {
+                    psaTimingMarkerEnabledValues.remove(segmentValue)
+                }
+            }
+        )
+    }
+
+    private func psaTimingMarkerSelectionBinding(_ segmentValue: String, options: [EventSummary]) -> Binding<String> {
+        Binding(
+            get: {
+                let validOptions = Set(options.map(\.code))
+                if let currentValue = psaTimingMarkerValuesBySegmentValue[segmentValue],
+                   validOptions.contains(currentValue) {
+                    return currentValue
+                }
+                return options.first?.code ?? ""
+            },
+            set: { newValue in
+                if options.contains(where: { $0.code == newValue }) {
+                    psaTimingMarkerValuesBySegmentValue[segmentValue] = newValue
+                }
+            }
+        )
+    }
+
+    private func psaTimingMarkerOptions(in summaries: [EventSummary], excluding segmentValue: String) -> [EventSummary] {
+        summaries.filter { $0.code != segmentValue }
+    }
+
     private func canApplyPSA(events: [MFFEvent]) -> Bool {
         !events.isEmpty
             && !psaSelectedEventCodes.isEmpty
             && psaPreStimulus >= 0
             && psaPostStimulus > 0
             && selectedPSACategoriesByCode() != nil
+            && selectedPSATimingMarkersBySegmentValue(events: events) != nil
     }
 
     private func selectedPSACategoriesByCode() -> [String: String]? {
@@ -5563,6 +6118,20 @@ struct WaveformView: View {
             categoriesByCode[code] = category
         }
         return categoriesByCode
+    }
+
+    private func selectedPSATimingMarkersBySegmentValue(events: [MFFEvent]) -> [String: String]? {
+        let availableValues = Set(groupedPSAEventSummaries(events).map(\.code))
+        var timingMarkersBySegmentValue = [String: String]()
+        for segmentValue in psaSelectedEventCodes where psaTimingMarkerEnabledValues.contains(segmentValue) {
+            guard let timingValue = psaTimingMarkerValuesBySegmentValue[segmentValue],
+                  availableValues.contains(timingValue),
+                  timingValue != segmentValue else {
+                return nil
+            }
+            timingMarkersBySegmentValue[segmentValue] = timingValue
+        }
+        return timingMarkersBySegmentValue
     }
 
     private func applyPSA(to signal: MFFSignalData) {
@@ -5600,17 +6169,29 @@ struct WaveformView: View {
     }
 
     private func buildEpochs(from signal: MFFSignalData) -> PSABuildResult? {
-        guard let categoriesByCode = selectedPSACategoriesByCode() else {
+        guard let categoriesBySegmentValue = selectedPSACategoriesByCode() else {
             psaStatusMessage = "Enter a category name for each selected event."
             return nil
         }
-
-        let events = segmentableEvents(for: signal)
-            .filter { psaSelectedEventCodes.contains($0.code) }
+        let allEvents = segmentableEvents(for: signal)
             .sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+        guard let timingMarkersBySegmentValue = selectedPSATimingMarkersBySegmentValue(events: allEvents) else {
+            psaStatusMessage = "Choose a timing marker for each DIN-adjusted event."
+            return nil
+        }
+        let timingEventsBySegmentValue = Dictionary(grouping: allEvents, by: psaSegmentValue(for:))
+        for (segmentValue, timingValue) in timingMarkersBySegmentValue {
+            guard timingEventsBySegmentValue[timingValue]?.isEmpty == false else {
+                psaStatusMessage = "No \(timingValue) timing markers found for \(segmentValue)."
+                return nil
+            }
+        }
+
+        let events = allEvents
+            .filter { psaSelectedEventCodes.contains(psaSegmentValue(for: $0)) }
 
         guard !events.isEmpty else {
-            psaStatusMessage = "Select at least one event code."
+            psaStatusMessage = "Select at least one event \(psaSegmentField.rawValue.lowercased())."
             return nil
         }
         guard signal.samplingRate > 0, let sampleCount = signal.data.first?.count, sampleCount > 0 else {
@@ -5630,13 +6211,29 @@ struct WaveformView: View {
         var segments: [EpochSegment] = []
         var skippedOutOfBounds = 0
         var skippedArtifacts = 0
+        var skippedTimingMarkers = 0
+        var timingAdjusted = 0
         var accepted = 0
-        let categoryColorIndices = categoryColorIndices(for: Array(categoriesByCode.values))
+        let categoryColorIndices = categoryColorIndices(for: Array(categoriesBySegmentValue.values))
         let artifactEventsForRejection = psaArtifactEventsForRejection(in: signal)
 
         for event in events {
-            guard let category = categoriesByCode[event.code] else { continue }
-            let correctedSample = Int(((event.beginTimeSeconds + psaOffset) * signal.samplingRate).rounded())
+            let segmentValue = psaSegmentValue(for: event)
+            guard let category = categoriesBySegmentValue[segmentValue] else { continue }
+            let anchorTimeSeconds: Double
+            let timingMarkerValue = timingMarkersBySegmentValue[segmentValue]
+            if let timingMarkerValue {
+                guard let timingEvents = timingEventsBySegmentValue[timingMarkerValue],
+                      let timingEvent = nearestPSATimingEvent(to: event, in: timingEvents) else {
+                    skippedTimingMarkers += 1
+                    continue
+                }
+                anchorTimeSeconds = timingEvent.beginTimeSeconds
+                timingAdjusted += 1
+            } else {
+                anchorTimeSeconds = event.beginTimeSeconds + psaOffset
+            }
+            let correctedSample = Int((anchorTimeSeconds * signal.samplingRate).rounded())
             let startSample = correctedSample - preSamples
             let endSample = startSample + epochLength
 
@@ -5669,7 +6266,7 @@ struct WaveformView: View {
                     code: category,
                     beginTimeSeconds: stimulusTime,
                     rawBeginTime: String(format: "%.6f", stimulusTime),
-                    sourceFile: "PSA: \(event.code)"
+                    sourceFile: timingMarkerValue.map { "PSA: \(segmentValue) via \($0)" } ?? "PSA: \(segmentValue)"
                 )
             )
             segments.append(
@@ -5679,7 +6276,7 @@ struct WaveformView: View {
                     stimulusOffsetSamples: preSamples,
                     category: category,
                     sourceCode: event.code,
-                    sourceTimeSeconds: event.beginTimeSeconds,
+                    sourceTimeSeconds: anchorTimeSeconds,
                     colorIndex: categoryColorIndices[category] ?? 0,
                     contributingEpochCount: 1
                 )
@@ -5688,9 +6285,13 @@ struct WaveformView: View {
         }
 
         guard accepted > 0, let totalSamples = epochedData.first?.count, totalSamples > 0 else {
-            psaStatusMessage = skippedArtifacts > 0
-                ? "No epochs remained after artifact rejection."
-                : "No epochs fit inside the recording bounds."
+            if skippedTimingMarkers > 0 {
+                psaStatusMessage = "No epochs could be aligned to timing markers."
+            } else {
+                psaStatusMessage = skippedArtifacts > 0
+                    ? "No epochs remained after artifact rejection."
+                    : "No epochs fit inside the recording bounds."
+            }
             return nil
         }
 
@@ -5710,11 +6311,28 @@ struct WaveformView: View {
         if skippedArtifacts > 0 {
             message += ", \(skippedArtifacts) skipped for \(psaArtifactRejectionLabel())"
         }
+        if timingAdjusted > 0 {
+            message += ", \(timingAdjusted) timing adjusted"
+        }
+        if skippedTimingMarkers > 0 {
+            message += ", \(skippedTimingMarkers) missing timing marker"
+        }
         if skippedOutOfBounds > 0 {
             message += ", \(skippedOutOfBounds) out of bounds"
         }
 
         return PSABuildResult(signal: epochedSignal, segments: segments, message: message)
+    }
+
+    private func nearestPSATimingEvent(to event: MFFEvent, in candidates: [MFFEvent]) -> MFFEvent? {
+        candidates.min { lhs, rhs in
+            let lhsDistance = abs(lhs.beginTimeSeconds - event.beginTimeSeconds)
+            let rhsDistance = abs(rhs.beginTimeSeconds - event.beginTimeSeconds)
+            if lhsDistance == rhsDistance {
+                return lhs.beginTimeSeconds < rhs.beginTimeSeconds
+            }
+            return lhsDistance < rhsDistance
+        }
     }
 
     private func psaArtifactEventsForRejection(in signal: MFFSignalData) -> [MFFEvent] {
@@ -6273,6 +6891,12 @@ struct WaveformView: View {
             Toggle("Average reference", isOn: $filterAverageReference)
                 .help("Re-reference to the common average: subtract the mean across all channels at each time point. Removes shared reference signal.")
 
+            if recording.pnsSignal != nil {
+                Toggle("Filter PNS", isOn: $filterPNSChannels)
+                    .font(.caption)
+                    .help("Apply the band-pass and line-noise filter to physio/PNS channels. Average reference is EEG-only.")
+            }
+
             HStack {
                 Button("Reset 0.1–30 Hz") {
                     filterLowCutoff = 0.1
@@ -6306,6 +6930,49 @@ struct WaveformView: View {
         .frame(width: 330)
     }
 
+    private nonisolated static func filteredChannels(
+        _ sourceData: [[Float]],
+        samplingRate: Double,
+        lowCutoff: Double,
+        highCutoff: Double,
+        lineNoiseMode: FilterLineNoiseMode,
+        notchFrequency: Double,
+        lineNoiseHarmonics: Int,
+        lineNoiseWindowSeconds: Double,
+        lineNoiseStrength: Double,
+        averageReference: Bool,
+        excludedChannels: Set<Int>,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> [[Float]] {
+        let notchEnabled = lineNoiseMode == .notch
+        var bandPassed = try await EEGSignalFilter.bandPass(
+            channels: sourceData,
+            samplingRate: samplingRate,
+            lowCutoff: lowCutoff,
+            highCutoff: highCutoff,
+            notch60HzEnabled: notchEnabled,
+            notchFrequency: notchFrequency,
+            progress: { fraction in
+                progress(lineNoiseMode == .adaptiveCleanLine ? 0.62 * fraction : fraction)
+            }
+        )
+        if lineNoiseMode == .adaptiveCleanLine {
+            bandPassed = await EEGSignalFilter.adaptiveLineNoiseReduction(
+                channels: bandPassed,
+                samplingRate: samplingRate,
+                baseFrequency: notchFrequency,
+                harmonicCount: lineNoiseHarmonics,
+                windowSeconds: lineNoiseWindowSeconds,
+                strength: lineNoiseStrength,
+                progress: { fraction in progress(0.62 + 0.38 * fraction) }
+            )
+        }
+        if averageReference {
+            EEGSignalFilter.averageReferenceInPlace(&bandPassed, excluding: excludedChannels)
+        }
+        return bandPassed
+    }
+
     private func applyBandpassFilter(to signal: MFFSignalData) {
         isFiltering = true
         filterProgress = 0
@@ -6320,10 +6987,10 @@ struct WaveformView: View {
         let recordingStartTime = signal.recordingStartTime
         let events = signal.events
         let sourceData = signal.data
+        let pnsInput = filterPNSChannels ? pnsFilterBaseSignal() : nil
         let lowCutoff = filterLowCutoff
         let highCutoff = filterHighCutoff
         let lineNoiseMode = activeFilterLineNoiseMode
-        let notch60HzEnabled = lineNoiseMode == .notch
         let lineNoiseFrequency = filterLineNoiseFrequency
         let lineNoiseHarmonics = filterLineNoiseHarmonics
         let lineNoiseWindowSeconds = filterLineNoiseWindowSeconds
@@ -6335,43 +7002,54 @@ struct WaveformView: View {
         }
 
         // Stream per-channel completion fractions to the UI.
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                filterProgress = fraction
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            filterProgress = fraction
         }
 
         Task {
             do {
                 let badChannels = channels.bad
-                let filteredData = try await Task.detached(priority: .userInitiated) {
-                    var bandPassed = try await EEGSignalFilter.bandPass(
-                        channels: sourceData,
+                let pnsEnabled = pnsInput != nil
+                let result = try await Task.detached(priority: .userInitiated) {
+                    let filteredData = try await Self.filteredChannels(
+                        sourceData,
                         samplingRate: samplingRate,
                         lowCutoff: lowCutoff,
                         highCutoff: highCutoff,
-                        notch60HzEnabled: notch60HzEnabled,
+                        lineNoiseMode: lineNoiseMode,
                         notchFrequency: lineNoiseFrequency,
+                        lineNoiseHarmonics: lineNoiseHarmonics,
+                        lineNoiseWindowSeconds: lineNoiseWindowSeconds,
+                        lineNoiseStrength: lineNoiseStrength,
+                        averageReference: averageReference,
+                        excludedChannels: badChannels,
                         progress: { fraction in
-                            progressContinuation.yield(lineNoiseMode == .adaptiveCleanLine ? 0.62 * fraction : fraction)
+                            progressContinuation.yield(pnsEnabled ? 0.70 * fraction : fraction)
                         }
                     )
-                    if lineNoiseMode == .adaptiveCleanLine {
-                        bandPassed = await EEGSignalFilter.adaptiveLineNoiseReduction(
-                            channels: bandPassed,
-                            samplingRate: samplingRate,
-                            baseFrequency: lineNoiseFrequency,
-                            harmonicCount: lineNoiseHarmonics,
-                            windowSeconds: lineNoiseWindowSeconds,
-                            strength: lineNoiseStrength,
-                            progress: { fraction in progressContinuation.yield(0.62 + 0.38 * fraction) }
+
+                    let filteredPNSData: [[Float]]?
+                    if let pnsInput {
+                        filteredPNSData = try await Self.filteredChannels(
+                            pnsInput.data,
+                            samplingRate: pnsInput.samplingRate,
+                            lowCutoff: lowCutoff,
+                            highCutoff: highCutoff,
+                            lineNoiseMode: lineNoiseMode,
+                            notchFrequency: lineNoiseFrequency,
+                            lineNoiseHarmonics: lineNoiseHarmonics,
+                            lineNoiseWindowSeconds: lineNoiseWindowSeconds,
+                            lineNoiseStrength: lineNoiseStrength,
+                            averageReference: false,
+                            excludedChannels: [],
+                            progress: { fraction in
+                                progressContinuation.yield(0.70 + 0.30 * fraction)
+                            }
                         )
+                    } else {
+                        filteredPNSData = nil
                     }
-                    if averageReference {
-                        EEGSignalFilter.averageReferenceInPlace(&bandPassed, excluding: badChannels)
-                    }
-                    return bandPassed
+                    return (filteredData, filteredPNSData)
                 }.value
                 progressContinuation.finish()
                 progressTask.cancel()
@@ -6384,14 +7062,31 @@ struct WaveformView: View {
                     duration: duration,
                     recordingStartTime: recordingStartTime,
                     events: events,
-                    data: filteredData,
+                    data: result.0,
                     channelNames: signal.channelNames
                 )
+                if let pnsInput, let filteredPNSData = result.1 {
+                    filteredPNSSignal = MFFSignalData(
+                        signalURL: pnsInput.signalURL,
+                        signalType: "\(pnsInput.signalType) filtered",
+                        numberOfChannels: pnsInput.numberOfChannels,
+                        samplingRate: pnsInput.samplingRate,
+                        duration: pnsInput.duration,
+                        recordingStartTime: pnsInput.recordingStartTime,
+                        events: pnsInput.events,
+                        data: filteredPNSData,
+                        channelNames: pnsInput.channelNames
+                    )
+                    filteredPNSInputSignalType = pnsInput.signalType
+                } else {
+                    filteredPNSSignal = nil
+                    filteredPNSInputSignalType = nil
+                }
                 clearAppliedArtifactCleaning()
                 artifactDetectionRefreshToken += 1
                 invalidateEpochsForSignalChange()
                 invalidateInterpolations()
-                filterStatusMessage = "Applied Butterworth \(String(format: "%.1f", lowCutoff))-\(String(format: "%.1f", highCutoff)) Hz\(filterLineNoiseSummary)\(averageReference ? " + average reference" : "")."
+                filterStatusMessage = "Applied Butterworth \(String(format: "%.1f", lowCutoff))-\(String(format: "%.1f", highCutoff)) Hz\(filterLineNoiseSummary)\(averageReference ? " + average reference" : "")\(pnsInput == nil ? "" : " + PNS")."
                 filterStatusIsError = false
             } catch {
                 progressContinuation.finish()
@@ -6405,6 +7100,8 @@ struct WaveformView: View {
 
     private func clearBandpassFilter() {
         filteredSignal = nil
+        filteredPNSSignal = nil
+        filteredPNSInputSignalType = nil
         clearAppliedArtifactCleaning()
         filterStatusMessage = "Removed band-pass filter."
         filterStatusIsError = false
@@ -6415,19 +7112,374 @@ struct WaveformView: View {
 
     // MARK: - MRI gradient artifact removal
 
-    /// TREV (volume trigger) sample indices from the raw recording, used as the
-    /// TR grid for gradient correction.
-    private func trevSamples(in signal: MFFSignalData) -> [Int] {
-        signal.events
-            .filter { $0.code == "TREV" }
-            .map { Int(($0.beginTimeSeconds * signal.samplingRate).rounded()) }
+    /// Volume-trigger sample indices from the raw recording (events whose code
+    /// matches `code`), used as the TR grid for gradient correction.
+    private func trMarkerSamples(in signal: MFFSignalData, code: String, samplingRate: Double? = nil) -> [Int] {
+        let rate = samplingRate ?? signal.samplingRate
+        return signal.events
+            .filter { $0.code == code }
+            .map { Int(($0.beginTimeSeconds * rate).rounded()) }
             .sorted()
+    }
+
+    /// Distinct event codes in the recording with their occurrence counts,
+    /// sorted by descending count then code.
+    private func eventCodeCounts(in signal: MFFSignalData) -> [(code: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for event in signal.events {
+            counts[event.code, default: 0] += 1
+        }
+        return counts
+            .map { (code: $0.key, count: $0.value) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.code < $1.code }
+    }
+
+    @ViewBuilder
+    private func mriPopover(for signal: MFFSignalData?) -> some View {
+        let codeCounts = signal.map(eventCodeCounts) ?? []
+        let selectedCount = codeCounts.first { $0.code == mriTRMarkerCode }?.count
+        let motionUsable = (motionParameters?.count ?? 0) >= 2
+        let motionAlignmentOK = mriMotionAlignmentOK(selectedCount: selectedCount)
+        let spacing = trSpacingInfo(for: signal)
+        let canApply = signal != nil && !isProcessingMRI && (selectedCount ?? 0) >= 2
+            && (mriMethod != .moosmann || motionUsable)
+            && motionAlignmentOK
+            && spacing.hasEnoughTriggers && spacing.isEvenlySpaced
+
+        VStack(alignment: .leading, spacing: 14) {
+            Text("MR Gradient Removal")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Text("Method")
+                        .font(.caption.weight(.semibold))
+                    Button {
+                        showsMRIMethodHelp = true
+                    } label: {
+                        Image(systemName: "questionmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .help("About AAS vs FASTR and references")
+                    .popover(isPresented: $showsMRIMethodHelp, arrowEdge: .trailing) {
+                        mriMethodHelp()
+                    }
+                }
+                Picker("Method", selection: $mriMethod) {
+                    ForEach(MRIGradientMethod.allCases) { method in
+                        Text(method.label).tag(method)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("TR Marker Event")
+                    .font(.caption.weight(.semibold))
+                if codeCounts.isEmpty {
+                    Text("No events found in this recording.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Picker("TR Marker Event", selection: $mriTRMarkerCode) {
+                                ForEach(codeCounts, id: \.code) { entry in
+                                    Text("\(entry.code)  (\(entry.count))").tag(entry.code)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 150, alignment: .leading)
+                            if let selectedCount {
+                                Text("\(trimmedMarkerCount(total: selectedCount)) of \(selectedCount) \(mriTRMarkerCode) markers used.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("No \(mriTRMarkerCode) markers in this recording.")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+
+                        Spacer(minLength: 0)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            mriSkipControl(
+                                title: "Skip First",
+                                value: $mriSkipStart,
+                                totalMarkers: selectedCount,
+                                otherSkip: mriSkipEnd
+                            )
+                            mriSkipControl(
+                                title: "Skip Last",
+                                value: $mriSkipEnd,
+                                totalMarkers: selectedCount,
+                                otherSkip: mriSkipStart
+                            )
+                        }
+                    }
+
+                    if let selectedCount, selectedCount > 0 {
+                        mriTRSpacingStatus(spacing: spacing, totalMarkers: selectedCount)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Template Window (neighboring TRs)")
+                    .font(.caption.weight(.semibold))
+                HStack {
+                    Text("Pre")
+                        .font(.caption)
+                        .frame(width: 36, alignment: .leading)
+                    TextField("Pre", value: $mriWindowBefore, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Stepper("", value: $mriWindowBefore, in: 1...64)
+                        .labelsHidden()
+                }
+                HStack {
+                    Text("Post")
+                        .font(.caption)
+                        .frame(width: 36, alignment: .leading)
+                    TextField("Post", value: $mriWindowAfter, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Stepper("", value: $mriWindowAfter, in: 1...64)
+                        .labelsHidden()
+                }
+            }
+
+            let motionLoaded = (motionParameters?.count ?? 0) >= 2
+
+            if mriMethod == .moosmann, motionLoaded {
+                Text("Using motion: \(motionParameters?.sourceName ?? "") (\(motionParameters?.count ?? 0) vols), threshold \(String(format: "%.2f", motionFDThreshold)) mm")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // Optional motion-censoring for AAS/FASTR/FARM (Moosmann censors
+            // intrinsically, so the toggle is hidden there).
+            if motionLoaded, mriMethod != .moosmann {
+                Toggle(isOn: $mriExcludeHighMotion) {
+                    Text("Exclude high-motion TRs")
+                        .font(.caption)
+                }
+                .help("High-motion volumes (FD over the threshold set in Configure Motion…) are still corrected, but are not used as donors when building artifact templates.")
+            }
+
+            if recording.pnsSignal != nil {
+                Toggle("Apply to PNS channels", isOn: $mriAppliesToPNS)
+                    .font(.caption)
+                    .help("Apply the selected MRI gradient artifact correction to physio/PNS channels using the same TR markers.")
+            }
+
+            if mriMethod.isFASTR {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("FASTR Options")
+                        .font(.caption.weight(.semibold))
+                    HStack {
+                        Text("Slices / volume")
+                            .font(.caption)
+                            .frame(width: 96, alignment: .leading)
+                        TextField("Slices", value: $fastrSlices, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Stepper("", value: $fastrSlices, in: 1...128)
+                            .labelsHidden()
+                    }
+                    .help("Number of fMRI slices per volume. Each TR interval is split into this many slice epochs.")
+                    Toggle("Sub-sample alignment", isOn: $fastrSubSample)
+                        .font(.caption)
+                        .help("FACET-style fractional-sample epoch alignment.")
+                    Toggle("OBS residual removal (auto PCs)", isOn: $fastrOBSAuto)
+                        .font(.caption)
+                        .help("Remove residual artifact via an optimal basis set of residual PCs.")
+                    Toggle("Adaptive noise cancellation (ANC)", isOn: $fastrANC)
+                        .font(.caption)
+                        .help("Apply LMS adaptive noise cancellation after template subtraction.")
+                }
+            }
+
+            Divider()
+
+            Button {
+                showsMRIPopover = false
+                showsMotionConfig = true
+            } label: {
+                Label(motionParameters == nil
+                      ? "Configure Motion…"
+                      : "Motion: \(motionParameters?.sourceName ?? "") (\(motionParameters?.count ?? 0) TRs)…",
+                      systemImage: "slider.horizontal.3")
+            }
+            .help("Load 3dvolreg motion parameters, plot head motion, and set a motion threshold.")
+
+            if let motionParameters {
+                mriMotionAlignmentStatus(motion: motionParameters, selectedCount: selectedCount)
+            }
+
+            HStack {
+                Button("Reset 4 / 4") {
+                    mriWindowBefore = GradientRemover.Window.default.before
+                    mriWindowAfter = GradientRemover.Window.default.after
+                }
+
+                if gradientCorrectedSignal != nil {
+                    Button("Restore Original", role: .destructive) {
+                        clearGradientCorrection()
+                        showsMRIPopover = false
+                    }
+                }
+
+                Spacer()
+
+                Button("Apply") {
+                    switch mriMethod {
+                    case .aas:
+                        removeGradientArtifact(from: signal)
+                    case .fastr, .moosmann, .farm:
+                        removeGradientArtifactFASTR(from: signal)
+                    }
+                    showsMRIPopover = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canApply)
+                .help(applyButtonHelp(motionUsable: motionUsable, selectedCount: selectedCount, spacing: spacing, motionAlignmentOK: motionAlignmentOK))
+            }
+        }
+        .padding(16)
+        .frame(width: 420)
+        .onAppear {
+            // Default to TREV when present; otherwise fall back to the most
+            // common event code so the picker always shows a valid selection.
+            if !codeCounts.contains(where: { $0.code == mriTRMarkerCode }) {
+                if codeCounts.contains(where: { $0.code == "TREV" }) {
+                    mriTRMarkerCode = "TREV"
+                } else if let first = codeCounts.first {
+                    mriTRMarkerCode = first.code
+                }
+            }
+            clampMRITrims(totalMarkers: codeCounts.first { $0.code == mriTRMarkerCode }?.count)
+        }
+        .onChange(of: mriTRMarkerCode) { _, newCode in
+            clampMRITrims(totalMarkers: codeCounts.first { $0.code == newCode }?.count)
+        }
+    }
+
+    private func clampMRITrims(totalMarkers: Int?) {
+        let maximumCombinedSkip = max(0, (totalMarkers ?? 0) - 2)
+        mriSkipStart = min(max(mriSkipStart, 0), maximumCombinedSkip)
+        mriSkipEnd = min(max(mriSkipEnd, 0), maximumCombinedSkip - mriSkipStart)
+    }
+
+    private func mriSkipControl(
+        title: String,
+        value: Binding<Int>,
+        totalMarkers: Int?,
+        otherSkip: Int
+    ) -> some View {
+        let maximum = max(0, (totalMarkers ?? 0) - otherSkip - 2)
+
+        return HStack(spacing: 5) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 54, alignment: .leading)
+            TextField("", value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 44)
+            Stepper("", value: value, in: 0...maximum)
+                .labelsHidden()
+        }
+        .help("Trim \(title.lowercased()) \(mriTRMarkerCode) markers before running AAS/FASTR correction.")
+        .onChange(of: value.wrappedValue) { _, newValue in
+            value.wrappedValue = min(max(newValue, 0), maximum)
+        }
+    }
+
+    private func trimmedMarkerCount(total: Int) -> Int {
+        max(total - mriSkipStart - mriSkipEnd, 0)
+    }
+
+    private func mriMotionAlignmentOK(selectedCount: Int?) -> Bool {
+        guard let motionParameters else { return true }
+        guard let selectedCount else { return false }
+        return trimmedMarkerCount(total: selectedCount) == motionParameters.count
+    }
+
+    @ViewBuilder
+    private func mriMotionAlignmentStatus(motion: MotionParameters, selectedCount: Int?) -> some View {
+        let usedCount = selectedCount.map(trimmedMarkerCount(total:)) ?? 0
+        let matches = selectedCount != nil && usedCount == motion.count
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: matches ? "checkmark.circle" : "exclamationmark.triangle.fill")
+                .foregroundStyle(matches ? Color.green : Color.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(matches
+                     ? "Motion file matches \(usedCount) \(mriTRMarkerCode) TRs."
+                     : "Motion file has \(motion.count) TRs; current \(mriTRMarkerCode) selection uses \(usedCount).")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(matches ? Color.secondary : Color.orange)
+
+                Text(matches
+                     ? "\(motion.sourceName), FD threshold \(String(format: "%.2f", motionFDThreshold)) mm."
+                     : "Adjust Skip First/Last, choose the matching TR marker event, or clear the motion file before applying.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private func mriTRSpacingStatus(spacing: TRSpacingInfo, totalMarkers: Int) -> some View {
+        let usedCount = trimmedMarkerCount(total: totalMarkers)
+        HStack(spacing: 6) {
+            Image(systemName: spacing.isEvenlySpaced ? "checkmark.circle" : "exclamationmark.triangle.fill")
+                .foregroundStyle(spacing.isEvenlySpaced ? Color.secondary : Color.orange)
+            if spacing.hasEnoughTriggers {
+                Text(spacing.isEvenlySpaced
+                     ? "Fixed TR \(String(format: "%.3f", spacing.modeSeconds)) s after trim."
+                     : "TRs uneven after trim; correction is disabled.")
+            } else {
+                Text("Need at least 2 markers after trim; currently using \(usedCount).")
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(spacing.isEvenlySpaced ? Color.secondary : Color.orange)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// TR markers after trimming `mriSkipStart` events from the start and
+    /// `mriSkipEnd` from the end (to align the EEG's TREV events to the motion
+    /// file). Returns [] if the skips would leave nothing.
+    private func trimmedTRMarkers(in signal: MFFSignalData, code: String, samplingRate: Double? = nil) -> [Int] {
+        let all = trMarkerSamples(in: signal, code: code, samplingRate: samplingRate)
+        guard all.count > mriSkipStart + mriSkipEnd else { return [] }
+        return Array(all[mriSkipStart..<(all.count - mriSkipEnd)])
+    }
+
+    private func trSpacingInfo(for signal: MFFSignalData?) -> TRSpacingInfo {
+        guard let signal else {
+            return TRSpacingInfo.from(triggerSamples: [], samplingRate: 0)
+        }
+        return TRSpacingInfo.from(
+            triggerSamples: trimmedTRMarkers(in: signal, code: mriTRMarkerCode),
+            samplingRate: signal.samplingRate
+        )
     }
 
     private func removeGradientArtifact(from signal: MFFSignalData?) {
         guard let signal else { return }
 
-        let trSamples = trevSamples(in: signal)
+        let trSamples = trimmedTRMarkers(in: signal, code: mriTRMarkerCode)
+        let window = GradientRemover.Window(before: mriWindowBefore, after: mriWindowAfter)
+        let excludedTRs = highMotionVolumeSet()
+        let excludedCount = excludedTRs.count
         isProcessingMRI = true
         mriProgress = 0
         mriStatusMessage = nil
@@ -6440,21 +7492,32 @@ struct WaveformView: View {
         let recordingStartTime = signal.recordingStartTime
         let events = signal.events
         let sourceData = signal.data
+        let pnsInput = mriAppliesToPNS ? recording.pnsSignal : nil
+        let pnsTRSamples = pnsInput.map {
+            trimmedTRMarkers(in: signal, code: mriTRMarkerCode, samplingRate: $0.samplingRate)
+        } ?? []
 
         // Stream completion fractions from the worker threads to the UI.
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                mriProgress = fraction
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            mriProgress = fraction
         }
 
         Task {
             do {
-                let correctedData = try await Task.detached(priority: .userInitiated) {
-                    try GradientRemover.correct(channels: sourceData, trSamples: trSamples) { fraction in
-                        progressContinuation.yield(fraction)
+                let hasPNS = pnsInput != nil
+                let result = try await Task.detached(priority: .userInitiated) {
+                    let correctedData = try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs) { fraction in
+                        progressContinuation.yield(hasPNS ? 0.70 * fraction : fraction)
                     }
+                    let correctedPNSData: [[Float]]?
+                    if let pnsInput {
+                        correctedPNSData = try GradientRemover.correct(channels: pnsInput.data, trSamples: pnsTRSamples, window: window, excludedTRs: excludedTRs) { fraction in
+                            progressContinuation.yield(0.70 + 0.30 * fraction)
+                        }
+                    } else {
+                        correctedPNSData = nil
+                    }
+                    return (correctedData, correctedPNSData)
                 }.value
                 progressContinuation.finish()
                 progressTask.cancel()
@@ -6467,16 +7530,33 @@ struct WaveformView: View {
                     duration: duration,
                     recordingStartTime: recordingStartTime,
                     events: events,
-                    data: correctedData,
+                    data: result.0,
                     channelNames: signal.channelNames
                 )
+                if let pnsInput, let correctedPNSData = result.1 {
+                    gradientCorrectedPNSSignal = MFFSignalData(
+                        signalURL: pnsInput.signalURL,
+                        signalType: "\(pnsInput.signalType) MRI",
+                        numberOfChannels: pnsInput.numberOfChannels,
+                        samplingRate: pnsInput.samplingRate,
+                        duration: pnsInput.duration,
+                        recordingStartTime: pnsInput.recordingStartTime,
+                        events: pnsInput.events,
+                        data: correctedPNSData,
+                        channelNames: pnsInput.channelNames
+                    )
+                } else {
+                    gradientCorrectedPNSSignal = nil
+                }
                 // The base signal changed, so any band-pass filter computed on
                 // the old base is stale.
                 icaCleanedSignal = nil
                 icaDecomposition = nil
                 filteredSignal = nil
+                filteredPNSSignal = nil
+                filteredPNSInputSignalType = nil
                 clearAppliedArtifactCleaning()
-                mriStatusMessage = "Applied MRI gradient artifact correction (TR = \(trSamples) samples)."
+                mriStatusMessage = "Applied MRI gradient artifact correction (\(mriTRMarkerCode) markers, template window \(window.before) pre / \(window.after) post TRs\(excludedCount > 0 ? ", \(excludedCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
                 mriStatusIsError = false
                 artifactDetectionRefreshToken += 1
                 invalidateEpochsForSignalChange()
@@ -6492,11 +7572,235 @@ struct WaveformView: View {
         }
     }
 
+    /// Volume indices flagged as high-motion (FD > threshold) when the user has
+    /// enabled exclusion and motion parameters are loaded; empty otherwise.
+    private func highMotionVolumeSet() -> Set<Int> {
+        guard mriExcludeHighMotion, let motion = motionParameters, motion.count >= 2 else {
+            return []
+        }
+        return Set(motion.volumesExceeding(threshold: motionFDThreshold, radiusMm: motionRadiusMm))
+    }
+
+    private func removeGradientArtifactFASTR(from signal: MFFSignalData?) {
+        guard let signal else { return }
+
+        let trSamples = trimmedTRMarkers(in: signal, code: mriTRMarkerCode)
+        var config = FastrCorrector.Config()
+        config.numberOfSlices = max(1, fastrSlices)
+        config.subSampleAlignment = fastrSubSample
+        config.obs = fastrOBSAuto ? .auto : .off
+        config.anc = fastrANC
+        if mriMethod == .moosmann {
+            config.templateScheme = .moosmann
+            config.motion = motionParameters?.samples
+            config.motionThresholdMm = motionFDThreshold
+            config.motionRadiusMm = motionRadiusMm
+        } else if mriMethod == .farm {
+            config.templateScheme = .farm
+        }
+        // Optional motion-censoring (Moosmann excludes high-motion volumes
+        // intrinsically, so only apply the explicit set for the other methods).
+        if mriMethod != .moosmann {
+            config.censoredVolumes = highMotionVolumeSet()
+        }
+        let censoredCount = config.censoredVolumes.count
+        let methodName = mriMethod.rawValue
+        let configCopy = config
+
+        isProcessingMRI = true
+        mriProgress = 0
+        mriStatusMessage = nil
+
+        let signalURL = signal.signalURL
+        let signalType = signal.signalType
+        let numberOfChannels = signal.numberOfChannels
+        let samplingRate = signal.samplingRate
+        let duration = signal.duration
+        let recordingStartTime = signal.recordingStartTime
+        let events = signal.events
+        let sourceData = signal.data
+        let slices = config.numberOfSlices
+        let pnsInput = mriAppliesToPNS ? recording.pnsSignal : nil
+        let pnsTRSamples = pnsInput.map {
+            trimmedTRMarkers(in: signal, code: mriTRMarkerCode, samplingRate: $0.samplingRate)
+        } ?? []
+
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            mriProgress = fraction
+        }
+
+        Task {
+            do {
+                let hasPNS = pnsInput != nil
+                let result = try await Task.detached(priority: .userInitiated) {
+                    let correctedData = try FastrCorrector.correct(
+                        channels: sourceData,
+                        volumeTriggers: trSamples,
+                        config: configCopy,
+                        samplingRate: samplingRate
+                    ) { fraction in
+                        progressContinuation.yield(hasPNS ? 0.70 * fraction : fraction)
+                    }
+                    let correctedPNSData: [[Float]]?
+                    if let pnsInput {
+                        correctedPNSData = try FastrCorrector.correct(
+                            channels: pnsInput.data,
+                            volumeTriggers: pnsTRSamples,
+                            config: configCopy,
+                            samplingRate: pnsInput.samplingRate
+                        ) { fraction in
+                            progressContinuation.yield(0.70 + 0.30 * fraction)
+                        }
+                    } else {
+                        correctedPNSData = nil
+                    }
+                    return (correctedData, correctedPNSData)
+                }.value
+                progressContinuation.finish()
+                progressTask.cancel()
+
+                gradientCorrectedSignal = MFFSignalData(
+                    signalURL: signalURL,
+                    signalType: signalType,
+                    numberOfChannels: numberOfChannels,
+                    samplingRate: samplingRate,
+                    duration: duration,
+                    recordingStartTime: recordingStartTime,
+                    events: events,
+                    data: result.0,
+                    channelNames: signal.channelNames
+                )
+                if let pnsInput, let correctedPNSData = result.1 {
+                    gradientCorrectedPNSSignal = MFFSignalData(
+                        signalURL: pnsInput.signalURL,
+                        signalType: "\(pnsInput.signalType) MRI",
+                        numberOfChannels: pnsInput.numberOfChannels,
+                        samplingRate: pnsInput.samplingRate,
+                        duration: pnsInput.duration,
+                        recordingStartTime: pnsInput.recordingStartTime,
+                        events: pnsInput.events,
+                        data: correctedPNSData,
+                        channelNames: pnsInput.channelNames
+                    )
+                } else {
+                    gradientCorrectedPNSSignal = nil
+                }
+                icaCleanedSignal = nil
+                icaDecomposition = nil
+                filteredSignal = nil
+                filteredPNSSignal = nil
+                filteredPNSInputSignalType = nil
+                clearAppliedArtifactCleaning()
+                mriStatusMessage = "Applied \(methodName) correction (\(mriTRMarkerCode) markers, \(slices) slice\(slices == 1 ? "" : "s")/volume\(fastrOBSAuto ? ", OBS" : "")\(fastrANC ? ", ANC" : "")\(censoredCount > 0 ? ", \(censoredCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
+                mriStatusIsError = false
+                artifactDetectionRefreshToken += 1
+                invalidateEpochsForSignalChange()
+                invalidateInterpolations()
+            } catch {
+                progressContinuation.finish()
+                progressTask.cancel()
+                mriStatusMessage = error.localizedDescription
+                mriStatusIsError = true
+            }
+
+            isProcessingMRI = false
+        }
+    }
+
+    /// Tooltip for the Apply button explaining why it may be disabled.
+    private func applyButtonHelp(motionUsable: Bool, selectedCount: Int?, spacing: TRSpacingInfo, motionAlignmentOK: Bool) -> String {
+        if (selectedCount ?? 0) < 2 {
+            return "Select a TR marker event with at least two markers to enable Apply."
+        }
+        if !spacing.hasEnoughTriggers {
+            return "Too few TR markers after trimming to run correction."
+        }
+        if !spacing.isEvenlySpaced {
+            return "TRs are not evenly spaced"
+        }
+        if !motionAlignmentOK, let motionParameters, let selectedCount {
+            return "Motion file has \(motionParameters.count) TRs, but \(trimmedMarkerCount(total: selectedCount)) \(mriTRMarkerCode) markers are selected after trimming."
+        }
+        if mriMethod == .moosmann, !motionUsable {
+            return "Moosmann requires a motion file. Load one via Configure Motion… to enable Apply."
+        }
+        return "Apply \(mriMethod.rawValue) gradient artifact removal."
+    }
+
+    /// Explanation of the AAS vs FASTR choice with references.
+    @ViewBuilder
+    private func mriMethodHelp() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Gradient Artifact Removal Methods")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("AAS — Average Artifact Subtraction")
+                    .font(.subheadline.weight(.semibold))
+                Text("Builds one artifact template per TR by averaging neighboring volumes and subtracts it. Fast and robust when motion is low. This is EVA's per-TR template method (Allen et al. 2000).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("FASTR — fMRI Artifact Slice Template Removal")
+                    .font(.subheadline.weight(.semibold))
+                Text("Subdivides each volume into slice epochs, aligns them (optionally at sub-sample resolution), subtracts a per-slice template, then removes residual artifact with an Optimal Basis Set (OBS) and optional adaptive noise cancellation (ANC). Better suppression, more parameters (Niazy et al. 2005).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Moosmann — RP-informed averaging")
+                    .font(.subheadline.weight(.semibold))
+                Text("A FASTR variant (Bergen toolbox) that builds each volume's template from a motion-warped temporal window of low-motion volumes — excluding high-motion volumes and avoiding averaging across head-movement events (translation only). Falls back to a plain moving average when no motion exceeds the threshold. Requires loaded motion parameters (Moosmann et al. 2009).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("FARM — most-correlated-epoch averaging")
+                    .font(.subheadline.weight(.semibold))
+                Text("A FASTR variant whose template, for each artifact, averages the most similar artifacts (highest waveform correlation, ≥ 0.9) rather than temporal neighbors. Robust to motion without needing external motion parameters; selection is derived from the EEG itself (van der Meer et al. 2010, as in FACET).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("References")
+                    .font(.caption.weight(.semibold))
+                Text("• Allen, Josephs & Turner (2000). NeuroImage 12:230–239.")
+                Text("• Niazy, Beckmann, Iannetti, Brady & Smith (2005). NeuroImage 28(3):720–737.")
+                Text("• Moosmann et al. (2009). NeuroImage 45(4):1144–1150.")
+                Text("• van der Meer et al. (2010). NeuroImage 49(3):2495–2505.")
+                Text("• Glaser et al. (2013). FACET toolbox. BMC Neuroscience 14:138.")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+
+            Text("EVA's FASTR is a port of the FMRIB/FACET implementations. See the in-app TODO for pending MATLAB-reference validation.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 360)
+    }
+
     private func clearGradientCorrection() {
         gradientCorrectedSignal = nil
+        gradientCorrectedPNSSignal = nil
         icaCleanedSignal = nil
         icaDecomposition = nil
         filteredSignal = nil
+        filteredPNSSignal = nil
+        filteredPNSInputSignalType = nil
         clearAppliedArtifactCleaning()
         mriStatusMessage = "Removed MRI gradient correction."
         mriStatusIsError = false
@@ -6506,6 +7810,388 @@ struct WaveformView: View {
     }
 
     // MARK: - Artifact detection
+
+    private func openECGDetectionSheet(for signal: MFFSignalData) {
+        prepareECGDetectionDefaults(for: signal, pns: displayedPhysioSignal())
+        showsECGDetectionSheet = true
+    }
+
+    private func prepareECGDetectionDefaults(for signal: MFFSignalData, pns: MFFSignalData?) {
+        if let pns {
+            ecgDetectionSelectedPNSChannels = ecgDetectionSelectedPNSChannels
+                .filter { pns.data.indices.contains($0) }
+            if ecgDetectionSelectedPNSChannels.isEmpty && ecgDetectionProxyChannels.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                ecgDetectionSelectedPNSChannels = Set(likelyECGPNSChannelIndices(in: pns))
+            }
+        } else {
+            ecgDetectionSelectedPNSChannels.removeAll()
+        }
+
+        let proxyChannels = parseChannelList(ecgDetectionProxyChannels, channelCount: signal.numberOfChannels)
+        if proxyChannels.count != Set(proxyChannels).count {
+            ecgDetectionProxyChannels = proxyChannels.map { String($0 + 1) }.joined(separator: ", ")
+        }
+    }
+
+    private func ecgDetectionSheet(for signal: MFFSignalData) -> some View {
+        let pns = displayedPhysioSignal()
+        let sources = ecgDetectionSources(for: signal)
+
+        return VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("ECG / R-wave Detection")
+                    .font(.headline)
+                Text("Select PNS channels, EEG proxy channels, or both. Detected R-waves appear as artifact events.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            if let pns {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("PNS Channels")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Button("Likely ECG") {
+                            ecgDetectionSelectedPNSChannels = Set(likelyECGPNSChannelIndices(in: pns))
+                        }
+                        Button("All") {
+                            ecgDetectionSelectedPNSChannels = Set(pns.data.indices)
+                        }
+                        Button("None") {
+                            ecgDetectionSelectedPNSChannels.removeAll()
+                        }
+                    }
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(pns.data.indices), id: \.self) { index in
+                                Toggle(pnsChannelDisplayName(index: index, signal: pns), isOn: ecgPNSSelectionBinding(for: index))
+                                    .font(.caption)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 130)
+                }
+            } else {
+                Text("No PNS channels are available for this recording. Use EEG proxy channels below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("EEG Proxy Channels")
+                    .font(.caption.weight(.semibold))
+                TextField("1, 8, 25 or 1-4", text: $ecgDetectionProxyChannels)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Visible Good") {
+                        let indices = signal.data.indices.filter { !channels.hidden.contains($0) && !channels.bad.contains($0) }
+                        ecgDetectionProxyChannels = indices.map { String($0 + 1) }.joined(separator: ", ")
+                    }
+                    Button("Clear") {
+                        ecgDetectionProxyChannels = ""
+                    }
+                    Spacer()
+                    Text(ecgProxySummary(in: signal))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Detection")
+                    .font(.caption.weight(.semibold))
+
+                Picker("Algorithm", selection: $ecgDetectionAlgorithm) {
+                    ForEach(ECGDetectionAlgorithm.allCases) { algorithm in
+                        Text(algorithm.tabTitle).tag(algorithm)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Text(ecgDetectionAlgorithm.summary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Picker("Polarity", selection: $ecgDetectionPolarity) {
+                    ForEach(ECGDetectionPolarity.allCases) { polarity in
+                        Text(polarity.rawValue).tag(polarity)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                HStack {
+                    Text("Threshold")
+                        .font(.caption)
+                        .frame(width: 86, alignment: .leading)
+                    TextField("Threshold", value: $ecgDetectionThresholdSD, format: .number.precision(.fractionLength(1)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("robust SD")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(value: $ecgDetectionThresholdSD, in: 2...10, step: 0.5)
+                }
+
+                HStack {
+                    Text("Min RR")
+                        .font(.caption)
+                        .frame(width: 86, alignment: .leading)
+                    TextField("Min RR", value: $ecgDetectionMinimumRRSeconds, format: .number.precision(.fractionLength(2)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("s")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(value: $ecgDetectionMinimumRRSeconds, in: 0.20...1.20, step: 0.05)
+                }
+            }
+
+            Text(ecgSourceSummary(sources))
+                .font(.caption)
+                .foregroundStyle(sources.isEmpty ? .orange : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ecgDetectionEstimateView()
+
+            HStack {
+                if detectsECGArtifacts {
+                    Button("Disable ECG Detection", role: .destructive) {
+                        detectsECGArtifacts = false
+                        artifactDetectionRefreshToken += 1
+                        showsECGDetectionSheet = false
+                    }
+                }
+
+                Spacer()
+
+                Button("Cancel") {
+                    showsECGDetectionSheet = false
+                }
+                Button("Detect R Waves") {
+                    detectsECGArtifacts = true
+                    artifactDetectionMethod = .threshold
+                    artifactDetectionRefreshToken += 1
+                    showsECGDetectionSheet = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(sources.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 620)
+        .task(id: ecgDetectionPreviewRequestID(for: signal)) {
+            await refreshECGDetectionEstimate(for: signal)
+        }
+        .onAppear {
+            prepareECGDetectionDefaults(for: signal, pns: pns)
+        }
+    }
+
+    private func ecgPNSSelectionBinding(for index: Int) -> Binding<Bool> {
+        Binding(
+            get: { ecgDetectionSelectedPNSChannels.contains(index) },
+            set: { isSelected in
+                if isSelected {
+                    ecgDetectionSelectedPNSChannels.insert(index)
+                } else {
+                    ecgDetectionSelectedPNSChannels.remove(index)
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func ecgDetectionEstimateView() -> some View {
+        HStack(spacing: 8) {
+            if isEstimatingECGDetection {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: ecgDetectionEstimatedCount == nil ? "waveform.path.ecg" : "number.circle")
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ecgDetectionEstimateTitle)
+                    .font(.caption.weight(.semibold))
+                if let message = ecgDetectionEstimateMessage {
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var ecgDetectionEstimateTitle: String {
+        if isEstimatingECGDetection {
+            return "Estimating R-waves..."
+        }
+        guard let count = ecgDetectionEstimatedCount else {
+            return "No estimate yet"
+        }
+        if let bpm = ecgDetectionEstimatedBPM, bpm.isFinite {
+            return "Estimated \(count) R-wave\(count == 1 ? "" : "s") (\(String(format: "%.0f", bpm)) bpm)"
+        }
+        return "Estimated \(count) R-wave\(count == 1 ? "" : "s")"
+    }
+
+    private func ecgDetectionPreviewRequestID(for signal: MFFSignalData) -> String {
+        [
+            signal.signalURL.path,
+            "\(signal.numberOfChannels)",
+            "\(signal.data.first?.count ?? 0)",
+            displayedPhysioSignal().map { physioRangeTaskID(for: $0) } ?? "noPNS",
+            ecgDetectionSelectedPNSChannels.sorted().map(String.init).joined(separator: ","),
+            ecgDetectionProxyChannels,
+            ecgDetectionAlgorithm.rawValue,
+            ecgDetectionPolarity.rawValue,
+            String(format: "%.3f", ecgDetectionThresholdSD),
+            String(format: "%.3f", ecgDetectionMinimumRRSeconds)
+        ].joined(separator: "|")
+    }
+
+    @MainActor
+    private func refreshECGDetectionEstimate(for signal: MFFSignalData) async {
+        let requestID = ecgDetectionPreviewRequestID(for: signal)
+        let sources = ecgDetectionSources(for: signal)
+        guard !sources.isEmpty else {
+            isEstimatingECGDetection = false
+            ecgDetectionEstimatedCount = nil
+            ecgDetectionEstimatedBPM = nil
+            ecgDetectionEstimateMessage = "Select PNS and/or EEG proxy channels to preview detection."
+            return
+        }
+
+        isEstimatingECGDetection = true
+        ecgDetectionEstimateMessage = "Using \(sources.reduce(0) { $0 + $1.channelLabels.count }) channel\(sources.reduce(0) { $0 + $1.channelLabels.count } == 1 ? "" : "s")."
+
+        let configuration = ECGDetectionConfiguration(
+            algorithm: ecgDetectionAlgorithm,
+            thresholdSD: ecgDetectionThresholdSD,
+            minimumRRSeconds: ecgDetectionMinimumRRSeconds,
+            polarity: ecgDetectionPolarity
+        )
+        let duration = sources.map(\.duration).max() ?? signal.duration
+
+        let count = await Task.detached(priority: .utility) {
+            RWaveDetector.detect(sources: sources, configuration: configuration).count
+        }.value
+
+        guard !Task.isCancelled, requestID == ecgDetectionPreviewRequestID(for: signal) else { return }
+
+        isEstimatingECGDetection = false
+        ecgDetectionEstimatedCount = count
+        ecgDetectionEstimatedBPM = duration > 0 ? Double(count) / duration * 60 : nil
+        if count == 0 {
+            ecgDetectionEstimateMessage = "No peaks over threshold. Try lowering the threshold or changing polarity/source channels."
+        } else {
+            ecgDetectionEstimateMessage = "Updates as you change source channels, algorithm, polarity, threshold, or minimum RR."
+        }
+    }
+
+    private func pnsChannelDisplayName(index: Int, signal: MFFSignalData) -> String {
+        let name = signal.channelNames?.indices.contains(index) == true
+            ? signal.channelNames?[index].nilIfEmpty ?? "PNS \(index + 1)"
+            : "PNS \(index + 1)"
+        return "\(index + 1): \(name)"
+    }
+
+    private func eegChannelDisplayName(index: Int, signal: MFFSignalData) -> String {
+        let name = signal.channelNames?.indices.contains(index) == true
+            ? signal.channelNames?[index].nilIfEmpty ?? "Ch \(index + 1)"
+            : "Ch \(index + 1)"
+        return "\(index + 1): \(name)"
+    }
+
+    private func likelyECGPNSChannelIndices(in pns: MFFSignalData) -> [Int] {
+        let names = pns.channelNames ?? []
+        let cardiacTokens = ["ecg", "ekg", "card", "heart"]
+        let pulseTokens = ["pulse", "pleth", "ppg"]
+
+        let cardiac = pns.data.indices.filter { index in
+            guard names.indices.contains(index) else { return false }
+            let lower = names[index].lowercased()
+            return cardiacTokens.contains { lower.contains($0) }
+        }
+        if !cardiac.isEmpty { return cardiac }
+
+        let pulse = pns.data.indices.filter { index in
+            guard names.indices.contains(index) else { return false }
+            let lower = names[index].lowercased()
+            return pulseTokens.contains { lower.contains($0) }
+        }
+        if !pulse.isEmpty { return pulse }
+
+        return pns.data.indices.first.map { [$0] } ?? []
+    }
+
+    private func ecgProxySummary(in signal: MFFSignalData) -> String {
+        let indices = parseChannelList(ecgDetectionProxyChannels, channelCount: signal.numberOfChannels)
+        guard !indices.isEmpty else { return "No EEG proxy channels selected" }
+        return "\(indices.count) EEG proxy channel\(indices.count == 1 ? "" : "s")"
+    }
+
+    private func ecgSourceSummary(_ sources: [ECGDetectionSource]) -> String {
+        guard !sources.isEmpty else {
+            return "Choose at least one PNS channel or EEG proxy channel before detecting R-waves."
+        }
+        let channelCount = sources.reduce(0) { $0 + $1.channelLabels.count }
+        return "Will detect from \(channelCount) channel\(channelCount == 1 ? "" : "s") across \(sources.count) source group\(sources.count == 1 ? "" : "s")."
+    }
+
+    private func ecgDetectionSources(for signal: MFFSignalData) -> [ECGDetectionSource] {
+        var sources: [ECGDetectionSource] = []
+
+        if let pns = displayedPhysioSignal() {
+            let indices = ecgDetectionSelectedPNSChannels.sorted().filter { pns.data.indices.contains($0) }
+            let valid = indices.filter { pns.data[$0].count == (pns.data.first?.count ?? 0) }
+            if !valid.isEmpty {
+                sources.append(
+                    ECGDetectionSource(
+                        id: "pns",
+                        label: "PNS",
+                        channelLabels: valid.map { pnsChannelDisplayName(index: $0, signal: pns) },
+                        channels: valid.map { pns.data[$0] },
+                        samplingRate: pns.samplingRate,
+                        duration: min(pns.duration, signal.duration)
+                    )
+                )
+            }
+        }
+
+        let eegIndices = parseChannelList(ecgDetectionProxyChannels, channelCount: signal.numberOfChannels)
+            .filter { signal.data.indices.contains($0) }
+        let eegValid = eegIndices.filter { signal.data[$0].count == (signal.data.first?.count ?? 0) }
+        if !eegValid.isEmpty {
+            sources.append(
+                ECGDetectionSource(
+                    id: "eeg",
+                    label: "EEG proxy",
+                    channelLabels: eegValid.map { eegChannelDisplayName(index: $0, signal: signal) },
+                    channels: eegValid.map { signal.data[$0] },
+                    samplingRate: signal.samplingRate,
+                    duration: signal.duration
+                )
+            )
+        }
+
+        return sources
+    }
 
     private var artifactsAreActive: Bool {
         detectsEyeBlinkArtifacts
@@ -6557,6 +8243,13 @@ struct WaveformView: View {
             "\(detectsEyeBlinkArtifacts)",
             "\(detectsEyeMovementArtifacts)",
             "\(detectsECGArtifacts)",
+            ecgDetectionSelectedPNSChannels.sorted().map(String.init).joined(separator: ","),
+            ecgDetectionProxyChannels,
+            ecgDetectionAlgorithm.rawValue,
+            ecgDetectionPolarity.rawValue,
+            "\(ecgDetectionThresholdSD)",
+            "\(ecgDetectionMinimumRRSeconds)",
+            displayedPhysioSignal().map { physioRangeTaskID(for: $0) } ?? "noPNS",
             artifactDetectionMethod.rawValue,
             "\(artifactDetectionRefreshToken)"
         ].joined(separator: "|")
@@ -6569,9 +8262,17 @@ struct WaveformView: View {
             return
         }
 
-        guard (detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts), artifactDetectionMethod == .threshold else {
+        guard (detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts || detectsECGArtifacts), artifactDetectionMethod == .threshold else {
             artifactEvents = []
-            artifactStatusMessage = artifactsAreActive ? "Only threshold eye artifact detection is available." : nil
+            artifactStatusMessage = artifactsAreActive ? "Only threshold artifact detection is available." : nil
+            isDetectingArtifacts = false
+            return
+        }
+
+        let ecgSources = detectsECGArtifacts ? ecgDetectionSources(for: signal) : []
+        if detectsECGArtifacts, ecgSources.isEmpty, !detectsEyeBlinkArtifacts, !detectsEyeMovementArtifacts {
+            artifactEvents = []
+            artifactStatusMessage = "Choose a PNS channel or EEG proxy channel for ECG detection."
             isDetectingArtifacts = false
             return
         }
@@ -6584,6 +8285,13 @@ struct WaveformView: View {
         let duration = signal.duration
         let detectBlinks = detectsEyeBlinkArtifacts
         let detectMovements = detectsEyeMovementArtifacts
+        let detectECG = detectsECGArtifacts
+        let ecgConfiguration = ECGDetectionConfiguration(
+            algorithm: ecgDetectionAlgorithm,
+            thresholdSD: ecgDetectionThresholdSD,
+            minimumRRSeconds: ecgDetectionMinimumRRSeconds,
+            polarity: ecgDetectionPolarity
+        )
 
         let detectedEvents = await Task.detached(priority: .userInitiated) {
             var events: [MFFEvent] = []
@@ -6603,6 +8311,9 @@ struct WaveformView: View {
                     duration: duration
                 )
             }
+            if detectECG, !ecgSources.isEmpty {
+                events += RWaveDetector.detect(sources: ecgSources, configuration: ecgConfiguration)
+            }
             return events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
         }.value
 
@@ -6612,15 +8323,22 @@ struct WaveformView: View {
     }
 
     private func artifactDetectionSummary(for events: [MFFEvent]) -> String {
-        guard !events.isEmpty else { return "No eye artifacts detected." }
+        guard !events.isEmpty else { return "No artifacts detected." }
         let blinkCount = events.filter { $0.code == EyeArtifactKind.blink.eventCode }.count
         let movementCount = events.filter { $0.code == EyeArtifactKind.movement.eventCode }.count
+        let rWaveCount = events.filter { $0.code == RWaveDetector.eventCode }.count
         var parts: [String] = []
         if blinkCount > 0 {
             parts.append("\(blinkCount) blinks")
         }
         if movementCount > 0 {
             parts.append("\(movementCount) eye movements")
+        }
+        if rWaveCount > 0 {
+            parts.append("\(rWaveCount) R-waves")
+        }
+        if parts.isEmpty {
+            parts.append("\(events.count) artifact event\(events.count == 1 ? "" : "s")")
         }
         return parts.joined(separator: ", ")
     }
@@ -6711,11 +8429,8 @@ struct WaveformView: View {
         channels.healthProgress = 0
         channelHealthStatusMessage = "Running wavelet channel goodness..."
 
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                channels.healthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            channels.healthProgress = min(max(fraction, 0), 1)
         }
 
         channelHealthTask = Task { @MainActor in
@@ -6809,11 +8524,8 @@ struct WaveformView: View {
         let baseConfig = goodnessSettings.base
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                channels.healthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            channels.healthProgress = min(max(fraction, 0), 1)
         }
 
         channelHealthTask = Task { @MainActor in
@@ -6889,11 +8601,8 @@ struct WaveformView: View {
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
 
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                channels.healthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            channels.healthProgress = min(max(fraction, 0), 1)
         }
 
         channelHealthTask = Task { @MainActor in
@@ -7194,11 +8903,8 @@ struct WaveformView: View {
         let excludedChannels = channels.bad
         let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
         let sourceSignal = signal
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                segmentHealthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            segmentHealthProgress = min(max(fraction, 0), 1)
         }
 
         segmentHealthTask = Task { @MainActor in
@@ -7297,11 +9003,8 @@ struct WaveformView: View {
         let excludedChannels = channels.bad
         let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
 
-        let (progressStream, progressContinuation) = AsyncStream<Double>.makeStream()
-        let progressTask = Task { @MainActor in
-            for await fraction in progressStream {
-                segmentHealthProgress = min(max(fraction, 0), 1)
-            }
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            segmentHealthProgress = min(max(fraction, 0), 1)
         }
 
         segmentHealthTask = Task { @MainActor in
@@ -7472,9 +9175,12 @@ struct WaveformView: View {
     private func resetToOriginalData() {
         // Derived signals.
         filteredSignal = nil
+        filteredPNSSignal = nil
+        filteredPNSInputSignalType = nil
         icaCleanedSignal = nil
         icaDecomposition = nil
         gradientCorrectedSignal = nil
+        gradientCorrectedPNSSignal = nil
         artifactCleanedSignal = nil
         artifactCleaningIsEnabled = true
         waveletReducedSignal = nil
@@ -7498,6 +9204,8 @@ struct WaveformView: View {
         detectsEyeBlinkArtifacts = false
         detectsEyeMovementArtifacts = false
         detectsECGArtifacts = false
+        ecgDetectionSelectedPNSChannels.removeAll()
+        ecgDetectionProxyChannels = ""
         selectedArtifactTemplateChannel = nil
         artifactTemplateClickedChannel = nil
         artifactTemplateSelectionRange = nil
@@ -7662,6 +9370,24 @@ struct WaveformView: View {
         return String(format: "%.3fs", seconds)
     }
 
+    private func eventMetadataRows(for event: MFFEvent) -> [String] {
+        var rows: [String] = []
+        if let label = event.label {
+            rows.append("Label: \(label)")
+        }
+        if let description = event.eventDescription {
+            rows.append("Description: \(description)")
+        }
+        if let cell = event.cell {
+            rows.append("Cell: \(cell)")
+        }
+        return rows
+    }
+
+    private func eventAccessibilitySummary(_ event: MFFEvent) -> String {
+        ([event.code] + eventMetadataRows(for: event)).joined(separator: ", ")
+    }
+
     private func groupedEventSummaries(_ events: [MFFEvent]) -> [EventSummary] {
         Dictionary(grouping: events, by: \.code)
             .map { EventSummary(code: $0.key, count: $0.value.count) }
@@ -7670,6 +9396,151 @@ struct WaveformView: View {
                     ? lhs.code.localizedStandardCompare(rhs.code) == .orderedAscending
                     : lhs.count > rhs.count
             }
+    }
+
+    private func groupedPSAEventSummaries(_ events: [MFFEvent]) -> [EventSummary] {
+        Dictionary(grouping: events, by: psaSegmentValue(for:))
+            .map { value, groupedEvents in
+                let distinctCodes = Set(groupedEvents.map(\.code)).sorted()
+                let searchFields = psaSearchFields(for: value, events: groupedEvents)
+                let searchText = psaSearchText(fields: searchFields)
+                let detail: String?
+                switch psaSegmentField {
+                case .code:
+                    let labels = Set(groupedEvents.compactMap(\.label)).sorted()
+                    detail = labels.isEmpty ? nil : "Labels: \(labels.prefix(3).joined(separator: ", "))\(labels.count > 3 ? "..." : "")"
+                case .label:
+                    detail = distinctCodes.count == 1 ? "Code: \(distinctCodes[0])" : "\(distinctCodes.count) codes"
+                }
+                return EventSummary(
+                    code: value,
+                    count: groupedEvents.count,
+                    detail: detail,
+                    searchText: searchText,
+                    searchFields: searchFields
+                )
+            }
+            .sorted { lhs, rhs in
+                lhs.count == rhs.count
+                    ? lhs.code.localizedStandardCompare(rhs.code) == .orderedAscending
+                    : lhs.count > rhs.count
+            }
+    }
+
+    private func filteredPSAEventSummaries(_ summaries: [EventSummary]) -> [EventSummary] {
+        let filters = psaSearchFilters(from: psaEventSearchText)
+        guard !filters.isEmpty else { return summaries }
+
+        return summaries.filter { summary in
+            filters.allSatisfy { filter in
+                psaSummary(summary, matches: filter)
+            }
+        }
+    }
+
+    private func psaSummary(_ summary: EventSummary, matches filter: PSAEventSearchFilter) -> Bool {
+        let needle = filter.value.lowercased()
+        guard !needle.isEmpty else { return true }
+        if let field = filter.field {
+            return summary.searchFields[field]?.lowercased().contains(needle) == true
+        }
+        return summary.searchText.lowercased().contains(needle)
+    }
+
+    private func psaSearchFilters(from query: String) -> [PSAEventSearchFilter] {
+        let tokens = query
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        var filters: [PSAEventSearchFilter] = []
+        var index = 0
+
+        while index < tokens.count {
+            let token = tokens[index]
+            if let filter = psaFieldFilter(
+                from: token,
+                nextToken: tokens.indices.contains(index + 1) ? tokens[index + 1] : nil,
+                followingToken: tokens.indices.contains(index + 2) ? tokens[index + 2] : nil
+            ) {
+                filters.append(filter.filter)
+                index += filter.consumedTokenCount
+                continue
+            }
+            filters.append(PSAEventSearchFilter(field: nil, value: token))
+            index += 1
+        }
+
+        return filters.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    private func psaFieldFilter(
+        from token: String,
+        nextToken: String?,
+        followingToken: String?
+    ) -> (filter: PSAEventSearchFilter, consumedTokenCount: Int)? {
+        if let colon = token.firstIndex(of: ":") {
+            let key = String(token[..<colon])
+            let value = String(token[token.index(after: colon)...])
+            guard let field = PSAEventSearchField(alias: key) else { return nil }
+            if !value.isEmpty {
+                return (PSAEventSearchFilter(field: field, value: value), 1)
+            }
+            guard let nextToken else { return nil }
+            return (PSAEventSearchFilter(field: field, value: nextToken), 2)
+        }
+
+        guard let field = PSAEventSearchField(alias: token),
+              let nextToken,
+              nextToken.hasPrefix(":") else {
+            return nil
+        }
+        let value = String(nextToken.drop(while: { $0 == ":" }))
+        if !value.isEmpty {
+            return (PSAEventSearchFilter(field: field, value: value), 2)
+        }
+        guard let followingToken else { return nil }
+        return (PSAEventSearchFilter(field: field, value: followingToken), 3)
+    }
+
+    private func psaSearchFields(for segmentValue: String, events: [MFFEvent]) -> [PSAEventSearchField: String] {
+        var values: [PSAEventSearchField: [String]] = [
+            .code: [],
+            .label: [],
+            .description: [],
+            .cell: [],
+            .source: []
+        ]
+        switch psaSegmentField {
+        case .code:
+            values[.code, default: []].append(segmentValue)
+        case .label:
+            values[.label, default: []].append(segmentValue)
+        }
+        for event in events {
+            values[.code, default: []].append(event.code)
+            if let label = event.label { values[.label, default: []].append(label) }
+            if let description = event.eventDescription { values[.description, default: []].append(description) }
+            if let cell = event.cell { values[.cell, default: []].append(cell) }
+            values[.source, default: []].append(event.sourceFile)
+        }
+        return values.mapValues { $0.joined(separator: " ") }
+    }
+
+    private func psaSearchText(fields: [PSAEventSearchField: String]) -> String {
+        var values: [String] = []
+        for field in PSAEventSearchField.allCases {
+            guard let text = fields[field], !text.isEmpty else { continue }
+            values.append("\(field.rawValue): \(text)")
+        }
+        return values.joined(separator: " ")
+    }
+
+    private func psaSegmentValue(for event: MFFEvent) -> String {
+        switch psaSegmentField {
+        case .code:
+            return event.code
+        case .label:
+            return event.label ?? event.code
+        }
     }
 
     private func filteredEvents(_ events: [MFFEvent]) -> [MFFEvent] {
@@ -7933,22 +9804,12 @@ private struct ICADebugSignalStats {
             sampledValueCount: count,
             mean: sum / Double(count),
             rms: sqrt(sumSquares / Double(count)),
-            p50Abs: percentile(sampledAbsValues, fraction: 0.50),
-            p95Abs: percentile(sampledAbsValues, fraction: 0.95),
-            p99Abs: percentile(sampledAbsValues, fraction: 0.99),
+            p50Abs: SignalStatistics.percentile(sampledAbsValues, fraction: 0.50),
+            p95Abs: SignalStatistics.percentile(sampledAbsValues, fraction: 0.95),
+            p99Abs: SignalStatistics.percentile(sampledAbsValues, fraction: 0.99),
             maxAbs: maxAbs,
             maxAbsChannel: maxAbsChannel
         )
-    }
-
-    private static func percentile(_ sortedValues: [Double], fraction: Double) -> Double {
-        guard let first = sortedValues.first else { return 0 }
-        guard sortedValues.count > 1 else { return first }
-        let position = min(max(fraction, 0), 1) * Double(sortedValues.count - 1)
-        let lower = Int(position.rounded(.down))
-        let upper = min(lower + 1, sortedValues.count - 1)
-        let weight = position - Double(lower)
-        return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight
     }
 
     private static func format(_ value: Double) -> String {
@@ -8741,22 +10602,42 @@ private extension ChannelHealthGrade {
 private struct EventSummary: Identifiable {
     let code: String
     let count: Int
+    var detail: String? = nil
+    var searchText: String = ""
+    var searchFields: [PSAEventSearchField: String] = [:]
     var id: String { code }
 }
 
-nonisolated struct EpochSegment: Identifiable, Sendable {
-    let startSample: Int
-    let endSample: Int
-    let stimulusOffsetSamples: Int
-    let category: String
-    let sourceCode: String
-    let sourceTimeSeconds: Double
-    let colorIndex: Int
-    let contributingEpochCount: Int
+private enum PSAEventSearchField: String, CaseIterable {
+    case code = "Code"
+    case label = "Label"
+    case description = "Description"
+    case cell = "Cell"
+    case source = "Source"
 
-    var id: String {
-        "\(startSample)-\(endSample)-\(category)-\(sourceCode)-\(sourceTimeSeconds)-\(contributingEpochCount)"
+    init?(alias: String) {
+        switch alias
+            .trimmingCharacters(in: CharacterSet(charactersIn: ":").union(.whitespacesAndNewlines))
+            .lowercased() {
+        case "code", "codes":
+            self = .code
+        case "label", "labels":
+            self = .label
+        case "description", "descriptions", "desc":
+            self = .description
+        case "cell", "cells":
+            self = .cell
+        case "source", "sources", "file", "files":
+            self = .source
+        default:
+            return nil
+        }
     }
+}
+
+private struct PSAEventSearchFilter {
+    let field: PSAEventSearchField?
+    let value: String
 }
 
 private struct EpochCategorySummary: Identifiable {
@@ -8824,11 +10705,9 @@ private struct ArtifactTemplateFieldLabel: View {
     }
 }
 
-private struct ArtifactCleaningPreviewButton: View {
-    let artifact: DefinedArtifact
-    let beforeSignal: MFFSignalData
-    let afterSignal: MFFSignalData?
-    let layout: SensorLayout?
+private struct HoverPinnedPreviewButton<PreviewContent: View>: View {
+    let helpText: String
+    @ViewBuilder var previewContent: () -> PreviewContent
 
     @State private var showsPreview = false
     @State private var isPreviewPinned = false
@@ -8861,22 +10740,17 @@ private struct ArtifactCleaningPreviewButton: View {
                 .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
-        .help("Preview artifact cleanup")
+        .help(helpText)
         .onHover { hovering in
             isButtonHovered = hovering
             schedulePreviewVisibility()
         }
         .popover(isPresented: previewPresentation, arrowEdge: .trailing) {
-            ArtifactCleaningPreview(
-                artifact: artifact,
-                beforeSignal: beforeSignal,
-                afterSignal: afterSignal,
-                layout: layout
-            )
-            .onHover { hovering in
-                isPopoverHovered = hovering
-                schedulePreviewVisibility()
-            }
+            previewContent()
+                .onHover { hovering in
+                    isPopoverHovered = hovering
+                    schedulePreviewVisibility()
+                }
         }
         .onDisappear {
             hoverTask?.cancel()
@@ -8896,72 +10770,36 @@ private struct ArtifactCleaningPreviewButton: View {
     }
 }
 
+private struct ArtifactCleaningPreviewButton: View {
+    let artifact: DefinedArtifact
+    let beforeSignal: MFFSignalData
+    let afterSignal: MFFSignalData?
+    let layout: SensorLayout?
+
+    var body: some View {
+        HoverPinnedPreviewButton(helpText: "Preview artifact cleanup") {
+            ArtifactCleaningPreview(
+                artifact: artifact,
+                beforeSignal: beforeSignal,
+                afterSignal: afterSignal,
+                layout: layout
+            )
+        }
+    }
+}
+
 private struct WaveletCleaningPreviewButton: View {
     let candidate: WaveletArtifactCandidate
     let signal: MFFSignalData
     let configuration: WaveletCleaningConfiguration
 
-    @State private var showsPreview = false
-    @State private var isPreviewPinned = false
-    @State private var isButtonHovered = false
-    @State private var isPopoverHovered = false
-    @State private var hoverTask: Task<Void, Never>?
-
-    private var previewPresentation: Binding<Bool> {
-        Binding {
-            showsPreview
-        } set: { isPresented in
-            showsPreview = isPresented
-            if !isPresented {
-                isPreviewPinned = false
-                isPopoverHovered = false
-            }
-        }
-    }
-
     var body: some View {
-        Button {
-            isPreviewPinned.toggle()
-            showsPreview = isPreviewPinned
-            if !showsPreview {
-                hoverTask?.cancel()
-            }
-        } label: {
-            Image(systemName: "eye")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .help("Preview wavelet cleanup")
-        .onHover { hovering in
-            isButtonHovered = hovering
-            schedulePreviewVisibility()
-        }
-        .popover(isPresented: previewPresentation, arrowEdge: .trailing) {
+        HoverPinnedPreviewButton(helpText: "Preview wavelet cleanup") {
             WaveletCleaningPreview(
                 candidate: candidate,
                 signal: signal,
                 configuration: configuration
             )
-            .onHover { hovering in
-                isPopoverHovered = hovering
-                schedulePreviewVisibility()
-            }
-        }
-        .onDisappear {
-            hoverTask?.cancel()
-        }
-    }
-
-    private func schedulePreviewVisibility() {
-        hoverTask?.cancel()
-        guard !isPreviewPinned else { return }
-        let shouldShow = isButtonHovered || isPopoverHovered
-        let delay: UInt64 = shouldShow ? 80_000_000 : 220_000_000
-        hoverTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: delay)
-            guard !Task.isCancelled else { return }
-            showsPreview = isButtonHovered || isPopoverHovered
         }
     }
 }
@@ -10161,6 +11999,105 @@ private enum ArtifactDetectionMethod: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+private enum PSASegmentField: String, CaseIterable, Identifiable {
+    case code = "Code"
+    case label = "Label"
+
+    var id: String { rawValue }
+}
+
+private enum ECGDetectionAlgorithm: String, CaseIterable, Identifiable, Sendable {
+    case simple = "Simple"
+    case panTompkins = "Pan-Tompkins"
+    case hamilton = "Hamilton"
+    case wfdb = "WFDB"
+    case wavelet = "Wavelet"
+    case christov = "Christov"
+
+    nonisolated var id: String { rawValue }
+
+    nonisolated var tabTitle: String {
+        switch self {
+        case .simple:
+            return "Simple"
+        case .panTompkins:
+            return "Pan-T"
+        case .hamilton:
+            return "Hamilton"
+        case .wfdb:
+            return "WFDB"
+        case .wavelet:
+            return "Wavelet"
+        case .christov:
+            return "Christov"
+        }
+    }
+
+    nonisolated var summary: String {
+        switch self {
+        case .simple:
+            return "Robust peak picking on the baseline-corrected waveform."
+        case .panTompkins:
+            return "Band-pass, derivative, squaring, moving integration, and adaptive QRS thresholding."
+        case .hamilton:
+            return "Slope-envelope QRS detection with adaptive signal/noise thresholding."
+        case .wfdb:
+            return "WFDB-style curve-length and slope-energy QRS detection inspired by wqrs/gqrs."
+        case .wavelet:
+            return "Multiscale detail-energy QRS detection for sharp cardiac transients in noisy signals."
+        case .christov:
+            return "Christov-style adaptive slope-envelope detection with time-varying signal/noise thresholds."
+        }
+    }
+}
+
+private enum ECGDetectionPolarity: String, CaseIterable, Identifiable, Sendable {
+    case positive = "Positive"
+    case negative = "Negative"
+    case either = "Either"
+
+    var id: String { rawValue }
+
+    nonisolated func score(_ zValue: Double) -> Double {
+        switch self {
+        case .positive:
+            return max(zValue, 0)
+        case .negative:
+            return max(-zValue, 0)
+        case .either:
+            return abs(zValue)
+        }
+    }
+}
+
+private struct ECGDetectionSource: Sendable {
+    var id: String
+    var label: String
+    var channelLabels: [String]
+    var channels: [[Float]]
+    var samplingRate: Double
+    var duration: TimeInterval
+}
+
+private struct ECGDetectionConfiguration: Sendable {
+    var algorithm: ECGDetectionAlgorithm
+    var thresholdSD: Double
+    var minimumRRSeconds: Double
+    var polarity: ECGDetectionPolarity
+}
+
+private struct ECGProcessedChannel: Sendable {
+    var scores: [Double]
+    var waveform: [Double]
+}
+
+private struct RWaveCandidate: Sendable {
+    var timeSeconds: Double
+    var score: Double
+    var sourceID: String
+    var sourceLabel: String
+}
+
 nonisolated private enum EyeArtifactKind {
     case blink
     case movement
@@ -10177,6 +12114,824 @@ nonisolated private enum EyeArtifactKind {
         case .blink: return "eye-blink"
         case .movement: return "eye-movement"
         }
+    }
+}
+
+nonisolated private enum RWaveDetector {
+    static let eventCode = "R Wave"
+    private static let sourceFile = "ECG Detection"
+    private static let baselineWindowSeconds = 0.60
+    private static let qrsHighPassWindowSeconds = 0.20
+    private static let qrsSmoothingWindowSeconds = 0.035
+    private static let panTompkinsIntegrationWindowSeconds = 0.150
+    private static let hamiltonSlopeWindowSeconds = 0.080
+    private static let hamiltonNoiseWindowSeconds = 1.00
+    private static let wfdbCurveLengthWindowSeconds = 0.130
+    private static let wfdbSlopeWindowSeconds = 0.050
+    private static let waveletDetailEnvelopeWindowSeconds = 0.080
+    private static let christovEnvelopeWindowSeconds = 0.040
+    private static let christovLongSlopeWindowSeconds = 0.280
+    private static let adaptivePeakSpacingSeconds = 0.080
+    private static let rPeakRefinementWindowSeconds = 0.080
+
+    static func detect(
+        sources: [ECGDetectionSource],
+        configuration: ECGDetectionConfiguration
+    ) -> [MFFEvent] {
+        let threshold = min(max(configuration.thresholdSD, 1), 20)
+        let minimumRRSeconds = min(max(configuration.minimumRRSeconds, 0.15), 2.0)
+        var candidates: [RWaveCandidate] = []
+
+        for source in sources {
+            candidates += detectCandidates(
+                in: source,
+                algorithm: configuration.algorithm,
+                threshold: threshold,
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: configuration.polarity
+            )
+        }
+
+        let selected = strongestNonOverlapping(candidates, minimumIntervalSeconds: minimumRRSeconds)
+            .sorted { $0.timeSeconds < $1.timeSeconds }
+
+        return selected.enumerated().map { index, candidate in
+            let time = candidate.timeSeconds
+            return MFFEvent(
+                id: "artifact-rwave-\(configuration.algorithm.id)-\(index)-\(Int((time * 1_000_000).rounded()))",
+                code: eventCode,
+                beginTimeSeconds: time,
+                rawBeginTime: String(format: "%.6f", time),
+                sourceFile: "\(sourceFile): \(configuration.algorithm.rawValue)"
+            )
+        }
+    }
+
+    private static func detectCandidates(
+        in source: ECGDetectionSource,
+        algorithm: ECGDetectionAlgorithm,
+        threshold: Double,
+        minimumRRSeconds: Double,
+        polarity: ECGDetectionPolarity
+    ) -> [RWaveCandidate] {
+        guard source.samplingRate > 0,
+              source.duration > 0,
+              let sampleCount = source.channels.map(\.count).min(),
+              sampleCount > 2 else {
+            return []
+        }
+
+        let processedChannels = source.channels.compactMap {
+            processedChannel(
+                samples: $0,
+                sampleCount: sampleCount,
+                samplingRate: source.samplingRate,
+                algorithm: algorithm,
+                polarity: polarity
+            )
+        }
+        guard !processedChannels.isEmpty else { return [] }
+
+        let aggregate = aggregateScores(processedChannels, sampleCount: sampleCount)
+
+        switch algorithm {
+        case .simple:
+            return staticPeakCandidates(
+                aggregate: aggregate,
+                processedChannels: processedChannels,
+                source: source,
+                threshold: threshold,
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: polarity
+            )
+        case .panTompkins:
+            return adaptivePeakCandidates(
+                aggregate: aggregate,
+                processedChannels: processedChannels,
+                source: source,
+                threshold: max(threshold * 0.45, 0.90),
+                floorThreshold: max(threshold * 0.25, 0.55),
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: polarity
+            )
+        case .hamilton:
+            return adaptivePeakCandidates(
+                aggregate: aggregate,
+                processedChannels: processedChannels,
+                source: source,
+                threshold: max(threshold * 0.55, 1.00),
+                floorThreshold: max(threshold * 0.30, 0.65),
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: polarity
+            )
+        case .wfdb:
+            return adaptivePeakCandidates(
+                aggregate: aggregate,
+                processedChannels: processedChannels,
+                source: source,
+                threshold: max(threshold * 0.50, 0.95),
+                floorThreshold: max(threshold * 0.28, 0.60),
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: polarity
+            )
+        case .wavelet:
+            return adaptivePeakCandidates(
+                aggregate: aggregate,
+                processedChannels: processedChannels,
+                source: source,
+                threshold: max(threshold * 0.48, 0.90),
+                floorThreshold: max(threshold * 0.25, 0.55),
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: polarity
+            )
+        case .christov:
+            return adaptivePeakCandidates(
+                aggregate: aggregate,
+                processedChannels: processedChannels,
+                source: source,
+                threshold: max(threshold * 0.52, 0.95),
+                floorThreshold: max(threshold * 0.30, 0.60),
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: polarity
+            )
+        }
+    }
+
+    private static func processedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double,
+        algorithm: ECGDetectionAlgorithm,
+        polarity: ECGDetectionPolarity
+    ) -> ECGProcessedChannel? {
+        switch algorithm {
+        case .simple:
+            return simpleProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate,
+                polarity: polarity
+            )
+        case .panTompkins:
+            return panTompkinsProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate
+            )
+        case .hamilton:
+            return hamiltonProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate
+            )
+        case .wfdb:
+            return wfdbProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate
+            )
+        case .wavelet:
+            return waveletProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate
+            )
+        case .christov:
+            return christovProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate
+            )
+        }
+    }
+
+    private static func simpleProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double,
+        polarity: ECGDetectionPolarity
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let highPassed = baselineRemoved(
+            samples: samples,
+            sampleCount: sampleCount,
+            samplingRate: samplingRate
+        )
+        guard let scores = normalizedPolarityScores(
+            values: highPassed,
+            sampleCount: sampleCount,
+            polarity: polarity
+        ) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: highPassed)
+    }
+
+    private static func panTompkinsProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
+        let differentiated = derivative(filtered)
+        let squared = differentiated.map { $0 * $0 }
+        let integrationWindow = sampleWindow(
+            seconds: panTompkinsIntegrationWindowSeconds,
+            samplingRate: samplingRate,
+            minimum: 3
+        )
+        let integrated = centeredMovingAverage(
+            squared,
+            sampleCount: sampleCount,
+            windowSamples: integrationWindow
+        )
+        guard let scores = normalizedEnvelopeScores(values: integrated, sampleCount: sampleCount) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: filtered)
+    }
+
+    private static func hamiltonProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
+        let slope = derivative(filtered).map { abs($0) }
+        let shortWindow = sampleWindow(
+            seconds: hamiltonSlopeWindowSeconds,
+            samplingRate: samplingRate,
+            minimum: 3
+        )
+        let longWindow = sampleWindow(
+            seconds: hamiltonNoiseWindowSeconds,
+            samplingRate: samplingRate,
+            minimum: shortWindow * 2
+        )
+        let shortEnvelope = centeredMovingAverage(
+            slope,
+            sampleCount: sampleCount,
+            windowSamples: shortWindow
+        )
+        let noiseEnvelope = centeredMovingAverage(
+            shortEnvelope,
+            sampleCount: sampleCount,
+            windowSamples: longWindow
+        )
+        var enhanced = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            enhanced[sample] = max(shortEnvelope[sample] - noiseEnvelope[sample] * 0.50, 0)
+        }
+        guard let scores = normalizedEnvelopeScores(values: enhanced, sampleCount: sampleCount) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: filtered)
+    }
+
+    private static func wfdbProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
+        let slope = derivative(filtered).map { abs($0) }
+        let slopeWindow = sampleWindow(
+            seconds: wfdbSlopeWindowSeconds,
+            samplingRate: samplingRate,
+            minimum: 3
+        )
+        let slopeEnergy = centeredMovingAverage(
+            slope.map { $0 * $0 },
+            sampleCount: sampleCount,
+            windowSamples: slopeWindow
+        )
+        let curveLength = curveLengthEnvelope(
+            filtered,
+            sampleCount: sampleCount,
+            samplingRate: samplingRate
+        )
+        var combined = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            combined[sample] = curveLength[sample] + sqrt(max(slopeEnergy[sample], 0))
+        }
+
+        guard let scores = normalizedEnvelopeScores(values: combined, sampleCount: sampleCount) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: filtered)
+    }
+
+    private static func waveletProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
+        let first = centeredMovingAverage(
+            filtered,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(seconds: 0.025, samplingRate: samplingRate, minimum: 1)
+        )
+        let second = centeredMovingAverage(
+            filtered,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(seconds: 0.050, samplingRate: samplingRate, minimum: 3)
+        )
+        let third = centeredMovingAverage(
+            filtered,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(seconds: 0.100, samplingRate: samplingRate, minimum: 5)
+        )
+        let fourth = centeredMovingAverage(
+            filtered,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(seconds: 0.200, samplingRate: samplingRate, minimum: 9)
+        )
+
+        var detailEnergy = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            let d1 = filtered[sample] - first[sample]
+            let d2 = first[sample] - second[sample]
+            let d3 = second[sample] - third[sample]
+            let d4 = third[sample] - fourth[sample]
+            detailEnergy[sample] = d1 * d1 + 0.85 * d2 * d2 + 0.60 * d3 * d3 + 0.35 * d4 * d4
+        }
+        let envelope = centeredMovingAverage(
+            detailEnergy.map { sqrt(max($0, 0)) },
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(
+                seconds: waveletDetailEnvelopeWindowSeconds,
+                samplingRate: samplingRate,
+                minimum: 3
+            )
+        )
+        guard let scores = normalizedEnvelopeScores(values: envelope, sampleCount: sampleCount) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: filtered)
+    }
+
+    private static func christovProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
+        let firstDerivative = derivative(filtered)
+        let secondDerivative = derivative(firstDerivative)
+        var complexLead = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            complexLead[sample] = abs(firstDerivative[sample]) + 0.45 * abs(secondDerivative[sample])
+        }
+        let shortEnvelope = centeredMovingAverage(
+            complexLead,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(
+                seconds: christovEnvelopeWindowSeconds,
+                samplingRate: samplingRate,
+                minimum: 3
+            )
+        )
+        let slowEnvelope = centeredMovingAverage(
+            shortEnvelope,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(
+                seconds: christovLongSlopeWindowSeconds,
+                samplingRate: samplingRate,
+                minimum: 7
+            )
+        )
+        var enhanced = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            enhanced[sample] = max(shortEnvelope[sample] - slowEnvelope[sample] * 0.35, 0)
+        }
+        guard let scores = normalizedEnvelopeScores(values: enhanced, sampleCount: sampleCount) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: filtered)
+    }
+
+    private static func aggregateScores(
+        _ channels: [ECGProcessedChannel],
+        sampleCount: Int
+    ) -> [Double] {
+        var aggregate = Array(repeating: 0.0, count: sampleCount)
+        for channel in channels {
+            for sample in 0..<sampleCount where channel.scores[sample] > aggregate[sample] {
+                aggregate[sample] = channel.scores[sample]
+            }
+        }
+        return aggregate
+    }
+
+    private static func staticPeakCandidates(
+        aggregate: [Double],
+        processedChannels: [ECGProcessedChannel],
+        source: ECGDetectionSource,
+        threshold: Double,
+        minimumRRSeconds: Double,
+        polarity: ECGDetectionPolarity
+    ) -> [RWaveCandidate] {
+        let sampleCount = aggregate.count
+        var candidates: [RWaveCandidate] = []
+        for sample in 1..<(sampleCount - 1) {
+            let score = aggregate[sample]
+            guard score >= threshold,
+                  score >= aggregate[sample - 1],
+                  score > aggregate[sample + 1] else {
+                continue
+            }
+            let refinedSample = refinedPeakSample(
+                near: sample,
+                processedChannels: processedChannels,
+                samplingRate: source.samplingRate,
+                polarity: polarity
+            )
+            let time = Double(refinedSample) / source.samplingRate
+            guard time >= 0, time <= source.duration else { continue }
+            candidates.append(RWaveCandidate(
+                timeSeconds: time,
+                score: score,
+                sourceID: source.id,
+                sourceLabel: source.label
+            ))
+        }
+
+        return strongestNonOverlapping(candidates, minimumIntervalSeconds: minimumRRSeconds)
+    }
+
+    private static func adaptivePeakCandidates(
+        aggregate: [Double],
+        processedChannels: [ECGProcessedChannel],
+        source: ECGDetectionSource,
+        threshold: Double,
+        floorThreshold: Double,
+        minimumRRSeconds: Double,
+        polarity: ECGDetectionPolarity
+    ) -> [RWaveCandidate] {
+        let spacingSamples = sampleWindow(
+            seconds: adaptivePeakSpacingSeconds,
+            samplingRate: source.samplingRate,
+            minimum: 1
+        )
+        let peaks = localPeakIndices(in: aggregate, minimumSpacingSamples: spacingSamples)
+        guard !peaks.isEmpty else { return [] }
+
+        var peakScores = peaks.map { aggregate[$0] }.filter(\.isFinite)
+        peakScores.sort()
+        var signalLevel = max(threshold, percentile(sortedValues: peakScores, fraction: 0.85))
+        var noiseLevel = max(0, percentile(sortedValues: peakScores, fraction: 0.20))
+        var adaptiveThreshold = max(floorThreshold, min(threshold, noiseLevel + 0.25 * (signalLevel - noiseLevel)))
+        var candidates: [RWaveCandidate] = []
+
+        for peak in peaks {
+            let score = aggregate[peak]
+            guard score.isFinite else { continue }
+
+            if score >= adaptiveThreshold {
+                let refinedSample = refinedPeakSample(
+                    near: peak,
+                    processedChannels: processedChannels,
+                    samplingRate: source.samplingRate,
+                    polarity: polarity
+                )
+                let time = Double(refinedSample) / source.samplingRate
+                if time >= 0, time <= source.duration {
+                    candidates.append(RWaveCandidate(
+                        timeSeconds: time,
+                        score: score,
+                        sourceID: source.id,
+                        sourceLabel: source.label
+                    ))
+                }
+                signalLevel = 0.125 * score + 0.875 * signalLevel
+            } else {
+                noiseLevel = 0.125 * score + 0.875 * noiseLevel
+            }
+
+            adaptiveThreshold = max(floorThreshold, noiseLevel + 0.25 * (signalLevel - noiseLevel))
+        }
+
+        return strongestNonOverlapping(candidates, minimumIntervalSeconds: minimumRRSeconds)
+    }
+
+    private static func normalizedPolarityScores(
+        values: [Double],
+        sampleCount: Int,
+        polarity: ECGDetectionPolarity
+    ) -> [Double]? {
+        guard let stats = robustStats(values: values, sampleCount: sampleCount) else { return nil }
+        return values.map { value in
+            guard value.isFinite else { return 0 }
+            return polarity.score((value - stats.center) / stats.scale)
+        }
+    }
+
+    private static func normalizedEnvelopeScores(
+        values: [Double],
+        sampleCount: Int
+    ) -> [Double]? {
+        guard let stats = robustStats(values: values, sampleCount: sampleCount) else { return nil }
+        return values.map { value in
+            guard value.isFinite else { return 0 }
+            return max((value - stats.center) / stats.scale, 0)
+        }
+    }
+
+    private static func qrsFiltered(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> [Double] {
+        let baselineCorrected = baselineRemoved(
+            samples: samples,
+            sampleCount: sampleCount,
+            samplingRate: samplingRate
+        )
+        let highPassWindow = sampleWindow(
+            seconds: qrsHighPassWindowSeconds,
+            samplingRate: samplingRate,
+            minimum: 3
+        )
+        let trend = centeredMovingAverage(
+            baselineCorrected,
+            sampleCount: sampleCount,
+            windowSamples: highPassWindow
+        )
+        var highPassed = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            highPassed[sample] = baselineCorrected[sample] - trend[sample]
+        }
+
+        let smoothingWindow = sampleWindow(
+            seconds: qrsSmoothingWindowSeconds,
+            samplingRate: samplingRate,
+            minimum: 1
+        )
+        return centeredMovingAverage(
+            highPassed,
+            sampleCount: sampleCount,
+            windowSamples: smoothingWindow
+        )
+    }
+
+    private static func baselineRemoved(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> [Double] {
+        let halfWindow = max(Int((baselineWindowSeconds * samplingRate / 2).rounded()), 1)
+        var sums = Array(repeating: 0.0, count: sampleCount + 1)
+        var counts = Array(repeating: 0.0, count: sampleCount + 1)
+
+        for index in 0..<sampleCount {
+            let value = Double(samples[index])
+            if value.isFinite {
+                sums[index + 1] = sums[index] + value
+                counts[index + 1] = counts[index] + 1
+            } else {
+                sums[index + 1] = sums[index]
+                counts[index + 1] = counts[index]
+            }
+        }
+
+        var result = Array(repeating: 0.0, count: sampleCount)
+        for index in 0..<sampleCount {
+            let lower = max(0, index - halfWindow)
+            let upper = min(sampleCount, index + halfWindow + 1)
+            let count = counts[upper] - counts[lower]
+            let baseline = count > 0 ? (sums[upper] - sums[lower]) / count : 0
+            let value = Double(samples[index])
+            result[index] = value.isFinite ? value - baseline : 0
+        }
+        return result
+    }
+
+    private static func derivative(_ values: [Double]) -> [Double] {
+        guard values.count > 1 else { return values }
+        var result = Array(repeating: 0.0, count: values.count)
+        result[0] = values[1] - values[0]
+        result[values.count - 1] = values[values.count - 1] - values[values.count - 2]
+        if values.count > 2 {
+            for index in 1..<(values.count - 1) {
+                result[index] = (values[index + 1] - values[index - 1]) / 2
+            }
+        }
+        return result
+    }
+
+    private static func curveLengthEnvelope(
+        _ values: [Double],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> [Double] {
+        guard sampleCount > 1 else { return Array(values.prefix(sampleCount)) }
+
+        let differences = derivative(values)
+        let robustScale = robustStats(values: differences, sampleCount: sampleCount)?.scale ?? 1
+        let scale = max(robustScale, 1e-6)
+        var increments = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            let normalizedSlope = differences[sample] / scale
+            increments[sample] = sqrt(1 + normalizedSlope * normalizedSlope) - 1
+        }
+
+        return centeredMovingAverage(
+            increments,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(
+                seconds: wfdbCurveLengthWindowSeconds,
+                samplingRate: samplingRate,
+                minimum: 3
+            )
+        )
+    }
+
+    private static func centeredMovingAverage(
+        _ values: [Double],
+        sampleCount: Int,
+        windowSamples: Int
+    ) -> [Double] {
+        guard sampleCount > 0 else { return [] }
+        guard windowSamples > 1 else { return Array(values.prefix(sampleCount)) }
+
+        let radius = max(windowSamples / 2, 1)
+        var sums = Array(repeating: 0.0, count: sampleCount + 1)
+        var counts = Array(repeating: 0.0, count: sampleCount + 1)
+
+        for index in 0..<sampleCount {
+            let value = values[index]
+            if value.isFinite {
+                sums[index + 1] = sums[index] + value
+                counts[index + 1] = counts[index] + 1
+            } else {
+                sums[index + 1] = sums[index]
+                counts[index + 1] = counts[index]
+            }
+        }
+
+        var result = Array(repeating: 0.0, count: sampleCount)
+        for index in 0..<sampleCount {
+            let lower = max(0, index - radius)
+            let upper = min(sampleCount, index + radius + 1)
+            let count = counts[upper] - counts[lower]
+            result[index] = count > 0 ? (sums[upper] - sums[lower]) / count : 0
+        }
+        return result
+    }
+
+    private static func sampleWindow(seconds: Double, samplingRate: Double, minimum: Int) -> Int {
+        max(Int((seconds * samplingRate).rounded()), minimum)
+    }
+
+    private static func localPeakIndices(
+        in values: [Double],
+        minimumSpacingSamples: Int
+    ) -> [Int] {
+        guard values.count > 2 else { return [] }
+
+        var peaks: [Int] = []
+        for index in 1..<(values.count - 1) {
+            guard values[index].isFinite,
+                  values[index] >= values[index - 1],
+                  values[index] > values[index + 1] else {
+                continue
+            }
+            peaks.append(index)
+        }
+        guard let firstPeak = peaks.first else { return [] }
+
+        var selected: [Int] = []
+        var clusterStart = firstPeak
+        var bestPeak = firstPeak
+        for peak in peaks.dropFirst() {
+            if peak - clusterStart <= minimumSpacingSamples {
+                if values[peak] > values[bestPeak] {
+                    bestPeak = peak
+                }
+            } else {
+                selected.append(bestPeak)
+                clusterStart = peak
+                bestPeak = peak
+            }
+        }
+        selected.append(bestPeak)
+        return selected
+    }
+
+    private static func refinedPeakSample(
+        near sample: Int,
+        processedChannels: [ECGProcessedChannel],
+        samplingRate: Double,
+        polarity: ECGDetectionPolarity
+    ) -> Int {
+        guard let sampleCount = processedChannels.map(\.waveform.count).min(), sampleCount > 0 else {
+            return sample
+        }
+
+        let radius = sampleWindow(
+            seconds: rPeakRefinementWindowSeconds,
+            samplingRate: samplingRate,
+            minimum: 1
+        )
+        let lower = max(0, sample - radius)
+        let upper = min(sampleCount - 1, sample + radius)
+        var bestSample = min(max(sample, lower), upper)
+        var bestScore = -Double.greatestFiniteMagnitude
+
+        for candidateSample in lower...upper {
+            var score = 0.0
+            for channel in processedChannels {
+                let value = channel.waveform[candidateSample]
+                guard value.isFinite else { continue }
+                score = max(score, polarity.score(value))
+            }
+            if score > bestScore {
+                bestScore = score
+                bestSample = candidateSample
+            }
+        }
+
+        return bestSample
+    }
+
+    private static func robustStats(
+        values: [Double],
+        sampleCount: Int
+    ) -> (center: Double, scale: Double)? {
+        let sampleStride = max(sampleCount / 20_000, 1)
+        var sampled: [Double] = []
+        sampled.reserveCapacity(sampleCount / sampleStride + 1)
+        for index in stride(from: 0, to: sampleCount, by: sampleStride) {
+            let value = values[index]
+            if value.isFinite {
+                sampled.append(value)
+            }
+        }
+        guard sampled.count >= 8 else { return nil }
+
+        var centerValues = sampled
+        let center = median(&centerValues)
+        var deviations = sampled.map { abs($0 - center) }
+        let mad = median(&deviations)
+        let rms = sqrt(sampled.reduce(0.0) { $0 + ($1 - center) * ($1 - center) } / Double(sampled.count))
+        let p95 = percentile(sortedValues: centerValues, fraction: 0.95)
+        let scale = max(mad * 1.4826, (p95 - center) / 3, rms * 0.10, 1e-6)
+        return (center, scale)
+    }
+
+    private static func strongestNonOverlapping(
+        _ candidates: [RWaveCandidate],
+        minimumIntervalSeconds: Double
+    ) -> [RWaveCandidate] {
+        var selected: [RWaveCandidate] = []
+        for candidate in candidates.sorted(by: { $0.score > $1.score }) {
+            let overlaps = selected.contains { abs($0.timeSeconds - candidate.timeSeconds) < minimumIntervalSeconds }
+            if !overlaps {
+                selected.append(candidate)
+            }
+        }
+        return selected
+    }
+
+    private static func percentile(sortedValues: [Double], fraction: Double) -> Double {
+        guard !sortedValues.isEmpty else { return 0 }
+        let clamped = min(max(fraction, 0), 1)
+        let position = clamped * Double(sortedValues.count - 1)
+        let lower = Int(floor(position))
+        let upper = Int(ceil(position))
+        if lower == upper {
+            return sortedValues[lower]
+        }
+        let weight = position - Double(lower)
+        return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight
+    }
+
+    private static func median(_ values: inout [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        values.sort()
+        let middle = values.count / 2
+        if values.count.isMultiple(of: 2) {
+            return (values[middle - 1] + values[middle]) / 2
+        }
+        return values[middle]
     }
 }
 
@@ -10753,30 +13508,122 @@ private struct ICATimeCoursePlot: View {
         }
 
         scaledValues.sort()
-        let low = percentile(sortedValues: scaledValues, fraction: 0.02)
-        let high = percentile(sortedValues: scaledValues, fraction: 0.98)
-        let center = percentile(sortedValues: scaledValues, fraction: 0.50)
+        let low = SignalStatistics.percentile(scaledValues, fraction: 0.02)
+        let high = SignalStatistics.percentile(scaledValues, fraction: 0.98)
+        let center = SignalStatistics.percentile(scaledValues, fraction: 0.50)
         let amplitude = max(abs(high - center), abs(low - center), 1e-9)
         return (center, amplitude)
     }
 
-    private func percentile(sortedValues: [Double], fraction: Double) -> Double {
-        guard let first = sortedValues.first else {
-            return 0
-        }
-        guard sortedValues.count > 1 else {
-            return first
-        }
-
-        let position = min(max(fraction, 0), 1) * Double(sortedValues.count - 1)
-        let lowerIndex = Int(position.rounded(.down))
-        let upperIndex = min(lowerIndex + 1, sortedValues.count - 1)
-        let weight = position - Double(lowerIndex)
-        return sortedValues[lowerIndex] * (1 - weight) + sortedValues[upperIndex] * weight
-    }
-
     private func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {
         min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+/// Pinned physio (PNS) trace pane, sharing the EEG time axis. Mirrors
+/// `EventTrackView`: it is offset-driven (not its own scroll view) so it stays
+/// fixed while the EEG channels scroll vertically and aligns horizontally with
+/// the waveform cursor.
+private struct PhysioTrackView: View {
+    let signal: MFFSignalData
+    let ranges: [ClosedRange<Float>]
+    let scaleFactors: [Int: Double]
+    let maxScaledChannels: Set<Int>
+    let flippedPolarity: Set<Int>
+    let rowHeight: CGFloat
+    let eegSamplingRate: Double
+    let sampleStride: Int
+    let timeScale: Double
+    let contentOffset: CGFloat
+    let viewportWidth: CGFloat
+
+    var body: some View {
+        Canvas { context, size in
+            guard signal.samplingRate > 0, eegSamplingRate > 0, sampleStride > 0,
+                  size.width > 0 else { return }
+            let pxPerSecond = eegSamplingRate / Double(sampleStride) * timeScale
+            guard pxPerSecond > 0 else { return }
+
+            let pnsSR = signal.samplingRate
+            let tStart = max(0, Double(contentOffset) / pxPerSecond)
+            let tEnd = Double(contentOffset + size.width) / pxPerSecond
+
+            for (c, channel) in signal.data.enumerated() {
+                let rowTop = CGFloat(c) * rowHeight
+                let midY = rowTop + rowHeight / 2
+                let usable = rowHeight - 8
+
+                // Row baseline.
+                var baseline = Path()
+                baseline.move(to: CGPoint(x: 0, y: rowTop + rowHeight - 2))
+                baseline.addLine(to: CGPoint(x: size.width, y: rowTop + rowHeight - 2))
+                context.stroke(baseline, with: .color(.secondary.opacity(0.12)), lineWidth: 0.5)
+
+                guard !channel.isEmpty else { continue }
+                let startSample = max(0, Int(tStart * pnsSR))
+                let endSample = min(channel.count - 1, Int(tEnd * pnsSR) + 1)
+                guard endSample > startSample else { continue }
+
+                let maxScaled = maxScaledChannels.contains(c)
+                let fallbackRange = c < ranges.count
+                    ? ranges[c]
+                    : (channel.min() ?? -1)...(channel.max() ?? 1)
+                let range: ClosedRange<Float>
+                if maxScaled {
+                    let scanStep = max(1, (endSample - startSample) / 5_000)
+                    var lo = Float.greatestFiniteMagnitude
+                    var hi = -Float.greatestFiniteMagnitude
+                    var k = startSample
+                    while k <= endSample {
+                        let value = channel[k]
+                        if value.isFinite {
+                            lo = min(lo, value)
+                            hi = max(hi, value)
+                        }
+                        k += scanStep
+                    }
+                    range = lo < hi ? lo...hi : fallbackRange
+                } else {
+                    range = fallbackRange
+                }
+
+                let span = max(range.upperBound - range.lowerBound, .leastNonzeroMagnitude)
+                let center = (range.lowerBound + range.upperBound) / 2
+                let scaleFactor = maxScaled
+                    ? CGFloat(1)
+                    : CGFloat(min(max(scaleFactors[c] ?? 1, 1), 64))
+                let polarity: CGFloat = flippedPolarity.contains(c) ? -1 : 1
+                let yScale = usable / CGFloat(span) * scaleFactor
+                let minY = rowTop + 4
+                let maxY = rowTop + rowHeight - 4
+                // Decimate to ~1 point per pixel.
+                let step = max(1, (endSample - startSample) / max(1, Int(size.width)))
+
+                var path = Path()
+                var started = false
+                var j = startSample
+                while j <= endSample {
+                    let x = CGFloat(Double(j) / pnsSR * pxPerSecond) - contentOffset
+                    let centered = CGFloat(channel[j] - center) * polarity
+                    let rawY = midY - centered * yScale
+                    let y = min(max(rawY, minY), maxY)
+                    if started {
+                        path.addLine(to: CGPoint(x: x, y: y))
+                    } else {
+                        path.move(to: CGPoint(x: x, y: y))
+                        started = true
+                    }
+                    j += step
+                }
+                context.stroke(path, with: .color(.pink), lineWidth: 1)
+            }
+        }
+        .frame(height: CGFloat(signal.numberOfChannels) * rowHeight)
+        .frame(maxWidth: .infinity)
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+        }
     }
 }
 

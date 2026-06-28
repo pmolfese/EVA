@@ -78,9 +78,38 @@ nonisolated struct MFFSignalData: Sendable {
 nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
     let id: String
     let code: String
+    let label: String?
+    let eventDescription: String?
+    let cell: String?
     let beginTimeSeconds: Double
     let rawBeginTime: String
     let sourceFile: String
+
+    init(
+        id: String,
+        code: String,
+        label: String? = nil,
+        eventDescription: String? = nil,
+        cell: String? = nil,
+        beginTimeSeconds: Double,
+        rawBeginTime: String,
+        sourceFile: String
+    ) {
+        self.id = id
+        self.code = code
+        self.label = Self.nonEmpty(label)
+        self.eventDescription = Self.nonEmpty(eventDescription)
+        self.cell = Self.nonEmpty(cell)
+        self.beginTimeSeconds = beginTimeSeconds
+        self.rawBeginTime = rawBeginTime
+        self.sourceFile = sourceFile
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+    }
 }
 
 enum MFFReaderError: LocalizedError {
@@ -138,15 +167,23 @@ nonisolated final class MFFReader {
         )
     }
 
-    func loadSignal(from packageURL: URL, signalFileName: String? = nil) throws -> MFFSignalData {
+    func loadSignal(
+        from packageURL: URL,
+        signalFileName: String? = nil,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) throws -> MFFSignalData {
         let packageURL = try validatedPackageURL(from: packageURL)
+        progress?(0.01)
         let signalDescriptor = try selectSignal(in: packageURL, preferredSignalFile: signalFileName)
-        let signalData = try parseSignal(from: signalDescriptor.signalURL)
+        let signalData = try parseSignal(from: signalDescriptor.signalURL) { fraction in
+            progress?(0.02 + 0.78 * fraction)
+        }
 
         guard signalData.numberOfChannels > 0, signalData.totalSamples > 0 else {
             throw MFFReaderError.emptySignal
         }
 
+        progress?(0.82)
         var samples = signalData.samples
         if let gcal = try parseCalibrationFactors(
             named: "GCAL",
@@ -157,16 +194,24 @@ nonisolated final class MFFReader {
             applyCalibrationFactors(gcal, to: &samples)
         }
 
+        progress?(0.88)
+        let recordingStartTime = try parseRecordingStartTime(in: packageURL)
+        progress?(0.90)
+        let events = try parseEvents(in: packageURL)
+        progress?(0.96)
+        let channelNames = try parseChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
+        progress?(1)
+
         return MFFSignalData(
             signalURL: signalDescriptor.signalURL,
             signalType: signalDescriptor.signalType,
             numberOfChannels: signalData.numberOfChannels,
             samplingRate: signalData.samplingRate,
             duration: Double(signalData.totalSamples) / signalData.samplingRate,
-            recordingStartTime: try parseRecordingStartTime(in: packageURL),
-            events: try parseEvents(in: packageURL),
+            recordingStartTime: recordingStartTime,
+            events: events,
             data: samples,
-            channelNames: try parseChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
+            channelNames: channelNames
         )
     }
 
@@ -491,6 +536,95 @@ nonisolated final class MFFReader {
         }
     }
 
+    /// Loads the peripheral/physiological (PNS) signal file (e.g. ECG, EMG,
+    /// respiration) if the package contains one. These channels live in a
+    /// separate `signal*.bin` whose `info*.xml` declares the `PNSData` type, with
+    /// channel names in `pnsSet.xml`. Returns nil when there is no PNS signal.
+    func loadPNSSignal(
+        from packageURL: URL,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) throws -> MFFSignalData? {
+        let packageURL = try validatedPackageURL(from: packageURL)
+        progress?(0.01)
+        let signalFiles = try binFiles(in: packageURL)
+
+        var descriptor: (signalURL: URL, infoFileName: String, signalType: String)?
+        for fileName in signalFiles {
+            let signalURL = packageURL.appendingPathComponent(fileName)
+            let type = (try? parseSignalType(for: signalURL, in: packageURL)) ?? nil
+            if let type, type.range(of: "pns", options: .caseInsensitive) != nil {
+                descriptor = (signalURL, signalInfoFileName(for: signalURL), type)
+                break
+            }
+        }
+        guard let descriptor else { return nil }
+
+        let signalData = try parseSignal(from: descriptor.signalURL) { fraction in
+            progress?(0.02 + 0.82 * fraction)
+        }
+        guard signalData.numberOfChannels > 0, signalData.totalSamples > 0 else { return nil }
+
+        progress?(0.86)
+        var samples = signalData.samples
+        if let gcal = try parseCalibrationFactors(
+            named: "GCAL",
+            in: packageURL,
+            infoFileName: descriptor.infoFileName,
+            expectedCount: signalData.numberOfChannels
+        ) {
+            applyCalibrationFactors(gcal, to: &samples)
+        }
+
+        progress?(0.94)
+        let recordingStartTime = try parseRecordingStartTime(in: packageURL)
+        let channelNames = parsePNSChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
+        progress?(1)
+
+        return MFFSignalData(
+            signalURL: descriptor.signalURL,
+            signalType: descriptor.signalType,
+            numberOfChannels: signalData.numberOfChannels,
+            samplingRate: signalData.samplingRate,
+            duration: Double(signalData.totalSamples) / signalData.samplingRate,
+            recordingStartTime: recordingStartTime,
+            events: [],   // events belong to the primary (EEG) signal
+            data: samples,
+            channelNames: channelNames
+        )
+    }
+
+    /// Parses PNS channel names from `pnsSet.xml`, keyed by the sensor `<number>`
+    /// (0-based, matching the data channel order).
+    private func parsePNSChannelNames(in packageURL: URL, expectedCount: Int) -> [String]? {
+        let url = packageURL.appendingPathComponent("pnsSet.xml")
+        guard expectedCount > 0, FileManager.default.fileExists(atPath: url.path),
+              let document = try? loadXMLDocument(at: url),
+              let root = document.rootElement() else {
+            return nil
+        }
+
+        var names = Array(repeating: "", count: expectedCount)
+        for sensor in descendants(named: "sensor", in: root) {
+            let children = (sensor.children ?? []).compactMap { $0 as? XMLElement }
+            let number = children
+                .first { sanitizedTagName($0.name) == "number" }?
+                .stringValue
+                .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let name = children
+                .first { sanitizedTagName($0.name) == "name" }?
+                .stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let number, (0..<expectedCount).contains(number),
+                  let name, !name.isEmpty else { continue }
+            names[number] = name
+        }
+
+        guard names.contains(where: { !$0.isEmpty }) else { return nil }
+        return names.enumerated().map { index, name in
+            name.isEmpty ? "PNS \(index + 1)" : name
+        }
+    }
+
     private func parseEvents(in packageURL: URL) throws -> [MFFEvent] {
         let eventFiles = try xmlFiles(in: packageURL)
             .filter { $0.hasPrefix("Events") }
@@ -528,6 +662,11 @@ nonisolated final class MFFReader {
         let children = (element.children ?? []).compactMap { $0 as? XMLElement }
         let directCode = children.first(where: { sanitizedTagName($0.name) == "code" })?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let directLabel = children.first(where: { sanitizedTagName($0.name) == "label" })?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let directDescription = children.first(where: { sanitizedTagName($0.name) == "description" })?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let directCell = eventCellValue(from: element)
         let directBeginTime = children.first(where: { sanitizedTagName($0.name) == "beginTime" })?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -540,6 +679,9 @@ nonisolated final class MFFReader {
                     MFFEvent(
                         id: eventID,
                         code: directCode,
+                        label: directLabel,
+                        eventDescription: directDescription,
+                        cell: directCell,
                         beginTimeSeconds: beginTimeSeconds,
                         rawBeginTime: directBeginTime,
                         sourceFile: sourceFile
@@ -559,6 +701,30 @@ nonisolated final class MFFReader {
         }
     }
 
+    private func eventCellValue(from eventElement: XMLElement) -> String? {
+        let keyElements = (eventElement.children ?? [])
+            .compactMap { $0 as? XMLElement }
+            .filter { sanitizedTagName($0.name) == "keys" }
+            .flatMap { keysElement in
+                (keysElement.children ?? [])
+                    .compactMap { $0 as? XMLElement }
+                    .filter { sanitizedTagName($0.name) == "key" }
+            }
+        for key in keyElements {
+            let keyChildren = (key.children ?? []).compactMap { $0 as? XMLElement }
+            let keyCode = keyChildren.first { sanitizedTagName($0.name) == "keyCode" }?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard let keyCode, ["cel#", "#cel", "cell"].contains(keyCode) else { continue }
+            let value = keyChildren.first { sanitizedTagName($0.name) == "data" }?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let value, !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
     private func resolveEventBeginTimeSeconds(_ rawValue: String, recordingStartTime: Date?) -> Double? {
         if let numericValue = Double(rawValue) {
             if numericValue > 1_000_000 {
@@ -574,18 +740,23 @@ nonisolated final class MFFReader {
         return nil
     }
 
-    private func parseSignal(from signalURL: URL) throws -> ParsedSignal {
+    private func parseSignal(
+        from signalURL: URL,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) throws -> ParsedSignal {
         let handle = try FileHandle(forReadingFrom: signalURL)
         defer { try? handle.close() }
 
         let fileSize = try handle.seekToEnd()
         try handle.seek(toOffset: 0)
+        progress?(0)
 
         var lastHeader: SignalHeader?
         var allChannels: [[Float]] = []
         var totalSamples = 0
         var expectedChannelCount: Int?
         var expectedSamplingRate: Double?
+        var lastReportedProgress = 0.0
 
         while try handle.offset() < fileSize {
             let flag = try Int(readInt32(from: handle, signalURL: signalURL))
@@ -631,12 +802,21 @@ nonisolated final class MFFReader {
             }
 
             totalSamples += header.numberOfSamples
+
+            if fileSize > 0 {
+                let fraction = Double(try handle.offset()) / Double(fileSize)
+                if fraction - lastReportedProgress >= 0.005 || fraction >= 1 {
+                    lastReportedProgress = fraction
+                    progress?(min(max(fraction, 0), 1))
+                }
+            }
         }
 
         guard let numberOfChannels = expectedChannelCount, let samplingRate = expectedSamplingRate else {
             throw MFFReaderError.emptySignal
         }
 
+        progress?(1)
         return ParsedSignal(
             numberOfChannels: numberOfChannels,
             samplingRate: samplingRate,

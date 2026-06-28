@@ -271,9 +271,9 @@ nonisolated enum ChannelHealthAnalyzer {
                 name: "Wavelet Burden",
                 score: wavelet.goodnessScore,
                 detail: [
-                    "energy \(formatPercent(wavelet.artifactEnergyFraction))",
-                    "bursts \(formatPercent(wavelet.burstFraction))",
-                    "peak \(formatMicrovolts(Double(wavelet.peakArtifactMagnitude)))",
+                    "energy \(HealthScoring.formatPercent(wavelet.artifactEnergyFraction))",
+                    "bursts \(HealthScoring.formatPercent(wavelet.burstFraction))",
+                    "peak \(HealthScoring.formatMicrovolts(Double(wavelet.peakArtifactMagnitude)))",
                     "L\(wavelet.dominantLevel)"
                 ].joined(separator: ", "),
                 weight: 1.4
@@ -332,8 +332,8 @@ nonisolated enum ChannelHealthAnalyzer {
         for (channelIndex, logPower) in logPowers {
             let z = (logPower - mean) / standardDeviation
             let isOutlier = z > configuration.upperZThreshold || z < -configuration.lowerZThreshold
-            let upperScore = scoreUpperRatio(z, green: greenZ, red: configuration.upperZThreshold)
-            let lowerScore = scoreUpperRatio(-z, green: configuration.lowerZThreshold * 0.6, red: configuration.lowerZThreshold)
+            let upperScore = HealthScoring.scoreUpperRatio(z, green: greenZ, red: configuration.upperZThreshold)
+            let lowerScore = HealthScoring.scoreUpperRatio(-z, green: configuration.lowerZThreshold * 0.6, red: configuration.lowerZThreshold)
             results[channelIndex] = ChannelSpectralResult(
                 channelIndex: channelIndex,
                 zScore: z,
@@ -508,7 +508,7 @@ nonisolated enum ChannelHealthAnalyzer {
                 badWindowFraction: badFraction,
                 neighborCount: weightedNeighbors.count,
                 isBad: medianCorrelation < configuration.minimumCorrelation,
-                score: scoreLowerBound(
+                score: HealthScoring.scoreLowerBound(
                     medianCorrelation,
                     green: min(configuration.minimumCorrelation + 0.2, 0.95),
                     red: configuration.minimumCorrelation
@@ -530,7 +530,7 @@ nonisolated enum ChannelHealthAnalyzer {
             let ransacMetric = metric(
                 name: "Neighbor Prediction",
                 score: ransac.score,
-                detail: "median r \(String(format: "%.2f", ransac.medianCorrelation)), \(formatPercent(ransac.badWindowFraction)) bad windows",
+                detail: "median r \(String(format: "%.2f", ransac.medianCorrelation)), \(HealthScoring.formatPercent(ransac.badWindowFraction)) bad windows",
                 weight: 1.4
             )
             let metrics = result.metrics.filter { $0.name != ransacMetric.name } + [ransacMetric]
@@ -663,15 +663,15 @@ nonisolated enum ChannelHealthAnalyzer {
         let finiteCount = finiteValues.count
         let mean = sum / Double(finiteCount)
         let rms = sqrt(sumSquares / Double(finiteCount))
-        let p95Abs = percentile(absValues, fraction: 0.95)
-        let p99Abs = percentile(absValues, fraction: 0.99)
+        let p95Abs = SignalStatistics.percentile(absValues, fraction: 0.95)
+        let p99Abs = SignalStatistics.percentile(absValues, fraction: 0.99)
         let maxAbs = absValues.last ?? 0
-        let differenceRMS = rootMeanSquare(differences)
+        let differenceRMS = SignalStatistics.rootMeanSquare(differences)
         let flatlineThreshold = max(p95Abs * 0.0001, 1e-7)
         let flatlineFraction = differences.isEmpty
             ? 1
             : Double(differences.filter { $0 <= flatlineThreshold }.count) / Double(differences.count)
-        let clippingFraction = clippingFraction(absValues: absValues, maxAbs: maxAbs)
+        let clippingFraction = HealthScoring.clippingFraction(absValues: absValues, maxAbs: maxAbs)
         let driftRMS = blockMeanRMS(values: sampledValues, samplingRate: samplingRate / Double(max(sampleStride, 1)))
         let lineNoisePower = sinusoidPower(
             values: sampledValues,
@@ -706,8 +706,8 @@ nonisolated enum ChannelHealthAnalyzer {
 
         metrics.append(metric(
             name: "Finite Samples",
-            score: scoreLowerBound(summary.finiteFraction, green: base.finiteGreen, red: base.finiteRed),
-            detail: "\(formatPercent(summary.finiteFraction)) finite samples",
+            score: HealthScoring.scoreLowerBound(summary.finiteFraction, green: base.finiteGreen, red: base.finiteRed),
+            detail: "\(HealthScoring.formatPercent(summary.finiteFraction)) finite samples",
             weight: 1.4
         ))
 
@@ -722,8 +722,8 @@ nonisolated enum ChannelHealthAnalyzer {
             let ratio = summary.p95Abs / baselines.medianP95AbsMicrovolts
             metrics.append(metric(
                 name: "Signal Amplitude",
-                score: scoreTwoSidedRatio(ratio, green: base.amplitudeGreen, red: base.amplitudeRed),
-                detail: "p95 \(formatMicrovolts(summary.p95Abs)), \(formatRatio(ratio)) typical",
+                score: HealthScoring.scoreTwoSidedRatio(ratio, green: base.amplitudeGreen, red: base.amplitudeRed),
+                detail: "p95 \(HealthScoring.formatMicrovolts(summary.p95Abs)), \(HealthScoring.formatRatio(ratio)) typical",
                 weight: 1.4
             ))
         }
@@ -731,22 +731,22 @@ nonisolated enum ChannelHealthAnalyzer {
         let burstRatio = summary.maxAbs / max(baselines.medianP99AbsMicrovolts, 1e-9)
         metrics.append(metric(
             name: "Burst Peaks",
-            score: scoreUpperRatio(burstRatio, green: base.burstGreen, red: base.burstRed),
-            detail: "max \(formatMicrovolts(summary.maxAbs)), \(formatRatio(burstRatio)) median p99",
+            score: HealthScoring.scoreUpperRatio(burstRatio, green: base.burstGreen, red: base.burstRed),
+            detail: "max \(HealthScoring.formatMicrovolts(summary.maxAbs)), \(HealthScoring.formatRatio(burstRatio)) median p99",
             weight: 1.0
         ))
 
         metrics.append(metric(
             name: "Flatline",
-            score: scoreUpperFraction(summary.flatlineFraction, green: base.flatlineGreen, red: base.flatlineRed),
-            detail: "\(formatPercent(summary.flatlineFraction)) near-zero / no-change samples",
+            score: HealthScoring.scoreUpperFraction(summary.flatlineFraction, green: base.flatlineGreen, red: base.flatlineRed),
+            detail: "\(HealthScoring.formatPercent(summary.flatlineFraction)) near-zero / no-change samples",
             weight: 1.3
         ))
 
         metrics.append(metric(
             name: "Clipping",
-            score: scoreUpperFraction(summary.clippingFraction, green: base.clippingGreen, red: base.clippingRed),
-            detail: "\(formatPercent(summary.clippingFraction)) samples pinned at rail",
+            score: HealthScoring.scoreUpperFraction(summary.clippingFraction, green: base.clippingGreen, red: base.clippingRed),
+            detail: "\(HealthScoring.formatPercent(summary.clippingFraction)) samples pinned at rail",
             weight: 1.1
         ))
 
@@ -754,8 +754,8 @@ nonisolated enum ChannelHealthAnalyzer {
         let derivativeTypicality = derivativeRatio / baselines.medianDerivativeRatio
         metrics.append(metric(
             name: "Fast Noise",
-            score: scoreUpperRatio(derivativeTypicality, green: base.fastNoiseGreen, red: base.fastNoiseRed),
-            detail: "sample-to-sample change \(formatRatio(derivativeTypicality)) typical",
+            score: HealthScoring.scoreUpperRatio(derivativeTypicality, green: base.fastNoiseGreen, red: base.fastNoiseRed),
+            detail: "sample-to-sample change \(HealthScoring.formatRatio(derivativeTypicality)) typical",
             weight: 1.0
         ))
 
@@ -763,8 +763,8 @@ nonisolated enum ChannelHealthAnalyzer {
         let driftTypicality = driftRatio / baselines.medianDriftRatio
         metrics.append(metric(
             name: "Slow Drift",
-            score: scoreUpperRatio(driftTypicality, green: base.slowDriftGreen, red: base.slowDriftRed),
-            detail: "block-mean drift \(formatRatio(driftTypicality)) typical",
+            score: HealthScoring.scoreUpperRatio(driftTypicality, green: base.slowDriftGreen, red: base.slowDriftRed),
+            detail: "block-mean drift \(HealthScoring.formatRatio(driftTypicality)) typical",
             weight: 0.8
         ))
 
@@ -772,8 +772,8 @@ nonisolated enum ChannelHealthAnalyzer {
             let lineRatio = summary.lineNoisePower / baselines.medianLineNoisePower
             metrics.append(metric(
                 name: "60 Hz Line",
-                score: scoreUpperRatio(lineRatio, green: 3.0, red: 10.0),
-                detail: "60 Hz proxy \(formatRatio(lineRatio)) typical",
+                score: HealthScoring.scoreUpperRatio(lineRatio, green: 3.0, red: 10.0),
+                detail: "60 Hz proxy \(HealthScoring.formatRatio(lineRatio)) typical",
                 weight: 0.8
             ))
         }
@@ -787,7 +787,7 @@ nonisolated enum ChannelHealthAnalyzer {
         let weightTotal = metrics.reduce(0) { $0 + $1.weight }
         let goodFraction = weightTotal > 0 ? weightedTotal / weightTotal : 0
         let percentage = Int((min(max(goodFraction, 0), 1) * 100).rounded())
-        let grade = grade(for: goodFraction)
+        let grade = HealthScoring.grade(for: goodFraction)
         let weakMetrics = metrics
             .filter { $0.score < 0.78 }
             .sorted { $0.score < $1.score }
@@ -812,7 +812,7 @@ nonisolated enum ChannelHealthAnalyzer {
         let weightTotal = sortedMetrics.reduce(0) { $0 + $1.weight }
         let goodFraction = weightTotal > 0 ? weightedTotal / weightTotal : 0
         let percentage = Int((min(max(goodFraction, 0), 1) * 100).rounded())
-        let grade = grade(for: goodFraction)
+        let grade = HealthScoring.grade(for: goodFraction)
         let weakMetrics = sortedMetrics
             .filter { $0.score < 0.78 }
             .prefix(2)
@@ -835,7 +835,7 @@ nonisolated enum ChannelHealthAnalyzer {
         return ChannelHealthMetric(
             name: name,
             score: boundedScore,
-            grade: grade(for: boundedScore),
+            grade: HealthScoring.grade(for: boundedScore),
             detail: detail,
             weight: weight
         )
@@ -939,13 +939,6 @@ nonisolated enum ChannelHealthAnalyzer {
         return numerator / denominator
     }
 
-    private static func clippingFraction(absValues: [Double], maxAbs: Double) -> Double {
-        guard absValues.count > 3, maxAbs > 20 else { return 0 }
-        let tolerance = max(maxAbs * 0.001, 0.01)
-        let clipped = absValues.filter { abs($0 - maxAbs) <= tolerance }.count
-        return Double(clipped) / Double(absValues.count)
-    }
-
     private static func blockMeanRMS(values: [Double], samplingRate: Double) -> Double {
         guard values.count > 10, samplingRate > 0 else { return 0 }
         let blockSize = max(Int((samplingRate * 2.0).rounded()), 8)
@@ -984,75 +977,11 @@ nonisolated enum ChannelHealthAnalyzer {
         return 2.0 * (cosineProjection * cosineProjection + sineProjection * sineProjection) / (Double(values.count) * energy)
     }
 
-    private static func rootMeanSquare(_ values: [Double]) -> Double {
-        guard !values.isEmpty else { return 0 }
-        return sqrt(values.reduce(0) { $0 + $1 * $1 } / Double(values.count))
-    }
-
-    private static func percentile(_ sortedValues: [Double], fraction: Double) -> Double {
-        guard let first = sortedValues.first else { return 0 }
-        guard sortedValues.count > 1 else { return first }
-        let position = min(max(fraction, 0), 1) * Double(sortedValues.count - 1)
-        let lower = Int(position.rounded(.down))
-        let upper = min(lower + 1, sortedValues.count - 1)
-        let weight = position - Double(lower)
-        return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight
-    }
-
     fileprivate static func median(_ values: [Double], fallback: Double = 1) -> Double {
         var finite = values.filter { $0.isFinite && $0 > 0 }
         guard !finite.isEmpty else { return fallback }
         finite.sort()
-        return max(percentile(finite, fraction: 0.5), 1e-9)
-    }
-
-    private static func scoreUpperRatio(_ ratio: Double, green: Double, red: Double) -> Double {
-        guard ratio.isFinite else { return 0 }
-        if ratio <= green { return 1 }
-        if ratio >= red { return 0 }
-        return 1 - (ratio - green) / max(red - green, 1e-9)
-    }
-
-    private static func scoreTwoSidedRatio(_ ratio: Double, green: Double, red: Double) -> Double {
-        guard ratio.isFinite, ratio > 0 else { return 0 }
-        return scoreUpperRatio(max(ratio, 1 / ratio), green: green, red: red)
-    }
-
-    private static func scoreUpperFraction(_ fraction: Double, green: Double, red: Double) -> Double {
-        scoreUpperRatio(fraction, green: green, red: red)
-    }
-
-    private static func scoreLowerBound(_ value: Double, green: Double, red: Double) -> Double {
-        guard value.isFinite else { return 0 }
-        if value >= green { return 1 }
-        if value <= red { return 0 }
-        return (value - red) / max(green - red, 1e-9)
-    }
-
-    private static func grade(for score: Double) -> ChannelHealthGrade {
-        if score >= 0.78 { return .good }
-        if score >= 0.50 { return .watch }
-        return .poor
-    }
-
-    private static func formatPercent(_ fraction: Double) -> String {
-        String(format: "%.1f%%", min(max(fraction, 0), 1) * 100)
-    }
-
-    private static func formatRatio(_ ratio: Double) -> String {
-        guard ratio.isFinite else { return "nanx" }
-        return String(format: "%.1fx", ratio)
-    }
-
-    private static func formatMicrovolts(_ value: Double) -> String {
-        guard value.isFinite else { return "nan uV" }
-        if abs(value) >= 100 {
-            return String(format: "%.0f uV", value)
-        }
-        if abs(value) >= 10 {
-            return String(format: "%.1f uV", value)
-        }
-        return String(format: "%.2f uV", value)
+        return max(SignalStatistics.percentile(finite, fraction: 0.5), 1e-9)
     }
 }
 

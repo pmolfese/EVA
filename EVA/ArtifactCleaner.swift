@@ -18,7 +18,6 @@
 //  templates and their detected event windows.
 //
 
-import Accelerate
 import Foundation
 
 enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -151,7 +150,7 @@ nonisolated enum ArtifactCleaner {
         }
         guard !ranges.isEmpty else { return nil }
 
-        let channels = validChannels(in: signal.data, sampleCount: sampleCount)
+        let channels = SignalSelection.validChannels(in: signal.data, sampleCount: sampleCount)
         guard !channels.isEmpty else { return nil }
 
         let componentLimit = min(max(maximumComponents, 0), max(ranges.count - 1, 0))
@@ -285,7 +284,7 @@ nonisolated enum ArtifactCleaner {
 
         for row in residuals.indices {
             for column in row..<residuals.count {
-                let value = dot(residuals[row], residuals[column])
+                let value = LinearAlgebra.dot(residuals[row], residuals[column])
                 gram[row][column] = value
                 gram[column][row] = value
                 if row == column {
@@ -420,7 +419,7 @@ nonisolated enum ArtifactCleaner {
         }
 
         let windowSamples = windowSamples(for: artifact, signal: signal)
-        let channels = validChannels(in: data, sampleCount: sampleCount)
+        let channels = SignalSelection.validChannels(in: data, sampleCount: sampleCount)
         var cleanedChannels = Set<Int>()
         var channelTemplates: [(channel: Int, template: [Double])] = []
 
@@ -481,7 +480,7 @@ nonisolated enum ArtifactCleaner {
         let ranges = eventRanges.compactMap { $0 }
         guard !ranges.isEmpty else { return 0 }
 
-        let channels = validChannels(in: data, sampleCount: sampleCount)
+        let channels = SignalSelection.validChannels(in: data, sampleCount: sampleCount)
         let workerCount = workerCount(for: channels.count)
         setupProgress("Fitting OBS bases from \(min(ranges.count, 80)) sampled windows across \(channels.count) channels on \(workerCount) worker\(workerCount == 1 ? "" : "s")")
         var cleanedChannels = Set<Int>()
@@ -651,7 +650,7 @@ nonisolated enum ArtifactCleaner {
             )
         }
         let ranges = eventRanges.compactMap { $0 }
-        let channels = validChannels(in: data, sampleCount: sampleCount)
+        let channels = SignalSelection.validChannels(in: data, sampleCount: sampleCount)
             .filter { !badChannels.contains($0) }
         guard channels.count > 1, !ranges.isEmpty else { return 0 }
         let taper = raisedCosineTaper(count: windowSamples, edgeSamples: edgeTaperSamples)
@@ -659,7 +658,7 @@ nonisolated enum ArtifactCleaner {
         setupProgress("Computing spatial covariance from \(ranges.count) windows across \(channels.count) channels")
         let covariance = spatialCovariance(data: data, ranges: ranges, channels: channels)
         setupProgress("Solving SSP/PCA projection components")
-        let eigen = symmetricEigenDecomposition(covariance)
+        let eigen = LinearAlgebra.symmetricEigenDecomposition(covariance)
         guard eigen.values.count == channels.count,
               eigen.vectors.count == channels.count else {
             return 0
@@ -780,7 +779,7 @@ nonisolated enum ArtifactCleaner {
         preservesLocalBaseline: Bool,
         edgeTaperSamples: Int
     ) -> OBSCorrection? {
-        let basis = basis.filter { $0.count == range.count && vectorEnergy($0) > 1e-12 }
+        let basis = basis.filter { $0.count == range.count && SignalStatistics.vectorEnergy($0) > 1e-12 }
         guard !basis.isEmpty, taper.count == range.count else { return nil }
 
         let samples = range.map { channel[$0] }
@@ -812,9 +811,9 @@ nonisolated enum ArtifactCleaner {
         var rhs = [Double](repeating: 0, count: count)
 
         for row in 0..<count {
-            rhs[row] = dot(basis[row], y)
+            rhs[row] = LinearAlgebra.dot(basis[row], y)
             for column in row..<count {
-                let value = dot(basis[row], basis[column])
+                let value = LinearAlgebra.dot(basis[row], basis[column])
                 gram[row][column] = value
                 gram[column][row] = value
             }
@@ -823,7 +822,7 @@ nonisolated enum ArtifactCleaner {
         for index in 0..<count {
             gram[index][index] += max(abs(gram[index][index]) * 1e-6, 1e-9)
         }
-        return solveLinearSystem(gram, rhs) ?? []
+        return LinearAlgebra.solveLinearSystem(gram, rhs) ?? []
     }
 
     private static func sspCorrections(
@@ -846,7 +845,7 @@ nonisolated enum ArtifactCleaner {
 
             var removal = [Double](repeating: 0, count: channels.count)
             for component in components {
-                let coefficient = dot(values, component)
+                let coefficient = LinearAlgebra.dot(values, component)
                 for index in removal.indices {
                     removal[index] += coefficient * component[index]
                 }
@@ -993,10 +992,6 @@ nonisolated enum ArtifactCleaner {
         return count > 0 ? total / count : 0
     }
 
-    private static func validChannels(in data: [[Float]], sampleCount: Int) -> [Int] {
-        data.indices.filter { data[$0].count == sampleCount }
-    }
-
     // MARK: - PCA helpers
 
     private static func principalComponents(from residuals: [[Double]], maximumCount: Int) -> [[Double]] {
@@ -1010,13 +1005,13 @@ nonisolated enum ArtifactCleaner {
         var gram = Array(repeating: [Double](repeating: 0, count: residuals.count), count: residuals.count)
         for row in residuals.indices {
             for column in row..<residuals.count {
-                let value = dot(residuals[row], residuals[column])
+                let value = LinearAlgebra.dot(residuals[row], residuals[column])
                 gram[row][column] = value
                 gram[column][row] = value
             }
         }
 
-        let eigen = symmetricEigenDecomposition(gram)
+        let eigen = LinearAlgebra.symmetricEigenDecomposition(gram)
         guard eigen.values.count == residuals.count,
               eigen.vectors.count == residuals.count else {
             return []
@@ -1062,7 +1057,7 @@ nonisolated enum ArtifactCleaner {
         var gram = Array(repeating: [Double](repeating: 0, count: residuals.count), count: residuals.count)
         for row in residuals.indices {
             for column in row..<residuals.count {
-                let value = dot(residuals[row], residuals[column])
+                let value = LinearAlgebra.dot(residuals[row], residuals[column])
                 gram[row][column] = value
                 gram[column][row] = value
             }
@@ -1078,7 +1073,7 @@ nonisolated enum ArtifactCleaner {
             return []
         }
 
-        let eigen = symmetricEigenDecomposition(gram)
+        let eigen = LinearAlgebra.symmetricEigenDecomposition(gram)
         guard eigen.values.count == gram.count else { return [] }
 
         return eigen.values
@@ -1162,7 +1157,7 @@ nonisolated enum ArtifactCleaner {
 
     private static func centeredUnitVector(_ samples: [Double]) -> [Double] {
         var centered = centeredVector(samples)
-        let norm = sqrt(vectorEnergy(centered))
+        let norm = sqrt(SignalStatistics.vectorEnergy(centered))
         guard norm > 1e-12 else { return [] }
         for index in centered.indices {
             centered[index] /= norm
@@ -1170,188 +1165,6 @@ nonisolated enum ArtifactCleaner {
         return centered
     }
 
-    private static func vectorEnergy(_ values: [Double]) -> Double {
-        values.reduce(0) { $0 + ($1 * $1) }
-    }
-
-    private static func dot(_ lhs: [Double], _ rhs: [Double]) -> Double {
-        guard lhs.count == rhs.count else { return 0 }
-        var total = 0.0
-        for index in lhs.indices {
-            total += lhs[index] * rhs[index]
-        }
-        return total
-    }
-
-    private static func solveLinearSystem(_ matrix: [[Double]], _ rhs: [Double]) -> [Double]? {
-        let n = matrix.count
-        guard n > 0, rhs.count == n, matrix.allSatisfy({ $0.count == n }) else { return nil }
-
-        var a = matrix
-        var b = rhs
-        for pivot in 0..<n {
-            var bestRow = pivot
-            var bestValue = abs(a[pivot][pivot])
-            for row in (pivot + 1)..<n {
-                let value = abs(a[row][pivot])
-                if value > bestValue {
-                    bestValue = value
-                    bestRow = row
-                }
-            }
-            guard bestValue > 1e-12 else { return nil }
-
-            if bestRow != pivot {
-                a.swapAt(bestRow, pivot)
-                b.swapAt(bestRow, pivot)
-            }
-
-            let divisor = a[pivot][pivot]
-            for column in pivot..<n {
-                a[pivot][column] /= divisor
-            }
-            b[pivot] /= divisor
-
-            for row in 0..<n where row != pivot {
-                let factor = a[row][pivot]
-                guard abs(factor) > 0 else { continue }
-                for column in pivot..<n {
-                    a[row][column] -= factor * a[pivot][column]
-                }
-                b[row] -= factor * b[pivot]
-            }
-        }
-        return b
-    }
-
-    private static func symmetricEigenDecomposition(_ matrix: [[Double]]) -> (values: [Double], vectors: [[Double]]) {
-        let n = matrix.count
-        guard n > 0, matrix.allSatisfy({ $0.count == n }) else {
-            return ([], [])
-        }
-
-        var columnMajor = Array(repeating: 0.0, count: n * n)
-        for row in 0..<n {
-            for column in 0..<n {
-                columnMajor[column * n + row] = matrix[row][column]
-            }
-        }
-
-        var eigenvalues = Array(repeating: 0.0, count: n)
-        var jobz = Int8(UnicodeScalar("V").value)
-        var uplo = Int8(UnicodeScalar("U").value)
-        var dimension = __CLPK_integer(n)
-        var leadingDimension = __CLPK_integer(n)
-        var queryWork = 0.0
-        var querySize = __CLPK_integer(-1)
-        var info = __CLPK_integer(0)
-
-        dsyev_(
-            &jobz,
-            &uplo,
-            &dimension,
-            &columnMajor,
-            &leadingDimension,
-            &eigenvalues,
-            &queryWork,
-            &querySize,
-            &info
-        )
-
-        guard info == 0 else {
-            return jacobiEigenDecomposition(matrix)
-        }
-
-        var workSize = __CLPK_integer(max(Int(queryWork.rounded(.up)), 3 * n - 1))
-        var work = Array(repeating: 0.0, count: Int(workSize))
-        info = 0
-
-        dsyev_(
-            &jobz,
-            &uplo,
-            &dimension,
-            &columnMajor,
-            &leadingDimension,
-            &eigenvalues,
-            &work,
-            &workSize,
-            &info
-        )
-
-        guard info == 0 else {
-            return jacobiEigenDecomposition(matrix)
-        }
-
-        let eigenvectors = (0..<n).map { row in
-            (0..<n).map { column in
-                columnMajor[column * n + row]
-            }
-        }
-        return (eigenvalues, eigenvectors)
-    }
-
-    private static func jacobiEigenDecomposition(_ matrix: [[Double]]) -> (values: [Double], vectors: [[Double]]) {
-        let n = matrix.count
-        guard n > 0 else { return ([], []) }
-        guard n > 1 else { return ([matrix[0][0]], [[1]]) }
-        var a = matrix
-        var v = identity(n)
-        let maxIterations = max(100, n * n * 8)
-
-        for _ in 0..<maxIterations {
-            var p = 0
-            var q = min(1, n - 1)
-            var maxValue = 0.0
-            for row in 0..<n {
-                for column in (row + 1)..<n {
-                    let value = abs(a[row][column])
-                    if value > maxValue {
-                        maxValue = value
-                        p = row
-                        q = column
-                    }
-                }
-            }
-            if maxValue < 1e-10 { break }
-
-            let app = a[p][p]
-            let aqq = a[q][q]
-            let apq = a[p][q]
-            let tau = (aqq - app) / (2 * apq)
-            let t = (tau >= 0 ? 1.0 : -1.0) / (abs(tau) + sqrt(1 + tau * tau))
-            let c = 1.0 / sqrt(1 + t * t)
-            let s = t * c
-
-            for k in 0..<n where k != p && k != q {
-                let akp = a[k][p]
-                let akq = a[k][q]
-                a[k][p] = c * akp - s * akq
-                a[p][k] = a[k][p]
-                a[k][q] = s * akp + c * akq
-                a[q][k] = a[k][q]
-            }
-
-            a[p][p] = c * c * app - 2 * s * c * apq + s * s * aqq
-            a[q][q] = s * s * app + 2 * s * c * apq + c * c * aqq
-            a[p][q] = 0
-            a[q][p] = 0
-
-            for k in 0..<n {
-                let vkp = v[k][p]
-                let vkq = v[k][q]
-                v[k][p] = c * vkp - s * vkq
-                v[k][q] = s * vkp + c * vkq
-            }
-        }
-
-        return ((0..<n).map { a[$0][$0] }, v)
-    }
-
-    private static func identity(_ n: Int) -> [[Double]] {
-        (0..<n).map { row in
-            (0..<n).map { column in row == column ? 1.0 : 0.0 }
-        }
-    }
 }
 
 nonisolated private struct OBSCorrection {

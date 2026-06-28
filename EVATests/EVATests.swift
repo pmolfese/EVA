@@ -119,6 +119,38 @@ struct EVATests {
         #expect(exportedSignal.data == signal.data)
     }
 
+    // MARK: - MFF reader: real fixture recordings (BEL-Public/mffpy)
+
+    @Test func mffReaderSelectsEEGSignalFromMultiSignalPackage() throws {
+        // example_3 contains both an EEG signal (signal1.bin) and a PNS signal
+        // (signal2.bin). loadSignal must pick the EEG descriptor, not the PNS one.
+        let url = Fixtures.url("example_3.mff")
+
+        let binFiles = try MFFReader().binFiles(in: url)
+        #expect(binFiles.count == 2) // EEG + PNS present
+
+        let signal = try MFFReader().loadSignal(from: url)
+        #expect(signal.signalType.caseInsensitiveCompare("EEG") == .orderedSame)
+        #expect(signal.signalURL.lastPathComponent == "signal1.bin")
+        #expect(signal.numberOfChannels > 0)
+        #expect(signal.samplingRate > 0)
+        #expect(signal.data.count == signal.numberOfChannels)
+        #expect((signal.data.first?.count ?? 0) > 0)
+    }
+
+    @Test func mffReaderLoadsPackageWithEmptyCalibrations() throws {
+        // example_4 declares <calibrations /> (empty). Reading must succeed and
+        // return data unchanged by any calibration step.
+        let url = Fixtures.url("example_4.mff")
+
+        let signal = try MFFReader().loadSignal(from: url)
+        #expect(signal.signalType.caseInsensitiveCompare("EEG") == .orderedSame)
+        #expect(signal.numberOfChannels > 0)
+        #expect(signal.samplingRate > 0)
+        #expect(signal.data.count == signal.numberOfChannels)
+        #expect(signal.data.allSatisfy { $0.count == (signal.data.first?.count ?? -1) })
+    }
+
     private func makeMFFPackage() throws -> URL {
         let packageURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("EVA-test-\(UUID().uuidString)")

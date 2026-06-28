@@ -59,7 +59,28 @@ struct ContentView: View {
         .onChange(of: openRecordingRequest) { _, _ in
             showsFileImporter = true
         }
-        .background(WindowAccessor(autosaveName: "EVAMainWindow"))
+        .background(WindowAccessor(autosaveName: "EVAMainWindow", onCloseRequest: {
+            // Closing a window that has a recording open doesn't close the
+            // window — it closes the file and resets to the launch screen so the
+            // user can drop a new EEG file. With no recording open, close as
+            // usual.
+            if recording != nil {
+                closeRecording()
+                return false
+            }
+            return true
+        }))
+    }
+
+    /// Closes the current recording and returns the window to a fresh launch
+    /// state. Because `WaveformView` is keyed by `recording.id`, dropping the
+    /// recording discards all of its per-recording in-memory state; opening a
+    /// new file builds a brand-new view.
+    private func closeRecording() {
+        recording = nil
+        openError = nil
+        isDropTargeted = false
+        showsFileImporter = false
     }
 
     private var launchScreen: some View {
@@ -219,18 +240,60 @@ struct ContentView: View {
 }
 
 /// Sets an AppKit frame-autosave name on the hosting window so its size and
-/// position are remembered in user defaults and restored on the next launch.
+/// position are remembered, and intercepts the window close so the app can
+/// decide whether to actually close or just reset to the launch screen.
 private struct WindowAccessor: NSViewRepresentable {
     let autosaveName: String
+    /// Invoked when the window is asked to close. Return `true` to allow the
+    /// close, `false` to keep the window open.
+    let onCloseRequest: () -> Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView { NSView() }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onCloseRequest = onCloseRequest
+        let autosaveName = autosaveName
         DispatchQueue.main.async {
             guard let window = nsView.window else { return }
             if window.frameAutosaveName != autosaveName {
                 window.setFrameAutosaveName(autosaveName)
             }
+            context.coordinator.attach(to: window)
+        }
+    }
+
+    /// Window delegate that intercepts `windowShouldClose` and otherwise forwards
+    /// every message to SwiftUI's original delegate (so window lifecycle and
+    /// state restoration keep working).
+    final class Coordinator: NSObject, NSWindowDelegate {
+        var onCloseRequest: (() -> Bool)?
+        private weak var originalDelegate: NSWindowDelegate?
+
+        func attach(to window: NSWindow) {
+            // Already installed (and SwiftUI hasn't replaced us): nothing to do.
+            guard window.delegate !== self else { return }
+            originalDelegate = window.delegate
+            window.delegate = self
+        }
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            if onCloseRequest?() == false { return false }
+            if let originalDelegate,
+               originalDelegate.responds(to: #selector(NSWindowDelegate.windowShouldClose(_:))) {
+                return originalDelegate.windowShouldClose?(sender) ?? true
+            }
+            return true
+        }
+
+        override func responds(to aSelector: Selector!) -> Bool {
+            super.responds(to: aSelector) || (originalDelegate?.responds(to: aSelector) ?? false)
+        }
+
+        override func forwardingTarget(for aSelector: Selector!) -> Any? {
+            if originalDelegate?.responds(to: aSelector) == true { return originalDelegate }
+            return super.forwardingTarget(for: aSelector)
         }
     }
 }

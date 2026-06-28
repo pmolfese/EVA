@@ -34,6 +34,9 @@ nonisolated struct ImportedRecording: Sendable {
     var signal: MFFSignalData
     var layout: SensorLayout?
     var geometry: ElectrodeGeometry?
+    /// Peripheral/physiological channels (ECG, EMG, …) shown alongside the EEG,
+    /// when the source provides them. Display-only; not part of `signal`.
+    var pnsSignal: MFFSignalData?
 }
 
 nonisolated enum SignalImportError: LocalizedError {
@@ -77,24 +80,39 @@ nonisolated enum SignalImportReader {
         supportedRecordingExtensions.contains(url.pathExtension.lowercased())
     }
 
-    static func load(from url: URL) throws -> ImportedRecording {
+    static func load(
+        from url: URL,
+        progress: (@Sendable (Double, String) -> Void)? = nil
+    ) throws -> ImportedRecording {
         let ext = url.pathExtension.lowercased()
         let imported: ImportedRecording
 
         switch ext {
         case "mff":
             let reader = MFFReader()
-            let signal = try reader.loadSignal(from: url)
+            progress?(0.01, "Inspecting MFF package")
+            let signal = try reader.loadSignal(from: url) { fraction in
+                progress?(0.02 + 0.76 * fraction, "Reading EEG channels")
+            }
+            progress?(0.80, "Loading sensor layout")
+            let pnsSignal = try? reader.loadPNSSignal(from: url) { fraction in
+                progress?(0.82 + 0.14 * fraction, "Reading PNS channels")
+            }
+            progress?(0.96, "Loading electrode locations")
             imported = ImportedRecording(
                 signal: signal,
                 layout: SensorLayout.load(fromPackageContaining: signal.signalURL),
-                geometry: ElectrodeGeometry.load(fromPackageContaining: signal.signalURL)
+                geometry: ElectrodeGeometry.load(fromPackageContaining: signal.signalURL),
+                pnsSignal: pnsSignal
             )
         case "vhdr", "vmrk", "eeg":
+            progress?(0.05, "Reading BrainVision recording")
             imported = try BrainVisionSignalReader.load(from: url)
         case "edf":
+            progress?(0.05, "Reading EDF recording")
             imported = try EDFSignalReader.load(from: url)
         case "lay", "dat":
+            progress?(0.05, "Reading Persyst recording")
             imported = try PersystSignalReader.load(from: url)
         case "set", "fdt":
             throw SignalImportError.unsupportedVariant(
@@ -102,6 +120,7 @@ nonisolated enum SignalImportReader {
                 "EEGLAB import is scaffolded through MNE-Python, but it is disabled until we have representative .set/.fdt files to validate it."
             )
         case "avr", "mul":
+            progress?(0.05, "Reading BESA recording")
             imported = try BESAASCIIReader.load(from: url)
         case "generic":
             throw SignalImportError.unsupportedVariant(
@@ -117,7 +136,10 @@ nonisolated enum SignalImportReader {
             throw SignalImportError.unsupportedFormat(url)
         }
 
-        return attachLocationSidecar(to: imported)
+        progress?(0.98, "Checking electrode sidecars")
+        let withLocations = attachLocationSidecar(to: imported)
+        progress?(1, "Loaded")
+        return withLocations
     }
 
     private static func attachLocationSidecar(to imported: ImportedRecording) -> ImportedRecording {
@@ -135,7 +157,8 @@ nonisolated enum SignalImportReader {
         return ImportedRecording(
             signal: imported.signal,
             layout: imported.layout ?? locations.layout,
-            geometry: imported.geometry ?? locations.geometry
+            geometry: imported.geometry ?? locations.geometry,
+            pnsSignal: imported.pnsSignal
         )
     }
 }
@@ -934,6 +957,9 @@ with open(os.path.join(outdir, "meta.json"), "w", encoding="utf-8") as f:
             MFFEvent(
                 id: $0.id,
                 code: $0.code,
+                label: $0.label,
+                eventDescription: $0.eventDescription,
+                cell: $0.cell,
                 beginTimeSeconds: $0.beginTimeSeconds,
                 rawBeginTime: $0.rawBeginTime,
                 sourceFile: $0.sourceFile
@@ -975,6 +1001,9 @@ with open(os.path.join(outdir, "meta.json"), "w", encoding="utf-8") as f:
     private struct MNEBridgeEvent: Decodable {
         var id: String
         var code: String
+        var label: String?
+        var eventDescription: String?
+        var cell: String?
         var beginTimeSeconds: Double
         var rawBeginTime: String
         var sourceFile: String
