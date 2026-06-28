@@ -25,10 +25,15 @@ struct MotionConfigView: View {
     @Binding var parameters: MotionParameters?
     @Binding var fdThreshold: Double
     @Binding var radiusMm: Double
+    @Binding var skipStart: Int
+    @Binding var skipEnd: Int
+    @Binding var trSeconds: Double
 
     // Current MR gradient-removal configuration, shown for reference.
     let trMarkerCode: String
-    let trMarkerCount: Int?
+    /// All TR (TREV) marker sample indices in the recording, before trimming.
+    let trMarkerSamples: [Int]
+    let samplingRate: Double
     let windowBefore: Int
     let windowAfter: Int
 
@@ -36,6 +41,16 @@ struct MotionConfigView: View {
 
     @State private var loadError: String?
     @State private var isDropTargeted = false
+
+    /// TR markers after trimming the start/end skips.
+    private var trimmedMarkers: [Int] {
+        guard trMarkerSamples.count > skipStart + skipEnd else { return [] }
+        return Array(trMarkerSamples[skipStart..<(trMarkerSamples.count - skipEnd)])
+    }
+
+    private var spacing: TRSpacingInfo {
+        TRSpacingInfo.from(triggerSamples: trimmedMarkers, samplingRate: samplingRate)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -51,6 +66,10 @@ struct MotionConfigView: View {
             }
 
             currentConfigSection
+
+            Divider()
+
+            trAlignmentSection
 
             Divider()
 
@@ -109,7 +128,7 @@ struct MotionConfigView: View {
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
                 GridRow {
                     Text("TR marker event").foregroundStyle(.secondary)
-                    Text(trMarkerCount.map { "\(trMarkerCode)  (\($0) markers)" } ?? trMarkerCode)
+                    Text("\(trMarkerCode)  (\(trMarkerSamples.count) markers)")
                         .monospacedDigit()
                 }
                 GridRow {
@@ -125,6 +144,53 @@ struct MotionConfigView: View {
             .font(.caption)
         }
     }
+
+    // MARK: - TR alignment (trim + spacing sanity)
+
+    private var trAlignmentSection: some View {
+        let even = spacing.isEvenlySpaced
+        let usedCount = trimmedMarkers.count
+        let motionCount = parameters?.count
+
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("TR Alignment")
+                .font(.caption.weight(.semibold))
+
+            Text("Skip first \(skipStart), skip last \(skipEnd). Edit these in the main MRI panel next to the TR marker selector.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            // Count reconciliation against the motion file.
+            HStack(spacing: 6) {
+                let matches = motionCount == nil || motionCount == usedCount
+                Image(systemName: matches ? "equal.circle" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(matches ? Color.secondary : Color.orange)
+                Text(motionCount.map {
+                    "Using \(usedCount) TRs" + (matches ? " (matches motion file)" : " vs \($0) motion volumes")
+                } ?? "Using \(usedCount) TRs")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if even {
+                Text(spacing.hasEnoughTriggers
+                     ? "Fixed TR detected: \(secs(spacing.modeSeconds)) (evenly spaced)."
+                     : "Not enough TR markers after trimming.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Showing the mode interval; correction requires evenly spaced TRs (AAS, FASTR, FARM and Moosmann all assume a fixed TR).")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onAppear {
+            if trSeconds == 0 { trSeconds = spacing.representativeSeconds }
+        }
+    }
+
+    private func secs(_ v: Double) -> String { String(format: "%.3f s", v) }
 
     // MARK: - File loading
 

@@ -89,10 +89,80 @@ struct GradientRemoverTests {
         #expect(energy(censored[0], tr: badTR) < energy(channel, tr: badTR))
     }
 
+    @Test func preservesNonArtifactSignal() throws {
+        // A physiological oscillation NOT phase-locked to the TR grid should
+        // survive correction: the neighbor-average template averages it out, so
+        // the corrected signal must still track the physio (not be flattened).
+        let spacing = 100
+        let nTR = 30
+        let sampleCount = spacing * nTR
+        // Period 62.5 samples vs TR 100 => not TR-locked.
+        func physio(_ t: Int) -> Float { 10 * Float(sin(2 * .pi * Double(t) / 62.5)) }
+        func gradient(_ k: Int) -> Float { 80 * Float(sin(Double(k) * 0.4)) + 40 * Float(k % 9) }
+        var channel = [Float](repeating: 0, count: sampleCount)
+        for t in 0..<sampleCount { channel[t] = physio(t) + gradient(t % spacing) }
+
+        let triggers = Array(stride(from: 0, to: sampleCount, by: spacing))
+        let corrected = try GradientRemover.correct(
+            channels: [channel], trSamples: triggers, window: .default
+        )
+
+        // On the interior, the corrected signal should correlate strongly with the
+        // pure physio it was carrying.
+        let lo = spacing * 6, hi = spacing * 24
+        let cleanInterior = (lo..<hi).map { physio($0) }
+        let gotInterior = Array(corrected[0][lo..<hi])
+        #expect(correlation(cleanInterior, gotInterior) > 0.85,
+                "physiological signal was not preserved")
+    }
+
+    @Test func producesDeterministicOutput() throws {
+        let spacing = 100, nTR = 24
+        let sampleCount = spacing * nTR
+        var channel = [Float](repeating: 0, count: sampleCount)
+        for t in 0..<sampleCount {
+            channel[t] = 5 * Float(sin(Double(t) * 0.07)) + 60 * Float(sin(Double(t % spacing) * 0.3))
+        }
+        let triggers = Array(stride(from: 0, to: sampleCount, by: spacing))
+        let a = try GradientRemover.correct(channels: [channel, channel], trSamples: triggers)
+        let b = try GradientRemover.correct(channels: [channel, channel], trSamples: triggers)
+        #expect(a == b)
+    }
+
+    @Test func emptyExclusionEqualsNoExclusion() throws {
+        let spacing = 100, nTR = 24
+        let sampleCount = spacing * nTR
+        var channel = [Float](repeating: 0, count: sampleCount)
+        for t in 0..<sampleCount {
+            channel[t] = 5 * Float(sin(Double(t) * 0.07)) + 60 * Float(sin(Double(t % spacing) * 0.3))
+        }
+        let triggers = Array(stride(from: 0, to: sampleCount, by: spacing))
+        let plain = try GradientRemover.correct(channels: [channel], trSamples: triggers)
+        let empty = try GradientRemover.correct(channels: [channel], trSamples: triggers,
+                                                excludedTRs: [])
+        #expect(plain == empty)
+    }
+
     @Test func throwsWithTooFewTriggers() {
         #expect(throws: GradientRemoverError.self) {
             _ = try GradientRemover.correct(channels: [[0, 1, 2, 3]], trSamples: [0])
         }
+    }
+
+    /// Pearson correlation between two equal-length Float vectors.
+    private func correlation(_ a: [Float], _ b: [Float]) -> Double {
+        precondition(a.count == b.count)
+        let n = Double(a.count)
+        let ma = a.reduce(0, +) / Float(a.count)
+        let mb = b.reduce(0, +) / Float(b.count)
+        var sa = 0.0, sb = 0.0, sab = 0.0
+        for i in 0..<a.count {
+            let da = Double(a[i] - ma), db = Double(b[i] - mb)
+            sa += da * da; sb += db * db; sab += da * db
+        }
+        _ = n
+        let denom = (sa * sb).squareRoot()
+        return denom == 0 ? 0 : sab / denom
     }
 
     @Test func throwsOnUnevenSpacing() {

@@ -116,6 +116,126 @@ struct FastrCorrectorTests {
         for c in result { #expect(c.allSatisfy { $0.isFinite }) }
     }
 
+    // MARK: - Characterization (determinism & equivalence anchors)
+
+    @Test func producesDeterministicOutput() throws {
+        let (channel, triggers) = makeSyntheticChannel(spacing: 120, volumes: 36)
+        var config = FastrCorrector.Config()
+        config.upsampleFactor = 2
+        config.obs = .auto
+        let a = try FastrCorrector.correct(channels: [channel, channel],
+                                           volumeTriggers: triggers, config: config,
+                                           samplingRate: 250)
+        let b = try FastrCorrector.correct(channels: [channel, channel],
+                                           volumeTriggers: triggers, config: config,
+                                           samplingRate: 250)
+        // Bit-for-bit identical across runs (guards against accidental
+        // nondeterminism from parallelism or unseeded state in a refactor).
+        #expect(a == b)
+    }
+
+    @Test func emptyCensoringEqualsNoCensoring() throws {
+        let (channel, triggers) = makeSyntheticChannel(spacing: 120, volumes: 36)
+        var base = FastrCorrector.Config()
+        base.upsampleFactor = 2
+        base.obs = .off
+        var withEmpty = base
+        withEmpty.censoredVolumes = []   // explicit empty must be a no-op
+
+        let a = try FastrCorrector.correct(channels: [channel], volumeTriggers: triggers,
+                                           config: base, samplingRate: 250)
+        let b = try FastrCorrector.correct(channels: [channel], volumeTriggers: triggers,
+                                           config: withEmpty, samplingRate: 250)
+        #expect(a == b)
+    }
+
+    @Test func neighborSchemeEqualsDefaultPipeline() throws {
+        let (channel, triggers) = makeSyntheticChannel(spacing: 120, volumes: 36)
+        var def = FastrCorrector.Config()
+        def.upsampleFactor = 2
+        def.obs = .off
+        var neighbor = def
+        neighbor.templateScheme = .neighbor   // the default scheme, stated explicitly
+
+        let a = try FastrCorrector.correct(channels: [channel], volumeTriggers: triggers,
+                                           config: def, samplingRate: 250)
+        let b = try FastrCorrector.correct(channels: [channel], volumeTriggers: triggers,
+                                           config: neighbor, samplingRate: 250)
+        #expect(a == b)
+    }
+
+    @Test func singleChannelMatchesMultiChannel() throws {
+        // A channel's result must not depend on what other channels accompany it
+        // (the shared aligner is computed from channel 0 only).
+        let (channel, triggers) = makeSyntheticChannel(spacing: 120, volumes: 36)
+        var config = FastrCorrector.Config()
+        config.upsampleFactor = 2
+        config.obs = .off
+        let solo = try FastrCorrector.correct(channels: [channel], volumeTriggers: triggers,
+                                              config: config, samplingRate: 250)
+        let multi = try FastrCorrector.correct(channels: [channel, channel, channel],
+                                               volumeTriggers: triggers, config: config,
+                                               samplingRate: 250)
+        #expect(solo[0] == multi[0])
+        #expect(multi[0] == multi[2])
+    }
+
+    // MARK: - Signal preservation
+
+    @Test func preservesNonArtifactSignal() throws {
+        // Physio NOT locked to the TR grid must survive FASTR (template averaging
+        // cancels it; OBS off so it can't be fitted away).
+        let spacing = 120
+        let volumes = 40
+        let sampleCount = spacing * volumes
+        // Physio NOT TR-locked, with an artifact of comparable magnitude (a
+        // realistic regime where the template can be cleanly separated). A
+        // refactor that starts destroying signal will drop this correlation.
+        func physio(_ t: Int) -> Float { 10 * Float(sin(2 * .pi * Double(t) / 71.0)) }
+        // Smooth (band-limited) artifact at frequencies well separated from the
+        // physio, so it's near-orthogonal to the physio within an epoch (keeps
+        // the amplitude-scaling step from leaking artifact) and resamples
+        // cleanly. A destructive refactor still drops the correlation.
+        func gradient(_ k: Int) -> Float { 15 * Float(sin(Double(k) * 0.6)) + 10 * Float(sin(Double(k) * 0.9 + 1)) }
+        var channel = [Float](repeating: 0, count: sampleCount)
+        for t in 0..<sampleCount { channel[t] = physio(t) + gradient(t % spacing) }
+        let triggers = (0..<volumes).map { $0 * spacing }
+
+        var config = FastrCorrector.Config()
+        config.upsampleFactor = 2
+        config.numberOfSlices = 1
+        config.subSampleAlignment = false
+        config.obs = .off
+
+        let result = try FastrCorrector.correct(
+            channels: [channel], volumeTriggers: triggers,
+            config: config, samplingRate: 250
+        )
+        let lo = spacing * 6, hi = spacing * 34
+        let clean = (lo..<hi).map { physio($0) }
+        let got = Array(result[0][lo..<hi])
+        // Conservative "signal not destroyed" floor. The current approximate
+        // pipeline (windowed-sinc interp/decimate + AAS amplitude scaling) only
+        // reaches ~0.5–0.7 here; a refactor that starts destroying signal drives
+        // this toward 0. See TODO: investigate FASTR signal attenuation /
+        // validate against a MATLAB reference. AAS has a stricter (0.85) guard.
+        #expect(correlation(clean, got) > 0.5, "physiological signal was not preserved (corr=\(correlation(clean, got)))")
+    }
+
+    /// Pearson correlation between two equal-length Float vectors.
+    private func correlation(_ a: [Float], _ b: [Float]) -> Double {
+        precondition(a.count == b.count)
+        let ma = a.reduce(0, +) / Float(a.count)
+        let mb = b.reduce(0, +) / Float(b.count)
+        var sa = 0.0, sb = 0.0, sab = 0.0
+        for i in 0..<a.count {
+            let da = Double(a[i] - ma), db = Double(b[i] - mb)
+            sa += da * da; sb += db * db; sab += da * db
+        }
+        let denom = (sa * sb).squareRoot()
+        return denom == 0 ? 0 : sab / denom
+    }
+
     // MARK: - Motion censoring
 
     @Test func censoringIgnoresHighMotionDonorsButStillCorrectsThem() throws {
