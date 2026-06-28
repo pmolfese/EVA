@@ -59,7 +59,7 @@ struct MotionConfigView: View {
                     .font(.title3.weight(.semibold))
                 Spacer()
                 if let parameters {
-                    Text("\(parameters.count) volumes")
+                    Text("\(parameters.count) TRs")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -166,7 +166,7 @@ struct MotionConfigView: View {
                 Image(systemName: matches ? "equal.circle" : "exclamationmark.triangle.fill")
                     .foregroundStyle(matches ? Color.secondary : Color.orange)
                 Text(motionCount.map {
-                    "Using \(usedCount) TRs" + (matches ? " (matches motion file)" : " vs \($0) motion volumes")
+                    "Using \(usedCount) TRs" + (matches ? " (matches motion file)" : " vs \($0) motion TRs")
                 } ?? "Using \(usedCount) TRs")
                     .font(.caption)
                     .foregroundStyle(.secondary)

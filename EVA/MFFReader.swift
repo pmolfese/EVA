@@ -78,9 +78,38 @@ nonisolated struct MFFSignalData: Sendable {
 nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
     let id: String
     let code: String
+    let label: String?
+    let eventDescription: String?
+    let cell: String?
     let beginTimeSeconds: Double
     let rawBeginTime: String
     let sourceFile: String
+
+    init(
+        id: String,
+        code: String,
+        label: String? = nil,
+        eventDescription: String? = nil,
+        cell: String? = nil,
+        beginTimeSeconds: Double,
+        rawBeginTime: String,
+        sourceFile: String
+    ) {
+        self.id = id
+        self.code = code
+        self.label = Self.nonEmpty(label)
+        self.eventDescription = Self.nonEmpty(eventDescription)
+        self.cell = Self.nonEmpty(cell)
+        self.beginTimeSeconds = beginTimeSeconds
+        self.rawBeginTime = rawBeginTime
+        self.sourceFile = sourceFile
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+    }
 }
 
 enum MFFReaderError: LocalizedError {
@@ -633,6 +662,11 @@ nonisolated final class MFFReader {
         let children = (element.children ?? []).compactMap { $0 as? XMLElement }
         let directCode = children.first(where: { sanitizedTagName($0.name) == "code" })?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let directLabel = children.first(where: { sanitizedTagName($0.name) == "label" })?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let directDescription = children.first(where: { sanitizedTagName($0.name) == "description" })?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let directCell = eventCellValue(from: element)
         let directBeginTime = children.first(where: { sanitizedTagName($0.name) == "beginTime" })?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -645,6 +679,9 @@ nonisolated final class MFFReader {
                     MFFEvent(
                         id: eventID,
                         code: directCode,
+                        label: directLabel,
+                        eventDescription: directDescription,
+                        cell: directCell,
                         beginTimeSeconds: beginTimeSeconds,
                         rawBeginTime: directBeginTime,
                         sourceFile: sourceFile
@@ -662,6 +699,30 @@ nonisolated final class MFFReader {
                 seenIDs: &seenIDs
             )
         }
+    }
+
+    private func eventCellValue(from eventElement: XMLElement) -> String? {
+        let keyElements = (eventElement.children ?? [])
+            .compactMap { $0 as? XMLElement }
+            .filter { sanitizedTagName($0.name) == "keys" }
+            .flatMap { keysElement in
+                (keysElement.children ?? [])
+                    .compactMap { $0 as? XMLElement }
+                    .filter { sanitizedTagName($0.name) == "key" }
+            }
+        for key in keyElements {
+            let keyChildren = (key.children ?? []).compactMap { $0 as? XMLElement }
+            let keyCode = keyChildren.first { sanitizedTagName($0.name) == "keyCode" }?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard let keyCode, ["cel#", "#cel", "cell"].contains(keyCode) else { continue }
+            let value = keyChildren.first { sanitizedTagName($0.name) == "data" }?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let value, !value.isEmpty {
+                return value
+            }
+        }
+        return nil
     }
 
     private func resolveEventBeginTimeSeconds(_ rawValue: String, recordingStartTime: Date?) -> Double? {

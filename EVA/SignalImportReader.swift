@@ -957,6 +957,9 @@ with open(os.path.join(outdir, "meta.json"), "w", encoding="utf-8") as f:
             MFFEvent(
                 id: $0.id,
                 code: $0.code,
+                label: $0.label,
+                eventDescription: $0.eventDescription,
+                cell: $0.cell,
                 beginTimeSeconds: $0.beginTimeSeconds,
                 rawBeginTime: $0.rawBeginTime,
                 sourceFile: $0.sourceFile
@@ -998,6 +1001,9 @@ with open(os.path.join(outdir, "meta.json"), "w", encoding="utf-8") as f:
     private struct MNEBridgeEvent: Decodable {
         var id: String
         var code: String
+        var label: String?
+        var eventDescription: String?
+        var cell: String?
         var beginTimeSeconds: Double
         var rawBeginTime: String
         var sourceFile: String

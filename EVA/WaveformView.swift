@@ -183,6 +183,7 @@ struct WaveformView: View {
     @State private var icaDebugReportSerial = 0
     @State private var lastICAReconstructionDebugReport: String?
     @State private var showsPSASheet = false
+    @State private var psaSegmentField = PSASegmentField.code
     @State private var psaSelectedEventCodes = Set<String>()
     @State private var psaPreStimulus = 0.2
     @State private var psaPostStimulus = 0.8
@@ -599,6 +600,9 @@ struct WaveformView: View {
         return MFFEvent(
             id: "epoched-overlay-\(segment.id)-\(event.id)",
             code: event.code,
+            label: event.label,
+            eventDescription: event.eventDescription,
+            cell: event.cell,
             beginTimeSeconds: displayTime,
             rawBeginTime: event.rawBeginTime,
             sourceFile: event.sourceFile
@@ -708,7 +712,10 @@ struct WaveformView: View {
                 samplingRate: recording.signal?.samplingRate ?? 0,
                 windowBefore: mriWindowBefore,
                 windowAfter: mriWindowAfter,
-                onClose: { showsMotionConfig = false }
+                onClose: {
+                    showsMotionConfig = false
+                    showsMRIPopover = true
+                }
             )
         }
         .onChange(of: artifactDetectionMethod) { _, method in
@@ -2306,6 +2313,12 @@ struct WaveformView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(event.code)
                                     .font(.system(.body, design: .monospaced).weight(.semibold))
+                                ForEach(eventMetadataRows(for: event), id: \.self) { row in
+                                    Text(row)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
                                 Text(formattedEventTime(event.beginTimeSeconds))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -2319,7 +2332,7 @@ struct WaveformView: View {
                         .padding(.vertical, 4)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Event \(offset + 1), \(event.code), \(formattedEventTime(event.beginTimeSeconds))")
+                    .accessibilityLabel("Event \(offset + 1), \(eventAccessibilitySummary(event)), \(formattedEventTime(event.beginTimeSeconds))")
                     .listRowBackground(
                         selectedEventID == event.id ? Color.accentColor.opacity(0.14) : Color.clear
                     )
@@ -5728,14 +5741,18 @@ struct WaveformView: View {
     private func openPSASheet(for signal: MFFSignalData) {
         reconcilePSADefinedArtifactRejectionSelections()
         let events = segmentableEvents(for: signal)
-        let summaries = groupedEventSummaries(events)
-        let availableCodes = Set(summaries.map(\.code))
-        psaSelectedEventCodes = psaSelectedEventCodes.intersection(availableCodes)
+        reconcilePSAEventSelection(for: events)
+        psaStatusMessage = nil
+        showsPSASheet = true
+    }
+
+    private func reconcilePSAEventSelection(for events: [MFFEvent]) {
+        let summaries = groupedPSAEventSummaries(events)
+        let availableValues = Set(summaries.map(\.code))
+        psaSelectedEventCodes = psaSelectedEventCodes.intersection(availableValues)
         for summary in summaries where psaCategoryNames[summary.code] == nil {
             psaCategoryNames[summary.code] = summary.code
         }
-        psaStatusMessage = nil
-        showsPSASheet = true
     }
 
     private func segmentableEvents(for signal: MFFSignalData) -> [MFFEvent] {
@@ -5744,7 +5761,14 @@ struct WaveformView: View {
 
     private func psaSheet(for signal: MFFSignalData) -> some View {
         let events = segmentableEvents(for: signal)
-        let summaries = groupedEventSummaries(events)
+        let summaries = groupedPSAEventSummaries(events)
+        let segmentFieldBinding = Binding<PSASegmentField>(
+            get: { psaSegmentField },
+            set: { newField in
+                psaSegmentField = newField
+                reconcilePSAEventSelection(for: events)
+            }
+        )
 
         return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
@@ -5757,8 +5781,18 @@ struct WaveformView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Segment On")
-                    .font(.caption.weight(.semibold))
+                HStack {
+                    Text("Segment On")
+                        .font(.caption.weight(.semibold))
+                    Picker("Segment On", selection: segmentFieldBinding) {
+                        ForEach(PSASegmentField.allCases) { field in
+                            Text(field.rawValue).tag(field)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 150)
+                }
 
                 if summaries.isEmpty {
                     ContentUnavailableView(
@@ -5773,8 +5807,16 @@ struct WaveformView: View {
                             ForEach(summaries) { summary in
                                 HStack(spacing: 12) {
                                     Toggle(isOn: psaEventCodeBinding(summary.code)) {
-                                        Text(summary.code)
-                                            .font(.system(.body, design: .monospaced))
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(summary.code)
+                                                .font(.system(.body, design: .monospaced))
+                                            if let detail = summary.detail {
+                                                Text(detail)
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                                    .lineLimit(1)
+                                            }
+                                        }
                                     }
                                     .frame(width: 150, alignment: .leading)
 
@@ -5989,17 +6031,17 @@ struct WaveformView: View {
     }
 
     private func buildEpochs(from signal: MFFSignalData) -> PSABuildResult? {
-        guard let categoriesByCode = selectedPSACategoriesByCode() else {
+        guard let categoriesBySegmentValue = selectedPSACategoriesByCode() else {
             psaStatusMessage = "Enter a category name for each selected event."
             return nil
         }
 
         let events = segmentableEvents(for: signal)
-            .filter { psaSelectedEventCodes.contains($0.code) }
+            .filter { psaSelectedEventCodes.contains(psaSegmentValue(for: $0)) }
             .sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
 
         guard !events.isEmpty else {
-            psaStatusMessage = "Select at least one event code."
+            psaStatusMessage = "Select at least one event \(psaSegmentField.rawValue.lowercased())."
             return nil
         }
         guard signal.samplingRate > 0, let sampleCount = signal.data.first?.count, sampleCount > 0 else {
@@ -6020,11 +6062,12 @@ struct WaveformView: View {
         var skippedOutOfBounds = 0
         var skippedArtifacts = 0
         var accepted = 0
-        let categoryColorIndices = categoryColorIndices(for: Array(categoriesByCode.values))
+        let categoryColorIndices = categoryColorIndices(for: Array(categoriesBySegmentValue.values))
         let artifactEventsForRejection = psaArtifactEventsForRejection(in: signal)
 
         for event in events {
-            guard let category = categoriesByCode[event.code] else { continue }
+            let segmentValue = psaSegmentValue(for: event)
+            guard let category = categoriesBySegmentValue[segmentValue] else { continue }
             let correctedSample = Int(((event.beginTimeSeconds + psaOffset) * signal.samplingRate).rounded())
             let startSample = correctedSample - preSamples
             let endSample = startSample + epochLength
@@ -6058,7 +6101,7 @@ struct WaveformView: View {
                     code: category,
                     beginTimeSeconds: stimulusTime,
                     rawBeginTime: String(format: "%.6f", stimulusTime),
-                    sourceFile: "PSA: \(event.code)"
+                    sourceFile: "PSA: \(segmentValue)"
                 )
             )
             segments.append(
@@ -6910,9 +6953,11 @@ struct WaveformView: View {
         let codeCounts = signal.map(eventCodeCounts) ?? []
         let selectedCount = codeCounts.first { $0.code == mriTRMarkerCode }?.count
         let motionUsable = (motionParameters?.count ?? 0) >= 2
+        let motionAlignmentOK = mriMotionAlignmentOK(selectedCount: selectedCount)
         let spacing = trSpacingInfo(for: signal)
         let canApply = signal != nil && !isProcessingMRI && (selectedCount ?? 0) >= 2
             && (mriMethod != .moosmann || motionUsable)
+            && motionAlignmentOK
             && spacing.hasEnoughTriggers && spacing.isEvenlySpaced
 
         VStack(alignment: .leading, spacing: 14) {
@@ -7079,10 +7124,14 @@ struct WaveformView: View {
             } label: {
                 Label(motionParameters == nil
                       ? "Configure Motion…"
-                      : "Motion: \(motionParameters?.sourceName ?? "") (\(motionParameters?.count ?? 0) vols)…",
+                      : "Motion: \(motionParameters?.sourceName ?? "") (\(motionParameters?.count ?? 0) TRs)…",
                       systemImage: "slider.horizontal.3")
             }
             .help("Load 3dvolreg motion parameters, plot head motion, and set a motion threshold.")
+
+            if let motionParameters {
+                mriMotionAlignmentStatus(motion: motionParameters, selectedCount: selectedCount)
+            }
 
             HStack {
                 Button("Reset 4 / 4") {
@@ -7110,7 +7159,7 @@ struct WaveformView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canApply)
-                .help(applyButtonHelp(motionUsable: motionUsable, selectedCount: selectedCount, spacing: spacing))
+                .help(applyButtonHelp(motionUsable: motionUsable, selectedCount: selectedCount, spacing: spacing, motionAlignmentOK: motionAlignmentOK))
             }
         }
         .padding(16)
@@ -7165,6 +7214,39 @@ struct WaveformView: View {
 
     private func trimmedMarkerCount(total: Int) -> Int {
         max(total - mriSkipStart - mriSkipEnd, 0)
+    }
+
+    private func mriMotionAlignmentOK(selectedCount: Int?) -> Bool {
+        guard let motionParameters else { return true }
+        guard let selectedCount else { return false }
+        return trimmedMarkerCount(total: selectedCount) == motionParameters.count
+    }
+
+    @ViewBuilder
+    private func mriMotionAlignmentStatus(motion: MotionParameters, selectedCount: Int?) -> some View {
+        let usedCount = selectedCount.map(trimmedMarkerCount(total:)) ?? 0
+        let matches = selectedCount != nil && usedCount == motion.count
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: matches ? "checkmark.circle" : "exclamationmark.triangle.fill")
+                .foregroundStyle(matches ? Color.green : Color.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(matches
+                     ? "Motion file matches \(usedCount) \(mriTRMarkerCode) TRs."
+                     : "Motion file has \(motion.count) TRs; current \(mriTRMarkerCode) selection uses \(usedCount).")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(matches ? Color.secondary : Color.orange)
+
+                Text(matches
+                     ? "\(motion.sourceName), FD threshold \(String(format: "%.2f", motionFDThreshold)) mm."
+                     : "Adjust Skip First/Last, choose the matching TR marker event, or clear the motion file before applying.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     @ViewBuilder
@@ -7440,7 +7522,7 @@ struct WaveformView: View {
     }
 
     /// Tooltip for the Apply button explaining why it may be disabled.
-    private func applyButtonHelp(motionUsable: Bool, selectedCount: Int?, spacing: TRSpacingInfo) -> String {
+    private func applyButtonHelp(motionUsable: Bool, selectedCount: Int?, spacing: TRSpacingInfo, motionAlignmentOK: Bool) -> String {
         if (selectedCount ?? 0) < 2 {
             return "Select a TR marker event with at least two markers to enable Apply."
         }
@@ -7449,6 +7531,9 @@ struct WaveformView: View {
         }
         if !spacing.isEvenlySpaced {
             return "TRs are not evenly spaced"
+        }
+        if !motionAlignmentOK, let motionParameters, let selectedCount {
+            return "Motion file has \(motionParameters.count) TRs, but \(trimmedMarkerCount(total: selectedCount)) \(mriTRMarkerCode) markers are selected after trimming."
         }
         if mriMethod == .moosmann, !motionUsable {
             return "Moosmann requires a motion file. Load one via Configure Motion… to enable Apply."
@@ -7638,7 +7723,7 @@ struct WaveformView: View {
 
                 Picker("Algorithm", selection: $ecgDetectionAlgorithm) {
                     ForEach(ECGDetectionAlgorithm.allCases) { algorithm in
-                        Text(algorithm.rawValue).tag(algorithm)
+                        Text(algorithm.tabTitle).tag(algorithm)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -7716,7 +7801,7 @@ struct WaveformView: View {
             }
         }
         .padding(20)
-        .frame(width: 520)
+        .frame(width: 620)
         .task(id: ecgDetectionPreviewRequestID(for: signal)) {
             await refreshECGDetectionEstimate(for: signal)
         }
@@ -9099,6 +9184,24 @@ struct WaveformView: View {
         return String(format: "%.3fs", seconds)
     }
 
+    private func eventMetadataRows(for event: MFFEvent) -> [String] {
+        var rows: [String] = []
+        if let label = event.label {
+            rows.append("Label: \(label)")
+        }
+        if let description = event.eventDescription {
+            rows.append("Description: \(description)")
+        }
+        if let cell = event.cell {
+            rows.append("Cell: \(cell)")
+        }
+        return rows
+    }
+
+    private func eventAccessibilitySummary(_ event: MFFEvent) -> String {
+        ([event.code] + eventMetadataRows(for: event)).joined(separator: ", ")
+    }
+
     private func groupedEventSummaries(_ events: [MFFEvent]) -> [EventSummary] {
         Dictionary(grouping: events, by: \.code)
             .map { EventSummary(code: $0.key, count: $0.value.count) }
@@ -9107,6 +9210,36 @@ struct WaveformView: View {
                     ? lhs.code.localizedStandardCompare(rhs.code) == .orderedAscending
                     : lhs.count > rhs.count
             }
+    }
+
+    private func groupedPSAEventSummaries(_ events: [MFFEvent]) -> [EventSummary] {
+        Dictionary(grouping: events, by: psaSegmentValue(for:))
+            .map { value, groupedEvents in
+                let distinctCodes = Set(groupedEvents.map(\.code)).sorted()
+                let detail: String?
+                switch psaSegmentField {
+                case .code:
+                    let labels = Set(groupedEvents.compactMap(\.label)).sorted()
+                    detail = labels.isEmpty ? nil : "Labels: \(labels.prefix(3).joined(separator: ", "))\(labels.count > 3 ? "..." : "")"
+                case .label:
+                    detail = distinctCodes.count == 1 ? "Code: \(distinctCodes[0])" : "\(distinctCodes.count) codes"
+                }
+                return EventSummary(code: value, count: groupedEvents.count, detail: detail)
+            }
+            .sorted { lhs, rhs in
+                lhs.count == rhs.count
+                    ? lhs.code.localizedStandardCompare(rhs.code) == .orderedAscending
+                    : lhs.count > rhs.count
+            }
+    }
+
+    private func psaSegmentValue(for event: MFFEvent) -> String {
+        switch psaSegmentField {
+        case .code:
+            return event.code
+        case .label:
+            return event.label ?? event.code
+        }
     }
 
     private func filteredEvents(_ events: [MFFEvent]) -> [MFFEvent] {
@@ -10168,6 +10301,7 @@ private extension ChannelHealthGrade {
 private struct EventSummary: Identifiable {
     let code: String
     let count: Int
+    var detail: String? = nil
     var id: String { code }
 }
 
@@ -11530,12 +11664,39 @@ private enum ArtifactDetectionMethod: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+private enum PSASegmentField: String, CaseIterable, Identifiable {
+    case code = "Code"
+    case label = "Label"
+
+    var id: String { rawValue }
+}
+
 private enum ECGDetectionAlgorithm: String, CaseIterable, Identifiable, Sendable {
     case simple = "Simple"
     case panTompkins = "Pan-Tompkins"
     case hamilton = "Hamilton"
+    case wfdb = "WFDB"
+    case wavelet = "Wavelet"
+    case christov = "Christov"
 
     nonisolated var id: String { rawValue }
+
+    nonisolated var tabTitle: String {
+        switch self {
+        case .simple:
+            return "Simple"
+        case .panTompkins:
+            return "Pan-T"
+        case .hamilton:
+            return "Hamilton"
+        case .wfdb:
+            return "WFDB"
+        case .wavelet:
+            return "Wavelet"
+        case .christov:
+            return "Christov"
+        }
+    }
 
     nonisolated var summary: String {
         switch self {
@@ -11545,6 +11706,12 @@ private enum ECGDetectionAlgorithm: String, CaseIterable, Identifiable, Sendable
             return "Band-pass, derivative, squaring, moving integration, and adaptive QRS thresholding."
         case .hamilton:
             return "Slope-envelope QRS detection with adaptive signal/noise thresholding."
+        case .wfdb:
+            return "WFDB-style curve-length and slope-energy QRS detection inspired by wqrs/gqrs."
+        case .wavelet:
+            return "Multiscale detail-energy QRS detection for sharp cardiac transients in noisy signals."
+        case .christov:
+            return "Christov-style adaptive slope-envelope detection with time-varying signal/noise thresholds."
         }
     }
 }
@@ -11624,6 +11791,11 @@ nonisolated private enum RWaveDetector {
     private static let panTompkinsIntegrationWindowSeconds = 0.150
     private static let hamiltonSlopeWindowSeconds = 0.080
     private static let hamiltonNoiseWindowSeconds = 1.00
+    private static let wfdbCurveLengthWindowSeconds = 0.130
+    private static let wfdbSlopeWindowSeconds = 0.050
+    private static let waveletDetailEnvelopeWindowSeconds = 0.080
+    private static let christovEnvelopeWindowSeconds = 0.040
+    private static let christovLongSlopeWindowSeconds = 0.280
     private static let adaptivePeakSpacingSeconds = 0.080
     private static let rPeakRefinementWindowSeconds = 0.080
 
@@ -11717,6 +11889,36 @@ nonisolated private enum RWaveDetector {
                 minimumRRSeconds: minimumRRSeconds,
                 polarity: polarity
             )
+        case .wfdb:
+            return adaptivePeakCandidates(
+                aggregate: aggregate,
+                processedChannels: processedChannels,
+                source: source,
+                threshold: max(threshold * 0.50, 0.95),
+                floorThreshold: max(threshold * 0.28, 0.60),
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: polarity
+            )
+        case .wavelet:
+            return adaptivePeakCandidates(
+                aggregate: aggregate,
+                processedChannels: processedChannels,
+                source: source,
+                threshold: max(threshold * 0.48, 0.90),
+                floorThreshold: max(threshold * 0.25, 0.55),
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: polarity
+            )
+        case .christov:
+            return adaptivePeakCandidates(
+                aggregate: aggregate,
+                processedChannels: processedChannels,
+                source: source,
+                threshold: max(threshold * 0.52, 0.95),
+                floorThreshold: max(threshold * 0.30, 0.60),
+                minimumRRSeconds: minimumRRSeconds,
+                polarity: polarity
+            )
         }
     }
 
@@ -11743,6 +11945,24 @@ nonisolated private enum RWaveDetector {
             )
         case .hamilton:
             return hamiltonProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate
+            )
+        case .wfdb:
+            return wfdbProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate
+            )
+        case .wavelet:
+            return waveletProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate
+            )
+        case .christov:
+            return christovProcessedChannel(
                 samples: samples,
                 sampleCount: sampleCount,
                 samplingRate: samplingRate
@@ -11833,6 +12053,138 @@ nonisolated private enum RWaveDetector {
         var enhanced = Array(repeating: 0.0, count: sampleCount)
         for sample in 0..<sampleCount {
             enhanced[sample] = max(shortEnvelope[sample] - noiseEnvelope[sample] * 0.50, 0)
+        }
+        guard let scores = normalizedEnvelopeScores(values: enhanced, sampleCount: sampleCount) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: filtered)
+    }
+
+    private static func wfdbProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
+        let slope = derivative(filtered).map { abs($0) }
+        let slopeWindow = sampleWindow(
+            seconds: wfdbSlopeWindowSeconds,
+            samplingRate: samplingRate,
+            minimum: 3
+        )
+        let slopeEnergy = centeredMovingAverage(
+            slope.map { $0 * $0 },
+            sampleCount: sampleCount,
+            windowSamples: slopeWindow
+        )
+        let curveLength = curveLengthEnvelope(
+            filtered,
+            sampleCount: sampleCount,
+            samplingRate: samplingRate
+        )
+        var combined = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            combined[sample] = curveLength[sample] + sqrt(max(slopeEnergy[sample], 0))
+        }
+
+        guard let scores = normalizedEnvelopeScores(values: combined, sampleCount: sampleCount) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: filtered)
+    }
+
+    private static func waveletProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
+        let first = centeredMovingAverage(
+            filtered,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(seconds: 0.025, samplingRate: samplingRate, minimum: 1)
+        )
+        let second = centeredMovingAverage(
+            filtered,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(seconds: 0.050, samplingRate: samplingRate, minimum: 3)
+        )
+        let third = centeredMovingAverage(
+            filtered,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(seconds: 0.100, samplingRate: samplingRate, minimum: 5)
+        )
+        let fourth = centeredMovingAverage(
+            filtered,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(seconds: 0.200, samplingRate: samplingRate, minimum: 9)
+        )
+
+        var detailEnergy = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            let d1 = filtered[sample] - first[sample]
+            let d2 = first[sample] - second[sample]
+            let d3 = second[sample] - third[sample]
+            let d4 = third[sample] - fourth[sample]
+            detailEnergy[sample] = d1 * d1 + 0.85 * d2 * d2 + 0.60 * d3 * d3 + 0.35 * d4 * d4
+        }
+        let envelope = centeredMovingAverage(
+            detailEnergy.map { sqrt(max($0, 0)) },
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(
+                seconds: waveletDetailEnvelopeWindowSeconds,
+                samplingRate: samplingRate,
+                minimum: 3
+            )
+        )
+        guard let scores = normalizedEnvelopeScores(values: envelope, sampleCount: sampleCount) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: filtered)
+    }
+
+    private static func christovProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
+        let firstDerivative = derivative(filtered)
+        let secondDerivative = derivative(firstDerivative)
+        var complexLead = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            complexLead[sample] = abs(firstDerivative[sample]) + 0.45 * abs(secondDerivative[sample])
+        }
+        let shortEnvelope = centeredMovingAverage(
+            complexLead,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(
+                seconds: christovEnvelopeWindowSeconds,
+                samplingRate: samplingRate,
+                minimum: 3
+            )
+        )
+        let slowEnvelope = centeredMovingAverage(
+            shortEnvelope,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(
+                seconds: christovLongSlopeWindowSeconds,
+                samplingRate: samplingRate,
+                minimum: 7
+            )
+        )
+        var enhanced = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            enhanced[sample] = max(shortEnvelope[sample] - slowEnvelope[sample] * 0.35, 0)
         }
         guard let scores = normalizedEnvelopeScores(values: enhanced, sampleCount: sampleCount) else {
             return nil
@@ -12048,6 +12400,33 @@ nonisolated private enum RWaveDetector {
             }
         }
         return result
+    }
+
+    private static func curveLengthEnvelope(
+        _ values: [Double],
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> [Double] {
+        guard sampleCount > 1 else { return Array(values.prefix(sampleCount)) }
+
+        let differences = derivative(values)
+        let robustScale = robustStats(values: differences, sampleCount: sampleCount)?.scale ?? 1
+        let scale = max(robustScale, 1e-6)
+        var increments = Array(repeating: 0.0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            let normalizedSlope = differences[sample] / scale
+            increments[sample] = sqrt(1 + normalizedSlope * normalizedSlope) - 1
+        }
+
+        return centeredMovingAverage(
+            increments,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(
+                seconds: wfdbCurveLengthWindowSeconds,
+                samplingRate: samplingRate,
+                minimum: 3
+            )
+        )
     }
 
     private static func centeredMovingAverage(

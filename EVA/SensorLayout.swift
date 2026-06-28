@@ -20,9 +20,10 @@
 //  The sensorLayout coordinates are already a flat 2D projection (z = 0).
 //  Type 0 sensors are EEG electrodes numbered 1...N and map directly onto the
 //  signal's channels (channel index = number - 1). Type 1 (reference) and
-//  type 2 (fiducials) entries are ignored. The nasion fiducial sits at the
-//  maximum +y, so +y is anterior — we keep math coordinates with +y pointing
-//  up (toward the nose) and let the view flip into screen space.
+//  type 2 (fiducials) entries are ignored. EGI's flat projection puts
+//  anterior/ocular electrodes at smaller raw y values, so we normalize into
+//  math coordinates with +y pointing up (toward the nose) and let the view
+//  flip into screen space.
 //
 
 import Foundation
@@ -76,7 +77,7 @@ struct SensorLayout: Sendable {
             SensorPosition(
                 channelIndex: sensor.number - 1,
                 x: (sensor.x - centroidX) / scale,
-                y: (sensor.y - centroidY) / scale
+                y: (centroidY - sensor.y) / scale
             )
         }
         .sorted { $0.channelIndex < $1.channelIndex }
