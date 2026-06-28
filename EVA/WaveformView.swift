@@ -190,6 +190,8 @@ struct WaveformView: View {
     @State private var psaPostStimulus = 0.8
     @State private var psaOffset = 0.0
     @State private var psaCategoryNames = [String: String]()
+    @State private var psaTimingMarkerEnabledValues = Set<String>()
+    @State private var psaTimingMarkerValuesBySegmentValue = [String: String]()
     @State private var psaSkipIfContainsArtifact = false
     @State private var psaSkipEyeBlinks = true
     @State private var psaSkipEyeMovements = true
@@ -5754,6 +5756,29 @@ struct WaveformView: View {
         for summary in summaries where psaCategoryNames[summary.code] == nil {
             psaCategoryNames[summary.code] = summary.code
         }
+        var enabledTimingValues = psaTimingMarkerEnabledValues.intersection(availableValues)
+        var timingMarkerValues = psaTimingMarkerValuesBySegmentValue.filter { segmentValue, timingValue in
+            availableValues.contains(segmentValue)
+                && availableValues.contains(timingValue)
+                && segmentValue != timingValue
+        }
+        var timingValuesWithoutOptions = Set<String>()
+        for segmentValue in enabledTimingValues {
+            let options = psaTimingMarkerOptions(in: summaries, excluding: segmentValue)
+            if let currentValue = timingMarkerValues[segmentValue],
+               options.contains(where: { $0.code == currentValue }) {
+                continue
+            }
+            if let defaultValue = options.first?.code {
+                timingMarkerValues[segmentValue] = defaultValue
+            } else {
+                timingValuesWithoutOptions.insert(segmentValue)
+                timingMarkerValues[segmentValue] = nil
+            }
+        }
+        enabledTimingValues.subtract(timingValuesWithoutOptions)
+        psaTimingMarkerEnabledValues = enabledTimingValues
+        psaTimingMarkerValuesBySegmentValue = timingMarkerValues
     }
 
     private func segmentableEvents(for signal: MFFSignalData) -> [MFFEvent] {
@@ -5832,30 +5857,7 @@ struct WaveformView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(summaries) { summary in
-                                HStack(spacing: 12) {
-                                    Toggle(isOn: psaEventCodeBinding(summary.code)) {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(summary.code)
-                                                .font(.system(.body, design: .monospaced))
-                                            if let detail = summary.detail {
-                                                Text(detail)
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
-                                                    .lineLimit(1)
-                                            }
-                                        }
-                                    }
-                                    .frame(width: 150, alignment: .leading)
-
-                                    Text("\(summary.count)")
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
-                                        .frame(width: 44, alignment: .trailing)
-
-                                    TextField("Category", text: psaCategoryBinding(summary.code))
-                                        .textFieldStyle(.roundedBorder)
-                                        .disabled(!psaSelectedEventCodes.contains(summary.code))
-                                }
+                                psaSegmentEventRow(summary: summary, allSummaries: allSummaries)
                             }
                         }
                         .padding(10)
@@ -5886,6 +5888,7 @@ struct WaveformView: View {
                     TextField("Offset", value: $psaOffset, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 100)
+                        .help("Ignored for categories that use a DIN timing marker.")
                 }
             }
 
@@ -5945,7 +5948,59 @@ struct WaveformView: View {
             }
         }
         .padding(20)
-        .frame(width: 560)
+        .frame(width: 760)
+    }
+
+    private func psaSegmentEventRow(summary: EventSummary, allSummaries: [EventSummary]) -> some View {
+        let timingOptions = psaTimingMarkerOptions(in: allSummaries, excluding: summary.code)
+        let isSelected = psaSelectedEventCodes.contains(summary.code)
+        let usesTimingMarker = psaTimingMarkerEnabledValues.contains(summary.code)
+
+        return HStack(spacing: 12) {
+            Toggle(isOn: psaEventCodeBinding(summary.code)) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(summary.code)
+                        .font(.system(.body, design: .monospaced))
+                    if let detail = summary.detail {
+                        Text(detail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .frame(width: 150, alignment: .leading)
+
+            Text("\(summary.count)")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
+
+            TextField("Category", text: psaCategoryBinding(summary.code))
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 170)
+                .disabled(!isSelected)
+
+            Toggle("DIN", isOn: psaTimingMarkerEnabledBinding(summary.code, options: timingOptions))
+                .toggleStyle(.checkbox)
+                .disabled(!isSelected || timingOptions.isEmpty)
+                .help("Use the nearest selected timing marker as this category's onset.")
+
+            Picker("Timing Marker", selection: psaTimingMarkerSelectionBinding(summary.code, options: timingOptions)) {
+                if timingOptions.isEmpty {
+                    Text("No markers").tag("")
+                } else {
+                    ForEach(timingOptions) { option in
+                        Text(option.code).tag(option.code)
+                    }
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 128)
+            .disabled(!isSelected || !usesTimingMarker || timingOptions.isEmpty)
+            .help("Marker group whose nearest event supplies the true onset time.")
+        }
     }
 
     private func psaArtifactRejectionRow(
@@ -5993,6 +6048,7 @@ struct WaveformView: View {
                     }
                 } else {
                     psaSelectedEventCodes.remove(code)
+                    psaTimingMarkerEnabledValues.remove(code)
                 }
             }
         )
@@ -6005,12 +6061,53 @@ struct WaveformView: View {
         )
     }
 
+    private func psaTimingMarkerEnabledBinding(_ segmentValue: String, options: [EventSummary]) -> Binding<Bool> {
+        Binding(
+            get: { psaTimingMarkerEnabledValues.contains(segmentValue) },
+            set: { isEnabled in
+                if isEnabled {
+                    psaTimingMarkerEnabledValues.insert(segmentValue)
+                    if let currentValue = psaTimingMarkerValuesBySegmentValue[segmentValue],
+                       options.contains(where: { $0.code == currentValue }) {
+                        return
+                    }
+                    psaTimingMarkerValuesBySegmentValue[segmentValue] = options.first?.code
+                } else {
+                    psaTimingMarkerEnabledValues.remove(segmentValue)
+                }
+            }
+        )
+    }
+
+    private func psaTimingMarkerSelectionBinding(_ segmentValue: String, options: [EventSummary]) -> Binding<String> {
+        Binding(
+            get: {
+                let validOptions = Set(options.map(\.code))
+                if let currentValue = psaTimingMarkerValuesBySegmentValue[segmentValue],
+                   validOptions.contains(currentValue) {
+                    return currentValue
+                }
+                return options.first?.code ?? ""
+            },
+            set: { newValue in
+                if options.contains(where: { $0.code == newValue }) {
+                    psaTimingMarkerValuesBySegmentValue[segmentValue] = newValue
+                }
+            }
+        )
+    }
+
+    private func psaTimingMarkerOptions(in summaries: [EventSummary], excluding segmentValue: String) -> [EventSummary] {
+        summaries.filter { $0.code != segmentValue }
+    }
+
     private func canApplyPSA(events: [MFFEvent]) -> Bool {
         !events.isEmpty
             && !psaSelectedEventCodes.isEmpty
             && psaPreStimulus >= 0
             && psaPostStimulus > 0
             && selectedPSACategoriesByCode() != nil
+            && selectedPSATimingMarkersBySegmentValue(events: events) != nil
     }
 
     private func selectedPSACategoriesByCode() -> [String: String]? {
@@ -6021,6 +6118,20 @@ struct WaveformView: View {
             categoriesByCode[code] = category
         }
         return categoriesByCode
+    }
+
+    private func selectedPSATimingMarkersBySegmentValue(events: [MFFEvent]) -> [String: String]? {
+        let availableValues = Set(groupedPSAEventSummaries(events).map(\.code))
+        var timingMarkersBySegmentValue = [String: String]()
+        for segmentValue in psaSelectedEventCodes where psaTimingMarkerEnabledValues.contains(segmentValue) {
+            guard let timingValue = psaTimingMarkerValuesBySegmentValue[segmentValue],
+                  availableValues.contains(timingValue),
+                  timingValue != segmentValue else {
+                return nil
+            }
+            timingMarkersBySegmentValue[segmentValue] = timingValue
+        }
+        return timingMarkersBySegmentValue
     }
 
     private func applyPSA(to signal: MFFSignalData) {
@@ -6062,10 +6173,22 @@ struct WaveformView: View {
             psaStatusMessage = "Enter a category name for each selected event."
             return nil
         }
-
-        let events = segmentableEvents(for: signal)
-            .filter { psaSelectedEventCodes.contains(psaSegmentValue(for: $0)) }
+        let allEvents = segmentableEvents(for: signal)
             .sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+        guard let timingMarkersBySegmentValue = selectedPSATimingMarkersBySegmentValue(events: allEvents) else {
+            psaStatusMessage = "Choose a timing marker for each DIN-adjusted event."
+            return nil
+        }
+        let timingEventsBySegmentValue = Dictionary(grouping: allEvents, by: psaSegmentValue(for:))
+        for (segmentValue, timingValue) in timingMarkersBySegmentValue {
+            guard timingEventsBySegmentValue[timingValue]?.isEmpty == false else {
+                psaStatusMessage = "No \(timingValue) timing markers found for \(segmentValue)."
+                return nil
+            }
+        }
+
+        let events = allEvents
+            .filter { psaSelectedEventCodes.contains(psaSegmentValue(for: $0)) }
 
         guard !events.isEmpty else {
             psaStatusMessage = "Select at least one event \(psaSegmentField.rawValue.lowercased())."
@@ -6088,6 +6211,8 @@ struct WaveformView: View {
         var segments: [EpochSegment] = []
         var skippedOutOfBounds = 0
         var skippedArtifacts = 0
+        var skippedTimingMarkers = 0
+        var timingAdjusted = 0
         var accepted = 0
         let categoryColorIndices = categoryColorIndices(for: Array(categoriesBySegmentValue.values))
         let artifactEventsForRejection = psaArtifactEventsForRejection(in: signal)
@@ -6095,7 +6220,20 @@ struct WaveformView: View {
         for event in events {
             let segmentValue = psaSegmentValue(for: event)
             guard let category = categoriesBySegmentValue[segmentValue] else { continue }
-            let correctedSample = Int(((event.beginTimeSeconds + psaOffset) * signal.samplingRate).rounded())
+            let anchorTimeSeconds: Double
+            let timingMarkerValue = timingMarkersBySegmentValue[segmentValue]
+            if let timingMarkerValue {
+                guard let timingEvents = timingEventsBySegmentValue[timingMarkerValue],
+                      let timingEvent = nearestPSATimingEvent(to: event, in: timingEvents) else {
+                    skippedTimingMarkers += 1
+                    continue
+                }
+                anchorTimeSeconds = timingEvent.beginTimeSeconds
+                timingAdjusted += 1
+            } else {
+                anchorTimeSeconds = event.beginTimeSeconds + psaOffset
+            }
+            let correctedSample = Int((anchorTimeSeconds * signal.samplingRate).rounded())
             let startSample = correctedSample - preSamples
             let endSample = startSample + epochLength
 
@@ -6128,7 +6266,7 @@ struct WaveformView: View {
                     code: category,
                     beginTimeSeconds: stimulusTime,
                     rawBeginTime: String(format: "%.6f", stimulusTime),
-                    sourceFile: "PSA: \(segmentValue)"
+                    sourceFile: timingMarkerValue.map { "PSA: \(segmentValue) via \($0)" } ?? "PSA: \(segmentValue)"
                 )
             )
             segments.append(
@@ -6138,7 +6276,7 @@ struct WaveformView: View {
                     stimulusOffsetSamples: preSamples,
                     category: category,
                     sourceCode: event.code,
-                    sourceTimeSeconds: event.beginTimeSeconds,
+                    sourceTimeSeconds: anchorTimeSeconds,
                     colorIndex: categoryColorIndices[category] ?? 0,
                     contributingEpochCount: 1
                 )
@@ -6147,9 +6285,13 @@ struct WaveformView: View {
         }
 
         guard accepted > 0, let totalSamples = epochedData.first?.count, totalSamples > 0 else {
-            psaStatusMessage = skippedArtifacts > 0
-                ? "No epochs remained after artifact rejection."
-                : "No epochs fit inside the recording bounds."
+            if skippedTimingMarkers > 0 {
+                psaStatusMessage = "No epochs could be aligned to timing markers."
+            } else {
+                psaStatusMessage = skippedArtifacts > 0
+                    ? "No epochs remained after artifact rejection."
+                    : "No epochs fit inside the recording bounds."
+            }
             return nil
         }
 
@@ -6169,11 +6311,28 @@ struct WaveformView: View {
         if skippedArtifacts > 0 {
             message += ", \(skippedArtifacts) skipped for \(psaArtifactRejectionLabel())"
         }
+        if timingAdjusted > 0 {
+            message += ", \(timingAdjusted) timing adjusted"
+        }
+        if skippedTimingMarkers > 0 {
+            message += ", \(skippedTimingMarkers) missing timing marker"
+        }
         if skippedOutOfBounds > 0 {
             message += ", \(skippedOutOfBounds) out of bounds"
         }
 
         return PSABuildResult(signal: epochedSignal, segments: segments, message: message)
+    }
+
+    private func nearestPSATimingEvent(to event: MFFEvent, in candidates: [MFFEvent]) -> MFFEvent? {
+        candidates.min { lhs, rhs in
+            let lhsDistance = abs(lhs.beginTimeSeconds - event.beginTimeSeconds)
+            let rhsDistance = abs(rhs.beginTimeSeconds - event.beginTimeSeconds)
+            if lhsDistance == rhsDistance {
+                return lhs.beginTimeSeconds < rhs.beginTimeSeconds
+            }
+            return lhsDistance < rhsDistance
+        }
     }
 
     private func psaArtifactEventsForRejection(in signal: MFFSignalData) -> [MFFEvent] {
@@ -9243,7 +9402,8 @@ struct WaveformView: View {
         Dictionary(grouping: events, by: psaSegmentValue(for:))
             .map { value, groupedEvents in
                 let distinctCodes = Set(groupedEvents.map(\.code)).sorted()
-                let searchText = psaSearchText(for: value, events: groupedEvents)
+                let searchFields = psaSearchFields(for: value, events: groupedEvents)
+                let searchText = psaSearchText(fields: searchFields)
                 let detail: String?
                 switch psaSegmentField {
                 case .code:
@@ -9252,7 +9412,13 @@ struct WaveformView: View {
                 case .label:
                     detail = distinctCodes.count == 1 ? "Code: \(distinctCodes[0])" : "\(distinctCodes.count) codes"
                 }
-                return EventSummary(code: value, count: groupedEvents.count, detail: detail, searchText: searchText)
+                return EventSummary(
+                    code: value,
+                    count: groupedEvents.count,
+                    detail: detail,
+                    searchText: searchText,
+                    searchFields: searchFields
+                )
             }
             .sorted { lhs, rhs in
                 lhs.count == rhs.count
@@ -9262,25 +9428,108 @@ struct WaveformView: View {
     }
 
     private func filteredPSAEventSummaries(_ summaries: [EventSummary]) -> [EventSummary] {
-        let terms = psaEventSearchText
-            .split(whereSeparator: \.isWhitespace)
-            .map { String($0).lowercased() }
-        guard !terms.isEmpty else { return summaries }
+        let filters = psaSearchFilters(from: psaEventSearchText)
+        guard !filters.isEmpty else { return summaries }
 
         return summaries.filter { summary in
-            let searchable = summary.searchText.lowercased()
-            return terms.allSatisfy { searchable.contains($0) }
+            filters.allSatisfy { filter in
+                psaSummary(summary, matches: filter)
+            }
         }
     }
 
-    private func psaSearchText(for segmentValue: String, events: [MFFEvent]) -> String {
-        var values = [segmentValue]
+    private func psaSummary(_ summary: EventSummary, matches filter: PSAEventSearchFilter) -> Bool {
+        let needle = filter.value.lowercased()
+        guard !needle.isEmpty else { return true }
+        if let field = filter.field {
+            return summary.searchFields[field]?.lowercased().contains(needle) == true
+        }
+        return summary.searchText.lowercased().contains(needle)
+    }
+
+    private func psaSearchFilters(from query: String) -> [PSAEventSearchFilter] {
+        let tokens = query
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        var filters: [PSAEventSearchFilter] = []
+        var index = 0
+
+        while index < tokens.count {
+            let token = tokens[index]
+            if let filter = psaFieldFilter(
+                from: token,
+                nextToken: tokens.indices.contains(index + 1) ? tokens[index + 1] : nil,
+                followingToken: tokens.indices.contains(index + 2) ? tokens[index + 2] : nil
+            ) {
+                filters.append(filter.filter)
+                index += filter.consumedTokenCount
+                continue
+            }
+            filters.append(PSAEventSearchFilter(field: nil, value: token))
+            index += 1
+        }
+
+        return filters.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    private func psaFieldFilter(
+        from token: String,
+        nextToken: String?,
+        followingToken: String?
+    ) -> (filter: PSAEventSearchFilter, consumedTokenCount: Int)? {
+        if let colon = token.firstIndex(of: ":") {
+            let key = String(token[..<colon])
+            let value = String(token[token.index(after: colon)...])
+            guard let field = PSAEventSearchField(alias: key) else { return nil }
+            if !value.isEmpty {
+                return (PSAEventSearchFilter(field: field, value: value), 1)
+            }
+            guard let nextToken else { return nil }
+            return (PSAEventSearchFilter(field: field, value: nextToken), 2)
+        }
+
+        guard let field = PSAEventSearchField(alias: token),
+              let nextToken,
+              nextToken.hasPrefix(":") else {
+            return nil
+        }
+        let value = String(nextToken.drop(while: { $0 == ":" }))
+        if !value.isEmpty {
+            return (PSAEventSearchFilter(field: field, value: value), 2)
+        }
+        guard let followingToken else { return nil }
+        return (PSAEventSearchFilter(field: field, value: followingToken), 3)
+    }
+
+    private func psaSearchFields(for segmentValue: String, events: [MFFEvent]) -> [PSAEventSearchField: String] {
+        var values: [PSAEventSearchField: [String]] = [
+            .code: [],
+            .label: [],
+            .description: [],
+            .cell: [],
+            .source: []
+        ]
+        switch psaSegmentField {
+        case .code:
+            values[.code, default: []].append(segmentValue)
+        case .label:
+            values[.label, default: []].append(segmentValue)
+        }
         for event in events {
-            values.append(event.code)
-            if let label = event.label { values.append(label) }
-            if let description = event.eventDescription { values.append(description) }
-            if let cell = event.cell { values.append(cell) }
-            values.append(event.sourceFile)
+            values[.code, default: []].append(event.code)
+            if let label = event.label { values[.label, default: []].append(label) }
+            if let description = event.eventDescription { values[.description, default: []].append(description) }
+            if let cell = event.cell { values[.cell, default: []].append(cell) }
+            values[.source, default: []].append(event.sourceFile)
+        }
+        return values.mapValues { $0.joined(separator: " ") }
+    }
+
+    private func psaSearchText(fields: [PSAEventSearchField: String]) -> String {
+        var values: [String] = []
+        for field in PSAEventSearchField.allCases {
+            guard let text = fields[field], !text.isEmpty else { continue }
+            values.append("\(field.rawValue): \(text)")
         }
         return values.joined(separator: " ")
     }
@@ -10355,7 +10604,40 @@ private struct EventSummary: Identifiable {
     let count: Int
     var detail: String? = nil
     var searchText: String = ""
+    var searchFields: [PSAEventSearchField: String] = [:]
     var id: String { code }
+}
+
+private enum PSAEventSearchField: String, CaseIterable {
+    case code = "Code"
+    case label = "Label"
+    case description = "Description"
+    case cell = "Cell"
+    case source = "Source"
+
+    init?(alias: String) {
+        switch alias
+            .trimmingCharacters(in: CharacterSet(charactersIn: ":").union(.whitespacesAndNewlines))
+            .lowercased() {
+        case "code", "codes":
+            self = .code
+        case "label", "labels":
+            self = .label
+        case "description", "descriptions", "desc":
+            self = .description
+        case "cell", "cells":
+            self = .cell
+        case "source", "sources", "file", "files":
+            self = .source
+        default:
+            return nil
+        }
+    }
+}
+
+private struct PSAEventSearchFilter {
+    let field: PSAEventSearchField?
+    let value: String
 }
 
 private struct EpochCategorySummary: Identifiable {
