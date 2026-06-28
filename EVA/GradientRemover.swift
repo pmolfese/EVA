@@ -75,11 +75,16 @@ struct GradientRemover {
     ///   - progress: Optional callback invoked with a 0...1 completion fraction.
     ///     Called from worker threads, so the handler must be thread-safe.
     /// - Returns: Corrected channels, same shape as the input.
+    /// - Parameters:
+    ///   - excludedTRs: TR indices to exclude as *donors* when averaging the
+    ///     template (e.g. high-motion volumes). Excluded TRs are still corrected;
+    ///     they just don't contaminate other TRs' templates. Empty = no change.
     nonisolated static func correct(
         channels: [[Float]],
         trSamples: [Int],
         window: Window = .default,
         spacingTolerance: Int = 1,
+        excludedTRs: Set<Int> = [],
         progress: (@Sendable (Double) -> Void)? = nil
     ) throws -> [[Float]] {
         guard trSamples.count >= 2 else { throw GradientRemoverError.tooFewTRTriggers(trSamples.count) }
@@ -130,7 +135,8 @@ struct GradientRemover {
                     nTR: nTR,
                     window: window,
                     weightBefore: weightBefore,
-                    weightAfter: weightAfter
+                    weightAfter: weightAfter,
+                    excludedTRs: excludedTRs
                 )
 
                 if let progress {
@@ -157,7 +163,8 @@ struct GradientRemover {
         nTR: Int,
         window: Window,
         weightBefore: Float,
-        weightAfter: Float
+        weightAfter: Float,
+        excludedTRs: Set<Int> = []
     ) -> [Float] {
         // Detrend every TR segment once (Python caches detrended TRs lazily).
         var detrended = [[Float]]()
@@ -187,11 +194,35 @@ struct GradientRemover {
                 continue
             }
 
-            // template = weightBefore * mean(before TRs) + weightAfter * mean(after TRs)
+            // Donor TR indices on each side, dropping excluded (e.g. high-motion)
+            // TRs. When `excludedTRs` is empty these are the full ranges, so the
+            // template is identical to the unfiltered case.
+            let beforeIdx = ((n - window.before)..<n).filter { !excludedTRs.contains($0) }
+            let afterIdx = ((n + 1)..<(n + window.after + 1)).filter { !excludedTRs.contains($0) }
+
+            // If both sides are fully censored, leave the TR detrended (as at the
+            // edges) — better than subtracting an empty template.
+            if beforeIdx.isEmpty && afterIdx.isEmpty {
+                row.replaceSubrange(start..<(start + spacing), with: detrended[n])
+                continue
+            }
+
+            // Renormalize weights when one side has no surviving donors so the
+            // template amplitude stays correct.
+            let wB: Float
+            let wA: Float
+            if !beforeIdx.isEmpty && !afterIdx.isEmpty {
+                wB = weightBefore; wA = weightAfter
+            } else if !beforeIdx.isEmpty {
+                wB = 1; wA = 0
+            } else {
+                wB = 0; wA = 1
+            }
+
+            // template = wB * mean(before TRs) + wA * mean(after TRs)
             for i in 0..<spacing { template[i] = 0 }
-            if window.before > 0 {
-                // range(n - window.before ..< n) → window.before TRs (matches Python).
-                accumulateMean(of: detrended, range: (n - window.before)..<n, scale: weightBefore, into: &template)
+            if wB > 0 {
+                accumulateMean(of: detrended, indices: beforeIdx, scale: wB, into: &template)
             }
             // CORRECTNESS FIX (diverges from upstream Python on purpose):
             // The reference gradient_remover computes the "after" part as
@@ -205,8 +236,8 @@ struct GradientRemover {
             // We use range(n+1 ..< n+window.after+1) → the full window.after TRs,
             // symmetric with "before". (Verified against
             // github.com/nimh-sfim/gradient_remover GradientRemover.py, main.)
-            if window.after > 0 {
-                accumulateMean(of: detrended, range: (n + 1)..<(n + window.after + 1), scale: weightAfter, into: &template)
+            if wA > 0 {
+                accumulateMean(of: detrended, indices: afterIdx, scale: wA, into: &template)
             }
 
             // corrected = detrended[n] - template
@@ -217,17 +248,16 @@ struct GradientRemover {
         return row
     }
 
-    /// Adds `scale * mean(segments[range])` into `accumulator` (element-wise).
+    /// Adds `scale * mean(segments[indices])` into `accumulator` (element-wise).
     nonisolated private static func accumulateMean(
         of segments: [[Float]],
-        range: Range<Int>,
+        indices: [Int],
         scale: Float,
         into accumulator: inout [Float]
     ) {
-        guard !range.isEmpty else { return }
-        let count = range.count
-        let factor = scale / Float(count)
-        for tr in range {
+        guard !indices.isEmpty else { return }
+        let factor = scale / Float(indices.count)
+        for tr in indices {
             // accumulator += factor * segments[tr]
             vDSP.add(multiplication: (segments[tr], factor), accumulator, result: &accumulator)
         }

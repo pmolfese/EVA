@@ -24,6 +24,32 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 
+/// Selectable MR gradient-artifact removal algorithm.
+enum MRIGradientMethod: String, CaseIterable, Identifiable {
+    /// Average artifact subtraction — the per-TR template in `GradientRemover`.
+    case aas = "AAS"
+    /// FMRIB Artifact Slice Template Removal (Niazy 2005) with OBS/ANC.
+    case fastr = "FASTR"
+    /// FASTR with Moosmann (2009) realignment-parameter-informed averaging.
+    case moosmann = "Moosmann"
+    /// FASTR with FARM (van der Meer 2010) most-correlated-epoch averaging.
+    case farm = "FARM"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .aas: return "AAS"
+        case .fastr: return "FASTR"
+        case .moosmann: return "Moosmann"
+        case .farm: return "FARM"
+        }
+    }
+
+    /// Whether this method runs the FASTR pipeline (slice/OBS/ANC options apply).
+    var isFASTR: Bool { self == .fastr || self == .moosmann || self == .farm }
+}
+
 struct WaveformView: View {
     @ObservedObject var recording: MFFRecording
 
@@ -216,6 +242,28 @@ struct WaveformView: View {
     @State private var isProcessingMRI = false
     @State private var mriStatusMessage: String?
     @State private var mriProgress: Double = 0
+    @State private var showsMRIPopover = false
+    // Number of neighboring TRs averaged into the template before/after the
+    // current TR. Exposed in the MRI popover; defaults mirror GradientRemover.
+    @State private var mriWindowBefore = GradientRemover.Window.default.before
+    @State private var mriWindowAfter = GradientRemover.Window.default.after
+    // Event code whose occurrences mark the TR (volume) onsets. Defaults to
+    // "TREV" when present in the recording.
+    @State private var mriTRMarkerCode = "TREV"
+    // Head-motion configuration for fMRI-gradient correction (FASTR et al.).
+    @State private var showsMotionConfig = false
+    @State private var motionParameters: MotionParameters?
+    @State private var motionFDThreshold = 0.5
+    @State private var motionRadiusMm = 50.0
+    // Gradient-removal method selection and FASTR parameters.
+    @State private var mriMethod = MRIGradientMethod.aas
+    @State private var showsMRIMethodHelp = false
+    @State private var fastrSlices = 1
+    @State private var fastrOBSAuto = true
+    @State private var fastrANC = false
+    @State private var fastrSubSample = true
+    // Optional: drop volumes whose FD exceeds the threshold from templates.
+    @State private var mriExcludeHighMotion = false
 
     // Per-channel state, shared with the menu-bar Channels commands.
     @State private var channels = ChannelModel()
@@ -594,6 +642,20 @@ struct WaveformView: View {
         .sheet(isPresented: $showsSegmentHealthDetails) {
             segmentHealthDetailsSheet()
         }
+        .sheet(isPresented: $showsMotionConfig) {
+            MotionConfigView(
+                parameters: $motionParameters,
+                fdThreshold: $motionFDThreshold,
+                radiusMm: $motionRadiusMm,
+                trMarkerCode: mriTRMarkerCode,
+                trMarkerCount: recording.signal.map { signal in
+                    signal.events.filter { $0.code == mriTRMarkerCode }.count
+                },
+                windowBefore: mriWindowBefore,
+                windowAfter: mriWindowAfter,
+                onClose: { showsMotionConfig = false }
+            )
+        }
         .onChange(of: artifactDetectionMethod) { _, method in
             if method == .ica {
                 DispatchQueue.main.async {
@@ -640,33 +702,20 @@ struct WaveformView: View {
             }
 
             HStack(spacing: 6) {
-            Menu {
-                Button("Gradient Artifact Removal") {
-                    removeGradientArtifact(from: recording.signal)
-                }
-                .disabled(isProcessingMRI || recording.signal == nil)
-
-                if gradientCorrectedSignal != nil {
-                    Button("Restore Original (Undo Gradient Removal)", role: .destructive) {
-                        clearGradientCorrection()
-                    }
-                }
-
-                Divider()
-
-                Button("BCG Removal") {}
-                    .disabled(true)
-                    .help("Ballistocardiogram removal — coming soon.")
+            Button {
+                showsMRIPopover.toggle()
             } label: {
                 ToolbarIcon(name: "icon.mri", isActive: gradientCorrectedSignal != nil)
             }
-            .menuIndicator(.hidden)
             .buttonStyle(.plain)
             .accessibilityLabel("MRI")
             .disabled(isProcessingMRI)
             .help(gradientCorrectedSignal != nil
-                ? "Gradient artifact removed using TREV triggers."
+                ? "Gradient artifact removed using \(mriTRMarkerCode) triggers."
                 : "MR artifact removal")
+            .popover(isPresented: $showsMRIPopover, arrowEdge: .bottom) {
+                mriPopover(for: recording.signal)
+            }
 
             Button {
                 showsFilterPopover.toggle()
@@ -6403,19 +6452,223 @@ struct WaveformView: View {
 
     // MARK: - MRI gradient artifact removal
 
-    /// TREV (volume trigger) sample indices from the raw recording, used as the
-    /// TR grid for gradient correction.
-    private func trevSamples(in signal: MFFSignalData) -> [Int] {
+    /// Volume-trigger sample indices from the raw recording (events whose code
+    /// matches `code`), used as the TR grid for gradient correction.
+    private func trMarkerSamples(in signal: MFFSignalData, code: String) -> [Int] {
         signal.events
-            .filter { $0.code == "TREV" }
+            .filter { $0.code == code }
             .map { Int(($0.beginTimeSeconds * signal.samplingRate).rounded()) }
             .sorted()
+    }
+
+    /// Distinct event codes in the recording with their occurrence counts,
+    /// sorted by descending count then code.
+    private func eventCodeCounts(in signal: MFFSignalData) -> [(code: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for event in signal.events {
+            counts[event.code, default: 0] += 1
+        }
+        return counts
+            .map { (code: $0.key, count: $0.value) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.code < $1.code }
+    }
+
+    @ViewBuilder
+    private func mriPopover(for signal: MFFSignalData?) -> some View {
+        let codeCounts = signal.map(eventCodeCounts) ?? []
+        let selectedCount = codeCounts.first { $0.code == mriTRMarkerCode }?.count
+        let motionUsable = (motionParameters?.count ?? 0) >= 2
+        let canApply = signal != nil && !isProcessingMRI && (selectedCount ?? 0) >= 2
+            && (mriMethod != .moosmann || motionUsable)
+
+        VStack(alignment: .leading, spacing: 14) {
+            Text("MR Gradient Removal")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Text("Method")
+                        .font(.caption.weight(.semibold))
+                    Button {
+                        showsMRIMethodHelp = true
+                    } label: {
+                        Image(systemName: "questionmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .help("About AAS vs FASTR and references")
+                    .popover(isPresented: $showsMRIMethodHelp, arrowEdge: .trailing) {
+                        mriMethodHelp()
+                    }
+                }
+                Picker("Method", selection: $mriMethod) {
+                    ForEach(MRIGradientMethod.allCases) { method in
+                        Text(method.label).tag(method)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("TR Marker Event")
+                    .font(.caption.weight(.semibold))
+                if codeCounts.isEmpty {
+                    Text("No events found in this recording.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("TR Marker Event", selection: $mriTRMarkerCode) {
+                        ForEach(codeCounts, id: \.code) { entry in
+                            Text("\(entry.code)  (\(entry.count))").tag(entry.code)
+                        }
+                    }
+                    .labelsHidden()
+                    if let selectedCount {
+                        Text("\(selectedCount) \(mriTRMarkerCode) marker\(selectedCount == 1 ? "" : "s") found.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("No \(mriTRMarkerCode) markers in this recording.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Template Window (neighboring TRs)")
+                    .font(.caption.weight(.semibold))
+                HStack {
+                    Text("Pre")
+                        .font(.caption)
+                        .frame(width: 36, alignment: .leading)
+                    TextField("Pre", value: $mriWindowBefore, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Stepper("", value: $mriWindowBefore, in: 1...64)
+                        .labelsHidden()
+                }
+                HStack {
+                    Text("Post")
+                        .font(.caption)
+                        .frame(width: 36, alignment: .leading)
+                    TextField("Post", value: $mriWindowAfter, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Stepper("", value: $mriWindowAfter, in: 1...64)
+                        .labelsHidden()
+                }
+            }
+
+            let motionLoaded = (motionParameters?.count ?? 0) >= 2
+
+            if mriMethod == .moosmann, motionLoaded {
+                Text("Using motion: \(motionParameters?.sourceName ?? "") (\(motionParameters?.count ?? 0) vols), threshold \(String(format: "%.2f", motionFDThreshold)) mm")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // Optional motion-censoring for AAS/FASTR/FARM (Moosmann censors
+            // intrinsically, so the toggle is hidden there).
+            if motionLoaded, mriMethod != .moosmann {
+                Toggle(isOn: $mriExcludeHighMotion) {
+                    Text("Exclude high-motion TRs")
+                        .font(.caption)
+                }
+                .help("High-motion volumes (FD over the threshold set in Configure Motion…) are still corrected, but are not used as donors when building artifact templates.")
+            }
+
+            if mriMethod.isFASTR {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("FASTR Options")
+                        .font(.caption.weight(.semibold))
+                    HStack {
+                        Text("Slices / volume")
+                            .font(.caption)
+                            .frame(width: 96, alignment: .leading)
+                        TextField("Slices", value: $fastrSlices, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Stepper("", value: $fastrSlices, in: 1...128)
+                            .labelsHidden()
+                    }
+                    .help("Number of fMRI slices per volume. Each TR interval is split into this many slice epochs.")
+                    Toggle("Sub-sample alignment", isOn: $fastrSubSample)
+                        .font(.caption)
+                        .help("FACET-style fractional-sample epoch alignment.")
+                    Toggle("OBS residual removal (auto PCs)", isOn: $fastrOBSAuto)
+                        .font(.caption)
+                        .help("Remove residual artifact via an optimal basis set of residual PCs.")
+                    Toggle("Adaptive noise cancellation (ANC)", isOn: $fastrANC)
+                        .font(.caption)
+                        .help("Apply LMS adaptive noise cancellation after template subtraction.")
+                }
+            }
+
+            Divider()
+
+            Button {
+                showsMRIPopover = false
+                showsMotionConfig = true
+            } label: {
+                Label(motionParameters == nil
+                      ? "Configure Motion…"
+                      : "Motion: \(motionParameters?.sourceName ?? "") (\(motionParameters?.count ?? 0) vols)…",
+                      systemImage: "slider.horizontal.3")
+            }
+            .help("Load 3dvolreg motion parameters, plot head motion, and set a motion threshold.")
+
+            HStack {
+                Button("Reset 4 / 4") {
+                    mriWindowBefore = GradientRemover.Window.default.before
+                    mriWindowAfter = GradientRemover.Window.default.after
+                }
+
+                if gradientCorrectedSignal != nil {
+                    Button("Restore Original", role: .destructive) {
+                        clearGradientCorrection()
+                        showsMRIPopover = false
+                    }
+                }
+
+                Spacer()
+
+                Button("Apply") {
+                    switch mriMethod {
+                    case .aas:
+                        removeGradientArtifact(from: signal)
+                    case .fastr, .moosmann, .farm:
+                        removeGradientArtifactFASTR(from: signal)
+                    }
+                    showsMRIPopover = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canApply)
+                .help(applyButtonHelp(motionUsable: motionUsable, selectedCount: selectedCount))
+            }
+        }
+        .padding(16)
+        .frame(width: 330)
+        .onAppear {
+            // Default to TREV when present; otherwise fall back to the most
+            // common event code so the picker always shows a valid selection.
+            if !codeCounts.contains(where: { $0.code == mriTRMarkerCode }) {
+                if codeCounts.contains(where: { $0.code == "TREV" }) {
+                    mriTRMarkerCode = "TREV"
+                } else if let first = codeCounts.first {
+                    mriTRMarkerCode = first.code
+                }
+            }
+        }
     }
 
     private func removeGradientArtifact(from signal: MFFSignalData?) {
         guard let signal else { return }
 
-        let trSamples = trevSamples(in: signal)
+        let trSamples = trMarkerSamples(in: signal, code: mriTRMarkerCode)
+        let window = GradientRemover.Window(before: mriWindowBefore, after: mriWindowAfter)
+        let excludedTRs = highMotionVolumeSet()
+        let excludedCount = excludedTRs.count
         isProcessingMRI = true
         mriProgress = 0
         mriStatusMessage = nil
@@ -6437,7 +6690,7 @@ struct WaveformView: View {
         Task {
             do {
                 let correctedData = try await Task.detached(priority: .userInitiated) {
-                    try GradientRemover.correct(channels: sourceData, trSamples: trSamples) { fraction in
+                    try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs) { fraction in
                         progressContinuation.yield(fraction)
                     }
                 }.value
@@ -6461,7 +6714,7 @@ struct WaveformView: View {
                 icaDecomposition = nil
                 filteredSignal = nil
                 clearAppliedArtifactCleaning()
-                mriStatusMessage = "Applied MRI gradient artifact correction (TR = \(trSamples) samples)."
+                mriStatusMessage = "Applied MRI gradient artifact correction (\(mriTRMarkerCode) markers, template window \(window.before) pre / \(window.after) post TRs\(excludedCount > 0 ? ", \(excludedCount) high-motion TRs excluded" : ""))."
                 mriStatusIsError = false
                 artifactDetectionRefreshToken += 1
                 invalidateEpochsForSignalChange()
@@ -6475,6 +6728,182 @@ struct WaveformView: View {
 
             isProcessingMRI = false
         }
+    }
+
+    /// Volume indices flagged as high-motion (FD > threshold) when the user has
+    /// enabled exclusion and motion parameters are loaded; empty otherwise.
+    private func highMotionVolumeSet() -> Set<Int> {
+        guard mriExcludeHighMotion, let motion = motionParameters, motion.count >= 2 else {
+            return []
+        }
+        return Set(motion.volumesExceeding(threshold: motionFDThreshold, radiusMm: motionRadiusMm))
+    }
+
+    private func removeGradientArtifactFASTR(from signal: MFFSignalData?) {
+        guard let signal else { return }
+
+        let trSamples = trMarkerSamples(in: signal, code: mriTRMarkerCode)
+        var config = FastrCorrector.Config()
+        config.numberOfSlices = max(1, fastrSlices)
+        config.subSampleAlignment = fastrSubSample
+        config.obs = fastrOBSAuto ? .auto : .off
+        config.anc = fastrANC
+        if mriMethod == .moosmann {
+            config.templateScheme = .moosmann
+            config.motion = motionParameters?.samples
+            config.motionThresholdMm = motionFDThreshold
+            config.motionRadiusMm = motionRadiusMm
+        } else if mriMethod == .farm {
+            config.templateScheme = .farm
+        }
+        // Optional motion-censoring (Moosmann excludes high-motion volumes
+        // intrinsically, so only apply the explicit set for the other methods).
+        if mriMethod != .moosmann {
+            config.censoredVolumes = highMotionVolumeSet()
+        }
+        let censoredCount = config.censoredVolumes.count
+        let methodName = mriMethod.rawValue
+        let configCopy = config
+
+        isProcessingMRI = true
+        mriProgress = 0
+        mriStatusMessage = nil
+
+        let signalURL = signal.signalURL
+        let signalType = signal.signalType
+        let numberOfChannels = signal.numberOfChannels
+        let samplingRate = signal.samplingRate
+        let duration = signal.duration
+        let recordingStartTime = signal.recordingStartTime
+        let events = signal.events
+        let sourceData = signal.data
+        let slices = config.numberOfSlices
+
+        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
+            mriProgress = fraction
+        }
+
+        Task {
+            do {
+                let correctedData = try await Task.detached(priority: .userInitiated) {
+                    try FastrCorrector.correct(
+                        channels: sourceData,
+                        volumeTriggers: trSamples,
+                        config: configCopy,
+                        samplingRate: samplingRate
+                    ) { fraction in
+                        progressContinuation.yield(fraction)
+                    }
+                }.value
+                progressContinuation.finish()
+                progressTask.cancel()
+
+                gradientCorrectedSignal = MFFSignalData(
+                    signalURL: signalURL,
+                    signalType: signalType,
+                    numberOfChannels: numberOfChannels,
+                    samplingRate: samplingRate,
+                    duration: duration,
+                    recordingStartTime: recordingStartTime,
+                    events: events,
+                    data: correctedData,
+                    channelNames: signal.channelNames
+                )
+                icaCleanedSignal = nil
+                icaDecomposition = nil
+                filteredSignal = nil
+                clearAppliedArtifactCleaning()
+                mriStatusMessage = "Applied \(methodName) correction (\(mriTRMarkerCode) markers, \(slices) slice\(slices == 1 ? "" : "s")/volume\(fastrOBSAuto ? ", OBS" : "")\(fastrANC ? ", ANC" : "")\(censoredCount > 0 ? ", \(censoredCount) high-motion TRs excluded" : ""))."
+                mriStatusIsError = false
+                artifactDetectionRefreshToken += 1
+                invalidateEpochsForSignalChange()
+                invalidateInterpolations()
+            } catch {
+                progressContinuation.finish()
+                progressTask.cancel()
+                mriStatusMessage = error.localizedDescription
+                mriStatusIsError = true
+            }
+
+            isProcessingMRI = false
+        }
+    }
+
+    /// Tooltip for the Apply button explaining why it may be disabled.
+    private func applyButtonHelp(motionUsable: Bool, selectedCount: Int?) -> String {
+        if (selectedCount ?? 0) < 2 {
+            return "Select a TR marker event with at least two markers to enable Apply."
+        }
+        if mriMethod == .moosmann, !motionUsable {
+            return "Moosmann requires a motion file. Load one via Configure Motion… to enable Apply."
+        }
+        return "Apply \(mriMethod.rawValue) gradient artifact removal."
+    }
+
+    /// Explanation of the AAS vs FASTR choice with references.
+    @ViewBuilder
+    private func mriMethodHelp() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Gradient Artifact Removal Methods")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("AAS — Average Artifact Subtraction")
+                    .font(.subheadline.weight(.semibold))
+                Text("Builds one artifact template per TR by averaging neighboring volumes and subtracts it. Fast and robust when motion is low. This is EVA's per-TR template method (Allen et al. 2000).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("FASTR — fMRI Artifact Slice Template Removal")
+                    .font(.subheadline.weight(.semibold))
+                Text("Subdivides each volume into slice epochs, aligns them (optionally at sub-sample resolution), subtracts a per-slice template, then removes residual artifact with an Optimal Basis Set (OBS) and optional adaptive noise cancellation (ANC). Better suppression, more parameters (Niazy et al. 2005).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Moosmann — RP-informed averaging")
+                    .font(.subheadline.weight(.semibold))
+                Text("A FASTR variant (Bergen toolbox) that builds each volume's template from a motion-warped temporal window of low-motion volumes — excluding high-motion volumes and avoiding averaging across head-movement events (translation only). Falls back to a plain moving average when no motion exceeds the threshold. Requires loaded motion parameters (Moosmann et al. 2009).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("FARM — most-correlated-epoch averaging")
+                    .font(.subheadline.weight(.semibold))
+                Text("A FASTR variant whose template, for each artifact, averages the most similar artifacts (highest waveform correlation, ≥ 0.9) rather than temporal neighbors. Robust to motion without needing external motion parameters; selection is derived from the EEG itself (van der Meer et al. 2010, as in FACET).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("References")
+                    .font(.caption.weight(.semibold))
+                Text("• Allen, Josephs & Turner (2000). NeuroImage 12:230–239.")
+                Text("• Niazy, Beckmann, Iannetti, Brady & Smith (2005). NeuroImage 28(3):720–737.")
+                Text("• Moosmann et al. (2009). NeuroImage 45(4):1144–1150.")
+                Text("• van der Meer et al. (2010). NeuroImage 49(3):2495–2505.")
+                Text("• Glaser et al. (2013). FACET toolbox. BMC Neuroscience 14:138.")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+
+            Text("EVA's FASTR is a port of the FMRIB/FACET implementations. See the in-app TODO for pending MATLAB-reference validation.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 360)
     }
 
     private func clearGradientCorrection() {

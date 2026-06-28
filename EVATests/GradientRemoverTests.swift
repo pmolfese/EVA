@@ -56,6 +56,39 @@ struct GradientRemoverTests {
         #expect(residualEnergy < originalEnergy * 0.2, "gradient not substantially removed")
     }
 
+    @Test func excludedTRsAreNotUsedAsDonorsButAreStillCorrected() throws {
+        let spacing = 100
+        let nTR = 20
+        let sampleCount = spacing * nTR
+        func gradient(_ k: Int) -> Float { 50 * Float(sin(Double(k) * 0.3)) + 30 * Float(k % 7) }
+        func physio(_ t: Int) -> Float { 5 * Float(sin(2 * .pi * 3 * Double(t) / 1000)) }
+        var channel = [Float](repeating: 0, count: sampleCount)
+        for t in 0..<sampleCount { channel[t] = physio(t) + gradient(t % spacing) }
+        let triggers = Array(stride(from: 0, to: sampleCount, by: spacing))
+
+        // Corrupt TR 9 with a big spike so it would poison neighbors' templates.
+        let badTR = 9
+        for i in 0..<spacing { channel[badTR * spacing + i] += 500 }
+
+        let baseline = try GradientRemover.correct(
+            channels: [channel], trSamples: triggers, window: .default
+        )
+        let censored = try GradientRemover.correct(
+            channels: [channel], trSamples: triggers, window: .default,
+            excludedTRs: [badTR]
+        )
+
+        #expect(censored[0].count == sampleCount)
+        // A neighbor of the bad TR (TR 7) is cleaner when the spike is excluded
+        // from its template.
+        func energy(_ x: [Float], tr: Int) -> Double {
+            (0..<spacing).reduce(0.0) { $0 + Double(x[tr * spacing + $1] * x[tr * spacing + $1]) }
+        }
+        #expect(energy(censored[0], tr: 7) < energy(baseline[0], tr: 7))
+        // The excluded TR is still corrected (not left untouched/huge).
+        #expect(energy(censored[0], tr: badTR) < energy(channel, tr: badTR))
+    }
+
     @Test func throwsWithTooFewTriggers() {
         #expect(throws: GradientRemoverError.self) {
             _ = try GradientRemover.correct(channels: [[0, 1, 2, 3]], trSamples: [0])
