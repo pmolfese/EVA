@@ -166,7 +166,7 @@ struct WaveformView: View {
     @State private var icaProgressMessage = ""
     @State private var icaMethod: ICAMethod = .picard
     @State private var icaComponentCount = 20
-    @State private var icaVarianceThreshold = 0.99
+    @State private var icaVarianceThreshold = 0.999
     @State private var icaUsesAverageReference = true
     @State private var icaDownsampleRate = 100.0
     @State private var icaMaxIterations = 200
@@ -184,6 +184,7 @@ struct WaveformView: View {
     @State private var lastICAReconstructionDebugReport: String?
     @State private var showsPSASheet = false
     @State private var psaSegmentField = PSASegmentField.code
+    @State private var psaEventSearchText = ""
     @State private var psaSelectedEventCodes = Set<String>()
     @State private var psaPreStimulus = 0.2
     @State private var psaPostStimulus = 0.8
@@ -4990,9 +4991,9 @@ struct WaveformView: View {
                 GridRow {
                     ArtifactTemplateFieldLabel(
                         title: "Keep Var",
-                        help: "PCA variance target used to choose how many components to keep, capped by the Components field. 99% is a practical default for avoiding near-zero variance components."
+                        help: "PCA variance target used to choose how many components to keep, capped by the Components field. 99.9% is a practical default for preserving blink components while still avoiding near-zero noisy directions."
                     )
-                    TextField("Fraction", value: $icaVarianceThreshold, format: .number.precision(.fractionLength(2)))
+                    TextField("Fraction", value: $icaVarianceThreshold, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
 
@@ -5042,7 +5043,7 @@ struct WaveformView: View {
                         title: "Tolerance",
                         help: "MNE-style early stopping threshold for summed squared ICA weight change between iterations. Smaller values may run longer."
                     )
-                    TextField("Tolerance", value: $icaConvergenceTolerance, format: .number.precision(.significantDigits(2...4)))
+                    TextField("Tolerance", value: $icaConvergenceTolerance, format: .number.notation(.scientific).precision(.significantDigits(2...4)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
 
@@ -5596,13 +5597,13 @@ struct WaveformView: View {
             "## ICA Settings",
             "Method field: \(icaMethod.displayName)",
             "Components field: \(icaComponentCount)",
-            "Keep variance field: \(String(format: "%.2f", icaVarianceThreshold))",
+            "Keep variance field: \(String(format: "%.3f", icaVarianceThreshold))",
             "Average reference field: \(icaUsesAverageReference ? "on" : "off")",
             "Search Hz field: \(String(format: "%.1f", icaDownsampleRate))",
             "Iterations field: \(icaMaxIterations)",
             "Fit filter field: \(icaUsesFitFilter ? "on" : "off")",
             "Fit Hz field: \(String(format: "%.2f", icaFitLowCutoff))-\(String(format: "%.2f", icaFitHighCutoff)), notch \(icaFitNotch60HzEnabled ? "on" : "off")",
-            "Tolerance field: \(icaConvergenceTolerance)",
+            "Tolerance field: \(String(format: "%.3e", icaConvergenceTolerance))",
             "Minimum iterations field: \(icaMinimumIterations)"
         ]
 
@@ -5615,10 +5616,10 @@ struct WaveformView: View {
                 "Analysis sampling rate: \(String(format: "%.1f", decomposition.analysisSamplingRate)) Hz",
                 "Decimation: \(decomposition.decimation)",
                 "Iterations: \(decomposition.iterations)",
-                "Final change: \(decomposition.finalChange)",
+                "Final change: \(String(format: "%.3e", decomposition.finalChange))",
                 "Converged by tolerance: \(decomposition.finalChange.isFinite && decomposition.finalChange <= decomposition.convergenceTolerance ? "yes" : "no")",
                 "Average reference: \(decomposition.averageReference ? "yes" : "no")",
-                "PCA variance target: \(String(format: "%.2f", decomposition.varianceThreshold))",
+                "PCA variance target: \(String(format: "%.3f", decomposition.varianceThreshold))",
                 "Selected PCA variance: \(String(format: "%.1f", decomposition.pcaVarianceRetained * 100))%",
                 "Fit filter: \(decomposition.fitFilter.map { "\(String(format: "%.2f", $0.lowCutoff))-\(String(format: "%.2f", $0.highCutoff)) Hz, notch \($0.notch60HzEnabled ? "on" : "off")" } ?? "none")",
                 "Excluded components: \(decomposition.excludedComponents.sorted().map { "IC \($0 + 1) \(decomposition.labels[$0] ?? "")" }.joined(separator: ", ").nilIfEmpty ?? "none")"
@@ -5761,7 +5762,8 @@ struct WaveformView: View {
 
     private func psaSheet(for signal: MFFSignalData) -> some View {
         let events = segmentableEvents(for: signal)
-        let summaries = groupedPSAEventSummaries(events)
+        let allSummaries = groupedPSAEventSummaries(events)
+        let summaries = filteredPSAEventSummaries(allSummaries)
         let segmentFieldBinding = Binding<PSASegmentField>(
             get: { psaSegmentField },
             set: { newField in
@@ -5792,13 +5794,38 @@ struct WaveformView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .frame(width: 150)
+
+                    Spacer(minLength: 12)
+
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Filter events", text: $psaEventSearchText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                    if !psaEventSearchText.isEmpty {
+                        Button {
+                            psaEventSearchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Clear filter")
+                    }
                 }
 
-                if summaries.isEmpty {
+                if allSummaries.isEmpty {
                     ContentUnavailableView(
                         "No Events",
                         systemImage: "list.bullet.rectangle",
                         description: Text("This recording has no events to segment on.")
+                    )
+                    .frame(height: 120)
+                } else if summaries.isEmpty {
+                    ContentUnavailableView(
+                        "No Matches",
+                        systemImage: "magnifyingglass",
+                        description: Text("No event \(psaSegmentField.rawValue.lowercased()) values match the filter.")
                     )
                     .frame(height: 120)
                 } else {
@@ -9216,6 +9243,7 @@ struct WaveformView: View {
         Dictionary(grouping: events, by: psaSegmentValue(for:))
             .map { value, groupedEvents in
                 let distinctCodes = Set(groupedEvents.map(\.code)).sorted()
+                let searchText = psaSearchText(for: value, events: groupedEvents)
                 let detail: String?
                 switch psaSegmentField {
                 case .code:
@@ -9224,13 +9252,37 @@ struct WaveformView: View {
                 case .label:
                     detail = distinctCodes.count == 1 ? "Code: \(distinctCodes[0])" : "\(distinctCodes.count) codes"
                 }
-                return EventSummary(code: value, count: groupedEvents.count, detail: detail)
+                return EventSummary(code: value, count: groupedEvents.count, detail: detail, searchText: searchText)
             }
             .sorted { lhs, rhs in
                 lhs.count == rhs.count
                     ? lhs.code.localizedStandardCompare(rhs.code) == .orderedAscending
                     : lhs.count > rhs.count
             }
+    }
+
+    private func filteredPSAEventSummaries(_ summaries: [EventSummary]) -> [EventSummary] {
+        let terms = psaEventSearchText
+            .split(whereSeparator: \.isWhitespace)
+            .map { String($0).lowercased() }
+        guard !terms.isEmpty else { return summaries }
+
+        return summaries.filter { summary in
+            let searchable = summary.searchText.lowercased()
+            return terms.allSatisfy { searchable.contains($0) }
+        }
+    }
+
+    private func psaSearchText(for segmentValue: String, events: [MFFEvent]) -> String {
+        var values = [segmentValue]
+        for event in events {
+            values.append(event.code)
+            if let label = event.label { values.append(label) }
+            if let description = event.eventDescription { values.append(description) }
+            if let cell = event.cell { values.append(cell) }
+            values.append(event.sourceFile)
+        }
+        return values.joined(separator: " ")
     }
 
     private func psaSegmentValue(for event: MFFEvent) -> String {
@@ -10302,6 +10354,7 @@ private struct EventSummary: Identifiable {
     let code: String
     let count: Int
     var detail: String? = nil
+    var searchText: String = ""
     var id: String { code }
 }
 
