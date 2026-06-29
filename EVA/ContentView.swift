@@ -59,17 +59,9 @@ struct ContentView: View {
         .onChange(of: openRecordingRequest) { _, _ in
             showsFileImporter = true
         }
-        .background(WindowAccessor(autosaveName: "EVAMainWindow", onCloseRequest: {
-            // Closing a window that has a recording open doesn't close the
-            // window — it closes the file and resets to the launch screen so the
-            // user can drop a new EEG file. With no recording open, close as
-            // usual.
-            if recording != nil {
-                closeRecording()
-                return false
-            }
-            return true
-        }))
+        .background(WindowAccessor(autosaveName: "EVAMainWindow",
+                                   hasRecording: recording != nil,
+                                   onConfirmedClose: closeRecording))
     }
 
     /// Closes the current recording and returns the window to a fresh launch
@@ -239,21 +231,20 @@ struct ContentView: View {
     }
 }
 
-/// Sets an AppKit frame-autosave name on the hosting window so its size and
-/// position are remembered, and intercepts the window close so the app can
-/// decide whether to actually close or just reset to the launch screen.
+/// Sets an AppKit frame-autosave name on the hosting window and intercepts
+/// the close button to show a discard-confirmation sheet when a recording is open.
 private struct WindowAccessor: NSViewRepresentable {
     let autosaveName: String
-    /// Invoked when the window is asked to close. Return `true` to allow the
-    /// close, `false` to keep the window open.
-    let onCloseRequest: () -> Bool
+    var hasRecording: Bool = false
+    var onConfirmedClose: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView { NSView() }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.onCloseRequest = onCloseRequest
+        context.coordinator.hasRecording = hasRecording
+        context.coordinator.onConfirmedClose = onConfirmedClose
         let autosaveName = autosaveName
         DispatchQueue.main.async {
             guard let window = nsView.window else { return }
@@ -264,27 +255,44 @@ private struct WindowAccessor: NSViewRepresentable {
         }
     }
 
-    /// Window delegate that intercepts `windowShouldClose` and otherwise forwards
-    /// every message to SwiftUI's original delegate (so window lifecycle and
-    /// state restoration keep working).
+    /// Intercepts `windowShouldClose` to show a discard-confirmation alert sheet
+    /// when a recording is open; forwards all other delegate messages to SwiftUI's
+    /// original delegate so lifecycle and state restoration keep working.
     final class Coordinator: NSObject, NSWindowDelegate {
-        var onCloseRequest: (() -> Bool)?
+        var hasRecording = false
+        var onConfirmedClose: (() -> Void)?
         private weak var originalDelegate: NSWindowDelegate?
 
         func attach(to window: NSWindow) {
-            // Already installed (and SwiftUI hasn't replaced us): nothing to do.
             guard window.delegate !== self else { return }
             originalDelegate = window.delegate
             window.delegate = self
         }
 
         func windowShouldClose(_ sender: NSWindow) -> Bool {
-            if onCloseRequest?() == false { return false }
+            if hasRecording {
+                showDiscardSheet(for: sender)
+                return false
+            }
             if let originalDelegate,
                originalDelegate.responds(to: #selector(NSWindowDelegate.windowShouldClose(_:))) {
                 return originalDelegate.windowShouldClose?(sender) ?? true
             }
             return true
+        }
+
+        private func showDiscardSheet(for window: NSWindow) {
+            let alert = NSAlert()
+            alert.messageText = "Discard unsaved work?"
+            alert.informativeText = "Closing this recording will discard any processing that has not been exported. This cannot be undone."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Discard")
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { [weak self] response in
+                if response == .alertFirstButtonReturn {
+                    self?.onConfirmedClose?()
+                }
+            }
         }
 
         override func responds(to aSelector: Selector!) -> Bool {
