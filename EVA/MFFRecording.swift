@@ -41,10 +41,12 @@ final class MFFRecording: ObservableObject, Identifiable {
     private(set) var pnsSignal: MFFSignalData?
     private(set) var sensorLayout: SensorLayout?
     private(set) var electrodeGeometry: ElectrodeGeometry?
+    private(set) var antiAliasTimingCorrection: MFFAntiAliasTimingCorrection?
     private(set) var loadError: String?
     private(set) var isLoading = true
     private(set) var loadProgress: Double?
     private(set) var loadStatusMessage = "Preparing to read recording"
+    private(set) var loadDetailMessage: String?
 
     init(packageURL: URL) {
         self.packageURL = packageURL
@@ -59,17 +61,23 @@ final class MFFRecording: ObservableObject, Identifiable {
         objectWillChange.send()
         loadProgress = 0
         loadStatusMessage = "Opening \(packageName)"
+        loadDetailMessage = nil
 
-        let (progressContinuation, progressTask) = ProgressBridge.make { (update: LoadProgressUpdate) in
+        let (progressContinuation, progressTask) = ProgressBridge.make { (update: SignalImportProgress) in
             guard self.isLoading else { return }
             self.objectWillChange.send()
             self.loadProgress = update.fraction
             self.loadStatusMessage = update.message
+            self.loadDetailMessage = update.detail
         }
 
-        let progressHandler: @Sendable (Double, String) -> Void = { fraction, message in
-            let clamped = min(max(fraction, 0), 1)
-            progressContinuation.yield(LoadProgressUpdate(fraction: clamped, message: message))
+        let progressHandler: @Sendable (SignalImportProgress) -> Void = { update in
+            let clamped = min(max(update.fraction, 0), 1)
+            progressContinuation.yield(SignalImportProgress(
+                fraction: clamped,
+                message: update.message,
+                detail: update.detail
+            ))
         }
 
         let result = await Task.detached(priority: .userInitiated) {
@@ -83,15 +91,12 @@ final class MFFRecording: ObservableObject, Identifiable {
         pnsSignal = result.pnsSignal
         sensorLayout = result.layout
         electrodeGeometry = result.geometry
+        antiAliasTimingCorrection = result.antiAliasTimingCorrection
         loadError = result.error
         loadProgress = nil
         loadStatusMessage = result.error == nil ? "Loaded" : "Load failed"
+        loadDetailMessage = result.antiAliasTimingCorrection?.loadingMessage
         isLoading = false
-    }
-
-    private struct LoadProgressUpdate: Sendable {
-        var fraction: Double
-        var message: String
     }
 
     private struct LoadResult: Sendable {
@@ -99,12 +104,13 @@ final class MFFRecording: ObservableObject, Identifiable {
         var pnsSignal: MFFSignalData?
         var layout: SensorLayout?
         var geometry: ElectrodeGeometry?
+        var antiAliasTimingCorrection: MFFAntiAliasTimingCorrection?
         var error: String?
     }
 
     nonisolated private static func load(
         packageURL: URL,
-        progress: (@Sendable (Double, String) -> Void)? = nil
+        progress: (@Sendable (SignalImportProgress) -> Void)? = nil
     ) -> LoadResult {
         let didStartAccessing = packageURL.startAccessingSecurityScopedResource()
         defer {
@@ -120,10 +126,17 @@ final class MFFRecording: ObservableObject, Identifiable {
                 pnsSignal: imported.pnsSignal,
                 layout: imported.layout,
                 geometry: imported.geometry,
+                antiAliasTimingCorrection: imported.antiAliasTimingCorrection,
                 error: nil
             )
         } catch {
-            return LoadResult(signal: nil, layout: nil, geometry: nil, error: error.localizedDescription)
+            return LoadResult(
+                signal: nil,
+                layout: nil,
+                geometry: nil,
+                antiAliasTimingCorrection: nil,
+                error: error.localizedDescription
+            )
         }
     }
 }

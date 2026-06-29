@@ -412,6 +412,13 @@ struct WaveformView: View {
                     Text(recording.loadStatusMessage)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    if let loadDetailMessage = recording.loadDetailMessage {
+                        Text(loadDetailMessage)
+                            .font(.caption2.weight(.medium))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 360)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let rawSignal = recording.signal {
@@ -519,6 +526,29 @@ struct WaveformView: View {
         if electrodeGeometry == nil {
             electrodeGeometry = recording.electrodeGeometry
         }
+        adoptOnDiskEpochsIfPresent()
+    }
+
+    /// When the opened file was segmented or category-averaged by other software,
+    /// the reader already supplies `epochSegments`. Surface them through the same
+    /// state the in-app PSA pipeline uses, so the recording displays as discrete
+    /// epochs (with stimulus-locked markers) instead of a misleading continuous
+    /// strip with out-of-place events.
+    private func adoptOnDiskEpochsIfPresent() {
+        guard epochedSignal == nil,
+              let signal = recording.signal,
+              signal.isSegmented,
+              !signal.epochSegments.isEmpty else {
+            return
+        }
+        segmentedEpochSignal = signal
+        segmentedEpochSegments = signal.epochSegments
+        epochedSignal = signal
+        epochSegments = signal.epochSegments
+        psaIsAveraged = signal.isAveraged
+        psaStatusMessage = signal.isAveraged
+            ? "Loaded \(signal.epochSegments.count) averaged categories"
+            : "Loaded \(signal.epochSegments.count) epochs"
     }
 
     /// Markers the user has created for *this* recording, surfaced as events.

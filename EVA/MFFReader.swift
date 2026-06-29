@@ -25,6 +25,21 @@ nonisolated struct MFFPackage: Sendable {
     let metrics: [String: String]
 }
 
+nonisolated struct MFFAntiAliasTimingCorrection: Sendable, Equatable {
+    enum Evidence: Hashable, Sendable {
+        case acquisitionVersion
+        case hardwareFilterAdjusted
+    }
+
+    let shiftMicroseconds: Int?
+    let acquisitionVersion: String?
+    let evidence: Set<Evidence>
+
+    var loadingMessage: String {
+        "Corrected for anti-alias timing bug at recording"
+    }
+}
+
 nonisolated struct MFFSignalData: Sendable {
     let signalURL: URL
     let signalType: String
@@ -35,6 +50,15 @@ nonisolated struct MFFSignalData: Sendable {
     let events: [MFFEvent]
     let data: [[Float]]
     let channelNames: [String]?
+    /// Pre-segmented epochs declared on disk (`epochs.xml` + `categories.xml`),
+    /// e.g. when the file was segmented or category-averaged by other software.
+    /// Empty for ordinary continuous recordings.
+    let epochSegments: [EpochSegment]
+    /// True when the file is segmented into discrete epochs on disk.
+    let isSegmented: Bool
+    /// True when each epoch is a category *average* (one segment per category,
+    /// each built from multiple trials), i.e. an ERP/averaged file.
+    let isAveraged: Bool
 
     init(
         signalURL: URL,
@@ -45,7 +69,10 @@ nonisolated struct MFFSignalData: Sendable {
         recordingStartTime: Date?,
         events: [MFFEvent],
         data: [[Float]],
-        channelNames: [String]? = nil
+        channelNames: [String]? = nil,
+        epochSegments: [EpochSegment] = [],
+        isSegmented: Bool = false,
+        isAveraged: Bool = false
     ) {
         self.signalURL = signalURL
         self.signalType = signalType
@@ -56,6 +83,9 @@ nonisolated struct MFFSignalData: Sendable {
         self.events = events
         self.data = data
         self.channelNames = channelNames
+        self.epochSegments = epochSegments
+        self.isSegmented = isSegmented
+        self.isAveraged = isAveraged
     }
 
     /// Returns a copy with the sample data replaced, preserving all metadata.
@@ -70,7 +100,10 @@ nonisolated struct MFFSignalData: Sendable {
             recordingStartTime: recordingStartTime,
             events: events,
             data: newData,
-            channelNames: channelNames
+            channelNames: channelNames,
+            epochSegments: epochSegments,
+            isSegmented: isSegmented,
+            isAveraged: isAveraged
         )
     }
 }
@@ -200,7 +233,20 @@ nonisolated final class MFFReader {
         let events = try parseEvents(in: packageURL)
         progress?(0.96)
         let channelNames = try parseChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
+
+        // Detect on-disk segmentation/averaging (epochs.xml + categories.xml).
+        // When present, the concatenated blocks are discrete epochs rather than
+        // one continuous recording, and the raw event tracks are in the original
+        // recording's timeline — useless against the re-segmented data. We replace
+        // them with one stimulus-locked marker per epoch.
+        let epochInfo = (try? parseOnDiskEpochs(
+            in: packageURL,
+            blockSampleCounts: signalData.blockSampleCounts,
+            samplingRate: signalData.samplingRate
+        )) ?? nil
         progress?(1)
+
+        let resolvedEvents = epochInfo.map(\.events) ?? events
 
         return MFFSignalData(
             signalURL: signalDescriptor.signalURL,
@@ -209,9 +255,43 @@ nonisolated final class MFFReader {
             samplingRate: signalData.samplingRate,
             duration: Double(signalData.totalSamples) / signalData.samplingRate,
             recordingStartTime: recordingStartTime,
-            events: events,
+            events: resolvedEvents,
             data: samples,
-            channelNames: channelNames
+            channelNames: channelNames,
+            epochSegments: epochInfo?.segments ?? [],
+            isSegmented: epochInfo != nil,
+            isAveraged: epochInfo?.isAveraged ?? false
+        )
+    }
+
+    func antiAliasTimingCorrection(
+        in packageURL: URL,
+        signalFileName: String? = nil
+    ) throws -> MFFAntiAliasTimingCorrection? {
+        let packageURL = try validatedPackageURL(from: packageURL)
+        let signalDescriptor = try selectSignal(in: packageURL, preferredSignalFile: signalFileName)
+        let acquisitionVersion = try parseAcquisitionVersion(in: packageURL)
+        let hardwareAdjustment = try parseHardwareFilterAdjustment(
+            in: packageURL,
+            infoFileName: signalDescriptor.infoFileName
+        )
+
+        var evidence = Set<MFFAntiAliasTimingCorrection.Evidence>()
+        if let acquisitionVersion, acquisitionVersionIndicatesAntiAliasCorrection(acquisitionVersion) {
+            evidence.insert(.acquisitionVersion)
+        }
+        if hardwareAdjustment.isAdjusted {
+            evidence.insert(.hardwareFilterAdjusted)
+        }
+
+        guard !evidence.isEmpty else {
+            return nil
+        }
+
+        return MFFAntiAliasTimingCorrection(
+            shiftMicroseconds: hardwareAdjustment.isAdjusted ? hardwareAdjustment.shiftMicroseconds : nil,
+            acquisitionVersion: acquisitionVersion,
+            evidence: evidence
         )
     }
 
@@ -491,6 +571,89 @@ nonisolated final class MFFReader {
         return parseMFFDate(rawValue)
     }
 
+    private func parseAcquisitionVersion(in packageURL: URL) throws -> String? {
+        let infoURL = packageURL.appendingPathComponent("info.xml")
+        guard FileManager.default.fileExists(atPath: infoURL.path) else {
+            return nil
+        }
+
+        let document = try loadXMLDocument(at: infoURL)
+        guard let root = document.rootElement(),
+              let acquisitionVersionElement = firstDescendant(named: "acquisitionVersion", in: root),
+              let rawValue = acquisitionVersionElement.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawValue.isEmpty else {
+            return nil
+        }
+
+        return rawValue
+    }
+
+    private func parseHardwareFilterAdjustment(
+        in packageURL: URL,
+        infoFileName: String
+    ) throws -> (isAdjusted: Bool, shiftMicroseconds: Int?) {
+        let infoURL = packageURL.appendingPathComponent(infoFileName)
+        guard FileManager.default.fileExists(atPath: infoURL.path) else {
+            return (false, nil)
+        }
+
+        let document = try loadXMLDocument(at: infoURL)
+        guard let root = document.rootElement(),
+              let adjustmentElement = firstDescendant(named: "hardwareFilterAdjusted", in: root) else {
+            return (false, nil)
+        }
+
+        let rawValue = adjustmentElement.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let isAdjusted = parseXMLBoolean(rawValue)
+        let shiftText = adjustmentElement.attributes?
+            .first(where: { sanitizedTagName($0.name) == "shiftMicroseconds" })?
+            .stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let shiftMicroseconds = shiftText.flatMap { Int($0) }
+
+        return (isAdjusted, shiftMicroseconds)
+    }
+
+    private func acquisitionVersionIndicatesAntiAliasCorrection(_ value: String) -> Bool {
+        guard let components = versionComponents(from: value) else {
+            return false
+        }
+        return version(components, isAtLeast: [5, 2])
+    }
+
+    private func versionComponents(from value: String) -> [Int]? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = String(trimmed.prefix { $0.isNumber || $0 == "." })
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard !prefix.isEmpty else {
+            return nil
+        }
+
+        let components = prefix.split(separator: ".").compactMap { Int($0) }
+        return components.isEmpty ? nil : components
+    }
+
+    private func version(_ lhs: [Int], isAtLeast rhs: [Int]) -> Bool {
+        let count = max(lhs.count, rhs.count)
+        for index in 0..<count {
+            let lhsComponent = index < lhs.count ? lhs[index] : 0
+            let rhsComponent = index < rhs.count ? rhs[index] : 0
+            if lhsComponent != rhsComponent {
+                return lhsComponent > rhsComponent
+            }
+        }
+        return true
+    }
+
+    private func parseXMLBoolean(_ value: String) -> Bool {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true", "1", "yes":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func parseChannelNames(in packageURL: URL, expectedCount: Int) throws -> [String]? {
         let layoutURL = packageURL.appendingPathComponent("sensorLayout.xml")
         guard expectedCount > 0, FileManager.default.fileExists(atPath: layoutURL.path) else {
@@ -740,6 +903,236 @@ nonisolated final class MFFReader {
         return nil
     }
 
+    // MARK: - On-disk epochs / averaged data
+
+    private struct OnDiskEpochInfo {
+        let segments: [EpochSegment]
+        let events: [MFFEvent]
+        let isAveraged: Bool
+    }
+
+    private struct EpochBlockRange {
+        let beginTimeMicroseconds: Double
+        let endTimeMicroseconds: Double
+        let startSample: Int
+        let endSampleExclusive: Int
+    }
+
+    private struct CategorySegment {
+        let category: String
+        let beginTimeMicroseconds: Double
+        let endTimeMicroseconds: Double
+        let eventTimeMicroseconds: Double
+        let contributingEpochCount: Int
+    }
+
+    /// Reads `epochs.xml` + `categories.xml`. When the package is segmented or
+    /// category-averaged, returns the per-epoch `EpochSegment`s mapped onto the
+    /// concatenated sample timeline, plus one stimulus-locked marker per epoch.
+    /// Returns nil for ordinary continuous recordings.
+    private func parseOnDiskEpochs(
+        in packageURL: URL,
+        blockSampleCounts: [Int],
+        samplingRate: Double
+    ) throws -> OnDiskEpochInfo? {
+        guard samplingRate > 0, !blockSampleCounts.isEmpty else { return nil }
+
+        let categorySegments = try parseCategorySegments(in: packageURL)
+        // Continuous recordings have no category segments. A lone segment that
+        // spans the whole recording (e.g. a single un-averaged "Category 1") is
+        // treated as continuous so we don't draw a spurious epoch boundary.
+        guard categorySegments.count >= 2
+            || categorySegments.contains(where: { $0.contributingEpochCount > 1 }) else {
+            return nil
+        }
+
+        let epochs = try parseEpochRanges(in: packageURL, blockSampleCounts: blockSampleCounts)
+        guard !epochs.isEmpty else { return nil }
+
+        let colorIndices = categoryColorIndices(for: categorySegments.map(\.category))
+
+        var segments: [EpochSegment] = []
+        for segment in categorySegments {
+            // Match by the segment midpoint so a segment that starts exactly on an
+            // epoch boundary isn't ambiguously assigned to the preceding epoch.
+            let midpoint = (segment.beginTimeMicroseconds + segment.endTimeMicroseconds) / 2
+            guard let epoch = epochs.first(where: {
+                midpoint >= $0.beginTimeMicroseconds && midpoint < $0.endTimeMicroseconds
+            }) else { continue }
+
+            let startSample = sampleIndex(
+                forMicroseconds: segment.beginTimeMicroseconds,
+                in: epoch,
+                samplingRate: samplingRate
+            )
+            let endExclusive = sampleIndex(
+                forMicroseconds: segment.endTimeMicroseconds,
+                in: epoch,
+                samplingRate: samplingRate
+            )
+            let stimulusSample = sampleIndex(
+                forMicroseconds: segment.eventTimeMicroseconds,
+                in: epoch,
+                samplingRate: samplingRate
+            )
+            guard endExclusive > startSample else { continue }
+
+            let endSample = endExclusive - 1
+            let stimulusOffset = min(max(stimulusSample - startSample, 0), endSample - startSample)
+            segments.append(
+                EpochSegment(
+                    startSample: startSample,
+                    endSample: endSample,
+                    stimulusOffsetSamples: stimulusOffset,
+                    category: segment.category,
+                    sourceCode: segment.category,
+                    sourceTimeSeconds: Double(startSample + stimulusOffset) / samplingRate,
+                    colorIndex: colorIndices[segment.category] ?? 0,
+                    contributingEpochCount: segment.contributingEpochCount
+                )
+            )
+        }
+
+        guard !segments.isEmpty else { return nil }
+        segments.sort { $0.startSample < $1.startSample }
+
+        let events = segments.enumerated().map { index, segment in
+            let stimulusTime = segment.sourceTimeSeconds
+            return MFFEvent(
+                id: "epoch-\(index)-\(segment.category)",
+                code: segment.category,
+                beginTimeSeconds: stimulusTime,
+                rawBeginTime: String(format: "%.6f", stimulusTime),
+                sourceFile: "Epochs"
+            )
+        }
+
+        let isAveraged = segments.allSatisfy { $0.contributingEpochCount > 1 }
+        return OnDiskEpochInfo(segments: segments, events: events, isAveraged: isAveraged)
+    }
+
+    /// Assigns a stable color index to each category in first-appearance order.
+    private func categoryColorIndices(for categories: [String]) -> [String: Int] {
+        var indices: [String: Int] = [:]
+        for category in categories where indices[category] == nil {
+            indices[category] = indices.count
+        }
+        return indices
+    }
+
+    /// Maps a microsecond timestamp within an epoch to a concatenated sample
+    /// index, clamped to the epoch's sample span.
+    private func sampleIndex(
+        forMicroseconds microseconds: Double,
+        in epoch: EpochBlockRange,
+        samplingRate: Double
+    ) -> Int {
+        let offsetSeconds = (microseconds - epoch.beginTimeMicroseconds) / 1_000_000
+        let sample = epoch.startSample + Int((offsetSeconds * samplingRate).rounded())
+        return min(max(sample, epoch.startSample), epoch.endSampleExclusive)
+    }
+
+    private func parseEpochRanges(
+        in packageURL: URL,
+        blockSampleCounts: [Int]
+    ) throws -> [EpochBlockRange] {
+        let epochsURL = packageURL.appendingPathComponent("epochs.xml")
+        guard FileManager.default.fileExists(atPath: epochsURL.path) else { return [] }
+
+        let document = try loadXMLDocument(at: epochsURL)
+        guard let root = document.rootElement() else { return [] }
+
+        // Prefix sums of samples preceding each block boundary (0-based blocks).
+        var prefix = [Int](repeating: 0, count: blockSampleCounts.count + 1)
+        for index in blockSampleCounts.indices {
+            prefix[index + 1] = prefix[index] + blockSampleCounts[index]
+        }
+
+        var ranges: [EpochBlockRange] = []
+        for epoch in descendants(named: "epoch", in: root) {
+            let children = (epoch.children ?? []).compactMap { $0 as? XMLElement }
+            func value(_ name: String) -> Double? {
+                guard let raw = children.first(where: { sanitizedTagName($0.name) == name })?
+                    .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+                return Double(raw)
+            }
+            guard let beginTime = value("beginTime"),
+                  let endTime = value("endTime"),
+                  let firstBlock = value("firstBlock").map({ Int($0) }) ?? nil,
+                  let lastBlock = value("lastBlock").map({ Int($0) }) ?? nil,
+                  firstBlock >= 1, lastBlock >= firstBlock,
+                  lastBlock <= blockSampleCounts.count else {
+                continue
+            }
+            ranges.append(
+                EpochBlockRange(
+                    beginTimeMicroseconds: beginTime,
+                    endTimeMicroseconds: endTime,
+                    startSample: prefix[firstBlock - 1],
+                    endSampleExclusive: prefix[lastBlock]
+                )
+            )
+        }
+        return ranges
+    }
+
+    private func parseCategorySegments(in packageURL: URL) throws -> [CategorySegment] {
+        let categoriesURL = packageURL.appendingPathComponent("categories.xml")
+        guard FileManager.default.fileExists(atPath: categoriesURL.path) else { return [] }
+
+        let document = try loadXMLDocument(at: categoriesURL)
+        guard let root = document.rootElement() else { return [] }
+
+        var segments: [CategorySegment] = []
+        for category in descendants(named: "cat", in: root) {
+            let categoryChildren = (category.children ?? []).compactMap { $0 as? XMLElement }
+            let name = categoryChildren.first { sanitizedTagName($0.name) == "name" }?
+                .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let categoryName = (name?.isEmpty == false) ? name! : "Category"
+
+            for seg in descendants(named: "seg", in: category) {
+                let children = (seg.children ?? []).compactMap { $0 as? XMLElement }
+                func value(_ tag: String) -> Double? {
+                    guard let raw = children.first(where: { sanitizedTagName($0.name) == tag })?
+                        .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+                    return Double(raw)
+                }
+                guard let beginTime = value("beginTime"),
+                      let endTime = value("endTime"), endTime > beginTime else {
+                    continue
+                }
+                let eventTime = value("evtBegin") ?? beginTime
+                segments.append(
+                    CategorySegment(
+                        category: categoryName,
+                        beginTimeMicroseconds: beginTime,
+                        endTimeMicroseconds: endTime,
+                        eventTimeMicroseconds: eventTime,
+                        contributingEpochCount: segmentContributingCount(in: seg)
+                    )
+                )
+            }
+        }
+        return segments
+    }
+
+    /// The `#seg` key records how many trials were averaged into a segment;
+    /// absent (value 1) for plain segmented (un-averaged) data.
+    private func segmentContributingCount(in seg: XMLElement) -> Int {
+        for key in descendants(named: "key", in: seg) {
+            let keyChildren = (key.children ?? []).compactMap { $0 as? XMLElement }
+            let code = keyChildren.first { sanitizedTagName($0.name) == "keyCode" }?
+                .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard code == "#seg" else { continue }
+            if let raw = keyChildren.first(where: { sanitizedTagName($0.name) == "data" })?
+                .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                let count = Int(raw), count > 0 {
+                return count
+            }
+        }
+        return 1
+    }
+
     private func parseSignal(
         from signalURL: URL,
         progress: (@Sendable (Double) -> Void)? = nil
@@ -754,6 +1147,7 @@ nonisolated final class MFFReader {
         var lastHeader: SignalHeader?
         var allChannels: [[Float]] = []
         var totalSamples = 0
+        var blockSampleCounts: [Int] = []
         var expectedChannelCount: Int?
         var expectedSamplingRate: Double?
         var lastReportedProgress = 0.0
@@ -802,6 +1196,7 @@ nonisolated final class MFFReader {
             }
 
             totalSamples += header.numberOfSamples
+            blockSampleCounts.append(header.numberOfSamples)
 
             if fileSize > 0 {
                 let fraction = Double(try handle.offset()) / Double(fileSize)
@@ -821,7 +1216,8 @@ nonisolated final class MFFReader {
             numberOfChannels: numberOfChannels,
             samplingRate: samplingRate,
             totalSamples: totalSamples,
-            samples: allChannels
+            samples: allChannels,
+            blockSampleCounts: blockSampleCounts
         )
     }
 
@@ -1014,4 +1410,7 @@ private struct ParsedSignal {
     let samplingRate: Double
     let totalSamples: Int
     let samples: [[Float]]
+    /// Number of samples contributed by each successive signal block, in order.
+    /// One entry per block; the boundaries delimit on-disk epochs.
+    let blockSampleCounts: [Int]
 }

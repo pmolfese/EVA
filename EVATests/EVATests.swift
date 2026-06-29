@@ -119,6 +119,34 @@ struct EVATests {
         #expect(exportedSignal.data == signal.data)
     }
 
+    @Test func mffReaderDetectsAntiAliasTimingCorrectionFromFixtureMetadata() throws {
+        let correction = try MFFReader().antiAliasTimingCorrection(in: Fixtures.url("example_2.mff"))
+        let status = try #require(correction)
+
+        #expect(status.shiftMicroseconds == 36_000)
+        #expect(status.acquisitionVersion == "5.4.1.2 (r28337)")
+        #expect(status.evidence.contains(.hardwareFilterAdjusted))
+        #expect(status.evidence.contains(.acquisitionVersion))
+    }
+
+    @Test func mffReaderFallsBackToAcquisitionVersionForAntiAliasTimingCorrection() throws {
+        let packageURL = try makeMFFPackage(acquisitionVersion: "5.2.0")
+        defer { try? FileManager.default.removeItem(at: packageURL) }
+
+        let correction = try MFFReader().antiAliasTimingCorrection(in: packageURL)
+        let status = try #require(correction)
+
+        #expect(status.shiftMicroseconds == nil)
+        #expect(status.evidence == [.acquisitionVersion])
+    }
+
+    @Test func signalImportExposesAntiAliasTimingCorrectionMetadata() throws {
+        let imported = try SignalImportReader.load(from: Fixtures.url("example_2.mff"))
+        let status = try #require(imported.antiAliasTimingCorrection)
+
+        #expect(status.loadingMessage == "Corrected for anti-alias timing bug at recording")
+    }
+
     // MARK: - MFF reader: real fixture recordings (BEL-Public/mffpy)
 
     @Test func mffReaderSelectsEEGSignalFromMultiSignalPackage() throws {
@@ -151,20 +179,36 @@ struct EVATests {
         #expect(signal.data.allSatisfy { $0.count == (signal.data.first?.count ?? -1) })
     }
 
-    private func makeMFFPackage() throws -> URL {
+    private func makeMFFPackage(
+        acquisitionVersion: String? = nil,
+        hardwareFilterAdjusted: Bool? = nil,
+        shiftMicroseconds: Int? = nil
+    ) throws -> URL {
         let packageURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("EVA-test-\(UUID().uuidString)")
             .appendingPathExtension("mff")
         try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
 
+        let acquisitionVersionXML = acquisitionVersion.map {
+            "  <acquisitionVersion>\($0)</acquisitionVersion>\n"
+        } ?? ""
         try """
 <?xml version="1.0" encoding="UTF-8"?>
 <fileInfo>
   <recordTime>2026-06-25T12:00:00.000000-04:00</recordTime>
-  <mffVersion>3</mffVersion>
+\(acquisitionVersionXML)  <mffVersion>3</mffVersion>
 </fileInfo>
 """.write(to: packageURL.appendingPathComponent("info.xml"), atomically: true, encoding: .utf8)
 
+        let hardwareFilterAdjustedXML: String
+        if let hardwareFilterAdjusted {
+            let shiftAttribute = shiftMicroseconds.map { " shiftMicroseconds=\"\($0)\"" } ?? ""
+            hardwareFilterAdjustedXML = """
+  <hardwareFilterAdjusted\(shiftAttribute)>\(hardwareFilterAdjusted ? "true" : "false")</hardwareFilterAdjusted>
+"""
+        } else {
+            hardwareFilterAdjustedXML = ""
+        }
         try """
 <?xml version="1.0" encoding="UTF-8"?>
 <dataInfo>
@@ -173,7 +217,7 @@ struct EVATests {
       <EEG/>
     </fileDataType>
   </generalInformation>
-  <calibrations>
+\(hardwareFilterAdjustedXML.isEmpty ? "" : "\(hardwareFilterAdjustedXML)\n")  <calibrations>
     <calibration>
       <beginTime>0</beginTime>
       <type>GCAL</type>
@@ -204,6 +248,107 @@ struct EVATests {
         )
 
         return packageURL
+    }
+
+    // MARK: - On-disk segmented / averaged detection
+
+    @Test func mffReaderDetectsAveragedEpochsFromCategories() throws {
+        let packageURL = try makeAveragedMFFPackage()
+        defer { try? FileManager.default.removeItem(at: packageURL) }
+
+        let signal = try MFFReader().loadSignal(from: packageURL)
+
+        #expect(signal.isSegmented)
+        #expect(signal.isAveraged)
+        #expect(signal.epochSegments.count == 2)
+
+        let a = try #require(signal.epochSegments.first(where: { $0.category == "A" }))
+        #expect(a.startSample == 0)
+        #expect(a.endSample == 3)
+        #expect(a.stimulusOffsetSamples == 1)
+        #expect(a.contributingEpochCount == 10)
+
+        let b = try #require(signal.epochSegments.first(where: { $0.category == "B" }))
+        #expect(b.startSample == 4)
+        #expect(b.endSample == 7)
+        #expect(b.stimulusOffsetSamples == 1)
+        #expect(b.contributingEpochCount == 7)
+
+        // Events come from the epochs, not the original recording's event tracks.
+        #expect(signal.events.count == 2)
+        #expect(Set(signal.events.map(\.code)) == ["A", "B"])
+        let aEvent = try #require(signal.events.first(where: { $0.code == "A" }))
+        #expect(abs(aEvent.beginTimeSeconds - 0.001) < 1e-9)
+    }
+
+    @Test func mffReaderTreatsSingleFullSpanCategoryAsContinuous() throws {
+        // One category whose single segment spans the whole recording (no
+        // averaging) must not be flagged as segmented.
+        let signal = try MFFReader().loadSignal(from: Fixtures.url("example_2.mff"))
+        #expect(!signal.isSegmented)
+        #expect(signal.epochSegments.isEmpty)
+    }
+
+    /// Builds a 2-block, 2-category averaged package (each block one epoch).
+    private func makeAveragedMFFPackage() throws -> URL {
+        let packageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EVA-avg-\(UUID().uuidString)")
+            .appendingPathExtension("mff")
+        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+
+        try """
+<?xml version="1.0" encoding="UTF-8"?>
+<fileInfo><recordTime>2026-06-25T12:00:00.000000-04:00</recordTime><mffVersion>3</mffVersion></fileInfo>
+""".write(to: packageURL.appendingPathComponent("info.xml"), atomically: true, encoding: .utf8)
+
+        try """
+<?xml version="1.0" encoding="UTF-8"?>
+<dataInfo><generalInformation><fileDataType><EEG/></fileDataType></generalInformation></dataInfo>
+""".write(to: packageURL.appendingPathComponent("info1.xml"), atomically: true, encoding: .utf8)
+
+        try """
+<?xml version="1.0" encoding="UTF-8"?>
+<epochs>
+  <epoch><beginTime>0</beginTime><endTime>4000</endTime><firstBlock>1</firstBlock><lastBlock>1</lastBlock></epoch>
+  <epoch><beginTime>4000</beginTime><endTime>8000</endTime><firstBlock>2</firstBlock><lastBlock>2</lastBlock></epoch>
+</epochs>
+""".write(to: packageURL.appendingPathComponent("epochs.xml"), atomically: true, encoding: .utf8)
+
+        try """
+<?xml version="1.0" encoding="UTF-8"?>
+<categories>
+  <cat><name>A</name><segments><seg><beginTime>0</beginTime><endTime>4000</endTime><evtBegin>1000</evtBegin>
+    <keys><key><keyCode>#seg</keyCode><data dataType="long">10</data></key></keys></seg></segments></cat>
+  <cat><name>B</name><segments><seg><beginTime>4000</beginTime><endTime>8000</endTime><evtBegin>5000</evtBegin>
+    <keys><key><keyCode>#seg</keyCode><data dataType="long">7</data></key></keys></seg></segments></cat>
+</categories>
+""".write(to: packageURL.appendingPathComponent("categories.xml"), atomically: true, encoding: .utf8)
+
+        // Two blocks of four samples each, 1000 Hz, two channels.
+        var data = Data()
+        appendSignalBlock(to: &data, samplesByChannel: [[1, 2, 3, 4], [5, 6, 7, 8]], sampleRate: 1_000)
+        appendSignalBlock(to: &data, samplesByChannel: [[9, 10, 11, 12], [13, 14, 15, 16]], sampleRate: 1_000)
+        try data.write(to: packageURL.appendingPathComponent("signal1.bin"), options: .atomic)
+
+        return packageURL
+    }
+
+    private func appendSignalBlock(to data: inout Data, samplesByChannel: [[Float]], sampleRate: Int32) {
+        let channelCount = Int32(samplesByChannel.count)
+        let sampleCount = Int32(samplesByChannel.first?.count ?? 0)
+        let headerSize = Int32(16 + Int(channelCount) * 8)
+        let blockSize = Int32(Int(channelCount) * Int(sampleCount) * MemoryLayout<Float>.size)
+        let rateDepth = (sampleRate << 8) | 32
+
+        appendInt32(1, to: &data)
+        appendInt32(headerSize, to: &data)
+        appendInt32(blockSize, to: &data)
+        appendInt32(channelCount, to: &data)
+        for _ in 0..<channelCount { appendInt32(0, to: &data) }
+        for _ in 0..<channelCount { appendInt32(rateDepth, to: &data) }
+        for channel in samplesByChannel {
+            for sample in channel { appendFloat32(sample, to: &data) }
+        }
     }
 
     private func writeSignalBinary(to url: URL, samplesByChannel: [[Float]], sampleRate: Int32) throws {

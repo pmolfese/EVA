@@ -30,6 +30,12 @@
 import Foundation
 import simd
 
+nonisolated struct SignalImportProgress: Sendable {
+    var fraction: Double
+    var message: String
+    var detail: String?
+}
+
 nonisolated struct ImportedRecording: Sendable {
     var signal: MFFSignalData
     var layout: SensorLayout?
@@ -37,6 +43,7 @@ nonisolated struct ImportedRecording: Sendable {
     /// Peripheral/physiological channels (ECG, EMG, …) shown alongside the EEG,
     /// when the source provides them. Display-only; not part of `signal`.
     var pnsSignal: MFFSignalData?
+    var antiAliasTimingCorrection: MFFAntiAliasTimingCorrection? = nil
 }
 
 nonisolated enum SignalImportError: LocalizedError {
@@ -82,7 +89,7 @@ nonisolated enum SignalImportReader {
 
     static func load(
         from url: URL,
-        progress: (@Sendable (Double, String) -> Void)? = nil
+        progress: (@Sendable (SignalImportProgress) -> Void)? = nil
     ) throws -> ImportedRecording {
         let ext = url.pathExtension.lowercased()
         let imported: ImportedRecording
@@ -90,29 +97,40 @@ nonisolated enum SignalImportReader {
         switch ext {
         case "mff":
             let reader = MFFReader()
-            progress?(0.01, "Inspecting MFF package")
+            let antiAliasTimingCorrection = try? reader.antiAliasTimingCorrection(in: url)
+            let loadDetail = antiAliasTimingCorrection?.loadingMessage
+            let report: (Double, String) -> Void = { fraction, message in
+                progress?(SignalImportProgress(
+                    fraction: fraction,
+                    message: message,
+                    detail: loadDetail
+                ))
+            }
+
+            report(0.01, "Inspecting MFF package")
             let signal = try reader.loadSignal(from: url) { fraction in
-                progress?(0.02 + 0.76 * fraction, "Reading EEG channels")
+                report(0.02 + 0.76 * fraction, "Reading EEG channels")
             }
-            progress?(0.80, "Loading sensor layout")
+            report(0.80, "Loading sensor layout")
             let pnsSignal = try? reader.loadPNSSignal(from: url) { fraction in
-                progress?(0.82 + 0.14 * fraction, "Reading PNS channels")
+                report(0.82 + 0.14 * fraction, "Reading PNS channels")
             }
-            progress?(0.96, "Loading electrode locations")
+            report(0.96, "Loading electrode locations")
             imported = ImportedRecording(
                 signal: signal,
                 layout: SensorLayout.load(fromPackageContaining: signal.signalURL),
                 geometry: ElectrodeGeometry.load(fromPackageContaining: signal.signalURL),
-                pnsSignal: pnsSignal
+                pnsSignal: pnsSignal,
+                antiAliasTimingCorrection: antiAliasTimingCorrection
             )
         case "vhdr", "vmrk", "eeg":
-            progress?(0.05, "Reading BrainVision recording")
+            progress?(SignalImportProgress(fraction: 0.05, message: "Reading BrainVision recording", detail: nil))
             imported = try BrainVisionSignalReader.load(from: url)
         case "edf":
-            progress?(0.05, "Reading EDF recording")
+            progress?(SignalImportProgress(fraction: 0.05, message: "Reading EDF recording", detail: nil))
             imported = try EDFSignalReader.load(from: url)
         case "lay", "dat":
-            progress?(0.05, "Reading Persyst recording")
+            progress?(SignalImportProgress(fraction: 0.05, message: "Reading Persyst recording", detail: nil))
             imported = try PersystSignalReader.load(from: url)
         case "set", "fdt":
             throw SignalImportError.unsupportedVariant(
@@ -120,7 +138,7 @@ nonisolated enum SignalImportReader {
                 "EEGLAB import is scaffolded through MNE-Python, but it is disabled until we have representative .set/.fdt files to validate it."
             )
         case "avr", "mul":
-            progress?(0.05, "Reading BESA recording")
+            progress?(SignalImportProgress(fraction: 0.05, message: "Reading BESA recording", detail: nil))
             imported = try BESAASCIIReader.load(from: url)
         case "generic":
             throw SignalImportError.unsupportedVariant(
@@ -136,9 +154,17 @@ nonisolated enum SignalImportReader {
             throw SignalImportError.unsupportedFormat(url)
         }
 
-        progress?(0.98, "Checking electrode sidecars")
+        progress?(SignalImportProgress(
+            fraction: 0.98,
+            message: "Checking electrode sidecars",
+            detail: imported.antiAliasTimingCorrection?.loadingMessage
+        ))
         let withLocations = attachLocationSidecar(to: imported)
-        progress?(1, "Loaded")
+        progress?(SignalImportProgress(
+            fraction: 1,
+            message: "Loaded",
+            detail: withLocations.antiAliasTimingCorrection?.loadingMessage
+        ))
         return withLocations
     }
 
@@ -158,7 +184,8 @@ nonisolated enum SignalImportReader {
             signal: imported.signal,
             layout: imported.layout ?? locations.layout,
             geometry: imported.geometry ?? locations.geometry,
-            pnsSignal: imported.pnsSignal
+            pnsSignal: imported.pnsSignal,
+            antiAliasTimingCorrection: imported.antiAliasTimingCorrection
         )
     }
 }
