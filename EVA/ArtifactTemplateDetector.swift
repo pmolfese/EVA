@@ -474,6 +474,8 @@ nonisolated enum ArtifactTemplateDetector {
         let threshold = configuration.matchThreshold
 
         var chunkHits = [[(sample: Int, score: Float)]](repeating: [], count: coreCount)
+        nonisolated(unsafe) let chunkHitsPtr = UnsafeMutablePointer<[(sample: Int, score: Float)]>.allocate(capacity: coreCount)
+        chunkHitsPtr.initialize(from: &chunkHits, count: coreCount)
         let lock = NSLock()
         var globalCompleted = 0
 
@@ -484,7 +486,6 @@ nonisolated enum ArtifactTemplateDetector {
 
             var localHits: [(sample: Int, score: Float)] = []
             var window = [Float](repeating: 0, count: channelIndices.count)
-            let reportEvery = max((endD - startD) / 5, 1)
 
             for dSample in startD..<endD {
                 let sample = dSample * decimation
@@ -504,16 +505,17 @@ nonisolated enum ArtifactTemplateDetector {
                     }
                     if Double(score) >= threshold { localHits.append((sample, score)) }
                 }
-                if (dSample - startD) % reportEvery == 0 {
-                    lock.lock()
-                    globalCompleted += reportEvery
-                    let c = min(globalCompleted * decimation, sampleCount)
-                    lock.unlock()
-                    progress?(c, sampleCount)
-                }
+                lock.lock()
+                globalCompleted += 1
+                let c = min(globalCompleted * decimation, sampleCount)
+                lock.unlock()
+                progress?(c, sampleCount)
             }
-            chunkHits[chunkIdx] = localHits
+            chunkHitsPtr[chunkIdx] = localHits
         }
+        chunkHits = Array(UnsafeBufferPointer(start: chunkHitsPtr, count: coreCount))
+        chunkHitsPtr.deinitialize(count: coreCount)
+        chunkHitsPtr.deallocate()
         progress?(sampleCount, sampleCount)
 
         var hits = chunkHits.flatMap { $0 }
@@ -664,11 +666,12 @@ nonisolated enum ArtifactTemplateDetector {
         let chunkSize = max((totalCandidates + coreCount - 1) / coreCount, 1)
 
         var chunkHits = [[(sample: Int, score: Float)]](repeating: [], count: coreCount)
+        nonisolated(unsafe) let chunkHitsPtr2 = UnsafeMutablePointer<[(sample: Int, score: Float)]>.allocate(capacity: coreCount)
+        chunkHitsPtr2.initialize(from: &chunkHits, count: coreCount)
         let metric = configuration.topographyMetric
         let threshold = configuration.matchThreshold
         let lock = NSLock()
         var globalCompleted = 0
-        let reportEvery = max(totalCandidates / 20, 1)
 
         evaConcurrentPerform(iterations: coreCount) { chunkIdx in
             let startIdx = chunkIdx * chunkSize
@@ -718,16 +721,17 @@ nonisolated enum ArtifactTemplateDetector {
                     localHits.append((sample: centerSample, score: bestScore))
                 }
 
-                if (localIdx - startIdx) % reportEvery == 0 {
-                    lock.lock()
-                    globalCompleted += reportEvery
-                    let c = min(globalCompleted * sampleCount / totalCandidates, sampleCount)
-                    lock.unlock()
-                    progress?(c, sampleCount)
-                }
+                lock.lock()
+                globalCompleted += 1
+                let c = min(globalCompleted * sampleCount / totalCandidates, sampleCount)
+                lock.unlock()
+                progress?(c, sampleCount)
             }
-            chunkHits[chunkIdx] = localHits
+            chunkHitsPtr2[chunkIdx] = localHits
         }
+        chunkHits = Array(UnsafeBufferPointer(start: chunkHitsPtr2, count: coreCount))
+        chunkHitsPtr2.deinitialize(count: coreCount)
+        chunkHitsPtr2.deallocate()
         progress?(sampleCount, sampleCount)
 
         var hits = chunkHits.flatMap { $0 }

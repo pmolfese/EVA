@@ -542,8 +542,10 @@ nonisolated enum ArtifactCleaner {
                 guard let range = maybeRange else { continue }
 
                 var corrections = [OBSCorrection?](repeating: nil, count: basisCount)
+                nonisolated(unsafe) let correctionsPtr = UnsafeMutablePointer<OBSCorrection?>.allocate(capacity: basisCount)
+                correctionsPtr.initialize(from: &corrections, count: basisCount)
                 evaConcurrentPerform(iterations: basisCount) { basisIndex in
-                    corrections[basisIndex] = fittedCorrection(
+                    correctionsPtr[basisIndex] = fittedCorrection(
                         basis: channelBases[basisIndex].basis,
                         from: channelSnapshot[basisIndex],
                         in: range,
@@ -552,6 +554,9 @@ nonisolated enum ArtifactCleaner {
                         edgeTaperSamples: edgeTaperSamples
                     )
                 }
+                corrections = Array(UnsafeBufferPointer(start: correctionsPtr, count: basisCount))
+                correctionsPtr.deinitialize(count: basisCount)
+                correctionsPtr.deallocate()
                 for basisIndex in channelBases.indices {
                     guard let correction = corrections[basisIndex] else { continue }
                     let channel = channelBases[basisIndex].channel
@@ -738,14 +743,19 @@ nonisolated enum ArtifactCleaner {
                 )
                 // Compute tapered corrections concurrently, apply serially.
                 var smoothed = [OBSCorrection?](repeating: nil, count: channelCount)
+                nonisolated(unsafe) let smoothedPtr = UnsafeMutablePointer<OBSCorrection?>.allocate(capacity: channelCount)
+                smoothedPtr.initialize(from: &smoothed, count: channelCount)
                 evaConcurrentPerform(iterations: channelCount) { offset in
-                    smoothed[offset] = smoothedWindowCorrection(
+                    smoothedPtr[offset] = smoothedWindowCorrection(
                         rawCorrections[offset],
                         taper: taper,
                         preservesLocalBaseline: preservesBaseline,
                         edgeTaperSamples: edgeTaperSamples
                     )
                 }
+                smoothed = Array(UnsafeBufferPointer(start: smoothedPtr, count: channelCount))
+                smoothedPtr.deinitialize(count: channelCount)
+                smoothedPtr.deallocate()
                 for (offset, channel) in channels.enumerated() {
                     guard let correction = smoothed[offset] else { continue }
                     for sampleOffset in 0..<range.count {

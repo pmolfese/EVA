@@ -112,8 +112,14 @@ nonisolated enum SignalImportReader {
                 report(0.02 + 0.76 * fraction, "Reading EEG channels")
             }
             report(0.80, "Loading sensor layout")
-            let pnsSignal = try? reader.loadPNSSignal(from: url) { fraction in
-                report(0.82 + 0.14 * fraction, "Reading PNS channels")
+            let pnsSignal: MFFSignalData?
+            do {
+                pnsSignal = try reader.loadPNSSignal(from: url) { fraction in
+                    report(0.82 + 0.14 * fraction, "Reading PNS channels")
+                }
+            } catch {
+                pnsSignal = nil
+                report(0.96, "PNS channels could not be loaded: \(error.localizedDescription)")
             }
             report(0.96, "Loading electrode locations")
             imported = ImportedRecording(

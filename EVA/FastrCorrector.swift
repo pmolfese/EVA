@@ -174,6 +174,9 @@ struct FastrCorrector {
         let channel0Up = DSP.interp(channels[0].map(Double.init), factor: L)
         let alignedMarkers = aligner.align(dataUp: channel0Up)
 
+        // Use an explicitly managed buffer so concurrent writes to distinct slots are safe.
+        nonisolated(unsafe) let resultPtr = UnsafeMutablePointer<[Float]>.allocate(capacity: channels.count)
+        resultPtr.initialize(from: &result, count: channels.count)
         evaConcurrentPerform(iterations: channels.count) { c in
             let raw = channels[c].map(Double.init)
             let corrected = correctChannel(
@@ -190,7 +193,7 @@ struct FastrCorrector {
                 obsHPF: obsHPF,
                 config: config, samplingRate: samplingRate
             )
-            result[c] = corrected.map { Float($0) }
+            resultPtr[c] = corrected.map { Float($0) }
 
             if let progress {
                 progressLock.lock()
@@ -200,6 +203,9 @@ struct FastrCorrector {
                 progress(fraction)
             }
         }
+        result = Array(UnsafeBufferPointer(start: resultPtr, count: channels.count))
+        resultPtr.deinitialize(count: channels.count)
+        resultPtr.deallocate()
         return result
     }
 
@@ -377,8 +383,9 @@ struct FastrCorrector {
         var count = 0
         for idx in indices {
             guard let e = epoch(idx) else { continue }
-            let arr = Array(e)
-            vDSP_vaddD(avg, 1, arr, 1, &avg, 1, vlen)
+            e.withUnsafeBufferPointer { eBuf in
+                vDSP_vaddD(avg, 1, eBuf.baseAddress!, 1, &avg, 1, vlen)
+            }
             count += 1
         }
         guard count > 0 else { return nil }
@@ -619,13 +626,14 @@ struct FastrCorrector {
             let prefJ = prefix[j + 1]
             for i in 0..<n {
                 let temporal = Double(abs(i - j) + 1)
-                let cumMot = i <= j ? -(prefJ - prefix[i]) : (prefix[i + 1] - prefJ)
+                let cumMot = i <= j ? (prefJ - prefix[i]) : (prefix[i + 1] - prefJ)
                 dist[i] = speed[i] > 0 ? .infinity : temporal + motionScaling * cumMot
             }
             // Partial selection: find k smallest finite distances without a full sort.
             neighborsPtr[j] = kSmallestIndices(dist, k: k)
         }
         neighbors = Array(UnsafeBufferPointer(start: neighborsPtr, count: n))
+        neighborsPtr.deinitialize(count: n)
         neighborsPtr.deallocate()
         return neighbors
     }
@@ -660,7 +668,16 @@ struct FastrCorrector {
     private nonisolated static func partialSort(_ indices: inout [Int], vals: inout [Double], k: Int) {
         var lo = 0, hi = indices.count - 1
         while lo < hi {
-            // Median-of-three pivot
+            // Median-of-three requires at least 3 elements; fall back to insertion sort for small ranges.
+            if hi - lo < 3 {
+                if vals[lo] > vals[hi] { indices.swapAt(lo, hi); vals.swapAt(lo, hi) }
+                if hi - lo == 2 {
+                    let m = lo + 1
+                    if vals[lo] > vals[m] { indices.swapAt(lo, m); vals.swapAt(lo, m) }
+                    if vals[m]  > vals[hi] { indices.swapAt(m, hi); vals.swapAt(m, hi) }
+                }
+                break
+            }
             let mid = (lo + hi) / 2
             if vals[lo] > vals[mid] { indices.swapAt(lo, mid); vals.swapAt(lo, mid) }
             if vals[lo] > vals[hi]  { indices.swapAt(lo, hi);  vals.swapAt(lo, hi)  }

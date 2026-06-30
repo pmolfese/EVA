@@ -939,8 +939,7 @@ struct WaveformView: View {
                 }
                 if detectsBCGArtifacts {
                     Button("Turn Off BCG Detection") {
-                        detectsBCGArtifacts = false
-                        artifactEvents = artifactEvents.filter { $0.sourceFile != BCGDetector.sourceFile }
+                        disableBCGDetection()
                     }
                 }
 
@@ -8580,11 +8579,7 @@ struct WaveformView: View {
             HStack {
                 if detectsBCGArtifacts {
                     Button("Disable BCG Detection", role: .destructive) {
-                        detectsBCGArtifacts = false
-                        artifactEvents = artifactEvents.filter { $0.sourceFile != BCGDetector.sourceFile }
-                        definedArtifacts.removeAll { $0.id == bcgDefinedArtifactID }
-                        bcgRefinedTemplate = nil
-                        bcgRefinedKeptCount = nil
+                        disableBCGDetection()
                         showsBCGDetectionSheet = false
                     }
                 }
@@ -8773,6 +8768,14 @@ struct WaveformView: View {
                 .help("Typical BCG onset lags the R-wave by 200–400 ms. Start at 300 ms and adjust to align the BCG artifact peak with detected events.")
             }
         }
+    }
+
+    private func disableBCGDetection() {
+        detectsBCGArtifacts = false
+        artifactEvents = artifactEvents.filter { $0.sourceFile != BCGDetector.sourceFile }
+        definedArtifacts.removeAll { $0.id == bcgDefinedArtifactID }
+        bcgRefinedTemplate = nil
+        bcgRefinedKeptCount = nil
     }
 
     private func runBCGDetection(signal: MFFSignalData, selection: ClosedRange<Int>?) async {
@@ -11721,10 +11724,11 @@ private struct PSABuildResult {
         for category in orderedCategories {
             guard let segs = groupedSegments[category]?.sorted(by: { $0.startSample < $1.startSample }),
                   let representative = segs.first else { continue }
+            let minChannelLength = signal.data.map(\.count).min() ?? 0
             let validSegs = segs.filter {
                 $0.endSample - $0.startSample + 1 == epochLength
                     && $0.startSample >= 0
-                    && $0.endSample < (signal.data.first?.count ?? 0)
+                    && $0.endSample < minChannelLength
             }
             guard !validSegs.isEmpty else { continue }
 
@@ -11883,8 +11887,8 @@ private struct PSABuildJob: Sendable {
                 }
             }
 
+            guard signal.data.indices.allSatisfy({ signal.data[$0].count >= endSample }) else { continue }
             for channelIndex in signal.data.indices {
-                guard signal.data[channelIndex].count >= endSample else { continue }
                 epochedData[channelIndex].append(contentsOf: signal.data[channelIndex][startSample..<endSample])
             }
 

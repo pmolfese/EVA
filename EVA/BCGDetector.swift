@@ -141,6 +141,7 @@ nonisolated enum BCGDetector {
 
         // Optionally whiten by background covariance.
         let pcaInput: [[Float]]
+        var whiteningMatrix: [Float] = []
         if spatialWhiten {
             let bgRange: Range<Int>
             if pcaRangeForWhitening.count < nAll / 2 {
@@ -161,7 +162,9 @@ nonisolated enum BCGDetector {
                 vDSP_vsadd(slice, 1, &neg, &shifted, 1, vDSP_Length(slice.count))
                 return shifted
             }
-            pcaInput = applyWhitening(exemplar: exemplar, background: bgData)
+            let result = applyWhitening(exemplar: exemplar, background: bgData)
+            pcaInput = result.whitened
+            whiteningMatrix = result.W
         } else {
             pcaInput = exemplar
         }
@@ -169,13 +172,29 @@ nonisolated enum BCGDetector {
         // Compute top nComp eigenvectors from exemplar covariance.
         let eigvecs = topEigenvectors(exemplar: pcaInput, k: nComp)
 
+        // When whitening is active, eigvecs live in the whitened space; apply W to the
+        // full recording so the projection is in the same space as the eigenvectors.
+        let projChannels: [[Float]]
+        if spatialWhiten, whiteningMatrix.count == nCh * nCh {
+            let chFlat = channels.flatMap { $0 }
+            var wChFlat = [Float](repeating: 0, count: nCh * nAll)
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        Int32(nCh), Int32(nAll), Int32(nCh),
+                        1.0, whiteningMatrix, Int32(nCh),
+                        chFlat, Int32(nAll),
+                        0.0, &wChFlat, Int32(nAll))
+            projChannels = (0..<nCh).map { i in Array(wChFlat[(i * nAll)..<((i + 1) * nAll)]) }
+        } else {
+            projChannels = channels
+        }
+
         // Project full recording onto each component and combine via RSS.
         var combinedScore = [Float](repeating: 0, count: nAll)
         for vec in eigvecs {
             var proj = [Float](repeating: 0, count: nAll)
-            for i in channels.indices {
+            for i in projChannels.indices {
                 var w = vec[i]
-                vDSP_vsma(channels[i], 1, &w, proj, 1, &proj, 1, vDSP_Length(nAll))
+                vDSP_vsma(projChannels[i], 1, &w, proj, 1, &proj, 1, vDSP_Length(nAll))
             }
             // score += proj²
             vDSP.add(multiplication: (proj, proj), combinedScore, result: &combinedScore)
@@ -543,10 +562,11 @@ nonisolated enum BCGDetector {
     ///
     /// Whitening matrix: W = V * diag(1 / sqrt(λ + ε)) * V^T
     /// Applied to each frame of the exemplar: X_white = W * X
-    private static func applyWhitening(exemplar: [[Float]], background: [[Float]]) -> [[Float]] {
+    /// Returns the whitened exemplar and the nCh×nCh whitening matrix W (row-major).
+    private static func applyWhitening(exemplar: [[Float]], background: [[Float]]) -> (whitened: [[Float]], W: [Float]) {
         let nCh = exemplar.count
         guard nCh > 1, let bgFirst = background.first, bgFirst.count > nCh else {
-            return exemplar
+            return (exemplar, [])
         }
         let nT_bg = bgFirst.count
         let bgFlat = background.flatMap { $0 }
@@ -572,28 +592,30 @@ nonisolated enum BCGDetector {
         var work  = [Float](repeating: 0, count: Int(lwork))
         var info  = Int32(0)
         ssyev_(&jobz, &uplo, &n32, &bgCov, &lda, &eigenvalues, &work, &lwork, &info)
-        guard info == 0 else { return exemplar }   // fallback: no whitening
+        guard info == 0 else { return (exemplar, []) }   // fallback: no whitening
 
-        // bgCov now contains eigenvectors as columns (LAPACK convention).
-        // Build W = V * diag(1/sqrt(λ+ε)) * V^T
+        // ssyev_ (Fortran column-major) returns eigenvectors as its columns; viewed
+        // from Swift (row-major) those columns become rows: bgCov[i, :] = eigenvector i.
+        // Build W = V * diag(1/sqrt(λ+ε)) * V^T where V has eigenvectors as columns.
+        // With eigenvectors as rows E: V = E^T, so W = E^T * diag(invSqrtLambda) * E.
         let eps: Float = max(eigenvalues.max() ?? 1, 1e-6) * 1e-3
         var invSqrtLambda = eigenvalues.map { 1.0 / sqrt(max($0, eps)) }
-        // Scale columns of V by 1/sqrt(λ): Vscaled[:,i] *= 1/sqrt(λ_i)
-        var Vscaled = bgCov   // copy; bgCov columns are eigenvectors after ssyev
+        // Scale row i of bgCov by 1/sqrt(λ_i): Vscaled[i, :] = invSqrtLambda[i] * E[i, :]
+        var Vscaled = bgCov
         Vscaled.withUnsafeMutableBufferPointer { buf in
             for i in 0 ..< nCh {
                 var s = invSqrtLambda[i]
-                // Column i lives at indices i, i+nCh, i+2*nCh, … (stride = nCh)
-                vDSP_vsmul(buf.baseAddress! + i, nCh, &s,
-                           buf.baseAddress! + i, nCh, vDSP_Length(nCh))
+                // Row i is contiguous at buf + i*nCh with stride 1.
+                vDSP_vsmul(buf.baseAddress! + i * nCh, 1, &s,
+                           buf.baseAddress! + i * nCh, 1, vDSP_Length(nCh))
             }
         }
-        // W = Vscaled * V^T  (both derived from bgCov)
+        // W = E^T * Vscaled  (= V * diag(invSqrtLambda) * V^T)
         var W = [Float](repeating: 0, count: nCh * nCh)
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+        cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                     Int32(nCh), Int32(nCh), Int32(nCh),
-                    1.0, Vscaled, Int32(nCh),
-                    bgCov, Int32(nCh),
+                    1.0, bgCov, Int32(nCh),
+                    Vscaled, Int32(nCh),
                     0.0, &W, Int32(nCh))
 
         // Apply W to exemplar: each time slice is a column vector of length nCh.
@@ -608,9 +630,10 @@ nonisolated enum BCGDetector {
                     0.0, &resultFlat, Int32(nT_ex))
 
         // Unpack back into [[Float]] (nCh × nT_ex).
-        return (0 ..< nCh).map { ch in
+        let whitened = (0 ..< nCh).map { ch in
             Array(resultFlat[(ch * nT_ex) ..< ((ch + 1) * nT_ex)])
         }
+        return (whitened, W)
     }
 
     // MARK: - Signal normalisation

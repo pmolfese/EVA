@@ -198,7 +198,9 @@ nonisolated enum DSP {
         xPad.replaceSubrange((nb - 1)..<(nb - 1 + nx), with: x)
         var bFlip = b  // b[0] is the most-recent tap; vDSP_conv uses time-reversed filter
         var y = [Double](repeating: 0, count: nx)
-        vDSP_convD(xPad, 1, &bFlip + (nb - 1), -1, &y, 1, vDSP_Length(nx), vDSP_Length(nb))
+        bFlip.withUnsafeBufferPointer { bBuf in
+            vDSP_convD(xPad, 1, bBuf.baseAddress! + (nb - 1), -1, &y, 1, vDSP_Length(nx), vDSP_Length(nb))
+        }
         return y
     }
 
@@ -210,18 +212,17 @@ nonisolated enum DSP {
         let nx = x.count
         guard nb > 0, nx > 0 else { return x }
         let delay = (nb - 1) / 2
-        // vDSP_conv computes the full correlation/convolution.
-        // Signal must be padded to length nx + nb - 1 for a full linear convolution.
-        // vDSP_conv with kernal flipped gives convolution; flip b once here.
-        let nFull = nx + nb - 1
-        var xPad = [Double](repeating: 0, count: nFull)
-        xPad.replaceSubrange(0..<nx, with: x)
+        // vDSP_convD with output length N and filter length M requires signal length N+M-1.
+        // Placing x at offset `delay` in the zero-padded buffer aligns the convolution
+        // center with output index 0, giving a zero-phase same-length result.
+        var xPad = [Double](repeating: 0, count: nx + nb - 1)
+        xPad.replaceSubrange(delay..<(delay + nx), with: x)
         var bFlip = b.reversed() as [Double]
-        var full = [Double](repeating: 0, count: nFull)
-        // vDSP_conv: __vDSP_conv(signal, 1, filter, 1, result, 1, N, M)
-        // result[n] = sum_k signal[n+k] * filter[k], so we flip b to get convolution.
-        vDSP_convD(xPad, 1, &bFlip + (nb - 1), -1, &full, 1, vDSP_Length(nFull), vDSP_Length(nb))
-        return Array(full[delay..<(delay + nx)])
+        var y = [Double](repeating: 0, count: nx)
+        bFlip.withUnsafeBufferPointer { bBuf in
+            vDSP_convD(xPad, 1, bBuf.baseAddress! + (nb - 1), -1, &y, 1, vDSP_Length(nx), vDSP_Length(nb))
+        }
+        return y
     }
 
     /// Zero-phase forward-backward FIR filtering, approximating MATLAB
@@ -305,21 +306,9 @@ nonisolated enum DSP {
         guard m > n else { return (data, y) }
         for e in n..<m {
             ring[head] = reference[e]
-            // Unwrap ring into rLinear in most-recent-first order.
-            let tail = (head + 1) % taps        // oldest sample
-            let fromHead = taps - tail           // samples from head to end-of-buffer
-            rLinear.withUnsafeMutableBufferPointer { dst in
-                ring.withUnsafeBufferPointer { src in
-                    // [head..end] → dst[0..]
-                    dst.baseAddress!.initialize(from: src.baseAddress! + tail + fromHead - fromHead,
-                                               count: 0)
-                    // Simpler: two memcpy segments
-                    dst.baseAddress!.assign(from: src.baseAddress! + head, count: fromHead)
-                    if tail > 0 {
-                        (dst.baseAddress! + fromHead).assign(from: src.baseAddress!, count: tail)
-                    }
-                }
-            }
+            // Unwrap ring into rLinear in most-recent-first order so that
+            // rLinear[k] = the sample k steps back from the current sample.
+            for k in 0..<taps { rLinear[k] = ring[(head - k + taps) % taps] }
             var yi = 0.0
             vDSP_dotprD(w, 1, rLinear, 1, &yi, vlen)
             let err  = data[e] - yi

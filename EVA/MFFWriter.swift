@@ -124,7 +124,13 @@ nonisolated enum MFFWriter {
         to packageURL: URL
     ) throws {
         let channelCount = pns.numberOfChannels
+        guard channelCount > 0, !pns.data.isEmpty else {
+            throw MFFWriterError.emptySignal
+        }
         let sampleCount = pns.data[0].count
+        guard sampleCount > 0, pns.data.allSatisfy({ $0.count == sampleCount }) else {
+            throw MFFWriterError.inconsistentChannelLengths
+        }
 
         var data = Data()
         let blockSize = channelCount * sampleCount * MemoryLayout<Float>.size
