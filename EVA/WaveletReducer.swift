@@ -193,13 +193,13 @@ nonisolated struct WaveletReductionCandidate: Identifiable, Sendable {
 nonisolated enum WaveletReducer {
     static let maximumLevelCount = 12
 
-    /// Default worker count: half the machine's cores, at least one.
+    /// Default worker count: half the usable cores, at least one.
     static var defaultCoreCount: Int {
-        max(ProcessInfo.processInfo.activeProcessorCount / 2, 1)
+        max(evaMaxWorkers / 2, 1)
     }
 
     static var maximumCoreCount: Int {
-        max(ProcessInfo.processInfo.activeProcessorCount, 1)
+        evaMaxWorkers
     }
 
     /// Reduces the requested channels and returns the cleaned signal, the removed
@@ -267,7 +267,7 @@ nonisolated enum WaveletReducer {
         } else {
             let lock = NSLock()
             var completed = 0
-            DispatchQueue.concurrentPerform(iterations: workerCount) { worker in
+            evaConcurrentPerform(iterations: workerCount) { worker in
                 var offset = worker
                 while offset < indices.count {
                     let channelIndex = indices[offset]

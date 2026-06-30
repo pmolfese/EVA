@@ -68,6 +68,7 @@ nonisolated enum MFFWriterError: LocalizedError {
 nonisolated enum MFFWriter {
     static func write(
         signal: MFFSignalData,
+        pnsSignal: MFFSignalData? = nil,
         segments: [EpochSegment],
         kind: MFFExportKind,
         to outputURL: URL
@@ -98,13 +99,116 @@ nonisolated enum MFFWriter {
             try writeEpochsXML(blocks: blocks, sampleRate: sampleRate, to: packageURL)
             try writeEventsXML(signal: signal, blocks: blocks, sampleRate: sampleRate, kind: kind, to: packageURL)
             try writeSensorLayoutXML(signal: signal, to: packageURL)
-            // Carry over the original electrode coordinates (3-D montage) verbatim.
             copyOriginalFileIfPresent(named: "coordinates.xml", sourceSignalURL: signal.signalURL, to: packageURL)
             try writeSubjectXML(packageURL: packageURL)
+
+            if let pns = pnsSignal,
+               pns.numberOfChannels > 0,
+               let firstChannel = pns.data.first, !firstChannel.isEmpty {
+                let pnsSampleRate = try integerSamplingRate(pns.samplingRate)
+                try writePNSBinary(pns: pns, sampleRate: pnsSampleRate, to: packageURL)
+                try writePNSInfoXML(pns: pns, to: packageURL)
+                try writePNSSetXML(pns: pns, to: packageURL)
+            }
         } catch {
             try? FileManager.default.removeItem(at: packageURL)
             throw error
         }
+    }
+
+    // MARK: - PNS export
+
+    private static func writePNSBinary(
+        pns: MFFSignalData,
+        sampleRate: Int,
+        to packageURL: URL
+    ) throws {
+        let channelCount = pns.numberOfChannels
+        let sampleCount = pns.data[0].count
+
+        var data = Data()
+        let blockSize = channelCount * sampleCount * MemoryLayout<Float>.size
+        let headerSize = 20 + channelCount * 8
+        appendInt32(1, to: &data)
+        appendInt32(headerSize, to: &data)
+        appendInt32(blockSize, to: &data)
+        appendInt32(channelCount, to: &data)
+
+        for channel in 0..<channelCount {
+            appendInt32(channel * sampleCount * MemoryLayout<Float>.size, to: &data)
+        }
+
+        let rateDepth = (sampleRate << 8) + 32
+        for _ in 0..<channelCount {
+            appendInt32(rateDepth, to: &data)
+        }
+
+        appendInt32(0, to: &data)
+
+        for channel in 0..<channelCount {
+            for sample in 0..<sampleCount {
+                appendFloat32(pns.data[channel][sample], to: &data)
+            }
+        }
+
+        try data.write(to: packageURL.appendingPathComponent("signal2.bin"), options: .atomic)
+    }
+
+    private static func writePNSInfoXML(pns: MFFSignalData, to packageURL: URL) throws {
+        // Strip calibrations just like writeSignalInfoXML — EVA stores calibrated
+        // physical values, so carrying GCAL/ICAL would double-scale on re-import.
+        if let original = originalPNSInfoData(sourceSignalURL: pns.signalURL) {
+            let destination = packageURL.appendingPathComponent("info2.xml")
+            try? FileManager.default.removeItem(at: destination)
+            try original.write(to: destination, options: .atomic)
+            return
+        }
+
+        let xml = """
+<?xml version="1.0" encoding="UTF-8"?>
+<dataInfo>
+  <generalInformation>
+    <fileDataType>
+      <PNSData/>
+    </fileDataType>
+  </generalInformation>
+</dataInfo>
+"""
+        try xml.write(to: packageURL.appendingPathComponent("info2.xml"), atomically: true, encoding: .utf8)
+    }
+
+    /// Copies and strips calibrations from the source info2.xml when the PNS
+    /// signal came from an existing MFF file (round-trip). Returns nil for
+    /// synthetic-only signals whose signalURL points at the package root.
+    private static func originalPNSInfoData(sourceSignalURL: URL) -> Data? {
+        let infoURL = sourceSignalURL.deletingLastPathComponent().appendingPathComponent("info2.xml")
+        guard FileManager.default.fileExists(atPath: infoURL.path),
+              let data = try? Data(contentsOf: infoURL),
+              let document = try? XMLDocument(data: data, options: [.documentTidyXML]),
+              let root = document.rootElement() else { return nil }
+        removeDescendants(named: "calibrations", from: root)
+        return try? document.xmlData(options: [.nodePrettyPrint])
+    }
+
+    private static func writePNSSetXML(pns: MFFSignalData, to packageURL: URL) throws {
+        let names = pns.channelNames
+        var body = ""
+        for index in 0..<pns.numberOfChannels {
+            let name = (names != nil && index < names!.count) ? names![index] : "PNS \(index + 1)"
+            body += """
+  <sensor>
+    <number>\(index)</number>
+    <name>\(xmlEscape(name))</name>
+    <type>PNS</type>
+  </sensor>
+"""
+        }
+        let xml = """
+<?xml version="1.0" encoding="UTF-8"?>
+<PNSSet xmlns="http://www.egi.com/pns_mff">
+\(body)</PNSSet>
+"""
+        try xml.write(to: packageURL.appendingPathComponent("pnsSet.xml"), atomically: true, encoding: .utf8)
     }
 
     private static func normalizedMFFURL(_ url: URL) -> URL {

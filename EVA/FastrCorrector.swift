@@ -174,7 +174,7 @@ struct FastrCorrector {
         let channel0Up = DSP.interp(channels[0].map(Double.init), factor: L)
         let alignedMarkers = aligner.align(dataUp: channel0Up)
 
-        DispatchQueue.concurrentPerform(iterations: channels.count) { c in
+        evaConcurrentPerform(iterations: channels.count) { c in
             let raw = channels[c].map(Double.init)
             let corrected = correctChannel(
                 raw: raw,
@@ -372,17 +372,18 @@ struct FastrCorrector {
 
         guard let first = epoch(indices.first ?? s) else { return nil }
         let length = first.count
+        let vlen = vDSP_Length(length)
         var avg = [Double](repeating: 0, count: length)
         var count = 0
         for idx in indices {
             guard let e = epoch(idx) else { continue }
             let arr = Array(e)
-            for i in 0..<length { avg[i] += arr[i] }
+            vDSP_vaddD(avg, 1, arr, 1, &avg, 1, vlen)
             count += 1
         }
         guard count > 0 else { return nil }
-        let inv = 1.0 / Double(count)
-        for i in 0..<length { avg[i] *= inv }
+        var inv = 1.0 / Double(count)
+        vDSP_vsmulD(avg, 1, &inv, &avg, 1, vlen)
         return avg
     }
 
@@ -601,25 +602,81 @@ struct FastrCorrector {
         guard let minPositive = positives.min() else { return nil }
         let motionScaling = Double(k) / minPositive
 
+        // Prefix sums of speed so cumulative motion cost is O(1) per (i,j) pair
+        // instead of O(n) inside the inner loop.
+        var prefix = [Double](repeating: 0, count: n + 1)
+        for i in 0..<n { prefix[i + 1] = prefix[i] + speed[i] }
+
         var neighbors = [[Int]](repeating: [], count: n)
-        for j in 0..<n {
+        // Each j writes to its own slot — safe to run concurrently.
+        nonisolated(unsafe) let neighborsPtr = UnsafeMutablePointer<[Int]>.allocate(capacity: n)
+        neighborsPtr.initialize(from: &neighbors, count: n)
+        evaConcurrentPerform(iterations: n) { j in
+            // dist[i] = |i-j|+1 + motionScaling * (prefix-sum-based cumulative motion)
+            // Left of j:  cum = -(prefix[j+1] - prefix[i])
+            // Right of j: cum =  prefix[i+1]  - prefix[j+1]
             var dist = [Double](repeating: 0, count: n)
-            var cum = 0.0
+            let prefJ = prefix[j + 1]
             for i in 0..<n {
-                // Triangular temporal distance |i - j| + 1.
-                var d = Double(abs(i - j) + 1)
-                // Warp by cumulative signed motion: negative left of j, positive right.
-                cum += (i <= j ? -speed[i] : speed[i])
-                d += motionScaling * cum
-                dist[i] = d
+                let temporal = Double(abs(i - j) + 1)
+                let cumMot = i <= j ? -(prefJ - prefix[i]) : (prefix[i + 1] - prefJ)
+                dist[i] = speed[i] > 0 ? .infinity : temporal + motionScaling * cumMot
             }
-            // Exclude volumes with supra-threshold motion (sort to the end).
-            for i in 0..<n where speed[i] > 0 { dist[i] = .infinity }
-            let order = (0..<n).sorted { dist[$0] < dist[$1] }
-            let valid = order.filter { dist[$0].isFinite }
-            neighbors[j] = Array((valid.isEmpty ? order : valid).prefix(k))
+            // Partial selection: find k smallest finite distances without a full sort.
+            neighborsPtr[j] = kSmallestIndices(dist, k: k)
         }
+        neighbors = Array(UnsafeBufferPointer(start: neighborsPtr, count: n))
+        neighborsPtr.deallocate()
         return neighbors
+    }
+
+    /// Returns indices of the k elements with the smallest values in `dist`,
+    /// preserving only finite entries (prefers finite over infinite).
+    /// Uses a linear-time partial selection rather than a full sort.
+    private nonisolated static func kSmallestIndices(_ dist: [Double], k: Int) -> [Int] {
+        let n = dist.count
+        guard k > 0, n > 0 else { return [] }
+        // Separate finite from infinite up-front.
+        var finite  = [(idx: Int, val: Double)]()
+        var infinite = [(idx: Int, val: Double)]()
+        finite.reserveCapacity(n)
+        for i in 0..<n {
+            if dist[i].isFinite { finite.append((i, dist[i])) }
+            else { infinite.append((i, dist[i])) }
+        }
+        let pool = finite.isEmpty ? infinite : finite
+        guard !pool.isEmpty else { return [] }
+        if pool.count <= k { return pool.map(\.idx) }
+        // Partial sort: nth_element equivalent via a simple selection on the k-th pivot.
+        // For small k (typically 4) this is effectively O(n).
+        var indices = pool.map(\.idx)
+        var vals    = pool.map(\.val)
+        partialSort(&indices, vals: &vals, k: k)
+        return Array(indices.prefix(k))
+    }
+
+    /// In-place partial sort: rearranges `indices` so the first `k` elements have
+    /// the k smallest corresponding `vals`. Uses introselect (quickselect fallback).
+    private nonisolated static func partialSort(_ indices: inout [Int], vals: inout [Double], k: Int) {
+        var lo = 0, hi = indices.count - 1
+        while lo < hi {
+            // Median-of-three pivot
+            let mid = (lo + hi) / 2
+            if vals[lo] > vals[mid] { indices.swapAt(lo, mid); vals.swapAt(lo, mid) }
+            if vals[lo] > vals[hi]  { indices.swapAt(lo, hi);  vals.swapAt(lo, hi)  }
+            if vals[mid] > vals[hi] { indices.swapAt(mid, hi); vals.swapAt(mid, hi) }
+            let pivot = vals[mid]
+            indices.swapAt(mid, hi - 1); vals.swapAt(mid, hi - 1)
+            var i = lo, j = hi - 1
+            while true {
+                i += 1; while vals[i] < pivot { i += 1 }
+                j -= 1; while vals[j] > pivot { j -= 1 }
+                if i >= j { break }
+                indices.swapAt(i, j); vals.swapAt(i, j)
+            }
+            indices.swapAt(i, hi - 1); vals.swapAt(i, hi - 1)
+            if i <= k { lo = i + 1 } else { hi = i - 1 }
+        }
     }
 
     /// FARM (van der Meer 2010 / FACET `AvgArtWghtFARM`) epoch selection: for each

@@ -127,7 +127,7 @@ struct GradientRemover {
             // Each iteration writes a distinct index, so concurrent writes don't
             // overlap; the buffer pointer is shared read-only metadata.
             nonisolated(unsafe) let out = out
-            DispatchQueue.concurrentPerform(iterations: channelCount) { c in
+            evaConcurrentPerform(iterations: channelCount) { c in
                 out[c] = correctChannel(
                     channels[c],
                     offset: offset,

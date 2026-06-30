@@ -24,6 +24,32 @@
 import Accelerate
 import Foundation
 
+/// Maximum number of GCD worker threads EVA will use for any parallel operation.
+/// Capped at `activeProcessorCount - 2` so at least two cores remain available
+/// for the main/render thread and the OS. Always ≥ 1.
+nonisolated var evaMaxWorkers: Int {
+    max(ProcessInfo.processInfo.activeProcessorCount - 2, 1)
+}
+
+/// Runs `body(i)` for each i in 0..<count using at most `evaMaxWorkers` parallel
+/// threads. Work items are striped across workers so GCD never sees more
+/// concurrent iterations than the cap, regardless of how large `count` is.
+nonisolated func evaConcurrentPerform(iterations count: Int, body: @Sendable (Int) -> Void) {
+    guard count > 0 else { return }
+    let workers = min(count, evaMaxWorkers)
+    if workers <= 1 {
+        for i in 0..<count { body(i) }
+        return
+    }
+    DispatchQueue.concurrentPerform(iterations: workers) { worker in
+        var i = worker
+        while i < count {
+            body(i)
+            i += workers
+        }
+    }
+}
+
 nonisolated enum DSP {
 
     // MARK: - Correlation
@@ -32,20 +58,23 @@ nonisolated enum DSP {
     /// Mirrors FMRIB's `prcorr2` (which falls back to MATLAB's `corrcoef`).
     static func pearson(_ a: ArraySlice<Double>, _ b: ArraySlice<Double>) -> Double {
         precondition(a.count == b.count)
-        let n = Double(a.count)
-        guard n > 1 else { return 0 }
+        guard a.count > 1 else { return 0 }
         let ai = Array(a), bi = Array(b)
+        let len = vDSP_Length(ai.count)
         var ma = 0.0, mb = 0.0
-        vDSP_meanvD(ai, 1, &ma, vDSP_Length(ai.count))
-        vDSP_meanvD(bi, 1, &mb, vDSP_Length(bi.count))
+        vDSP_meanvD(ai, 1, &ma, len)
+        vDSP_meanvD(bi, 1, &mb, len)
+        // Mean-centre both vectors in-place
+        var negMa = -ma, negMb = -mb
+        var da = [Double](repeating: 0, count: ai.count)
+        var db = [Double](repeating: 0, count: ai.count)
+        vDSP_vsaddD(ai, 1, &negMa, &da, 1, len)
+        vDSP_vsaddD(bi, 1, &negMb, &db, 1, len)
+        // ss_a = da·da, ss_b = db·db, cov = da·db
         var sa = 0.0, sb = 0.0, sab = 0.0
-        for i in 0..<ai.count {
-            let da = ai[i] - ma
-            let db = bi[i] - mb
-            sa += da * da
-            sb += db * db
-            sab += da * db
-        }
+        vDSP_dotprD(da, 1, da, 1, &sa, len)
+        vDSP_dotprD(db, 1, db, 1, &sb, len)
+        vDSP_dotprD(da, 1, db, 1, &sab, len)
         let denom = (sa * sb).squareRoot()
         return denom == 0 ? 0 : sab / denom
     }
@@ -161,13 +190,15 @@ nonisolated enum DSP {
     /// Causal FIR filtering, MATLAB `filter(b, 1, x)` (same length as input).
     static func firFilter(_ b: [Double], _ x: [Double]) -> [Double] {
         let nb = b.count
-        var y = [Double](repeating: 0, count: x.count)
-        for n in 0..<x.count {
-            var acc = 0.0
-            let kMax = min(nb - 1, n)
-            for k in 0...kMax { acc += b[k] * x[n - k] }
-            y[n] = acc
-        }
+        let nx = x.count
+        guard nb > 0, nx > 0 else { return x }
+        // Causal filter: y[n] = sum_{k=0}^{nb-1} b[k] * x[n-k].
+        // Pad x with nb-1 zeros at the front so vDSP_conv produces the causal output.
+        var xPad = [Double](repeating: 0, count: nx + nb - 1)
+        xPad.replaceSubrange((nb - 1)..<(nb - 1 + nx), with: x)
+        var bFlip = b  // b[0] is the most-recent tap; vDSP_conv uses time-reversed filter
+        var y = [Double](repeating: 0, count: nx)
+        vDSP_convD(xPad, 1, &bFlip + (nb - 1), -1, &y, 1, vDSP_Length(nx), vDSP_Length(nb))
         return y
     }
 
@@ -177,13 +208,19 @@ nonisolated enum DSP {
     static func convolveSame(_ b: [Double], _ x: [Double]) -> [Double] {
         let nb = b.count
         let nx = x.count
+        guard nb > 0, nx > 0 else { return x }
         let delay = (nb - 1) / 2
-        var full = [Double](repeating: 0, count: nx + nb - 1)
-        for n in 0..<nx {
-            let xn = x[n]
-            if xn == 0 { continue }
-            for k in 0..<nb { full[n + k] += b[k] * xn }
-        }
+        // vDSP_conv computes the full correlation/convolution.
+        // Signal must be padded to length nx + nb - 1 for a full linear convolution.
+        // vDSP_conv with kernal flipped gives convolution; flip b once here.
+        let nFull = nx + nb - 1
+        var xPad = [Double](repeating: 0, count: nFull)
+        xPad.replaceSubrange(0..<nx, with: x)
+        var bFlip = b.reversed() as [Double]
+        var full = [Double](repeating: 0, count: nFull)
+        // vDSP_conv: __vDSP_conv(signal, 1, filter, 1, result, 1, N, M)
+        // result[n] = sum_k signal[n+k] * filter[k], so we flip b to get convolution.
+        vDSP_convD(xPad, 1, &bFlip + (nb - 1), -1, &full, 1, vDSP_Length(nFull), vDSP_Length(nb))
         return Array(full[delay..<(delay + nx)])
     }
 
@@ -253,24 +290,44 @@ nonisolated enum DSP {
     static func lmsAdaptiveFilter(reference: [Double], data: [Double], order n: Int, mu: Double)
         -> (out: [Double], noise: [Double]) {
         precondition(reference.count == data.count)
-        let m = data.count
-        var w = [Double](repeating: 0, count: n + 1)
-        var r = [Double](repeating: 0, count: n + 1)  // most-recent-first delay line
+        let m   = data.count
+        let taps = n + 1
+        let vlen = vDSP_Length(taps)
+        var w   = [Double](repeating: 0, count: taps)
+        // Circular ring buffer — avoids O(order) insert/remove per sample.
+        var ring = [Double](repeating: 0, count: taps)
+        var head = 0                        // points to the slot for the newest sample
+        // Linearised copy buffer for vDSP dot product (most-recent-first order).
+        var rLinear = [Double](repeating: 0, count: taps)
         var out = [Double](repeating: 0, count: m)
-        var y = [Double](repeating: 0, count: m)
+        var y   = [Double](repeating: 0, count: m)
 
         guard m > n else { return (data, y) }
         for e in n..<m {
-            // r = [refs(E); r(1:end-1)]
-            r.removeLast()
-            r.insert(reference[e], at: 0)
+            ring[head] = reference[e]
+            // Unwrap ring into rLinear in most-recent-first order.
+            let tail = (head + 1) % taps        // oldest sample
+            let fromHead = taps - tail           // samples from head to end-of-buffer
+            rLinear.withUnsafeMutableBufferPointer { dst in
+                ring.withUnsafeBufferPointer { src in
+                    // [head..end] → dst[0..]
+                    dst.baseAddress!.initialize(from: src.baseAddress! + tail + fromHead - fromHead,
+                                               count: 0)
+                    // Simpler: two memcpy segments
+                    dst.baseAddress!.assign(from: src.baseAddress! + head, count: fromHead)
+                    if tail > 0 {
+                        (dst.baseAddress! + fromHead).assign(from: src.baseAddress!, count: tail)
+                    }
+                }
+            }
             var yi = 0.0
-            for k in 0...n { yi += w[k] * r[k] }
-            let err = data[e] - yi
-            y[e] = yi
+            vDSP_dotprD(w, 1, rLinear, 1, &yi, vlen)
+            let err  = data[e] - yi
+            y[e]   = yi
             out[e] = err
-            let step = 2 * mu * err
-            for k in 0...n { w[k] += step * r[k] }
+            var step = 2 * mu * err
+            vDSP_vsmaD(rLinear, 1, &step, w, 1, &w, 1, vlen)
+            head = (head + 1) % taps
         }
         return (out, y)
     }
@@ -293,11 +350,11 @@ nonisolated enum DSP {
         }
         // Gram matrix G = R R^T  (p × p), R rows = epochs.
         var g = [[Double]](repeating: [Double](repeating: 0, count: p), count: p)
+        let vecLen = vDSP_Length(length)
         for i in 0..<p {
             for j in i..<p {
                 var acc = 0.0
-                let ei = epochs[i], ej = epochs[j]
-                for s in 0..<length { acc += ei[s] * ej[s] }
+                vDSP_dotprD(epochs[i], 1, epochs[j], 1, &acc, vecLen)
                 g[i][j] = acc
                 g[j][i] = acc
             }
@@ -313,14 +370,12 @@ nonisolated enum DSP {
         var basis = [[Double]]()
         basis.reserveCapacity(p)
         for c in order {
-            // Eigenvector c is column c of `vectors` (vectors[row][col]).
-            let v = (0..<p).map { vectors[$0][c] }  // length p
+            let v = (0..<p).map { vectors[$0][c] }
             var u = [Double](repeating: 0, count: length)
             for i in 0..<p {
-                let vi = v[i]
-                if vi == 0 { continue }
-                let ei = epochs[i]
-                for s in 0..<length { u[s] += ei[s] * vi }
+                var vi = v[i]
+                guard vi != 0 else { continue }
+                vDSP_vsmaD(epochs[i], 1, &vi, u, 1, &u, 1, vecLen)
             }
             basis.append(u)
         }
@@ -401,19 +456,19 @@ nonisolated enum DSP {
         let n = target.count
         guard k > 0 else { return [Double](repeating: 0, count: n) }
         // Normal equations: (A^T A) coeff = A^T y.
+        let vecLen = vDSP_Length(n)
         var ata = [[Double]](repeating: [Double](repeating: 0, count: k), count: k)
         var aty = [Double](repeating: 0, count: k)
         for a in 0..<k {
             let ca = columns[a]
             for b in a..<k {
-                let cb = columns[b]
                 var acc = 0.0
-                for s in 0..<n { acc += ca[s] * cb[s] }
+                vDSP_dotprD(ca, 1, columns[b], 1, &acc, vecLen)
                 ata[a][b] = acc
                 ata[b][a] = acc
             }
             var accY = 0.0
-            for s in 0..<n { accY += ca[s] * target[s] }
+            vDSP_dotprD(ca, 1, target, 1, &accY, vecLen)
             aty[a] = accY
         }
         guard let coeff = LinearAlgebra.solveLinearSystem(ata, aty) else {
@@ -421,9 +476,8 @@ nonisolated enum DSP {
         }
         var fitted = [Double](repeating: 0, count: n)
         for a in 0..<k {
-            let c = coeff[a]
-            let col = columns[a]
-            for s in 0..<n { fitted[s] += c * col[s] }
+            var c = coeff[a]
+            vDSP_vsmaD(columns[a], 1, &c, fitted, 1, &fitted, 1, vecLen)
         }
         return fitted
     }
