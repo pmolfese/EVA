@@ -884,7 +884,7 @@ struct WaveformView: View {
                     showsArtifactCleaningSheet = true
                 }
                 .disabled(definedArtifacts.isEmpty)
-                
+
                 Divider()
 
                 Button("Wavelet Artifact Explorer…") {
@@ -925,6 +925,9 @@ struct WaveformView: View {
 
                 Toggle("Eye Blink", isOn: $detectsEyeBlinkArtifacts)
                 Toggle("Eye Movement", isOn: $detectsEyeMovementArtifacts)
+                
+                Divider()
+                
                 Button(detectsECGArtifacts ? "Configure ECG / QRS Detection…" : "ECG / QRS Detection…") {
                     openECGDetectionSheet(for: continuousSignal)
                 }
