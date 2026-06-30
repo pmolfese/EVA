@@ -878,14 +878,14 @@ struct WaveformView: View {
                     Button("Define Artifact…") {
                         openArtifactTemplateSheet(for: signal, clickedChannel: defaultChannel)
                     }
-
-                    Divider()
                 }
 
                 Button("Clean Artifacts…") {
                     showsArtifactCleaningSheet = true
                 }
                 .disabled(definedArtifacts.isEmpty)
+                
+                Divider()
 
                 Button("Wavelet Artifact Explorer…") {
                     openWaveletArtifactExplorer(for: continuousSignal)
