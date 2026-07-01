@@ -314,23 +314,34 @@ nonisolated enum ICAArtifactDetector {
             var referenceMeans = Array(repeating: Float(0), count: blockCount)
 
             if decomposition.averageReference {
-                for sampleOffset in 0..<blockCount {
-                    var total: Float = 0
-                    for channel in 0..<channelCount where activationData[channel].count > blockStart + sampleOffset {
-                        total += activationData[channel][blockStart + sampleOffset]
+                // Sum all channels into referenceMeans, then divide by channelCount.
+                vDSP_vclr(&referenceMeans, 1, vDSP_Length(blockCount))
+                for channel in 0..<channelCount {
+                    guard activationData[channel].count >= blockStart + blockCount else { continue }
+                    activationData[channel].withUnsafeBufferPointer { buf in
+                        vDSP_vadd(referenceMeans, 1,
+                                  buf.baseAddress! + blockStart, 1,
+                                  &referenceMeans, 1, vDSP_Length(blockCount))
                     }
-                    referenceMeans[sampleOffset] = total / Float(max(channelCount, 1))
                 }
+                var invN = 1.0 / Float(max(channelCount, 1))
+                vDSP_vsmul(referenceMeans, 1, &invN, &referenceMeans, 1, vDSP_Length(blockCount))
             }
 
+            var blockScratch = [Float](repeating: 0, count: blockCount)
             for channel in 0..<channelCount {
                 guard activationData[channel].count >= blockStart + blockCount else { continue }
-                let mean = activationMeans[channel]
+                var negMean = -activationMeans[channel]
                 let rowStart = channel * blockCount
-                for sampleOffset in 0..<blockCount {
-                    let reference = decomposition.averageReference ? referenceMeans[sampleOffset] : 0
-                    centeredBlock[rowStart + sampleOffset] = activationData[channel][blockStart + sampleOffset] - reference - mean
+                // blockScratch = activation[block] - reference (zero when not averageReference)
+                activationData[channel].withUnsafeBufferPointer { buf in
+                    vDSP_vsub(referenceMeans, 1,
+                              buf.baseAddress! + blockStart, 1,
+                              &blockScratch, 1, vDSP_Length(blockCount))
                 }
+                // centeredBlock[rowStart...] = blockScratch - mean
+                vDSP_vsadd(blockScratch, 1, &negMean,
+                           &centeredBlock[rowStart], 1, vDSP_Length(blockCount))
             }
 
             // sources = unmixing[excl,:] · centered   (k × block)
@@ -354,14 +365,22 @@ nonisolated enum ICAArtifactDetector {
                 &artifactBlock, Int32(blockCount)
             )
 
-            for channel in 0..<channelCount {
-                guard cleaned[channel].count >= blockStart + blockCount else { continue }
-                let rowStart = channel * blockCount
-                let limit = artifactLimits[channel]
-                for sampleOffset in 0..<blockCount {
-                    let correction = artifactBlock[rowStart + sampleOffset]
-                    guard correction.isFinite else { continue }
-                    cleaned[channel][blockStart + sampleOffset] -= min(max(correction, -limit), limit)
+            var clampScratch = [Float](repeating: 0, count: blockCount)
+            artifactBlock.withUnsafeBufferPointer { artifactBuf in
+                for channel in 0..<channelCount {
+                    guard cleaned[channel].count >= blockStart + blockCount else { continue }
+                    let rowStart = channel * blockCount
+                    var lo = -artifactLimits[channel]
+                    var hi =  artifactLimits[channel]
+                    // Clamp artifact to ±limit, then subtract from cleaned signal.
+                    vDSP_vclip(artifactBuf.baseAddress! + rowStart, 1, &lo, &hi,
+                               &clampScratch, 1, vDSP_Length(blockCount))
+                    cleaned[channel].withUnsafeMutableBufferPointer { buf in
+                        vDSP_vsub(clampScratch, 1,
+                                  buf.baseAddress! + blockStart, 1,
+                                  buf.baseAddress! + blockStart, 1,
+                                  vDSP_Length(blockCount))
+                    }
                 }
             }
         }
@@ -529,19 +548,34 @@ nonisolated private func averageReferencedChannelMeans(_ data: [[Float]], channe
         return Array(repeating: 0, count: channelCount)
     }
 
-    var totals = Array(repeating: 0.0, count: channelCount)
-    for sample in 0..<sampleCount {
-        var referenceTotal = 0.0
-        for channel in 0..<channelCount where channel < data.count && data[channel].count > sample {
-            referenceTotal += Double(data[channel][sample])
-        }
-        let reference = referenceTotal / Double(channelCount)
-        for channel in 0..<channelCount where channel < data.count && data[channel].count > sample {
-            totals[channel] += Double(data[channel][sample]) - reference
-        }
+    // Build a (channelCount × sampleCount) interleaved matrix so we can compute
+    // the per-sample average reference in one vDSP pass, then subtract it from
+    // each channel before accumulating the mean — all without per-sample scalar loops.
+    var channelSums = [Float](repeating: 0, count: channelCount)
+    var referenceSums = [Float](repeating: 0, count: sampleCount)
+
+    // Sum channels per sample to get the reference signal (unnormalized).
+    for channel in 0..<min(channelCount, data.count) {
+        let ch = data[channel]
+        guard ch.count == sampleCount else { continue }
+        vDSP_vadd(referenceSums, 1, ch, 1, &referenceSums, 1, vDSP_Length(sampleCount))
+    }
+    // Divide by channelCount to get per-sample average reference.
+    var scale = 1.0 / Float(channelCount)
+    vDSP_vsmul(referenceSums, 1, &scale, &referenceSums, 1, vDSP_Length(sampleCount))
+
+    // For each channel: mean(channel - reference).
+    var scratch = [Float](repeating: 0, count: sampleCount)
+    for channel in 0..<min(channelCount, data.count) {
+        let ch = data[channel]
+        guard ch.count == sampleCount else { continue }
+        vDSP_vsub(referenceSums, 1, ch, 1, &scratch, 1, vDSP_Length(sampleCount))
+        var mean: Float = 0
+        vDSP_meanv(scratch, 1, &mean, vDSP_Length(sampleCount))
+        channelSums[channel] = mean
     }
 
-    return totals.map { Float($0 / Double(sampleCount)) }
+    return channelSums
 }
 
 nonisolated private func artifactCorrectionLimits(

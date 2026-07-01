@@ -41,6 +41,22 @@ struct ArtifactTemplateConfiguration: Sendable {
     /// Cost function for scoring scalp-map similarity. Independent of `polarity`
     /// (which governs the per-channel waveform scan).
     var topographyMetric: ArtifactTopographyMetric = .pearson
+    /// Trajectory mode: maximum allowed time shift (seconds) applied to the
+    /// reference trajectory when searching for the best-fitting alignment.
+    /// Useful for compensating slight beat-to-beat onset jitter. Set to 0 to
+    /// disable shifting.
+    var trajectoryShiftSeconds: Double = 0.05
+    /// Trajectory mode: fractional time-scale variation (0–1). E.g. 0.10
+    /// allows the reference trajectory to be stretched or compressed by ±10%,
+    /// accommodating heart-rate variation. Set to 0 to disable scaling.
+    var trajectoryScaleRange: Double = 0.10
+    /// Trajectory mode: when true (default), each frame's spatial-correlation
+    /// contribution is weighted by the GFP of the reference map at that time
+    /// point. This focuses the score on frames where the artifact has strong
+    /// spatial structure (useful for BCG, saccades, muscle bursts). Disable
+    /// for sustained/flat artifacts where the "quiet" periods are part of the
+    /// signature you want to match.
+    var trajectoryGFPWeighted: Bool = true
 }
 
 /// How the similarity between two scalp maps is scored during topography
@@ -71,6 +87,11 @@ enum ArtifactTopographyMode: String, CaseIterable, Identifiable, Codable, Sendab
     case middle = "Window Middle"
     case peak = "Window Peak"
     case average = "Window Average"
+    /// Scores candidate windows by *mean* spatial correlation across a sequence
+    /// of scalp maps spanning the whole exemplar window, with optional time-shift
+    /// and time-scale tolerance. Better suited to BCG than single-map modes
+    /// because the BCG topography rotates/propagates across the beat.
+    case trajectory = "Trajectory"
 
     var id: String { rawValue }
 
@@ -97,6 +118,22 @@ struct ArtifactTemplateDetectionResult: Sendable {
 
 /// The reference scalp topography used for spatial matching, plus the result
 /// of scanning the recording for it.
+/// One display frame sampled from the trajectory reference window.
+struct ArtifactTrajectoryFrame: Sendable, Identifiable {
+    var id: Int { frameIndex }
+    /// Index within the full (decimated) trajectory.
+    var frameIndex: Int
+    /// Absolute time in the recording (seconds).
+    var timeSeconds: Double
+    /// Time relative to the start of the exemplar window (seconds).
+    var relativeSeconds: Double
+    /// Per-channel amplitude values across ALL channels (indexed by channel).
+    var channelValues: [Float]
+    /// Raw GFP of this frame before spatial normalisation — used to draw the
+    /// amplitude bar and to identify the highest-energy frame.
+    var gfp: Float
+}
+
 struct ArtifactTemplateTopography: Sendable {
     var mode: ArtifactTopographyMode
     /// Absolute sample whose scalp map was used (window centre, peak GFP sample,
@@ -109,6 +146,12 @@ struct ArtifactTemplateTopography: Sendable {
     var channelIndices: [Int]
     var matchThreshold: Double
     var matchCount: Int
+    /// Number of time frames in the full trajectory (nil for single-map modes).
+    var trajectoryFrameCount: Int? = nil
+    /// Up to ~10 evenly-spaced display frames sampled from the trajectory,
+    /// stored with full-channel values so they can be shown as topomaps.
+    /// Nil for non-trajectory modes.
+    var trajectoryDisplayFrames: [ArtifactTrajectoryFrame]? = nil
 }
 
 struct ArtifactTemplateComparisonScope: Sendable {
@@ -179,9 +222,15 @@ struct SavedArtifactTemplateMatching: Codable, Sendable {
 }
 
 nonisolated enum ArtifactTemplateDetector {
+    /// Reports scan progress as `(samplesCompleted, samplesTotal)`.
+    /// Called periodically from a background thread; callers must hop to the
+    /// main actor before updating UI state.
+    typealias ProgressHandler = @Sendable (Int, Int) -> Void
+
     static func detect(
         in signal: MFFSignalData,
-        configuration: ArtifactTemplateConfiguration
+        configuration: ArtifactTemplateConfiguration,
+        progress: ProgressHandler? = nil
     ) -> ArtifactTemplateDetectionResult {
         guard signal.samplingRate > 0,
               let sampleCount = signal.data.first?.count,
@@ -211,12 +260,29 @@ nonisolated enum ArtifactTemplateDetector {
         let selectedChannels = SignalSelection.validChannels(configuration.selectedChannelIndices, in: signal)
         let comparisonChannels = SignalSelection.validChannels(configuration.comparisonChannelIndices, in: signal)
 
+        // Progress budget: weight phases by approximate cost.
+        // Selected scan (heaviest) = 50%, comparison = 25%, topology = 25%.
+        // Scopes and single-channel counts share part of the comparison budget.
+        let topoEnabled = configuration.topographyMode.isEnabled
+        let selectedWeight  = topoEnabled ? 0.50 : 0.60
+        let compareWeight   = topoEnabled ? 0.25 : 0.40
+        let topoWeight      = topoEnabled ? 0.25 : 0.00
+
+        func phaseProgress(phase offset: Double, weight: Double) -> ProgressHandler? {
+            guard let progress else { return nil }
+            return { completed, total in
+                let fraction = total > 0 ? offset + weight * Double(completed) / Double(total) : offset
+                progress(Int(fraction * Double(sampleCount)), sampleCount)
+            }
+        }
+
         let selectedEvents = scan(
             signal: signal,
             channelIndices: selectedChannels,
             exemplarStart: exemplarStart,
             exemplarEnd: exemplarEnd,
-            configuration: configuration
+            configuration: configuration,
+            progress: phaseProgress(phase: 0, weight: selectedWeight)
         )
         let average = average(
             signal: signal,
@@ -229,7 +295,8 @@ nonisolated enum ArtifactTemplateDetector {
             channelIndices: comparisonChannels,
             exemplarStart: exemplarStart,
             exemplarEnd: exemplarEnd,
-            configuration: configuration
+            configuration: configuration,
+            progress: phaseProgress(phase: selectedWeight, weight: compareWeight * 0.5)
         )
         let scopeCounts = configuration.comparisonScopes.map { scope in
             let channels = SignalSelection.validChannels(scope.channelIndices, in: signal)
@@ -266,13 +333,14 @@ nonisolated enum ArtifactTemplateDetector {
 
         var topographyEvents: [MFFEvent] = []
         var topographyReference: ArtifactTemplateTopography?
-        if configuration.topographyMode.isEnabled {
+        if topoEnabled {
             (topographyEvents, topographyReference) = detectTopography(
                 signal: signal,
                 channelIndices: topographyChannels(configuration, in: signal),
                 exemplarStart: exemplarStart,
                 exemplarEnd: exemplarEnd,
-                configuration: configuration
+                configuration: configuration,
+                progress: phaseProgress(phase: selectedWeight + compareWeight, weight: topoWeight)
             )
         }
 
@@ -295,7 +363,8 @@ nonisolated enum ArtifactTemplateDetector {
     /// the more expensive per-channel waveform scans.
     static func detectTopography(
         in signal: MFFSignalData,
-        configuration: ArtifactTemplateConfiguration
+        configuration: ArtifactTemplateConfiguration,
+        progress: ProgressHandler? = nil
     ) -> (events: [MFFEvent], reference: ArtifactTemplateTopography?) {
         guard configuration.topographyMode.isEnabled,
               signal.samplingRate > 0,
@@ -315,7 +384,8 @@ nonisolated enum ArtifactTemplateDetector {
             channelIndices: topographyChannels(configuration, in: signal),
             exemplarStart: exemplarStart,
             exemplarEnd: exemplarEnd,
-            configuration: configuration
+            configuration: configuration,
+            progress: progress
         )
     }
 
@@ -331,19 +401,31 @@ nonisolated enum ArtifactTemplateDetector {
         return SignalSelection.validChannels(requested, in: signal)
     }
 
-    /// Builds the reference scalp map from the exemplar window and scans the
-    /// recording for samples whose topography spatially correlates with it.
-    private static func detectTopography(
+    /// Builds the reference scalp map (or trajectory) from the exemplar window
+    /// and scans the recording for matching candidates.
+    static func detectTopography(
         signal: MFFSignalData,
         channelIndices: [Int],
         exemplarStart: Int,
         exemplarEnd: Int,
-        configuration: ArtifactTemplateConfiguration
+        configuration: ArtifactTemplateConfiguration,
+        progress: ProgressHandler? = nil
     ) -> ([MFFEvent], ArtifactTemplateTopography?) {
         guard channelIndices.count >= 3,
               exemplarEnd > exemplarStart,
               signal.samplingRate > 0 else {
             return ([], nil)
+        }
+
+        if configuration.topographyMode == .trajectory {
+            return detectTrajectory(
+                signal: signal,
+                channelIndices: channelIndices,
+                exemplarStart: exemplarStart,
+                exemplarEnd: exemplarEnd,
+                configuration: configuration,
+                progress: progress
+            )
         }
 
         let referenceSample = topographyReferenceSample(
@@ -382,32 +464,61 @@ nonisolated enum ArtifactTemplateDetector {
         let decimation = Downsampler.factor(sourceRate: signal.samplingRate, targetRate: configuration.downsampleRate)
         let mergeSamples = max(Int((configuration.mergeWindowSeconds * signal.samplingRate).rounded()), 1)
 
-        var hits: [(sample: Int, score: Float)] = []
-        var window = [Float](repeating: 0, count: channelIndices.count)
-        var sample = 0
-        while sample < sampleCount {
-            for (offset, channelIndex) in channelIndices.enumerated() {
-                let channel = signal.data[channelIndex]
-                window[offset] = sample < channel.count ? channel[sample] : 0
+        // Split the recording into per-core chunks and score in parallel.
+        // Each chunk owns an independent window buffer and writes into its own
+        // hits array; we merge at the end — no locking needed.
+        let coreCount = evaMaxWorkers
+        let decimatedTotal = (sampleCount + decimation - 1) / decimation
+        let chunkSize = max((decimatedTotal + coreCount - 1) / coreCount, 1)
+        let metric = configuration.topographyMetric
+        let threshold = configuration.matchThreshold
+
+        var chunkHits = [[(sample: Int, score: Float)]](repeating: [], count: coreCount)
+        nonisolated(unsafe) let chunkHitsPtr = UnsafeMutablePointer<[(sample: Int, score: Float)]>.allocate(capacity: coreCount)
+        chunkHitsPtr.initialize(from: &chunkHits, count: coreCount)
+        let lock = NSLock()
+        var globalCompleted = 0
+
+        evaConcurrentPerform(iterations: coreCount) { chunkIdx in
+            let startD = chunkIdx * chunkSize
+            let endD   = min(startD + chunkSize, decimatedTotal)
+            guard startD < endD else { return }
+
+            var localHits: [(sample: Int, score: Float)] = []
+            var window = [Float](repeating: 0, count: channelIndices.count)
+
+            for dSample in startD..<endD {
+                let sample = dSample * decimation
+                for (offset, channelIndex) in channelIndices.enumerated() {
+                    let channel = signal.data[channelIndex]
+                    window[offset] = sample < channel.count ? channel[sample] : 0
+                }
+                let normalized = normalizedSpatial(window)
+                if !normalized.isEmpty {
+                    var dot: Float = 0
+                    for index in normalized.indices { dot += template[index] * normalized[index] }
+                    let score: Float
+                    switch metric {
+                    case .pearson:         score =  dot
+                    case .negativePearson: score = -dot
+                    case .absolutePearson: score =  abs(dot)
+                    }
+                    if Double(score) >= threshold { localHits.append((sample, score)) }
+                }
+                lock.lock()
+                globalCompleted += 1
+                let c = min(globalCompleted * decimation, sampleCount)
+                lock.unlock()
+                progress?(c, sampleCount)
             }
-            let normalized = normalizedSpatial(window)
-            if !normalized.isEmpty {
-                var dot: Float = 0
-                for index in normalized.indices {
-                    dot += template[index] * normalized[index]
-                }
-                let score: Float
-                switch configuration.topographyMetric {
-                case .pearson: score = dot
-                case .negativePearson: score = -dot
-                case .absolutePearson: score = abs(dot)
-                }
-                if Double(score) >= configuration.matchThreshold {
-                    hits.append((sample, score))
-                }
-            }
-            sample += decimation
+            chunkHitsPtr[chunkIdx] = localHits
         }
+        chunkHits = Array(UnsafeBufferPointer(start: chunkHitsPtr, count: coreCount))
+        chunkHitsPtr.deinitialize(count: coreCount)
+        chunkHitsPtr.deallocate()
+        progress?(sampleCount, sampleCount)
+
+        var hits = chunkHits.flatMap { $0 }
 
         let merged = mergeTopography(hits: hits, mergeSamples: mergeSamples)
         let events = merged.enumerated().map { index, hit -> MFFEvent in
@@ -429,6 +540,224 @@ nonisolated enum ArtifactTemplateDetector {
             channelIndices: channelIndices,
             matchThreshold: configuration.matchThreshold,
             matchCount: events.count
+        )
+        return (events, reference)
+    }
+
+    // MARK: - Trajectory topography matching
+
+    /// Scores candidate windows by mean spatial Pearson r across a sequence of
+    /// scalp maps spanning the exemplar window, with optional time-shift and
+    /// time-scale search to handle onset jitter and heart-rate variation.
+    private static func detectTrajectory(
+        signal: MFFSignalData,
+        channelIndices: [Int],
+        exemplarStart: Int,
+        exemplarEnd: Int,
+        configuration: ArtifactTemplateConfiguration,
+        progress: ProgressHandler? = nil
+    ) -> ([MFFEvent], ArtifactTemplateTopography?) {
+        let sr = signal.samplingRate
+        guard channelIndices.count >= 3, exemplarEnd > exemplarStart, sr > 0 else { return ([], nil) }
+        guard let sampleCount = signal.data.first?.count, sampleCount > 0 else { return ([], nil) }
+
+        let decimation = Downsampler.factor(sourceRate: sr, targetRate: configuration.downsampleRate)
+        let totalDecimatedSamples = sampleCount / decimation
+        let mergeSamples = max(Int((configuration.mergeWindowSeconds * sr).rounded()), 1)
+
+        // --- Build reference trajectory ---
+        // One normalized spatial map per decimated sample across the exemplar window.
+        let exemplarStartD = exemplarStart / decimation
+        let exemplarEndD   = min(exemplarEnd / decimation, totalDecimatedSamples)
+        let trajectoryLength = max(exemplarEndD - exemplarStartD, 2)
+
+        var referenceTrajectory = [[Float]]()
+        var referenceGFP = [Float]()          // raw GFP per frame, used as scoring weight
+        referenceTrajectory.reserveCapacity(trajectoryLength)
+        referenceGFP.reserveCapacity(trajectoryLength)
+        for t in 0..<trajectoryLength {
+            let sample = (exemplarStartD + t) * decimation
+            var rawMap = [Float](repeating: 0, count: channelIndices.count)
+            for (offset, chIdx) in channelIndices.enumerated() {
+                let ch = signal.data[chIdx]
+                rawMap[offset] = sample < ch.count ? ch[sample] : 0
+            }
+            // Compute GFP (std dev across channels) from the raw map before normalizing.
+            let mean = rawMap.reduce(Float(0), +) / Float(max(rawMap.count, 1))
+            let gfp  = sqrt(rawMap.reduce(Float(0)) { $0 + ($1 - mean) * ($1 - mean) }
+                            / Float(max(rawMap.count, 1)))
+            referenceGFP.append(gfp)
+            referenceTrajectory.append(normalizedSpatial(rawMap))
+        }
+        let actualLength = referenceTrajectory.count
+        guard actualLength >= 2 else { return ([], nil) }
+
+        // Weights per frame: GFP-proportional (focuses on amplitude peaks) or uniform.
+        let uniform = [Float](repeating: 1.0 / Float(actualLength), count: actualLength)
+        let gfpSum = referenceGFP.reduce(Float(0), +)
+        let refWeights: [Float] = configuration.trajectoryGFPWeighted && gfpSum > 0
+            ? referenceGFP.map { $0 / gfpSum }
+            : uniform
+
+        // Middle frame for topomap display (all channels, raw values).
+        let middleSampleD = exemplarStartD + actualLength / 2
+        let middleSample  = middleSampleD * decimation
+        var channelValues = [Float](repeating: 0, count: signal.numberOfChannels)
+        for chIdx in signal.data.indices {
+            let ch = signal.data[chIdx]
+            if middleSample < ch.count { channelValues[chIdx] = ch[middleSample] }
+        }
+
+        // Sample up to 10 evenly-spaced frames for the display strip.
+        // Each frame captures full-channel raw values so it can be shown as a topomap.
+        let displayFrameCount = min(actualLength, 10)
+        let windowStartTime = Double(exemplarStartD * decimation) / sr
+        let displayFrames: [ArtifactTrajectoryFrame] = (0..<displayFrameCount).map { fi in
+            let t = fi * (actualLength - 1) / max(displayFrameCount - 1, 1)
+            let dSample = exemplarStartD + t
+            let sample  = dSample * decimation
+            var fullChannelValues = [Float](repeating: 0, count: signal.numberOfChannels)
+            for chIdx in signal.data.indices {
+                let ch = signal.data[chIdx]
+                if sample < ch.count { fullChannelValues[chIdx] = ch[sample] }
+            }
+            return ArtifactTrajectoryFrame(
+                frameIndex: t,
+                timeSeconds: Double(sample) / sr,
+                relativeSeconds: Double(sample) / sr - windowStartTime,
+                channelValues: fullChannelValues,
+                gfp: t < referenceGFP.count ? referenceGFP[t] : 0
+            )
+        }
+
+        // --- Precompute normalized maps for the whole recording ---
+        // Memory: totalDecimatedSamples × channelIndices.count × 4 bytes.
+        // At a typical downsample rate of 20–30 Hz and 64 channels over 30 min,
+        // this is ~(36 000 × 64 × 4) ≈ 9 MB — well within budget.
+        var allNormalized = [[Float]](repeating: [], count: totalDecimatedSamples)
+        for dSample in 0..<totalDecimatedSamples {
+            let sample = dSample * decimation
+            var rawMap = [Float](repeating: 0, count: channelIndices.count)
+            for (offset, chIdx) in channelIndices.enumerated() {
+                let ch = signal.data[chIdx]
+                rawMap[offset] = sample < ch.count ? ch[sample] : 0
+            }
+            allNormalized[dSample] = normalizedSpatial(rawMap)
+        }
+
+        // --- Build search grid for time-shift and time-scale ---
+        let maxShiftD = max(Int((configuration.trajectoryShiftSeconds * sr / Double(decimation)).rounded()), 0)
+        let shiftStep = max(maxShiftD / 4, 1)
+        let shifts: [Int] = maxShiftD == 0 ? [0] :
+            Array(stride(from: -maxShiftD, through: maxShiftD, by: shiftStep))
+
+        let scaleRange = configuration.trajectoryScaleRange
+        let scales: [Double] = scaleRange <= 0 ? [1.0] : [
+            1.0 - scaleRange, 1.0 - scaleRange * 0.5, 1.0,
+            1.0 + scaleRange * 0.5, 1.0 + scaleRange
+        ]
+
+        // --- Slide and score (parallel across CPU cores) ---
+        let slideStep = max(actualLength / 8, 1)
+        let candidateStarts = Array(stride(from: 0, through: totalDecimatedSamples - actualLength, by: slideStep))
+        let totalCandidates = max(candidateStarts.count, 1)
+
+        let coreCount = evaMaxWorkers
+        let chunkSize = max((totalCandidates + coreCount - 1) / coreCount, 1)
+
+        var chunkHits = [[(sample: Int, score: Float)]](repeating: [], count: coreCount)
+        nonisolated(unsafe) let chunkHitsPtr2 = UnsafeMutablePointer<[(sample: Int, score: Float)]>.allocate(capacity: coreCount)
+        chunkHitsPtr2.initialize(from: &chunkHits, count: coreCount)
+        let metric = configuration.topographyMetric
+        let threshold = configuration.matchThreshold
+        let lock = NSLock()
+        var globalCompleted = 0
+
+        evaConcurrentPerform(iterations: coreCount) { chunkIdx in
+            let startIdx = chunkIdx * chunkSize
+            let endIdx   = min(startIdx + chunkSize, totalCandidates)
+            guard startIdx < endIdx else { return }
+
+            var localHits: [(sample: Int, score: Float)] = []
+
+            for localIdx in startIdx..<endIdx {
+                let candidateStartD = candidateStarts[localIdx]
+                var bestScore: Float = -1
+
+                for shift in shifts {
+                    for scale in scales {
+                        // GFP-weighted mean spatial r: peak-amplitude reference frames
+                        // drive the score; quiet frames at the window edges barely count.
+                        var weightedR: Float = 0
+                        var usedWeight: Float = 0
+                        for t in 0..<actualLength {
+                            let mappedT = Int((Double(t) * scale).rounded()) + shift
+                            let targetD = candidateStartD + mappedT
+                            guard targetD >= 0, targetD < totalDecimatedSamples else { continue }
+                            let refMap  = referenceTrajectory[t]
+                            let candMap = allNormalized[targetD]
+                            guard candMap.count == refMap.count, !candMap.isEmpty else { continue }
+                            var dot: Float = 0
+                            for i in refMap.indices { dot += refMap[i] * candMap[i] }
+                            let r: Float
+                            switch metric {
+                            case .pearson:         r =  dot
+                            case .negativePearson: r = -dot
+                            case .absolutePearson: r =  abs(dot)
+                            }
+                            let w = refWeights[t]
+                            weightedR  += r * w
+                            usedWeight += w
+                        }
+                        if usedWeight > 0 {
+                            let score = weightedR / usedWeight
+                            if score > bestScore { bestScore = score }
+                        }
+                    }
+                }
+
+                if Double(bestScore) >= threshold {
+                    let centerSample = (candidateStartD + actualLength / 2) * decimation
+                    localHits.append((sample: centerSample, score: bestScore))
+                }
+
+                lock.lock()
+                globalCompleted += 1
+                let c = min(globalCompleted * sampleCount / totalCandidates, sampleCount)
+                lock.unlock()
+                progress?(c, sampleCount)
+            }
+            chunkHitsPtr2[chunkIdx] = localHits
+        }
+        chunkHits = Array(UnsafeBufferPointer(start: chunkHitsPtr2, count: coreCount))
+        chunkHitsPtr2.deinitialize(count: coreCount)
+        chunkHitsPtr2.deallocate()
+        progress?(sampleCount, sampleCount)
+
+        var hits = chunkHits.flatMap { $0 }
+
+        let merged = mergeTopography(hits: hits, mergeSamples: mergeSamples)
+        let events = merged.enumerated().map { index, hit -> MFFEvent in
+            let time = Double(hit.sample) / sr
+            return MFFEvent(
+                id: "artifact-trajectory-\(index)-\(hit.sample)",
+                code: configuration.eventCode,
+                beginTimeSeconds: time,
+                rawBeginTime: String(format: "%.6f", time),
+                sourceFile: String(format: "Trajectory %.0f%%", configuration.matchThreshold * 100)
+            )
+        }
+
+        let reference = ArtifactTemplateTopography(
+            mode: .trajectory,
+            referenceSample: middleSample,
+            referenceTimeSeconds: Double(middleSample) / sr,
+            channelValues: channelValues,
+            channelIndices: channelIndices,
+            matchThreshold: configuration.matchThreshold,
+            matchCount: events.count,
+            trajectoryFrameCount: actualLength,
+            trajectoryDisplayFrames: displayFrames
         )
         return (events, reference)
     }
@@ -576,7 +905,8 @@ nonisolated enum ArtifactTemplateDetector {
         channelIndices: [Int],
         exemplarStart: Int,
         exemplarEnd: Int,
-        configuration: ArtifactTemplateConfiguration
+        configuration: ArtifactTemplateConfiguration,
+        progress: ProgressHandler? = nil
     ) -> [MFFEvent] {
         guard !channelIndices.isEmpty,
               exemplarEnd > exemplarStart,
@@ -615,7 +945,14 @@ nonisolated enum ArtifactTemplateDetector {
         let mergeSamples = max(Int((configuration.mergeWindowSeconds * downsampledRate).rounded()), 1)
 
         var hits: [(start: Int, score: Float)] = []
-        for start in candidates where start >= 0 && start + templateLength <= downsampledCount {
+        let totalCandidates = max(candidates.count, 1)
+        let reportEvery = max(totalCandidates / 20, 1)
+        for (candidateIdx, start) in candidates.enumerated() where start >= 0 && start + templateLength <= downsampledCount {
+            defer {
+                if candidateIdx % reportEvery == 0 {
+                    progress?(candidateIdx * downsampledCount / totalCandidates * decimation, sampleCount)
+                }
+            }
             var weightedScore: Float = 0
             for channelOffset in downsampledChannels.indices {
                 let channel = downsampledChannels[channelOffset]
@@ -643,6 +980,7 @@ nonisolated enum ArtifactTemplateDetector {
             }
         }
 
+        progress?(sampleCount, sampleCount)
         let merged = SignalSelection.mergeNearbyStarts(hits, mergeSamples: mergeSamples)
         return merged.enumerated().map { index, hit in
             let centerSample = min(max((hit.start + templateLength / 2) * decimation, 0), sampleCount - 1)

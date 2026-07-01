@@ -48,6 +48,40 @@ nonisolated enum HealthScoring {
         return (value - red) / max(green - red, 1e-9)
     }
 
+    /// Maps an electrode impedance (kΩ) to a 0...1 goodness score using the
+    /// EGI quality bands: <40 great, 40–60 good, 60–70 fair, 70+ poor. The score
+    /// anchors are chosen so the resulting grade lands great/good → "good",
+    /// fair → "watch", poor → "poor".
+    static func scoreImpedanceKOhm(_ kOhm: Double) -> Double {
+        guard kOhm.isFinite, kOhm >= 0 else { return 0 }
+        switch kOhm {
+        case ..<40:
+            return 1.0
+        case 40..<60:
+            return interpolate(kOhm, fromLow: 40, fromHigh: 60, toLow: 1.0, toHigh: 0.78)
+        case 60..<70:
+            return interpolate(kOhm, fromLow: 60, fromHigh: 70, toLow: 0.78, toHigh: 0.50)
+        default:
+            return max(0, interpolate(kOhm, fromLow: 70, fromHigh: 120, toLow: 0.49, toHigh: 0.0))
+        }
+    }
+
+    /// Human-readable EGI impedance band for `kOhm`.
+    static func impedanceBand(_ kOhm: Double) -> String {
+        guard kOhm.isFinite else { return "unknown" }
+        switch kOhm {
+        case ..<40:  return "great"
+        case 40..<60: return "good"
+        case 60..<70: return "fair"
+        default:      return "poor"
+        }
+    }
+
+    private static func interpolate(_ x: Double, fromLow: Double, fromHigh: Double, toLow: Double, toHigh: Double) -> Double {
+        let t = (x - fromLow) / max(fromHigh - fromLow, 1e-9)
+        return toLow + min(max(t, 0), 1) * (toHigh - toLow)
+    }
+
     static func grade(for score: Double) -> ChannelHealthGrade {
         if score >= 0.78 { return .good }
         if score >= 0.50 { return .watch }

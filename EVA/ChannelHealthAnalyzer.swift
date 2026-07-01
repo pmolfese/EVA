@@ -198,8 +198,14 @@ nonisolated enum ChannelHealthAnalyzer {
         base: ChannelBaseMetricSettings = ChannelBaseMetricSettings(),
         spectral: ChannelSpectralConfiguration? = nil,
         ransac: ChannelRansacConfiguration? = nil,
+        // Impedance is a stable property of the *recording*, independent of the
+        // processing pipeline (filtering, gradient correction, re-referencing),
+        // so it is passed explicitly rather than read off the processed signal.
+        // Falls back to the signal's own values when not provided.
+        impedancesKOhm: [Float]? = nil,
         progress: (@Sendable (Double) -> Void)? = nil
     ) -> ChannelHealthAnalysis {
+        let impedances = impedancesKOhm ?? signal.impedancesKOhm
         guard signal.samplingRate > 0,
               let sampleCount = signal.data.first?.count,
               sampleCount > 2,
@@ -229,7 +235,16 @@ nonisolated enum ChannelHealthAnalyzer {
         features.reserveCapacity(summaries.count)
         for summary in summaries {
             let neighborScore = neighborScores[summary.channelIndex]
-            let result = result(for: summary, baselines: baselines, base: base, neighborScore: neighborScore)
+            let impedance = impedances.flatMap { values in
+                values.indices.contains(summary.channelIndex) ? values[summary.channelIndex] : nil
+            }
+            let result = result(
+                for: summary,
+                baselines: baselines,
+                base: base,
+                neighborScore: neighborScore,
+                impedanceKOhm: impedance
+            )
             results[summary.channelIndex] = result
             features[summary.channelIndex] = channelFeatures(
                 for: summary,
@@ -254,6 +269,13 @@ nonisolated enum ChannelHealthAnalyzer {
             let ransacResults = ransacDetection(signal: signal, layout: layout, configuration: ransac)
             analysis = addingRansacMetrics(to: analysis, ransacResults: ransacResults)
         }
+
+        // Spectral-shape metrics (aperiodic slope, muscle band, line harmonics)
+        // always run — they are cheap once the periodogram is computed and need
+        // no cross-channel baseline or layout.
+        let advanced = advancedSpectralMetrics(signal: signal)
+        analysis = adding(metricsByChannel: advanced, to: analysis)
+
         progress?(1)
 
         return analysis
@@ -370,14 +392,208 @@ nonisolated enum ChannelHealthAnalyzer {
         return analysis
     }
 
+    // MARK: - Advanced spectral metrics (slope, muscle, line harmonics)
+
+    /// Per-channel spectral-shape metrics derived from one Welch periodogram:
+    /// the aperiodic 1/f slope, the high-frequency (EMG/muscle) band fraction,
+    /// and power-line harmonic prominence. Each is self-contained (no
+    /// cross-channel baseline) so the thresholds are absolute.
+    static func advancedSpectralMetrics(
+        signal: MFFSignalData,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) -> [Int: [ChannelHealthMetric]] {
+        guard signal.samplingRate > 0,
+              let sampleCount = signal.data.first?.count,
+              sampleCount > 32,
+              !signal.data.isEmpty else {
+            return [:]
+        }
+
+        let nyquist = signal.samplingRate / 2
+        var output: [Int: [ChannelHealthMetric]] = [:]
+        output.reserveCapacity(signal.data.count)
+
+        for (index, channel) in signal.data.enumerated() {
+            if Task.isCancelled { return output }
+            defer { progress?(Double(index + 1) / Double(max(signal.data.count, 1))) }
+            guard let (spectrum, binHz) = averagedPowerSpectrum(channel, samplingRate: signal.samplingRate) else {
+                continue
+            }
+
+            var metrics: [ChannelHealthMetric] = []
+
+            // Aperiodic slope: log–log fit of power vs. frequency. Clean EEG
+            // falls off as ~1/f^x (negative slope ≈ −1…−2.5). A near-flat
+            // (white) slope marks broadband noise / disconnection; an extreme
+            // negative slope marks drift/DC dominance.
+            let slopeHigh = min(40, nyquist * 0.9)
+            if let slope = aperiodicSlope(spectrum, binHz: binHz, low: 2, high: slopeHigh) {
+                let negSlope = -slope
+                let lowScore = HealthScoring.scoreLowerBound(negSlope, green: 0.7, red: 0.0)
+                let highScore = HealthScoring.scoreUpperRatio(negSlope, green: 3.0, red: 5.0)
+                metrics.append(metric(
+                    name: "Aperiodic Slope",
+                    score: min(lowScore, highScore),
+                    detail: String(format: "1/f exponent %.2f", negSlope),
+                    weight: 1.2
+                ))
+            }
+
+            // Muscle (EMG): high-frequency band power relative to the mid band.
+            // Sustained muscle activity lifts 20–40 Hz well above its usual
+            // small fraction of low-band power.
+            if nyquist > 25 {
+                let emgHigh = min(40, nyquist * 0.9)
+                let highBand = bandPower(spectrum, binHz: binHz, low: 20, high: emgHigh)
+                let lowBand = bandPower(spectrum, binHz: binHz, low: 2, high: 20)
+                if lowBand > 0 {
+                    let ratio = highBand / lowBand
+                    metrics.append(metric(
+                        name: "Muscle (EMG)",
+                        score: HealthScoring.scoreUpperRatio(ratio, green: 0.4, red: 2.0),
+                        detail: String(format: "HF/LF power %.2f", ratio),
+                        weight: 1.1
+                    ))
+                }
+            }
+
+            // Line harmonics + notch residual: prominence (local SNR) of the
+            // 60 Hz fundamental and its harmonics above the surrounding
+            // spectrum. Leftover line energy after notching shows here too.
+            if let (snr, freq) = lineHarmonicProminence(spectrum, binHz: binHz, fundamental: 60, nyquist: nyquist) {
+                metrics.append(metric(
+                    name: "Line Harmonics",
+                    score: HealthScoring.scoreUpperRatio(snr, green: 3, red: 15),
+                    detail: String(format: "%.0f Hz %.1f× local", freq, snr),
+                    weight: 0.9
+                ))
+            }
+
+            if !metrics.isEmpty { output[index] = metrics }
+        }
+        return output
+    }
+
+    /// Merges a batch of per-channel metrics into an analysis, replacing any
+    /// existing metric of the same name and recomputing the channel score.
+    static func adding(
+        metricsByChannel: [Int: [ChannelHealthMetric]],
+        to analysis: ChannelHealthAnalysis
+    ) -> ChannelHealthAnalysis {
+        guard !metricsByChannel.isEmpty else { return analysis }
+        var analysis = analysis
+        for (channelIndex, newMetrics) in metricsByChannel {
+            guard let result = analysis.resultsByChannel[channelIndex] else { continue }
+            let names = Set(newMetrics.map(\.name))
+            let merged = result.metrics.filter { !names.contains($0.name) } + newMetrics
+            analysis.resultsByChannel[channelIndex] = recomputedResult(channelIndex: channelIndex, metrics: merged)
+        }
+        return analysis
+    }
+
+    /// Ordinary-least-squares slope of log10(power) vs. log10(frequency) over
+    /// `low...high` Hz, skipping bins within ±2 Hz of a 60 Hz harmonic so line
+    /// noise doesn't bias the fit. Returns `nil` with too few usable bins.
+    private static func aperiodicSlope(
+        _ spectrum: [Double],
+        binHz: Double,
+        low: Double,
+        high: Double
+    ) -> Double? {
+        guard high > low, binHz > 0 else { return nil }
+        let half = spectrum.count
+        let lowBin = max(Int((low / binHz).rounded(.down)), 1)
+        let highBin = min(Int((high / binHz).rounded(.up)), half - 1)
+        guard highBin > lowBin else { return nil }
+
+        var xs: [Double] = []
+        var ys: [Double] = []
+        for bin in lowBin...highBin {
+            let freq = Double(bin) * binHz
+            // Skip ±2 Hz around each 60 Hz harmonic.
+            let nearLine = stride(from: 60.0, through: high, by: 60.0).contains { abs(freq - $0) <= 2 }
+            if nearLine { continue }
+            let power = spectrum[bin]
+            guard power > 0 else { continue }
+            xs.append(log10(freq))
+            ys.append(log10(power))
+        }
+        guard xs.count >= 8 else { return nil }
+
+        let n = Double(xs.count)
+        let meanX = xs.reduce(0, +) / n
+        let meanY = ys.reduce(0, +) / n
+        var sxx = 0.0
+        var sxy = 0.0
+        for i in xs.indices {
+            let dx = xs[i] - meanX
+            sxx += dx * dx
+            sxy += dx * (ys[i] - meanY)
+        }
+        guard sxx > 1e-12 else { return nil }
+        return sxy / sxx
+    }
+
+    /// Largest local SNR among the fundamental and its harmonics: peak power at
+    /// the harmonic bin (±1) divided by the median power of nearby off-peak
+    /// bins. Returns the SNR and the harmonic frequency that produced it.
+    private static func lineHarmonicProminence(
+        _ spectrum: [Double],
+        binHz: Double,
+        fundamental: Double,
+        nyquist: Double
+    ) -> (snr: Double, frequency: Double)? {
+        guard binHz > 0 else { return nil }
+        let half = spectrum.count
+        var best: (snr: Double, frequency: Double)? = nil
+
+        var harmonic = 1
+        while true {
+            let freq = fundamental * Double(harmonic)
+            if freq >= nyquist * 0.95 { break }
+            harmonic += 1
+            let centerBin = Int((freq / binHz).rounded())
+            guard centerBin > 2, centerBin < half - 2 else { continue }
+
+            let peak = (max(centerBin - 1, 0)...min(centerBin + 1, half - 1))
+                .map { spectrum[$0] }
+                .max() ?? 0
+
+            // Off-peak neighbors: ±2…±6 bins, excluding the peak shoulder.
+            var neighbors: [Double] = []
+            for offset in 2...6 {
+                if centerBin - offset >= 1 { neighbors.append(spectrum[centerBin - offset]) }
+                if centerBin + offset < half { neighbors.append(spectrum[centerBin + offset]) }
+            }
+            let baseline = median(neighbors)
+            guard baseline > 0 else { continue }
+            let snr = peak / baseline
+            if best == nil || snr > best!.snr {
+                best = (snr, freq)
+            }
+        }
+        return best
+    }
+
     private static func welchBandPower(
         _ samples: [Float],
         samplingRate: Double,
         low: Double,
         high: Double
     ) -> Double {
+        guard let spectrum = averagedPowerSpectrum(samples, samplingRate: samplingRate) else { return 0 }
+        return bandPower(spectrum.power, binHz: spectrum.binHz, low: low, high: high)
+    }
+
+    /// Welch-averaged periodogram: mean power per FFT bin (Hann window, 50 %
+    /// overlap). Returns the per-bin power array (length = segment/2) and the
+    /// frequency width of each bin, or `nil` if the channel is too short.
+    private static func averagedPowerSpectrum(
+        _ samples: [Float],
+        samplingRate: Double
+    ) -> (power: [Double], binHz: Double)? {
         let count = samples.count
-        guard count > 32 else { return 0 }
+        guard count > 32 else { return nil }
 
         // Segment length: a power of two near two seconds, bounded for speed.
         let target = min(max(Int(samplingRate * 2), 64), 4096)
@@ -390,7 +606,7 @@ nonisolated enum ChannelHealthAnalyzer {
                 transformType: .complexComplex,
                 ofType: Float.self
               ) else {
-            return 0
+            return nil
         }
 
         let window = vDSP.window(
@@ -429,15 +645,20 @@ nonisolated enum ChannelHealthAnalyzer {
             start += step
         }
 
-        guard segmentCount > 0 else { return 0 }
-        let binHz = samplingRate / Double(segment)
+        guard segmentCount > 0 else { return nil }
+        for bin in 0..<half { averagePower[bin] /= Double(segmentCount) }
+        return (averagePower, samplingRate / Double(segment))
+    }
+
+    /// Mean power across the FFT bins spanning `low...high` Hz.
+    private static func bandPower(_ spectrum: [Double], binHz: Double, low: Double, high: Double) -> Double {
+        let half = spectrum.count
         let lowBin = max(Int((low / binHz).rounded(.down)), 1)
         let highBin = min(Int((high / binHz).rounded(.up)), half - 1)
         guard highBin >= lowBin else { return 0 }
-
         var sum = 0.0
-        for bin in lowBin...highBin { sum += averagePower[bin] }
-        return sum / Double((highBin - lowBin + 1) * segmentCount)
+        for bin in lowBin...highBin { sum += spectrum[bin] }
+        return sum / Double(highBin - lowBin + 1)
     }
 
     // MARK: - Neighbor-prediction (RANSAC-style) detection
@@ -679,6 +900,19 @@ nonisolated enum ChannelHealthAnalyzer {
             frequency: 60
         )
 
+        // Excess kurtosis (Fisher) of the finite samples. m4/m2² − 3.
+        var m2 = 0.0
+        var m4 = 0.0
+        for value in finiteValues {
+            let d = value - mean
+            let d2 = d * d
+            m2 += d2
+            m4 += d2 * d2
+        }
+        m2 /= Double(finiteCount)
+        m4 /= Double(finiteCount)
+        let excessKurtosis = m2 > 1e-18 ? m4 / (m2 * m2) - 3 : 0
+
         return ChannelSummary(
             channelIndex: channelIndex,
             sampledValues: sampledValues,
@@ -692,7 +926,8 @@ nonisolated enum ChannelHealthAnalyzer {
             flatlineFraction: flatlineFraction,
             clippingFraction: clippingFraction,
             driftRMS: driftRMS,
-            lineNoisePower: lineNoisePower
+            lineNoisePower: lineNoisePower,
+            excessKurtosis: excessKurtosis
         )
     }
 
@@ -700,9 +935,21 @@ nonisolated enum ChannelHealthAnalyzer {
         for summary: ChannelSummary,
         baselines: ChannelHealthBaselines,
         base: ChannelBaseMetricSettings,
-        neighborScore: Double?
+        neighborScore: Double?,
+        impedanceKOhm: Float? = nil
     ) -> ChannelHealthResult {
         var metrics: [ChannelHealthMetric] = []
+
+        // Electrode impedance (EGI ICAL), only when the file recorded a value.
+        if let impedanceKOhm, impedanceKOhm.isFinite {
+            let kOhm = Double(impedanceKOhm)
+            metrics.append(metric(
+                name: "Impedance",
+                score: HealthScoring.scoreImpedanceKOhm(kOhm),
+                detail: String(format: "%.0f kΩ (%@)", kOhm, HealthScoring.impedanceBand(kOhm)),
+                weight: 1.4
+            ))
+        }
 
         metrics.append(metric(
             name: "Finite Samples",
@@ -766,6 +1013,16 @@ nonisolated enum ChannelHealthAnalyzer {
             score: HealthScoring.scoreUpperRatio(driftTypicality, green: base.slowDriftGreen, red: base.slowDriftRed),
             detail: "block-mean drift \(HealthScoring.formatRatio(driftTypicality)) typical",
             weight: 0.8
+        ))
+
+        // Heavy-tailed sample distribution (FASTER): isolated pops/spikes that a
+        // single max (Burst Peaks) can miss. Excess kurtosis ≈ 0 for clean EEG.
+        let kurtosis = max(summary.excessKurtosis, 0)
+        metrics.append(metric(
+            name: "Kurtosis",
+            score: HealthScoring.scoreUpperRatio(kurtosis, green: 5, red: 20),
+            detail: String(format: "excess kurtosis %.1f", summary.excessKurtosis),
+            weight: 1.0
         ))
 
         if summary.lineNoisePower > 0, baselines.medianLineNoisePower > 0 {
@@ -999,4 +1256,7 @@ private nonisolated struct ChannelSummary: Sendable {
     var clippingFraction: Double = 0
     var driftRMS: Double = 0
     var lineNoisePower: Double = 0
+    /// Excess kurtosis of the sample distribution (0 for Gaussian). Spiky,
+    /// intermittently-popping channels run heavy-tailed (large positive).
+    var excessKurtosis: Double = 0
 }

@@ -249,7 +249,7 @@ nonisolated enum ArtifactCleaner {
         for batchStart in stride(from: 0, to: channels.count, by: boundedWorkerCount) {
             let batchEnd = min(batchStart + boundedWorkerCount, channels.count)
             let batchChannels = Array(channels[batchStart..<batchEnd])
-            DispatchQueue.concurrentPerform(iterations: batchChannels.count) { batchIndex in
+            evaConcurrentPerform(iterations: batchChannels.count) { batchIndex in
                 let channel = batchChannels[batchIndex]
                 guard let contribution = obsVarianceContribution(
                     channelData: data[channel],
@@ -498,51 +498,72 @@ nonisolated enum ArtifactCleaner {
         guard !channelBases.isEmpty else { return 0 }
         setupProgress("Prepared \(channelBases.count) channel bases; starting per-event subtraction")
 
+        // Snapshot channel data as an immutable capture so concurrent closures
+        // can read it without inout aliasing issues.
+        let channelSnapshot: [[Float]] = channelBases.map { data[$0.channel] }
+        let basisCount = channelBases.count
+        let preservesBaseline = artifact.obsPreservesLocalBaseline
+
         if artifact.obsUsesOverlapAdd {
-            let accumulators = Dictionary(
-                uniqueKeysWithValues: channelBases.map {
-                    ($0.channel, OBSCorrectionAccumulator(sampleCount: sampleCount))
-                }
-            )
+            // One accumulator per basis (aligned by index, not by channel key) so
+            // the concurrentPerform inner loop can index without a dictionary lookup
+            // or any locking — each basisIndex owns exactly one accumulator.
+            let accumulators = (0..<basisCount).map { _ in
+                OBSCorrectionAccumulator(sampleCount: sampleCount)
+            }
 
             for (eventIndex, maybeRange) in eventRanges.enumerated() {
                 defer { eventProgress(eventIndex + 1) }
                 guard let range = maybeRange else { continue }
 
-                for channelBasis in channelBases {
+                evaConcurrentPerform(iterations: basisCount) { basisIndex in
                     guard let correction = fittedCorrection(
-                        basis: channelBasis.basis,
-                        from: data[channelBasis.channel],
+                        basis: channelBases[basisIndex].basis,
+                        from: channelSnapshot[basisIndex],
                         in: range,
                         taper: taper,
-                        preservesLocalBaseline: artifact.obsPreservesLocalBaseline,
+                        preservesLocalBaseline: preservesBaseline,
                         edgeTaperSamples: edgeTaperSamples
-                    ) else { continue }
-                    accumulators[channelBasis.channel]?.add(correction, in: range)
-                    cleanedChannels.insert(channelBasis.channel)
+                    ) else { return }
+                    accumulators[basisIndex].add(correction, in: range)
                 }
             }
 
             finalizingProgress("Combining overlapping OBS corrections")
-            for channelBasis in channelBases {
-                guard let accumulator = accumulators[channelBasis.channel] else { continue }
-                accumulator.apply(to: &data[channelBasis.channel])
+            for basisIndex in channelBases.indices {
+                accumulators[basisIndex].apply(to: &data[channelBases[basisIndex].channel])
+                cleanedChannels.insert(channelBases[basisIndex].channel)
             }
         } else {
+            // Non-overlap-add: compute corrections concurrently per channel, then
+            // apply to data serially (avoids inout aliasing across concurrent writes).
             for (eventIndex, maybeRange) in eventRanges.enumerated() {
                 defer { eventProgress(eventIndex + 1) }
                 guard let range = maybeRange else { continue }
 
-                for channelBasis in channelBases {
-                    subtractBasis(
-                        channelBasis.basis,
-                        from: &data[channelBasis.channel],
+                var corrections = [OBSCorrection?](repeating: nil, count: basisCount)
+                nonisolated(unsafe) let correctionsPtr = UnsafeMutablePointer<OBSCorrection?>.allocate(capacity: basisCount)
+                correctionsPtr.initialize(from: &corrections, count: basisCount)
+                evaConcurrentPerform(iterations: basisCount) { basisIndex in
+                    correctionsPtr[basisIndex] = fittedCorrection(
+                        basis: channelBases[basisIndex].basis,
+                        from: channelSnapshot[basisIndex],
                         in: range,
                         taper: taper,
-                        preservesLocalBaseline: artifact.obsPreservesLocalBaseline,
+                        preservesLocalBaseline: preservesBaseline,
                         edgeTaperSamples: edgeTaperSamples
                     )
-                    cleanedChannels.insert(channelBasis.channel)
+                }
+                corrections = Array(UnsafeBufferPointer(start: correctionsPtr, count: basisCount))
+                correctionsPtr.deinitialize(count: basisCount)
+                correctionsPtr.deallocate()
+                for basisIndex in channelBases.indices {
+                    guard let correction = corrections[basisIndex] else { continue }
+                    let channel = channelBases[basisIndex].channel
+                    for offset in 0..<range.count {
+                        data[channel][range.lowerBound + offset] -= Float(correction.weightedValues[offset])
+                    }
+                    cleanedChannels.insert(channel)
                 }
             }
         }
@@ -580,7 +601,7 @@ nonisolated enum ArtifactCleaner {
         for batchStart in stride(from: 0, to: channels.count, by: batchSize) {
             let batchEnd = min(batchStart + batchSize, channels.count)
             let batchChannels = Array(channels[batchStart..<batchEnd])
-            DispatchQueue.concurrentPerform(iterations: batchChannels.count) { batchIndex in
+            evaConcurrentPerform(iterations: batchChannels.count) { batchIndex in
                 let channel = batchChannels[batchIndex]
                 guard let basis = fitOBSChannelBasis(
                     channel: channel,
@@ -674,56 +695,69 @@ nonisolated enum ArtifactCleaner {
 
         setupProgress("Prepared \(componentCount) spatial components; starting per-event projection")
         var cleanedChannels = Set<Int>()
+        let channelCount = channels.count
+        let preservesBaseline = artifact.obsPreservesLocalBaseline
+
         if artifact.obsUsesOverlapAdd {
-            let accumulators = Dictionary(
-                uniqueKeysWithValues: channels.map {
-                    ($0, OBSCorrectionAccumulator(sampleCount: sampleCount))
-                }
-            )
+            // One accumulator per channel offset (aligned with `channels` array).
+            let accumulators = (0..<channelCount).map { _ in
+                OBSCorrectionAccumulator(sampleCount: sampleCount)
+            }
 
             for (eventIndex, maybeRange) in eventRanges.enumerated() {
                 defer { eventProgress(eventIndex + 1) }
                 guard let range = maybeRange else { continue }
-                let corrections = sspCorrections(
+                // sspCorrections is a single scan over samples; compute it once.
+                let rawCorrections = sspCorrections(
                     data: data,
                     range: range,
                     channels: channels,
                     components: components
                 )
-                for (offset, channel) in channels.enumerated() {
+                // Taper and accumulate per channel in parallel.
+                evaConcurrentPerform(iterations: channelCount) { offset in
                     guard let correction = smoothedWindowCorrection(
-                        corrections[offset],
+                        rawCorrections[offset],
                         taper: taper,
-                        preservesLocalBaseline: artifact.obsPreservesLocalBaseline,
+                        preservesLocalBaseline: preservesBaseline,
                         edgeTaperSamples: edgeTaperSamples
-                    ) else { continue }
-                    accumulators[channel]?.add(correction, in: range)
-                    cleanedChannels.insert(channel)
+                    ) else { return }
+                    accumulators[offset].add(correction, in: range)
                 }
             }
 
             finalizingProgress("Combining overlapping SSP/PCA corrections")
-            for channel in channels {
-                guard let accumulator = accumulators[channel] else { continue }
-                accumulator.apply(to: &data[channel])
+            for (offset, channel) in channels.enumerated() {
+                accumulators[offset].apply(to: &data[channel])
+                cleanedChannels.insert(channel)
             }
         } else {
             for (eventIndex, maybeRange) in eventRanges.enumerated() {
                 defer { eventProgress(eventIndex + 1) }
                 guard let range = maybeRange else { continue }
-                let corrections = sspCorrections(
+                let rawCorrections = sspCorrections(
                     data: data,
                     range: range,
                     channels: channels,
                     components: components
                 )
-                for (offset, channel) in channels.enumerated() {
-                    guard let correction = smoothedWindowCorrection(
-                        corrections[offset],
+                // Compute tapered corrections concurrently, apply serially.
+                var smoothed = [OBSCorrection?](repeating: nil, count: channelCount)
+                nonisolated(unsafe) let smoothedPtr = UnsafeMutablePointer<OBSCorrection?>.allocate(capacity: channelCount)
+                smoothedPtr.initialize(from: &smoothed, count: channelCount)
+                evaConcurrentPerform(iterations: channelCount) { offset in
+                    smoothedPtr[offset] = smoothedWindowCorrection(
+                        rawCorrections[offset],
                         taper: taper,
-                        preservesLocalBaseline: artifact.obsPreservesLocalBaseline,
+                        preservesLocalBaseline: preservesBaseline,
                         edgeTaperSamples: edgeTaperSamples
-                    ) else { continue }
+                    )
+                }
+                smoothed = Array(UnsafeBufferPointer(start: smoothedPtr, count: channelCount))
+                smoothedPtr.deinitialize(count: channelCount)
+                smoothedPtr.deallocate()
+                for (offset, channel) in channels.enumerated() {
+                    guard let correction = smoothed[offset] else { continue }
                     for sampleOffset in 0..<range.count {
                         data[channel][range.lowerBound + sampleOffset] -= Float(correction.weightedValues[sampleOffset])
                     }
@@ -886,8 +920,7 @@ nonisolated enum ArtifactCleaner {
 
     private static func workerCount(for itemCount: Int) -> Int {
         guard itemCount > 1 else { return 1 }
-        let availableCores = max(ProcessInfo.processInfo.activeProcessorCount, 1)
-        return min(itemCount, max(availableCores - 1, 1))
+        return min(itemCount, evaMaxWorkers)
     }
 
     private static func milliseconds(for sampleCount: Int, samplingRate: Double) -> Int {

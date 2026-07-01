@@ -643,7 +643,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         let resultLock = NSLock()
         let progressLock = NSLock()
 
-        DispatchQueue.concurrentPerform(iterations: workerCount) { workerIndex in
+        evaConcurrentPerform(iterations: workerCount) { workerIndex in
             var offset = workerIndex
             while offset < channelIndices.count {
                 let channelIndex = channelIndices[offset]
@@ -676,9 +676,7 @@ nonisolated enum WaveletArtifactAnalyzer {
     }
 
     private static func waveletWorkerCount(for channelCount: Int) -> Int {
-        let totalCores = max(ProcessInfo.processInfo.activeProcessorCount, 1)
-        let conservativeWorkerCount = max(totalCores / 4, 1)
-        return min(max(conservativeWorkerCount, 1), max(channelCount, 1))
+        min(evaMaxWorkers, max(channelCount, 1))
     }
 
     private static func prepareChannel(

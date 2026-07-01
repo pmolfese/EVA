@@ -19,6 +19,12 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// A set of dropped .mff URLs awaiting the combine sheet.
+struct CombineRequest: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+}
+
 struct ContentView: View {
     @Binding var recording: MFFRecording?
     @Binding var openRecordingRequest: Int
@@ -26,6 +32,8 @@ struct ContentView: View {
     @State private var showsFileImporter = false
     @State private var isDropTargeted = false
     @State private var openError: String?
+    /// Multiple .mff files dropped at once → present the combine sheet.
+    @State private var combineRequest: CombineRequest?
 
     var body: some View {
         Group {
@@ -58,6 +66,16 @@ struct ContentView: View {
         }
         .onChange(of: openRecordingRequest) { _, _ in
             showsFileImporter = true
+        }
+        .sheet(item: $combineRequest) { request in
+            CombineRecordingsSheet(
+                urls: request.urls,
+                onComplete: { packageURL in
+                    combineRequest = nil
+                    open(packageURL)
+                },
+                onCancel: { combineRequest = nil }
+            )
         }
         .background(WindowAccessor(autosaveName: "EVAMainWindow",
                                    hasRecording: recording != nil,
@@ -210,6 +228,11 @@ struct ContentView: View {
     }
 
     private func openDroppedURLs(_ urls: [URL]) -> Bool {
+        let mffURLs = urls.filter { $0.pathExtension.lowercased() == "mff" }
+        if mffURLs.count > 1 {
+            combineRequest = CombineRequest(urls: mffURLs)
+            return true
+        }
         guard let url = urls.first else { return false }
         return open(url)
     }

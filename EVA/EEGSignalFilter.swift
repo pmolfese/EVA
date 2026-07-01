@@ -38,14 +38,37 @@ enum EEGSignalFilterError: LocalizedError {
     }
 }
 
-struct EEGSignalFilter {
-    private nonisolated static let butterworthQ: Float = 1.0 / Float(sqrt(2.0))
+/// Rolloff slope expressed as dB per octave. Each step is one additional
+/// Butterworth biquad stage (two poles). With zero-phase (filtfilt) the
+/// effective slope is the same as the design slope because filtfilt is used
+/// to cancel phase shift, and we report the *design* order here to match the
+/// convention used by BrainVision Analyzer, EEGLAB, and similar tools.
+///
+/// Mapping: 12 dB/oct = 2-pole design (1st-order section + filtfilt),
+///          24 dB/oct = 4-pole design (1 biquad), 36 = 6-pole (1 biquad + 1st-order),
+///          48 = 8-pole (2 biquads). All are applied zero-phase.
+enum FilterSlope: Int, CaseIterable, Identifiable, Codable {
+    case dB12 = 12
+    case dB24 = 24
+    case dB36 = 36
+    case dB48 = 48
 
+    var id: Int { rawValue }
+
+    var label: String { "\(rawValue) dB/oct" }
+
+    /// Number of poles in the one-sided design (before filtfilt doubling).
+    var designPoles: Int { rawValue / 6 }
+}
+
+struct EEGSignalFilter {
     nonisolated static func bandPass(
         channels: [[Float]],
         samplingRate: Double,
         lowCutoff: Double,
         highCutoff: Double,
+        highPassSlope: FilterSlope = .dB24,
+        lowPassSlope: FilterSlope = .dB24,
         notch60HzEnabled: Bool = false,
         notchFrequency: Double = 60,
         progress: (@Sendable (Double) -> Void)? = nil
@@ -64,15 +87,17 @@ struct EEGSignalFilter {
         }
 
         return try await withThrowingTaskGroup(of: (Int, [Float]).self) { group in
-            let highPass = BiquadCoefficients.highPass(
+            let highPassStages = BiquadCoefficients.butterworth(
                 cutoff: Float(lowCutoff),
                 samplingRate: Float(samplingRate),
-                q: butterworthQ
+                poles: highPassSlope.designPoles,
+                type: .highPass
             )
-            let lowPass = BiquadCoefficients.lowPass(
+            let lowPassStages = BiquadCoefficients.butterworth(
                 cutoff: Float(highCutoff),
                 samplingRate: Float(samplingRate),
-                q: butterworthQ
+                poles: lowPassSlope.designPoles,
+                type: .lowPass
             )
             let notchFilter = BiquadCoefficients.notch(
                 centerFrequency: Float(notchFrequency),
@@ -87,17 +112,17 @@ struct EEGSignalFilter {
 
             for (index, channel) in channels.enumerated() {
                 group.addTask {
-                    let highPassed = zeroPhaseFilter(channel, coefficients: highPass, paddingCount: paddingCount)
-                    let bandPassed = zeroPhaseFilter(highPassed, coefficients: lowPass, paddingCount: paddingCount)
-                    let finalSamples: [Float]
-
-                    if notch60HzEnabled, notchFrequency < (samplingRate / 2) {
-                        finalSamples = zeroPhaseFilter(bandPassed, coefficients: notchFilter, paddingCount: paddingCount)
-                    } else {
-                        finalSamples = bandPassed
+                    var result = channel
+                    for stage in highPassStages {
+                        result = zeroPhaseFilter(result, coefficients: stage, paddingCount: paddingCount)
                     }
-
-                    return (index, finalSamples)
+                    for stage in lowPassStages {
+                        result = zeroPhaseFilter(result, coefficients: stage, paddingCount: paddingCount)
+                    }
+                    if notch60HzEnabled, notchFrequency < (samplingRate / 2) {
+                        result = zeroPhaseFilter(result, coefficients: notchFilter, paddingCount: paddingCount)
+                    }
+                    return (index, result)
                 }
             }
 
@@ -412,6 +437,61 @@ private struct BiquadCoefficients {
     let a1: Float
     let a2: Float
 
+    enum FilterType { case lowPass, highPass }
+
+    /// Returns the cascade of biquad (and optional 1st-order) sections needed
+    /// for an N-pole Butterworth filter at `cutoff`.
+    ///
+    /// - Odd pole count: one 1st-order section encoded as a biquad with b2=a2=0,
+    ///   followed by (poles-1)/2 standard biquad sections.
+    /// - Even pole count: poles/2 biquad sections.
+    ///
+    /// Q values for each pair follow the standard Butterworth pole placement:
+    ///   Q_k = 1 / (2 · cos(π(2k+1)/(2N)))  for k = 0 … N/2-1 (0-indexed pairs)
+    nonisolated static func butterworth(
+        cutoff: Float,
+        samplingRate: Float,
+        poles: Int,
+        type: FilterType
+    ) -> [BiquadCoefficients] {
+        let n = max(poles, 1)
+        var stages: [BiquadCoefficients] = []
+
+        // Odd pole: prepend a 1st-order section (encoded as biquad with b2=a2=0)
+        if n % 2 == 1 {
+            stages.append(firstOrder(cutoff: cutoff, samplingRate: samplingRate, type: type))
+        }
+
+        let pairs = n / 2
+        for k in 0..<pairs {
+            // Angle for k-th conjugate pair in an N-pole Butterworth
+            let angle = Float.pi * Float(2 * k + 1) / Float(2 * n)
+            let q = 1.0 / (2.0 * cos(angle))
+            switch type {
+            case .lowPass:
+                stages.append(lowPass(cutoff: cutoff, samplingRate: samplingRate, q: q))
+            case .highPass:
+                stages.append(highPass(cutoff: cutoff, samplingRate: samplingRate, q: q))
+            }
+        }
+        return stages
+    }
+
+    /// Single-pole (1st-order) filter encoded as a biquad with b2 = a2 = 0.
+    private nonisolated static func firstOrder(cutoff: Float, samplingRate: Float, type: FilterType) -> Self {
+        let omega = 2 * Float.pi * cutoff / samplingRate
+        // Bilinear transform of s-domain 1st-order LP: H(s) = 1/(s+1), HP: H(s) = s/(s+1)
+        let k = tan(omega / 2)
+        switch type {
+        case .lowPass:
+            let a0 = 1 + k
+            return Self(b0: k / a0, b1: k / a0, b2: 0, a1: (k - 1) / a0, a2: 0)
+        case .highPass:
+            let a0 = 1 + k
+            return Self(b0: 1 / a0, b1: -1 / a0, b2: 0, a1: (k - 1) / a0, a2: 0)
+        }
+    }
+
     nonisolated static func lowPass(cutoff: Float, samplingRate: Float, q: Float) -> Self {
         let omega = 2 * Float.pi * cutoff / samplingRate
         let cosine = cos(omega)
@@ -458,19 +538,8 @@ private struct BiquadCoefficients {
     }
 
     private nonisolated static func normalize(
-        b0: Float,
-        b1: Float,
-        b2: Float,
-        a0: Float,
-        a1: Float,
-        a2: Float
+        b0: Float, b1: Float, b2: Float, a0: Float, a1: Float, a2: Float
     ) -> Self {
-        Self(
-            b0: b0 / a0,
-            b1: b1 / a0,
-            b2: b2 / a0,
-            a1: a1 / a0,
-            a2: a2 / a0
-        )
+        Self(b0: b0/a0, b1: b1/a0, b2: b2/a0, a1: a1/a0, a2: a2/a0)
     }
 }
