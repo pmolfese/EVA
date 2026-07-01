@@ -249,10 +249,9 @@ struct WaveformView: View {
 
     // Band-pass / notch filtering (applied to the active base signal).
     @State private var icaCleanedSignal: MFFSignalData?
-    @State private var filteredSignal: MFFSignalData?
-    @State private var filteredPNSSignal: MFFSignalData?
-    @State private var filteredPNSInputSignalType: String?
-    @State private var filterPNSChannels = true
+    /// Filtering domain (band-pass / line-noise / average-reference), extracted
+    /// into an L4 store. See REFACTOR.md.
+    @StateObject private var filter = FilterViewModel()
     @State private var artifactCleanedSignal: MFFSignalData?
     @State private var artifactCleaningIsEnabled = true
     // Wavelet artifact reduction (HAPPE-style) pipeline stage.
@@ -270,10 +269,6 @@ struct WaveformView: View {
     @State private var waveletReductionCandidates: [WaveletReductionCandidate] = []
     @State private var selectedWaveletCandidateID: String?
     @State private var showsWaveletReductionSheet = false
-    @State private var isFiltering = false
-    @State private var filterProgress: Double = 0
-    @State private var filterStatusMessage: String?
-    @State private var filterStatusIsError = false
     @State private var mriStatusIsError = false
     @State private var channelStatusIsError = false
     // Scrollable status history (newest first), shown when the status area is clicked.
@@ -295,19 +290,6 @@ struct WaveformView: View {
     /// Synthetic PNS channels created from ICA components.
     @State private var syntheticPNSChannels: [SyntheticPNSChannel] = []
 
-    @State private var showsFilterPopover = false
-    @State private var filterLowCutoff = 0.1
-    @State private var filterHighPassSlope = FilterSlope.dB24
-    @State private var filterHighCutoff = 30.0
-    @State private var filterLowPassSlope = FilterSlope.dB24
-    @State private var notch60HzEnabled = false
-    @State private var filterLineNoiseMode = FilterLineNoiseMode.off
-    @State private var filterLineNoiseFrequency = 60.0
-    @State private var filterLineNoiseHarmonics = 2
-    @State private var filterLineNoiseWindowSeconds = 4.0
-    @State private var filterLineNoiseStrength = 1.0
-    @State private var showsFilterLineNoiseOptions = false
-    @State private var filterAverageReference = false
 
     // MRI artifact removal. The gradient-corrected signal becomes the base that
     // filtering and display build on.
@@ -475,7 +457,7 @@ struct WaveformView: View {
                 // `base` is what filtering builds on; `preArtifact` is the
                 // reversible source used by Clean Artifacts.
                 let base = icaCleanedSignal ?? gradientCorrectedSignal ?? rawSignal
-                let preArtifact = filteredSignal ?? base
+                let preArtifact = filter.output ?? base
                 let processed = artifactCleaningIsEnabled ? (artifactCleanedSignal ?? preArtifact) : preArtifact
                 // Wavelet reduction stage: computed from `processed`, applied
                 // before interpolation. Toggleable and revertible like cleaning.
@@ -866,17 +848,17 @@ struct WaveformView: View {
             }
 
             Button {
-                showsFilterPopover.toggle()
+                filter.showsPopover.toggle()
             } label: {
-                ToolbarIcon(name: "icon.filter", isActive: filteredSignal != nil)
+                ToolbarIcon(name: "icon.filter", isActive: filter.output != nil)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Filter")
-            .disabled(isFiltering)
-            .help(filteredSignal != nil
-                ? "Active: Butterworth \(String(format: "%.1f", filterLowCutoff))–\(String(format: "%.1f", filterHighCutoff)) Hz\(filterLineNoiseSummary)\(filterAverageReference ? " + avg ref" : "")"
+            .disabled(filter.isFiltering)
+            .help(filter.output != nil
+                ? "Active: Butterworth \(String(format: "%.1f", filter.lowCutoff))–\(String(format: "%.1f", filter.highCutoff)) Hz\(filter.lineNoiseSummary)\(filter.averageReference ? " + avg ref" : "")"
                 : "Apply a band-pass / notch / average-reference filter")
-            .popover(isPresented: $showsFilterPopover, arrowEdge: .bottom) {
+            .popover(isPresented: $filter.showsPopover, arrowEdge: .bottom) {
                 filterPopover(for: base)
             }
 
@@ -1090,8 +1072,8 @@ struct WaveformView: View {
         if !isProcessingMRI, let mriStatusMessage {
             lines.append(LogLine(source: "MRI", text: mriStatusMessage, isError: mriStatusIsError))
         }
-        if !isFiltering, let filterStatusMessage {
-            lines.append(LogLine(source: "Filter", text: filterStatusMessage, isError: filterStatusIsError))
+        if !filter.isFiltering, let filterStatusMessage = filter.statusMessage {
+            lines.append(LogLine(source: "Filter", text: filterStatusMessage, isError: filter.statusIsError))
         }
         if let psaStatusMessage {
             lines.append(LogLine(source: "Segment", text: psaStatusMessage, isError: false))
@@ -1147,8 +1129,8 @@ struct WaveformView: View {
                 if isProcessingMRI {
                     logProgressRow(label: "MRI", value: mriProgress)
                 }
-                if isFiltering {
-                    logProgressRow(label: "Filter", value: filterProgress)
+                if filter.isFiltering {
+                    logProgressRow(label: "Filter", value: filter.progress)
                 }
                 if let artifactCleaningProgress {
                     logProgressRow(label: "Artifact", value: artifactCleaningProgress.fraction)
@@ -1174,7 +1156,7 @@ struct WaveformView: View {
                 }
 
                 if !isProcessingMRI,
-                   !isFiltering,
+                   !filter.isFiltering,
                    !isRunningWaveletArtifactExplorer,
                    !isRunningWaveletReduction,
                    !channels.isAnalyzingHealth,
@@ -1453,10 +1435,10 @@ struct WaveformView: View {
     private func displayedPhysioSignal() -> MFFSignalData? {
         let base: MFFSignalData?
         if let pnsBase = pnsFilterBaseSignal() {
-            if filterPNSChannels,
-               let filteredPNSSignal,
-               filteredPNSInputSignalType == pnsBase.signalType {
-                base = filteredPNSSignal
+            if filter.filterPNS,
+               let filteredPNS = filter.pnsOutput,
+               filter.pnsInputSignalType == pnsBase.signalType {
+                base = filteredPNS
             } else {
                 base = pnsBase
             }
@@ -1680,7 +1662,7 @@ struct WaveformView: View {
             signal.signalType,
             "\(signal.numberOfChannels)",
             "\(signal.data.first?.count ?? 0)",
-            filterPNSChannels ? "filterPNS" : "rawPNS",
+            filter.filterPNS ? "filterPNS" : "rawPNS",
             mriAppliesToPNS ? "mriPNS" : "rawMRI"
         ].joined(separator: "|")
     }
@@ -4999,7 +4981,7 @@ struct WaveformView: View {
         let config = waveletReductionConfig
         let mode = waveletReductionMode
         let cores = waveletReductionCoreCount
-        let analysisBand = (low: filterLowCutoff, high: filterHighCutoff)
+        let analysisBand = (low: filter.lowCutoff, high: filter.highCutoff)
         // Leave bad channels untouched; reduce everything else.
         let reduceIndices = input.data.indices.filter { !channels.bad.contains($0) }
 
@@ -5928,11 +5910,11 @@ struct WaveformView: View {
         }
 
         let excludedComponents = decomposition.excludedComponents
-        let shouldRestoreFilter = filteredSignal != nil
-        let beforeDisplaySignal = filteredSignal ?? signal
-        let restoredFilterLowCutoff = filterLowCutoff
-        let restoredFilterHighCutoff = filterHighCutoff
-        let restoredNotch60HzEnabled = notch60HzEnabled
+        let shouldRestoreFilter = filter.output != nil
+        let beforeDisplaySignal = filter.output ?? signal
+        let restoredFilterLowCutoff = filter.lowCutoff
+        let restoredFilterHighCutoff = filter.highCutoff
+        let restoredNotch60HzEnabled = filter.notch60HzEnabled
         let restoredAmplitudeScale = amplitudeScale
         let restoredTimeScale = timeScale
         let restoredScrollPosition = horizontalScrollPosition
@@ -5971,8 +5953,8 @@ struct WaveformView: View {
                         channelNames: signal.channelNames
                     )
                 } catch {
-                    filterStatusMessage = error.localizedDescription
-                    filterStatusIsError = true
+                    filter.statusMessage = error.localizedDescription
+                    filter.statusIsError = true
                 }
             }
 
@@ -6011,13 +5993,13 @@ struct WaveformView: View {
                         channelNames: cleaned.channelNames
                     )
                 } catch {
-                    filterStatusMessage = error.localizedDescription
-                    filterStatusIsError = true
+                    filter.statusMessage = error.localizedDescription
+                    filter.statusIsError = true
                 }
             }
 
             icaCleanedSignal = cleaned
-            filteredSignal = restoredFilteredSignal
+            filter.output = restoredFilteredSignal
             clearAppliedArtifactCleaning()
             lastICAReconstructionDebugReport = icaReconstructionDebugReport(
                 beforeBase: signal,
@@ -6028,9 +6010,9 @@ struct WaveformView: View {
                 decomposition: decomposition,
                 excludedComponents: excludedComponents
             )
-            filterLowCutoff = restoredFilterLowCutoff
-            filterHighCutoff = restoredFilterHighCutoff
-            notch60HzEnabled = restoredNotch60HzEnabled
+            filter.lowCutoff = restoredFilterLowCutoff
+            filter.highCutoff = restoredFilterHighCutoff
+            filter.notch60HzEnabled = restoredNotch60HzEnabled
             amplitudeScale = restoredAmplitudeScale
             timeScale = restoredTimeScale
             horizontalScrollPosition = restoredScrollPosition
@@ -6082,7 +6064,7 @@ struct WaveformView: View {
 
     private func icaDebugReport(rawSignal: MFFSignalData) -> String {
         let base = icaCleanedSignal ?? gradientCorrectedSignal ?? rawSignal
-        let processed = filteredSignal ?? base
+        let processed = filter.output ?? base
         let visibleRange = visibleSampleRange(in: processed)
 
         var lines: [String] = [
@@ -6100,8 +6082,8 @@ struct WaveformView: View {
             "MRI correction active: \(gradientCorrectedSignal == nil ? "no" : "yes")",
             "ICA cleaned active: \(icaCleanedSignal == nil ? "no" : "yes")",
             "ICA removal in progress: \(isRemovingICAComponents ? "yes" : "no")",
-            "Filter active: \(filteredSignal == nil ? "no" : "yes")",
-            "Filter settings: \(String(format: "%.2f", filterLowCutoff))-\(String(format: "%.2f", filterHighCutoff)) Hz, notch \(notch60HzEnabled ? "on" : "off")",
+            "Filter active: \(filter.output == nil ? "no" : "yes")",
+            "Filter settings: \(String(format: "%.2f", filter.lowCutoff))-\(String(format: "%.2f", filter.highCutoff)) Hz, notch \(filter.notch60HzEnabled ? "on" : "off")",
             "Interpolated channels: \(channels.interpolated.keys.sorted().map { "\($0 + 1)" }.joined(separator: ", ").nilIfEmpty ?? "none")",
             "Bad channels: \(channels.bad.sorted().map { "\($0 + 1)" }.joined(separator: ", ").nilIfEmpty ?? "none")",
             "Hidden channels: \(channels.hidden.sorted().map { "\($0 + 1)" }.joined(separator: ", ").nilIfEmpty ?? "none")",
@@ -6154,8 +6136,8 @@ struct WaveformView: View {
         if let icaCleanedSignal {
             lines.append(debugStatsLine("ICA-cleaned full", signal: icaCleanedSignal))
         }
-        if let filteredSignal {
-            lines.append(debugStatsLine("Filtered full", signal: filteredSignal))
+        if let filteredFull = filter.output {
+            lines.append(debugStatsLine("Filtered full", signal: filteredFull))
         }
         if let visibleRange {
             lines += [
@@ -6167,8 +6149,8 @@ struct WaveformView: View {
             if let icaCleanedSignal {
                 lines.append(debugStatsLine("ICA-cleaned visible", signal: icaCleanedSignal, sampleRange: clippedSampleRange(visibleRange, in: icaCleanedSignal)))
             }
-            if let filteredSignal {
-                lines.append(debugStatsLine("Filtered visible", signal: filteredSignal, sampleRange: clippedSampleRange(visibleRange, in: filteredSignal)))
+            if let filteredVisible = filter.output {
+                lines.append(debugStatsLine("Filtered visible", signal: filteredVisible, sampleRange: clippedSampleRange(visibleRange, in: filteredVisible)))
             }
         }
 
@@ -7216,16 +7198,16 @@ struct WaveformView: View {
                 note: "ICA settings are portable; removed component indices are subject-specific."
             ))
         }
-        if filteredSignal != nil {
+        if filter.output != nil {
             var params: [String: String] = [
-                "highPassHz": String(format: "%.3g", filterLowCutoff),
-                "lowPassHz": String(format: "%.3g", filterHighCutoff),
-                "averageReference": "\(filterAverageReference)"
+                "highPassHz": String(format: "%.3g", filter.lowCutoff),
+                "lowPassHz": String(format: "%.3g", filter.highCutoff),
+                "averageReference": "\(filter.averageReference)"
             ]
-            if notch60HzEnabled { params["notchHz"] = "60" }
-            if filterLineNoiseMode != .off {
-                params["lineNoiseHz"] = String(format: "%.0f", filterLineNoiseFrequency)
-                params["lineNoiseHarmonics"] = "\(filterLineNoiseHarmonics)"
+            if filter.notch60HzEnabled { params["notchHz"] = "60" }
+            if filter.lineNoiseMode != .off {
+                params["lineNoiseHz"] = String(format: "%.0f", filter.lineNoiseFrequency)
+                params["lineNoiseHarmonics"] = "\(filter.lineNoiseHarmonics)"
             }
             script.append(EVAProcessingStep(operation: .filter, parameters: params))
         }
@@ -7254,7 +7236,7 @@ struct WaveformView: View {
         guard let rawSignal = recording.signal else { return nil }
 
         let base = icaCleanedSignal ?? gradientCorrectedSignal ?? rawSignal
-        let preArtifact = filteredSignal ?? base
+        let preArtifact = filter.output ?? base
         let processed = artifactCleaningIsEnabled ? (artifactCleanedSignal ?? preArtifact) : preArtifact
         let continuousSignal = applyInterpolations(to: processed)
 
@@ -7285,34 +7267,15 @@ struct WaveformView: View {
 
     // MARK: - Filtering
 
-    private var activeFilterLineNoiseMode: FilterLineNoiseMode {
-        if filterLineNoiseMode == .adaptiveCleanLine {
-            return .adaptiveCleanLine
-        }
-        return notch60HzEnabled ? .notch : filterLineNoiseMode
-    }
-
-    private var filterLineNoiseSummary: String {
-        switch activeFilterLineNoiseMode {
-        case .off:
-            return ""
-        case .notch:
-            return " + \(String(format: "%.1f", filterLineNoiseFrequency)) Hz notch"
-        case .adaptiveCleanLine:
-            let harmonics = filterLineNoiseHarmonics > 1 ? " x\(filterLineNoiseHarmonics)" : ""
-            return " + CleanLine \(String(format: "%.1f", filterLineNoiseFrequency)) Hz\(harmonics)"
-        }
-    }
-
     private func filterPopover(for signal: MFFSignalData) -> some View {
-        let lineNoiseMode = activeFilterLineNoiseMode
+        let lineNoiseMode = filter.activeLineNoiseMode
         let lineNoiseBinding = Binding<FilterLineNoiseMode> {
-            activeFilterLineNoiseMode
+            filter.activeLineNoiseMode
         } set: { mode in
-            filterLineNoiseMode = mode
-            notch60HzEnabled = mode == .notch
+            filter.lineNoiseMode = mode
+            filter.notch60HzEnabled = mode == .notch
             if mode != .off {
-                showsFilterLineNoiseOptions = true
+                filter.showsLineNoiseOptions = true
             }
         }
 
@@ -7324,12 +7287,12 @@ struct WaveformView: View {
                 Text("High-Pass Cutoff (Hz)")
                     .font(.caption.weight(.semibold))
                 HStack {
-                    TextField("Low", value: $filterLowCutoff, format: .number.precision(.fractionLength(1)))
+                    TextField("Low", value: $filter.lowCutoff, format: .number.precision(.fractionLength(1)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
-                    Stepper("", value: $filterLowCutoff, in: 0.1...100, step: 0.1)
+                    Stepper("", value: $filter.lowCutoff, in: 0.1...100, step: 0.1)
                         .labelsHidden()
-                    Picker("HP Slope", selection: $filterHighPassSlope) {
+                    Picker("HP Slope", selection: $filter.highPassSlope) {
                         ForEach(FilterSlope.allCases) { slope in
                             Text(slope.label).tag(slope)
                         }
@@ -7344,12 +7307,12 @@ struct WaveformView: View {
                 Text("Low-Pass Cutoff (Hz)")
                     .font(.caption.weight(.semibold))
                 HStack {
-                    TextField("High", value: $filterHighCutoff, format: .number.precision(.fractionLength(1)))
+                    TextField("High", value: $filter.highCutoff, format: .number.precision(.fractionLength(1)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
-                    Stepper("", value: $filterHighCutoff, in: 0.5...200, step: 0.5)
+                    Stepper("", value: $filter.highCutoff, in: 0.5...200, step: 0.5)
                         .labelsHidden()
-                    Picker("LP Slope", selection: $filterLowPassSlope) {
+                    Picker("LP Slope", selection: $filter.lowPassSlope) {
                         ForEach(FilterSlope.allCases) { slope in
                             Text(slope.label).tag(slope)
                         }
@@ -7371,16 +7334,16 @@ struct WaveformView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
-                DisclosureGroup("Line Noise Options", isExpanded: $showsFilterLineNoiseOptions) {
+                DisclosureGroup("Line Noise Options", isExpanded: $filter.showsLineNoiseOptions) {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
                             Text("Frequency")
                                 .font(.caption)
                                 .frame(width: 76, alignment: .leading)
-                            TextField("Hz", value: $filterLineNoiseFrequency, format: .number.precision(.fractionLength(1)))
+                            TextField("Hz", value: $filter.lineNoiseFrequency, format: .number.precision(.fractionLength(1)))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 70)
-                            Stepper("", value: $filterLineNoiseFrequency, in: 45...65, step: 0.5)
+                            Stepper("", value: $filter.lineNoiseFrequency, in: 45...65, step: 0.5)
                                 .labelsHidden()
                         }
 
@@ -7388,8 +7351,8 @@ struct WaveformView: View {
                             Text("Harmonics")
                                 .font(.caption)
                                 .frame(width: 76, alignment: .leading)
-                            Stepper(value: $filterLineNoiseHarmonics, in: 1...4) {
-                                Text("\(filterLineNoiseHarmonics)")
+                            Stepper(value: $filter.lineNoiseHarmonics, in: 1...4) {
+                                Text("\(filter.lineNoiseHarmonics)")
                                     .font(.caption.monospacedDigit())
                                     .frame(width: 32, alignment: .leading)
                             }
@@ -7401,11 +7364,11 @@ struct WaveformView: View {
                                 Text("Window")
                                     .font(.caption)
                                 Spacer()
-                                Text(String(format: "%.1fs", filterLineNoiseWindowSeconds))
+                                Text(String(format: "%.1fs", filter.lineNoiseWindowSeconds))
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             }
-                            Slider(value: $filterLineNoiseWindowSeconds, in: 1...10, step: 0.5)
+                            Slider(value: $filter.lineNoiseWindowSeconds, in: 1...10, step: 0.5)
                         }
                         .disabled(lineNoiseMode != .adaptiveCleanLine)
 
@@ -7414,11 +7377,11 @@ struct WaveformView: View {
                                 Text("Strength")
                                     .font(.caption)
                                 Spacer()
-                                Text(String(format: "%.2fx", filterLineNoiseStrength))
+                                Text(String(format: "%.2fx", filter.lineNoiseStrength))
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             }
-                            Slider(value: $filterLineNoiseStrength, in: 0.25...1.50, step: 0.05)
+                            Slider(value: $filter.lineNoiseStrength, in: 0.25...1.50, step: 0.05)
                         }
                         .disabled(lineNoiseMode != .adaptiveCleanLine)
                     }
@@ -7428,32 +7391,24 @@ struct WaveformView: View {
                 .disabled(lineNoiseMode == .off)
             }
 
-            Toggle("Average reference", isOn: $filterAverageReference)
+            Toggle("Average reference", isOn: $filter.averageReference)
                 .help("Re-reference to the common average: subtract the mean across all channels at each time point. Removes shared reference signal.")
 
             if recording.pnsSignal != nil {
-                Toggle("Filter PNS", isOn: $filterPNSChannels)
+                Toggle("Filter PNS", isOn: $filter.filterPNS)
                     .font(.caption)
                     .help("Apply the band-pass and line-noise filter to physio/PNS channels. Average reference is EEG-only.")
             }
 
             HStack {
                 Button("Reset 0.1–30 Hz") {
-                    filterLowCutoff = 0.1
-                    filterHighCutoff = 30
-                    notch60HzEnabled = false
-                    filterLineNoiseMode = .off
-                    filterLineNoiseFrequency = 60
-                    filterLineNoiseHarmonics = 2
-                    filterLineNoiseWindowSeconds = 4
-                    filterLineNoiseStrength = 1
-                    filterAverageReference = false
+                    filter.resetToDefaults()
                 }
 
-                if filteredSignal != nil {
+                if filter.isActive {
                     Button("Remove Filter", role: .destructive) {
                         clearBandpassFilter()
-                        showsFilterPopover = false
+                        filter.showsPopover = false
                     }
                 }
 
@@ -7461,7 +7416,7 @@ struct WaveformView: View {
 
                 Button("Apply Filter") {
                     applyBandpassFilter(to: signal)
-                    showsFilterPopover = false
+                    filter.showsPopover = false
                 }
                 .keyboardShortcut(.defaultAction)
             }
@@ -7470,194 +7425,28 @@ struct WaveformView: View {
         .frame(width: 330)
     }
 
-    private nonisolated static func filteredChannels(
-        _ sourceData: [[Float]],
-        samplingRate: Double,
-        lowCutoff: Double,
-        highCutoff: Double,
-        highPassSlope: FilterSlope = .dB24,
-        lowPassSlope: FilterSlope = .dB24,
-        lineNoiseMode: FilterLineNoiseMode,
-        notchFrequency: Double,
-        lineNoiseHarmonics: Int,
-        lineNoiseWindowSeconds: Double,
-        lineNoiseStrength: Double,
-        averageReference: Bool,
-        excludedChannels: Set<Int>,
-        progress: @escaping @Sendable (Double) -> Void
-    ) async throws -> [[Float]] {
-        let notchEnabled = lineNoiseMode == .notch
-        var bandPassed = try await EEGSignalFilter.bandPass(
-            channels: sourceData,
-            samplingRate: samplingRate,
-            lowCutoff: lowCutoff,
-            highCutoff: highCutoff,
-            highPassSlope: highPassSlope,
-            lowPassSlope: lowPassSlope,
-            notch60HzEnabled: notchEnabled,
-            notchFrequency: notchFrequency,
-            progress: { fraction in
-                progress(lineNoiseMode == .adaptiveCleanLine ? 0.62 * fraction : fraction)
-            }
-        )
-        if lineNoiseMode == .adaptiveCleanLine {
-            bandPassed = await EEGSignalFilter.adaptiveLineNoiseReduction(
-                channels: bandPassed,
-                samplingRate: samplingRate,
-                baseFrequency: notchFrequency,
-                harmonicCount: lineNoiseHarmonics,
-                windowSeconds: lineNoiseWindowSeconds,
-                strength: lineNoiseStrength,
-                progress: { fraction in progress(0.62 + 0.38 * fraction) }
-            )
-        }
-        if averageReference {
-            EEGSignalFilter.averageReferenceInPlace(&bandPassed, excluding: excludedChannels)
-        }
-        return bandPassed
-    }
-
     private func applyBandpassFilter(to signal: MFFSignalData) {
-        isFiltering = true
-        filterProgress = 0
-        filterStatusMessage = nil
-        filterStatusIsError = false
-
-        let signalURL = signal.signalURL
-        let signalType = signal.signalType
-        let numberOfChannels = signal.numberOfChannels
-        let samplingRate = signal.samplingRate
-        let duration = signal.duration
-        let recordingStartTime = signal.recordingStartTime
-        let events = signal.events
-        let sourceData = signal.data
-        let pnsInput = filterPNSChannels ? pnsFilterBaseSignal() : nil
-        let lowCutoff = filterLowCutoff
-        let highPassSlope = filterHighPassSlope
-        let highCutoff = filterHighCutoff
-        let lowPassSlope = filterLowPassSlope
-        let lineNoiseMode = activeFilterLineNoiseMode
-        let lineNoiseFrequency = filterLineNoiseFrequency
-        let lineNoiseHarmonics = filterLineNoiseHarmonics
-        let lineNoiseWindowSeconds = filterLineNoiseWindowSeconds
-        let lineNoiseStrength = filterLineNoiseStrength
-        let averageReference = filterAverageReference
-        if lineNoiseMode == .adaptiveCleanLine {
-            filterStatusMessage = "Filtering, then applying adaptive CleanLine..."
-            filterStatusIsError = false
-        }
-
-        // Stream per-channel completion fractions to the UI.
-        let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
-            filterProgress = fraction
-        }
-
-        Task {
-            do {
-                let badChannels = channels.bad
-                let pnsEnabled = pnsInput != nil
-                let result = try await Task.detached(priority: .userInitiated) {
-                    let filteredData = try await Self.filteredChannels(
-                        sourceData,
-                        samplingRate: samplingRate,
-                        lowCutoff: lowCutoff,
-                        highCutoff: highCutoff,
-                        highPassSlope: highPassSlope,
-                        lowPassSlope: lowPassSlope,
-                        lineNoiseMode: lineNoiseMode,
-                        notchFrequency: lineNoiseFrequency,
-                        lineNoiseHarmonics: lineNoiseHarmonics,
-                        lineNoiseWindowSeconds: lineNoiseWindowSeconds,
-                        lineNoiseStrength: lineNoiseStrength,
-                        averageReference: averageReference,
-                        excludedChannels: badChannels,
-                        progress: { fraction in
-                            progressContinuation.yield(pnsEnabled ? 0.70 * fraction : fraction)
-                        }
-                    )
-
-                    let filteredPNSData: [[Float]]?
-                    if let pnsInput {
-                        filteredPNSData = try await Self.filteredChannels(
-                            pnsInput.data,
-                            samplingRate: pnsInput.samplingRate,
-                            lowCutoff: lowCutoff,
-                            highCutoff: highCutoff,
-                            highPassSlope: highPassSlope,
-                            lowPassSlope: lowPassSlope,
-                            lineNoiseMode: lineNoiseMode,
-                            notchFrequency: lineNoiseFrequency,
-                            lineNoiseHarmonics: lineNoiseHarmonics,
-                            lineNoiseWindowSeconds: lineNoiseWindowSeconds,
-                            lineNoiseStrength: lineNoiseStrength,
-                            averageReference: false,
-                            excludedChannels: [],
-                            progress: { fraction in
-                                progressContinuation.yield(0.70 + 0.30 * fraction)
-                            }
-                        )
-                    } else {
-                        filteredPNSData = nil
-                    }
-                    return (filteredData, filteredPNSData)
-                }.value
-                progressContinuation.finish()
-                progressTask.cancel()
-
-                filteredSignal = MFFSignalData(
-                    signalURL: signalURL,
-                    signalType: signalType,
-                    numberOfChannels: numberOfChannels,
-                    samplingRate: samplingRate,
-                    duration: duration,
-                    recordingStartTime: recordingStartTime,
-                    events: events,
-                    data: result.0,
-                    channelNames: signal.channelNames
-                )
-                if let pnsInput, let filteredPNSData = result.1 {
-                    filteredPNSSignal = MFFSignalData(
-                        signalURL: pnsInput.signalURL,
-                        signalType: "\(pnsInput.signalType) filtered",
-                        numberOfChannels: pnsInput.numberOfChannels,
-                        samplingRate: pnsInput.samplingRate,
-                        duration: pnsInput.duration,
-                        recordingStartTime: pnsInput.recordingStartTime,
-                        events: pnsInput.events,
-                        data: filteredPNSData,
-                        channelNames: pnsInput.channelNames
-                    )
-                    filteredPNSInputSignalType = pnsInput.signalType
-                } else {
-                    filteredPNSSignal = nil
-                    filteredPNSInputSignalType = nil
-                }
+        let pnsInput = filter.filterPNS ? pnsFilterBaseSignal() : nil
+        filter.apply(
+            to: signal,
+            pnsInput: pnsInput,
+            excludedChannels: channels.bad,
+            onApplied: { [self] in
                 clearAppliedArtifactCleaning()
                 artifactDetectionRefreshToken += 1
                 invalidateEpochsForSignalChange()
                 invalidateInterpolations()
-                filterStatusMessage = "Applied Butterworth \(String(format: "%.1f", lowCutoff))-\(String(format: "%.1f", highCutoff)) Hz\(filterLineNoiseSummary)\(averageReference ? " + average reference" : "")\(pnsInput == nil ? "" : " + PNS")."
-                filterStatusIsError = false
-            } catch {
-                progressContinuation.finish()
-                progressTask.cancel()
-                filterStatusMessage = error.localizedDescription
             }
-
-            isFiltering = false
-        }
+        )
     }
 
     private func clearBandpassFilter() {
-        filteredSignal = nil
-        filteredPNSSignal = nil
-        filteredPNSInputSignalType = nil
-        clearAppliedArtifactCleaning()
-        filterStatusMessage = "Removed band-pass filter."
-        filterStatusIsError = false
-        artifactDetectionRefreshToken += 1
-        invalidateEpochsForSignalChange()
-        invalidateInterpolations()
+        filter.clear(onCleared: { [self] in
+            clearAppliedArtifactCleaning()
+            artifactDetectionRefreshToken += 1
+            invalidateEpochsForSignalChange()
+            invalidateInterpolations()
+        })
     }
 
     // MARK: - MRI gradient artifact removal
@@ -8102,9 +7891,9 @@ struct WaveformView: View {
                 // the old base is stale.
                 icaCleanedSignal = nil
                 icaDecomposition = nil
-                filteredSignal = nil
-                filteredPNSSignal = nil
-                filteredPNSInputSignalType = nil
+                filter.output = nil
+                filter.pnsOutput = nil
+                filter.pnsInputSignalType = nil
                 clearAppliedArtifactCleaning()
                 mriStatusMessage = "Applied MRI gradient artifact correction (\(mriTRMarkerCode) markers, template window \(window.before) pre / \(window.after) post TRs\(excludedCount > 0 ? ", \(excludedCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
                 mriStatusIsError = false
@@ -8237,9 +8026,9 @@ struct WaveformView: View {
                 }
                 icaCleanedSignal = nil
                 icaDecomposition = nil
-                filteredSignal = nil
-                filteredPNSSignal = nil
-                filteredPNSInputSignalType = nil
+                filter.output = nil
+                filter.pnsOutput = nil
+                filter.pnsInputSignalType = nil
                 clearAppliedArtifactCleaning()
                 mriStatusMessage = "Applied \(methodName) correction (\(mriTRMarkerCode) markers, \(slices) slice\(slices == 1 ? "" : "s")/volume\(fastrOBSAuto ? ", OBS" : "")\(fastrANC ? ", ANC" : "")\(censoredCount > 0 ? ", \(censoredCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
                 mriStatusIsError = false
@@ -8348,9 +8137,9 @@ struct WaveformView: View {
         gradientCorrectedPNSSignal = nil
         icaCleanedSignal = nil
         icaDecomposition = nil
-        filteredSignal = nil
-        filteredPNSSignal = nil
-        filteredPNSInputSignalType = nil
+        filter.output = nil
+        filter.pnsOutput = nil
+        filter.pnsInputSignalType = nil
         clearAppliedArtifactCleaning()
         mriStatusMessage = "Removed MRI gradient correction."
         mriStatusIsError = false
@@ -9632,7 +9421,7 @@ struct WaveformView: View {
             "\(signal.samplingRate)",
             "\(gradientCorrectedSignal != nil)",
             "\(icaCleanedSignal != nil)",
-            "\(filteredSignal != nil)",
+            "\(filter.output != nil)",
             "\(artifactCleanedSignal != nil)",
             "\(artifactCleaningIsEnabled)",
             channels.interpolated.keys.sorted().map(String.init).joined(separator: ",")
@@ -9933,7 +9722,7 @@ struct WaveformView: View {
     private func currentChannelLabelMetricsSignal() -> MFFSignalData? {
         guard let rawSignal = recording.signal else { return nil }
         let base = icaCleanedSignal ?? gradientCorrectedSignal ?? rawSignal
-        let preArtifact = filteredSignal ?? base
+        let preArtifact = filter.output ?? base
         return artifactCleaningIsEnabled ? (artifactCleanedSignal ?? preArtifact) : preArtifact
     }
 
@@ -9941,11 +9730,11 @@ struct WaveformView: View {
         SavedChannelHealthProcessing(
             gradientCorrected: gradientCorrectedSignal != nil,
             icaCleaned: icaCleanedSignal != nil,
-            filtered: filteredSignal != nil,
-            filterLowCutoffHz: filteredSignal == nil ? nil : filterLowCutoff,
-            filterHighCutoffHz: filteredSignal == nil ? nil : filterHighCutoff,
-            notch60HzEnabled: filteredSignal == nil ? nil : notch60HzEnabled,
-            averageReferenced: filteredSignal == nil ? nil : filterAverageReference,
+            filtered: filter.output != nil,
+            filterLowCutoffHz: filter.output == nil ? nil : filter.lowCutoff,
+            filterHighCutoffHz: filter.output == nil ? nil : filter.highCutoff,
+            notch60HzEnabled: filter.output == nil ? nil : filter.notch60HzEnabled,
+            averageReferenced: filter.output == nil ? nil : filter.averageReference,
             artifactCleaned: artifactCleanedSignal != nil,
             artifactCleaningVisible: artifactCleanedSignal != nil && artifactCleaningIsEnabled,
             interpolatedChannelIndices: channels.interpolated.keys.sorted(),
@@ -9996,7 +9785,7 @@ struct WaveformView: View {
             "\(signal.samplingRate)",
             "\(gradientCorrectedSignal != nil)",
             "\(icaCleanedSignal != nil)",
-            "\(filteredSignal != nil)",
+            "\(filter.output != nil)",
             "\(artifactCleanedSignal != nil)",
             "\(artifactCleaningIsEnabled)",
             "\(epochedSignal != nil)",
@@ -10342,7 +10131,7 @@ struct WaveformView: View {
     private func currentSegmentHealthSignal() -> MFFSignalData? {
         guard let rawSignal = recording.signal else { return nil }
         let base = icaCleanedSignal ?? gradientCorrectedSignal ?? rawSignal
-        let preArtifact = filteredSignal ?? base
+        let preArtifact = filter.output ?? base
         let processed = artifactCleaningIsEnabled ? (artifactCleanedSignal ?? preArtifact) : preArtifact
         let continuousSignal = applyInterpolations(to: processed)
         return epochedSignal ?? continuousSignal
@@ -10352,11 +10141,11 @@ struct WaveformView: View {
         SavedSegmentHealthProcessing(
             gradientCorrected: gradientCorrectedSignal != nil,
             icaCleaned: icaCleanedSignal != nil,
-            filtered: filteredSignal != nil,
-            filterLowCutoffHz: filteredSignal == nil ? nil : filterLowCutoff,
-            filterHighCutoffHz: filteredSignal == nil ? nil : filterHighCutoff,
-            notch60HzEnabled: filteredSignal == nil ? nil : notch60HzEnabled,
-            averageReferenced: filteredSignal == nil ? nil : filterAverageReference,
+            filtered: filter.output != nil,
+            filterLowCutoffHz: filter.output == nil ? nil : filter.lowCutoff,
+            filterHighCutoffHz: filter.output == nil ? nil : filter.highCutoff,
+            notch60HzEnabled: filter.output == nil ? nil : filter.notch60HzEnabled,
+            averageReferenced: filter.output == nil ? nil : filter.averageReference,
             artifactCleaned: artifactCleanedSignal != nil,
             artifactCleaningVisible: artifactCleanedSignal != nil && artifactCleaningIsEnabled,
             epoched: epochedSignal != nil,
@@ -10450,9 +10239,9 @@ struct WaveformView: View {
     /// Analysis parameters (cutoffs, ICA settings, template names) are preserved.
     private func resetToOriginalData() {
         // Derived signals.
-        filteredSignal = nil
-        filteredPNSSignal = nil
-        filteredPNSInputSignalType = nil
+        filter.output = nil
+        filter.pnsOutput = nil
+        filter.pnsInputSignalType = nil
         icaCleanedSignal = nil
         icaDecomposition = nil
         gradientCorrectedSignal = nil
@@ -10488,8 +10277,8 @@ struct WaveformView: View {
         artifactTemplateDefinedArtifactID = nil
 
         // Status messages and progress.
-        filterStatusMessage = nil
-        filterStatusIsError = false
+        filter.statusMessage = nil
+        filter.statusIsError = false
         icaStatusMessage = nil
         artifactStatusMessage = nil
         artifactTemplateStatusMessage = nil
@@ -10902,7 +10691,7 @@ private enum WaveletExplorerChannelScope: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-private enum FilterLineNoiseMode: String, CaseIterable, Identifiable, Sendable {
+enum FilterLineNoiseMode: String, CaseIterable, Identifiable, Sendable {
     case off = "Off"
     case notch = "IIR Notch"
     case adaptiveCleanLine = "CleanLine"
