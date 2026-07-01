@@ -106,10 +106,14 @@ struct WaveformView: View {
     @State private var bcgRefinedKeptCount: Int? = nil
     @State private var bcgIsRefining = false
     @State private var bcgRejectFraction = 0.20
+    /// Optional channel set restricting which channels feed the GFP-based BCG
+    /// methods (periodicity, spatial PCA, cardiac power map). `nil` = all channels.
+    @State private var bcgChannelSetID: ChannelSet.ID? = nil
     /// Stable UUID so re-running detection updates the existing DefinedArtifact rather than appending a new one.
     private let bcgDefinedArtifactID = UUID()
     @State private var ecgDetectionSelectedPNSChannels = Set<Int>()
     @State private var ecgDetectionProxyChannels = ""
+    @State private var ecgProxyChannelSetID: ChannelSet.ID? = nil
     @State private var ecgDetectionAlgorithm = ECGDetectionAlgorithm.panTompkins
     @State private var ecgDetectionThresholdSD = 4.0
     @State private var ecgDetectionMinimumRRSeconds = 0.30
@@ -143,6 +147,7 @@ struct WaveformView: View {
     @State private var artifactTrajectoryGFPWeighted  = true
     @State private var artifactTrajectorySelectedFrame: ArtifactTrajectoryFrame? = nil
     @State private var artifactTopographyChannelScope = ArtifactTopographyChannelScope.allGood
+    @State private var artifactTopographyChannelSetID: ChannelSet.ID? = nil
     @State private var artifactTopographyTopN: Int = 16
     @State private var artifactTopographyMetric = ArtifactTopographyMetric.pearson
     @State private var isRefreshingTopography = false
@@ -568,6 +573,7 @@ struct WaveformView: View {
         if electrodeGeometry == nil {
             electrodeGeometry = recording.electrodeGeometry
         }
+        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
         adoptOnDiskEpochsIfPresent()
     }
 
@@ -699,48 +705,49 @@ struct WaveformView: View {
             mapContinuousOverlaysIntoEpochs: isShowingEpochs
         )
 
-        HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                controls(for: signal, base: base, waveletInput: waveletInput, continuousSignal: continuousSignal)
+        VStack(spacing: 0) {
+            // Full-width button bar — side panels below must not shrink it.
+            controls(for: signal, base: base, waveletInput: waveletInput, continuousSignal: continuousSignal)
 
-                Divider()
+            Divider()
 
+            HStack(spacing: 0) {
                 waveformArea(for: signal, events: events, isShowingEpochs: isShowingEpochs)
-            }
 
-            if showsEventsPanel {
-                Divider()
-                eventsPanel(for: signal, events: events)
-                    .frame(width: eventsPanelWidth)
-                    .background(Color(nsColor: .windowBackgroundColor))
-            }
+                if showsEventsPanel {
+                    Divider()
+                    eventsPanel(for: signal, events: events)
+                        .frame(width: eventsPanelWidth)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                }
 
-            if showsButterflyPlot, psaIsAveraged {
-                Divider()
-                butterflyPanel(for: signal)
-                    .frame(width: butterflyPanelWidth)
-                    .background(Color(nsColor: .windowBackgroundColor))
-            }
+                if showsButterflyPlot, psaIsAveraged {
+                    Divider()
+                    butterflyPanel(for: signal)
+                        .frame(width: butterflyPanelWidth)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                }
 
-            if showsOverlaidCategories, psaIsAveraged {
-                Divider()
-                overlaidCategoriesPanel(for: signal)
-                    .frame(width: overlaidCategoriesPanelWidth)
-                    .background(Color(nsColor: .windowBackgroundColor))
-            }
+                if showsOverlaidCategories, psaIsAveraged {
+                    Divider()
+                    overlaidCategoriesPanel(for: signal)
+                        .frame(width: overlaidCategoriesPanelWidth)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                }
 
-            if let topomapSample {
-                Divider()
-                topomapPanel(for: signal, sample: topomapSample)
-                    .frame(width: topomapPanelWidth)
-                    .background(Color(nsColor: .windowBackgroundColor))
-            }
+                if let topomapSample {
+                    Divider()
+                    topomapPanel(for: signal, sample: topomapSample)
+                        .frame(width: topomapPanelWidth)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                }
 
-            if let butterflyTopomapRelativeSample, psaIsAveraged {
-                Divider()
-                averagedTopomapPanel(for: signal, relativeSample: butterflyTopomapRelativeSample)
-                    .frame(width: topomapPanelWidth)
-                    .background(Color(nsColor: .windowBackgroundColor))
+                if let butterflyTopomapRelativeSample, psaIsAveraged {
+                    Divider()
+                    averagedTopomapPanel(for: signal, relativeSample: butterflyTopomapRelativeSample)
+                        .frame(width: topomapPanelWidth)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                }
             }
         }
         .sheet(isPresented: $showsPSASheet) {
@@ -1285,6 +1292,12 @@ struct WaveformView: View {
     private func waveformArea(for signal: MFFSignalData, events: [MFFEvent], isShowingEpochs: Bool) -> some View {
         let plotWidth = plotWidth(for: signal)
 
+        // Stagger events from different source XML files into vertical lanes so
+        // overlapping markers/labels stay legible. Cap the lane count so the
+        // track doesn't grow without bound.
+        let eventLaneCount = max(min(Set(events.map(\.sourceFile)).count, EventTrackView.maxLanes), 1)
+        let dynamicEventTrackHeight = eventTrackHeight + CGFloat(eventLaneCount - 1) * EventTrackView.laneSpacing
+
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -1300,7 +1313,7 @@ struct WaveformView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .frame(width: labelColumnWidth, height: eventTrackHeight, alignment: .topLeading)
+                .frame(width: labelColumnWidth, height: dynamicEventTrackHeight, alignment: .topLeading)
 
                 EventTrackView(
                     events: events,
@@ -1309,9 +1322,10 @@ struct WaveformView: View {
                     sampleStride: sampleStride,
                     contentOffset: horizontalOffset,
                     visibleRange: visibleHorizontalRange,
-                    viewportWidth: horizontalViewportWidth
+                    viewportWidth: horizontalViewportWidth,
+                    laneCount: eventLaneCount
                 )
-                .frame(maxWidth: .infinity, minHeight: eventTrackHeight, maxHeight: eventTrackHeight)
+                .frame(maxWidth: .infinity, minHeight: dynamicEventTrackHeight, maxHeight: dynamicEventTrackHeight)
             }
             .padding(.horizontal, 20)
             .padding(.top, 20)
@@ -3699,6 +3713,11 @@ struct WaveformView: View {
         .onChange(of: artifactTopographyChannelScope) { _, _ in
             refreshTopographyIfNeeded(for: signal)
         }
+        .onChange(of: artifactTopographyChannelSetID) { _, _ in
+            if artifactTopographyChannelScope == .channelSet {
+                refreshTopographyIfNeeded(for: signal)
+            }
+        }
         .onChange(of: artifactTopographyTopN) { _, _ in
             guard artifactTopographyChannelScope == .topN else { return }
             refreshTopographyIfNeeded(for: signal)
@@ -3894,6 +3913,14 @@ struct WaveformView: View {
                             }
                             .help("Number of channels selected by highest RMS amplitude in the exemplar window. Fewer channels focus the spatial correlation on those that express the artifact most strongly.")
                         }
+                    }
+
+                    if artifactTopographyChannelScope == .channelSet {
+                        ChannelSetPickerView(
+                            label: "Channel Set",
+                            selectedSetID: $artifactTopographyChannelSetID,
+                            channelCount: signal.numberOfChannels
+                        )
                     }
 
                     ArtifactTemplateFieldLabel(
@@ -5226,6 +5253,13 @@ struct WaveformView: View {
                 return (chIdx, rms)
             }
             return scored.sorted { $0.1 > $1.1 }.prefix(n).map { $0.0 }.sorted()
+        case .channelSet:
+            guard let id = artifactTopographyChannelSetID,
+                  let set = ChannelSetStore.shared.allSets.first(where: { $0.id == id })
+            else { return goodChannels }
+            // Intersect the set with good channels that exist in this recording.
+            let setIndices = Set(set.channelIndices)
+            return goodChannels.filter { setIndices.contains($0) }
         }
     }
 
@@ -8331,17 +8365,39 @@ struct WaveformView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("EEG Proxy Channels")
                     .font(.caption.weight(.semibold))
-                TextField("1, 8, 25 or 1-4", text: $ecgDetectionProxyChannels)
-                    .textFieldStyle(.roundedBorder)
-                HStack {
-                    Button("Visible Good") {
-                        let indices = signal.data.indices.filter { !channels.hidden.contains($0) && !channels.bad.contains($0) }
-                        ecgDetectionProxyChannels = indices.map { String($0 + 1) }.joined(separator: ", ")
-                    }
-                    Button("Clear") {
+                ChannelSetPickerView(
+                    label: "Channel Set",
+                    selectedSetID: $ecgProxyChannelSetID,
+                    channelCount: signal.numberOfChannels,
+                    includesCustom: true
+                )
+                .onChange(of: ecgProxyChannelSetID) { _, id in
+                    if id == ChannelSetPickerView.customSentinel {
+                        // Leave the manual field as-is for editing.
+                    } else if let id, let set = ChannelSetStore.shared.allSets.first(where: { $0.id == id }) {
+                        ecgDetectionProxyChannels = set.channelIndices.map { String($0 + 1) }.joined(separator: ", ")
+                    } else {
                         ecgDetectionProxyChannels = ""
                     }
-                    Spacer()
+                }
+
+                if ecgProxyChannelSetID == ChannelSetPickerView.customSentinel {
+                    TextField("1, 8, 25 or 1-4", text: $ecgDetectionProxyChannels)
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button("Visible Good") {
+                            let indices = signal.data.indices.filter { !channels.hidden.contains($0) && !channels.bad.contains($0) }
+                            ecgDetectionProxyChannels = indices.map { String($0 + 1) }.joined(separator: ", ")
+                        }
+                        Button("Clear") {
+                            ecgDetectionProxyChannels = ""
+                        }
+                        Spacer()
+                        Text(ecgProxySummary(in: signal))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if ecgProxyChannelSetID != nil {
                     Text(ecgProxySummary(in: signal))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -8471,6 +8527,24 @@ struct WaveformView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     bcgMethodOptions(for: signal, selection: selection)
+
+                    // Channel restriction — applies to the GFP-based methods.
+                    if bcgDetectionMethod != .qrsLocking {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("BCG Channels")
+                                .font(.caption.weight(.semibold))
+                            ChannelSetPickerView(
+                                label: "Channel Set",
+                                selectedSetID: $bcgChannelSetID,
+                                channelCount: signal.numberOfChannels
+                            )
+                            Text(bcgChannelSetID == nil
+                                 ? "Using all EEG channels."
+                                 : "Restricting detection to the selected set.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
 
                     // Shared options
                     VStack(alignment: .leading, spacing: 10) {
@@ -8607,7 +8681,7 @@ struct WaveformView: View {
             }
             .padding(20)
         }
-        .frame(width: 560)
+        .frame(width: 644)
         .disabled(isRunningBCGDetection || bcgIsRefining)
     }
 
@@ -8742,6 +8816,48 @@ struct WaveformView: View {
                 }
             }
 
+        case .virtualECGPCA, .panTompkinsProxy:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Expected heart rate")
+                    .font(.caption.weight(.semibold))
+                if bcgChannelSetID == nil {
+                    Label("Pick a BCG channel set below for best results — these methods are designed for a focused proxy group.", systemImage: "exclamationmark.triangle")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Label(bcgDetectionMethod == .virtualECGPCA
+                          ? "First principal component of the selected channel set drives Pan-Tompkins QRS detection."
+                          : "Pan-Tompkins runs across the selected channel set and aggregates beats.",
+                          systemImage: "checkmark.circle")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack {
+                    Text("Min HR")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    TextField("BPM", value: $bcgMinHR, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Slider(value: $bcgMinHR, in: 30...80, step: 1)
+                }
+                HStack {
+                    Text("Max HR")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    TextField("BPM", value: $bcgMaxHR, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Slider(value: $bcgMaxHR, in: 60...180, step: 1)
+                }
+                Text("Max HR sets the refractory period (caps the beat rate); for Virtual ECG it also bounds the band-pass before PCA.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
         case .qrsLocking:
             VStack(alignment: .leading, spacing: 10) {
                 Text("QRS → BCG lag")
@@ -8783,11 +8899,19 @@ struct WaveformView: View {
 
     private func runBCGDetection(signal: MFFSignalData, selection: ClosedRange<Int>?) async {
         isRunningBCGDetection = true
-        bcgDetectionStatus = nil
+        bcgDetectionStatus = "Detecting…"
         bcgRefinedTemplate = nil
         bcgRefinedKeptCount = nil
 
-        let channels    = signal.data
+        // Restrict to a channel set when one is selected (GFP-based methods).
+        let restrictedIndices: [Int]? = bcgChannelSetID.flatMap { id in
+            ChannelSetStore.shared.allSets.first(where: { $0.id == id })?
+                .channelIndices.filter { signal.data.indices.contains($0) }
+        }
+        let channels: [[Float]] = {
+            guard let restrictedIndices, !restrictedIndices.isEmpty else { return signal.data }
+            return restrictedIndices.map { signal.data[$0] }
+        }()
         let sr          = signal.samplingRate
         let duration    = signal.duration
         let threshold   = bcgThresholdSD
@@ -8830,6 +8954,59 @@ struct WaveformView: View {
                 maxHz: bcgPowerMaxHz,
                 thresholdSD: threshold
             )
+
+        case .virtualECGPCA:
+            let minRR = 60.0 / max(bcgMaxHR, 1) * 0.6
+            if let pc = await BCGDetector.virtualECGComponent(
+                channels: channels,
+                samplingRate: sr,
+                minHR: bcgMinHR,
+                maxHR: bcgMaxHR
+            ) {
+                let source = ECGDetectionSource(
+                    id: "bcg-virtual-ecg",
+                    label: "Virtual ECG",
+                    channelLabels: ["PC1"],
+                    channels: [pc],
+                    samplingRate: sr,
+                    duration: duration
+                )
+                let config = ECGDetectionConfiguration(
+                    algorithm: .panTompkins,
+                    thresholdSD: threshold,
+                    minimumRRSeconds: minRR,
+                    polarity: .either
+                )
+                times = await Task.detached(priority: .userInitiated) {
+                    RWaveDetector.detect(sources: [source], configuration: config)
+                        .map(\.beginTimeSeconds)
+                }.value
+            } else {
+                times = []
+            }
+
+        case .panTompkinsProxy:
+            let minRR = 60.0 / max(bcgMaxHR, 1) * 0.6
+            let labels = restrictedIndices?.map { "Ch \($0 + 1)" }
+                ?? channels.indices.map { "Ch \($0 + 1)" }
+            let source = ECGDetectionSource(
+                id: "bcg-pan-tompkins",
+                label: "BCG Proxy",
+                channelLabels: labels,
+                channels: channels,
+                samplingRate: sr,
+                duration: duration
+            )
+            let config = ECGDetectionConfiguration(
+                algorithm: .panTompkins,
+                thresholdSD: threshold,
+                minimumRRSeconds: minRR,
+                polarity: .either
+            )
+            times = await Task.detached(priority: .userInitiated) {
+                RWaveDetector.detect(sources: [source], configuration: config)
+                    .map(\.beginTimeSeconds)
+            }.value
 
         case .qrsLocking:
             let qrsTimes = artifactEvents
@@ -9425,6 +9602,7 @@ struct WaveformView: View {
         let shouldRefreshBase = channelHealthSignature != signature || channels.healthResults.isEmpty
         let existingResults = channels.healthResults
         let layout = recording.sensorLayout
+        let impedances = recording.signal?.impedancesKOhm
         let baseConfig = goodnessSettings.base
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
@@ -9465,6 +9643,7 @@ struct WaveformView: View {
                         base: baseConfig,
                         spectral: spectralConfig,
                         ransac: ransacConfig,
+                        impedancesKOhm: impedances,
                         progress: { fraction in
                             progressContinuation.yield(0.42 * fraction)
                         }
@@ -9543,6 +9722,7 @@ struct WaveformView: View {
 
         let layout = recording.sensorLayout
         let sourceSignal = signal
+        let impedances = recording.signal?.impedancesKOhm
         let baseConfig = goodnessSettings.base
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
@@ -9558,6 +9738,7 @@ struct WaveformView: View {
                     base: baseConfig,
                     spectral: spectralConfig,
                     ransac: ransacConfig,
+                    impedancesKOhm: impedances,
                     progress: { fraction in
                         progressContinuation.yield(fraction)
                     }
@@ -9617,6 +9798,7 @@ struct WaveformView: View {
 
         let packageName = recording.packageName
         let layout = recording.sensorLayout
+        let impedances = recording.signal?.impedancesKOhm
         let processing = channelHealthProcessingSnapshot()
         let hiddenChannels = channels.hidden
         let baseConfig = goodnessSettings.base
@@ -9636,6 +9818,7 @@ struct WaveformView: View {
                         base: baseConfig,
                         spectral: spectralConfig,
                         ransac: ransacConfig,
+                        impedancesKOhm: impedances,
                         progress: { fraction in
                             progressContinuation.yield(0.85 * fraction)
                         }
@@ -10589,18 +10772,19 @@ struct WaveformView: View {
 // MARK: - Supporting views
 
 /// Which channels the scalp-topography correlation uses. Bad channels are always
-/// excluded. Cluster (region-of-interest) options will be added once channel
-/// clusters are implemented (see [[ChannelCluster]]).
+/// excluded.
 private enum ArtifactTopographyChannelScope: CaseIterable, Hashable, Identifiable {
     case allGood
     case topN
+    case channelSet
 
     var id: Self { self }
 
     var label: String {
         switch self {
-        case .allGood: return "All good channels"
-        case .topN:    return "Top N by amplitude"
+        case .allGood:     return "All good channels"
+        case .topN:        return "Top N by amplitude"
+        case .channelSet:  return "Channel set"
         }
     }
 }
@@ -14353,7 +14537,8 @@ nonisolated private enum EyeArtifactThresholdDetector {
 
 private struct EventMarkerStyle {
     let color: Color
-    let stemTopY: CGFloat
+    /// Vertical offset of this event's label (and stem top) — its source lane.
+    let laneY: CGFloat
 }
 
 private struct WaveformPlot: View {
@@ -14924,6 +15109,11 @@ private struct PhysioTrackView: View {
 }
 
 private struct EventTrackView: View {
+    /// Maximum number of vertical lanes events are staggered across, and the
+    /// extra height each lane beyond the first adds to the track.
+    static let maxLanes = 3
+    static let laneSpacing: CGFloat = 18
+
     let events: [MFFEvent]
     let samplingRate: Double
     let timeScale: Double
@@ -14933,6 +15123,11 @@ private struct EventTrackView: View {
     let contentOffset: CGFloat
     let visibleRange: ClosedRange<CGFloat>
     let viewportWidth: CGFloat
+    /// Number of distinct source lanes events are staggered into.
+    var laneCount: Int = 1
+
+    /// Event whose detail popover is currently shown (tap a flag to open).
+    @State private var poppedEvent: MFFEvent?
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -14951,27 +15146,15 @@ private struct EventTrackView: View {
                     let x = localXPosition(for: event)
                     let style = style(for: event)
                     var marker = Path()
-                    marker.move(to: CGPoint(x: x, y: style.stemTopY))
+                    // Stem starts at this source's lane (just below its label).
+                    marker.move(to: CGPoint(x: x, y: style.laneY + 4))
                     marker.addLine(to: CGPoint(x: x, y: baselineY))
                     context.stroke(marker, with: .color(style.color), lineWidth: 1)
                 }
             }
 
             ForEach(visibleEvents) { event in
-                let x = localXPosition(for: event)
-                let style = style(for: event)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(event.code)
-                        .font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(style.color.opacity(0.15), in: Capsule())
-                    Text(String(format: "%.3fs", event.beginTimeSeconds))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .foregroundStyle(style.color)
-                .offset(x: min(max(x + 4, 0), max(viewportWidth - 70, 0)), y: 4)
+                eventFlag(event)
             }
         }
         .overlay {
@@ -15000,10 +15183,90 @@ private struct EventTrackView: View {
         let sources = Array(Set(events.map(\.sourceFile))).sorted()
         let sourceIndex = sources.firstIndex(of: event.sourceFile) ?? 0
         let palette: [Color] = [.orange, .blue, .green, .red, .pink, .teal, .indigo, .brown]
+        let lane = sourceIndex % max(laneCount, 1)
         return EventMarkerStyle(
             color: palette[sourceIndex % palette.count],
-            stemTopY: 18 + CGFloat(sourceIndex % 3) * 10
+            laneY: 4 + CGFloat(lane) * Self.laneSpacing
         )
+    }
+
+    /// A single tappable event flag (code capsule) positioned in its lane.
+    @ViewBuilder
+    private func eventFlag(_ event: MFFEvent) -> some View {
+        let x = localXPosition(for: event)
+        let style = style(for: event)
+        let isPopped = Binding(
+            get: { poppedEvent == event },
+            set: { if !$0 { poppedEvent = nil } }
+        )
+        Text(event.code)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(style.color.opacity(0.15), in: Capsule())
+            .foregroundStyle(style.color)
+            .help(tooltip(for: event))
+            .contentShape(Capsule())
+            .onTapGesture { poppedEvent = event }
+            .popover(isPresented: isPopped) {
+                eventDetailPopover(event, color: style.color)
+            }
+            .offset(x: min(max(x + 4, 0), max(viewportWidth - 70, 0)), y: style.laneY)
+    }
+
+    /// Tap-to-open detail popover listing every populated field of the event.
+    @ViewBuilder
+    private func eventDetailPopover(_ event: MFFEvent, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(event.code)
+                .font(.headline)
+                .foregroundStyle(color)
+            Divider()
+            eventDetailRow("Label", event.label)
+            eventDetailRow("Description", event.eventDescription)
+            eventDetailRow("Cell", event.cell)
+            eventDetailRow("Onset", String(format: "%.3f s", event.beginTimeSeconds))
+            if let duration = event.durationSeconds {
+                eventDetailRow("Duration", duration >= 1
+                    ? String(format: "%.3f s", duration)
+                    : String(format: "%.0f ms", duration * 1000))
+            }
+            eventDetailRow("Source", event.sourceFile)
+        }
+        .padding(14)
+        .frame(minWidth: 220, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func eventDetailRow(_ label: String, _ value: String?) -> some View {
+        if let value, !value.isEmpty {
+            HStack(alignment: .top, spacing: 8) {
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 78, alignment: .leading)
+                Text(value)
+                    .font(.caption)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Multi-line hover tooltip listing every populated field of the event.
+    private func tooltip(for event: MFFEvent) -> String {
+        var lines: [String] = ["Code: \(event.code)"]
+        if let label = event.label { lines.append("Label: \(label)") }
+        if let description = event.eventDescription { lines.append("Description: \(description)") }
+        if let cell = event.cell { lines.append("Cell: \(cell)") }
+        lines.append(String(format: "Onset: %.3f s", event.beginTimeSeconds))
+        if let duration = event.durationSeconds {
+            lines.append(duration >= 1
+                ? String(format: "Duration: %.3f s", duration)
+                : String(format: "Duration: %.0f ms", duration * 1000))
+        }
+        lines.append("Source: \(event.sourceFile)")
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -15011,16 +15274,20 @@ private enum BCGDetectionMethod: String, CaseIterable, Identifiable {
     case periodicity    = "periodicity"
     case spatialPCA     = "spatialPCA"
     case cardiacPowerMap = "cardiacPowerMap"
+    case virtualECGPCA  = "virtualECGPCA"
+    case panTompkinsProxy = "panTompkinsProxy"
     case qrsLocking     = "qrsLocking"
 
     var id: String { rawValue }
 
     var tabLabel: String {
         switch self {
-        case .periodicity:     return "Periodicity"
-        case .spatialPCA:      return "Spatial PCA"
-        case .cardiacPowerMap: return "Power Map"
-        case .qrsLocking:      return "QRS Lock"
+        case .periodicity:      return "Periodicity"
+        case .spatialPCA:       return "Spatial PCA"
+        case .cardiacPowerMap:  return "Power Map"
+        case .virtualECGPCA:    return "Virtual ECG"
+        case .panTompkinsProxy: return "Pan-Tompkins"
+        case .qrsLocking:       return "QRS Lock"
         }
     }
 
@@ -15032,6 +15299,10 @@ private enum BCGDetectionMethod: String, CaseIterable, Identifiable {
             return "Derive the dominant spatial map of BCG from a highlighted exemplar window (or the first 30 s), project the full recording onto it, and detect peaks. Works even when beat morphology varies."
         case .cardiacPowerMap:
             return "Identify which channels carry the most cardiac-band energy, compute a power-weighted time series, and detect peaks. Good when BCG is focal to a subset of electrodes."
+        case .virtualECGPCA:
+            return "Collapse the BCG-channel group to a single \u{201C}virtual ECG\u{201D} by taking the first principal component across those channels, then run Pan-Tompkins QRS detection on it. Averages out channel-specific noise — generalizes FMRIB/OBS's best-channel step to a channel group. Select a BCG channel set below."
+        case .panTompkinsProxy:
+            return "Run the Pan-Tompkins QRS backbone (bandpass → derivative → squaring → moving-window integration → adaptive thresholding) directly on the BCG-channel group. The high-amplitude proxy deflection has a sharp transient the QRS detector locks onto. Select a BCG channel set below."
         case .qrsLocking:
             return "Offset each detected R-wave by a fixed mechanical delay. Requires ECG / QRS detection to be active. The lag from QRS to BCG onset is typically 200–400 ms — adjust to align peaks."
         }

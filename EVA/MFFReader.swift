@@ -59,6 +59,10 @@ nonisolated struct MFFSignalData: Sendable {
     /// True when each epoch is a category *average* (one segment per category,
     /// each built from multiple trials), i.e. an ERP/averaged file.
     let isAveraged: Bool
+    /// Per-channel electrode impedance in kΩ from the MFF `ICAL` calibration
+    /// (info1.xml), indexed by channel. `nil` when the file records no impedance
+    /// measurement; individual entries are `NaN` for channels with no value.
+    let impedancesKOhm: [Float]?
 
     init(
         signalURL: URL,
@@ -72,7 +76,8 @@ nonisolated struct MFFSignalData: Sendable {
         channelNames: [String]? = nil,
         epochSegments: [EpochSegment] = [],
         isSegmented: Bool = false,
-        isAveraged: Bool = false
+        isAveraged: Bool = false,
+        impedancesKOhm: [Float]? = nil
     ) {
         self.signalURL = signalURL
         self.signalType = signalType
@@ -86,6 +91,7 @@ nonisolated struct MFFSignalData: Sendable {
         self.epochSegments = epochSegments
         self.isSegmented = isSegmented
         self.isAveraged = isAveraged
+        self.impedancesKOhm = impedancesKOhm
     }
 
     /// Returns a copy with the sample data replaced, preserving all metadata.
@@ -103,7 +109,8 @@ nonisolated struct MFFSignalData: Sendable {
             channelNames: channelNames,
             epochSegments: epochSegments,
             isSegmented: isSegmented,
-            isAveraged: isAveraged
+            isAveraged: isAveraged,
+            impedancesKOhm: impedancesKOhm
         )
     }
 }
@@ -117,6 +124,9 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
     let beginTimeSeconds: Double
     let rawBeginTime: String
     let sourceFile: String
+    /// Event duration in seconds, when the source records one (MFF `<duration>`
+    /// is stored in microseconds). `nil` for instantaneous / unspecified events.
+    let durationSeconds: Double?
 
     init(
         id: String,
@@ -126,7 +136,8 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
         cell: String? = nil,
         beginTimeSeconds: Double,
         rawBeginTime: String,
-        sourceFile: String
+        sourceFile: String,
+        durationSeconds: Double? = nil
     ) {
         self.id = id
         self.code = code
@@ -136,6 +147,7 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
         self.beginTimeSeconds = beginTimeSeconds
         self.rawBeginTime = rawBeginTime
         self.sourceFile = sourceFile
+        self.durationSeconds = durationSeconds
     }
 
     private static func nonEmpty(_ value: String?) -> String? {
@@ -227,6 +239,16 @@ nonisolated final class MFFReader {
             applyCalibrationFactors(gcal, to: &samples)
         }
 
+        // ICAL records per-channel electrode impedance (kΩ) at recording start.
+        // Missing channels come back as NaN so health scoring can skip them.
+        let impedances = try parseCalibrationFactors(
+            named: "ICAL",
+            in: packageURL,
+            infoFileName: signalDescriptor.infoFileName,
+            expectedCount: signalData.numberOfChannels,
+            defaultValue: .nan
+        )
+
         progress?(0.88)
         let recordingStartTime = try parseRecordingStartTime(in: packageURL)
         progress?(0.90)
@@ -260,7 +282,8 @@ nonisolated final class MFFReader {
             channelNames: channelNames,
             epochSegments: epochInfo?.segments ?? [],
             isSegmented: epochInfo != nil,
-            isAveraged: epochInfo?.isAveraged ?? false
+            isAveraged: epochInfo?.isAveraged ?? false,
+            impedancesKOhm: impedances
         )
     }
 
@@ -459,7 +482,8 @@ nonisolated final class MFFReader {
         named calibrationType: String,
         in packageURL: URL,
         infoFileName: String,
-        expectedCount: Int
+        expectedCount: Int,
+        defaultValue: Float = 1
     ) throws -> [Float]? {
         guard expectedCount > 0 else { return nil }
 
@@ -498,7 +522,7 @@ nonisolated final class MFFReader {
                 continue
             }
 
-            var factors = Array(repeating: Float(1), count: expectedCount)
+            var factors = Array(repeating: defaultValue, count: expectedCount)
             var sequentialChannelNumber = 1
             var appliedAnyFactor = false
 
@@ -832,6 +856,15 @@ nonisolated final class MFFReader {
         let directCell = eventCellValue(from: element)
         let directBeginTime = children.first(where: { sanitizedTagName($0.name) == "beginTime" })?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // MFF <duration> is in microseconds; keep only positive values.
+        let durationString = children
+            .first(where: { sanitizedTagName($0.name) == "duration" })?
+            .stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var directDuration: Double? = nil
+        if let durationString, let micros = Double(durationString), micros > 0 {
+            directDuration = micros / 1_000_000.0
+        }
 
         if let directCode, !directCode.isEmpty,
            let directBeginTime, !directBeginTime.isEmpty,
@@ -847,7 +880,8 @@ nonisolated final class MFFReader {
                         cell: directCell,
                         beginTimeSeconds: beginTimeSeconds,
                         rawBeginTime: directBeginTime,
-                        sourceFile: sourceFile
+                        sourceFile: sourceFile,
+                        durationSeconds: directDuration
                     )
                 )
             }

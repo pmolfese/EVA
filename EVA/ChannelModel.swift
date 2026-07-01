@@ -65,6 +65,7 @@ extension FocusedValues {
     private struct ChannelLabelMetricsExportRequestKey: FocusedValueKey {
         typealias Value = Binding<Int>
     }
+
 }
 
 /// Menu-bar "Channels" commands, acting on the focused window's `ChannelModel`.
@@ -72,8 +73,15 @@ struct ChannelsCommands: View {
     @FocusedValue(\.channelModel) private var model
     @FocusedValue(\.channelLabelMetricsExportRequest) private var labelMetricsExportRequest
     @FocusedValue(\.channelHealthViewControls) private var healthControls
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        Button("Define Channel Sets…") {
+            openWindow(id: EVAApp.channelSetsWindowID)
+        }
+
+        Divider()
+
         if let model {
             Toggle("Show Channel Health", isOn: Binding(
                 get: { model.showsHealth },

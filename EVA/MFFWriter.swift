@@ -543,7 +543,11 @@ nonisolated enum MFFWriter {
             let data = try Data(contentsOf: source)
             let document = try XMLDocument(data: data, options: [.documentTidyXML])
             if let root = document.rootElement() {
-                removeDescendants(named: "calibrations", from: root)
+                // Strip only the gain calibration (GCAL): EVA stores calibrated
+                // physical samples, so re-importing with GCAL would double-scale.
+                // Keep ICAL — it is electrode-impedance metadata, not a scale
+                // factor, and downstream tooling (and EVA itself) reads it back.
+                removeCalibrations(ofType: "GCAL", from: root)
             }
             try? FileManager.default.removeItem(at: destination)
             try document.xmlData(options: [.nodePrettyPrint]).write(to: destination, options: .atomic)
@@ -572,6 +576,34 @@ nonisolated enum MFFWriter {
             }
         }
         return removed
+    }
+
+    /// Removes only `<calibration>` elements whose `<type>` matches `type`
+    /// (e.g. "GCAL"), leaving any other calibration (e.g. "ICAL" impedance) in
+    /// place. If a `<calibrations>` container is left empty it is removed too.
+    private static func removeCalibrations(ofType type: String, from element: XMLElement) {
+        for (containerIndex, child) in (element.children ?? []).enumerated().reversed() {
+            guard let childElement = child as? XMLElement else { continue }
+            if localName(childElement.name) == "calibrations" {
+                for (index, cal) in (childElement.children ?? []).enumerated().reversed() {
+                    guard let calElement = cal as? XMLElement,
+                          localName(calElement.name) == "calibration" else { continue }
+                    let calType = (calElement.children?.compactMap { $0 as? XMLElement } ?? [])
+                        .first { localName($0.name) == "type" }?
+                        .stringValue?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if calType?.caseInsensitiveCompare(type) == .orderedSame {
+                        childElement.removeChild(at: index)
+                    }
+                }
+                // Drop an emptied <calibrations> container.
+                if (childElement.children?.compactMap { $0 as? XMLElement } ?? []).isEmpty {
+                    element.removeChild(at: containerIndex)
+                }
+            } else {
+                removeCalibrations(ofType: type, from: childElement)
+            }
+        }
     }
 
     /// Returns the raw bytes of a montage file from the source package only when

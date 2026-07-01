@@ -427,6 +427,75 @@ nonisolated enum BCGDetector {
             .filter { $0 >= 0 && $0 < recordingDuration }
     }
 
+    // MARK: - Virtual ECG (PCA across the proxy channel group)
+
+    /// Collapses a BCG-proxy channel group into a single "virtual ECG" trace:
+    /// band-pass each channel to the cardiac band, take the first principal
+    /// component across the group, and return its time series (sign-normalized
+    /// so the dominant deflection is positive). This averages out
+    /// channel-specific noise — the generalization of FMRIB/OBS's "best EEG
+    /// channel" step to a whole channel group. Feed the result into a QRS
+    /// detector (e.g. Pan-Tompkins) to get beat times.
+    static func virtualECGComponent(
+        channels: [[Float]],
+        samplingRate: Double,
+        minHR: Double = 40,
+        maxHR: Double = 120
+    ) async -> [Float]? {
+        guard channels.count >= 2,
+              let first = channels.first, first.count > 10,
+              samplingRate > 0
+        else { return nil }
+
+        let minHz = minHR / 60.0
+        let maxHz = maxHR / 60.0
+        guard let filtered = try? await EEGSignalFilter.bandPass(
+            channels: channels,
+            samplingRate: samplingRate,
+            lowCutoff: minHz,
+            highCutoff: min(maxHz, samplingRate / 2 - 0.1),
+            highPassSlope: .dB12,
+            lowPassSlope: .dB12
+        ) else { return nil }
+
+        let nCh = filtered.count
+        let nAll = filtered.first?.count ?? 0
+        guard nAll > 0 else { return nil }
+
+        // Mean-centre each channel, then take the top eigenvector of the
+        // channel covariance over the whole (filtered) recording.
+        let centered: [[Float]] = filtered.map { ch in
+            var mu: Float = 0
+            vDSP_meanv(ch, 1, &mu, vDSP_Length(ch.count))
+            var neg = -mu
+            var shifted = ch
+            vDSP_vsadd(ch, 1, &neg, &shifted, 1, vDSP_Length(ch.count))
+            return shifted
+        }
+        guard let vec = topEigenvectors(exemplar: centered, k: 1).first, vec.count == nCh else {
+            return nil
+        }
+
+        // Project the centred channels onto the first PC → 1-D series.
+        var pc = [Float](repeating: 0, count: nAll)
+        for i in centered.indices {
+            var w = vec[i]
+            vDSP_vsma(centered[i], 1, &w, pc, 1, &pc, 1, vDSP_Length(nAll))
+        }
+
+        // Sign-normalize so the largest-magnitude excursion is positive, giving
+        // the QRS detector a consistent polarity.
+        var minV: Float = 0
+        var maxV: Float = 0
+        vDSP_minv(pc, 1, &minV, vDSP_Length(nAll))
+        vDSP_maxv(pc, 1, &maxV, vDSP_Length(nAll))
+        if abs(minV) > abs(maxV) {
+            var negOne: Float = -1
+            vDSP_vsmul(pc, 1, &negOne, &pc, 1, vDSP_Length(nAll))
+        }
+        return pc
+    }
+
     // MARK: - MFFEvent helpers
 
     static func makeEvents(times: [Double], windowSeconds: Double) -> [MFFEvent] {

@@ -68,9 +68,15 @@ struct EVAApp: App {
             DebugLogView()
         }
         .defaultSize(width: 640, height: 480)
+
+        Window("Channel Sets", id: Self.channelSetsWindowID) {
+            ChannelSetEditorView()
+        }
+        .defaultSize(width: 800, height: 580)
     }
 
     static let debugLogWindowID = "debug-log"
+    static let channelSetsWindowID = "channel-sets"
 
     private static var defaultWindowSize: CGSize {
         let frame = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
