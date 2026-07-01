@@ -244,6 +244,7 @@ struct WaveformView: View {
     @State private var segmentedEpochSegments: [EpochSegment] = []
     @State private var psaIsAveraged = false
     @State private var showsButterflyPlot = false
+    @State private var showsNoiseBand = true
     @State private var showsOverlaidCategories = false
 
     // Band-pass / notch filtering (applied to the active base signal).
@@ -2184,6 +2185,12 @@ struct WaveformView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if !recording.noiseCurvesByCategory.isEmpty {
+                    Toggle("Noise band", isOn: $showsNoiseBand)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                        .help("Shade the ± grand-average noise band (from the ± residual across contributing files) behind each category.")
+                }
                 Button {
                     showsButterflyPlot = false
                     butterflyTopomapRelativeSample = nil
@@ -2221,7 +2228,10 @@ struct WaveformView: View {
                                         hiddenChannels: channels.hidden,
                                         amplitudeScale: amplitudeScale,
                                         color: epochColor(for: segment.colorIndex),
-                                        highlightRelativeSample: butterflyTopomapRelativeSample
+                                        highlightRelativeSample: butterflyTopomapRelativeSample,
+                                        noiseCurve: (showsNoiseBand && !recording.noiseCurvesByCategory.isEmpty)
+                                            ? recording.noiseCurvesByCategory[segment.category]
+                                            : nil
                                     )
                                     .contentShape(Rectangle())
                                     .simultaneousGesture(
@@ -7129,6 +7139,9 @@ struct WaveformView: View {
         isExportingMFF = true
         mffExportStatusMessage = "Exporting \(snapshot.kind.statusName) MFF..."
 
+        // Capture the active processing pipeline for eva.xml + the process log.
+        let processingScript = currentProcessingScript()
+
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 do {
@@ -7139,6 +7152,14 @@ struct WaveformView: View {
                         kind: snapshot.kind,
                         to: url
                     )
+                    // Stamp the exported package with the processing record + log.
+                    try? EVAProcessingScriptXML.write(processingScript, toPackage: url)
+                    let log = EVAProcessLog(header: "EVA export — \(url.lastPathComponent)")
+                    for step in processingScript.steps {
+                        let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
+                        log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
+                    }
+                    try? log.write(toPackage: url)
                     return Result<URL, Error>.success(url)
                 } catch {
                     return Result<URL, Error>.failure(error)
@@ -7177,6 +7198,56 @@ struct WaveformView: View {
             data: pns.data,
             channelNames: names
         )
+    }
+
+    /// Builds a declarative processing record (eva.xml) from the active
+    /// pipeline state, so exported packages document how EVA transformed them.
+    private func currentProcessingScript() -> EVAProcessingScript {
+        var script = EVAProcessingScript()
+
+        if gradientCorrectedSignal != nil {
+            script.append(EVAProcessingStep(operation: .mriGradientCorrection, parameters: [:]))
+        }
+        if icaCleanedSignal != nil {
+            script.append(EVAProcessingStep(
+                operation: .icaClean,
+                parameters: ["averageReference": "\(icaUsesAverageReference)"],
+                replayable: false,
+                note: "ICA settings are portable; removed component indices are subject-specific."
+            ))
+        }
+        if filteredSignal != nil {
+            var params: [String: String] = [
+                "highPassHz": String(format: "%.3g", filterLowCutoff),
+                "lowPassHz": String(format: "%.3g", filterHighCutoff),
+                "averageReference": "\(filterAverageReference)"
+            ]
+            if notch60HzEnabled { params["notchHz"] = "60" }
+            if filterLineNoiseMode != .off {
+                params["lineNoiseHz"] = String(format: "%.0f", filterLineNoiseFrequency)
+                params["lineNoiseHarmonics"] = "\(filterLineNoiseHarmonics)"
+            }
+            script.append(EVAProcessingStep(operation: .filter, parameters: params))
+        }
+        if artifactCleaningIsEnabled {
+            script.append(EVAProcessingStep(operation: .artifactClean, parameters: [:]))
+        }
+        if !channels.interpolated.isEmpty {
+            script.append(EVAProcessingStep(
+                operation: .interpolateChannels,
+                parameters: ["channels": channels.interpolated.keys.sorted().map { String($0 + 1) }.joined(separator: ",")],
+                replayable: false,
+                note: "Interpolated channel indices are subject-specific."
+            ))
+        }
+        if !channels.bad.isEmpty {
+            script.append(EVAProcessingStep(
+                operation: .markBad,
+                parameters: ["channels": channels.bad.sorted().map { String($0 + 1) }.joined(separator: ",")],
+                replayable: false
+            ))
+        }
+        return script
     }
 
     private func currentMFFExportSnapshot() -> MFFExportSnapshot? {
@@ -14703,6 +14774,8 @@ private struct ButterflyConditionPlot: View {
     let amplitudeScale: Double
     let color: Color
     var highlightRelativeSample: Int? = nil
+    /// Per-sample grand-average noise amplitude (µV) shaded as a ± band.
+    var noiseCurve: [Float]? = nil
 
     var body: some View {
         Canvas { context, size in
@@ -14717,6 +14790,22 @@ private struct ButterflyConditionPlot: View {
             let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
             let xScale = size.width / CGFloat(max(epochLength - 1, 1))
             let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
+
+            // Shaded ± noise band (drawn first, under the traces).
+            if let noiseCurve, noiseCurve.count >= epochLength {
+                var upper = Path()
+                var lower = [CGPoint]()
+                for localSample in stride(from: 0, through: epochLength - 1, by: sampleStep) {
+                    let x = CGFloat(localSample) * xScale
+                    let n = CGFloat(noiseCurve[localSample]) * pointsPerMicrovolt
+                    let top = CGPoint(x: x, y: midY - n)
+                    if localSample == 0 { upper.move(to: top) } else { upper.addLine(to: top) }
+                    lower.append(CGPoint(x: x, y: midY + n))
+                }
+                for point in lower.reversed() { upper.addLine(to: point) }
+                upper.closeSubpath()
+                context.fill(upper, with: .color(color.opacity(0.12)))
+            }
 
             var baseline = Path()
             baseline.move(to: CGPoint(x: 0, y: midY))

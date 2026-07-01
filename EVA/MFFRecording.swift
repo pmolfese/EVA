@@ -42,6 +42,9 @@ final class MFFRecording: ObservableObject, Identifiable {
     private(set) var sensorLayout: SensorLayout?
     private(set) var electrodeGeometry: ElectrodeGeometry?
     private(set) var antiAliasTimingCorrection: MFFAntiAliasTimingCorrection?
+    /// Per-category grand-average noise band from a combined package's
+    /// `eva_noise.json` sidecar (empty for ordinary recordings).
+    private(set) var noiseCurvesByCategory: [String: [Float]] = [:]
     private(set) var loadError: String?
     private(set) var isLoading = true
     private(set) var loadProgress: Double?
@@ -92,6 +95,9 @@ final class MFFRecording: ObservableObject, Identifiable {
         sensorLayout = result.layout
         electrodeGeometry = result.geometry
         antiAliasTimingCorrection = result.antiAliasTimingCorrection
+        if let signalURL = result.signal?.signalURL {
+            noiseCurvesByCategory = NoiseSidecar.read(fromPackageContaining: signalURL) ?? [:]
+        }
         loadError = result.error
         loadProgress = nil
         loadStatusMessage = result.error == nil ? "Loaded" : "Load failed"
