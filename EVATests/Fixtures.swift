@@ -17,23 +17,21 @@
 
 import Foundation
 
-/// Resolves read-only test fixtures committed under `EVA/Fixtures/`.
+/// Resolves read-only test fixtures committed under `EVATests/Fixtures/`.
 ///
-/// Fixtures are located relative to this source file rather than via a bundle
-/// resource, so no Xcode target membership or copy-resources phase is required.
+/// Fixtures are located relative to this source file rather than via the app
+/// bundle, so the shipping app target does not include the large sample files.
 /// The committed `.mff` packages are redistributed from BEL-Public/mffpy under
-/// the Apache License 2.0 — see `EVA/Fixtures/LICENSE-mffpy.txt`.
+/// the Apache License 2.0 — see `EVATests/Fixtures/LICENSE-mffpy.txt`.
 enum Fixtures {
 
-    /// Absolute URL of the `EVA/Fixtures/` directory.
+    /// Absolute URL of the `EVATests/Fixtures/` directory.
     ///
     /// `#filePath` points at this file (`<repo>/EVATests/Fixtures.swift`); the
-    /// fixtures live a sibling level up at `<repo>/EVA/Fixtures/`.
+    /// fixtures live alongside it at `<repo>/EVATests/Fixtures/`.
     static let directory: URL = {
         URL(fileURLWithPath: #filePath)        // <repo>/EVATests/Fixtures.swift
             .deletingLastPathComponent()        // <repo>/EVATests
-            .deletingLastPathComponent()        // <repo>
-            .appendingPathComponent("EVA")
             .appendingPathComponent("Fixtures")
     }()
 

@@ -136,11 +136,11 @@ nonisolated enum LinearAlgebra {
         var eigenvalues = Array(repeating: 0.0, count: n)
         var jobz = Int8(UnicodeScalar("V").value)
         var uplo = Int8(UnicodeScalar("U").value)
-        var dimension = __CLPK_integer(n)
-        var leadingDimension = __CLPK_integer(n)
+        var dimension = LAPACKInt(n)
+        var leadingDimension = LAPACKInt(n)
         var queryWork = 0.0
-        var querySize = __CLPK_integer(-1)
-        var info = __CLPK_integer(0)
+        var querySize = LAPACKInt(-1)
+        var info = LAPACKInt(0)
 
         dsyev_(
             &jobz,
@@ -158,7 +158,7 @@ nonisolated enum LinearAlgebra {
             return jacobiEigenDecomposition(matrix)
         }
 
-        var workSize = __CLPK_integer(max(Int(queryWork.rounded(.up)), 3 * n - 1))
+        var workSize = LAPACKInt(max(Int(queryWork.rounded(.up)), 3 * n - 1))
         var work = Array(repeating: 0.0, count: Int(workSize))
         info = 0
 

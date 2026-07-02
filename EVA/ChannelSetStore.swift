@@ -32,6 +32,9 @@ final class ChannelSetStore {
     /// Updated by WaveformView whenever a recording is loaded. The channel set
     /// editor window reads this so it can show the interactive electrode map.
     var activeSensorLayout: SensorLayout? = nil
+    /// Channel labels from the active recording, used only for display in the
+    /// channel set editor. Channel sets remain stored by zero-based index.
+    var activeChannelNames: [String]? = nil
 
     static let shared = ChannelSetStore()
 

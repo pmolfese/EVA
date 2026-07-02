@@ -213,20 +213,20 @@ nonisolated enum WaveletReducer {
         progress: (@Sendable (Double) -> Void)? = nil
     ) -> WaveletReductionResult {
         let indices = channelIndices.filter { signal.data.indices.contains($0) }
-        var cleanedData = signal.data
-        var artifactData = signal.data.map { [Float](repeating: 0, count: $0.count) }
-        var perChannel: [Int: WaveletChannelReductionMetrics] = [:]
+        nonisolated(unsafe) var cleanedData = signal.data
+        nonisolated(unsafe) var artifactData = signal.data.map { [Float](repeating: 0, count: $0.count) }
+        nonisolated(unsafe) var perChannel: [Int: WaveletChannelReductionMetrics] = [:]
 
-        var globalOriginalVariance = 0.0
-        var globalCleanedVariance = 0.0
-        var correlationSum = 0.0
-        var correlationCount = 0
+        nonisolated(unsafe) var globalOriginalVariance = 0.0
+        nonisolated(unsafe) var globalCleanedVariance = 0.0
+        nonisolated(unsafe) var correlationSum = 0.0
+        nonisolated(unsafe) var correlationCount = 0
 
         let total = max(indices.count, 1)
         let workerCount = min(max(coreCount, 1), max(indices.count, 1))
 
         // Process one channel; returns everything the aggregation step needs.
-        func process(_ channelIndex: Int) -> (
+        @Sendable func process(_ channelIndex: Int) -> (
             cleaned: [Float], artifact: [Float],
             metrics: WaveletChannelReductionMetrics,
             originalVariance: Double, cleanedVariance: Double, correlation: Double
@@ -247,7 +247,7 @@ nonisolated enum WaveletReducer {
             return (cleaned.map(Float.init), artifact.map(Float.init), metrics, originalVariance, cleanedVariance, corr)
         }
 
-        func store(_ channelIndex: Int, _ result: (cleaned: [Float], artifact: [Float], metrics: WaveletChannelReductionMetrics, originalVariance: Double, cleanedVariance: Double, correlation: Double)) {
+        @Sendable func store(_ channelIndex: Int, _ result: (cleaned: [Float], artifact: [Float], metrics: WaveletChannelReductionMetrics, originalVariance: Double, cleanedVariance: Double, correlation: Double)) {
             cleanedData[channelIndex] = result.cleaned
             artifactData[channelIndex] = result.artifact
             perChannel[channelIndex] = result.metrics
@@ -266,7 +266,7 @@ nonisolated enum WaveletReducer {
             }
         } else {
             let lock = NSLock()
-            var completed = 0
+            nonisolated(unsafe) var completed = 0
             evaConcurrentPerform(iterations: workerCount) { worker in
                 var offset = worker
                 while offset < indices.count {

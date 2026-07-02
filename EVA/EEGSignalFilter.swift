@@ -23,6 +23,9 @@ enum EEGSignalFilterError: LocalizedError {
     /// Carries the actual cutoffs and Nyquist so the message reflects what the
     /// user asked for rather than a hardcoded range.
     case invalidBandpassRange(lowCutoff: Double, highCutoff: Double, nyquist: Double)
+    case invalidFilterRange(lowCutoff: Double?, highCutoff: Double?, nyquist: Double)
+    case nonFiniteOutput(channel: Int)
+    case unstableOutput(channel: Int)
 
     var errorDescription: String? {
         switch self {
@@ -34,6 +37,37 @@ enum EEGSignalFilterError: LocalizedError {
                     + "(must be 0 < low < high < Nyquist = %.2f Hz).",
                 lowCutoff, highCutoff, nyquist
             )
+        case let .invalidFilterRange(lowCutoff, highCutoff, nyquist):
+            let lowText = lowCutoff.map { String(format: "%.2f", $0) } ?? "blank"
+            let highText = highCutoff.map { String(format: "%.2f", $0) } ?? "blank"
+            return String(
+                format: "The filter cutoff range is not valid for this signal "
+                    + "(high-pass %@ Hz, low-pass %@ Hz; any enabled cutoff must be between 0 and Nyquist = %.2f Hz).",
+                lowText, highText, nyquist
+            )
+        case let .nonFiniteOutput(channel):
+            return "The filter became numerically unstable on channel \(channel). Try a higher high-pass cutoff or a gentler slope."
+        case let .unstableOutput(channel):
+            return "The filter output grew too large on channel \(channel). Try Double precision, a higher high-pass cutoff, or a gentler slope."
+        }
+    }
+}
+
+enum FilterPrecision: String, CaseIterable, Identifiable, Codable, Sendable {
+    case auto
+    case float
+    case double
+
+    nonisolated var id: String { rawValue }
+
+    nonisolated var label: String {
+        switch self {
+        case .auto:
+            return "Auto"
+        case .float:
+            return "Float"
+        case .double:
+            return "Double"
         }
     }
 }
@@ -47,30 +81,31 @@ enum EEGSignalFilterError: LocalizedError {
 /// Mapping: 12 dB/oct = 2-pole design (1st-order section + filtfilt),
 ///          24 dB/oct = 4-pole design (1 biquad), 36 = 6-pole (1 biquad + 1st-order),
 ///          48 = 8-pole (2 biquads). All are applied zero-phase.
-enum FilterSlope: Int, CaseIterable, Identifiable, Codable {
+enum FilterSlope: Int, CaseIterable, Identifiable, Codable, Sendable {
     case dB12 = 12
     case dB24 = 24
     case dB36 = 36
     case dB48 = 48
 
-    var id: Int { rawValue }
+    nonisolated var id: Int { rawValue }
 
-    var label: String { "\(rawValue) dB/oct" }
+    nonisolated var label: String { "\(rawValue) dB/oct" }
 
     /// Number of poles in the one-sided design (before filtfilt doubling).
-    var designPoles: Int { rawValue / 6 }
+    nonisolated var designPoles: Int { rawValue / 6 }
 }
 
 struct EEGSignalFilter {
     nonisolated static func bandPass(
         channels: [[Float]],
         samplingRate: Double,
-        lowCutoff: Double,
-        highCutoff: Double,
+        lowCutoff: Double?,
+        highCutoff: Double?,
         highPassSlope: FilterSlope = .dB24,
         lowPassSlope: FilterSlope = .dB24,
         notch60HzEnabled: Bool = false,
         notchFrequency: Double = 60,
+        precision: FilterPrecision = .auto,
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> [[Float]] {
         guard samplingRate > 0 else {
@@ -78,50 +113,65 @@ struct EEGSignalFilter {
         }
 
         let nyquist = samplingRate / 2
-        guard lowCutoff > 0, highCutoff > lowCutoff, highCutoff < nyquist else {
-            throw EEGSignalFilterError.invalidBandpassRange(
-                lowCutoff: lowCutoff,
-                highCutoff: highCutoff,
-                nyquist: nyquist
-            )
+        if let lowCutoff, !(lowCutoff > 0 && lowCutoff < nyquist) {
+            throw EEGSignalFilterError.invalidFilterRange(lowCutoff: lowCutoff, highCutoff: highCutoff, nyquist: nyquist)
+        }
+        if let highCutoff, !(highCutoff > 0 && highCutoff < nyquist) {
+            throw EEGSignalFilterError.invalidFilterRange(lowCutoff: lowCutoff, highCutoff: highCutoff, nyquist: nyquist)
+        }
+        if let lowCutoff, let highCutoff, highCutoff <= lowCutoff {
+            throw EEGSignalFilterError.invalidBandpassRange(lowCutoff: lowCutoff, highCutoff: highCutoff, nyquist: nyquist)
         }
 
         return try await withThrowingTaskGroup(of: (Int, [Float]).self) { group in
-            let highPassStages = BiquadCoefficients.butterworth(
-                cutoff: Float(lowCutoff),
-                samplingRate: Float(samplingRate),
-                poles: highPassSlope.designPoles,
-                type: .highPass
-            )
-            let lowPassStages = BiquadCoefficients.butterworth(
-                cutoff: Float(highCutoff),
-                samplingRate: Float(samplingRate),
-                poles: lowPassSlope.designPoles,
-                type: .lowPass
-            )
+            let highPassStages = lowCutoff.map {
+                BiquadCoefficients.butterworth(
+                    cutoff: $0,
+                    samplingRate: samplingRate,
+                    poles: highPassSlope.designPoles,
+                    type: .highPass
+                )
+            } ?? []
+            let lowPassStages = highCutoff.map {
+                BiquadCoefficients.butterworth(
+                    cutoff: $0,
+                    samplingRate: samplingRate,
+                    poles: lowPassSlope.designPoles,
+                    type: .lowPass
+                )
+            } ?? []
             let notchFilter = BiquadCoefficients.notch(
-                centerFrequency: Float(notchFrequency),
-                samplingRate: Float(samplingRate),
+                centerFrequency: notchFrequency,
+                samplingRate: samplingRate,
                 q: 30
             )
 
             // The high-pass (low cutoff) sets the edge-transient length; pad the
             // reflected boundary to cover it so the startup ripple stays outside
             // the data we keep instead of garbling the first/last samples.
-            let paddingCount = transientPadding(lowCutoff: lowCutoff, samplingRate: samplingRate)
+            let paddingReference = lowCutoff ?? highCutoff ?? (notch60HzEnabled ? notchFrequency : nil)
+            let paddingCount = transientPadding(lowCutoff: paddingReference ?? 0, samplingRate: samplingRate)
+            let automaticPrecision = automaticPrecision(
+                samplingRate: samplingRate,
+                lowCutoff: lowCutoff,
+                highCutoff: highCutoff,
+                highPassSlope: highPassSlope,
+                lowPassSlope: lowPassSlope
+            )
 
             for (index, channel) in channels.enumerated() {
                 group.addTask {
-                    var result = channel
-                    for stage in highPassStages {
-                        result = zeroPhaseFilter(result, coefficients: stage, paddingCount: paddingCount)
-                    }
-                    for stage in lowPassStages {
-                        result = zeroPhaseFilter(result, coefficients: stage, paddingCount: paddingCount)
-                    }
-                    if notch60HzEnabled, notchFrequency < (samplingRate / 2) {
-                        result = zeroPhaseFilter(result, coefficients: notchFilter, paddingCount: paddingCount)
-                    }
+                    let result = try filterChannel(
+                        channel,
+                        channelIndex: index,
+                        requestedPrecision: precision,
+                        automaticPrecision: automaticPrecision,
+                        highPassStages: highPassStages,
+                        lowPassStages: lowPassStages,
+                        notchFilter: notchFilter,
+                        notchEnabled: notch60HzEnabled && notchFrequency < nyquist,
+                        paddingCount: paddingCount
+                    )
                     return (index, result)
                 }
             }
@@ -256,7 +306,153 @@ struct EEGSignalFilter {
         return max(estimate, 24)
     }
 
+    private nonisolated static func automaticPrecision(
+        samplingRate: Double,
+        lowCutoff: Double?,
+        highCutoff: Double?,
+        highPassSlope: FilterSlope,
+        lowPassSlope: FilterSlope
+    ) -> FilterPrecision {
+        guard samplingRate > 0 else { return .double }
+        let nyquist = samplingRate / 2
+
+        if let lowCutoff {
+            let normalizedToRate = lowCutoff / samplingRate
+            if normalizedToRate < 0.00005 {
+                return .double
+            }
+            if highPassSlope.designPoles >= 8, normalizedToRate < 0.0002 {
+                return .double
+            }
+        }
+
+        if let highCutoff, nyquist > 0 {
+            let distanceFromNyquist = (nyquist - highCutoff) / nyquist
+            if distanceFromNyquist < 0.02 || lowPassSlope.designPoles >= 8 && distanceFromNyquist < 0.05 {
+                return .double
+            }
+        }
+
+        return .float
+    }
+
+    private nonisolated static func filterChannel(
+        _ channel: [Float],
+        channelIndex: Int,
+        requestedPrecision: FilterPrecision,
+        automaticPrecision: FilterPrecision,
+        highPassStages: [BiquadCoefficients],
+        lowPassStages: [BiquadCoefficients],
+        notchFilter: BiquadCoefficients,
+        notchEnabled: Bool,
+        paddingCount: Int
+    ) throws -> [Float] {
+        let initialPrecision = requestedPrecision == .auto ? automaticPrecision : requestedPrecision
+        do {
+            return try filterChannelOnce(
+                channel,
+                channelIndex: channelIndex,
+                precision: initialPrecision,
+                highPassStages: highPassStages,
+                lowPassStages: lowPassStages,
+                notchFilter: notchFilter,
+                notchEnabled: notchEnabled,
+                paddingCount: paddingCount
+            )
+        } catch {
+            if requestedPrecision == .auto,
+               initialPrecision == .float,
+               isPrecisionFallbackError(error) {
+                return try filterChannelOnce(
+                    channel,
+                    channelIndex: channelIndex,
+                    precision: .double,
+                    highPassStages: highPassStages,
+                    lowPassStages: lowPassStages,
+                    notchFilter: notchFilter,
+                    notchEnabled: notchEnabled,
+                    paddingCount: paddingCount
+                )
+            }
+            throw error
+        }
+    }
+
+    private nonisolated static func filterChannelOnce(
+        _ channel: [Float],
+        channelIndex: Int,
+        precision: FilterPrecision,
+        highPassStages: [BiquadCoefficients],
+        lowPassStages: [BiquadCoefficients],
+        notchFilter: BiquadCoefficients,
+        notchEnabled: Bool,
+        paddingCount: Int
+    ) throws -> [Float] {
+        var result = channel
+        for stage in highPassStages {
+            result = zeroPhaseFilter(result, coefficients: stage, precision: precision, paddingCount: paddingCount)
+        }
+        for stage in lowPassStages {
+            result = zeroPhaseFilter(result, coefficients: stage, precision: precision, paddingCount: paddingCount)
+        }
+        if notchEnabled {
+            result = zeroPhaseFilter(result, coefficients: notchFilter, precision: precision, paddingCount: paddingCount)
+        }
+        try validateFilteredChannel(result, source: channel, channelIndex: channelIndex)
+        return result
+    }
+
+    private nonisolated static func isPrecisionFallbackError(_ error: Error) -> Bool {
+        switch error {
+        case EEGSignalFilterError.nonFiniteOutput(_), EEGSignalFilterError.unstableOutput(_):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private nonisolated static func validateFilteredChannel(
+        _ result: [Float],
+        source: [Float],
+        channelIndex: Int
+    ) throws {
+        guard result.count == source.count else {
+            throw EEGSignalFilterError.unstableOutput(channel: channelIndex + 1)
+        }
+
+        var sourceMax = Float(0)
+        var resultMax = Float(0)
+        for value in source where value.isFinite {
+            sourceMax = max(sourceMax, abs(value))
+        }
+        for value in result {
+            guard value.isFinite else {
+                throw EEGSignalFilterError.nonFiniteOutput(channel: channelIndex + 1)
+            }
+            resultMax = max(resultMax, abs(value))
+        }
+
+        let growthLimit = max(Double(sourceMax) * 10_000, 1.0e9)
+        if Double(resultMax) > growthLimit {
+            throw EEGSignalFilterError.unstableOutput(channel: channelIndex + 1)
+        }
+    }
+
     private nonisolated static func zeroPhaseFilter(
+        _ samples: [Float],
+        coefficients: BiquadCoefficients,
+        precision: FilterPrecision,
+        paddingCount requestedPadding: Int = 24
+    ) -> [Float] {
+        switch precision {
+        case .auto, .double:
+            return zeroPhaseFilterDouble(samples, coefficients: coefficients, paddingCount: requestedPadding)
+        case .float:
+            return zeroPhaseFilterFloat(samples, coefficients: coefficients, paddingCount: requestedPadding)
+        }
+    }
+
+    private nonisolated static func zeroPhaseFilterDouble(
         _ samples: [Float],
         coefficients: BiquadCoefficients,
         paddingCount requestedPadding: Int = 24
@@ -269,6 +465,28 @@ struct EEGSignalFilter {
         let paddedSamples = reflectedPadding(for: samples, count: paddingCount)
         let forward = applyBiquad(to: paddedSamples, coefficients: coefficients)
         let backward = applyBiquad(to: Array(forward.reversed()), coefficients: coefficients)
+        let restored = Array(backward.reversed())
+
+        guard paddingCount > 0, restored.count > paddingCount * 2 else {
+            return restored
+        }
+
+        return Array(restored[paddingCount..<(restored.count - paddingCount)])
+    }
+
+    private nonisolated static func zeroPhaseFilterFloat(
+        _ samples: [Float],
+        coefficients: BiquadCoefficients,
+        paddingCount requestedPadding: Int = 24
+    ) -> [Float] {
+        guard samples.count > 6 else {
+            return samples
+        }
+
+        let paddingCount = min(max(requestedPadding, 0), samples.count - 1)
+        let paddedSamples = reflectedPadding(for: samples, count: paddingCount)
+        let forward = applyBiquadFloat(to: paddedSamples, coefficients: coefficients)
+        let backward = applyBiquadFloat(to: Array(forward.reversed()), coefficients: coefficients)
         let restored = Array(backward.reversed())
 
         guard paddingCount > 0, restored.count > paddingCount * 2 else {
@@ -408,20 +626,52 @@ struct EEGSignalFilter {
         var filtered: [Float] = []
         filtered.reserveCapacity(samples.count)
 
-        var x1: Float = 0
-        var x2: Float = 0
-        var y1: Float = 0
-        var y2: Float = 0
+        var x1 = 0.0
+        var x2 = 0.0
+        var y1 = 0.0
+        var y2 = 0.0
 
-        for x0 in samples {
+        for sample in samples {
+            let x0 = Double(sample)
             let y0 = coefficients.b0 * x0
                 + coefficients.b1 * x1
                 + coefficients.b2 * x2
                 - coefficients.a1 * y1
                 - coefficients.a2 * y2
-            filtered.append(y0)
+            filtered.append(Float(y0))
             x2 = x1
             x1 = x0
+            y2 = y1
+            y1 = y0
+        }
+
+        return filtered
+    }
+
+    private nonisolated static func applyBiquadFloat(to samples: [Float], coefficients: BiquadCoefficients) -> [Float] {
+        var filtered: [Float] = []
+        filtered.reserveCapacity(samples.count)
+
+        let b0 = Float(coefficients.b0)
+        let b1 = Float(coefficients.b1)
+        let b2 = Float(coefficients.b2)
+        let a1 = Float(coefficients.a1)
+        let a2 = Float(coefficients.a2)
+
+        var x1 = Float(0)
+        var x2 = Float(0)
+        var y1 = Float(0)
+        var y2 = Float(0)
+
+        for sample in samples {
+            let y0 = b0 * sample
+                + b1 * x1
+                + b2 * x2
+                - a1 * y1
+                - a2 * y2
+            filtered.append(y0)
+            x2 = x1
+            x1 = sample
             y2 = y1
             y1 = y0
         }
@@ -431,11 +681,11 @@ struct EEGSignalFilter {
 }
 
 private struct BiquadCoefficients {
-    let b0: Float
-    let b1: Float
-    let b2: Float
-    let a1: Float
-    let a2: Float
+    let b0: Double
+    let b1: Double
+    let b2: Double
+    let a1: Double
+    let a2: Double
 
     enum FilterType { case lowPass, highPass }
 
@@ -449,8 +699,8 @@ private struct BiquadCoefficients {
     /// Q values for each pair follow the standard Butterworth pole placement:
     ///   Q_k = 1 / (2 · cos(π(2k+1)/(2N)))  for k = 0 … N/2-1 (0-indexed pairs)
     nonisolated static func butterworth(
-        cutoff: Float,
-        samplingRate: Float,
+        cutoff: Double,
+        samplingRate: Double,
         poles: Int,
         type: FilterType
     ) -> [BiquadCoefficients] {
@@ -465,7 +715,7 @@ private struct BiquadCoefficients {
         let pairs = n / 2
         for k in 0..<pairs {
             // Angle for k-th conjugate pair in an N-pole Butterworth
-            let angle = Float.pi * Float(2 * k + 1) / Float(2 * n)
+            let angle = Double.pi * Double(2 * k + 1) / Double(2 * n)
             let q = 1.0 / (2.0 * cos(angle))
             switch type {
             case .lowPass:
@@ -478,8 +728,8 @@ private struct BiquadCoefficients {
     }
 
     /// Single-pole (1st-order) filter encoded as a biquad with b2 = a2 = 0.
-    private nonisolated static func firstOrder(cutoff: Float, samplingRate: Float, type: FilterType) -> Self {
-        let omega = 2 * Float.pi * cutoff / samplingRate
+    private nonisolated static func firstOrder(cutoff: Double, samplingRate: Double, type: FilterType) -> Self {
+        let omega = 2 * Double.pi * cutoff / samplingRate
         // Bilinear transform of s-domain 1st-order LP: H(s) = 1/(s+1), HP: H(s) = s/(s+1)
         let k = tan(omega / 2)
         switch type {
@@ -492,8 +742,8 @@ private struct BiquadCoefficients {
         }
     }
 
-    nonisolated static func lowPass(cutoff: Float, samplingRate: Float, q: Float) -> Self {
-        let omega = 2 * Float.pi * cutoff / samplingRate
+    nonisolated static func lowPass(cutoff: Double, samplingRate: Double, q: Double) -> Self {
+        let omega = 2 * Double.pi * cutoff / samplingRate
         let cosine = cos(omega)
         let alpha = sin(omega) / (2 * q)
 
@@ -507,8 +757,8 @@ private struct BiquadCoefficients {
         return normalize(b0: b0, b1: b1, b2: b2, a0: a0, a1: a1, a2: a2)
     }
 
-    nonisolated static func highPass(cutoff: Float, samplingRate: Float, q: Float) -> Self {
-        let omega = 2 * Float.pi * cutoff / samplingRate
+    nonisolated static func highPass(cutoff: Double, samplingRate: Double, q: Double) -> Self {
+        let omega = 2 * Double.pi * cutoff / samplingRate
         let cosine = cos(omega)
         let alpha = sin(omega) / (2 * q)
 
@@ -522,14 +772,14 @@ private struct BiquadCoefficients {
         return normalize(b0: b0, b1: b1, b2: b2, a0: a0, a1: a1, a2: a2)
     }
 
-    nonisolated static func notch(centerFrequency: Float, samplingRate: Float, q: Float) -> Self {
-        let omega = 2 * Float.pi * centerFrequency / samplingRate
+    nonisolated static func notch(centerFrequency: Double, samplingRate: Double, q: Double) -> Self {
+        let omega = 2 * Double.pi * centerFrequency / samplingRate
         let cosine = cos(omega)
         let alpha = sin(omega) / (2 * q)
 
-        let b0: Float = 1
+        let b0: Double = 1
         let b1 = -2 * cosine
-        let b2: Float = 1
+        let b2: Double = 1
         let a0 = 1 + alpha
         let a1 = -2 * cosine
         let a2 = 1 - alpha
@@ -538,7 +788,7 @@ private struct BiquadCoefficients {
     }
 
     private nonisolated static func normalize(
-        b0: Float, b1: Float, b2: Float, a0: Float, a1: Float, a2: Float
+        b0: Double, b1: Double, b2: Double, a0: Double, a1: Double, a2: Double
     ) -> Self {
         Self(b0: b0/a0, b1: b1/a0, b2: b2/a0, a1: a1/a0, a2: a2/a0)
     }

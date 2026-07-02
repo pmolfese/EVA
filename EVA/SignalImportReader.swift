@@ -162,10 +162,10 @@ nonisolated enum SignalImportReader {
 
         progress?(SignalImportProgress(
             fraction: 0.98,
-            message: "Checking electrode sidecars",
+            message: "Resolving electrode locations",
             detail: imported.antiAliasTimingCorrection?.loadingMessage
         ))
-        let withLocations = attachLocationSidecar(to: imported)
+        let withLocations = attachElectrodeLocations(to: imported)
         progress?(SignalImportProgress(
             fraction: 1,
             message: "Loaded",
@@ -174,15 +174,17 @@ nonisolated enum SignalImportReader {
         return withLocations
     }
 
-    private static func attachLocationSidecar(to imported: ImportedRecording) -> ImportedRecording {
+    private static func attachElectrodeLocations(to imported: ImportedRecording) -> ImportedRecording {
         guard imported.layout == nil || imported.geometry == nil else {
             return imported
         }
 
-        guard let locations = ElectrodeLocationReader.loadSidecar(
+        let locations = ElectrodeLocationReader.loadSidecar(
             near: imported.signal.signalURL,
             channelNames: imported.signal.channelNames
-        ) else {
+        ) ?? StandardElectrodeLocations.locations(for: imported.signal.channelNames)
+
+        guard let locations else {
             return imported
         }
 
@@ -304,7 +306,7 @@ private nonisolated enum BrainVisionSignalReader {
             let parts = (infos[key] ?? "Ch\(index + 1),,1,µV")
                 .split(separator: ",", omittingEmptySubsequences: false)
                 .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            let name = parts.first?.replacingOccurrences(of: #"\\1"#, with: ",").nonEmpty
+            let name = parts.first.map(decodeEscapedComma)?.nonEmpty
                 ?? "Ch\(index + 1)"
             let resolution = parts.count > 2 ? Double(parts[2]) ?? 1 : 1
             let unit = parts.count > 3 ? parts[3].nonEmpty ?? "µV" : "µV"
@@ -406,16 +408,27 @@ private nonisolated enum BrainVisionSignalReader {
                   let sample = Int(parts[2]) else {
                 return nil
             }
-            let description = parts.count > 1 ? parts[1].nonEmpty ?? parts[0] : parts[0]
+            let type = decodeEscapedComma(parts[0]).nonEmpty ?? "Marker"
+            let description = parts.count > 1 ? decodeEscapedComma(parts[1]).nonEmpty : nil
+            let code = description.map { "\(type)/\($0)" } ?? type
+            let sizeInSamples = parts.count > 3 ? Int(parts[3]) : nil
+            let duration = sizeInSamples.flatMap { $0 > 1 ? Double($0) / samplingRate : nil }
             let onset = Double(max(sample - 1, 0)) / samplingRate
             return MFFEvent(
                 id: "\(url.lastPathComponent)-\(key)",
-                code: description,
+                code: code,
+                label: type,
+                eventDescription: description,
                 beginTimeSeconds: onset,
                 rawBeginTime: "\(sample)",
-                sourceFile: url.lastPathComponent
+                sourceFile: url.lastPathComponent,
+                durationSeconds: duration
             )
         }
+    }
+
+    private static func decodeEscapedComma(_ value: String) -> String {
+        value.replacingOccurrences(of: "\\1", with: ",")
     }
 
     private static func parseCoordinates(
@@ -1199,6 +1212,184 @@ nonisolated enum ElectrodeLocationReader {
             aligned = coordinates.enumerated().map { ($0.offset, $0.element.vector) }
         }
         return aligned
+    }
+}
+
+private nonisolated enum StandardElectrodeLocations {
+    private static let rowY: [String: Double] = [
+        "FP": 0.95,
+        "AF": 0.78,
+        "F": 0.56,
+        "FC": 0.30,
+        "FT": 0.30,
+        "C": 0.00,
+        "T": 0.00,
+        "TP": -0.30,
+        "CP": -0.30,
+        "P": -0.56,
+        "PO": -0.78,
+        "O": -0.95,
+        "I": -1.03
+    ]
+
+    private static let aliases: [String: String] = [
+        "T3": "T7",
+        "T4": "T8",
+        "T5": "P7",
+        "T6": "P8"
+    ]
+
+    static func locations(for channelNames: [String]?) -> ImportedElectrodeLocations? {
+        guard let channelNames, !channelNames.isEmpty else { return nil }
+
+        var coordinates: [(label: String, vector: SIMD3<Double>)] = []
+        var eligibleChannelCount = 0
+        for name in channelNames {
+            guard !isNonScalpChannel(name) else { continue }
+            eligibleChannelCount += 1
+            guard let vector = vector(for: name) else { continue }
+            coordinates.append((label: name, vector: vector))
+        }
+
+        let requiredCount = max(3, Int(ceil(Double(eligibleChannelCount) * 0.5)))
+        guard coordinates.count >= requiredCount else { return nil }
+
+        let locations = ElectrodeLocationReader.locations(
+            from: coordinates,
+            channelNames: channelNames,
+            name: "Standard 10-20/10-10 labels"
+        )
+        guard locations.layout != nil || locations.geometry != nil else { return nil }
+        return locations
+    }
+
+    private static func vector(for name: String) -> SIMD3<Double>? {
+        guard let key = standardKey(name) else { return nil }
+        let mappedKey = aliases[key] ?? key
+        guard let parsed = parse(mappedKey) else { return nil }
+
+        let x: Double
+        let y: Double
+        switch parsed.suffix {
+        case "Z":
+            x = 0
+            y = parsed.prefix == "NZ" ? 1.03 : (rowY[parsed.prefix] ?? 0)
+        default:
+            guard let number = Int(parsed.suffix) else { return nil }
+            let sign = number.isMultiple(of: 2) ? 1.0 : -1.0
+            x = sign * lateralDistance(for: number, prefix: parsed.prefix)
+            y = rowY[parsed.prefix] ?? 0
+        }
+        return vector(x: x, y: y)
+    }
+
+    private static func standardKey(_ name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        var key = trimmed
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: ".", with: "")
+            .replacingOccurrences(of: "-REF", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "REF", with: "", options: .caseInsensitive)
+            .uppercased()
+
+        if key.hasPrefix("EEG") {
+            let withoutPrefix = String(key.dropFirst(3))
+            if parse(aliases[withoutPrefix] ?? withoutPrefix) != nil {
+                key = withoutPrefix
+            }
+        }
+
+        let mappedKey = aliases[key] ?? key
+        return parse(mappedKey) == nil ? nil : key
+    }
+
+    private static func parse(_ key: String) -> (prefix: String, suffix: String)? {
+        guard !key.isEmpty else { return nil }
+
+        if key == "NZ" {
+            return (prefix: "NZ", suffix: "Z")
+        }
+        if key.hasSuffix("Z") {
+            let prefix = String(key.dropLast())
+            if rowY[prefix] != nil {
+                return (prefix, "Z")
+            }
+        }
+
+        var splitIndex = key.startIndex
+        while splitIndex < key.endIndex, key[splitIndex].isLetter {
+            splitIndex = key.index(after: splitIndex)
+        }
+
+        let prefix = String(key[..<splitIndex])
+        let suffix = String(key[splitIndex...])
+        if suffix == "Z", rowY[prefix] != nil {
+            return (prefix, suffix)
+        }
+        if let number = Int(suffix), isRecognized(prefix: prefix, number: number) {
+            return (prefix, suffix)
+        }
+        return nil
+    }
+
+    private static func isRecognized(prefix: String, number: Int) -> Bool {
+        switch prefix {
+        case "FP", "O":
+            return number == 1 || number == 2
+        case "A", "M":
+            return number == 1 || number == 2
+        default:
+            return rowY[prefix] != nil && (1...10).contains(number)
+        }
+    }
+
+    private static func lateralDistance(for number: Int, prefix: String) -> Double {
+        if prefix == "A" || prefix == "M" {
+            return 1.04
+        }
+        if prefix == "FP" || prefix == "O" {
+            return 0.28
+        }
+        switch number {
+        case 1, 2:
+            return 0.22
+        case 3, 4:
+            return 0.42
+        case 5, 6:
+            return 0.62
+        case 7, 8:
+            return prefix == "T" ? 0.95 : 0.84
+        case 9, 10:
+            return 1.02
+        default:
+            return 0.22
+        }
+    }
+
+    private static func vector(x: Double, y: Double) -> SIMD3<Double> {
+        let radius = hypot(x, y)
+        let scale = radius > 0.98 ? 0.98 / radius : 1
+        let scaledX = x * scale
+        let scaledY = y * scale
+        let z = sqrt(max(1 - scaledX * scaledX - scaledY * scaledY, 0))
+        return SIMD3<Double>(scaledX, scaledY, z)
+    }
+
+    private static func isNonScalpChannel(_ name: String) -> Bool {
+        let key = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "_", with: "")
+            .uppercased()
+        guard !key.isEmpty else { return true }
+        return [
+            "ECG", "EKG", "EOG", "HEOG", "VEOG", "EMG", "GSR",
+            "RESP", "PULSE", "TRIG", "TRIGGER", "STATUS", "STI",
+            "AUX", "DC", "SYNC", "REF", "VREF", "CMS", "DRL", "GND", "GROUND"
+        ].contains { key.hasPrefix($0) }
     }
 }
 

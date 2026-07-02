@@ -613,7 +613,7 @@ nonisolated enum BCGDetector {
                         v, 1, 0.0, &Cv, 1)
             var lambda: Float = 0
             vDSP_dotpr(v, 1, Cv, 1, &lambda, vDSP_Length(nCh))
-            var negLambda = -lambda
+            let negLambda = -lambda
             cblas_ssyr(CblasRowMajor, CblasUpper,
                        Int32(nCh), negLambda, v, 1, &workCov, Int32(nCh))
             for i in 0 ..< nCh {
@@ -668,7 +668,7 @@ nonisolated enum BCGDetector {
         // Build W = V * diag(1/sqrt(λ+ε)) * V^T where V has eigenvectors as columns.
         // With eigenvectors as rows E: V = E^T, so W = E^T * diag(invSqrtLambda) * E.
         let eps: Float = max(eigenvalues.max() ?? 1, 1e-6) * 1e-3
-        var invSqrtLambda = eigenvalues.map { 1.0 / sqrt(max($0, eps)) }
+        let invSqrtLambda = eigenvalues.map { 1.0 / sqrt(max($0, eps)) }
         // Scale row i of bgCov by 1/sqrt(λ_i): Vscaled[i, :] = invSqrtLambda[i] * E[i, :]
         var Vscaled = bgCov
         Vscaled.withUnsafeMutableBufferPointer { buf in

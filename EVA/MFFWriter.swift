@@ -71,7 +71,8 @@ nonisolated enum MFFWriter {
         pnsSignal: MFFSignalData? = nil,
         segments: [EpochSegment],
         kind: MFFExportKind,
-        to outputURL: URL
+        to outputURL: URL,
+        preserveSourceFileInfo: Bool = true
     ) throws {
         let sampleRate = try integerSamplingRate(signal.samplingRate)
         let sampleCount = try validate(signal: signal)
@@ -88,7 +89,12 @@ nonisolated enum MFFWriter {
         try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
 
         do {
-            try writeInfoXML(signal: signal, kind: kind, to: packageURL)
+            try writeInfoXML(
+                signal: signal,
+                kind: kind,
+                to: packageURL,
+                preserveSourceFileInfo: preserveSourceFileInfo
+            )
             try writeSignalInfoXML(signal: signal, to: packageURL)
             try writeSignalBinary(
                 blocks: blocks.map { $0.withSignalData(signal.data) },
@@ -193,7 +199,7 @@ nonisolated enum MFFWriter {
               let document = try? XMLDocument(data: data, options: [.documentTidyXML]),
               let root = document.rootElement() else { return nil }
         removeDescendants(named: "calibrations", from: root)
-        return try? document.xmlData(options: [.nodePrettyPrint])
+        return document.xmlData(options: [.nodePrettyPrint])
     }
 
     private static func writePNSSetXML(pns: MFFSignalData, to packageURL: URL) throws {
@@ -284,12 +290,18 @@ nonisolated enum MFFWriter {
         }
     }
 
-    private static func writeInfoXML(signal: MFFSignalData, kind: MFFExportKind, to packageURL: URL) throws {
+    private static func writeInfoXML(
+        signal: MFFSignalData,
+        kind: MFFExportKind,
+        to packageURL: URL,
+        preserveSourceFileInfo: Bool
+    ) throws {
         // Carry over the original info.xml verbatim when the source is an MFF
         // package — it holds the real recordTime, amplifier type/serial/firmware,
         // and acquisition version. Only synthesize when there is no source
         // info.xml (e.g. exporting data imported from a non-MFF format).
-        if copyOriginalFileIfPresent(named: "info.xml", sourceSignalURL: signal.signalURL, to: packageURL) {
+        if preserveSourceFileInfo,
+           copyOriginalFileIfPresent(named: "info.xml", sourceSignalURL: signal.signalURL, to: packageURL) {
             return
         }
 

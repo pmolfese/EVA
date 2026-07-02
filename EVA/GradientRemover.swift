@@ -120,7 +120,7 @@ struct GradientRemover {
 
         // Progress accounting across parallel workers.
         let progressLock = NSLock()
-        var completed = 0
+        nonisolated(unsafe) var completed = 0
         let reportEvery = max(1, channelCount / 100)
 
         result.withUnsafeMutableBufferPointer { out in

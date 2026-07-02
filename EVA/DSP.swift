@@ -196,7 +196,7 @@ nonisolated enum DSP {
         // Pad x with nb-1 zeros at the front so vDSP_conv produces the causal output.
         var xPad = [Double](repeating: 0, count: nx + nb - 1)
         xPad.replaceSubrange((nb - 1)..<(nb - 1 + nx), with: x)
-        var bFlip = b  // b[0] is the most-recent tap; vDSP_conv uses time-reversed filter
+        let bFlip = b  // b[0] is the most-recent tap; vDSP_conv uses time-reversed filter
         var y = [Double](repeating: 0, count: nx)
         bFlip.withUnsafeBufferPointer { bBuf in
             vDSP_convD(xPad, 1, bBuf.baseAddress! + (nb - 1), -1, &y, 1, vDSP_Length(nx), vDSP_Length(nb))
@@ -217,7 +217,7 @@ nonisolated enum DSP {
         // center with output index 0, giving a zero-phase same-length result.
         var xPad = [Double](repeating: 0, count: nx + nb - 1)
         xPad.replaceSubrange(delay..<(delay + nx), with: x)
-        var bFlip = b.reversed() as [Double]
+        let bFlip = b.reversed() as [Double]
         var y = [Double](repeating: 0, count: nx)
         bFlip.withUnsafeBufferPointer { bBuf in
             vDSP_convD(xPad, 1, bBuf.baseAddress! + (nb - 1), -1, &y, 1, vDSP_Length(nx), vDSP_Length(nb))

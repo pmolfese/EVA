@@ -29,6 +29,7 @@ struct ChannelSetEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     private var layout: SensorLayout? { ChannelSetStore.shared.activeSensorLayout }
+    private var channelNames: [String]? { ChannelSetStore.shared.activeChannelNames }
 
     @State private var sidebarSelection: ChannelSet.ID? = nil
     @State private var editingSet: ChannelSet? = nil
@@ -189,16 +190,22 @@ struct ChannelSetEditorView: View {
 
                 // Map or fallback
                 if let layout {
-                    ChannelSetMapView(
-                        layout: layout,
-                        selectedIndices: $selectedIndices,
-                        interactive: !isViewingBuiltIn,
-                        onToggle: forceSymmetry && !isViewingBuiltIn
-                            ? { channel, nowSelected in
-                                applySymmetry(to: channel, nowSelected: nowSelected, layout: layout)
-                              }
-                            : nil
-                    )
+                    VStack(spacing: 10) {
+                        ChannelSetMapView(
+                            layout: layout,
+                            selectedIndices: $selectedIndices,
+                            interactive: !isViewingBuiltIn,
+                            channelLabel: channelDisplayLabel,
+                            onToggle: forceSymmetry && !isViewingBuiltIn
+                                ? { channel, nowSelected in
+                                    applySymmetry(to: channel, nowSelected: nowSelected, layout: layout)
+                                  }
+                                : nil
+                        )
+                        if !unpositionedChannelIndices(in: layout).isEmpty {
+                            unpositionedChannelsView(unpositionedChannelIndices(in: layout))
+                        }
+                    }
                     .padding(12)
                 } else {
                     noLayoutFallback
@@ -209,9 +216,16 @@ struct ChannelSetEditorView: View {
 
                 // Status + action bar
                 HStack {
-                    Text("\(selectedIndices.count) channel\(selectedIndices.count == 1 ? "" : "s") selected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(selectedIndices.count) channel\(selectedIndices.count == 1 ? "" : "s") selected")
+                        if !selectedIndices.isEmpty {
+                            Text(selectedChannelSummary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                     if !isViewingBuiltIn, layout != nil {
                         Toggle("Force symmetry", isOn: $forceSymmetry)
@@ -276,8 +290,8 @@ struct ChannelSetEditorView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 300)
             } else {
-                Text(selectedIndices.sorted().map { String($0 + 1) }.joined(separator: ", "))
-                    .font(.caption.monospacedDigit())
+                Text(selectedChannelSummary)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
@@ -285,10 +299,82 @@ struct ChannelSetEditorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func unpositionedChannelsView(_ indices: [Int]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("No plotted location")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(indices, id: \.self) { index in
+                        unpositionedChannelButton(index)
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func unpositionedChannelButton(_ index: Int) -> some View {
+        let label = channelDisplayLabel(index)
+        let selected = selectedIndices.contains(index)
+        let foreground = selected ? Color.blue : Color.primary.opacity(0.75)
+        let fill = selected ? Color.blue.opacity(0.18) : Color.primary.opacity(0.08)
+        let stroke = selected ? Color.blue.opacity(0.65) : Color.primary.opacity(0.16)
+
+        return Button {
+            guard !isViewingBuiltIn else { return }
+            if selected {
+                selectedIndices.remove(index)
+            } else {
+                selectedIndices.insert(index)
+            }
+        } label: {
+            Text(label)
+                .font(.caption)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .foregroundStyle(foreground)
+                .background(Capsule().fill(fill))
+                .overlay(Capsule().stroke(stroke, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(isViewingBuiltIn)
+        .help(label)
+    }
+
     // MARK: - Helpers
 
     private var isViewingBuiltIn: Bool {
         editingSet.map { store.isBuiltIn($0) } ?? false
+    }
+
+    private var selectedChannelSummary: String {
+        let labels = selectedIndices.sorted().map(channelDisplayLabel)
+        guard !labels.isEmpty else { return "" }
+        let visible = labels.prefix(24).joined(separator: ", ")
+        let remaining = labels.count - 24
+        return remaining > 0 ? "\(visible), +\(remaining) more" : visible
+    }
+
+    private func unpositionedChannelIndices(in layout: SensorLayout) -> [Int] {
+        guard let channelNames, !channelNames.isEmpty else { return [] }
+        let positioned = Set(layout.positions.map(\.channelIndex))
+        return channelNames.indices.filter { !positioned.contains($0) }
+    }
+
+    private func channelDisplayLabel(_ index: Int) -> String {
+        if let channelNames,
+           channelNames.indices.contains(index) {
+            let trimmed = channelNames[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return "\(index + 1)"
     }
 
     private func loadSet(_ set: ChannelSet) {

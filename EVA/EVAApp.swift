@@ -24,6 +24,7 @@ struct EVAApp: App {
     @State private var recording: MFFRecording?
     @State private var openRecordingRequest = 0
     @State private var goodnessSettings = ChannelGoodnessSettings()
+    @State private var processingDefaults = ProcessingDefaults.shared
 
     var body: some Scene {
         WindowGroup {
@@ -32,6 +33,7 @@ struct EVAApp: App {
                 openRecordingRequest: $openRecordingRequest
             )
             .environment(goodnessSettings)
+            .environment(processingDefaults)
         }
         .modelContainer(for: UserMarker.self)
         .defaultSize(Self.defaultWindowSize)
@@ -73,6 +75,12 @@ struct EVAApp: App {
             ChannelSetEditorView()
         }
         .defaultSize(width: 800, height: 580)
+
+        Settings {
+            PreferencesView()
+                .environment(goodnessSettings)
+                .environment(processingDefaults)
+        }
     }
 
     static let debugLogWindowID = "debug-log"

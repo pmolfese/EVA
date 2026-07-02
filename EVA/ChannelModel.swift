@@ -21,6 +21,10 @@
 
 import SwiftUI
 
+nonisolated enum ToolbarButtonLabels {
+    static let storageKey = "toolbarButtonLabelsVisible"
+}
+
 @Observable
 final class ChannelModel {
     /// Channels whose trace is not drawn (row stays in place).
@@ -29,6 +33,10 @@ final class ChannelModel {
     var bad = Set<Int>()
     /// channelIndex → spherical-spline-interpolated replacement series.
     var interpolated = [Int: [Float]]()
+    /// channelIndex → the channels (and spline weights) that produced its
+    /// interpolation, so health can be estimated by averaging their scores
+    /// instead of a full recompute.
+    var interpolationSources = [Int: (indices: [Int], weights: [Float])]()
     /// Whether the waveform should lazily compute and display channel quality.
     var showsHealth = false
     /// Latest channel-health scores, keyed by channel index.
@@ -83,10 +91,14 @@ struct ChannelsCommands: View {
         Divider()
 
         if let model {
-            Toggle("Show Channel Health", isOn: Binding(
-                get: { model.showsHealth },
-                set: { model.showsHealth = $0 }
-            ))
+            Button(model.healthResults.isEmpty ? "Run Channel Health" : "Refresh Channel Health") {
+                if let healthControls {
+                    healthControls.refreshRequest.wrappedValue += 1
+                } else {
+                    model.healthRefreshToken += 1
+                }
+            }
+            .disabled(model.isAnalyzingHealth)
 
             Button("Channel Goodness Details...") {
                 healthControls?.detailsRequest.wrappedValue += 1
@@ -98,19 +110,8 @@ struct ChannelsCommands: View {
             }
             .disabled(healthControls == nil)
 
-            if model.showsHealth {
-                Button("Refresh Channel Health") {
-                    if let healthControls {
-                        healthControls.refreshRequest.wrappedValue += 1
-                    } else {
-                        model.healthRefreshToken += 1
-                    }
-                }
-                .disabled(model.isAnalyzingHealth)
-
-                if model.isAnalyzingHealth {
-                    Text("Analyzing \(Int((model.healthProgress * 100).rounded()))%")
-                }
+            if model.isAnalyzingHealth {
+                Text("Analyzing \(Int((model.healthProgress * 100).rounded()))%")
             }
 
             Divider()
@@ -126,7 +127,10 @@ struct ChannelsCommands: View {
                 .disabled(model.hidden.isEmpty)
             Button("Unmark All Bad") { model.bad.removeAll() }
                 .disabled(model.bad.isEmpty)
-            Button("Remove All Interpolations") { model.interpolated.removeAll() }
+            Button("Remove All Interpolations") {
+                model.interpolated.removeAll()
+                model.interpolationSources.removeAll()
+            }
                 .disabled(model.interpolated.isEmpty)
 
             Divider()
@@ -315,6 +319,8 @@ struct FileExportCommands: View {
 
 /// Menu-bar View commands for the focused waveform window.
 struct ViewCommands: View {
+    @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
+
     @FocusedValue(\.icaDebugReportRequest) private var reportRequest
     @FocusedValue(\.resetToOriginalRequest) private var resetRequest
     @FocusedValue(\.psaViewControls) private var psaControls
@@ -322,6 +328,12 @@ struct ViewCommands: View {
     @FocusedValue(\.physioViewControls) private var physioControls
 
     var body: some View {
+        Button(showsToolbarButtonLabels ? "Hide Button Labels" : "Show Button Labels") {
+            showsToolbarButtonLabels.toggle()
+        }
+
+        Divider()
+
         if let physioControls, physioControls.hasPhysio {
             Button(physioControls.showsPhysio.wrappedValue
                    ? "Hide Physio Channels"

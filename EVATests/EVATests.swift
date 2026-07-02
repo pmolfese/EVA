@@ -94,7 +94,10 @@ struct EVATests {
         #expect(signal.data[1] == [5, 10, 15])
     }
 
-    @Test func mffExportStripsSourceCalibrationsAfterCalibratedRead() throws {
+    @Test func mffExportStripsGCALButKeepsICAL() throws {
+        // EVA stores calibrated physical samples, so the gain calibration (GCAL)
+        // must be stripped to avoid double-scaling on re-import. Electrode
+        // impedance (ICAL) is metadata, not a scale factor, and is preserved.
         let packageURL = try makeMFFPackage()
         let exportURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("EVA-export-\(UUID().uuidString)")
@@ -112,8 +115,7 @@ struct EVATests {
             encoding: .utf8
         )
         #expect(!exportedInfo.contains("GCAL"))
-        #expect(!exportedInfo.contains("ICAL"))
-        #expect(!exportedInfo.contains("calibrations"))
+        #expect(exportedInfo.contains("ICAL"))
 
         let exportedSignal = try MFFReader().loadSignal(from: exportURL)
         #expect(exportedSignal.data == signal.data)

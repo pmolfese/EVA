@@ -26,6 +26,7 @@ struct ChannelSetMapView: View {
     let layout: SensorLayout
     @Binding var selectedIndices: Set<Int>
     var interactive: Bool = true
+    var channelLabel: (Int) -> String = { "\($0 + 1)" }
     /// Optional hook called after a tap toggles a channel, with the channel and
     /// its new membership state. Used to apply symmetry mirroring.
     var onToggle: ((Int, Bool) -> Void)? = nil
@@ -45,8 +46,10 @@ struct ChannelSetMapView: View {
                 ForEach(layout.positions) { sensor in
                     let pos = sensorPoint(sensor, center: center, radius: radius)
                     let selected = selectedIndices.contains(sensor.channelIndex)
-                    electrodeMarker(channelIndex: sensor.channelIndex, selected: selected)
+                    let label = channelLabel(sensor.channelIndex)
+                    electrodeMarker(label: label, selected: selected)
                         .position(pos)
+                        .help(label)
                         .onTapGesture {
                             guard interactive else { return }
                             let nowSelected = !selected
@@ -66,7 +69,8 @@ struct ChannelSetMapView: View {
     }
 
     @ViewBuilder
-    private func electrodeMarker(channelIndex: Int, selected: Bool) -> some View {
+    private func electrodeMarker(label: String, selected: Bool) -> some View {
+        let size = markerSize(for: label)
         ZStack {
             Circle()
                 .fill(selected ? Color.blue.opacity(0.25) : Color.clear)
@@ -75,11 +79,26 @@ struct ChannelSetMapView: View {
                     selected ? Color.blue : Color.primary.opacity(0.30),
                     lineWidth: selected ? 1.5 : 0.8
                 )
-            Text("\(channelIndex + 1)")
-                .font(.system(size: 6, weight: selected ? .semibold : .regular))
+            Text(label)
+                .font(.system(size: fontSize(for: label), weight: selected ? .semibold : .regular))
                 .foregroundStyle(selected ? Color.blue : Color.primary.opacity(0.45))
+                .minimumScaleFactor(0.45)
+                .lineLimit(1)
+                .padding(.horizontal, 2)
         }
-        .frame(width: 16, height: 16)
+        .frame(width: size, height: size)
+    }
+
+    private func markerSize(for label: String) -> CGFloat {
+        if layout.positions.count > 128 { return 18 }
+        if layout.positions.count > 64 { return 20 }
+        return max(24, min(32, CGFloat(label.count) * 5 + 10))
+    }
+
+    private func fontSize(for label: String) -> CGFloat {
+        if layout.positions.count > 128 { return 5.5 }
+        if layout.positions.count > 64 { return 6.5 }
+        return label.count > 4 ? 7 : 8
     }
 
     private func sensorPoint(_ sensor: SensorPosition, center: CGPoint, radius: CGFloat) -> CGPoint {

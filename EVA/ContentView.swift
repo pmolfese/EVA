@@ -29,6 +29,8 @@ struct ContentView: View {
     @Binding var recording: MFFRecording?
     @Binding var openRecordingRequest: Int
 
+    @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
+
     @State private var showsFileImporter = false
     @State private var isDropTargeted = false
     @State private var openError: String?
@@ -60,7 +62,7 @@ struct ContentView: View {
         .fileImporter(
             isPresented: $showsFileImporter,
             allowedContentTypes: [.mff, .data, .plainText],
-            allowsMultipleSelection: false
+            allowsMultipleSelection: true
         ) { result in
             handleImportResult(result)
         }
@@ -134,7 +136,8 @@ struct ContentView: View {
                 idleToolbarButton(name: "icon.mri", label: "MRI")
                 idleToolbarButton(name: "icon.filter", label: "Filter")
                 idleToolbarButton(name: "icon.artifacts", label: "Artifacts")
-                idleToolbarButton(name: "icon.process", label: "Processing")
+                idleToolbarButton(name: "icon.process", label: "Processing", buttonLabel: "PROCESS")
+                idleToolbarButton(name: "icon.eeg-processing", label: "EEG Processing", buttonLabel: "EEG")
                 idleToolbarButton(name: "icon.events", label: "Events")
             }
 
@@ -152,9 +155,18 @@ struct ContentView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private func idleToolbarButton(name: String, label: String) -> some View {
+    private func idleToolbarButton(
+        name: String,
+        label: String,
+        buttonLabel: String? = nil,
+        inactiveForeground: Color = .primary
+    ) -> some View {
         Button {} label: {
-            ToolbarIcon(name: name)
+            ToolbarIcon(
+                name: name,
+                label: showsToolbarButtonLabels ? (buttonLabel ?? label) : nil,
+                inactiveForeground: inactiveForeground
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
@@ -220,37 +232,98 @@ struct ContentView: View {
     private func handleImportResult(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            guard let url = urls.first else { return }
-            open(url)
+            openSelectedURLs(urls)
         case .failure(let error):
             openError = error.localizedDescription
         }
     }
 
     private func openDroppedURLs(_ urls: [URL]) -> Bool {
-        let mffURLs = urls.filter { $0.pathExtension.lowercased() == "mff" }
+        openSelectedURLs(urls)
+    }
+
+    @discardableResult
+    private func openSelectedURLs(_ urls: [URL]) -> Bool {
+        let supportedURLs = urls.filter(isSupportedRecordingURL)
+        let mffURLs = supportedURLs.filter { $0.pathExtension.lowercased() == "mff" }
         if mffURLs.count > 1 {
             combineRequest = CombineRequest(urls: mffURLs)
             return true
         }
-        guard let url = urls.first else { return false }
-        return open(url)
+
+        let brainVisionURLs = supportedURLs.filter(isBrainVisionURL)
+        if !brainVisionURLs.isEmpty {
+            return openBrainVisionSelection(brainVisionURLs)
+        }
+
+        guard let url = supportedURLs.first else {
+            openError = "EVA can open .mff, BrainVision, EDF, Persyst, and BESA .avr/.mul recordings."
+            return false
+        }
+        return open(url, securityScopedURLs: supportedURLs)
     }
 
     @discardableResult
-    private func open(_ url: URL) -> Bool {
+    private func open(_ url: URL, securityScopedURLs: [URL] = []) -> Bool {
         guard isSupportedRecordingURL(url) else {
             openError = "EVA can open .mff, BrainVision, EDF, Persyst, and BESA .avr/.mul recordings."
             return false
         }
 
         openError = nil
-        recording = MFFRecording(packageURL: url)
+        recording = MFFRecording(packageURL: url, securityScopedURLs: securityScopedURLs)
         return true
     }
 
     private func isSupportedRecordingURL(_ url: URL) -> Bool {
         SignalImportReader.isSupportedRecordingURL(url)
+    }
+
+    private func isBrainVisionURL(_ url: URL) -> Bool {
+        ["vhdr", "vmrk", "eeg"].contains(url.pathExtension.lowercased())
+    }
+
+    private func openBrainVisionSelection(_ urls: [URL]) -> Bool {
+        guard let headerURL = brainVisionHeaderURL(from: urls) else {
+            openError = "BrainVision recordings need a .vhdr header file."
+            return false
+        }
+
+        var scopedURLs = urls
+        if !selectionIncludesBrainVisionSet(urls) {
+            guard let folderURL = requestBrainVisionFolderAccess(containing: headerURL) else {
+                openError = "BrainVision recordings use .vhdr, .vmrk, and .eeg sidecar files. Select the containing folder or choose all three files together."
+                return false
+            }
+            scopedURLs.append(folderURL)
+        }
+
+        return open(headerURL, securityScopedURLs: scopedURLs)
+    }
+
+    private func brainVisionHeaderURL(from urls: [URL]) -> URL? {
+        if let header = urls.first(where: { $0.pathExtension.lowercased() == "vhdr" }) {
+            return header
+        }
+        guard let sidecar = urls.first(where: isBrainVisionURL) else { return nil }
+        return sidecar.deletingPathExtension().appendingPathExtension("vhdr")
+    }
+
+    private func selectionIncludesBrainVisionSet(_ urls: [URL]) -> Bool {
+        let extensions = Set(urls.map { $0.pathExtension.lowercased() })
+        return extensions.isSuperset(of: ["vhdr", "vmrk", "eeg"])
+    }
+
+    private func requestBrainVisionFolderAccess(containing headerURL: URL) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = headerURL.deletingLastPathComponent()
+        panel.prompt = "Grant Access"
+        panel.message = "BrainVision recordings use multiple files. Select the folder that contains the .vhdr, .vmrk, and .eeg files."
+        return panel.runModal() == .OK ? panel.url : nil
     }
 }
 
