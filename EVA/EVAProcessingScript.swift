@@ -44,6 +44,7 @@ nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable 
         case mriGradientCorrection
         case waveletReduce
         case artifactClean
+        case thresholdArtifactDetection
         case icaClean
         case bcgDetection
         case ecgDetection

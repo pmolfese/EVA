@@ -193,6 +193,7 @@ struct WaveformView: View {
     @StateObject private var segHealth = SegmentHealthViewModel()
     @State private var resetToOriginalRequest = 0
     @State private var mffExportRequest = 0
+    @State private var copyProcessingRequest = 0
     @State private var isExportingMFF = false
     @State private var mffExportStatusMessage: String?
 
@@ -283,6 +284,10 @@ struct WaveformView: View {
     }
 
     var body: some View {
+        installEventHandlers(on: bodyChrome)
+    }
+
+    private var bodyChrome: some View {
         Group {
             if recording.isLoading {
                 let progress = recording.loadProgress ?? 0
@@ -348,12 +353,22 @@ struct WaveformView: View {
         .focusedSceneValue(\.segmentHealthViewControls, segmentHealthControls)
         .focusedSceneValue(\.channelHealthViewControls, channelHealthControls)
         .focusedSceneValue(\.mffExportRequest, $mffExportRequest)
+        .focusedSceneValue(\.copyProcessingRequest, $copyProcessingRequest)
         .focusedSceneValue(\.physioViewControls, physioViewControls)
+    }
+
+    /// Split out of `body` so each modifier chain stays small enough for the
+    /// Swift type-checker.
+    private func installEventHandlers(on content: some View) -> some View {
+        content
         .onChange(of: resetToOriginalRequest) { _, _ in
             resetToOriginalData()
         }
         .onChange(of: mffExportRequest) { _, _ in
             exportCurrentSignalToMFF()
+        }
+        .onChange(of: copyProcessingRequest) { _, _ in
+            importProcessingFromOtherFile()
         }
         .onChange(of: channelLabelMetricsExportRequest) { _, _ in
             saveChannelLabelMetricsJSON()
@@ -7350,6 +7365,48 @@ struct WaveformView: View {
         })
     }
 
+    // MARK: - Copy processing (eva.xml replay)
+
+    /// Reads another recording's `eva.xml` and replays its replayable steps onto
+    /// the current recording. First slice applies the filter step; other stages
+    /// are captured but skipped until their round-trip lands.
+    private func importProcessingFromOtherFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.mff]
+        panel.canChooseDirectories = true // MFF is a directory package
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Copy Processing"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        guard let script = EVAProcessingScriptXML.read(fromPackage: url) else {
+            filter.statusMessage = "No eva.xml found in \(url.lastPathComponent)."
+            filter.statusIsError = true
+            return
+        }
+
+        Task {
+            await replay(script)
+            let applied = script.replayableSteps
+                .map(\.operation)
+                .filter { [.mriGradientCorrection, .filter, .thresholdArtifactDetection].contains($0) }
+            let names = applied.map(replayOperationLabel).joined(separator: ", ")
+            filter.statusMessage = applied.isEmpty
+                ? "No replayable steps found in \(url.lastPathComponent)."
+                : "Copied processing (\(names)) from \(url.lastPathComponent)."
+            filter.statusIsError = false
+        }
+    }
+
+    private func replayOperationLabel(_ op: EVAProcessingStep.Operation) -> String {
+        switch op {
+        case .mriGradientCorrection: return "MRI gradient"
+        case .filter: return "filter"
+        case .thresholdArtifactDetection: return "artifact detection"
+        default: return op.rawValue
+        }
+    }
+
     // MARK: - MFF export
 
     private func exportCurrentSignalToMFF() {
@@ -7603,11 +7660,16 @@ struct WaveformView: View {
 
     /// Builds a declarative processing record (eva.xml) from the active
     /// pipeline state, so exported packages document how EVA transformed them.
+    /// Captures the current processing as a replayable script. Steps are emitted
+    /// in canonical chain order (matching `body`: gradient → ica → filter →
+    /// artifact → wavelet → interpolate → markBad) so that replaying them in
+    /// order reproduces the same result and each stage's downstream invalidation
+    /// lands correctly. Keep this order in sync with `body` and `replay(_:)`.
     private func currentProcessingScript() -> EVAProcessingScript {
         var script = EVAProcessingScript()
 
         if gradient.correctedSignal != nil {
-            script.append(EVAProcessingStep(operation: .mriGradientCorrection, parameters: [:]))
+            script.append(EVAProcessingStep(operation: .mriGradientCorrection, parameters: gradient.parameters))
         }
         if ica.cleanedSignal != nil {
             script.append(EVAProcessingStep(
@@ -7620,8 +7682,29 @@ struct WaveformView: View {
         if filter.output != nil {
             script.append(EVAProcessingStep(operation: .filter, parameters: filter.parameters))
         }
-        if artifactVM.cleaningIsEnabled {
-            script.append(EVAProcessingStep(operation: .artifactClean, parameters: [:]))
+        if artifactVM.isCleaningActive {
+            // Artifact cleaning is defined per-subject (drawn templates / events),
+            // so it is provenance-only, not replayable.
+            script.append(EVAProcessingStep(
+                operation: .artifactClean,
+                parameters: ["artifacts": "\(template.definedArtifacts.count)"],
+                replayable: false,
+                note: "Artifact definitions (templates/events) are subject-specific."
+            ))
+        }
+        if wavelet.isActive {
+            script.append(EVAProcessingStep(operation: .waveletReduce, parameters: wavelet.parameters))
+        }
+        // Threshold-based ocular detection is fully parameterized (no drawn
+        // templates), so it is portable and replayable.
+        if artifactVM.detectionMethod == .threshold, detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts {
+            var p: [String: String] = [
+                "eyeBlink": "\(detectsEyeBlinkArtifacts)",
+                "eyeMovement": "\(detectsEyeMovementArtifacts)"
+            ]
+            if let s = encodedThresholdConfig(artifactVM.blinkThresholdConfig) { p["blinkConfig"] = s }
+            if let s = encodedThresholdConfig(artifactVM.movementThresholdConfig) { p["movementConfig"] = s }
+            script.append(EVAProcessingStep(operation: .thresholdArtifactDetection, parameters: p))
         }
         if !channels.interpolated.isEmpty {
             script.append(EVAProcessingStep(
@@ -7639,6 +7722,16 @@ struct WaveformView: View {
             ))
         }
         return script
+    }
+
+    /// JSON-encodes an eye-artifact threshold config for an eva.xml param.
+    private func encodedThresholdConfig(_ config: EyeArtifactThresholdConfiguration) -> String? {
+        (try? JSONEncoder().encode(config)).flatMap { String(data: $0, encoding: .utf8) }
+    }
+
+    private func decodedThresholdConfig(_ string: String?) -> EyeArtifactThresholdConfiguration? {
+        guard let data = string?.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(EyeArtifactThresholdConfiguration.self, from: data)
     }
 
     private func currentMFFExportSnapshot() -> MFFExportSnapshot? {
@@ -7858,17 +7951,69 @@ struct WaveformView: View {
 
     private func applyBandpassFilter(to signal: MFFSignalData) {
         let pnsInput = filter.filterPNS ? pnsFilterBaseSignal() : nil
-        filter.apply(
-            to: signal,
-            pnsInput: pnsInput,
-            excludedChannels: channels.bad,
-            onApplied: { [self] in
-                clearAppliedArtifactCleaning()
-                artifactVM.detectionRefreshToken += 1
-                invalidateEpochsForSignalChange()
-                invalidateInterpolations()
+        // The interactive path fires the shared async apply without awaiting;
+        // the replay coordinator awaits the same method (one code path).
+        Task {
+            await filter.apply(
+                to: signal,
+                pnsInput: pnsInput,
+                excludedChannels: channels.bad,
+                onApplied: { [self] in postFilterInvalidation() }
+            )
+        }
+    }
+
+    /// Downstream invalidation shared by interactive filtering and replay.
+    private func postFilterInvalidation() {
+        clearAppliedArtifactCleaning()
+        artifactVM.detectionRefreshToken += 1
+        invalidateEpochsForSignalChange()
+        invalidateInterpolations()
+    }
+
+    /// Re-applies a saved processing script's replayable steps to the current
+    /// recording, in canonical chain order, driving the same apply-functions the
+    /// interactive UI uses. Awaits each stage so downstream stages start from the
+    /// settled output. Extend the switch as more stages gain a round-trip.
+    @MainActor
+    private func replay(_ script: EVAProcessingScript) async {
+        guard let rawSignal = recording.signal else { return }
+        for step in script.replayableSteps {
+            switch step.operation {
+            case .mriGradientCorrection:
+                gradient.apply(parameters: step.parameters)
+                await applyGradientCorrection(to: rawSignal)
+
+            case .filter:
+                filter.apply(parameters: step.parameters)
+                // Source per body's chain: filter builds on ICA/gradient if present.
+                let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+                let pnsInput = filter.filterPNS ? pnsFilterBaseSignal() : nil
+                await filter.apply(
+                    to: base,
+                    pnsInput: pnsInput,
+                    excludedChannels: channels.bad,
+                    onApplied: { [self] in postFilterInvalidation() }
+                )
+
+            case .thresholdArtifactDetection:
+                // Portable ocular threshold detection: set method + configs and
+                // let the artifactDetection task re-run (analysis, not a transform
+                // feeding later steps — no await needed).
+                artifactVM.detectionMethod = .threshold
+                detectsEyeBlinkArtifacts = step.parameters["eyeBlink"] == "true"
+                detectsEyeMovementArtifacts = step.parameters["eyeMovement"] == "true"
+                if let c = decodedThresholdConfig(step.parameters["blinkConfig"]) {
+                    artifactVM.blinkThresholdConfig = c
+                }
+                if let c = decodedThresholdConfig(step.parameters["movementConfig"]) {
+                    artifactVM.movementThresholdConfig = c
+                }
+
+            default:
+                continue // wavelet / other stages land in later slices
             }
-        )
+        }
     }
 
     private func clearBandpassFilter() {
@@ -8105,12 +8250,7 @@ struct WaveformView: View {
                 Spacer()
 
                 Button("Apply") {
-                    switch gradient.method {
-                    case .aas:
-                        removeGradientArtifact(from: signal)
-                    case .fastr, .moosmann, .farm:
-                        removeGradientArtifactFASTR(from: signal)
-                    }
+                    Task { await applyGradientCorrection(to: signal) }
                     gradient.showsPopover = false
                 }
                 .keyboardShortcut(.defaultAction)
@@ -8243,7 +8383,18 @@ struct WaveformView: View {
         )
     }
 
-    private func removeGradientArtifact(from signal: MFFSignalData?) {
+    /// Awaitable dispatcher shared by the interactive Apply button (wrapped in a
+    /// Task) and the replay coordinator (awaited) — one code path per method.
+    private func applyGradientCorrection(to signal: MFFSignalData?) async {
+        switch gradient.method {
+        case .aas:
+            await removeGradientArtifact(from: signal)
+        case .fastr, .moosmann, .farm:
+            await removeGradientArtifactFASTR(from: signal)
+        }
+    }
+
+    private func removeGradientArtifact(from signal: MFFSignalData?) async {
         guard let signal else { return }
 
         let trSamples = trimmedTRMarkers(in: signal, code: gradient.trMarkerCode)
@@ -8272,7 +8423,7 @@ struct WaveformView: View {
             gradient.progress = fraction
         }
 
-        Task {
+        await Task {
             do {
                 let hasPNS = pnsInput != nil
                 let result = try await Task.detached(priority: .userInitiated) {
@@ -8339,10 +8490,10 @@ struct WaveformView: View {
             }
 
             gradient.isProcessing = false
-        }
+        }.value
     }
 
-    private func removeGradientArtifactFASTR(from signal: MFFSignalData?) {
+    private func removeGradientArtifactFASTR(from signal: MFFSignalData?) async {
         guard let signal else { return }
 
         let trSamples = trimmedTRMarkers(in: signal, code: gradient.trMarkerCode)
@@ -8390,7 +8541,7 @@ struct WaveformView: View {
             gradient.progress = fraction
         }
 
-        Task {
+        await Task {
             do {
                 let hasPNS = pnsInput != nil
                 let result = try await Task.detached(priority: .userInitiated) {
@@ -8465,7 +8616,7 @@ struct WaveformView: View {
             }
 
             gradient.isProcessing = false
-        }
+        }.value
     }
 
     /// Tooltip for the Apply button explaining why it may be disabled.

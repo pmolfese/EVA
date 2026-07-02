@@ -232,6 +232,15 @@ extension FocusedValues {
         typealias Value = Binding<Int>
     }
 
+    var copyProcessingRequest: Binding<Int>? {
+        get { self[CopyProcessingRequestKey.self] }
+        set { self[CopyProcessingRequestKey.self] = newValue }
+    }
+
+    private struct CopyProcessingRequestKey: FocusedValueKey {
+        typealias Value = Binding<Int>
+    }
+
     var physioViewControls: PhysioViewControls? {
         get { self[PhysioViewControlsKey.self] }
         set { self[PhysioViewControlsKey.self] = newValue }
@@ -308,12 +317,18 @@ struct ChannelHealthViewControls {
 /// File-menu export commands for the focused waveform window.
 struct FileExportCommands: View {
     @FocusedValue(\.mffExportRequest) private var mffExportRequest
+    @FocusedValue(\.copyProcessingRequest) private var copyProcessingRequest
 
     var body: some View {
         Button("Export to MFF...") {
             mffExportRequest?.wrappedValue += 1
         }
         .disabled(mffExportRequest == nil)
+
+        Button("Copy Processing From...") {
+            copyProcessingRequest?.wrappedValue += 1
+        }
+        .disabled(copyProcessingRequest == nil)
     }
 }
 
