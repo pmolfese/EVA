@@ -53,6 +53,7 @@ nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable 
         case baseline
         case average
         case combine
+        case split
     }
 
     var id: UUID = UUID()

@@ -600,7 +600,8 @@ nonisolated enum ChannelHealthAnalyzer {
         var segment = 16
         while segment * 2 <= target { segment *= 2 }
         guard count >= segment,
-              let dft = vDSP.DFT(
+              let dft = try? vDSP.DiscreteFourierTransform(
+                previous: nil,
                 count: segment,
                 direction: .forward,
                 transformType: .complexComplex,
@@ -628,17 +629,10 @@ nonisolated enum ChannelHealthAnalyzer {
             realInput = vDSP.add(-mean, realInput)
             realInput = vDSP.multiply(realInput, window)
 
-            var realOutput = [Float](repeating: 0, count: segment)
-            var imaginaryOutput = [Float](repeating: 0, count: segment)
-            dft.transform(
-                inputReal: realInput,
-                inputImaginary: imaginaryInput,
-                outputReal: &realOutput,
-                outputImaginary: &imaginaryOutput
-            )
+            let output = dft.transform(real: realInput, imaginary: imaginaryInput)
             for bin in 0..<half {
-                let re = Double(realOutput[bin])
-                let im = Double(imaginaryOutput[bin])
+                let re = Double(output.real[bin])
+                let im = Double(output.imaginary[bin])
                 averagePower[bin] += re * re + im * im
             }
             segmentCount += 1

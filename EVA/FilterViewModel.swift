@@ -28,6 +28,14 @@ import SwiftUI
 
 @MainActor
 final class FilterViewModel: ObservableObject {
+    init() {
+        let d = ProcessingDefaults.shared
+        lowCutoff = d.filterHighPassHz
+        highCutoff = d.filterLowPassHz
+        notch60HzEnabled = d.filterNotch60
+        averageReference = d.filterAverageReference
+    }
+
     // MARK: Parameters (portable → eva.xml / replay)
     @Published var lowCutoff = 0.1
     @Published var highCutoff = 30.0

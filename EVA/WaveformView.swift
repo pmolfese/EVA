@@ -55,6 +55,7 @@ struct WaveformView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(ChannelGoodnessSettings.self) private var goodnessSettings
+    @Environment(ProcessingDefaults.self) private var processingDefaults
     @Query private var markers: [UserMarker]
 
     @State private var amplitudeScale: Double = 100
@@ -73,6 +74,7 @@ struct WaveformView: View {
     @State private var selectedSampleRange: ClosedRange<Int>?
     @State private var dragSelectionStartSample: Int?
     @State private var dragSelectionEndSample: Int?
+    @State private var waveformContextSample: Int?
     /// Timestamp of the last stationary click, used to detect a double-click
     /// manually inside the single waveform interaction gesture.
     @State private var lastWaveformClick: (time: Date, x: CGFloat)?
@@ -84,30 +86,8 @@ struct WaveformView: View {
     @State private var detectsECGArtifacts = false
     @State private var showsECGDetectionSheet = false
     // BCG detection
-    @State private var detectsBCGArtifacts = false
-    @State private var showsBCGDetectionSheet = false
-    @State private var bcgDetectionMethod = BCGDetectionMethod.periodicity
-    @State private var bcgEventCode = "BCG"
-    @State private var bcgWindowSeconds = 0.700
-    @State private var bcgThresholdSD = 2.5
-    @State private var bcgMinHR: Double = 40
-    @State private var bcgMaxHR: Double = 120
-    @State private var bcgPowerMinHz = 0.8
-    @State private var bcgPowerMaxHz = 1.5
-    @State private var bcgQRSLagMs = 300.0
-    @State private var bcgPCAComponents = 1
-    @State private var bcgSpatialWhiten = false
-    @State private var bcgSlidingNormalize = true
-    @State private var bcgRespAdaptive = true
-    @State private var isRunningBCGDetection = false
-    @State private var bcgDetectionStatus: String? = nil
-    @State private var bcgRefinedTemplate: [Float]? = nil
-    @State private var bcgRefinedKeptCount: Int? = nil
-    @State private var bcgIsRefining = false
-    @State private var bcgRejectFraction = 0.20
-    /// Optional channel set restricting which channels feed the GFP-based BCG
-    /// methods (periodicity, spatial PCA, cardiac power map). `nil` = all channels.
-    @State private var bcgChannelSetID: ChannelSet.ID? = nil
+    // BCG detection domain, extracted into an L4 store (REFACTOR.md).
+    @StateObject private var bcg = BCGDetectionViewModel()
     /// Stable UUID so re-running detection updates the existing DefinedArtifact rather than appending a new one.
     private let bcgDefinedArtifactID = UUID()
     @State private var ecgDetectionSelectedPNSChannels = Set<Int>()
@@ -122,48 +102,9 @@ struct WaveformView: View {
     // Artifact detection + cleaning domain, extracted into an L4 store. See
     // REFACTOR.md slice 5.
     @StateObject private var artifactVM = ArtifactViewModel()
-    @State private var showsArtifactTemplateSheet = false
-    @State private var artifactTemplateSelectionRange: ClosedRange<Int>?
-    @State private var artifactTemplateClickedChannel: Int?
-    @State private var artifactTemplateType = DefinedArtifactType.ocular
-    @State private var artifactTemplateDefinedArtifactID: DefinedArtifact.ID?
-    @State private var artifactTemplateName = "Eye Blink"
-    @State private var artifactTemplateEventCode = "Eye Blink"
-    @State private var artifactTemplateChannelScope = ArtifactTemplateChannelScope.clickedChannel
-    @State private var artifactTemplateCustomChannels = ""
-    @State private var artifactTemplateThreshold = 0.70
-    @State private var artifactTemplateWindowSeconds = 0.40
-    @State private var artifactTemplateDownsampleRate = 250.0
-    @State private var artifactTemplateMergeWindowSeconds = 0.25
-    @State private var artifactTemplatePolarity = ArtifactTemplatePolarity.same
-    @State private var artifactDefinitionPanel = ArtifactDefinitionPanel.waveforms
-    @State private var artifactTemplateConfirmedSource: ArtifactDefinitionResultSource?
-    @State private var artifactTemplateTopographyMode = ArtifactTopographyMode.off
-    @State private var artifactTrajectoryShiftSeconds = 0.05
-    @State private var artifactTrajectoryScaleRange   = 0.10
-    @State private var artifactTrajectoryGFPWeighted  = true
-    @State private var artifactTrajectorySelectedFrame: ArtifactTrajectoryFrame? = nil
-    @State private var artifactTopographyChannelScope = ArtifactTopographyChannelScope.allGood
-    @State private var artifactTopographyChannelSetID: ChannelSet.ID? = nil
-    @State private var artifactTopographyTopN: Int = 16
-    @State private var artifactTopographyMetric = ArtifactTopographyMetric.pearson
-    @State private var isRefreshingTopography = false
-    /// Monotonic token so out-of-order live topography refreshes can be ignored
-    /// (only the most recently started refresh is allowed to apply its result).
-    @State private var topographyRefreshGeneration = 0
-    /// Snapshot of the scan-affecting controls at the moment the last full scan
-    /// ran, used to know when the displayed result is stale (→ "Rescan").
-    @State private var lastArtifactScanSignature: ArtifactScanSignature?
-    @State private var isApplyingArtifactTemplate = false
-    @State private var artifactScanCompleted: Int = 0
-    @State private var artifactScanTotal: Int = 0
-    @State private var artifactTemplateResult: ArtifactTemplateDetectionResult?
-    @State private var selectedArtifactTemplateChannel: Int?
-    @State private var artifactTemplateStatusMessage: String?
-    @State private var definedArtifacts: [DefinedArtifact] = []
-    @State private var artifactDeletionRequest: DefinedArtifact.ID?
-    @State private var deleteAllArtifactsRequest = 0
-    @State private var obsVarianceReportCache = [String: OBSPCAVarianceReport]()
+    // "Define Artifact" template-detection domain, extracted into an L4 store
+    // (REFACTOR.md — analysis-domain slice).
+    @StateObject private var template = ArtifactTemplateViewModel()
     @State private var showsWaveletArtifactExplorer = false
     @State private var isRunningWaveletArtifactExplorer = false
     @State private var waveletExplorerProgress = 0.0
@@ -231,25 +172,13 @@ struct WaveformView: View {
     @State private var channels = ChannelModel()
     @State private var electrodeGeometry: ElectrodeGeometry?
     @State private var channelStatusMessage: String?
-    @State private var channelHealthStatusMessage: String?
-    @State private var channelHealthSignature: String?
-    @State private var channelHealthTask: Task<Void, Never>?
     @State private var channelLabelMetricsExportRequest = 0
-    @State private var showsChannelHealthDetails = false
-    @State private var channelHealthDetailsRequest = 0
+    // Channel-health coordination, extracted into an L4 store (REFACTOR.md).
+    @StateObject private var chanHealth = ChannelHealthViewModel()
     @State private var showsChannelGoodnessSettings = false
     @State private var channelGoodnessSettingsRequest = 0
-    @State private var showsSegmentHealth = false
-    @State private var showsSegmentHealthMouseOver = false
-    @State private var showsSegmentHealthDetails = false
-    @State private var segmentHealthAnalysis: SegmentHealthAnalysis?
-    @State private var isAnalyzingSegmentHealth = false
-    @State private var segmentHealthProgress: Double = 0
-    @State private var segmentHealthStatusMessage: String?
-    @State private var segmentHealthSignature: String?
-    @State private var segmentHealthTask: Task<Void, Never>?
-    @State private var segmentHealthDetailsRequest = 0
-    @State private var segmentHealthRefreshRequest = 0
+    // Segment-health domain, extracted into an L4 store (REFACTOR.md).
+    @StateObject private var segHealth = SegmentHealthViewModel()
     @State private var resetToOriginalRequest = 0
     @State private var mffExportRequest = 0
     @State private var isExportingMFF = false
@@ -270,9 +199,9 @@ struct WaveformView: View {
 
     private var artifactMenuControls: ArtifactMenuControls {
         ArtifactMenuControls(
-            artifacts: definedArtifacts,
-            deleteRequest: $artifactDeletionRequest,
-            deleteAllRequest: $deleteAllArtifactsRequest
+            artifacts: template.definedArtifacts,
+            deleteRequest: $template.deletionRequest,
+            deleteAllRequest: $template.deleteAllRequest
         )
     }
 
@@ -286,12 +215,12 @@ struct WaveformView: View {
 
     private var segmentHealthControls: SegmentHealthViewControls {
         SegmentHealthViewControls(
-            showsHealth: $showsSegmentHealth,
-            showsMouseOverHealth: $showsSegmentHealthMouseOver,
-            detailsRequest: $segmentHealthDetailsRequest,
-            refreshRequest: $segmentHealthRefreshRequest,
-            isAnalyzing: isAnalyzingSegmentHealth,
-            progress: segmentHealthProgress
+            showsHealth: $segHealth.shows,
+            showsMouseOverHealth: $segHealth.showsMouseOver,
+            detailsRequest: $segHealth.detailsRequest,
+            refreshRequest: $segHealth.refreshRequest,
+            isAnalyzing: segHealth.isAnalyzing,
+            progress: segHealth.progress
         )
     }
 
@@ -311,7 +240,7 @@ struct WaveformView: View {
                 get: { channels.showsHealth },
                 set: { channels.showsHealth = $0 }
             ),
-            detailsRequest: $channelHealthDetailsRequest,
+            detailsRequest: $chanHealth.detailsRequest,
             refreshRequest: Binding(
                 get: { channels.healthRefreshToken },
                 set: { channels.healthRefreshToken = $0 }
@@ -398,23 +327,23 @@ struct WaveformView: View {
         .onChange(of: channelLabelMetricsExportRequest) { _, _ in
             saveChannelLabelMetricsJSON()
         }
-        .onChange(of: segmentHealthDetailsRequest) { _, _ in
-            showsSegmentHealth = true
-            showsSegmentHealthDetails = true
+        .onChange(of: segHealth.detailsRequest) { _, _ in
+            segHealth.shows = true
+            segHealth.showsDetails = true
         }
-        .onChange(of: channelHealthDetailsRequest) { _, _ in
+        .onChange(of: chanHealth.detailsRequest) { _, _ in
             channels.showsHealth = true
-            showsChannelHealthDetails = true
+            chanHealth.showsDetails = true
         }
         .onChange(of: channelGoodnessSettingsRequest) { _, _ in
             showsChannelGoodnessSettings = true
         }
-        .onChange(of: artifactDeletionRequest) { _, artifactID in
+        .onChange(of: template.deletionRequest) { _, artifactID in
             guard let artifactID else { return }
             deleteDefinedArtifact(id: artifactID)
-            artifactDeletionRequest = nil
+            template.deletionRequest = nil
         }
-        .onChange(of: deleteAllArtifactsRequest) { _, _ in
+        .onChange(of: template.deleteAllRequest) { _, _ in
             deleteAllDefinedArtifacts()
         }
         .onChange(of: epoching.baselineCorrected) { _, _ in
@@ -444,10 +373,10 @@ struct WaveformView: View {
         }
         .onDisappear {
             removeCommandKeyMonitor()
-            channelHealthTask?.cancel()
-            channelHealthTask = nil
-            segmentHealthTask?.cancel()
-            segmentHealthTask = nil
+            chanHealth.task?.cancel()
+            chanHealth.task = nil
+            segHealth.task?.cancel()
+            segHealth.task = nil
         }
     }
 
@@ -517,7 +446,7 @@ struct WaveformView: View {
         var events = userMarkerEvents
         var seen = Set(events)
 
-        for event in definedArtifacts.flatMap(\.events) where seen.insert(event).inserted {
+        for event in template.definedArtifacts.flatMap(\.events) where seen.insert(event).inserted {
             events.append(event)
         }
         for event in artifactVM.events where seen.insert(event).inserted {
@@ -636,7 +565,7 @@ struct WaveformView: View {
         .sheet(isPresented: $epoching.showsSheet) {
             psaSheet(for: continuousSignal)
         }
-        .sheet(isPresented: $showsArtifactTemplateSheet) {
+        .sheet(isPresented: $template.showsSheet) {
             artifactTemplateSheet(for: continuousSignal)
         }
         .sheet(isPresented: $artifactVM.showsCleaningSheet) {
@@ -645,8 +574,9 @@ struct WaveformView: View {
         .sheet(isPresented: $showsECGDetectionSheet) {
             ecgDetectionSheet(for: continuousSignal)
         }
-        .sheet(isPresented: $showsBCGDetectionSheet) {
+        .sheet(isPresented: $bcg.showsSheet) {
             bcgDetectionSheet(for: continuousSignal, selection: activeSelectionRange(in: continuousSignal))
+                .onAppear { autoSelectBCGProxySetIfEnabled(for: continuousSignal) }
         }
         .sheet(isPresented: $showsWaveletArtifactExplorer) {
             waveletArtifactExplorerSheet(for: continuousSignal)
@@ -657,14 +587,14 @@ struct WaveformView: View {
         .sheet(isPresented: $ica.showsSheet) {
             icaSheet(for: base)
         }
-        .sheet(isPresented: $showsChannelHealthDetails) {
+        .sheet(isPresented: $chanHealth.showsDetails) {
             channelHealthDetailsSheet(for: continuousSignal)
         }
         .sheet(isPresented: $showsChannelGoodnessSettings) {
             ChannelGoodnessSettingsView()
                 .environment(goodnessSettings)
         }
-        .sheet(isPresented: $showsSegmentHealthDetails) {
+        .sheet(isPresented: $segHealth.showsDetails) {
             segmentHealthDetailsSheet()
         }
         .sheet(isPresented: $gradient.showsMotionConfig) {
@@ -773,7 +703,7 @@ struct WaveformView: View {
                 Button("Clean Artifacts…") {
                     artifactVM.showsCleaningSheet = true
                 }
-                .disabled(definedArtifacts.isEmpty)
+                .disabled(template.definedArtifacts.isEmpty)
 
                 Divider()
 
@@ -827,10 +757,10 @@ struct WaveformView: View {
                         artifactVM.detectionRefreshToken += 1
                     }
                 }
-                Button(detectsBCGArtifacts ? "Configure BCG Detection…" : "BCG Detection…") {
-                    showsBCGDetectionSheet = true
+                Button(bcg.detectsArtifacts ? "Configure BCG Detection…" : "BCG Detection…") {
+                    bcg.showsSheet = true
                 }
-                if detectsBCGArtifacts {
+                if bcg.detectsArtifacts {
                     Button("Turn Off BCG Detection") {
                         disableBCGDetection()
                     }
@@ -981,11 +911,11 @@ struct WaveformView: View {
         if let channelStatusMessage {
             lines.append(LogLine(source: "Channel", text: channelStatusMessage, isError: channelStatusIsError))
         }
-        if let channelHealthStatusMessage {
-            lines.append(LogLine(source: "Channel Health", text: channelHealthStatusMessage, isError: false))
+        if let chanStatus = chanHealth.statusMessage {
+            lines.append(LogLine(source: "Channel Health", text: chanStatus, isError: false))
         }
-        if let segmentHealthStatusMessage {
-            lines.append(LogLine(source: "Segment Health", text: segmentHealthStatusMessage, isError: false))
+        if let segStatus = segHealth.statusMessage {
+            lines.append(LogLine(source: "Segment Health", text: segStatus, isError: false))
         }
         if let cleaningStatus = artifactVM.cleaningStatusMessage {
             lines.append(LogLine(source: "Artifact", text: cleaningStatus, isError: false))
@@ -1044,8 +974,8 @@ struct WaveformView: View {
                 if channels.isAnalyzingHealth {
                     logProgressRow(label: "Health", value: channels.healthProgress)
                 }
-                if isAnalyzingSegmentHealth {
-                    logProgressRow(label: "Segments", value: segmentHealthProgress)
+                if segHealth.isAnalyzing {
+                    logProgressRow(label: "Segments", value: segHealth.progress)
                 }
                 if isExportingMFF {
                     logProgressRow(label: "MFF", value: 0.5)
@@ -1060,7 +990,7 @@ struct WaveformView: View {
                    !isRunningWaveletArtifactExplorer,
                    !wavelet.isRunning,
                    !channels.isAnalyzingHealth,
-                   !isAnalyzingSegmentHealth,
+                   !segHealth.isAnalyzing,
                    activeLogMessages.isEmpty {
                     Text(statusHistory.isEmpty ? "Ready" : "Ready · click for history")
                         .font(.caption)
@@ -1236,6 +1166,11 @@ struct WaveformView: View {
                         .overlay(alignment: .topLeading) { epochBoundaryOverlay() }
                         .overlay(alignment: .topLeading) { selectionOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { cursorOverlay() }
+                        .background(
+                            WaveformRightClickMonitor { point in
+                                waveformContextSample = sampleIndex(forContentX: point.x, in: signal)
+                            }
+                        )
                         .contentShape(Rectangle())
                         .background(
                             GeometryReader { proxy in
@@ -1798,9 +1733,47 @@ struct WaveformView: View {
                 openArtifactTemplateSheet(for: signal, clickedChannel: index)
             }
             .disabled(activeSelectionRange(in: signal) == nil)
+
+            Divider()
+            waveformSplitContextMenu(for: signal)
         }
         .accessibilityLabel("Channel \(index + 1)")
         .zIndex(1)
+    }
+
+    @ViewBuilder
+    private func waveformSplitContextMenu(for signal: MFFSignalData) -> some View {
+        if let sample = splitSampleForContextMenu(in: signal) {
+            Menu("Split File") {
+                Button("Save Left Segment…") {
+                    splitCurrentFile(.left, atSample: sample)
+                }
+                .disabled(isExportingMFF)
+
+                Button("Save Right Segment…") {
+                    splitCurrentFile(.right, atSample: sample)
+                }
+                .disabled(isExportingMFF)
+
+                Button("Save Both Segments…") {
+                    splitCurrentFile(.both, atSample: sample)
+                }
+                .disabled(isExportingMFF)
+            }
+        } else {
+            Menu("Split File") {
+                Button("No Split Point") {}
+                    .disabled(true)
+            }
+            .disabled(true)
+        }
+    }
+
+    private func splitSampleForContextMenu(in signal: MFFSignalData) -> Int? {
+        guard let sampleCount = signal.data.first?.count, sampleCount > 1 else { return nil }
+        let fallbackX = horizontalOffset + max(horizontalViewportWidth / 2, 0)
+        let fallback = sampleIndex(forContentX: fallbackX, in: signal)
+        return min(max(waveformContextSample ?? fallback, 1), sampleCount - 1)
     }
 
     /// Vertical cursor at the topomap sample, drawn once across the channel
@@ -1848,8 +1821,8 @@ struct WaveformView: View {
 
     @ViewBuilder
     private func segmentHealthOverlay(for signal: MFFSignalData) -> some View {
-        if showsSegmentHealth,
-           let results = segmentHealthAnalysis?.results,
+        if segHealth.shows,
+           let results = segHealth.analysis?.results,
            let sampleCount = signal.data.first?.count,
            sampleCount > 0 {
             ZStack(alignment: .topLeading) {
@@ -1860,7 +1833,7 @@ struct WaveformView: View {
                     let endX = contentX(forSample: end)
                     SegmentHealthBand(
                         result: result,
-                        showsMouseOverHealth: showsSegmentHealthMouseOver
+                        showsMouseOverHealth: segHealth.showsMouseOver
                     )
                         .frame(width: max(endX - startX, 2))
                         .frame(maxHeight: .infinity)
@@ -3487,7 +3460,7 @@ struct WaveformView: View {
     }
 
     private func nextArtifactTemplateDefaultName(baseName: String = "Eye Blink") -> String {
-        let existingNames = Set(definedArtifacts.flatMap { artifact in
+        let existingNames = Set(template.definedArtifacts.flatMap { artifact in
             [artifact.name, artifact.eventCode]
         }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
 
@@ -3500,38 +3473,38 @@ struct WaveformView: View {
 
     private func openArtifactTemplateSheet(for signal: MFFSignalData, clickedChannel: Int) {
         guard let range = activeSelectionRange(in: signal), signal.samplingRate > 0 else {
-            artifactTemplateStatusMessage = "Highlight a waveform region before defining an artifact."
+            template.statusMessage = "Highlight a waveform region before defining an artifact."
             return
         }
 
         let defaultName = nextArtifactTemplateDefaultName()
-        artifactTemplateSelectionRange = range
-        artifactTemplateClickedChannel = clickedChannel
-        artifactTemplateDefinedArtifactID = nil
-        artifactTemplateName = defaultName
-        artifactTemplateEventCode = defaultName
-        artifactTemplateType = inferredArtifactType(name: defaultName, eventCode: defaultName)
-        artifactTemplateChannelScope = .clickedChannel
-        artifactTemplateCustomChannels = "\(clickedChannel + 1)"
-        artifactTemplateWindowSeconds = max(Double(range.upperBound - range.lowerBound + 1) / signal.samplingRate, 0.02)
-        artifactTemplateDownsampleRate = min(250, signal.samplingRate)
-        artifactTemplateThreshold = 0.70
-        artifactTemplateMergeWindowSeconds = 0.25
-        artifactTemplatePolarity = .same
-        artifactTemplateTopographyMode = .off
-        artifactTopographyChannelScope = .allGood
-        artifactTopographyTopN = 16
-        artifactTopographyMetric = .pearson
-        artifactTrajectoryGFPWeighted = true
-        artifactTrajectorySelectedFrame = nil
-        artifactDefinitionPanel = .waveforms
-        artifactTemplateConfirmedSource = nil
-        artifactTemplateStatusMessage = nil
-        artifactTemplateResult = nil
-        lastArtifactScanSignature = nil
-        selectedArtifactTemplateChannel = nil
+        template.selectionRange = range
+        template.clickedChannel = clickedChannel
+        template.definedArtifactID = nil
+        template.name = defaultName
+        template.eventCode = defaultName
+        template.type = inferredArtifactType(name: defaultName, eventCode: defaultName)
+        template.channelScope = .clickedChannel
+        template.customChannels = "\(clickedChannel + 1)"
+        template.windowSeconds = max(Double(range.upperBound - range.lowerBound + 1) / signal.samplingRate, 0.02)
+        template.downsampleRate = min(250, signal.samplingRate)
+        template.threshold = 0.70
+        template.mergeWindowSeconds = 0.25
+        template.polarity = .same
+        template.topographyMode = .off
+        template.topographyChannelScope = .allGood
+        template.topographyTopN = 16
+        template.topographyMetric = .pearson
+        template.trajectoryGFPWeighted = true
+        template.trajectorySelectedFrame = nil
+        template.definitionPanel = .waveforms
+        template.confirmedSource = nil
+        template.statusMessage = nil
+        template.result = nil
+        template.lastScanSignature = nil
+        template.selectedChannel = nil
         artifactVM.detectionMethod = .template
-        showsArtifactTemplateSheet = true
+        template.showsSheet = true
     }
 
     private func artifactTemplateSheet(for signal: MFFSignalData) -> some View {
@@ -3543,7 +3516,7 @@ struct WaveformView: View {
                 Text("Define Artifact")
                     .font(.title3.weight(.semibold))
                 Spacer()
-                if let range = artifactTemplateSelectionRange {
+                if let range = template.selectionRange {
                     Text(selectionDescription(range, in: signal))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -3552,7 +3525,7 @@ struct WaveformView: View {
 
             artifactIdentitySection
 
-            Picker("Artifact definition section", selection: $artifactDefinitionPanel) {
+            Picker("Artifact definition section", selection: $template.definitionPanel) {
                 ForEach(ArtifactDefinitionPanel.allCases) { panel in
                     Text(panel.rawValue).tag(panel)
                 }
@@ -3566,14 +3539,14 @@ struct WaveformView: View {
 
             HStack {
                 Button("Save JSON…") {
-                    saveArtifactTemplateJSON(artifactTemplateResult?.savedTemplate)
+                    saveArtifactTemplateJSON(template.result?.savedTemplate)
                 }
-                .disabled(artifactTemplateResult == nil)
+                .disabled(template.result == nil)
 
                 Spacer()
 
                 Button(artifactDefinitionCloseTitle) {
-                    showsArtifactTemplateSheet = false
+                    template.showsSheet = false
                 }
                 .keyboardShortcut(.cancelAction)
 
@@ -3582,39 +3555,39 @@ struct WaveformView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(
-                    isApplyingArtifactTemplate
-                        || artifactTemplateSelectionRange == nil
+                    template.isApplying
+                        || template.selectionRange == nil
                         || selectedChannels.isEmpty
                         || comparisonChannels.isEmpty
-                        || artifactTemplateName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || template.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || template.eventCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || !activeArtifactDefinitionPanelCanRun
                 )
             }
         }
         .padding(20)
         .frame(width: 760)
-        .onChange(of: artifactDefinitionPanel) { _, panel in
-            if panel == .topography, !artifactTemplateTopographyMode.isEnabled {
-                artifactTemplateTopographyMode = .peak
+        .onChange(of: template.definitionPanel) { _, panel in
+            if panel == .topography, !template.topographyMode.isEnabled {
+                template.topographyMode = .peak
             }
         }
-        .onChange(of: artifactTemplateTopographyMode) { _, _ in
+        .onChange(of: template.topographyMode) { _, _ in
             refreshTopographyIfNeeded(for: signal)
         }
-        .onChange(of: artifactTopographyChannelScope) { _, _ in
+        .onChange(of: template.topographyChannelScope) { _, _ in
             refreshTopographyIfNeeded(for: signal)
         }
-        .onChange(of: artifactTopographyChannelSetID) { _, _ in
-            if artifactTopographyChannelScope == .channelSet {
+        .onChange(of: template.topographyChannelSetID) { _, _ in
+            if template.topographyChannelScope == .channelSet {
                 refreshTopographyIfNeeded(for: signal)
             }
         }
-        .onChange(of: artifactTopographyTopN) { _, _ in
-            guard artifactTopographyChannelScope == .topN else { return }
+        .onChange(of: template.topographyTopN) { _, _ in
+            guard template.topographyChannelScope == .topN else { return }
             refreshTopographyIfNeeded(for: signal)
         }
-        .onChange(of: artifactTopographyMetric) { _, _ in
+        .onChange(of: template.topographyMetric) { _, _ in
             refreshTopographyIfNeeded(for: signal)
         }
     }
@@ -3626,7 +3599,7 @@ struct WaveformView: View {
                     title: "Type",
                     help: "Used by Clean Artifacts to group ocular, ECG, BCG, and other artifact definitions."
                 )
-                Picker("Type", selection: $artifactTemplateType) {
+                Picker("Type", selection: $template.type) {
                     ForEach(DefinedArtifactType.allCases) { type in
                         Text(type.rawValue).tag(type)
                     }
@@ -3638,7 +3611,7 @@ struct WaveformView: View {
                     title: "Event Code",
                     help: "The event marker name inserted for each match. These generated markers appear in the Events panel and can be used by PSA artifact rejection."
                 )
-                TextField("Event code", text: $artifactTemplateEventCode)
+                TextField("Event code", text: $template.eventCode)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
             }
@@ -3648,7 +3621,7 @@ struct WaveformView: View {
                     title: "Name",
                     help: "A human-readable label for this artifact template. This is saved in the JSON so you can recognize the exemplar later."
                 )
-                TextField("Artifact name", text: $artifactTemplateName)
+                TextField("Artifact name", text: $template.name)
                     .textFieldStyle(.roundedBorder)
                     .gridCellColumns(3)
             }
@@ -3676,7 +3649,7 @@ struct WaveformView: View {
                     title: "Channels",
                     help: "Chooses which channels define the template score. Clicked Channel is fastest and easiest to interpret; Ocular Channels is useful for blinks; All Channels uses a weighted spatial template."
                 )
-                Picker("Channels", selection: $artifactTemplateChannelScope) {
+                Picker("Channels", selection: $template.channelScope) {
                     ForEach(ArtifactTemplateChannelScope.allCases) { scope in
                         Text(scope.rawValue).tag(scope)
                     }
@@ -3688,10 +3661,10 @@ struct WaveformView: View {
                     title: "Specific",
                     help: "A comma- or space-separated list of 1-based channel numbers, such as 8, 25, 126. Used only when Channels is set to Specific Channels."
                 )
-                TextField("1, 8, 25", text: $artifactTemplateCustomChannels)
+                TextField("1, 8, 25", text: $template.customChannels)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
-                    .disabled(artifactTemplateChannelScope != .specificChannels)
+                    .disabled(template.channelScope != .specificChannels)
             }
         }
     }
@@ -3704,8 +3677,8 @@ struct WaveformView: View {
                     help: "Minimum normalized cross-correlation required to count a match. 70% is a permissive starting point; higher values find fewer, more template-like events."
                 )
                 HStack {
-                    Slider(value: $artifactTemplateThreshold, in: 0.30...0.98, step: 0.01)
-                    Text("\(Int((artifactTemplateThreshold * 100).rounded()))%")
+                    Slider(value: $template.threshold, in: 0.30...0.98, step: 0.01)
+                    Text("\(Int((template.threshold * 100).rounded()))%")
                         .font(.caption.monospacedDigit())
                         .frame(width: 40, alignment: .trailing)
                 }
@@ -3715,7 +3688,7 @@ struct WaveformView: View {
                     title: "Polarity",
                     help: "Controls whether matches must have the same direction as the exemplar, the opposite direction, or either direction. Either is useful when channel reference or artifact direction varies."
                 )
-                Picker("Polarity", selection: $artifactTemplatePolarity) {
+                Picker("Polarity", selection: $template.polarity) {
                     ForEach(ArtifactTemplatePolarity.allCases) { polarity in
                         Text(polarity.rawValue).tag(polarity)
                     }
@@ -3733,7 +3706,7 @@ struct WaveformView: View {
                     title: "Window (s)",
                     help: "Duration of the template window centered on the highlighted exemplar. Larger windows capture more context but can make matching more specific."
                 )
-                TextField("Window", value: $artifactTemplateWindowSeconds, format: .number.precision(.fractionLength(3)))
+                TextField("Window", value: $template.windowSeconds, format: .number.precision(.fractionLength(3)))
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 100)
 
@@ -3742,12 +3715,12 @@ struct WaveformView: View {
                     help: "Temporary downsample rate used while searching. Lower values are faster; 250 Hz is usually enough for slow artifacts like blinks."
                 )
                 HStack(spacing: 10) {
-                    TextField("Hz", value: $artifactTemplateDownsampleRate, format: .number.precision(.fractionLength(0)))
+                    TextField("Hz", value: $template.downsampleRate, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
                     Text("Merge")
                         .font(.caption.weight(.semibold))
-                    TextField("Merge", value: $artifactTemplateMergeWindowSeconds, format: .number.precision(.fractionLength(3)))
+                    TextField("Merge", value: $template.mergeWindowSeconds, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
                 }
@@ -3763,7 +3736,7 @@ struct WaveformView: View {
                         title: "Reference",
                         help: "Scans for the exemplar's scalp voltage map (spatial pattern across electrodes). Window Middle uses the centre sample, Window Peak the highest global field power sample, and Window Average the mean map over the window."
                     )
-                    Picker("Reference", selection: $artifactTemplateTopographyMode) {
+                    Picker("Reference", selection: $template.topographyMode) {
                         ForEach(ArtifactTopographyMode.allCases) { mode in
                             Text(mode.rawValue).tag(mode)
                         }
@@ -3775,7 +3748,7 @@ struct WaveformView: View {
                         title: "Fit Metric",
                         help: "Cost function for scalp-map similarity, independent of the waveform polarity. Pearson r matches same-polarity maps; |Pearson r| also matches polarity-inverted maps; Opposite (-r) matches only the inverted map."
                     )
-                    Picker("Fit Metric", selection: $artifactTopographyMetric) {
+                    Picker("Fit Metric", selection: $template.topographyMetric) {
                         ForEach(ArtifactTopographyMetric.allCases) { metric in
                             Text(metric.rawValue).tag(metric)
                         }
@@ -3790,7 +3763,7 @@ struct WaveformView: View {
                         help: "Which channels the scalp-topography correlation uses. Bad channels are always excluded. Channel clusters (regions of interest) are coming soon."
                     )
                     HStack(spacing: 8) {
-                        Picker("Topo Channels", selection: $artifactTopographyChannelScope) {
+                        Picker("Topo Channels", selection: $template.topographyChannelScope) {
                             ForEach(ArtifactTopographyChannelScope.allCases) { scope in
                                 Text(scope.label).tag(scope)
                             }
@@ -3798,19 +3771,19 @@ struct WaveformView: View {
                         .labelsHidden()
                         .frame(width: 170)
 
-                        if artifactTopographyChannelScope == .topN {
-                            Stepper(value: $artifactTopographyTopN, in: 3...128) {
-                                Text("N = \(artifactTopographyTopN)")
+                        if template.topographyChannelScope == .topN {
+                            Stepper(value: $template.topographyTopN, in: 3...128) {
+                                Text("N = \(template.topographyTopN)")
                                     .font(.caption.monospacedDigit())
                             }
                             .help("Number of channels selected by highest RMS amplitude in the exemplar window. Fewer channels focus the spatial correlation on those that express the artifact most strongly.")
                         }
                     }
 
-                    if artifactTopographyChannelScope == .channelSet {
+                    if template.topographyChannelScope == .channelSet {
                         ChannelSetPickerView(
                             label: "Channel Set",
-                            selectedSetID: $artifactTopographyChannelSetID,
+                            selectedSetID: $template.topographyChannelSetID,
                             channelCount: signal.numberOfChannels
                         )
                     }
@@ -3820,21 +3793,21 @@ struct WaveformView: View {
                         help: "Minimum spatial correlation required to count a scalp-map match."
                     )
                     HStack {
-                        Slider(value: $artifactTemplateThreshold, in: 0.30...0.98, step: 0.01)
-                        Text("\(Int((artifactTemplateThreshold * 100).rounded()))%")
+                        Slider(value: $template.threshold, in: 0.30...0.98, step: 0.01)
+                        Text("\(Int((template.threshold * 100).rounded()))%")
                             .font(.caption.monospacedDigit())
                             .frame(width: 40, alignment: .trailing)
                     }
                     .frame(width: 180)
                 }
 
-                if artifactTemplateTopographyMode == .trajectory {
+                if template.topographyMode == .trajectory {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "Shift (s)",
                             help: "Maximum time shift (±seconds) applied to the reference trajectory when searching for the best-fitting alignment. Handles beat-to-beat onset jitter. Set to 0 to disable."
                         )
-                        TextField("Shift", value: $artifactTrajectoryShiftSeconds, format: .number.precision(.fractionLength(3)))
+                        TextField("Shift", value: $template.trajectoryShiftSeconds, format: .number.precision(.fractionLength(3)))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 80)
 
@@ -3843,10 +3816,10 @@ struct WaveformView: View {
                             help: "Fractional time-scale tolerance (0–1). E.g. 0.10 allows the trajectory to be stretched or compressed by ±10%, accommodating heart-rate variation. Set to 0 to disable."
                         )
                         HStack(spacing: 8) {
-                            TextField("Scale", value: $artifactTrajectoryScaleRange, format: .number.precision(.fractionLength(2)))
+                            TextField("Scale", value: $template.trajectoryScaleRange, format: .number.precision(.fractionLength(2)))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 80)
-                            if let ref = artifactTemplateResult?.topographyReference,
+                            if let ref = template.result?.topographyReference,
                                let frames = ref.trajectoryFrameCount {
                                 Text("\(frames)-frame trajectory")
                                     .font(.caption)
@@ -3860,7 +3833,7 @@ struct WaveformView: View {
                             title: "GFP Weighting",
                             help: "When on, each frame's spatial-correlation score is weighted by the reference frame's Global Field Power (amplitude). Peak-amplitude frames drive the match; quiet frames barely count. Good for artifacts with a clear temporal peak (BCG, saccades, muscle bursts). Turn off for sustained or amplitude-flat artifacts where the quiet periods are part of the signature."
                         )
-                        Toggle("Weight frames by amplitude", isOn: $artifactTrajectoryGFPWeighted)
+                        Toggle("Weight frames by amplitude", isOn: $template.trajectoryGFPWeighted)
                             .toggleStyle(.checkbox)
                     }
                 }
@@ -3870,7 +3843,7 @@ struct WaveformView: View {
                         title: "Window (s)",
                         help: "Duration of the exemplar window used to build the reference map (or trajectory). Centered on your highlighted region."
                     )
-                    TextField("Window", value: $artifactTemplateWindowSeconds, format: .number.precision(.fractionLength(3)))
+                    TextField("Window", value: $template.windowSeconds, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 100)
 
@@ -3878,7 +3851,7 @@ struct WaveformView: View {
                         title: "Sample Hz",
                         help: "Internal downsample rate used during the scan. Lower values run faster; 250 Hz is enough for scalp-map artifacts. Does not affect output event precision."
                     )
-                    TextField("Hz", value: $artifactTemplateDownsampleRate, format: .number.precision(.fractionLength(0)))
+                    TextField("Hz", value: $template.downsampleRate, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
                 }
@@ -3888,7 +3861,7 @@ struct WaveformView: View {
                         title: "Merge (s)",
                         help: "Hits within this time window of each other are merged into a single event (keeping the highest-scoring one). Prevents double-counting a single artifact."
                     )
-                    TextField("Merge", value: $artifactTemplateMergeWindowSeconds, format: .number.precision(.fractionLength(3)))
+                    TextField("Merge", value: $template.mergeWindowSeconds, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 100)
                 }
@@ -3901,32 +3874,32 @@ struct WaveformView: View {
     }
 
     private var artifactDefinitionCloseTitle: String {
-        guard let artifactTemplateConfirmedSource else {
+        guard let confirmedSource = template.confirmedSource else {
             return "Close"
         }
-        return "Confirm \(artifactTemplateConfirmedSource.confirmationName) Selection"
+        return "Confirm \(confirmedSource.confirmationName) Selection"
     }
 
     private var artifactDefinitionApplyTitle: String {
-        switch artifactDefinitionPanel {
+        switch template.definitionPanel {
         case .waveforms:
-            return artifactTemplateResult == nil ? "Run Waveform Scan" : "Rescan Waveforms"
+            return template.result == nil ? "Run Waveform Scan" : "Rescan Waveforms"
         case .topography:
-            return artifactTemplateResult?.topographyReference == nil ? "Run Topography Scan" : "Rescan Topography"
+            return template.result?.topographyReference == nil ? "Run Topography Scan" : "Rescan Topography"
         }
     }
 
     private var activeArtifactDefinitionPanelCanRun: Bool {
-        switch artifactDefinitionPanel {
+        switch template.definitionPanel {
         case .waveforms:
-            return artifactTemplateResult == nil || artifactTemplateScanIsStale
+            return template.result == nil || artifactTemplateScanIsStale
         case .topography:
-            return artifactTemplateTopographyMode.isEnabled
+            return template.topographyMode.isEnabled
         }
     }
 
     private func applyActiveArtifactDefinitionPanel(to signal: MFFSignalData) {
-        switch artifactDefinitionPanel {
+        switch template.definitionPanel {
         case .waveforms:
             applyArtifactTemplate(to: signal, preferredSource: .waveform)
         case .topography:
@@ -3936,7 +3909,7 @@ struct WaveformView: View {
 
     @ViewBuilder
     private func artifactDefinitionPanelContent(signal: MFFSignalData, selectedChannels: [Int]) -> some View {
-        switch artifactDefinitionPanel {
+        switch template.definitionPanel {
         case .waveforms:
             artifactWaveformsPanel(signal: signal, selectedChannels: selectedChannels)
         case .topography:
@@ -3948,12 +3921,12 @@ struct WaveformView: View {
         VStack(alignment: .leading, spacing: 12) {
             artifactWaveformConfigurationSection(selectedChannels: selectedChannels)
             artifactDefinitionActivityView(
-                isRunning: isApplyingArtifactTemplate,
+                isRunning: template.isApplying,
                 runningText: "Scanning waveform matches..."
             )
 
-            if let artifactTemplateResult {
-                artifactWaveformResultView(artifactTemplateResult, signal: signal)
+            if let templateResult = template.result {
+                artifactWaveformResultView(templateResult, signal: signal)
             } else {
                 artifactDefinitionEmptyPreview(
                     title: "No waveform scan yet",
@@ -3964,8 +3937,8 @@ struct WaveformView: View {
     }
 
     private func artifactTopographyPanel(signal: MFFSignalData) -> some View {
-        let isRunning = isApplyingArtifactTemplate || isRefreshingTopography
-        let runningText = isRefreshingTopography
+        let isRunning = template.isApplying || template.isRefreshingTopography
+        let runningText = template.isRefreshingTopography
             ? "Refreshing topography matches..."
             : "Scanning topography matches..."
 
@@ -3973,7 +3946,7 @@ struct WaveformView: View {
             artifactTopographyConfigurationSection(signal: signal)
             artifactDefinitionActivityView(isRunning: isRunning, runningText: runningText)
 
-            if let topography = artifactTemplateResult?.topographyReference {
+            if let topography = template.result?.topographyReference {
                 artifactTopographyResultView(topography)
             } else {
                 artifactDefinitionEmptyPreview(
@@ -3988,10 +3961,10 @@ struct WaveformView: View {
     private func artifactDefinitionActivityView(isRunning: Bool, runningText: String) -> some View {
         if isRunning {
             HStack(spacing: 10) {
-                if artifactScanTotal > 0 {
-                    ProgressView(value: Double(artifactScanCompleted), total: Double(artifactScanTotal))
+                if template.scanTotal > 0 {
+                    ProgressView(value: Double(template.scanCompleted), total: Double(template.scanTotal))
                         .frame(width: 100)
-                    Text("\(artifactScanCompleted) / \(artifactScanTotal)")
+                    Text("\(template.scanCompleted) / \(template.scanTotal)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 } else {
@@ -4003,8 +3976,8 @@ struct WaveformView: View {
             }
         }
 
-        if let artifactTemplateStatusMessage {
-            Text(artifactTemplateStatusMessage)
+        if let templateStatus = template.statusMessage {
+            Text(templateStatus)
                 .font(.caption)
                 .foregroundStyle(.red)
         }
@@ -4025,7 +3998,7 @@ struct WaveformView: View {
 
     @ViewBuilder
     private func artifactDefinitionComparisonSection(signal: MFFSignalData) -> some View {
-        if artifactTemplateResult != nil {
+        if template.result != nil {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Run Comparison")
                     .font(.caption.weight(.semibold))
@@ -4040,7 +4013,7 @@ struct WaveformView: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
 
-                    if let result = artifactTemplateResult {
+                    if let result = template.result {
                         artifactDefinitionComparisonRow(
                             source: .waveform,
                             count: result.selectedEvents.count,
@@ -4054,7 +4027,7 @@ struct WaveformView: View {
                             artifactDefinitionComparisonRow(
                                 source: .topography,
                                 count: topography.matchCount,
-                                detail: "\(topography.channelIndices.count) channels · \(artifactTopographyMetric.rawValue)",
+                                detail: "\(topography.channelIndices.count) channels · \(template.topographyMetric.rawValue)",
                                 score: nil
                             ) {
                                 useTopographyMatches(result, signal: signal)
@@ -4081,9 +4054,9 @@ struct WaveformView: View {
         action: @escaping () -> Void
     ) -> some View {
         GridRow {
-            Label(source.displayName, systemImage: artifactTemplateConfirmedSource == source ? "checkmark.circle.fill" : source.systemImage)
+            Label(source.displayName, systemImage: template.confirmedSource == source ? "checkmark.circle.fill" : source.systemImage)
                 .font(.caption)
-                .foregroundStyle(artifactTemplateConfirmedSource == source ? .green : .primary)
+                .foregroundStyle(template.confirmedSource == source ? .green : .primary)
             Text("\(count)")
                 .font(.caption.monospacedDigit().weight(.semibold))
             HStack(spacing: 6) {
@@ -4096,11 +4069,11 @@ struct WaveformView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Button(artifactTemplateConfirmedSource == source ? "Selected" : "Use") {
+            Button(template.confirmedSource == source ? "Selected" : "Use") {
                 action()
             }
             .font(.caption)
-            .disabled(count == 0 || artifactTemplateConfirmedSource == source)
+            .disabled(count == 0 || template.confirmedSource == source)
         }
     }
 
@@ -4116,39 +4089,39 @@ struct WaveformView: View {
     /// has already been run once. Keeps the displayed topomap in sync without a
     /// new Apply.
     private func refreshTopographyIfNeeded(for signal: MFFSignalData) {
-        guard artifactTemplateResult != nil,
-              let range = artifactTemplateSelectionRange else {
+        guard template.result != nil,
+              let range = template.selectionRange else {
             return
         }
 
-        guard artifactTemplateTopographyMode.isEnabled else {
-            artifactTemplateResult?.topographyEvents = []
-            artifactTemplateResult?.topographyReference = nil
+        guard template.topographyMode.isEnabled else {
+            template.result?.topographyEvents = []
+            template.result?.topographyReference = nil
             return
         }
 
         let configuration = artifactTemplateConfiguration(for: signal, range: range)
-        topographyRefreshGeneration += 1
-        let generation = topographyRefreshGeneration
-        isRefreshingTopography = true
-        artifactScanCompleted = 0
-        artifactScanTotal = 0
+        template.topographyRefreshGeneration += 1
+        let generation = template.topographyRefreshGeneration
+        template.isRefreshingTopography = true
+        template.scanCompleted = 0
+        template.scanTotal = 0
         Task {
             let outcome = await Task.detached(priority: .userInitiated) {
                 ArtifactTemplateDetector.detectTopography(in: signal, configuration: configuration) { completed, total in
                     Task { @MainActor in
-                        self.artifactScanCompleted = completed
-                        self.artifactScanTotal = total
+                        self.template.scanCompleted = completed
+                        self.template.scanTotal = total
                     }
                 }
             }.value
             // Ignore stale completions: a newer refresh has superseded this one
             // and will publish its own result (and clear the spinner).
-            guard generation == topographyRefreshGeneration else { return }
-            artifactTemplateResult?.topographyEvents = outcome.events
-            artifactTemplateResult?.topographyReference = outcome.reference
-            artifactTrajectorySelectedFrame = nil
-            isRefreshingTopography = false
+            guard generation == template.topographyRefreshGeneration else { return }
+            template.result?.topographyEvents = outcome.events
+            template.result?.topographyReference = outcome.reference
+            template.trajectorySelectedFrame = nil
+            template.isRefreshingTopography = false
         }
     }
 
@@ -4160,7 +4133,7 @@ struct WaveformView: View {
                         .font(.caption.weight(.semibold))
                     ArtifactTemplateAveragePlot(
                         average: average,
-                        primaryChannel: artifactTemplateClickedChannel,
+                        primaryChannel: template.clickedChannel,
                         highlightedChannels: Set(average.selectedChannelIndices)
                     )
                     .frame(height: 170)
@@ -4229,10 +4202,10 @@ struct WaveformView: View {
                             }
                         }
 
-                        if let selectedArtifactTemplateChannel,
-                           let matchCount = result.singleChannelMatchCounts[selectedArtifactTemplateChannel] {
+                        if let selectedChannel = template.selectedChannel,
+                           let matchCount = result.singleChannelMatchCounts[selectedChannel] {
                             GridRow {
-                                Text("Selected Channel: Ch \(selectedArtifactTemplateChannel + 1)")
+                                Text("Selected Channel: Ch \(selectedChannel + 1)")
                                     .font(.caption)
                                 Text("1")
                                     .font(.caption.monospacedDigit())
@@ -4256,7 +4229,7 @@ struct WaveformView: View {
                 Label("Scalp-topography template", systemImage: "circle.grid.3x3.fill")
                     .font(.caption.weight(.semibold))
                 Spacer()
-                Text("\(topography.channelIndices.count) channels · \(artifactTopographyMetric.rawValue)")
+                Text("\(topography.channelIndices.count) channels · \(template.topographyMetric.rawValue)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -4275,7 +4248,7 @@ struct WaveformView: View {
             HStack(spacing: 6) {
                 Text("Scalp topography")
                     .font(.caption.weight(.semibold))
-                if isRefreshingTopography {
+                if template.isRefreshingTopography {
                     ProgressView().controlSize(.mini)
                 }
                 Spacer()
@@ -4291,11 +4264,11 @@ struct WaveformView: View {
 
             // Large topomap — uses selected frame if clicked, else default
             let displayValues: [Double] = {
-                let vals = artifactTrajectorySelectedFrame?.channelValues ?? topography.channelValues
+                let vals = template.trajectorySelectedFrame?.channelValues ?? topography.channelValues
                 return vals.map(Double.init)
             }()
             let displayTime: Double =
-                artifactTrajectorySelectedFrame?.timeSeconds ?? topography.referenceTimeSeconds
+                template.trajectorySelectedFrame?.timeSeconds ?? topography.referenceTimeSeconds
 
             if let layout = recording.sensorLayout {
                 TopomapView(
@@ -4309,7 +4282,7 @@ struct WaveformView: View {
                 )
                 .frame(width: 230, height: 170)
 
-                if let frame = artifactTrajectorySelectedFrame {
+                if let frame = template.trajectorySelectedFrame {
                     Text(String(format: "+%.0f ms", frame.relativeSeconds * 1000))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -4340,8 +4313,8 @@ struct WaveformView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                if artifactTrajectorySelectedFrame != nil {
-                    Button("Clear") { artifactTrajectorySelectedFrame = nil }
+                if template.trajectorySelectedFrame != nil {
+                    Button("Clear") { template.trajectorySelectedFrame = nil }
                         .font(.caption2)
                         .buttonStyle(.plain)
                         .foregroundStyle(Color.accentColor)
@@ -4369,7 +4342,7 @@ struct WaveformView: View {
         thumbW: CGFloat,
         thumbH: CGFloat
     ) -> some View {
-        let isSelected = artifactTrajectorySelectedFrame?.frameIndex == frame.frameIndex
+        let isSelected = template.trajectorySelectedFrame?.frameIndex == frame.frameIndex
         let borderColor: Color = isSelected ? Color.accentColor : Color.clear
 
         VStack(spacing: 2) {
@@ -4402,37 +4375,37 @@ struct WaveformView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            artifactTrajectorySelectedFrame = isSelected ? nil : frame
+            template.trajectorySelectedFrame = isSelected ? nil : frame
         }
     }
 
     private func useWaveformMatches(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData) {
-        guard let range = artifactTemplateSelectionRange else { return }
+        guard let range = template.selectionRange else { return }
         let configuration = artifactTemplateConfiguration(for: signal, range: range)
         upsertDefinedArtifact(from: result, configuration: configuration, source: .waveform)
-        artifactVM.events = definedArtifacts.flatMap(\.events)
+        artifactVM.events = template.definedArtifacts.flatMap(\.events)
         selectedEventCodes = [configuration.eventCode]
         showsEventsPanel = true
-        artifactTemplateConfirmedSource = .waveform
+        template.confirmedSource = .waveform
         artifactVM.statusMessage = "\(result.selectedEvents.count) waveform matches"
     }
 
     private func useTopographyMatches(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData? = nil) {
-        if let range = artifactTemplateSelectionRange,
+        if let range = template.selectionRange,
            let signalForConfiguration = signal ?? recording.signal {
             let configuration = artifactTemplateConfiguration(for: signalForConfiguration, range: range)
             upsertDefinedArtifact(from: result, configuration: configuration, source: .topography)
-        } else if let artifactID = artifactTemplateDefinedArtifactID,
-                  let index = definedArtifacts.firstIndex(where: { $0.id == artifactID }) {
-            definedArtifacts[index].events = result.topographyEvents
-            definedArtifacts[index].topography = result.topographyReference
+        } else if let artifactID = template.definedArtifactID,
+                  let index = template.definedArtifacts.firstIndex(where: { $0.id == artifactID }) {
+            template.definedArtifacts[index].events = result.topographyEvents
+            template.definedArtifacts[index].topography = result.topographyReference
             invalidateOBSVarianceCache(for: artifactID)
             clearAppliedArtifactCleaning()
         }
-        artifactVM.events = definedArtifacts.isEmpty ? result.topographyEvents : definedArtifacts.flatMap(\.events)
-        selectedEventCodes = [artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines)]
+        artifactVM.events = template.definedArtifacts.isEmpty ? result.topographyEvents : template.definedArtifacts.flatMap(\.events)
+        selectedEventCodes = [template.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)]
         showsEventsPanel = true
-        artifactTemplateConfirmedSource = .topography
+        template.confirmedSource = .topography
         artifactVM.statusMessage = "\(result.topographyEvents.count) topography matches"
     }
 
@@ -4440,11 +4413,11 @@ struct WaveformView: View {
         _ summary: ArtifactTemplateChannelSummary,
         average: ArtifactTemplateAverage
     ) -> Color {
-        if artifactTemplateClickedChannel == summary.channelIndex {
+        if template.clickedChannel == summary.channelIndex {
             return Color.blue.opacity(0.24)
         }
 
-        if selectedArtifactTemplateChannel == summary.channelIndex {
+        if template.selectedChannel == summary.channelIndex {
             return Color.blue.opacity(0.18)
         }
 
@@ -4456,15 +4429,15 @@ struct WaveformView: View {
     }
 
     private func selectArtifactTemplateChannel(_ channelIndex: Int, autoApplyIn signal: MFFSignalData? = nil) {
-        artifactTemplateClickedChannel = channelIndex
-        selectedArtifactTemplateChannel = channelIndex
-        artifactTemplateChannelScope = .clickedChannel
-        artifactTemplateCustomChannels = "\(channelIndex + 1)"
+        template.clickedChannel = channelIndex
+        template.selectedChannel = channelIndex
+        template.channelScope = .clickedChannel
+        template.customChannels = "\(channelIndex + 1)"
         guard let signal,
-              !isApplyingArtifactTemplate else {
+              !template.isApplying else {
             return
         }
-        if artifactTemplateResult != nil {
+        if template.result != nil {
             applyArtifactTemplate(to: signal, preferredSource: .waveform)
         }
     }
@@ -4473,48 +4446,48 @@ struct WaveformView: View {
         to signal: MFFSignalData,
         preferredSource: ArtifactDefinitionResultSource = .waveform
     ) {
-        guard let range = artifactTemplateSelectionRange else {
-            artifactTemplateStatusMessage = "Highlight a waveform region before applying."
+        guard let range = template.selectionRange else {
+            template.statusMessage = "Highlight a waveform region before applying."
             return
         }
 
         let selectedChannels = artifactTemplateSelectedChannels(in: signal)
         guard !selectedChannels.isEmpty else {
-            artifactTemplateStatusMessage = "Choose at least one readable channel."
+            template.statusMessage = "Choose at least one readable channel."
             return
         }
 
         let configuration = artifactTemplateConfiguration(for: signal, range: range)
 
-        isApplyingArtifactTemplate = true
-        artifactTemplateStatusMessage = nil
-        artifactScanCompleted = 0
-        artifactScanTotal = 0
+        template.isApplying = true
+        template.statusMessage = nil
+        template.scanCompleted = 0
+        template.scanTotal = 0
 
         let signature = artifactScanSignature
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 ArtifactTemplateDetector.detect(in: signal, configuration: configuration) { completed, total in
                     Task { @MainActor in
-                        self.artifactScanCompleted = completed
-                        self.artifactScanTotal = total
+                        self.template.scanCompleted = completed
+                        self.template.scanTotal = total
                     }
                 }
             }.value
 
-            artifactTemplateResult = result
-            lastArtifactScanSignature = signature
-            selectedArtifactTemplateChannel = nil
+            template.result = result
+            template.lastScanSignature = signature
+            template.selectedChannel = nil
             let source: ArtifactDefinitionResultSource = preferredSource == .topography ? .topography : .waveform
             upsertDefinedArtifact(from: result, configuration: configuration, source: source)
-            artifactVM.events = definedArtifacts.flatMap(\.events)
+            artifactVM.events = template.definedArtifacts.flatMap(\.events)
             selectedEventCodes = [configuration.eventCode]
             showsEventsPanel = true
-            artifactTemplateConfirmedSource = source
+            template.confirmedSource = source
             artifactVM.statusMessage = source == .topography
                 ? "\(result.topographyEvents.count) topography matches"
                 : "\(result.selectedEvents.count) template matches"
-            isApplyingArtifactTemplate = false
+            template.isApplying = false
         }
     }
 
@@ -4527,8 +4500,8 @@ struct WaveformView: View {
         let eventCode = configuration.eventCode.nilIfEmpty ?? name
         let selectedEvents = source == .topography ? result.topographyEvents : result.selectedEvents
         let artifact = DefinedArtifact(
-            id: artifactTemplateDefinedArtifactID ?? UUID(),
-            type: artifactTemplateType,
+            id: template.definedArtifactID ?? UUID(),
+            type: template.type,
             name: name,
             eventCode: eventCode,
             events: selectedEvents,
@@ -4541,38 +4514,38 @@ struct WaveformView: View {
             cleanedAt: nil
         )
 
-        if let index = definedArtifacts.firstIndex(where: { $0.id == artifact.id }) {
-            let previousMethod = definedArtifacts[index].cleaningMethod
-            let previousOBSComponentCount = definedArtifacts[index].obsPCAComponentCount
-            let previousOBSEdgeTaperSeconds = definedArtifacts[index].obsEdgeTaperSeconds
-            let previousOBSPreservesLocalBaseline = definedArtifacts[index].obsPreservesLocalBaseline
-            let previousOBSUsesOverlapAdd = definedArtifacts[index].obsUsesOverlapAdd
-            definedArtifacts[index] = artifact
-            definedArtifacts[index].cleaningMethod = previousMethod
-            definedArtifacts[index].obsPCAComponentCount = previousOBSComponentCount
-            definedArtifacts[index].obsEdgeTaperSeconds = previousOBSEdgeTaperSeconds
-            definedArtifacts[index].obsPreservesLocalBaseline = previousOBSPreservesLocalBaseline
-            definedArtifacts[index].obsUsesOverlapAdd = previousOBSUsesOverlapAdd
+        if let index = template.definedArtifacts.firstIndex(where: { $0.id == artifact.id }) {
+            let previousMethod = template.definedArtifacts[index].cleaningMethod
+            let previousOBSComponentCount = template.definedArtifacts[index].obsPCAComponentCount
+            let previousOBSEdgeTaperSeconds = template.definedArtifacts[index].obsEdgeTaperSeconds
+            let previousOBSPreservesLocalBaseline = template.definedArtifacts[index].obsPreservesLocalBaseline
+            let previousOBSUsesOverlapAdd = template.definedArtifacts[index].obsUsesOverlapAdd
+            template.definedArtifacts[index] = artifact
+            template.definedArtifacts[index].cleaningMethod = previousMethod
+            template.definedArtifacts[index].obsPCAComponentCount = previousOBSComponentCount
+            template.definedArtifacts[index].obsEdgeTaperSeconds = previousOBSEdgeTaperSeconds
+            template.definedArtifacts[index].obsPreservesLocalBaseline = previousOBSPreservesLocalBaseline
+            template.definedArtifacts[index].obsUsesOverlapAdd = previousOBSUsesOverlapAdd
         } else {
-            definedArtifacts.append(artifact)
+            template.definedArtifacts.append(artifact)
             registerPSADefinedArtifactForRejection(artifact.id)
         }
         invalidateOBSVarianceCache(for: artifact.id)
-        artifactTemplateDefinedArtifactID = artifact.id
+        template.definedArtifactID = artifact.id
         clearAppliedArtifactCleaning()
     }
 
     private func deleteDefinedArtifact(id: DefinedArtifact.ID) {
-        guard let index = definedArtifacts.firstIndex(where: { $0.id == id }) else { return }
-        let name = definedArtifacts[index].name
-        definedArtifacts.remove(at: index)
+        guard let index = template.definedArtifacts.firstIndex(where: { $0.id == id }) else { return }
+        let name = template.definedArtifacts[index].name
+        template.definedArtifacts.remove(at: index)
 
-        if artifactTemplateDefinedArtifactID == id {
-            artifactTemplateDefinedArtifactID = nil
-            artifactTemplateResult = nil
-            artifactTemplateConfirmedSource = nil
-            lastArtifactScanSignature = nil
-            selectedArtifactTemplateChannel = nil
+        if template.definedArtifactID == id {
+            template.definedArtifactID = nil
+            template.result = nil
+            template.confirmedSource = nil
+            template.lastScanSignature = nil
+            template.selectedChannel = nil
         }
 
         invalidateOBSVarianceCache(for: id)
@@ -4581,13 +4554,13 @@ struct WaveformView: View {
     }
 
     private func deleteAllDefinedArtifacts() {
-        guard !definedArtifacts.isEmpty else { return }
-        definedArtifacts.removeAll()
-        artifactTemplateDefinedArtifactID = nil
-        artifactTemplateResult = nil
-        artifactTemplateConfirmedSource = nil
-        lastArtifactScanSignature = nil
-        selectedArtifactTemplateChannel = nil
+        guard !template.definedArtifacts.isEmpty else { return }
+        template.definedArtifacts.removeAll()
+        template.definedArtifactID = nil
+        template.result = nil
+        template.confirmedSource = nil
+        template.lastScanSignature = nil
+        template.selectedChannel = nil
         invalidateOBSVarianceCache()
         epoching.skippedDefinedArtifactIDs.removeAll()
         epoching.knownArtifactIDsForRejection.removeAll()
@@ -4606,7 +4579,7 @@ struct WaveformView: View {
     }
 
     private func reconcilePSADefinedArtifactRejectionSelections() {
-        let currentIDs = Set(definedArtifacts.map(\.id))
+        let currentIDs = Set(template.definedArtifacts.map(\.id))
         epoching.skippedDefinedArtifactIDs.formIntersection(currentIDs)
         epoching.knownArtifactIDsForRejection.formIntersection(currentIDs)
         for id in currentIDs where !epoching.knownArtifactIDsForRejection.contains(id) {
@@ -4616,18 +4589,18 @@ struct WaveformView: View {
 
     private func invalidateOBSVarianceCache(for artifactID: DefinedArtifact.ID? = nil) {
         guard let artifactID else {
-            obsVarianceReportCache.removeAll()
+            template.obsVarianceReportCache.removeAll()
             return
         }
         let prefix = "\(artifactID.uuidString)|"
-        obsVarianceReportCache = obsVarianceReportCache.filter { !$0.key.hasPrefix(prefix) }
+        template.obsVarianceReportCache = template.obsVarianceReportCache.filter { !$0.key.hasPrefix(prefix) }
     }
 
     private func refreshAfterDeletingArtifacts(message: String) {
         clearAppliedArtifactCleaning()
-        artifactVM.events = definedArtifacts.flatMap(\.events)
+        artifactVM.events = template.definedArtifacts.flatMap(\.events)
         artifactVM.detectionRefreshToken += 1
-        artifactVM.statusMessage = definedArtifacts.isEmpty ? nil : "\(definedArtifacts.count) artifact definitions"
+        artifactVM.statusMessage = template.definedArtifacts.isEmpty ? nil : "\(template.definedArtifacts.count) artifact definitions"
         artifactVM.cleaningStatusMessage = message
     }
 
@@ -4637,12 +4610,12 @@ struct WaveformView: View {
                 Text("Clean Artifacts")
                     .font(.title3.weight(.semibold))
                 Spacer()
-                Text("\(definedArtifacts.count) defined")
+                Text("\(template.definedArtifacts.count) defined")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
 
-            if definedArtifacts.isEmpty {
+            if template.definedArtifacts.isEmpty {
                 ContentUnavailableView(
                     "No Artifacts Defined",
                     systemImage: "scope",
@@ -4669,7 +4642,7 @@ struct WaveformView: View {
                         Divider()
                             .gridCellColumns(4)
 
-                        ForEach($definedArtifacts) { $artifact in
+                        ForEach($template.definedArtifacts) { $artifact in
                             GridRow {
                                 Button {
                                     deleteDefinedArtifact(id: artifact.id)
@@ -4733,7 +4706,7 @@ struct WaveformView: View {
                 Button("Restore Original") {
                     restoreArtifactCleaning()
                 }
-                .disabled(artifactVM.cleanedSignal == nil && definedArtifacts.allSatisfy { $0.appliedMethod == nil })
+                .disabled(artifactVM.cleanedSignal == nil && template.definedArtifacts.allSatisfy { $0.appliedMethod == nil })
 
                 Spacer()
 
@@ -4746,7 +4719,7 @@ struct WaveformView: View {
                     applyArtifactCleaning(to: signal)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(artifactVM.isCleaning || !definedArtifacts.contains { $0.cleaningMethod.removesArtifact })
+                .disabled(artifactVM.isCleaning || !template.definedArtifacts.contains { $0.cleaningMethod.removesArtifact })
             }
         }
         .padding(.horizontal, 32)
@@ -4775,7 +4748,7 @@ struct WaveformView: View {
                 ArtifactOBSOptionsButton(
                     artifact: artifact,
                     signal: signal,
-                    reportCache: $obsVarianceReportCache,
+                    reportCache: $template.obsVarianceReportCache,
                     onSettingsChange: clearAppliedArtifactCleaning
                 )
             }
@@ -4987,7 +4960,7 @@ struct WaveformView: View {
     }
 
     private func applyArtifactCleaning(to signal: MFFSignalData) {
-        let artifacts = definedArtifacts
+        let artifacts = template.definedArtifacts
         guard artifacts.contains(where: { $0.cleaningMethod.removesArtifact }) else {
             restoreArtifactCleaning()
             return
@@ -5019,14 +4992,14 @@ struct WaveformView: View {
             artifactVM.cleaningSummaries = outcome.summaries
             let summariesByID = Dictionary(uniqueKeysWithValues: outcome.summaries.map { ($0.artifactID, $0) })
             let now = Date()
-            for index in definedArtifacts.indices {
-                if summariesByID[definedArtifacts[index].id] != nil,
-                   definedArtifacts[index].cleaningMethod.removesArtifact {
-                    definedArtifacts[index].appliedMethod = definedArtifacts[index].cleaningMethod
-                    definedArtifacts[index].cleanedAt = now
+            for index in template.definedArtifacts.indices {
+                if summariesByID[template.definedArtifacts[index].id] != nil,
+                   template.definedArtifacts[index].cleaningMethod.removesArtifact {
+                    template.definedArtifacts[index].appliedMethod = template.definedArtifacts[index].cleaningMethod
+                    template.definedArtifacts[index].cleanedAt = now
                 } else {
-                    definedArtifacts[index].appliedMethod = nil
-                    definedArtifacts[index].cleanedAt = nil
+                    template.definedArtifacts[index].appliedMethod = nil
+                    template.definedArtifacts[index].cleanedAt = nil
                 }
             }
 
@@ -5057,15 +5030,15 @@ struct WaveformView: View {
     }
 
     private func clearAppliedArtifactCleaning() {
-        let hadCleaning = artifactVM.cleanedSignal != nil || definedArtifacts.contains { $0.appliedMethod != nil }
+        let hadCleaning = artifactVM.cleanedSignal != nil || template.definedArtifacts.contains { $0.appliedMethod != nil }
         artifactVM.cleanedSignal = nil
         artifactVM.cleaningIsEnabled = true
         artifactVM.cleaningSummaries = []
         artifactVM.cleaningProgress = nil
         artifactVM.cleaningStatusMessage = nil
-        for index in definedArtifacts.indices {
-            definedArtifacts[index].appliedMethod = nil
-            definedArtifacts[index].cleanedAt = nil
+        for index in template.definedArtifacts.indices {
+            template.definedArtifacts[index].appliedMethod = nil
+            template.definedArtifacts[index].cleanedAt = nil
         }
         guard hadCleaning else { return }
         artifactVM.detectionRefreshToken += 1
@@ -5073,26 +5046,25 @@ struct WaveformView: View {
         invalidateInterpolations()
     }
 
-    /// Current values of the scan-affecting controls.
     private var artifactScanSignature: ArtifactScanSignature {
         ArtifactScanSignature(
-            eventCode: artifactTemplateEventCode,
-            clickedChannel: artifactTemplateClickedChannel,
-            channelScope: artifactTemplateChannelScope,
-            customChannels: artifactTemplateCustomChannels,
-            threshold: artifactTemplateThreshold,
-            windowSeconds: artifactTemplateWindowSeconds,
-            downsampleRate: artifactTemplateDownsampleRate,
-            mergeWindowSeconds: artifactTemplateMergeWindowSeconds,
-            polarity: artifactTemplatePolarity,
-            range: artifactTemplateSelectionRange
+            eventCode: template.eventCode,
+            clickedChannel: template.clickedChannel,
+            channelScope: template.channelScope,
+            customChannels: template.customChannels,
+            threshold: template.threshold,
+            windowSeconds: template.windowSeconds,
+            downsampleRate: template.downsampleRate,
+            mergeWindowSeconds: template.mergeWindowSeconds,
+            polarity: template.polarity,
+            range: template.selectionRange
         )
     }
 
     /// True when settings have changed since the displayed result was produced
     /// (or no scan has run yet).
     private var artifactTemplateScanIsStale: Bool {
-        lastArtifactScanSignature != artifactScanSignature
+        template.lastScanSignature != artifactScanSignature
     }
 
     /// Builds the detector configuration from the current sheet controls.
@@ -5101,23 +5073,23 @@ struct WaveformView: View {
         range: ClosedRange<Int>
     ) -> ArtifactTemplateConfiguration {
         ArtifactTemplateConfiguration(
-            name: artifactTemplateName.trimmingCharacters(in: .whitespacesAndNewlines),
-            eventCode: artifactTemplateEventCode.trimmingCharacters(in: .whitespacesAndNewlines),
+            name: template.name.trimmingCharacters(in: .whitespacesAndNewlines),
+            eventCode: template.eventCode.trimmingCharacters(in: .whitespacesAndNewlines),
             selectedChannelIndices: artifactTemplateSelectedChannels(in: signal),
             comparisonChannelIndices: Array(signal.data.indices),
             exemplarRange: range,
-            matchThreshold: artifactTemplateThreshold,
-            windowSizeSeconds: max(artifactTemplateWindowSeconds, 0.01),
-            downsampleRate: min(max(artifactTemplateDownsampleRate, 20), signal.samplingRate),
-            mergeWindowSeconds: max(artifactTemplateMergeWindowSeconds, 0.01),
-            polarity: artifactTemplatePolarity,
+            matchThreshold: template.threshold,
+            windowSizeSeconds: max(template.windowSeconds, 0.01),
+            downsampleRate: min(max(template.downsampleRate, 20), signal.samplingRate),
+            mergeWindowSeconds: max(template.mergeWindowSeconds, 0.01),
+            polarity: template.polarity,
             comparisonScopes: artifactTemplateComparisonScopes(in: signal),
-            topographyMode: artifactTemplateTopographyMode,
+            topographyMode: template.topographyMode,
             topographyChannelIndices: artifactTopographyChannels(in: signal),
-            topographyMetric: artifactTopographyMetric,
-            trajectoryShiftSeconds: artifactTrajectoryShiftSeconds,
-            trajectoryScaleRange: artifactTrajectoryScaleRange,
-            trajectoryGFPWeighted: artifactTrajectoryGFPWeighted
+            topographyMetric: template.topographyMetric,
+            trajectoryShiftSeconds: template.trajectoryShiftSeconds,
+            trajectoryScaleRange: template.trajectoryScaleRange,
+            trajectoryGFPWeighted: template.trajectoryGFPWeighted
         )
     }
 
@@ -5125,13 +5097,13 @@ struct WaveformView: View {
     /// minus bad channels (and, in future, restricted to a selected cluster).
     private func artifactTopographyChannels(in signal: MFFSignalData) -> [Int] {
         let goodChannels = signal.data.indices.filter { !channels.bad.contains($0) }
-        switch artifactTopographyChannelScope {
+        switch template.topographyChannelScope {
         case .allGood:
             return goodChannels
         case .topN:
-            guard let range = artifactTemplateSelectionRange,
+            guard let range = template.selectionRange,
                   !goodChannels.isEmpty else { return goodChannels }
-            let n = max(min(artifactTopographyTopN, goodChannels.count), 3)
+            let n = max(min(template.topographyTopN, goodChannels.count), 3)
             // Rank by RMS amplitude over the exemplar window.
             let scored: [(Int, Float)] = goodChannels.map { chIdx in
                 let ch = signal.data[chIdx]
@@ -5146,7 +5118,7 @@ struct WaveformView: View {
             }
             return scored.sorted { $0.1 > $1.1 }.prefix(n).map { $0.0 }.sorted()
         case .channelSet:
-            guard let id = artifactTopographyChannelSetID,
+            guard let id = template.topographyChannelSetID,
                   let set = ChannelSetStore.shared.allSets.first(where: { $0.id == id })
             else { return goodChannels }
             // Intersect the set with good channels that exist in this recording.
@@ -5156,10 +5128,10 @@ struct WaveformView: View {
     }
 
     private func artifactTemplateSelectedChannels(in signal: MFFSignalData) -> [Int] {
-        switch artifactTemplateChannelScope {
+        switch template.channelScope {
         case .clickedChannel:
-            if let artifactTemplateClickedChannel, signal.data.indices.contains(artifactTemplateClickedChannel) {
-                return [artifactTemplateClickedChannel]
+            if let clickedChannel = template.clickedChannel, signal.data.indices.contains(clickedChannel) {
+                return [clickedChannel]
             }
             return []
         case .ocularChannels:
@@ -5169,7 +5141,7 @@ struct WaveformView: View {
         case .allChannels:
             return Array(signal.data.indices)
         case .specificChannels:
-            return parseChannelList(artifactTemplateCustomChannels, channelCount: signal.numberOfChannels)
+            return parseChannelList(template.customChannels, channelCount: signal.numberOfChannels)
         }
     }
 
@@ -5177,7 +5149,7 @@ struct WaveformView: View {
         var scopes: [ArtifactTemplateComparisonScope] = [
             ArtifactTemplateComparisonScope(
                 name: ArtifactTemplateChannelScope.clickedChannel.rawValue,
-                channelIndices: artifactTemplateClickedChannel.map { [$0] } ?? []
+                channelIndices: template.clickedChannel.map { [$0] } ?? []
             ),
             ArtifactTemplateComparisonScope(
                 name: ArtifactTemplateChannelScope.ocularChannels.rawValue,
@@ -5193,7 +5165,7 @@ struct WaveformView: View {
             )
         ]
 
-        let specificChannels = parseChannelList(artifactTemplateCustomChannels, channelCount: signal.numberOfChannels)
+        let specificChannels = parseChannelList(template.customChannels, channelCount: signal.numberOfChannels)
         if !specificChannels.isEmpty {
             scopes.append(
                 ArtifactTemplateComparisonScope(
@@ -5255,12 +5227,12 @@ struct WaveformView: View {
         return indices.sorted()
     }
 
-    private func saveArtifactTemplateJSON(_ template: SavedArtifactTemplate?) {
-        guard let template else { return }
+    private func saveArtifactTemplateJSON(_ saved: SavedArtifactTemplate?) {
+        guard let saved else { return }
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "\(template.name.replacingOccurrences(of: " ", with: "-")).artifact.json"
+        panel.nameFieldStringValue = "\(saved.name.replacingOccurrences(of: " ", with: "-")).artifact.json"
         panel.canCreateDirectories = true
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -5269,11 +5241,11 @@ struct WaveformView: View {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
-            let data = try encoder.encode(template)
+            let data = try encoder.encode(saved)
             try data.write(to: url, options: .atomic)
-            artifactTemplateStatusMessage = "Saved \(url.lastPathComponent)."
+            template.statusMessage = "Saved \(url.lastPathComponent)."
         } catch {
-            artifactTemplateStatusMessage = error.localizedDescription
+            template.statusMessage = error.localizedDescription
         }
     }
 
@@ -6322,10 +6294,10 @@ struct WaveformView: View {
                         isOn: $epoching.skipEyeMovements,
                         help: "Rejects epochs containing default eye movement artifact events."
                     )
-                    if !definedArtifacts.isEmpty {
+                    if !template.definedArtifacts.isEmpty {
                         Divider()
                             .padding(.vertical, 2)
-                        ForEach(definedArtifacts) { artifact in
+                        ForEach(template.definedArtifacts) { artifact in
                             psaArtifactRejectionRow(
                                 title: artifact.name,
                                 detail: "\(artifact.events.count) events · \(artifact.type.rawValue)",
@@ -6720,7 +6692,7 @@ struct WaveformView: View {
         if epoching.skipEyeMovements {
             events += artifactEventsOrDetection(for: .movement, in: signal)
         }
-        events += definedArtifacts
+        events += template.definedArtifacts
             .filter { epoching.skippedDefinedArtifactIDs.contains($0.id) }
             .flatMap(\.events)
 
@@ -6765,7 +6737,7 @@ struct WaveformView: View {
         if epoching.skipEyeMovements {
             labels.append("eye movements")
         }
-        let definedCount = definedArtifacts.filter {
+        let definedCount = template.definedArtifacts.filter {
             epoching.skippedDefinedArtifactIDs.contains($0.id)
         }.count
         if definedCount == 1 {
@@ -6941,12 +6913,12 @@ struct WaveformView: View {
         epoching.showsButterflyPlot = false
         selectedEventCodes.removeAll()
         epoching.statusMessage = nil
-        segmentHealthTask?.cancel()
-        segmentHealthTask = nil
-        segmentHealthAnalysis = nil
-        segmentHealthSignature = nil
-        isAnalyzingSegmentHealth = false
-        segmentHealthProgress = 0
+        segHealth.task?.cancel()
+        segHealth.task = nil
+        segHealth.analysis = nil
+        segHealth.signature = nil
+        segHealth.isAnalyzing = false
+        segHealth.progress = 0
         horizontalScrollPosition.scrollTo(x: 0)
     }
 
@@ -6993,30 +6965,7 @@ struct WaveformView: View {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        // Build the real PNS signal with any user renames applied.
-        let renamedPNS = pnsSignalWithRenames()
-
-        // If synthetic ICA channels exist, ask whether to include them.
-        let includeSynthetic: Bool
-        if !syntheticPNSChannels.isEmpty {
-            let alert = NSAlert()
-            alert.messageText = "Include synthesized ICA channels?"
-            let names = syntheticPNSChannels.map(\.name).joined(separator: ", ")
-            alert.informativeText = "The following synthetic PNS channels were created from ICA components: \(names). Include them in the exported MFF?"
-            alert.addButton(withTitle: "Include")
-            alert.addButton(withTitle: "Skip")
-            includeSynthetic = alert.runModal() == .alertFirstButtonReturn
-        } else {
-            includeSynthetic = false
-        }
-
-        // Merge real PNS + (optionally) synthetic channels into a single signal.
-        let pnsForExport: MFFSignalData?
-        if includeSynthetic {
-            pnsForExport = mergingWithSynthetic(base: renamedPNS)
-        } else {
-            pnsForExport = renamedPNS
-        }
+        let pnsForExport = pnsSignalForMFFExport()
 
         isExportingMFF = true
         mffExportStatusMessage = "Exporting \(snapshot.kind.statusName) MFF..."
@@ -7058,6 +7007,174 @@ struct WaveformView: View {
                 }
             }
         }
+    }
+
+    private func pnsSignalForMFFExport() -> MFFSignalData? {
+        let renamedPNS = pnsSignalWithRenames()
+        guard shouldIncludeSyntheticPNSChannelsInExport() else { return renamedPNS }
+        return mergingWithSynthetic(base: renamedPNS)
+    }
+
+    private func shouldIncludeSyntheticPNSChannelsInExport() -> Bool {
+        guard !syntheticPNSChannels.isEmpty else { return false }
+        let alert = NSAlert()
+        alert.messageText = "Include synthesized ICA channels?"
+        let names = syntheticPNSChannels.map(\.name).joined(separator: ", ")
+        alert.informativeText = "The following synthetic PNS channels were created from ICA components: \(names). Include them in the exported MFF?"
+        alert.addButton(withTitle: "Include")
+        alert.addButton(withTitle: "Skip")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func splitCurrentFile(_ selection: MFFSplitSelection, atSample sample: Int) {
+        guard !isExportingMFF else { return }
+        guard let snapshot = currentMFFExportSnapshot() else {
+            mffExportStatusMessage = "No signal is ready to split."
+            return
+        }
+
+        let split: MFFSignalSplitPair
+        do {
+            split = try MFFSignalSplitter.split(signal: snapshot.signal, atSample: sample)
+        } catch {
+            mffExportStatusMessage = error.localizedDescription
+            return
+        }
+
+        let splitTime = split.left.endTimeSeconds
+        let outputs: [MFFSplitOutput]
+        switch selection {
+        case .left:
+            guard let url = splitSaveURL(defaultName: defaultMFFSplitName(side: .left, splitTime: splitTime)) else { return }
+            outputs = [MFFSplitOutput(segment: split.left, url: normalizedMFFPackageURL(url))]
+        case .right:
+            guard let url = splitSaveURL(defaultName: defaultMFFSplitName(side: .right, splitTime: splitTime)) else { return }
+            outputs = [MFFSplitOutput(segment: split.right, url: normalizedMFFPackageURL(url))]
+        case .both:
+            guard let leftURL = splitSaveURL(
+                defaultName: defaultMFFSplitName(side: .left, splitTime: splitTime),
+                message: "Choose the left-segment file. Eva will create the matching right-segment file beside it."
+            ) else { return }
+            let pairURLs = splitPairURLs(fromLeftURL: leftURL)
+            guard confirmReplacingGeneratedSplitFiles([pairURLs.right]) else { return }
+            outputs = [
+                MFFSplitOutput(segment: split.left, url: pairURLs.left),
+                MFFSplitOutput(segment: split.right, url: pairURLs.right)
+            ]
+        }
+
+        let pnsForExport = pnsSignalForMFFExport()
+        let processingScript = currentProcessingScript()
+        isExportingMFF = true
+        mffExportStatusMessage = "Splitting MFF at \(formattedEventTime(splitTime))..."
+
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                do {
+                    for output in outputs {
+                        let pnsSlice = try pnsForExport.map {
+                            try MFFSignalSplitter.slice(
+                                signal: $0,
+                                startTimeSeconds: output.segment.startTimeSeconds,
+                                endTimeSeconds: output.segment.endTimeSeconds,
+                                side: output.segment.side
+                            ).signal
+                        }
+                        try MFFWriter.write(
+                            signal: output.segment.signal,
+                            pnsSignal: pnsSlice,
+                            segments: [],
+                            kind: .continuous,
+                            to: output.url,
+                            preserveSourceFileInfo: false
+                        )
+
+                        var script = processingScript
+                        script.append(EVAProcessingStep(
+                            operation: .split,
+                            parameters: [
+                                "side": output.segment.side.rawValue,
+                                "startSeconds": String(format: "%.6f", output.segment.startTimeSeconds),
+                                "endSeconds": String(format: "%.6f", output.segment.endTimeSeconds),
+                                "boundarySample": "\(split.boundarySample)"
+                            ],
+                            replayable: false,
+                            note: "Created by right-click Split File export."
+                        ))
+                        try? EVAProcessingScriptXML.write(script, toPackage: output.url)
+
+                        let log = EVAProcessLog(header: "EVA split export — \(output.url.lastPathComponent)")
+                        for step in script.steps {
+                            let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
+                            log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
+                        }
+                        try? log.write(toPackage: output.url)
+                    }
+                    return Result<[URL], Error>.success(outputs.map(\.url))
+                } catch {
+                    return Result<[URL], Error>.failure(error)
+                }
+            }.value
+
+            await MainActor.run {
+                isExportingMFF = false
+                switch result {
+                case .success(let urls):
+                    let names = urls.map(\.lastPathComponent).joined(separator: ", ")
+                    mffExportStatusMessage = "Exported split MFF\(urls.count == 1 ? "" : "s"): \(names)"
+                case .failure(let error):
+                    mffExportStatusMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func splitSaveURL(defaultName: String, message: String? = nil) -> URL? {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.mff]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = defaultName
+        panel.message = message
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func defaultMFFSplitName(side: MFFSignalSplitSide, splitTime: Double) -> String {
+        let baseName = (recording.packageName as NSString).deletingPathExtension
+        let time = splitTimeFilenameComponent(splitTime)
+        return "\(baseName)-\(side.rawValue)-\(time).mff"
+    }
+
+    private func splitPairURLs(fromLeftURL leftURL: URL) -> (left: URL, right: URL) {
+        let left = normalizedMFFPackageURL(leftURL)
+        let directory = left.deletingLastPathComponent()
+        let baseName = (left.lastPathComponent as NSString).deletingPathExtension
+        let rightBaseName: String
+        if let range = baseName.range(of: "-left-", options: .backwards) {
+            rightBaseName = baseName.replacingCharacters(in: range, with: "-right-")
+        } else if baseName.hasSuffix("-left") {
+            rightBaseName = String(baseName.dropLast("-left".count)) + "-right"
+        } else {
+            rightBaseName = "\(baseName)-right"
+        }
+        let right = directory.appendingPathComponent(rightBaseName).appendingPathExtension("mff")
+        return (left, right)
+    }
+
+    private func confirmReplacingGeneratedSplitFiles(_ urls: [URL]) -> Bool {
+        let existing = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !existing.isEmpty else { return true }
+
+        let alert = NSAlert()
+        alert.messageText = existing.count == 1 ? "Replace existing split file?" : "Replace existing split files?"
+        alert.informativeText = existing.map(\.lastPathComponent).joined(separator: ", ")
+        alert.addButton(withTitle: "Replace")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func splitTimeFilenameComponent(_ seconds: Double) -> String {
+        String(format: "%.3fs", seconds).replacingOccurrences(of: ".", with: "p")
     }
 
     /// Returns the real PNS signal with any user renames applied to channel names.
@@ -8255,7 +8372,7 @@ struct WaveformView: View {
             Divider()
 
             // Method tab strip
-            Picker("Method", selection: $bcgDetectionMethod) {
+            Picker("Method", selection: $bcg.method) {
                 ForEach(BCGDetectionMethod.allCases) { method in
                     Text(method.tabLabel).tag(method)
                 }
@@ -8265,7 +8382,7 @@ struct WaveformView: View {
             .padding(.vertical, 12)
 
             // Method description
-            Text(bcgDetectionMethod.summary)
+            Text(bcg.method.summary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -8280,16 +8397,16 @@ struct WaveformView: View {
                     bcgMethodOptions(for: signal, selection: selection)
 
                     // Channel restriction — applies to the GFP-based methods.
-                    if bcgDetectionMethod != .qrsLocking {
+                    if bcg.method != .qrsLocking {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("BCG Channels")
                                 .font(.caption.weight(.semibold))
                             ChannelSetPickerView(
                                 label: "Channel Set",
-                                selectedSetID: $bcgChannelSetID,
+                                selectedSetID: $bcg.channelSetID,
                                 channelCount: signal.numberOfChannels
                             )
-                            Text(bcgChannelSetID == nil
+                            Text(bcg.channelSetID == nil
                                  ? "Using all EEG channels."
                                  : "Restricting detection to the selected set.")
                                 .font(.caption2)
@@ -8306,13 +8423,13 @@ struct WaveformView: View {
                             Text("Event code")
                                 .font(.caption)
                                 .frame(width: 100, alignment: .leading)
-                            TextField("BCG", text: $bcgEventCode)
+                            TextField("BCG", text: $bcg.eventCode)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 100)
                             Text("Window")
                                 .font(.caption)
                                 .padding(.leading, 8)
-                            TextField("s", value: $bcgWindowSeconds, format: .number.precision(.fractionLength(3)))
+                            TextField("s", value: $bcg.windowSeconds, format: .number.precision(.fractionLength(3)))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 70)
                             Text("s")
@@ -8324,26 +8441,26 @@ struct WaveformView: View {
                             Text("Threshold")
                                 .font(.caption)
                                 .frame(width: 100, alignment: .leading)
-                            TextField("SD", value: $bcgThresholdSD, format: .number.precision(.fractionLength(1)))
+                            TextField("SD", value: $bcg.thresholdSD, format: .number.precision(.fractionLength(1)))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 70)
                             Text("robust SD above mean")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Slider(value: $bcgThresholdSD, in: 1...6, step: 0.25)
+                            Slider(value: $bcg.thresholdSD, in: 1...6, step: 0.25)
                         }
-                        .opacity(bcgDetectionMethod == .qrsLocking ? 0.35 : 1)
-                        .disabled(bcgDetectionMethod == .qrsLocking)
+                        .opacity(bcg.method == .qrsLocking ? 0.35 : 1)
+                        .disabled(bcg.method == .qrsLocking)
                     }
 
-                    if let status = bcgDetectionStatus {
+                    if let status = bcg.status {
                         Text(status)
                             .font(.caption)
                             .foregroundStyle(status.hasPrefix("✓") ? Color.green : .secondary)
                     }
 
                     // Iterative refinement panel — spatial PCA only, shown after detection
-                    if bcgDetectionMethod == .spatialPCA && detectsBCGArtifacts {
+                    if bcg.method == .spatialPCA && bcg.detectsArtifacts {
                         Divider()
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Iterative Exemplar Refinement")
@@ -8357,18 +8474,18 @@ struct WaveformView: View {
                                     .font(.caption)
                                     .frame(width: 100, alignment: .leading)
                                 TextField("%", value: Binding(
-                                    get: { bcgRejectFraction * 100 },
-                                    set: { bcgRejectFraction = $0 / 100 }
+                                    get: { bcg.rejectFraction * 100 },
+                                    set: { bcg.rejectFraction = $0 / 100 }
                                 ), format: .number.precision(.fractionLength(0)))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 50)
                                 Text("% of beats removed")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                Slider(value: $bcgRejectFraction, in: 0.05...0.50, step: 0.05)
+                                Slider(value: $bcg.rejectFraction, in: 0.05...0.50, step: 0.05)
                             }
 
-                            if let refined = bcgRefinedTemplate, refined.count == signal.numberOfChannels,
+                            if let refined = bcg.refinedTemplate, refined.count == signal.numberOfChannels,
                                let sensorLayout = recording.sensorLayout {
                                 HStack(spacing: 12) {
                                     TopomapView(
@@ -8386,7 +8503,7 @@ struct WaveformView: View {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text("Refined template")
                                             .font(.caption.weight(.semibold))
-                                        if let kept = bcgRefinedKeptCount {
+                                        if let kept = bcg.refinedKeptCount {
                                             let total = artifactVM.events.filter { $0.sourceFile == BCGDetector.sourceFile }.count
                                             Text("Averaged from \(kept) / \(total + (total - kept)) beats")
                                                 .font(.caption)
@@ -8405,40 +8522,40 @@ struct WaveformView: View {
 
             // Action row
             HStack {
-                if detectsBCGArtifacts {
+                if bcg.detectsArtifacts {
                     Button("Disable BCG Detection", role: .destructive) {
                         disableBCGDetection()
-                        showsBCGDetectionSheet = false
+                        bcg.showsSheet = false
                     }
                 }
                 Spacer()
-                if isRunningBCGDetection || bcgIsRefining {
+                if bcg.isRunning || bcg.isRefining {
                     ProgressView().controlSize(.small)
                 }
                 Button("Cancel") {
-                    showsBCGDetectionSheet = false
+                    bcg.showsSheet = false
                 }
-                if bcgDetectionMethod == .spatialPCA && detectsBCGArtifacts {
+                if bcg.method == .spatialPCA && bcg.detectsArtifacts {
                     Button("Refine") {
                         Task { await runBCGRefinement(signal: signal) }
                     }
-                    .disabled(bcgIsRefining || isRunningBCGDetection)
+                    .disabled(bcg.isRefining || bcg.isRunning)
                 }
                 Button("Detect BCG") {
                     Task { await runBCGDetection(signal: signal, selection: selection) }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(isRunningBCGDetection || (bcgDetectionMethod == .qrsLocking && !detectsECGArtifacts))
+                .disabled(bcg.isRunning || (bcg.method == .qrsLocking && !detectsECGArtifacts))
             }
             .padding(20)
         }
         .frame(width: 644)
-        .disabled(isRunningBCGDetection || bcgIsRefining)
+        .disabled(bcg.isRunning || bcg.isRefining)
     }
 
     @ViewBuilder
     private func bcgMethodOptions(for signal: MFFSignalData, selection: ClosedRange<Int>?) -> some View {
-        switch bcgDetectionMethod {
+        switch bcg.method {
         case .periodicity:
             VStack(alignment: .leading, spacing: 10) {
                 Text("Heart rate range")
@@ -8447,25 +8564,25 @@ struct WaveformView: View {
                     Text("Min HR")
                         .font(.caption)
                         .frame(width: 100, alignment: .leading)
-                    TextField("BPM", value: $bcgMinHR, format: .number.precision(.fractionLength(0)))
+                    TextField("BPM", value: $bcg.minHR, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
                     Text("BPM")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Slider(value: $bcgMinHR, in: 30...80, step: 1)
+                    Slider(value: $bcg.minHR, in: 30...80, step: 1)
                 }
                 HStack {
                     Text("Max HR")
                         .font(.caption)
                         .frame(width: 100, alignment: .leading)
-                    TextField("BPM", value: $bcgMaxHR, format: .number.precision(.fractionLength(0)))
+                    TextField("BPM", value: $bcg.maxHR, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
                     Text("BPM")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Slider(value: $bcgMaxHR, in: 60...180, step: 1)
+                    Slider(value: $bcg.maxHR, in: 60...180, step: 1)
                 }
                 if selection != nil {
                     Label("Uses all EEG channels; selection ignored for this method.", systemImage: "info.circle")
@@ -8495,15 +8612,15 @@ struct WaveformView: View {
                     Text("Components")
                         .font(.caption)
                         .frame(width: 100, alignment: .leading)
-                    Stepper("\(bcgPCAComponents)", value: $bcgPCAComponents, in: 1...4)
+                    Stepper("\(bcg.pcaComponents)", value: $bcg.pcaComponents, in: 1...4)
                         .labelsHidden()
-                    Text("\(bcgPCAComponents) PC\(bcgPCAComponents == 1 ? "" : "s") combined via RSS")
+                    Text("\(bcg.pcaComponents) PC\(bcg.pcaComponents == 1 ? "" : "s") combined via RSS")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 .help("Project onto the top N spatial components and combine scores via root-sum-of-squares. 2–3 components captures BCG sources that span more than one dipole.")
 
-                Toggle(isOn: $bcgSpatialWhiten) {
+                Toggle(isOn: $bcg.spatialWhiten) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Spatial whitening")
                             .font(.caption)
@@ -8514,7 +8631,7 @@ struct WaveformView: View {
                 }
                 .help("Equalises all spatial directions by the background covariance before computing the BCG subspace. Reduces contamination from large non-BCG sources in the exemplar PCs.")
 
-                Toggle(isOn: $bcgRespAdaptive) {
+                Toggle(isOn: $bcg.respAdaptive) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Respiratory envelope normalization")
                             .font(.caption)
@@ -8525,7 +8642,7 @@ struct WaveformView: View {
                 }
                 .help("BCG amplitude is modulated ~10–20% by breathing. A short sliding RMS normalisation keeps sensitivity uniform across the breath cycle, preventing missed beats at respiratory troughs.")
 
-                Toggle(isOn: $bcgSlidingNormalize) {
+                Toggle(isOn: $bcg.slidingNormalize) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Sliding z-score normalization")
                             .font(.caption)
@@ -8545,25 +8662,25 @@ struct WaveformView: View {
                     Text("Low cutoff")
                         .font(.caption)
                         .frame(width: 100, alignment: .leading)
-                    TextField("Hz", value: $bcgPowerMinHz, format: .number.precision(.fractionLength(2)))
+                    TextField("Hz", value: $bcg.powerMinHz, format: .number.precision(.fractionLength(2)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
                     Text("Hz")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Slider(value: $bcgPowerMinHz, in: 0.3...1.5, step: 0.05)
+                    Slider(value: $bcg.powerMinHz, in: 0.3...1.5, step: 0.05)
                 }
                 HStack {
                     Text("High cutoff")
                         .font(.caption)
                         .frame(width: 100, alignment: .leading)
-                    TextField("Hz", value: $bcgPowerMaxHz, format: .number.precision(.fractionLength(2)))
+                    TextField("Hz", value: $bcg.powerMaxHz, format: .number.precision(.fractionLength(2)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
                     Text("Hz")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Slider(value: $bcgPowerMaxHz, in: 0.8...3.0, step: 0.05)
+                    Slider(value: $bcg.powerMaxHz, in: 0.8...3.0, step: 0.05)
                 }
             }
 
@@ -8571,13 +8688,13 @@ struct WaveformView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Expected heart rate")
                     .font(.caption.weight(.semibold))
-                if bcgChannelSetID == nil {
+                if bcg.channelSetID == nil {
                     Label("Pick a BCG channel set below for best results — these methods are designed for a focused proxy group.", systemImage: "exclamationmark.triangle")
                         .font(.caption2)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Label(bcgDetectionMethod == .virtualECGPCA
+                    Label(bcg.method == .virtualECGPCA
                           ? "First principal component of the selected channel set drives Pan-Tompkins QRS detection."
                           : "Pan-Tompkins runs across the selected channel set and aggregates beats.",
                           systemImage: "checkmark.circle")
@@ -8589,19 +8706,19 @@ struct WaveformView: View {
                     Text("Min HR")
                         .font(.caption)
                         .frame(width: 100, alignment: .leading)
-                    TextField("BPM", value: $bcgMinHR, format: .number.precision(.fractionLength(0)))
+                    TextField("BPM", value: $bcg.minHR, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
-                    Slider(value: $bcgMinHR, in: 30...80, step: 1)
+                    Slider(value: $bcg.minHR, in: 30...80, step: 1)
                 }
                 HStack {
                     Text("Max HR")
                         .font(.caption)
                         .frame(width: 100, alignment: .leading)
-                    TextField("BPM", value: $bcgMaxHR, format: .number.precision(.fractionLength(0)))
+                    TextField("BPM", value: $bcg.maxHR, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
-                    Slider(value: $bcgMaxHR, in: 60...180, step: 1)
+                    Slider(value: $bcg.maxHR, in: 60...180, step: 1)
                 }
                 Text("Max HR sets the refractory period (caps the beat rate); for Virtual ECG it also bounds the band-pass before PCA.")
                     .font(.caption2)
@@ -8627,13 +8744,13 @@ struct WaveformView: View {
                     Text("Lag")
                         .font(.caption)
                         .frame(width: 100, alignment: .leading)
-                    TextField("ms", value: $bcgQRSLagMs, format: .number.precision(.fractionLength(0)))
+                    TextField("ms", value: $bcg.qrsLagMs, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
                     Text("ms")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Slider(value: $bcgQRSLagMs, in: 100...700, step: 10)
+                    Slider(value: $bcg.qrsLagMs, in: 100...700, step: 10)
                 }
                 .help("Typical BCG onset lags the R-wave by 200–400 ms. Start at 300 ms and adjust to align the BCG artifact peak with detected events.")
             }
@@ -8641,21 +8758,33 @@ struct WaveformView: View {
     }
 
     private func disableBCGDetection() {
-        detectsBCGArtifacts = false
+        bcg.detectsArtifacts = false
         artifactVM.events = artifactVM.events.filter { $0.sourceFile != BCGDetector.sourceFile }
-        definedArtifacts.removeAll { $0.id == bcgDefinedArtifactID }
-        bcgRefinedTemplate = nil
-        bcgRefinedKeptCount = nil
+        template.definedArtifacts.removeAll { $0.id == bcgDefinedArtifactID }
+        bcg.refinedTemplate = nil
+        bcg.refinedKeptCount = nil
+    }
+
+    /// When the "auto-select proxy set" default is on, pick a compatible
+    /// built-in BCG channel set the first time the sheet opens.
+    private func autoSelectBCGProxySetIfEnabled(for signal: MFFSignalData) {
+        guard processingDefaults.bcgAutoSelectProxySet, bcg.channelSetID == nil else { return }
+        if let set = ChannelSetStore.builtInSets.first(where: {
+            $0.name.localizedCaseInsensitiveContains("BCG")
+                && ($0.channelIndices.max() ?? -1) < signal.numberOfChannels
+        }) {
+            bcg.channelSetID = set.id
+        }
     }
 
     private func runBCGDetection(signal: MFFSignalData, selection: ClosedRange<Int>?) async {
-        isRunningBCGDetection = true
-        bcgDetectionStatus = "Detecting…"
-        bcgRefinedTemplate = nil
-        bcgRefinedKeptCount = nil
+        bcg.isRunning = true
+        bcg.status = "Detecting…"
+        bcg.refinedTemplate = nil
+        bcg.refinedKeptCount = nil
 
         // Restrict to a channel set when one is selected (GFP-based methods).
-        let restrictedIndices: [Int]? = bcgChannelSetID.flatMap { id in
+        let restrictedIndices: [Int]? = bcg.channelSetID.flatMap { id in
             ChannelSetStore.shared.allSets.first(where: { $0.id == id })?
                 .channelIndices.filter { signal.data.indices.contains($0) }
         }
@@ -8665,9 +8794,9 @@ struct WaveformView: View {
         }()
         let sr          = signal.samplingRate
         let duration    = signal.duration
-        let threshold   = bcgThresholdSD
-        let winSec      = bcgWindowSeconds
-        let method      = bcgDetectionMethod
+        let threshold   = bcg.thresholdSD
+        let winSec      = bcg.windowSeconds
+        let method      = bcg.method
 
         let times: [Double]
 
@@ -8676,16 +8805,16 @@ struct WaveformView: View {
             times = await BCGDetector.periodicityEvents(
                 channels: channels,
                 samplingRate: sr,
-                minHR: bcgMinHR,
-                maxHR: bcgMaxHR,
+                minHR: bcg.minHR,
+                maxHR: bcg.maxHR,
                 thresholdSD: threshold
             )
 
         case .spatialPCA:
-            let nComp      = bcgPCAComponents
-            let whiten     = bcgSpatialWhiten
-            let slideNorm  = bcgSlidingNormalize
-            let respNorm   = bcgRespAdaptive
+            let nComp      = bcg.pcaComponents
+            let whiten     = bcg.spatialWhiten
+            let slideNorm  = bcg.slidingNormalize
+            let respNorm   = bcg.respAdaptive
             times = await BCGDetector.spatialPCAEvents(
                 channels: channels,
                 samplingRate: sr,
@@ -8701,18 +8830,18 @@ struct WaveformView: View {
             times = await BCGDetector.cardiacPowerEvents(
                 channels: channels,
                 samplingRate: sr,
-                minHz: bcgPowerMinHz,
-                maxHz: bcgPowerMaxHz,
+                minHz: bcg.powerMinHz,
+                maxHz: bcg.powerMaxHz,
                 thresholdSD: threshold
             )
 
         case .virtualECGPCA:
-            let minRR = 60.0 / max(bcgMaxHR, 1) * 0.6
+            let minRR = 60.0 / max(bcg.maxHR, 1) * 0.6
             if let pc = await BCGDetector.virtualECGComponent(
                 channels: channels,
                 samplingRate: sr,
-                minHR: bcgMinHR,
-                maxHR: bcgMaxHR
+                minHR: bcg.minHR,
+                maxHR: bcg.maxHR
             ) {
                 let source = ECGDetectionSource(
                     id: "bcg-virtual-ecg",
@@ -8737,7 +8866,7 @@ struct WaveformView: View {
             }
 
         case .panTompkinsProxy:
-            let minRR = 60.0 / max(bcgMaxHR, 1) * 0.6
+            let minRR = 60.0 / max(bcg.maxHR, 1) * 0.6
             let labels = restrictedIndices?.map { "Ch \($0 + 1)" }
                 ?? channels.indices.map { "Ch \($0 + 1)" }
             let source = ECGDetectionSource(
@@ -8765,12 +8894,12 @@ struct WaveformView: View {
                 .map { $0.beginTimeSeconds }
             times = BCGDetector.qrsLockingEvents(
                 qrsTimes: qrsTimes,
-                lagSeconds: bcgQRSLagMs / 1000.0,
+                lagSeconds: bcg.qrsLagMs / 1000.0,
                 recordingDuration: duration
             )
         }
 
-        let code    = bcgEventCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        let code    = bcg.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
         let useCode = code.isEmpty ? BCGDetector.eventCode : code
 
         let newEvents: [MFFEvent] = times.enumerated().map { (idx, t) in
@@ -8787,22 +8916,22 @@ struct WaveformView: View {
         artifactVM.events = (nonBCG + newEvents).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
 
         if let estBPM = estimatedBPM(from: times) {
-            bcgDetectionStatus = "✓ \(newEvents.count) events  ·  ~\(String(format: "%.0f", estBPM)) BPM"
+            bcg.status = "✓ \(newEvents.count) events  ·  ~\(String(format: "%.0f", estBPM)) BPM"
         } else {
-            bcgDetectionStatus = newEvents.isEmpty
+            bcg.status = newEvents.isEmpty
                 ? "No events detected — try lowering the threshold or check channel selection."
                 : "✓ \(newEvents.count) events"
         }
 
-        detectsBCGArtifacts = !newEvents.isEmpty
+        bcg.detectsArtifacts = !newEvents.isEmpty
         showsEventsPanel = !newEvents.isEmpty
         if !newEvents.isEmpty {
             selectedEventCodes = [useCode]
             registerBCGDefinedArtifact(events: newEvents, eventCode: useCode)
         }
-        isRunningBCGDetection = false
+        bcg.isRunning = false
         if !newEvents.isEmpty {
-            showsBCGDetectionSheet = false
+            bcg.showsSheet = false
         }
     }
 
@@ -8815,29 +8944,29 @@ struct WaveformView: View {
         let channels = signal.data
         let sr = signal.samplingRate
 
-        bcgIsRefining = true
-        bcgDetectionStatus = "Refining…"
+        bcg.isRefining = true
+        bcg.status = "Refining…"
 
         let result = await BCGDetector.refineSpatialPCA(
             channels: channels,
             samplingRate: sr,
             detectedTimes: existingTimes,
-            rejectFraction: bcgRejectFraction,
-            numComponents: bcgPCAComponents,
-            spatialWhiten: bcgSpatialWhiten,
-            slidingNormalize: bcgSlidingNormalize,
-            respAdaptive: bcgRespAdaptive,
-            thresholdSD: bcgThresholdSD
+            rejectFraction: bcg.rejectFraction,
+            numComponents: bcg.pcaComponents,
+            spatialWhiten: bcg.spatialWhiten,
+            slidingNormalize: bcg.slidingNormalize,
+            respAdaptive: bcg.respAdaptive,
+            thresholdSD: bcg.thresholdSD
         )
 
         guard let (newTimes, templateValues, keptCount) = result else {
-            bcgDetectionStatus = "⚠ Not enough detected events to refine"
-            bcgIsRefining = false
+            bcg.status = "⚠ Not enough detected events to refine"
+            bcg.isRefining = false
             return
         }
 
-        let useCode = bcgEventCode.trimmingCharacters(in: .whitespacesAndNewlines)
-            .isEmpty ? BCGDetector.eventCode : bcgEventCode
+        let useCode = bcg.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ? BCGDetector.eventCode : bcg.eventCode
         let newEvents: [MFFEvent] = newTimes.enumerated().map { (idx, t) in
             MFFEvent(id: "bcg-refined-\(idx)-\(t)",
                      code: useCode,
@@ -8848,15 +8977,15 @@ struct WaveformView: View {
 
         let nonBCG = artifactVM.events.filter { $0.sourceFile != BCGDetector.sourceFile }
         artifactVM.events = (nonBCG + newEvents).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
-        detectsBCGArtifacts = true
-        bcgRefinedTemplate = templateValues
-        bcgRefinedKeptCount = keptCount
+        bcg.detectsArtifacts = true
+        bcg.refinedTemplate = templateValues
+        bcg.refinedKeptCount = keptCount
 
         let total = existingTimes.count
         let bpmStr = estimatedBPM(from: newTimes).map { String(format: "  ·  ~%.0f BPM", $0) } ?? ""
-        bcgDetectionStatus = "✓ Refined: \(keptCount)/\(total) beats kept → \(newEvents.count) events\(bpmStr)"
+        bcg.status = "✓ Refined: \(keptCount)/\(total) beats kept → \(newEvents.count) events\(bpmStr)"
         registerBCGDefinedArtifact(events: newEvents, eventCode: useCode)
-        bcgIsRefining = false
+        bcg.isRefining = false
     }
 
     private func registerBCGDefinedArtifact(events: [MFFEvent], eventCode: String) {
@@ -8867,25 +8996,25 @@ struct WaveformView: View {
             eventCode: eventCode,
             events: events,
             selectedChannelIndices: [],
-            windowSizeSeconds: bcgWindowSeconds,
+            windowSizeSeconds: bcg.windowSeconds,
             average: nil,
             topography: nil,
             cleaningMethod: .obs
         )
-        if let index = definedArtifacts.firstIndex(where: { $0.id == bcgDefinedArtifactID }) {
-            let prevMethod    = definedArtifacts[index].cleaningMethod
-            let prevOBSComps  = definedArtifacts[index].obsPCAComponentCount
-            let prevTaper     = definedArtifacts[index].obsEdgeTaperSeconds
-            let prevBaseline  = definedArtifacts[index].obsPreservesLocalBaseline
-            let prevOverlap   = definedArtifacts[index].obsUsesOverlapAdd
-            definedArtifacts[index] = artifact
-            definedArtifacts[index].cleaningMethod              = prevMethod
-            definedArtifacts[index].obsPCAComponentCount        = prevOBSComps
-            definedArtifacts[index].obsEdgeTaperSeconds         = prevTaper
-            definedArtifacts[index].obsPreservesLocalBaseline   = prevBaseline
-            definedArtifacts[index].obsUsesOverlapAdd           = prevOverlap
+        if let index = template.definedArtifacts.firstIndex(where: { $0.id == bcgDefinedArtifactID }) {
+            let prevMethod    = template.definedArtifacts[index].cleaningMethod
+            let prevOBSComps  = template.definedArtifacts[index].obsPCAComponentCount
+            let prevTaper     = template.definedArtifacts[index].obsEdgeTaperSeconds
+            let prevBaseline  = template.definedArtifacts[index].obsPreservesLocalBaseline
+            let prevOverlap   = template.definedArtifacts[index].obsUsesOverlapAdd
+            template.definedArtifacts[index] = artifact
+            template.definedArtifacts[index].cleaningMethod              = prevMethod
+            template.definedArtifacts[index].obsPCAComponentCount        = prevOBSComps
+            template.definedArtifacts[index].obsEdgeTaperSeconds         = prevTaper
+            template.definedArtifacts[index].obsPreservesLocalBaseline   = prevBaseline
+            template.definedArtifacts[index].obsUsesOverlapAdd           = prevOverlap
         } else {
-            definedArtifacts.append(artifact)
+            template.definedArtifacts.append(artifact)
         }
         invalidateOBSVarianceCache(for: bcgDefinedArtifactID)
         clearAppliedArtifactCleaning()
@@ -9141,7 +9270,7 @@ struct WaveformView: View {
             || detectsEyeMovementArtifacts
             || detectsECGArtifacts
             || !artifactVM.events.isEmpty
-            || !definedArtifacts.isEmpty
+            || !template.definedArtifacts.isEmpty
             || isRunningWaveletArtifactExplorer
             || artifactVM.cleanedSignal != nil
     }
@@ -9171,8 +9300,8 @@ struct WaveformView: View {
             return "Artifact detection\n\(detectStatus)"
         }
 
-        if !definedArtifacts.isEmpty {
-            return "Artifact detection\n\(definedArtifacts.count) artifact definitions"
+        if !template.definedArtifacts.isEmpty {
+            return "Artifact detection\n\(template.definedArtifacts.count) artifact definitions"
         }
 
         return "Artifact detection"
@@ -9325,7 +9454,7 @@ struct WaveformView: View {
             results: Array(channels.healthResults.values),
             isAnalyzing: channels.isAnalyzingHealth,
             progress: channels.healthProgress,
-            statusMessage: channelHealthStatusMessage,
+            statusMessage: chanHealth.statusMessage,
             onRefresh: {
                 channels.showsHealth = true
                 channels.healthRefreshToken += 1
@@ -9341,7 +9470,7 @@ struct WaveformView: View {
                 runWaveletChannelGoodness(for: signal)
             },
             onClose: {
-                showsChannelHealthDetails = false
+                chanHealth.showsDetails = false
             }
         )
     }
@@ -9350,7 +9479,7 @@ struct WaveformView: View {
     private func runWaveletChannelGoodness(for signal: MFFSignalData) {
         guard !channels.isAnalyzingHealth else { return }
         let signature = channelHealthSignature(for: signal)
-        let shouldRefreshBase = channelHealthSignature != signature || channels.healthResults.isEmpty
+        let shouldRefreshBase = chanHealth.signature != signature || channels.healthResults.isEmpty
         let existingResults = channels.healthResults
         let layout = recording.sensorLayout
         let impedances = recording.signal?.impedancesKOhm
@@ -9370,21 +9499,21 @@ struct WaveformView: View {
             thresholdModel: wavelet.thresholdModel
         )
 
-        channelHealthTask?.cancel()
-        channelHealthSignature = signature
+        chanHealth.task?.cancel()
+        chanHealth.signature = signature
         if shouldRefreshBase {
             channels.healthResults = [:]
         }
         channels.showsHealth = true
         channels.isAnalyzingHealth = true
         channels.healthProgress = 0
-        channelHealthStatusMessage = "Running wavelet channel goodness..."
+        chanHealth.statusMessage = "Running wavelet channel goodness..."
 
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
             channels.healthProgress = min(max(fraction, 0), 1)
         }
 
-        channelHealthTask = Task { @MainActor in
+        chanHealth.task = Task { @MainActor in
             let worker = Task.detached(priority: .utility) {
                 let baseAnalysis: ChannelHealthAnalysis
                 if shouldRefreshBase {
@@ -9434,14 +9563,14 @@ struct WaveformView: View {
 
             guard !Task.isCancelled,
                   channels.showsHealth,
-                  channelHealthSignature == signature else {
+                  chanHealth.signature == signature else {
                 return
             }
 
             channels.healthResults = analysis.resultsByChannel
             channels.isAnalyzingHealth = false
             channels.healthProgress = 1
-            channelHealthStatusMessage = analysis.resultsByChannel.isEmpty
+            chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
                 ? "No wavelet channel-goodness metrics available."
                 : "Wavelet channel goodness updated \(analysis.resultsByChannel.count) channels."
         }
@@ -9452,24 +9581,24 @@ struct WaveformView: View {
         let signature = channelHealthSignature(for: signal)
 
         guard channels.showsHealth else {
-            channelHealthTask?.cancel()
-            channelHealthTask = nil
-            channelHealthSignature = nil
+            chanHealth.task?.cancel()
+            chanHealth.task = nil
+            chanHealth.signature = nil
             channels.clearHealthResults()
-            channelHealthStatusMessage = nil
+            chanHealth.statusMessage = nil
             return
         }
 
-        guard channelHealthSignature != signature || channels.healthResults.isEmpty else {
+        guard chanHealth.signature != signature || channels.healthResults.isEmpty else {
             return
         }
 
-        channelHealthTask?.cancel()
-        channelHealthSignature = signature
+        chanHealth.task?.cancel()
+        chanHealth.signature = signature
         channels.healthResults = [:]
         channels.isAnalyzingHealth = true
         channels.healthProgress = 0
-        channelHealthStatusMessage = nil
+        chanHealth.statusMessage = nil
 
         let layout = recording.sensorLayout
         let sourceSignal = signal
@@ -9481,7 +9610,7 @@ struct WaveformView: View {
             channels.healthProgress = min(max(fraction, 0), 1)
         }
 
-        channelHealthTask = Task { @MainActor in
+        chanHealth.task = Task { @MainActor in
             let worker = Task.detached(priority: .utility) {
                 ChannelHealthAnalyzer.analyze(
                     signal: sourceSignal,
@@ -9511,14 +9640,14 @@ struct WaveformView: View {
 
             guard !Task.isCancelled,
                   channels.showsHealth,
-                  channelHealthSignature == signature else {
+                  chanHealth.signature == signature else {
                 return
             }
 
             channels.healthResults = analysis.resultsByChannel
             channels.isAnalyzingHealth = false
             channels.healthProgress = 1
-            channelHealthStatusMessage = analysis.resultsByChannel.isEmpty
+            chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
                 ? "No channel health metrics available."
                 : "Channel health scored \(analysis.resultsByChannel.count) channels."
         }
@@ -9526,11 +9655,11 @@ struct WaveformView: View {
 
     private func saveChannelLabelMetricsJSON() {
         guard !channels.bad.isEmpty else {
-            channelHealthStatusMessage = "Mark at least one bad channel before saving labels."
+            chanHealth.statusMessage = "Mark at least one bad channel before saving labels."
             return
         }
         guard let signal = currentChannelLabelMetricsSignal() else {
-            channelHealthStatusMessage = "No signal is ready for channel-label export."
+            chanHealth.statusMessage = "No signal is ready for channel-label export."
             return
         }
 
@@ -9542,10 +9671,10 @@ struct WaveformView: View {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        channelHealthTask?.cancel()
+        chanHealth.task?.cancel()
         channels.isAnalyzingHealth = true
         channels.healthProgress = 0
-        channelHealthStatusMessage = "Saving channel label metrics..."
+        chanHealth.statusMessage = "Saving channel label metrics..."
 
         let packageName = recording.packageName
         let layout = recording.sensorLayout
@@ -9560,7 +9689,7 @@ struct WaveformView: View {
             channels.healthProgress = min(max(fraction, 0), 1)
         }
 
-        channelHealthTask = Task { @MainActor in
+        chanHealth.task = Task { @MainActor in
             let result = await Task.detached(priority: .utility) {
                 do {
                     let analysis = ChannelHealthAnalyzer.analyze(
@@ -9602,10 +9731,10 @@ struct WaveformView: View {
             switch result {
             case .success(let channelCount):
                 channels.healthProgress = 1
-                channelHealthStatusMessage = "Saved labels and metrics for \(channelCount) channels: \(url.lastPathComponent)"
+                chanHealth.statusMessage = "Saved labels and metrics for \(channelCount) channels: \(url.lastPathComponent)"
             case .failure(let error):
                 channels.healthProgress = 0
-                channelHealthStatusMessage = error.localizedDescription
+                chanHealth.statusMessage = error.localizedDescription
             }
         }
     }
@@ -9642,8 +9771,8 @@ struct WaveformView: View {
 
     private func segmentHealthRequestID(for signal: MFFSignalData) -> String {
         [
-            "\(showsSegmentHealth)",
-            "\(segmentHealthRefreshRequest)",
+            "\(segHealth.shows)",
+            "\(segHealth.refreshRequest)",
             segmentHealthSignature(for: signal)
         ].joined(separator: "|")
     }
@@ -9652,7 +9781,7 @@ struct WaveformView: View {
         let badChannelSignature = channels.bad.sorted().map(String.init).joined(separator: ",")
         let interpolationSignature = channels.interpolated.keys.sorted().map(String.init).joined(separator: ",")
         let epochSignature = epoching.epochSegments.map(\.id).joined(separator: ",")
-        let definedArtifactSignature = definedArtifacts.map { artifact in
+        let definedArtifactSignature = template.definedArtifacts.map { artifact in
             [
                 artifact.id.uuidString,
                 artifact.eventCode,
@@ -9735,7 +9864,7 @@ struct WaveformView: View {
         var windows: [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double)] = []
         var definedEvents = Set<MFFEvent>()
 
-        for artifact in definedArtifacts {
+        for artifact in template.definedArtifacts {
             let windowSeconds = max(artifact.windowSizeSeconds, defaultWindowSeconds)
             for event in artifact.events {
                 definedEvents.insert(event)
@@ -9827,43 +9956,43 @@ struct WaveformView: View {
     private func refreshSegmentHealthIfNeeded(for signal: MFFSignalData) {
         let signature = segmentHealthSignature(for: signal)
 
-        guard showsSegmentHealth else {
-            segmentHealthTask?.cancel()
-            segmentHealthTask = nil
-            segmentHealthSignature = nil
-            segmentHealthAnalysis = nil
-            isAnalyzingSegmentHealth = false
-            segmentHealthProgress = 0
-            segmentHealthStatusMessage = nil
+        guard segHealth.shows else {
+            segHealth.task?.cancel()
+            segHealth.task = nil
+            segHealth.signature = nil
+            segHealth.analysis = nil
+            segHealth.isAnalyzing = false
+            segHealth.progress = 0
+            segHealth.statusMessage = nil
             return
         }
 
-        guard segmentHealthSignature != signature || segmentHealthAnalysis?.results.isEmpty != false else {
+        guard segHealth.signature != signature || segHealth.analysis?.results.isEmpty != false else {
             return
         }
 
         let segments = segmentHealthInputSegments(for: signal)
         guard !segments.isEmpty else {
-            segmentHealthAnalysis = nil
-            segmentHealthStatusMessage = "No segments are available to score."
+            segHealth.analysis = nil
+            segHealth.statusMessage = "No segments are available to score."
             return
         }
 
-        segmentHealthTask?.cancel()
-        segmentHealthSignature = signature
-        segmentHealthAnalysis = nil
-        isAnalyzingSegmentHealth = true
-        segmentHealthProgress = 0
-        segmentHealthStatusMessage = nil
+        segHealth.task?.cancel()
+        segHealth.signature = signature
+        segHealth.analysis = nil
+        segHealth.isAnalyzing = true
+        segHealth.progress = 0
+        segHealth.statusMessage = nil
 
         let excludedChannels = channels.bad
         let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
         let sourceSignal = signal
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
-            segmentHealthProgress = min(max(fraction, 0), 1)
+            segHealth.progress = min(max(fraction, 0), 1)
         }
 
-        segmentHealthTask = Task { @MainActor in
+        segHealth.task = Task { @MainActor in
             let worker = Task.detached(priority: .utility) {
                 SegmentHealthAnalyzer.analyze(
                     signal: sourceSignal,
@@ -9890,15 +10019,15 @@ struct WaveformView: View {
             progressTask.cancel()
 
             guard !Task.isCancelled,
-                  showsSegmentHealth,
-                  segmentHealthSignature == signature else {
+                  segHealth.shows,
+                  segHealth.signature == signature else {
                 return
             }
 
-            segmentHealthAnalysis = analysis
-            isAnalyzingSegmentHealth = false
-            segmentHealthProgress = 1
-            segmentHealthStatusMessage = analysis.results.isEmpty
+            segHealth.analysis = analysis
+            segHealth.isAnalyzing = false
+            segHealth.progress = 1
+            segHealth.statusMessage = analysis.results.isEmpty
                 ? "No segment health metrics available."
                 : "Segment health scored \(analysis.results.count) segments."
         }
@@ -9906,13 +10035,13 @@ struct WaveformView: View {
 
     private func segmentHealthDetailsSheet() -> some View {
         SegmentHealthDetailsView(
-            results: segmentHealthAnalysis?.results ?? [],
-            isAnalyzing: isAnalyzingSegmentHealth,
-            progress: segmentHealthProgress,
-            statusMessage: segmentHealthStatusMessage,
+            results: segHealth.analysis?.results ?? [],
+            isAnalyzing: segHealth.isAnalyzing,
+            progress: segHealth.progress,
+            statusMessage: segHealth.statusMessage,
             onRefresh: {
-                showsSegmentHealth = true
-                segmentHealthRefreshRequest += 1
+                segHealth.shows = true
+                segHealth.refreshRequest += 1
             },
             onSave: {
                 saveSegmentHealthMetricsJSON()
@@ -9921,20 +10050,20 @@ struct WaveformView: View {
                 jumpToSegment(result)
             },
             onClose: {
-                showsSegmentHealthDetails = false
+                segHealth.showsDetails = false
             }
         )
     }
 
     private func saveSegmentHealthMetricsJSON() {
         guard let signal = currentSegmentHealthSignal() else {
-            segmentHealthStatusMessage = "No signal is ready for segment-metrics export."
+            segHealth.statusMessage = "No signal is ready for segment-metrics export."
             return
         }
 
         let segments = segmentHealthInputSegments(for: signal)
         guard !segments.isEmpty else {
-            segmentHealthStatusMessage = "No segments are available to export."
+            segHealth.statusMessage = "No segments are available to export."
             return
         }
 
@@ -9946,24 +10075,24 @@ struct WaveformView: View {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        segmentHealthTask?.cancel()
-        showsSegmentHealth = true
-        isAnalyzingSegmentHealth = true
-        segmentHealthProgress = 0
-        segmentHealthStatusMessage = "Saving segment health metrics..."
+        segHealth.task?.cancel()
+        segHealth.shows = true
+        segHealth.isAnalyzing = true
+        segHealth.progress = 0
+        segHealth.statusMessage = "Saving segment health metrics..."
 
         let signature = segmentHealthSignature(for: signal)
-        let reusableAnalysis = segmentHealthSignature == signature ? segmentHealthAnalysis : nil
+        let reusableAnalysis = segHealth.signature == signature ? segHealth.analysis : nil
         let packageName = recording.packageName
         let processing = segmentHealthProcessingSnapshot()
         let excludedChannels = channels.bad
         let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
 
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
-            segmentHealthProgress = min(max(fraction, 0), 1)
+            segHealth.progress = min(max(fraction, 0), 1)
         }
 
-        segmentHealthTask = Task { @MainActor in
+        segHealth.task = Task { @MainActor in
             let result = await Task.detached(priority: .utility) {
                 do {
                     let analysis: SegmentHealthAnalysis
@@ -10004,17 +10133,17 @@ struct WaveformView: View {
 
             progressContinuation.finish()
             progressTask.cancel()
-            isAnalyzingSegmentHealth = false
+            segHealth.isAnalyzing = false
 
             switch result {
             case .success(let payload):
-                segmentHealthProgress = 1
-                segmentHealthSignature = signature
-                segmentHealthAnalysis = payload.1
-                segmentHealthStatusMessage = "Saved metrics for \(payload.0) segments: \(url.lastPathComponent)"
+                segHealth.progress = 1
+                segHealth.signature = signature
+                segHealth.analysis = payload.1
+                segHealth.statusMessage = "Saved metrics for \(payload.0) segments: \(url.lastPathComponent)"
             case .failure(let error):
-                segmentHealthProgress = 0
-                segmentHealthStatusMessage = error.localizedDescription
+                segHealth.progress = 0
+                segHealth.statusMessage = error.localizedDescription
             }
         }
     }
@@ -10150,11 +10279,11 @@ struct WaveformView: View {
 
         // Artifact detection + templates.
         artifactVM.events = []
-        artifactTemplateResult = nil
-        definedArtifacts = []
+        template.result = nil
+        template.definedArtifacts = []
         artifactVM.cleaningSummaries = []
         artifactVM.cleaningProgress = nil
-        obsVarianceReportCache.removeAll()
+        template.obsVarianceReportCache.removeAll()
         epoching.skippedDefinedArtifactIDs.removeAll()
         epoching.knownArtifactIDsForRejection.removeAll()
         detectsEyeBlinkArtifacts = false
@@ -10162,35 +10291,35 @@ struct WaveformView: View {
         detectsECGArtifacts = false
         ecgDetectionSelectedPNSChannels.removeAll()
         ecgDetectionProxyChannels = ""
-        selectedArtifactTemplateChannel = nil
-        artifactTemplateClickedChannel = nil
-        artifactTemplateSelectionRange = nil
-        artifactTemplateDefinedArtifactID = nil
+        template.selectedChannel = nil
+        template.clickedChannel = nil
+        template.selectionRange = nil
+        template.definedArtifactID = nil
 
         // Status messages and progress.
         filter.statusMessage = nil
         filter.statusIsError = false
         ica.statusMessage = nil
         artifactVM.statusMessage = nil
-        artifactTemplateStatusMessage = nil
+        template.statusMessage = nil
         artifactVM.cleaningStatusMessage = nil
         gradient.statusMessage = nil
         epoching.statusMessage = nil
         channelStatusMessage = nil
-        channelHealthStatusMessage = nil
-        segmentHealthStatusMessage = nil
+        chanHealth.statusMessage = nil
+        segHealth.statusMessage = nil
         ica.lastReconstructionDebugReport = nil
 
         // Interpolations, epochs, and the dependent selection/topomap state.
         invalidateInterpolations()
         channels.clearHealthResults()
-        channelHealthSignature = nil
-        segmentHealthTask?.cancel()
-        segmentHealthTask = nil
-        segmentHealthAnalysis = nil
-        segmentHealthSignature = nil
-        isAnalyzingSegmentHealth = false
-        segmentHealthProgress = 0
+        chanHealth.signature = nil
+        segHealth.task?.cancel()
+        segHealth.task = nil
+        segHealth.analysis = nil
+        segHealth.signature = nil
+        segHealth.isAnalyzing = false
+        segHealth.progress = 0
         invalidateEpochsForSignalChange()
 
         // Force artifact overlays and downstream views to rebuild from the base.
@@ -10210,12 +10339,12 @@ struct WaveformView: View {
         epoching.butterflyTopomapRelativeSample = nil
         epoching.showsButterflyPlot = false
         epoching.showsOverlaidCategories = false
-        segmentHealthTask?.cancel()
-        segmentHealthTask = nil
-        segmentHealthAnalysis = nil
-        segmentHealthSignature = nil
-        isAnalyzingSegmentHealth = false
-        segmentHealthProgress = 0
+        segHealth.task?.cancel()
+        segHealth.task = nil
+        segHealth.analysis = nil
+        segHealth.signature = nil
+        segHealth.isAnalyzing = false
+        segHealth.progress = 0
     }
 
     // MARK: - SwiftData markers
@@ -10524,7 +10653,7 @@ struct WaveformView: View {
 
 /// Which channels the scalp-topography correlation uses. Bad channels are always
 /// excluded.
-private enum ArtifactTopographyChannelScope: CaseIterable, Hashable, Identifiable {
+enum ArtifactTopographyChannelScope: CaseIterable, Hashable, Identifiable {
     case allGood
     case topN
     case channelSet
@@ -10540,14 +10669,14 @@ private enum ArtifactTopographyChannelScope: CaseIterable, Hashable, Identifiabl
     }
 }
 
-private enum ArtifactDefinitionPanel: String, CaseIterable, Identifiable {
+enum ArtifactDefinitionPanel: String, CaseIterable, Identifiable {
     case waveforms = "Waveforms"
     case topography = "Topography"
 
     var id: String { rawValue }
 }
 
-private enum ArtifactDefinitionResultSource: Equatable {
+enum ArtifactDefinitionResultSource: Equatable {
     case waveform
     case topography
 
@@ -10611,7 +10740,7 @@ struct SyntheticPNSChannel: Identifiable {
 
 /// Snapshot of the artifact-template controls that affect a full scan. Topography
 /// mode/scope are excluded because they refresh live without a rescan.
-private struct ArtifactScanSignature: Equatable {
+struct ArtifactScanSignature: Equatable {
     var eventCode: String
     var clickedChannel: Int?
     var channelScope: ArtifactTemplateChannelScope
@@ -10809,775 +10938,6 @@ private struct HorizontalViewport: Equatable {
     let width: CGFloat
 }
 
-private struct SegmentHealthBand: View {
-    let result: SegmentHealthResult
-    let showsMouseOverHealth: Bool
-    @State private var showsDetails = false
-
-    var body: some View {
-        Rectangle()
-            .fill(result.grade.color.opacity(result.grade.segmentOverlayOpacity))
-            .overlay(alignment: .leading) {
-                Rectangle()
-                    .fill(result.grade.color.opacity(0.28))
-                    .frame(width: result.grade == .good ? 0 : 1)
-            }
-            .contentShape(Rectangle())
-            .onHover { hovering in
-                guard showsMouseOverHealth else {
-                    showsDetails = false
-                    return
-                }
-                showsDetails = hovering
-            }
-            .popover(isPresented: $showsDetails, arrowEdge: .top) {
-                SegmentHealthPopover(result: result)
-            }
-            .onChange(of: showsMouseOverHealth) { _, isEnabled in
-                if !isEnabled {
-                    showsDetails = false
-                }
-            }
-            .accessibilityLabel("Segment health \(result.goodPercentage) percent good")
-    }
-}
-
-private struct SegmentHealthDetailsView: View {
-    let results: [SegmentHealthResult]
-    let isAnalyzing: Bool
-    let progress: Double
-    let statusMessage: String?
-    let onRefresh: () -> Void
-    let onSave: () -> Void
-    let onJump: (SegmentHealthResult) -> Void
-    let onClose: () -> Void
-
-    private var gradeCounts: [(ChannelHealthGrade, Int)] {
-        ChannelHealthGrade.allHealthGrades.map { grade in
-            (grade, results.filter { $0.grade == grade }.count)
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Segment Health")
-                        .font(.title3.weight(.semibold))
-                    Text("\(results.count) segments")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack(spacing: 8) {
-                    ForEach(gradeCounts, id: \.0) { grade, count in
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(grade.color)
-                                .frame(width: 8, height: 8)
-                            Text("\(count)")
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                Spacer()
-
-                if isAnalyzing {
-                    ProgressView(value: progress)
-                        .frame(width: 120)
-                    Text("\(Int((progress * 100).rounded()))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-
-                Button {
-                    onRefresh()
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(isAnalyzing)
-
-                Button {
-                    onSave()
-                } label: {
-                    Label("Save Metrics JSON...", systemImage: "square.and.arrow.down")
-                }
-                .disabled(results.isEmpty || isAnalyzing)
-
-                Button("Close") {
-                    onClose()
-                }
-            }
-
-            if let statusMessage {
-                Text(statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            VStack(spacing: 0) {
-                SegmentHealthTableHeader()
-
-                Divider()
-
-                if results.isEmpty {
-                    ContentUnavailableView(
-                        "No Segment Health",
-                        systemImage: "rectangle.split.3x1",
-                        description: Text(isAnalyzing ? "Scoring segments..." : "Refresh to score the current signal.")
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(results) { result in
-                                SegmentHealthTableRow(
-                                    result: result,
-                                    onJump: {
-                                        onJump(result)
-                                    }
-                                )
-                                Divider()
-                            }
-                        }
-                    }
-                }
-            }
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(Color.secondary.opacity(0.16), lineWidth: 1)
-            }
-        }
-        .padding(20)
-        .frame(minWidth: 880, minHeight: 520)
-    }
-}
-
-private struct SegmentHealthTableHeader: View {
-    var body: some View {
-        HStack(spacing: 12) {
-            Text("Segment")
-                .frame(width: 78, alignment: .leading)
-            Text("Category")
-                .frame(width: 145, alignment: .leading)
-            Text("Time")
-                .frame(width: 170, alignment: .leading)
-            Text("Health")
-                .frame(width: 96, alignment: .leading)
-            Text("Summary")
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text("Jump")
-                .frame(width: 64, alignment: .trailing)
-        }
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-    }
-}
-
-private struct SegmentHealthTableRow: View {
-    let result: SegmentHealthResult
-    let onJump: () -> Void
-    @State private var showsDetails = false
-    @State private var pinsDetails = false
-    @State private var isHovered = false
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Text("#\(result.segmentIndex + 1)")
-                .font(.caption.monospacedDigit())
-                .frame(width: 78, alignment: .leading)
-
-            Text(result.category)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(width: 145, alignment: .leading)
-
-            Text(segmentTimeText(result))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 170, alignment: .leading)
-
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(result.grade.color)
-                    .frame(width: 9, height: 9)
-                Text("\(result.goodPercentage)%")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(result.grade.color)
-            }
-            .frame(width: 96, alignment: .leading)
-
-            Text(result.summary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button {
-                onJump()
-            } label: {
-                Label("Jump", systemImage: "arrow.right.to.line")
-                    .labelStyle(.iconOnly)
-            }
-            .buttonStyle(.borderless)
-            .help("Jump to this segment in the waveform viewer")
-            .frame(width: 64, alignment: .trailing)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(isHovered || pinsDetails ? result.grade.color.opacity(0.10) : Color.clear)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            isHovered = hovering
-            if hovering {
-                showsDetails = true
-            } else if !pinsDetails {
-                showsDetails = false
-            }
-        }
-        .onTapGesture {
-            pinsDetails.toggle()
-            showsDetails = pinsDetails
-        }
-        .popover(isPresented: $showsDetails, arrowEdge: .trailing) {
-            SegmentHealthPopover(result: result)
-        }
-        .onChange(of: showsDetails) { _, isShowing in
-            if !isShowing {
-                pinsDetails = false
-            }
-        }
-    }
-
-    private func segmentTimeText(_ result: SegmentHealthResult) -> String {
-        let start = Self.formatSeconds(result.startTimeSeconds)
-        let end = Self.formatSeconds(result.endTimeSeconds)
-        return "\(start)-\(end)"
-    }
-
-    private static func formatSeconds(_ seconds: Double) -> String {
-        if seconds >= 60 {
-            let minutes = Int(seconds) / 60
-            let remaining = seconds.truncatingRemainder(dividingBy: 60)
-            return String(format: "%d:%05.2f", minutes, remaining)
-        }
-        return String(format: "%.2fs", seconds)
-    }
-}
-
-private struct SegmentHealthPopover: View {
-    let result: SegmentHealthResult
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Segment \(result.segmentIndex + 1)")
-                        .font(.headline)
-                    Text(result.category)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text("\(result.goodPercentage)% good")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(result.grade.color)
-            }
-
-            HStack(spacing: 8) {
-                Text(segmentWindowText(result))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                if result.contributingEpochCount > 1 {
-                    Text("\(result.contributingEpochCount) epochs")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Text(result.summary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(result.metrics) { metric in
-                    SegmentHealthMetricRow(metric: metric)
-                }
-            }
-        }
-        .padding(12)
-        .frame(width: 340)
-    }
-
-    private func segmentWindowText(_ result: SegmentHealthResult) -> String {
-        String(
-            format: "%.2fs-%.2fs (%.2fs)",
-            result.startTimeSeconds,
-            result.endTimeSeconds,
-            result.durationSeconds
-        )
-    }
-}
-
-private struct SegmentHealthMetricRow: View {
-    let metric: SegmentHealthMetric
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Circle()
-                .fill(metric.grade.color)
-                .frame(width: 9, height: 9)
-                .padding(.top, 4)
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(metric.name)
-                        .font(.caption.weight(.semibold))
-                    Spacer()
-                    Text(metric.grade.displayName)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(metric.grade.color)
-                }
-                Text(metric.detail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
-private struct ChannelHealthBadge: View {
-    let result: ChannelHealthResult?
-    let isAnalyzing: Bool
-    @State private var showsDetails = false
-    @State private var pinsDetails = false
-
-    var body: some View {
-        Group {
-            if let result {
-                Circle()
-                    .fill(result.grade.color)
-                    .frame(width: 10, height: 10)
-                    .overlay {
-                        Circle()
-                            .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
-                    }
-            } else if isAnalyzing {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 14, height: 14)
-            } else {
-                Circle()
-                    .strokeBorder(Color.secondary.opacity(0.45), lineWidth: 1)
-                    .frame(width: 10, height: 10)
-            }
-        }
-        .frame(width: 22, height: 22)
-        .background(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill((result?.grade.color ?? Color.secondary).opacity(result == nil ? 0.06 : 0.10))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .strokeBorder((result?.grade.color ?? Color.secondary).opacity(result == nil ? 0.20 : 0.35), lineWidth: 0.75)
-        )
-        .onHover { hovering in
-            guard result != nil else { return }
-            if hovering {
-                showsDetails = true
-            } else if !pinsDetails {
-                showsDetails = false
-            }
-        }
-        .onTapGesture {
-            guard result != nil else { return }
-            pinsDetails.toggle()
-            showsDetails = pinsDetails
-        }
-        .popover(isPresented: $showsDetails, arrowEdge: .trailing) {
-            if let result {
-                ChannelHealthPopover(result: result)
-            }
-        }
-        .onChange(of: showsDetails) { _, isShowing in
-            if !isShowing {
-                pinsDetails = false
-            }
-        }
-        .accessibilityLabel(result.map { "Channel health \($0.goodPercentage) percent good" } ?? "Channel health pending")
-    }
-}
-
-private enum ChannelHealthSort: String, CaseIterable, Identifiable {
-    case lowestGoodness = "Lowest First"
-    case highestGoodness = "Highest First"
-    case channel = "Channel"
-
-    var id: String { rawValue }
-}
-
-private struct ChannelHealthDetailsView: View {
-    let results: [ChannelHealthResult]
-    let isAnalyzing: Bool
-    let progress: Double
-    let statusMessage: String?
-    let onRefresh: () -> Void
-    @Binding var waveletFamily: WaveletCleaningFamily
-    @Binding var waveletLevelCount: Int
-    @Binding var waveletThresholdModel: WaveletCleaningThresholdModel
-    @Binding var waveletThresholdRule: WaveletCleaningThresholdRule
-    @Binding var waveletDownsampleRate: Double
-    @Binding var waveletCleaningMode: WaveletCleaningMode
-    @Binding var waveletIntensity: Double
-    let onRunWavelets: () -> Void
-    let onClose: () -> Void
-
-    @State private var sort = ChannelHealthSort.lowestGoodness
-    @State private var showsWaveletOptions = false
-
-    private var sortedResults: [ChannelHealthResult] {
-        switch sort {
-        case .lowestGoodness:
-            return results.sorted {
-                if $0.goodPercentage == $1.goodPercentage {
-                    return $0.channelIndex < $1.channelIndex
-                }
-                return $0.goodPercentage < $1.goodPercentage
-            }
-        case .highestGoodness:
-            return results.sorted {
-                if $0.goodPercentage == $1.goodPercentage {
-                    return $0.channelIndex < $1.channelIndex
-                }
-                return $0.goodPercentage > $1.goodPercentage
-            }
-        case .channel:
-            return results.sorted { $0.channelIndex < $1.channelIndex }
-        }
-    }
-
-    private var gradeCounts: [(ChannelHealthGrade, Int)] {
-        ChannelHealthGrade.allHealthGrades.map { grade in
-            (grade, results.filter { $0.grade == grade }.count)
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Channel Goodness")
-                        .font(.title3.weight(.semibold))
-                    Text("\(results.count) channels scored")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                Picker("Sort", selection: $sort) {
-                    ForEach(ChannelHealthSort.allCases) { sort in
-                        Text(sort.rawValue).tag(sort)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 145)
-
-                Button("Refresh", action: onRefresh)
-                    .disabled(isAnalyzing)
-
-                Button("Wavelet...") { showsWaveletOptions = true }
-                    .disabled(isAnalyzing)
-                    .popover(isPresented: $showsWaveletOptions, arrowEdge: .bottom) {
-                        WaveletRunPopover(
-                            family: $waveletFamily,
-                            levelCount: $waveletLevelCount,
-                            thresholdModel: $waveletThresholdModel,
-                            thresholdRule: $waveletThresholdRule,
-                            downsampleRate: $waveletDownsampleRate,
-                            cleaningMode: $waveletCleaningMode,
-                            intensity: $waveletIntensity,
-                            isAnalyzing: isAnalyzing,
-                            onRun: {
-                                showsWaveletOptions = false
-                                onRunWavelets()
-                            }
-                        )
-                    }
-
-                Button("Close", action: onClose)
-                    .keyboardShortcut(.cancelAction)
-            }
-
-            HStack(spacing: 8) {
-                ForEach(gradeCounts, id: \.0) { grade, count in
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(grade.color)
-                            .frame(width: 8, height: 8)
-                        Text("\(grade.displayName) \(count)")
-                            .font(.caption.monospacedDigit())
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(grade.color.opacity(0.10))
-                    )
-                }
-
-                Spacer()
-            }
-
-            if isAnalyzing {
-                VStack(alignment: .leading, spacing: 5) {
-                    ProgressView(value: progress)
-                    Text("\(Int((progress * 100).rounded()))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if let statusMessage {
-                Text(statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            if sortedResults.isEmpty {
-                Spacer()
-                Text("No channel goodness metrics yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                Spacer()
-            } else {
-                ScrollView {
-                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 7) {
-                        GridRow {
-                            Text("Ch")
-                            Text("Good")
-                            Text("Grade")
-                            Text("Summary")
-                            Text("Weakest Metrics")
-                        }
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-
-                        ForEach(sortedResults) { result in
-                            GridRow {
-                                Text("\(result.channelIndex + 1)")
-                                    .font(.caption.monospacedDigit().weight(.semibold))
-                                Text("\(result.goodPercentage)%")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(result.grade.color)
-                                Text(result.grade.displayName)
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(result.grade.color)
-                                Text(result.summary)
-                                    .font(.caption)
-                                    .lineLimit(2)
-                                Text(weakestMetricText(result))
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 2)
-                }
-            }
-        }
-        .padding(18)
-        .frame(minWidth: 760, idealWidth: 880, minHeight: 520, idealHeight: 640)
-    }
-
-    private func weakestMetricText(_ result: ChannelHealthResult) -> String {
-        result.metrics.prefix(3).map {
-            "\($0.name) \(Int(($0.score * 100).rounded()))%"
-        }
-        .joined(separator: " | ")
-    }
-}
-
-private struct WaveletRunPopover: View {
-    @Binding var family: WaveletCleaningFamily
-    @Binding var levelCount: Int
-    @Binding var thresholdModel: WaveletCleaningThresholdModel
-    @Binding var thresholdRule: WaveletCleaningThresholdRule
-    @Binding var downsampleRate: Double
-    @Binding var cleaningMode: WaveletCleaningMode
-    @Binding var intensity: Double
-    let isAnalyzing: Bool
-    let onRun: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Wavelet Channel Burden")
-                .font(.headline)
-            Text("Scores each channel by its multiscale transient (artifact) burden using an undecimated wavelet decomposition.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
-                GridRow {
-                    Text("Wavelet")
-                    Picker("", selection: $family) {
-                        ForEach(WaveletCleaningFamily.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 130)
-                }
-                GridRow {
-                    Text("Cleaning mode")
-                    Picker("", selection: $cleaningMode) {
-                        ForEach(WaveletCleaningMode.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 160)
-                }
-                GridRow {
-                    Text("Threshold model")
-                    Picker("", selection: $thresholdModel) {
-                        ForEach(WaveletCleaningThresholdModel.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 130)
-                }
-                GridRow {
-                    Text("Threshold rule")
-                    Picker("", selection: $thresholdRule) {
-                        ForEach(WaveletCleaningThresholdRule.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 130)
-                }
-                GridRow {
-                    Text("Levels")
-                    Stepper("\(levelCount)", value: $levelCount, in: 1...WaveletArtifactAnalyzer.maximumLevelCount)
-                        .frame(width: 110)
-                }
-                GridRow {
-                    Text("Intensity")
-                    TextField("x", value: $intensity, format: .number.precision(.fractionLength(2)))
-                        .frame(width: 80)
-                }
-                GridRow {
-                    Text("Downsample (Hz)")
-                    TextField("Hz", value: $downsampleRate, format: .number.precision(.fractionLength(0)))
-                        .frame(width: 80)
-                }
-            }
-            .font(.caption)
-
-            HStack {
-                Spacer()
-                Button("Run", action: onRun)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(isAnalyzing)
-            }
-        }
-        .padding(14)
-        .frame(width: 320)
-    }
-}
-
-private struct ChannelHealthPopover: View {
-    let result: ChannelHealthResult
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Ch \(result.channelIndex + 1)")
-                    .font(.headline)
-                Spacer()
-                Text("\(result.goodPercentage)% good")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(result.grade.color)
-            }
-
-            Text(result.summary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(result.metrics) { metric in
-                    ChannelHealthMetricRow(metric: metric)
-                }
-            }
-        }
-        .padding(12)
-        .frame(width: 320)
-    }
-}
-
-private struct ChannelHealthMetricRow: View {
-    let metric: ChannelHealthMetric
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Circle()
-                .fill(metric.grade.color)
-                .frame(width: 9, height: 9)
-                .padding(.top, 4)
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(metric.name)
-                        .font(.caption.weight(.semibold))
-                    Spacer()
-                    Text(metric.grade.displayName)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(metric.grade.color)
-                }
-                Text(metric.detail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
-private extension ChannelHealthGrade {
-    static var allHealthGrades: [ChannelHealthGrade] {
-        [.good, .watch, .poor]
-    }
-
-    var color: Color {
-        switch self {
-        case .good: return .green
-        case .watch: return .yellow
-        case .poor: return .red
-        }
-    }
-
-    var segmentOverlayOpacity: Double {
-        switch self {
-        case .good: return 0.08
-        case .watch: return 0.11
-        case .poor: return 0.12
-        }
-    }
-}
 
 private struct EventSummary: Identifiable {
     let code: String
@@ -11892,1319 +11252,94 @@ private struct MFFExportSnapshot: Sendable {
     let kind: MFFExportKind
 }
 
+private enum MFFSplitSelection {
+    case left
+    case right
+    case both
+}
+
+private struct MFFSplitOutput: Sendable {
+    let segment: MFFSignalSplitSegment
+    let url: URL
+}
+
+private func normalizedMFFPackageURL(_ url: URL) -> URL {
+    url.pathExtension.lowercased() == "mff" ? url : url.appendingPathExtension("mff")
+}
+
+private struct WaveformRightClickMonitor: NSViewRepresentable {
+    var onRightClick: (CGPoint) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onRightClick: onRightClick)
+    }
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView()
+        context.coordinator.view = view
+        context.coordinator.installIfNeeded()
+        return view
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {
+        context.coordinator.onRightClick = onRightClick
+        context.coordinator.view = nsView
+        context.coordinator.installIfNeeded()
+    }
+
+    static func dismantleNSView(_ nsView: MonitorView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    final class MonitorView: NSView {
+        override var isFlipped: Bool { true }
+    }
+
+    final class Coordinator {
+        weak var view: NSView?
+        var onRightClick: (CGPoint) -> Void
+        private var monitor: Any?
+
+        init(onRightClick: @escaping (CGPoint) -> Void) {
+            self.onRightClick = onRightClick
+        }
+
+        deinit {
+            uninstall()
+        }
+
+        func installIfNeeded() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown]) { [weak self] event in
+                guard let self = self,
+                      let view = self.view,
+                      event.window === view.window else {
+                    return event
+                }
+                let point = view.convert(event.locationInWindow, from: nil)
+                if view.bounds.contains(point) {
+                    self.onRightClick(point)
+                }
+                return event
+            }
+        }
+
+        func uninstall() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            monitor = nil
+        }
+    }
+}
+
 private struct ICAProgressUpdate: Sendable {
     var fraction: Double
     var message: String
 }
 
-private struct ArtifactTemplateFieldLabel: View {
-    let title: String
-    let help: String
-    @State private var showsHelp = false
 
-    var body: some View {
-        HStack(spacing: 4) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-
-            Button {
-                showsHelp.toggle()
-            } label: {
-                Image(systemName: "questionmark.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help(help)
-            .popover(isPresented: $showsHelp, arrowEdge: .trailing) {
-                Text(help)
-                    .font(.caption)
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(12)
-                    .frame(width: 260, alignment: .leading)
-            }
-        }
-    }
-}
-
-private struct HoverPinnedPreviewButton<PreviewContent: View>: View {
-    let helpText: String
-    @ViewBuilder var previewContent: () -> PreviewContent
-
-    @State private var showsPreview = false
-    @State private var isPreviewPinned = false
-    @State private var isButtonHovered = false
-    @State private var isPopoverHovered = false
-    @State private var hoverTask: Task<Void, Never>?
-
-    private var previewPresentation: Binding<Bool> {
-        Binding {
-            showsPreview
-        } set: { isPresented in
-            showsPreview = isPresented
-            if !isPresented {
-                isPreviewPinned = false
-                isPopoverHovered = false
-            }
-        }
-    }
-
-    var body: some View {
-        Button {
-            isPreviewPinned.toggle()
-            showsPreview = isPreviewPinned
-            if !showsPreview {
-                hoverTask?.cancel()
-            }
-        } label: {
-            Image(systemName: "eye")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .help(helpText)
-        .onHover { hovering in
-            isButtonHovered = hovering
-            schedulePreviewVisibility()
-        }
-        .popover(isPresented: previewPresentation, arrowEdge: .trailing) {
-            previewContent()
-                .onHover { hovering in
-                    isPopoverHovered = hovering
-                    schedulePreviewVisibility()
-                }
-        }
-        .onDisappear {
-            hoverTask?.cancel()
-        }
-    }
-
-    private func schedulePreviewVisibility() {
-        hoverTask?.cancel()
-        guard !isPreviewPinned else { return }
-        let shouldShow = isButtonHovered || isPopoverHovered
-        let delay: UInt64 = shouldShow ? 80_000_000 : 220_000_000
-        hoverTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: delay)
-            guard !Task.isCancelled else { return }
-            showsPreview = isButtonHovered || isPopoverHovered
-        }
-    }
-}
-
-private struct ArtifactCleaningPreviewButton: View {
-    let artifact: DefinedArtifact
-    let beforeSignal: MFFSignalData
-    let afterSignal: MFFSignalData?
-    let layout: SensorLayout?
-
-    var body: some View {
-        HoverPinnedPreviewButton(helpText: "Preview artifact cleanup") {
-            ArtifactCleaningPreview(
-                artifact: artifact,
-                beforeSignal: beforeSignal,
-                afterSignal: afterSignal,
-                layout: layout
-            )
-        }
-    }
-}
-
-private struct WaveletCleaningPreviewButton: View {
-    let candidate: WaveletArtifactCandidate
-    let signal: MFFSignalData
-    let configuration: WaveletCleaningConfiguration
-
-    var body: some View {
-        HoverPinnedPreviewButton(helpText: "Preview wavelet cleanup") {
-            WaveletCleaningPreview(
-                candidate: candidate,
-                signal: signal,
-                configuration: configuration
-            )
-        }
-    }
-}
-
-private struct WaveletCleaningPreview: View {
-    let candidate: WaveletArtifactCandidate
-    let signal: MFFSignalData
-    let configuration: WaveletCleaningConfiguration
-
-    @State private var preview: WaveletCleaningPreviewResult?
-    @State private var isLoadingPreview = false
-
-    private var previewLoadID: String {
-        [
-            candidate.id,
-            configuration.pipeline.rawValue,
-            configuration.mode.rawValue,
-            configuration.waveletFamily.rawValue,
-            configuration.thresholdModel.rawValue,
-            configuration.thresholdRule.rawValue,
-            "\(configuration.levelCount)",
-            String(format: "%.3f", configuration.thresholdScale),
-            String(format: "%.3f", configuration.intensity),
-            configuration.channelIndices.map(String.init).joined(separator: ","),
-            String(format: "%.3f", configuration.paddingSeconds),
-            String(format: "%.3f", signal.duration)
-        ].joined(separator: "|")
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Wavelet Cleaning Preview")
-                        .font(.headline)
-                    Text("Candidate \(candidate.rank) · Ch \(candidate.channelIndex + 1) · \(Self.timeString(candidate.peakTimeSeconds))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text("\(configuration.pipeline.rawValue) · \(configuration.mode.rawValue) · \(configuration.waveletFamily.rawValue) · \(configuration.thresholdModel.rawValue) · \(configuration.thresholdRule.rawValue)")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            if let preview {
-                let sharedScale = Self.waveformScale([
-                    preview.beforeAverage,
-                    preview.artifactAverage,
-                    preview.afterAverage
-                ])
-                let removedScale = Self.waveformScale([preview.artifactAverage])
-                let removedSubtitle = Self.removedScaleSubtitle(
-                    sharedScale: sharedScale,
-                    removedScale: removedScale
-                )
-                let removedPlotScale = removedSubtitle == nil ? sharedScale : removedScale
-
-                metricsView(preview.metrics)
-
-                HStack(spacing: 10) {
-                    waveformPreview(
-                        title: "Before",
-                        average: preview.beforeAverage,
-                        scale: sharedScale
-                    )
-                    waveformPreview(
-                        title: "Removed",
-                        subtitle: removedSubtitle,
-                        average: preview.artifactAverage,
-                        scale: removedPlotScale
-                    )
-                    waveformPreview(
-                        title: "After",
-                        average: preview.afterAverage,
-                        scale: sharedScale
-                    )
-                }
-
-                removedEnergyHeatmap(preview.channelRemovedEnergy)
-
-                Text("Preview window \(Self.timeString(preview.startTimeSeconds))-\(Self.timeString(preview.endTimeSeconds)); \(configuration.channelIndices.count) channels cleaned with \(configuration.levelCount) undecimated levels, \(configuration.thresholdModel.rawValue), \(String(format: "%.2f", configuration.intensity))x intensity, and a \(String(format: "%.2f", configuration.thresholdScale))x effective gate.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if isLoadingPreview {
-                loadingPreview
-            } else {
-                Text("No valid wavelet cleanup preview could be computed for this candidate.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(14)
-        .frame(width: 700, height: 430, alignment: .topLeading)
-        .task(id: previewLoadID) {
-            await loadPreview()
-        }
-    }
-
-    @MainActor
-    private func loadPreview() async {
-        isLoadingPreview = true
-        preview = nil
-        let signal = signal
-        let candidate = candidate
-        let configuration = configuration
-        let result = await Task.detached(priority: .userInitiated) {
-            WaveletArtifactAnalyzer.cleaningPreview(
-                in: signal,
-                candidate: candidate,
-                configuration: configuration
-            )
-        }.value
-        guard !Task.isCancelled else { return }
-        preview = result
-        isLoadingPreview = false
-    }
-
-    private func metricsView(_ metrics: WaveletCleaningPreviewMetrics) -> some View {
-        HStack(spacing: 8) {
-            metricChip(
-                title: "Variance kept",
-                value: String(format: "%.0f%%", metrics.varianceRetainedPercent),
-                detail: "Remaining variance"
-            )
-            metricChip(
-                title: "Shape r",
-                value: String(format: "%.3f", metrics.correlation),
-                detail: "Before/after similarity"
-            )
-            metricChip(
-                title: "Removed RMS",
-                value: Self.microvoltString(Float(metrics.removedRMSMicrovolts)),
-                detail: "Mean removed amplitude"
-            )
-            metricChip(
-                title: "Peak drop",
-                value: String(format: "%.0f%%", metrics.peakReductionPercent),
-                detail: "Peak amplitude reduction"
-            )
-        }
-    }
-
-    private func metricChip(title: String, value: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption.monospacedDigit())
-            Text(detail)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.secondary.opacity(0.08))
-        )
-    }
-
-    private func removedEnergyHeatmap(_ channels: [WaveletCleaningChannelEnergy]) -> some View {
-        let sortedChannels = channels.sorted { $0.channelIndex < $1.channelIndex }
-        let columns = Array(repeating: GridItem(.fixed(22), spacing: 4), count: 24)
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Removed energy by channel")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(strongestRemovedEnergyText(sortedChannels))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 4) {
-                ForEach(sortedChannels) { channel in
-                    let intensity = min(max(channel.normalizedRemovedEnergy, 0), 1)
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(removedEnergyColor(intensity))
-                        .frame(width: 22, height: 14)
-                        .overlay {
-                            Text("\(channel.channelIndex + 1)")
-                                .font(.system(size: 6, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(intensity > 0.60 ? Color.white : Color.primary.opacity(0.65))
-                        }
-                        .help(removedEnergyHelp(channel))
-                }
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.secondary.opacity(0.06))
-        )
-    }
-
-    private func removedEnergyColor(_ intensity: Double) -> Color {
-        let value = min(max(intensity, 0), 1)
-        return Color(
-            red: 0.18 + 0.78 * value,
-            green: 0.42 - 0.16 * value,
-            blue: 0.72 - 0.58 * value,
-            opacity: 0.22 + 0.76 * value
-        )
-    }
-
-    private func strongestRemovedEnergyText(_ channels: [WaveletCleaningChannelEnergy]) -> String {
-        let strongest = channels.sorted {
-            if $0.normalizedRemovedEnergy == $1.normalizedRemovedEnergy {
-                return $0.channelIndex < $1.channelIndex
-            }
-            return $0.normalizedRemovedEnergy > $1.normalizedRemovedEnergy
-        }
-        .prefix(3)
-        .map { "Ch \($0.channelIndex + 1) \(Self.microvoltString(Float($0.removedRMSMicrovolts)))" }
-
-        return strongest.isEmpty ? "No removed energy" : strongest.joined(separator: " · ")
-    }
-
-    private func removedEnergyHelp(_ channel: WaveletCleaningChannelEnergy) -> String {
-        [
-            "Ch \(channel.channelIndex + 1)",
-            "removed RMS \(Self.microvoltString(Float(channel.removedRMSMicrovolts)))",
-            "peak \(Self.microvoltString(channel.peakRemovedMicrovolts))",
-            String(format: "energy %.1f%% of local signal", min(max(channel.removedEnergyFraction, 0), 9.99) * 100)
-        ].joined(separator: "\n")
-    }
-
-    private func waveformPreview(
-        title: String,
-        subtitle: String? = nil,
-        average: ArtifactTemplateAverage,
-        scale: Float?
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(title)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            ArtifactTemplateAveragePlot(
-                average: average,
-                primaryChannel: candidate.channelIndex,
-                highlightedChannels: [candidate.channelIndex],
-                fixedScaleMicrovolts: scale,
-                maximumBackgroundChannels: 18,
-                usesAmplitudeWeightedOpacity: true
-            )
-            .frame(height: 112)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var loadingPreview: some View {
-        RoundedRectangle(cornerRadius: 6)
-            .fill(Color.secondary.opacity(0.08))
-            .overlay {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Computing local wavelet reconstruction...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(height: 170)
-    }
-
-    nonisolated private static func waveformScale(_ averages: [ArtifactTemplateAverage]) -> Float? {
-        let maxAbs = averages
-            .flatMap { $0.allChannelSamples }
-            .flatMap { $0.map(abs) }
-            .max() ?? 0
-        return maxAbs > 0 ? maxAbs : nil
-    }
-
-    nonisolated private static func removedScaleSubtitle(sharedScale: Float?, removedScale: Float?) -> String? {
-        guard let sharedScale,
-              let removedScale,
-              sharedScale > 0,
-              removedScale > 0,
-              sharedScale > removedScale * 1.5 else {
-            return nil
-        }
-        return String(format: "%.1fx", sharedScale / removedScale)
-    }
-
-    nonisolated private static func microvoltString(_ value: Float) -> String {
-        if value >= 100 {
-            return String(format: "%.0f µV", value)
-        }
-        if value >= 10 {
-            return String(format: "%.1f µV", value)
-        }
-        return String(format: "%.2f µV", value)
-    }
-
-    nonisolated private static func timeString(_ seconds: Double) -> String {
-        if seconds >= 60 {
-            let minutes = Int(seconds) / 60
-            let remainingSeconds = seconds.truncatingRemainder(dividingBy: 60)
-            return String(format: "%d:%06.3f", minutes, remainingSeconds)
-        }
-        return String(format: "%.3fs", seconds)
-    }
-}
-
-private struct ArtifactOBSOptionsButton: View {
-    @Binding var artifact: DefinedArtifact
-    let signal: MFFSignalData
-    @Binding var reportCache: [String: OBSPCAVarianceReport]
-    let onSettingsChange: () -> Void
-
-    @State private var showsOptions = false
-
-    var body: some View {
-        Button("Options...") {
-            showsOptions = true
-        }
-        .font(.caption)
-        .sheet(isPresented: $showsOptions) {
-            ArtifactOBSOptionsSheet(
-                artifact: $artifact,
-                signal: signal,
-                reportCache: $reportCache,
-                onSettingsChange: onSettingsChange
-            )
-        }
-    }
-}
-
-private struct ArtifactOBSOptionsSheet: View {
-    @Binding var artifact: DefinedArtifact
-    let signal: MFFSignalData
-    @Binding var reportCache: [String: OBSPCAVarianceReport]
-    let onSettingsChange: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var report: OBSPCAVarianceReport?
-    @State private var isLoadingReport = false
-
-    private var showsOBSVarianceOptions: Bool {
-        artifact.cleaningMethod == .obs
-    }
-
-    private var componentCountBinding: Binding<Int> {
-        Binding {
-            artifact.obsPCAComponentCount
-        } set: { newValue in
-            let bounded = min(max(newValue, 0), DefinedArtifact.maximumOBSComponentCount)
-            guard artifact.obsPCAComponentCount != bounded else { return }
-            artifact.obsPCAComponentCount = bounded
-            onSettingsChange()
-        }
-    }
-
-    private var selectedCumulativeVariance: Double {
-        report?.cumulativeVariance(for: artifact.obsPCAComponentCount) ?? 0
-    }
-
-    private var edgeTaperBinding: Binding<Double> {
-        Binding {
-            artifact.obsEdgeTaperSeconds
-        } set: { newValue in
-            let bounded = min(max(newValue, 0), DefinedArtifact.maximumOBSEdgeTaperSeconds)
-            guard abs(artifact.obsEdgeTaperSeconds - bounded) > 0.0001 else { return }
-            artifact.obsEdgeTaperSeconds = bounded
-            onSettingsChange()
-        }
-    }
-
-    private var preservesLocalBaselineBinding: Binding<Bool> {
-        Binding {
-            artifact.obsPreservesLocalBaseline
-        } set: { newValue in
-            guard artifact.obsPreservesLocalBaseline != newValue else { return }
-            artifact.obsPreservesLocalBaseline = newValue
-            onSettingsChange()
-        }
-    }
-
-    private var usesOverlapAddBinding: Binding<Bool> {
-        Binding {
-            artifact.obsUsesOverlapAdd
-        } set: { newValue in
-            guard artifact.obsUsesOverlapAdd != newValue else { return }
-            artifact.obsUsesOverlapAdd = newValue
-            onSettingsChange()
-        }
-    }
-
-    private var reportCacheKey: String {
-        [
-            artifact.id.uuidString,
-            artifact.cleaningMethod.rawValue,
-            "\(artifact.eventCount)",
-            "\(artifact.events.first?.beginTimeSeconds ?? -1)",
-            "\(artifact.events.last?.beginTimeSeconds ?? -1)",
-            "\(artifact.windowSizeSeconds)",
-            "\(artifact.obsEdgeTaperSeconds)",
-            "\(signal.signalURL.path)",
-            "\(signal.samplingRate)",
-            "\(signal.duration)",
-            "\(DefinedArtifact.maximumOBSComponentCount)"
-        ].joined(separator: "|")
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("\(artifact.cleaningMethod.rawValue) Options")
-                        .font(.title3.weight(.semibold))
-                    Text(artifact.name)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text("\(artifact.eventCount) events")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            if showsOBSVarianceOptions {
-                VStack(alignment: .leading, spacing: 8) {
-                    Stepper(value: componentCountBinding, in: 0...DefinedArtifact.maximumOBSComponentCount) {
-                        Text("PCA components: \(artifact.obsPCAComponentCount)")
-                            .font(.callout.weight(.medium))
-                    }
-
-                    Text("OBS always removes the mean artifact waveform; PCA components model the remaining event-to-event residual shape.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else {
-                Text("SSP/PCA uses the edge settings below to fade the spatial projection in and out around each event.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Edge handling")
-                    .font(.callout.weight(.medium))
-
-                HStack(spacing: 10) {
-                    Text("Edge taper")
-                        .frame(width: 88, alignment: .leading)
-                    Slider(
-                        value: edgeTaperBinding,
-                        in: 0...DefinedArtifact.maximumOBSEdgeTaperSeconds,
-                        step: 0.01
-                    )
-                    Text("\(Int((artifact.obsEdgeTaperSeconds * 1000).rounded())) ms")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 58, alignment: .trailing)
-                }
-                .help("Adds this much padding before and after each event, then ramps the OBS correction smoothly from zero at the padded edges.")
-
-                Toggle("Preserve local baseline", isOn: preservesLocalBaselineBinding)
-                    .help("Removes local DC/slope from the correction so the cleaned segment keeps the surrounding slow baseline.")
-
-                Toggle("Weighted overlap-add for nearby events", isOn: usesOverlapAddBinding)
-                    .help("Combines overlapping OBS correction windows with weights so close events do not get over-subtracted where they overlap.")
-
-                Text("Windowed corrections are forced to zero at the padded boundaries before tapering, which helps avoid step-like edges.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if showsOBSVarianceOptions {
-                if isLoadingReport {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Fitting residual PCA to artifact windows...")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                } else if let report {
-                    obsVarianceReportView(report)
-                } else {
-                    ContentUnavailableView(
-                        "No OBS PCA Estimate",
-                        systemImage: "chart.bar.xaxis",
-                        description: Text("There were not enough valid artifact windows to estimate residual PCA variance.")
-                    )
-                    .frame(height: 180)
-                }
-            }
-
-            HStack {
-                Spacer()
-                Button("Done") {
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(18)
-        .frame(width: 560)
-        .task(id: reportCacheKey) {
-            await loadReport()
-        }
-    }
-
-    private func obsVarianceReportView(_ report: OBSPCAVarianceReport) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Selected components account for \(Self.percent(selectedCumulativeVariance)) of residual variance.")
-                    .font(.callout.weight(.medium))
-                ProgressView(value: selectedCumulativeVariance)
-                    .progressViewStyle(.linear)
-                Text("\(Self.percent(max(1 - selectedCumulativeVariance, 0))) residual variance remains after the selected PCA components.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 12) {
-                obsReportChip(title: "Valid", value: "\(report.validEventCount)/\(report.eventCount)")
-                obsReportChip(title: "Sampled", value: "\(report.sampledEventCount)")
-                obsReportChip(title: "Channels", value: "\(report.channelCount)")
-                obsReportChip(title: "Window", value: "\(report.windowSampleCount)")
-            }
-
-            if report.components.isEmpty {
-                Text("The residual windows have no measurable PCA variance after subtracting the mean artifact waveform.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 7) {
-                    GridRow {
-                        Text("Component")
-                        Text("Adds")
-                        Text("Cumulative")
-                        Text("Remaining")
-                    }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                    ForEach(report.components) { component in
-                        GridRow {
-                            Label("\(component.componentIndex)", systemImage: component.componentIndex <= artifact.obsPCAComponentCount ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(component.componentIndex <= artifact.obsPCAComponentCount ? .green : .secondary)
-                            Text(Self.percent(component.explainedVariance))
-                            Text(Self.percent(component.cumulativeVariance))
-                            Text(Self.percent(component.remainingVariance))
-                        }
-                        .font(.caption.monospacedDigit())
-                    }
-                }
-            }
-        }
-    }
-
-    private func obsReportChip(title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption.monospacedDigit())
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @MainActor
-    private func loadReport() async {
-        guard showsOBSVarianceOptions else {
-            report = nil
-            isLoadingReport = false
-            return
-        }
-
-        let key = reportCacheKey
-        if let cachedReport = reportCache[key] {
-            report = cachedReport
-            isLoadingReport = false
-            return
-        }
-
-        isLoadingReport = true
-        report = nil
-        let artifact = artifact
-        let signal = signal
-        let fittedReport = await Task.detached(priority: .userInitiated) {
-            ArtifactCleaner.obsVarianceReport(for: artifact, in: signal)
-        }.value
-        guard !Task.isCancelled else { return }
-        report = fittedReport
-        if let fittedReport {
-            reportCache[key] = fittedReport
-        }
-        isLoadingReport = false
-    }
-
-    private static func percent(_ value: Double) -> String {
-        String(format: "%.1f%%", value * 100)
-    }
-}
-
-private struct ArtifactCleaningPreviewData: Sendable {
-    var beforeAverage: ArtifactTemplateAverage?
-    var afterAverage: ArtifactTemplateAverage?
-    var beforeTopographyValues: [Double]?
-    var afterTopographyValues: [Double]?
-    var topographyScale: Double?
-    var waveformScaleMicrovolts: Float?
-    var afterScaleMicrovolts: Float?
-    var reductionMetrics: ArtifactCleaningReductionMetrics?
-}
-
-private struct ArtifactCleaningReductionMetrics: Sendable {
-    var beforePeakMicrovolts: Float
-    var afterPeakMicrovolts: Float
-    var beforeRMSMicrovolts: Float
-    var afterRMSMicrovolts: Float
-
-    var peakReduction: Double? {
-        reduction(before: beforePeakMicrovolts, after: afterPeakMicrovolts)
-    }
-
-    var rmsReduction: Double? {
-        reduction(before: beforeRMSMicrovolts, after: afterRMSMicrovolts)
-    }
-
-    private func reduction(before: Float, after: Float) -> Double? {
-        guard before > 1e-6 else { return nil }
-        return max(0, min(1, 1 - Double(after / before)))
-    }
-}
-
-private struct ArtifactCleaningPreview: View {
-    let artifact: DefinedArtifact
-    let beforeSignal: MFFSignalData
-    let afterSignal: MFFSignalData?
-    let layout: SensorLayout?
-
-    @State private var previewData: ArtifactCleaningPreviewData?
-    @State private var isLoadingPreview = false
-    @State private var magnifiesResidual = false
-
-    private var previewLoadID: String {
-        [
-            artifact.id.uuidString,
-            artifact.appliedMethod?.rawValue ?? artifact.cleaningMethod.rawValue,
-            afterSignal?.signalType ?? "no-after",
-            String(afterSignal?.duration ?? 0)
-        ].joined(separator: "-")
-    }
-
-    private var previewHeight: CGFloat {
-        artifact.topography != nil && layout != nil ? 540 : 285
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(artifact.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                Spacer()
-                Text(artifact.appliedMethod?.rawValue ?? artifact.cleaningMethod.rawValue)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            if artifact.topography != nil, let layout {
-                if let previewData,
-                   let beforeValues = previewData.beforeTopographyValues,
-                   let afterValues = previewData.afterTopographyValues {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Topography")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        HStack(spacing: 10) {
-                            topographyPreview(title: "Before", layout: layout, values: beforeValues, scale: previewData.topographyScale)
-                            topographyPreview(title: "After", layout: layout, values: afterValues, scale: previewData.topographyScale)
-                        }
-                    }
-                } else if isLoadingPreview {
-                    loadingPreview(title: "Topography", height: 180)
-                }
-            }
-
-            if let beforeAverage = previewData?.beforeAverage {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text("Average Waveform")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if previewData?.afterAverage != nil {
-                            Toggle("Magnify residual", isOn: $magnifiesResidual)
-                                .toggleStyle(.checkbox)
-                                .font(.caption2)
-                                .help("Use an independent y-axis for the After plot to inspect small residual activity.")
-                        }
-                    }
-                    if let metrics = previewData?.reductionMetrics {
-                        reductionMetricsView(metrics)
-                    }
-                    HStack(spacing: 10) {
-                        waveformPreview(
-                            title: "Before",
-                            subtitle: sharedScaleSubtitle,
-                            average: beforeAverage,
-                            scale: previewData?.waveformScaleMicrovolts
-                        )
-                        if let afterAverage = previewData?.afterAverage {
-                            waveformPreview(
-                                title: "After",
-                                subtitle: afterWaveformSubtitle,
-                                average: afterAverage,
-                                scale: afterWaveformScale
-                            )
-                        } else {
-                            missingPreview(title: "After")
-                        }
-                    }
-                }
-            } else if isLoadingPreview {
-                loadingPreview(title: "Average Waveform", height: 110)
-            } else {
-                Text("No preview average available.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 320, alignment: .leading)
-            }
-        }
-        .padding(14)
-        .frame(width: 520, height: previewHeight, alignment: .topLeading)
-        .task(id: previewLoadID) {
-            await loadPreview()
-        }
-    }
-
-    @MainActor
-    private func loadPreview() async {
-        isLoadingPreview = true
-        previewData = nil
-        let artifact = artifact
-        let beforeSignal = beforeSignal
-        let afterSignal = afterSignal
-        let data = await Task.detached(priority: .userInitiated) {
-            Self.makePreviewData(
-                artifact: artifact,
-                beforeSignal: beforeSignal,
-                afterSignal: afterSignal
-            )
-        }.value
-        guard !Task.isCancelled else { return }
-        previewData = data
-        isLoadingPreview = false
-    }
-
-    private var afterWaveformScale: Float? {
-        guard magnifiesResidual else {
-            return previewData?.waveformScaleMicrovolts
-        }
-        return previewData?.afterScaleMicrovolts ?? previewData?.waveformScaleMicrovolts
-    }
-
-    private var sharedScaleSubtitle: String? {
-        guard !magnifiesResidual, previewData?.afterAverage != nil else { return nil }
-        return "Shared scale"
-    }
-
-    private var afterWaveformSubtitle: String? {
-        guard magnifiesResidual,
-              let sharedScale = previewData?.waveformScaleMicrovolts,
-              let afterScale = previewData?.afterScaleMicrovolts,
-              afterScale > 0,
-              sharedScale > afterScale * 1.1 else {
-            return sharedScaleSubtitle
-        }
-        return String(format: "%.1fx residual scale", sharedScale / afterScale)
-    }
-
-    private func reductionMetricsView(_ metrics: ArtifactCleaningReductionMetrics) -> some View {
-        HStack(spacing: 8) {
-            metricChip(
-                title: "Peak",
-                value: "\(Self.microvoltString(metrics.beforePeakMicrovolts)) -> \(Self.microvoltString(metrics.afterPeakMicrovolts))",
-                reduction: metrics.peakReduction
-            )
-            metricChip(
-                title: "RMS",
-                value: "\(Self.microvoltString(metrics.beforeRMSMicrovolts)) -> \(Self.microvoltString(metrics.afterRMSMicrovolts))",
-                reduction: metrics.rmsReduction
-            )
-        }
-    }
-
-    private func metricChip(title: String, value: String, reduction: Double?) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 4) {
-                Text(title)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                if let reduction {
-                    Text(Self.percentString(reduction))
-                        .font(.caption2.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(.green)
-                }
-            }
-            Text(value)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.primary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.secondary.opacity(0.08))
-        )
-    }
-
-    private func waveformPreview(
-        title: String,
-        subtitle: String?,
-        average: ArtifactTemplateAverage,
-        scale: Float?
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(title)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            ArtifactTemplateAveragePlot(
-                average: average,
-                primaryChannel: nil,
-                highlightedChannels: Set(artifact.selectedChannelIndices),
-                fixedScaleMicrovolts: scale,
-                maximumBackgroundChannels: 18,
-                usesAmplitudeWeightedOpacity: true
-            )
-            .frame(height: 110)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func missingPreview(title: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.08))
-                .overlay {
-                    Text("Not applied")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(height: 110)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func topographyPreview(title: String, layout: SensorLayout, values: [Double], scale: Double?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            TopomapView(
-                layout: layout,
-                values: values,
-                timeSeconds: artifact.topography?.referenceTimeSeconds ?? 0,
-                fixedScale: scale,
-                showsHeader: false,
-                colorBarPlacement: .bottom,
-                minimumMapHeight: 130
-            )
-            .frame(height: 180)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func loadingPreview(title: String, height: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.08))
-                .overlay {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Preparing preview...")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(height: height)
-        }
-    }
-
-    nonisolated private static func makePreviewData(
-        artifact: DefinedArtifact,
-        beforeSignal: MFFSignalData,
-        afterSignal: MFFSignalData?
-    ) -> ArtifactCleaningPreviewData {
-        let beforeAverage = average(in: beforeSignal, artifact: artifact)
-            ?? artifact.average.map(baselineAlignedAverage)
-        let afterAverage = afterSignal.flatMap { average(in: $0, artifact: artifact) }
-        let beforeTopographyValues = beforeAverage.flatMap(centerValues(from:))
-        let afterTopographyValues = afterAverage.flatMap(centerValues(from:))
-
-        return ArtifactCleaningPreviewData(
-            beforeAverage: beforeAverage,
-            afterAverage: afterAverage,
-            beforeTopographyValues: beforeTopographyValues,
-            afterTopographyValues: afterTopographyValues,
-            topographyScale: topographyScale(beforeTopographyValues, afterTopographyValues),
-            waveformScaleMicrovolts: waveformScale(beforeAverage, afterAverage),
-            afterScaleMicrovolts: waveformScale(afterAverage),
-            reductionMetrics: reductionMetrics(beforeAverage: beforeAverage, afterAverage: afterAverage, artifact: artifact)
-        )
-    }
-
-    nonisolated private static func waveformScale(_ averages: ArtifactTemplateAverage?...) -> Float? {
-        let maxAbs = averages.compactMap { $0 }.flatMap { average in
-            average.allChannelSamples.flatMap { $0.map(abs) }
-        }.max() ?? 0
-        return maxAbs > 0 ? maxAbs : nil
-    }
-
-    nonisolated private static func reductionMetrics(
-        beforeAverage: ArtifactTemplateAverage?,
-        afterAverage: ArtifactTemplateAverage?,
-        artifact: DefinedArtifact
-    ) -> ArtifactCleaningReductionMetrics? {
-        guard let beforeAverage, let afterAverage else { return nil }
-        let before = waveformMetrics(for: beforeAverage, preferredChannels: artifact.selectedChannelIndices)
-        let after = waveformMetrics(for: afterAverage, preferredChannels: artifact.selectedChannelIndices)
-        return ArtifactCleaningReductionMetrics(
-            beforePeakMicrovolts: before.peak,
-            afterPeakMicrovolts: after.peak,
-            beforeRMSMicrovolts: before.rms,
-            afterRMSMicrovolts: after.rms
-        )
-    }
-
-    nonisolated private static func waveformMetrics(
-        for average: ArtifactTemplateAverage,
-        preferredChannels: [Int]
-    ) -> (peak: Float, rms: Float) {
-        let validPreferredChannels = preferredChannels.filter {
-            average.allChannelSamples.indices.contains($0)
-        }
-        let channels = validPreferredChannels.isEmpty
-            ? Array(average.allChannelSamples.indices)
-            : validPreferredChannels
-        var peak: Float = 0
-        var squareSum = 0.0
-        var sampleCount = 0
-        for channel in channels {
-            for value in average.allChannelSamples[channel] {
-                peak = max(peak, abs(value))
-                squareSum += Double(value * value)
-                sampleCount += 1
-            }
-        }
-        let rms = sampleCount > 0 ? Float(sqrt(squareSum / Double(sampleCount))) : 0
-        return (peak, rms)
-    }
-
-    nonisolated private static func microvoltString(_ value: Float) -> String {
-        if value >= 100 {
-            return String(format: "%.0f µV", value)
-        }
-        if value >= 10 {
-            return String(format: "%.1f µV", value)
-        }
-        return String(format: "%.2f µV", value)
-    }
-
-    nonisolated private static func percentString(_ value: Double) -> String {
-        String(format: "%.0f%% reduction", value * 100)
-    }
-
-    nonisolated private static func topographyScale(_ before: [Double]?, _ after: [Double]?) -> Double? {
-        guard let before, let after else { return nil }
-        let maxAbs = (before + after).map(abs).max() ?? 0
-        return maxAbs > 0 ? maxAbs : nil
-    }
-
-    nonisolated private static func centerValues(from average: ArtifactTemplateAverage) -> [Double]? {
-        guard let sampleCount = average.allChannelSamples.first?.count, sampleCount > 0 else { return nil }
-        let center = sampleCount / 2
-        return average.allChannelSamples.map { samples in
-            center < samples.count ? Double(samples[center]) : 0
-        }
-    }
-
-    nonisolated private static func average(in signal: MFFSignalData, artifact: DefinedArtifact) -> ArtifactTemplateAverage? {
-        guard signal.samplingRate > 0,
-              let sampleCount = signal.data.first?.count,
-              sampleCount > 0,
-              !artifact.events.isEmpty else {
-            return nil
-        }
-
-        let windowSamples = artifact.average?.allChannelSamples.first?.count
-            ?? max(Int((artifact.windowSizeSeconds * signal.samplingRate).rounded()), 3)
-        guard windowSamples > 1, sampleCount >= windowSamples else { return nil }
-
-        let edgeSamples = previewBaselineEdgeSamples(windowSamples: windowSamples, samplingRate: signal.samplingRate)
-        let firstCenter = Double(edgeSamples - 1) / 2
-        let lastCenter = Double(windowSamples - edgeSamples) + firstCenter
-        let baselineDenominator = max(lastCenter - firstCenter, 1)
-        var averages = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
-        var accepted = 0
-        for event in artifact.events {
-            let center = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
-            let start = center - windowSamples / 2
-            let end = start + windowSamples
-            guard start >= 0, end <= sampleCount else { continue }
-
-            for channelIndex in signal.data.indices where signal.data[channelIndex].count >= end {
-                let channelData = signal.data[channelIndex]
-                let firstMean = mean(channelData, start: start, count: edgeSamples)
-                let lastMean = mean(channelData, start: end - edgeSamples, count: edgeSamples)
-                let slope = (lastMean - firstMean) / baselineDenominator
-                for offset in 0..<windowSamples {
-                    let baseline = firstMean + slope * (Double(offset) - firstCenter)
-                    averages[channelIndex][offset] += Float(Double(channelData[start + offset]) - baseline)
-                }
-            }
-            accepted += 1
-        }
-
-        guard accepted > 0 else { return nil }
-        let divisor = Float(accepted)
-        for channelIndex in averages.indices {
-            for sample in averages[channelIndex].indices {
-                averages[channelIndex][sample] /= divisor
-            }
-        }
-
-        var summaries: [ArtifactTemplateChannelSummary] = []
-        summaries.reserveCapacity(averages.count)
-        for channelIndex in averages.indices {
-            let samples = averages[channelIndex]
-            var peak: Float = 0
-            var squareSum: Float = 0
-            for value in samples {
-                peak = max(peak, abs(value))
-                squareSum += value * value
-            }
-            let divisor = Float(samples.isEmpty ? 1 : samples.count)
-            let meanSquare = squareSum / divisor
-            summaries.append(ArtifactTemplateChannelSummary(
-                channelIndex: channelIndex,
-                peakAbsoluteMicrovolts: peak,
-                rmsMicrovolts: sqrt(meanSquare)
-            ))
-        }
-        summaries.sort {
-            $0.peakAbsoluteMicrovolts == $1.peakAbsoluteMicrovolts
-                ? $0.channelIndex < $1.channelIndex
-                : $0.peakAbsoluteMicrovolts > $1.peakAbsoluteMicrovolts
-        }
-
-        return ArtifactTemplateAverage(
-            samplingRate: signal.samplingRate,
-            windowSizeSeconds: Double(windowSamples) / signal.samplingRate,
-            eventCount: accepted,
-            selectedChannelIndices: artifact.selectedChannelIndices,
-            allChannelSamples: averages,
-            channelSummaries: summaries
-        )
-    }
-
-    nonisolated private static func baselineAlignedAverage(_ average: ArtifactTemplateAverage) -> ArtifactTemplateAverage {
-        guard let sampleCount = average.allChannelSamples.first?.count, sampleCount > 1 else {
-            return average
-        }
-
-        let edgeSamples = previewBaselineEdgeSamples(windowSamples: sampleCount, samplingRate: average.samplingRate)
-        let firstCenter = Double(edgeSamples - 1) / 2
-        let lastCenter = Double(sampleCount - edgeSamples) + firstCenter
-        let baselineDenominator = max(lastCenter - firstCenter, 1)
-        var samples = average.allChannelSamples
-
-        for channelIndex in samples.indices {
-            let channelSamples = samples[channelIndex]
-            guard channelSamples.count >= sampleCount else { continue }
-            let firstMean = mean(channelSamples, start: 0, count: edgeSamples)
-            let lastMean = mean(channelSamples, start: sampleCount - edgeSamples, count: edgeSamples)
-            let slope = (lastMean - firstMean) / baselineDenominator
-            for offset in 0..<sampleCount {
-                let baseline = firstMean + slope * (Double(offset) - firstCenter)
-                samples[channelIndex][offset] = Float(Double(channelSamples[offset]) - baseline)
-            }
-        }
-
-        var summaries: [ArtifactTemplateChannelSummary] = []
-        summaries.reserveCapacity(samples.count)
-        for channelIndex in samples.indices {
-            let channelSamples = samples[channelIndex]
-            var peak: Float = 0
-            var squareSum: Float = 0
-            for value in channelSamples {
-                peak = max(peak, abs(value))
-                squareSum += value * value
-            }
-            let divisor = Float(channelSamples.isEmpty ? 1 : channelSamples.count)
-            let meanSquare = squareSum / divisor
-            summaries.append(ArtifactTemplateChannelSummary(
-                channelIndex: channelIndex,
-                peakAbsoluteMicrovolts: peak,
-                rmsMicrovolts: sqrt(meanSquare)
-            ))
-        }
-        summaries.sort {
-            $0.peakAbsoluteMicrovolts == $1.peakAbsoluteMicrovolts
-                ? $0.channelIndex < $1.channelIndex
-                : $0.peakAbsoluteMicrovolts > $1.peakAbsoluteMicrovolts
-        }
-
-        return ArtifactTemplateAverage(
-            samplingRate: average.samplingRate,
-            windowSizeSeconds: average.windowSizeSeconds,
-            eventCount: average.eventCount,
-            selectedChannelIndices: average.selectedChannelIndices,
-            allChannelSamples: samples,
-            channelSummaries: summaries
-        )
-    }
-
-    nonisolated private static func previewBaselineEdgeSamples(windowSamples: Int, samplingRate: Double) -> Int {
-        let maximumByWindow = max(1, windowSamples / 4)
-        let fractionCount = max(1, Int((Double(windowSamples) * 0.10).rounded()))
-        let maximumByTime = samplingRate > 0
-            ? max(1, Int((samplingRate * 0.10).rounded()))
-            : fractionCount
-        let minimumUsefulCount = min(3, maximumByWindow, maximumByTime)
-        return min(max(fractionCount, minimumUsefulCount), maximumByWindow, maximumByTime)
-    }
-
-    nonisolated private static func mean(_ samples: [Float], start: Int, count: Int) -> Double {
-        guard count > 0, start >= 0, start + count <= samples.count else { return 0 }
-        var sum = 0.0
-        for index in start..<(start + count) {
-            sum += Double(samples[index])
-        }
-        return sum / Double(count)
-    }
-}
-
-private enum ArtifactTemplateChannelScope: String, CaseIterable, Identifiable {
+enum ArtifactTemplateChannelScope: String, CaseIterable, Identifiable {
     case clickedChannel = "Clicked Channel"
     case ocularChannels = "Ocular Channels"
     case visibleChannels = "Visible Channels"
@@ -13230,1816 +11365,9 @@ enum PSASegmentField: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-private struct ECGAlgorithmResult: Sendable {
-    let count: Int
-    let bpm: Double?
-}
 
-private enum ECGDetectionAlgorithm: String, CaseIterable, Identifiable, Sendable {
-    case simple = "Simple"
-    case panTompkins = "Pan-Tompkins"
-    case hamilton = "Hamilton"
-    case wfdb = "WFDB"
-    case wavelet = "Wavelet"
-    case christov = "Christov"
 
-    nonisolated var id: String { rawValue }
-
-    nonisolated var displayName: String { rawValue }
-
-    nonisolated var tabTitle: String {
-        switch self {
-        case .simple:
-            return "Simple"
-        case .panTompkins:
-            return "Pan-T"
-        case .hamilton:
-            return "Hamilton"
-        case .wfdb:
-            return "WFDB"
-        case .wavelet:
-            return "Wavelet"
-        case .christov:
-            return "Christov"
-        }
-    }
-
-    nonisolated var summary: String {
-        switch self {
-        case .simple:
-            return "Robust peak picking on the baseline-corrected waveform."
-        case .panTompkins:
-            return "Band-pass, derivative, squaring, moving integration, and adaptive QRS thresholding."
-        case .hamilton:
-            return "Slope-envelope QRS detection with adaptive signal/noise thresholding."
-        case .wfdb:
-            return "WFDB-style curve-length and slope-energy QRS detection inspired by wqrs/gqrs."
-        case .wavelet:
-            return "Multiscale detail-energy QRS detection for sharp cardiac transients in noisy signals."
-        case .christov:
-            return "Christov-style adaptive slope-envelope detection with time-varying signal/noise thresholds."
-        }
-    }
-}
-
-private enum ECGDetectionPolarity: String, CaseIterable, Identifiable, Sendable {
-    case positive = "Positive"
-    case negative = "Negative"
-    case either = "Either"
-
-    var id: String { rawValue }
-
-    nonisolated func score(_ zValue: Double) -> Double {
-        switch self {
-        case .positive:
-            return max(zValue, 0)
-        case .negative:
-            return max(-zValue, 0)
-        case .either:
-            return abs(zValue)
-        }
-    }
-}
-
-private struct ECGDetectionSource: Sendable {
-    var id: String
-    var label: String
-    var channelLabels: [String]
-    var channels: [[Float]]
-    var samplingRate: Double
-    var duration: TimeInterval
-}
-
-private struct ECGDetectionConfiguration: Sendable {
-    var algorithm: ECGDetectionAlgorithm
-    var thresholdSD: Double
-    var minimumRRSeconds: Double
-    var polarity: ECGDetectionPolarity
-}
-
-private struct ECGProcessedChannel: Sendable {
-    var scores: [Double]
-    var waveform: [Double]
-}
-
-private struct RWaveCandidate: Sendable {
-    var timeSeconds: Double
-    var score: Double
-    var sourceID: String
-    var sourceLabel: String
-}
-
-nonisolated private enum EyeArtifactKind {
-    case blink
-    case movement
-
-    var eventCode: String {
-        switch self {
-        case .blink: return "Eye Blink"
-        case .movement: return "Eye Movement"
-        }
-    }
-
-    var idComponent: String {
-        switch self {
-        case .blink: return "eye-blink"
-        case .movement: return "eye-movement"
-        }
-    }
-}
-
-nonisolated private enum RWaveDetector {
-    static let eventCode = "R Wave"
-    private static let sourceFile = "ECG Detection"
-    private static let baselineWindowSeconds = 0.60
-    private static let qrsHighPassWindowSeconds = 0.20
-    private static let qrsSmoothingWindowSeconds = 0.035
-    private static let panTompkinsIntegrationWindowSeconds = 0.150
-    private static let hamiltonSlopeWindowSeconds = 0.080
-    private static let hamiltonNoiseWindowSeconds = 1.00
-    private static let wfdbCurveLengthWindowSeconds = 0.130
-    private static let wfdbSlopeWindowSeconds = 0.050
-    private static let waveletDetailEnvelopeWindowSeconds = 0.080
-    private static let christovEnvelopeWindowSeconds = 0.040
-    private static let christovLongSlopeWindowSeconds = 0.280
-    private static let adaptivePeakSpacingSeconds = 0.080
-    private static let rPeakRefinementWindowSeconds = 0.080
-
-    static func detect(
-        sources: [ECGDetectionSource],
-        configuration: ECGDetectionConfiguration
-    ) -> [MFFEvent] {
-        let threshold = min(max(configuration.thresholdSD, 1), 20)
-        let minimumRRSeconds = min(max(configuration.minimumRRSeconds, 0.15), 2.0)
-        var candidates: [RWaveCandidate] = []
-
-        for source in sources {
-            candidates += detectCandidates(
-                in: source,
-                algorithm: configuration.algorithm,
-                threshold: threshold,
-                minimumRRSeconds: minimumRRSeconds,
-                polarity: configuration.polarity
-            )
-        }
-
-        let selected = strongestNonOverlapping(candidates, minimumIntervalSeconds: minimumRRSeconds)
-            .sorted { $0.timeSeconds < $1.timeSeconds }
-
-        return selected.enumerated().map { index, candidate in
-            let time = candidate.timeSeconds
-            return MFFEvent(
-                id: "artifact-rwave-\(configuration.algorithm.id)-\(index)-\(Int((time * 1_000_000).rounded()))",
-                code: eventCode,
-                beginTimeSeconds: time,
-                rawBeginTime: String(format: "%.6f", time),
-                sourceFile: "\(sourceFile): \(configuration.algorithm.rawValue)"
-            )
-        }
-    }
-
-    private static func detectCandidates(
-        in source: ECGDetectionSource,
-        algorithm: ECGDetectionAlgorithm,
-        threshold: Double,
-        minimumRRSeconds: Double,
-        polarity: ECGDetectionPolarity
-    ) -> [RWaveCandidate] {
-        guard source.samplingRate > 0,
-              source.duration > 0,
-              let sampleCount = source.channels.map(\.count).min(),
-              sampleCount > 2 else {
-            return []
-        }
-
-        let processedChannels = source.channels.compactMap {
-            processedChannel(
-                samples: $0,
-                sampleCount: sampleCount,
-                samplingRate: source.samplingRate,
-                algorithm: algorithm,
-                polarity: polarity
-            )
-        }
-        guard !processedChannels.isEmpty else { return [] }
-
-        let aggregate = aggregateScores(processedChannels, sampleCount: sampleCount)
-
-        switch algorithm {
-        case .simple:
-            return staticPeakCandidates(
-                aggregate: aggregate,
-                processedChannels: processedChannels,
-                source: source,
-                threshold: threshold,
-                minimumRRSeconds: minimumRRSeconds,
-                polarity: polarity
-            )
-        case .panTompkins:
-            return adaptivePeakCandidates(
-                aggregate: aggregate,
-                processedChannels: processedChannels,
-                source: source,
-                threshold: max(threshold * 0.45, 0.90),
-                floorThreshold: max(threshold * 0.25, 0.55),
-                minimumRRSeconds: minimumRRSeconds,
-                polarity: polarity
-            )
-        case .hamilton:
-            return adaptivePeakCandidates(
-                aggregate: aggregate,
-                processedChannels: processedChannels,
-                source: source,
-                threshold: max(threshold * 0.55, 1.00),
-                floorThreshold: max(threshold * 0.30, 0.65),
-                minimumRRSeconds: minimumRRSeconds,
-                polarity: polarity
-            )
-        case .wfdb:
-            return adaptivePeakCandidates(
-                aggregate: aggregate,
-                processedChannels: processedChannels,
-                source: source,
-                threshold: max(threshold * 0.50, 0.95),
-                floorThreshold: max(threshold * 0.28, 0.60),
-                minimumRRSeconds: minimumRRSeconds,
-                polarity: polarity
-            )
-        case .wavelet:
-            return adaptivePeakCandidates(
-                aggregate: aggregate,
-                processedChannels: processedChannels,
-                source: source,
-                threshold: max(threshold * 0.48, 0.90),
-                floorThreshold: max(threshold * 0.25, 0.55),
-                minimumRRSeconds: minimumRRSeconds,
-                polarity: polarity
-            )
-        case .christov:
-            return adaptivePeakCandidates(
-                aggregate: aggregate,
-                processedChannels: processedChannels,
-                source: source,
-                threshold: max(threshold * 0.52, 0.95),
-                floorThreshold: max(threshold * 0.30, 0.60),
-                minimumRRSeconds: minimumRRSeconds,
-                polarity: polarity
-            )
-        }
-    }
-
-    private static func processedChannel(
-        samples: [Float],
-        sampleCount: Int,
-        samplingRate: Double,
-        algorithm: ECGDetectionAlgorithm,
-        polarity: ECGDetectionPolarity
-    ) -> ECGProcessedChannel? {
-        switch algorithm {
-        case .simple:
-            return simpleProcessedChannel(
-                samples: samples,
-                sampleCount: sampleCount,
-                samplingRate: samplingRate,
-                polarity: polarity
-            )
-        case .panTompkins:
-            return panTompkinsProcessedChannel(
-                samples: samples,
-                sampleCount: sampleCount,
-                samplingRate: samplingRate
-            )
-        case .hamilton:
-            return hamiltonProcessedChannel(
-                samples: samples,
-                sampleCount: sampleCount,
-                samplingRate: samplingRate
-            )
-        case .wfdb:
-            return wfdbProcessedChannel(
-                samples: samples,
-                sampleCount: sampleCount,
-                samplingRate: samplingRate
-            )
-        case .wavelet:
-            return waveletProcessedChannel(
-                samples: samples,
-                sampleCount: sampleCount,
-                samplingRate: samplingRate
-            )
-        case .christov:
-            return christovProcessedChannel(
-                samples: samples,
-                sampleCount: sampleCount,
-                samplingRate: samplingRate
-            )
-        }
-    }
-
-    private static func simpleProcessedChannel(
-        samples: [Float],
-        sampleCount: Int,
-        samplingRate: Double,
-        polarity: ECGDetectionPolarity
-    ) -> ECGProcessedChannel? {
-        guard sampleCount > 2 else { return nil }
-
-        let highPassed = baselineRemoved(
-            samples: samples,
-            sampleCount: sampleCount,
-            samplingRate: samplingRate
-        )
-        guard let scores = normalizedPolarityScores(
-            values: highPassed,
-            sampleCount: sampleCount,
-            polarity: polarity
-        ) else {
-            return nil
-        }
-
-        return ECGProcessedChannel(scores: scores, waveform: highPassed)
-    }
-
-    private static func panTompkinsProcessedChannel(
-        samples: [Float],
-        sampleCount: Int,
-        samplingRate: Double
-    ) -> ECGProcessedChannel? {
-        guard sampleCount > 2 else { return nil }
-
-        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
-        let differentiated = derivative(filtered)
-        let squared = differentiated.map { $0 * $0 }
-        let integrationWindow = sampleWindow(
-            seconds: panTompkinsIntegrationWindowSeconds,
-            samplingRate: samplingRate,
-            minimum: 3
-        )
-        let integrated = centeredMovingAverage(
-            squared,
-            sampleCount: sampleCount,
-            windowSamples: integrationWindow
-        )
-        guard let scores = normalizedEnvelopeScores(values: integrated, sampleCount: sampleCount) else {
-            return nil
-        }
-
-        return ECGProcessedChannel(scores: scores, waveform: filtered)
-    }
-
-    private static func hamiltonProcessedChannel(
-        samples: [Float],
-        sampleCount: Int,
-        samplingRate: Double
-    ) -> ECGProcessedChannel? {
-        guard sampleCount > 2 else { return nil }
-
-        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
-        let slope = derivative(filtered).map { abs($0) }
-        let shortWindow = sampleWindow(
-            seconds: hamiltonSlopeWindowSeconds,
-            samplingRate: samplingRate,
-            minimum: 3
-        )
-        let longWindow = sampleWindow(
-            seconds: hamiltonNoiseWindowSeconds,
-            samplingRate: samplingRate,
-            minimum: shortWindow * 2
-        )
-        let shortEnvelope = centeredMovingAverage(
-            slope,
-            sampleCount: sampleCount,
-            windowSamples: shortWindow
-        )
-        let noiseEnvelope = centeredMovingAverage(
-            shortEnvelope,
-            sampleCount: sampleCount,
-            windowSamples: longWindow
-        )
-        var enhanced = Array(repeating: 0.0, count: sampleCount)
-        for sample in 0..<sampleCount {
-            enhanced[sample] = max(shortEnvelope[sample] - noiseEnvelope[sample] * 0.50, 0)
-        }
-        guard let scores = normalizedEnvelopeScores(values: enhanced, sampleCount: sampleCount) else {
-            return nil
-        }
-
-        return ECGProcessedChannel(scores: scores, waveform: filtered)
-    }
-
-    private static func wfdbProcessedChannel(
-        samples: [Float],
-        sampleCount: Int,
-        samplingRate: Double
-    ) -> ECGProcessedChannel? {
-        guard sampleCount > 2 else { return nil }
-
-        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
-        let slope = derivative(filtered).map { abs($0) }
-        let slopeWindow = sampleWindow(
-            seconds: wfdbSlopeWindowSeconds,
-            samplingRate: samplingRate,
-            minimum: 3
-        )
-        let slopeEnergy = centeredMovingAverage(
-            slope.map { $0 * $0 },
-            sampleCount: sampleCount,
-            windowSamples: slopeWindow
-        )
-        let curveLength = curveLengthEnvelope(
-            filtered,
-            sampleCount: sampleCount,
-            samplingRate: samplingRate
-        )
-        var combined = Array(repeating: 0.0, count: sampleCount)
-        for sample in 0..<sampleCount {
-            combined[sample] = curveLength[sample] + sqrt(max(slopeEnergy[sample], 0))
-        }
-
-        guard let scores = normalizedEnvelopeScores(values: combined, sampleCount: sampleCount) else {
-            return nil
-        }
-
-        return ECGProcessedChannel(scores: scores, waveform: filtered)
-    }
-
-    private static func waveletProcessedChannel(
-        samples: [Float],
-        sampleCount: Int,
-        samplingRate: Double
-    ) -> ECGProcessedChannel? {
-        guard sampleCount > 2 else { return nil }
-
-        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
-        let first = centeredMovingAverage(
-            filtered,
-            sampleCount: sampleCount,
-            windowSamples: sampleWindow(seconds: 0.025, samplingRate: samplingRate, minimum: 1)
-        )
-        let second = centeredMovingAverage(
-            filtered,
-            sampleCount: sampleCount,
-            windowSamples: sampleWindow(seconds: 0.050, samplingRate: samplingRate, minimum: 3)
-        )
-        let third = centeredMovingAverage(
-            filtered,
-            sampleCount: sampleCount,
-            windowSamples: sampleWindow(seconds: 0.100, samplingRate: samplingRate, minimum: 5)
-        )
-        let fourth = centeredMovingAverage(
-            filtered,
-            sampleCount: sampleCount,
-            windowSamples: sampleWindow(seconds: 0.200, samplingRate: samplingRate, minimum: 9)
-        )
-
-        var detailEnergy = Array(repeating: 0.0, count: sampleCount)
-        for sample in 0..<sampleCount {
-            let d1 = filtered[sample] - first[sample]
-            let d2 = first[sample] - second[sample]
-            let d3 = second[sample] - third[sample]
-            let d4 = third[sample] - fourth[sample]
-            detailEnergy[sample] = d1 * d1 + 0.85 * d2 * d2 + 0.60 * d3 * d3 + 0.35 * d4 * d4
-        }
-        let envelope = centeredMovingAverage(
-            detailEnergy.map { sqrt(max($0, 0)) },
-            sampleCount: sampleCount,
-            windowSamples: sampleWindow(
-                seconds: waveletDetailEnvelopeWindowSeconds,
-                samplingRate: samplingRate,
-                minimum: 3
-            )
-        )
-        guard let scores = normalizedEnvelopeScores(values: envelope, sampleCount: sampleCount) else {
-            return nil
-        }
-
-        return ECGProcessedChannel(scores: scores, waveform: filtered)
-    }
-
-    private static func christovProcessedChannel(
-        samples: [Float],
-        sampleCount: Int,
-        samplingRate: Double
-    ) -> ECGProcessedChannel? {
-        guard sampleCount > 2 else { return nil }
-
-        let filtered = qrsFiltered(samples: samples, sampleCount: sampleCount, samplingRate: samplingRate)
-        let firstDerivative = derivative(filtered)
-        let secondDerivative = derivative(firstDerivative)
-        var complexLead = Array(repeating: 0.0, count: sampleCount)
-        for sample in 0..<sampleCount {
-            complexLead[sample] = abs(firstDerivative[sample]) + 0.45 * abs(secondDerivative[sample])
-        }
-        let shortEnvelope = centeredMovingAverage(
-            complexLead,
-            sampleCount: sampleCount,
-            windowSamples: sampleWindow(
-                seconds: christovEnvelopeWindowSeconds,
-                samplingRate: samplingRate,
-                minimum: 3
-            )
-        )
-        let slowEnvelope = centeredMovingAverage(
-            shortEnvelope,
-            sampleCount: sampleCount,
-            windowSamples: sampleWindow(
-                seconds: christovLongSlopeWindowSeconds,
-                samplingRate: samplingRate,
-                minimum: 7
-            )
-        )
-        var enhanced = Array(repeating: 0.0, count: sampleCount)
-        for sample in 0..<sampleCount {
-            enhanced[sample] = max(shortEnvelope[sample] - slowEnvelope[sample] * 0.35, 0)
-        }
-        guard let scores = normalizedEnvelopeScores(values: enhanced, sampleCount: sampleCount) else {
-            return nil
-        }
-
-        return ECGProcessedChannel(scores: scores, waveform: filtered)
-    }
-
-    private static func aggregateScores(
-        _ channels: [ECGProcessedChannel],
-        sampleCount: Int
-    ) -> [Double] {
-        var aggregate = Array(repeating: 0.0, count: sampleCount)
-        for channel in channels {
-            for sample in 0..<sampleCount where channel.scores[sample] > aggregate[sample] {
-                aggregate[sample] = channel.scores[sample]
-            }
-        }
-        return aggregate
-    }
-
-    private static func staticPeakCandidates(
-        aggregate: [Double],
-        processedChannels: [ECGProcessedChannel],
-        source: ECGDetectionSource,
-        threshold: Double,
-        minimumRRSeconds: Double,
-        polarity: ECGDetectionPolarity
-    ) -> [RWaveCandidate] {
-        let sampleCount = aggregate.count
-        var candidates: [RWaveCandidate] = []
-        for sample in 1..<(sampleCount - 1) {
-            let score = aggregate[sample]
-            guard score >= threshold,
-                  score >= aggregate[sample - 1],
-                  score > aggregate[sample + 1] else {
-                continue
-            }
-            let refinedSample = refinedPeakSample(
-                near: sample,
-                processedChannels: processedChannels,
-                samplingRate: source.samplingRate,
-                polarity: polarity
-            )
-            let time = Double(refinedSample) / source.samplingRate
-            guard time >= 0, time <= source.duration else { continue }
-            candidates.append(RWaveCandidate(
-                timeSeconds: time,
-                score: score,
-                sourceID: source.id,
-                sourceLabel: source.label
-            ))
-        }
-
-        return strongestNonOverlapping(candidates, minimumIntervalSeconds: minimumRRSeconds)
-    }
-
-    private static func adaptivePeakCandidates(
-        aggregate: [Double],
-        processedChannels: [ECGProcessedChannel],
-        source: ECGDetectionSource,
-        threshold: Double,
-        floorThreshold: Double,
-        minimumRRSeconds: Double,
-        polarity: ECGDetectionPolarity
-    ) -> [RWaveCandidate] {
-        let spacingSamples = sampleWindow(
-            seconds: adaptivePeakSpacingSeconds,
-            samplingRate: source.samplingRate,
-            minimum: 1
-        )
-        let peaks = localPeakIndices(in: aggregate, minimumSpacingSamples: spacingSamples)
-        guard !peaks.isEmpty else { return [] }
-
-        var peakScores = peaks.map { aggregate[$0] }.filter(\.isFinite)
-        peakScores.sort()
-        var signalLevel = max(threshold, percentile(sortedValues: peakScores, fraction: 0.85))
-        var noiseLevel = max(0, percentile(sortedValues: peakScores, fraction: 0.20))
-        var adaptiveThreshold = max(floorThreshold, min(threshold, noiseLevel + 0.25 * (signalLevel - noiseLevel)))
-        var candidates: [RWaveCandidate] = []
-
-        for peak in peaks {
-            let score = aggregate[peak]
-            guard score.isFinite else { continue }
-
-            if score >= adaptiveThreshold {
-                let refinedSample = refinedPeakSample(
-                    near: peak,
-                    processedChannels: processedChannels,
-                    samplingRate: source.samplingRate,
-                    polarity: polarity
-                )
-                let time = Double(refinedSample) / source.samplingRate
-                if time >= 0, time <= source.duration {
-                    candidates.append(RWaveCandidate(
-                        timeSeconds: time,
-                        score: score,
-                        sourceID: source.id,
-                        sourceLabel: source.label
-                    ))
-                }
-                signalLevel = 0.125 * score + 0.875 * signalLevel
-            } else {
-                noiseLevel = 0.125 * score + 0.875 * noiseLevel
-            }
-
-            adaptiveThreshold = max(floorThreshold, noiseLevel + 0.25 * (signalLevel - noiseLevel))
-        }
-
-        return strongestNonOverlapping(candidates, minimumIntervalSeconds: minimumRRSeconds)
-    }
-
-    private static func normalizedPolarityScores(
-        values: [Double],
-        sampleCount: Int,
-        polarity: ECGDetectionPolarity
-    ) -> [Double]? {
-        guard let stats = robustStats(values: values, sampleCount: sampleCount) else { return nil }
-        return values.map { value in
-            guard value.isFinite else { return 0 }
-            return polarity.score((value - stats.center) / stats.scale)
-        }
-    }
-
-    private static func normalizedEnvelopeScores(
-        values: [Double],
-        sampleCount: Int
-    ) -> [Double]? {
-        guard let stats = robustStats(values: values, sampleCount: sampleCount) else { return nil }
-        return values.map { value in
-            guard value.isFinite else { return 0 }
-            return max((value - stats.center) / stats.scale, 0)
-        }
-    }
-
-    private static func qrsFiltered(
-        samples: [Float],
-        sampleCount: Int,
-        samplingRate: Double
-    ) -> [Double] {
-        let baselineCorrected = baselineRemoved(
-            samples: samples,
-            sampleCount: sampleCount,
-            samplingRate: samplingRate
-        )
-        let highPassWindow = sampleWindow(
-            seconds: qrsHighPassWindowSeconds,
-            samplingRate: samplingRate,
-            minimum: 3
-        )
-        let trend = centeredMovingAverage(
-            baselineCorrected,
-            sampleCount: sampleCount,
-            windowSamples: highPassWindow
-        )
-        var highPassed = Array(repeating: 0.0, count: sampleCount)
-        for sample in 0..<sampleCount {
-            highPassed[sample] = baselineCorrected[sample] - trend[sample]
-        }
-
-        let smoothingWindow = sampleWindow(
-            seconds: qrsSmoothingWindowSeconds,
-            samplingRate: samplingRate,
-            minimum: 1
-        )
-        return centeredMovingAverage(
-            highPassed,
-            sampleCount: sampleCount,
-            windowSamples: smoothingWindow
-        )
-    }
-
-    private static func baselineRemoved(
-        samples: [Float],
-        sampleCount: Int,
-        samplingRate: Double
-    ) -> [Double] {
-        let halfWindow = max(Int((baselineWindowSeconds * samplingRate / 2).rounded()), 1)
-        var sums = Array(repeating: 0.0, count: sampleCount + 1)
-        var counts = Array(repeating: 0.0, count: sampleCount + 1)
-
-        for index in 0..<sampleCount {
-            let value = Double(samples[index])
-            if value.isFinite {
-                sums[index + 1] = sums[index] + value
-                counts[index + 1] = counts[index] + 1
-            } else {
-                sums[index + 1] = sums[index]
-                counts[index + 1] = counts[index]
-            }
-        }
-
-        var result = Array(repeating: 0.0, count: sampleCount)
-        for index in 0..<sampleCount {
-            let lower = max(0, index - halfWindow)
-            let upper = min(sampleCount, index + halfWindow + 1)
-            let count = counts[upper] - counts[lower]
-            let baseline = count > 0 ? (sums[upper] - sums[lower]) / count : 0
-            let value = Double(samples[index])
-            result[index] = value.isFinite ? value - baseline : 0
-        }
-        return result
-    }
-
-    private static func derivative(_ values: [Double]) -> [Double] {
-        guard values.count > 1 else { return values }
-        var result = Array(repeating: 0.0, count: values.count)
-        result[0] = values[1] - values[0]
-        result[values.count - 1] = values[values.count - 1] - values[values.count - 2]
-        if values.count > 2 {
-            for index in 1..<(values.count - 1) {
-                result[index] = (values[index + 1] - values[index - 1]) / 2
-            }
-        }
-        return result
-    }
-
-    private static func curveLengthEnvelope(
-        _ values: [Double],
-        sampleCount: Int,
-        samplingRate: Double
-    ) -> [Double] {
-        guard sampleCount > 1 else { return Array(values.prefix(sampleCount)) }
-
-        let differences = derivative(values)
-        let robustScale = robustStats(values: differences, sampleCount: sampleCount)?.scale ?? 1
-        let scale = max(robustScale, 1e-6)
-        var increments = Array(repeating: 0.0, count: sampleCount)
-        for sample in 0..<sampleCount {
-            let normalizedSlope = differences[sample] / scale
-            increments[sample] = sqrt(1 + normalizedSlope * normalizedSlope) - 1
-        }
-
-        return centeredMovingAverage(
-            increments,
-            sampleCount: sampleCount,
-            windowSamples: sampleWindow(
-                seconds: wfdbCurveLengthWindowSeconds,
-                samplingRate: samplingRate,
-                minimum: 3
-            )
-        )
-    }
-
-    private static func centeredMovingAverage(
-        _ values: [Double],
-        sampleCount: Int,
-        windowSamples: Int
-    ) -> [Double] {
-        guard sampleCount > 0 else { return [] }
-        guard windowSamples > 1 else { return Array(values.prefix(sampleCount)) }
-
-        let radius = max(windowSamples / 2, 1)
-        var sums = Array(repeating: 0.0, count: sampleCount + 1)
-        var counts = Array(repeating: 0.0, count: sampleCount + 1)
-
-        for index in 0..<sampleCount {
-            let value = values[index]
-            if value.isFinite {
-                sums[index + 1] = sums[index] + value
-                counts[index + 1] = counts[index] + 1
-            } else {
-                sums[index + 1] = sums[index]
-                counts[index + 1] = counts[index]
-            }
-        }
-
-        var result = Array(repeating: 0.0, count: sampleCount)
-        for index in 0..<sampleCount {
-            let lower = max(0, index - radius)
-            let upper = min(sampleCount, index + radius + 1)
-            let count = counts[upper] - counts[lower]
-            result[index] = count > 0 ? (sums[upper] - sums[lower]) / count : 0
-        }
-        return result
-    }
-
-    private static func sampleWindow(seconds: Double, samplingRate: Double, minimum: Int) -> Int {
-        max(Int((seconds * samplingRate).rounded()), minimum)
-    }
-
-    private static func localPeakIndices(
-        in values: [Double],
-        minimumSpacingSamples: Int
-    ) -> [Int] {
-        guard values.count > 2 else { return [] }
-
-        var peaks: [Int] = []
-        for index in 1..<(values.count - 1) {
-            guard values[index].isFinite,
-                  values[index] >= values[index - 1],
-                  values[index] > values[index + 1] else {
-                continue
-            }
-            peaks.append(index)
-        }
-        guard let firstPeak = peaks.first else { return [] }
-
-        var selected: [Int] = []
-        var clusterStart = firstPeak
-        var bestPeak = firstPeak
-        for peak in peaks.dropFirst() {
-            if peak - clusterStart <= minimumSpacingSamples {
-                if values[peak] > values[bestPeak] {
-                    bestPeak = peak
-                }
-            } else {
-                selected.append(bestPeak)
-                clusterStart = peak
-                bestPeak = peak
-            }
-        }
-        selected.append(bestPeak)
-        return selected
-    }
-
-    private static func refinedPeakSample(
-        near sample: Int,
-        processedChannels: [ECGProcessedChannel],
-        samplingRate: Double,
-        polarity: ECGDetectionPolarity
-    ) -> Int {
-        guard let sampleCount = processedChannels.map(\.waveform.count).min(), sampleCount > 0 else {
-            return sample
-        }
-
-        let radius = sampleWindow(
-            seconds: rPeakRefinementWindowSeconds,
-            samplingRate: samplingRate,
-            minimum: 1
-        )
-        let lower = max(0, sample - radius)
-        let upper = min(sampleCount - 1, sample + radius)
-        var bestSample = min(max(sample, lower), upper)
-        var bestScore = -Double.greatestFiniteMagnitude
-
-        for candidateSample in lower...upper {
-            var score = 0.0
-            for channel in processedChannels {
-                let value = channel.waveform[candidateSample]
-                guard value.isFinite else { continue }
-                score = max(score, polarity.score(value))
-            }
-            if score > bestScore {
-                bestScore = score
-                bestSample = candidateSample
-            }
-        }
-
-        return bestSample
-    }
-
-    private static func robustStats(
-        values: [Double],
-        sampleCount: Int
-    ) -> (center: Double, scale: Double)? {
-        let sampleStride = max(sampleCount / 20_000, 1)
-        var sampled: [Double] = []
-        sampled.reserveCapacity(sampleCount / sampleStride + 1)
-        for index in stride(from: 0, to: sampleCount, by: sampleStride) {
-            let value = values[index]
-            if value.isFinite {
-                sampled.append(value)
-            }
-        }
-        guard sampled.count >= 8 else { return nil }
-
-        var centerValues = sampled
-        let center = median(&centerValues)
-        var deviations = sampled.map { abs($0 - center) }
-        let mad = median(&deviations)
-        let rms = sqrt(sampled.reduce(0.0) { $0 + ($1 - center) * ($1 - center) } / Double(sampled.count))
-        let p95 = percentile(sortedValues: centerValues, fraction: 0.95)
-        let scale = max(mad * 1.4826, (p95 - center) / 3, rms * 0.10, 1e-6)
-        return (center, scale)
-    }
-
-    private static func strongestNonOverlapping(
-        _ candidates: [RWaveCandidate],
-        minimumIntervalSeconds: Double
-    ) -> [RWaveCandidate] {
-        var selected: [RWaveCandidate] = []
-        for candidate in candidates.sorted(by: { $0.score > $1.score }) {
-            let overlaps = selected.contains { abs($0.timeSeconds - candidate.timeSeconds) < minimumIntervalSeconds }
-            if !overlaps {
-                selected.append(candidate)
-            }
-        }
-        return selected
-    }
-
-    private static func percentile(sortedValues: [Double], fraction: Double) -> Double {
-        guard !sortedValues.isEmpty else { return 0 }
-        let clamped = min(max(fraction, 0), 1)
-        let position = clamped * Double(sortedValues.count - 1)
-        let lower = Int(floor(position))
-        let upper = Int(ceil(position))
-        if lower == upper {
-            return sortedValues[lower]
-        }
-        let weight = position - Double(lower)
-        return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight
-    }
-
-    private static func median(_ values: inout [Double]) -> Double {
-        guard !values.isEmpty else { return 0 }
-        values.sort()
-        let middle = values.count / 2
-        if values.count.isMultiple(of: 2) {
-            return (values[middle - 1] + values[middle]) / 2
-        }
-        return values[middle]
-    }
-}
-
-nonisolated private enum EyeArtifactThresholdDetector {
-    private static let thresholdMicrovolts: Float = 150
-    private static let minimumDurationSeconds = 0.05
-    private static let mergeGapSeconds = 0.25
-
-    static func detect(
-        kind: EyeArtifactKind,
-        channels: [[Float]],
-        samplingRate: Double,
-        duration: TimeInterval
-    ) -> [MFFEvent] {
-        guard samplingRate > 0, duration > 0, let sampleCount = channels.first?.count, sampleCount > 0 else {
-            return []
-        }
-
-        let candidateChannels = ocularChannelIndices(kind: kind, channelCount: channels.count)
-            .filter { $0 < channels.count && channels[$0].count == sampleCount }
-        guard !candidateChannels.isEmpty else { return [] }
-
-        let minimumSamples = max(Int((minimumDurationSeconds * samplingRate).rounded()), 1)
-        let mergeGapSamples = max(Int((mergeGapSeconds * samplingRate).rounded()), 1)
-
-        var intervals: [ClosedRange<Int>] = []
-        var activeStart: Int?
-        var lastAboveThreshold: Int?
-
-        for sample in 0..<sampleCount {
-            let exceedsThreshold = candidateChannels.contains { channelIndex in
-                abs(channels[channelIndex][sample]) >= thresholdMicrovolts
-            }
-
-            if exceedsThreshold {
-                if activeStart == nil {
-                    activeStart = sample
-                }
-                lastAboveThreshold = sample
-            } else if let start = activeStart, let end = lastAboveThreshold {
-                if end - start + 1 >= minimumSamples {
-                    append(start...end, to: &intervals, mergeGapSamples: mergeGapSamples)
-                }
-                activeStart = nil
-                lastAboveThreshold = nil
-            }
-        }
-
-        if let start = activeStart, let end = lastAboveThreshold, end - start + 1 >= minimumSamples {
-            append(start...end, to: &intervals, mergeGapSamples: mergeGapSamples)
-        }
-
-        return intervals.enumerated().map { index, interval in
-            let peakSample = peakSample(in: interval, channels: channels, candidateChannels: candidateChannels)
-            let time = min(max(Double(peakSample) / samplingRate, 0), duration)
-            return MFFEvent(
-                id: "artifact-\(kind.idComponent)-threshold-\(index)-\(peakSample)",
-                code: kind.eventCode,
-                beginTimeSeconds: time,
-                rawBeginTime: String(format: "%.6f", time),
-                sourceFile: "Artifact Detection"
-            )
-        }
-    }
-
-    private static func ocularChannelIndices(kind: EyeArtifactKind, channelCount: Int) -> [Int] {
-        // EGI channel numbers are 1-based; signal arrays are 0-based.
-        let oneBasedChannels: [Int]
-        switch (kind, channelCount) {
-        case (.blink, 241...):
-            oneBasedChannels = [18, 37, 238, 241]
-        case (.blink, 127...):
-            oneBasedChannels = [8, 25, 126, 127]
-        case (.movement, 252...):
-            oneBasedChannels = [226, 252]
-        case (.movement, 128...):
-            oneBasedChannels = [1, 32, 125, 128]
-        default:
-            oneBasedChannels = Array(1...min(channelCount, 4))
-        }
-
-        return oneBasedChannels.map { $0 - 1 }
-    }
-
-    private static func append(
-        _ interval: ClosedRange<Int>,
-        to intervals: inout [ClosedRange<Int>],
-        mergeGapSamples: Int
-    ) {
-        guard let last = intervals.last else {
-            intervals.append(interval)
-            return
-        }
-
-        if interval.lowerBound - last.upperBound <= mergeGapSamples {
-            intervals[intervals.count - 1] = last.lowerBound...interval.upperBound
-        } else {
-            intervals.append(interval)
-        }
-    }
-
-    private static func peakSample(
-        in interval: ClosedRange<Int>,
-        channels: [[Float]],
-        candidateChannels: [Int]
-    ) -> Int {
-        var peakSample = interval.lowerBound
-        var peakValue: Float = 0
-
-        for sample in interval {
-            for channelIndex in candidateChannels {
-                let value = abs(channels[channelIndex][sample])
-                if value > peakValue {
-                    peakValue = value
-                    peakSample = sample
-                }
-            }
-        }
-
-        return peakSample
-    }
-}
-
-private struct EventMarkerStyle {
-    let color: Color
-    /// Vertical offset of this event's label (and stem top) — its source lane.
-    let laneY: CGFloat
-}
-
-private struct WaveformPlot: View {
-    let samples: [Float]
-    let amplitudeScale: Double
-    let timeScale: Double
-    let sampleStride: Int
-    let visibleRange: ClosedRange<CGFloat>
-    let nominalHeight: CGFloat
-    var color: Color = .accentColor
-
-    var body: some View {
-        Canvas { context, size in
-            guard samples.count > sampleStride else { return }
-
-            let xScale = CGFloat(timeScale)
-            let lowerVisibleIndex = max(Int(floor(visibleRange.lowerBound / max(xScale, 0.001))) - 2, 0)
-            let upperVisibleIndex = Int(ceil(visibleRange.upperBound / max(xScale, 0.001))) + 2
-
-            let firstSampleIndex = min(lowerVisibleIndex * sampleStride, samples.count - 1)
-            let lastSampleIndex = min(max(upperVisibleIndex * sampleStride, firstSampleIndex + sampleStride), samples.count - 1)
-            guard lastSampleIndex > firstSampleIndex else { return }
-
-            let midY = size.height / 2
-            let pointsPerMicrovolt = (nominalHeight / 2) / max(amplitudeScale, 1)
-
-            var path = Path()
-            let firstPlottedIndex = firstSampleIndex / sampleStride
-            path.move(
-                to: CGPoint(
-                    x: CGFloat(firstPlottedIndex) * xScale,
-                    y: midY - CGFloat(samples[firstSampleIndex]) * pointsPerMicrovolt
-                )
-            )
-
-            for sampleIndex in stride(from: firstSampleIndex + sampleStride, through: lastSampleIndex, by: sampleStride) {
-                let plottedIndex = sampleIndex / sampleStride
-                path.addLine(
-                    to: CGPoint(
-                        x: CGFloat(plottedIndex) * xScale,
-                        y: midY - CGFloat(samples[sampleIndex]) * pointsPerMicrovolt
-                    )
-                )
-            }
-
-            var baseline = Path()
-            baseline.move(to: CGPoint(x: visibleRange.lowerBound, y: midY))
-            baseline.addLine(to: CGPoint(x: visibleRange.upperBound, y: midY))
-
-            context.stroke(baseline, with: .color(.secondary.opacity(0.3)), lineWidth: 0.75)
-            context.stroke(path, with: .color(color), lineWidth: 1)
-        }
-    }
-}
-
-/// One channel with every category average overlaid (each in its category color),
-/// aligned on the epoch latency axis.
-private struct OverlaidCategoryChannelPlot: View {
-    let data: [[Float]]
-    let channelIndex: Int
-    let segments: [EpochSegment]
-    let colors: [Color]
-    let amplitudeScale: Double
-    var highlightRelativeSample: Int? = nil
-
-    var body: some View {
-        Canvas { context, size in
-            guard channelIndex < data.count, let first = segments.first else { return }
-            let channel = data[channelIndex]
-
-            let epochLength = max(first.endSample - first.startSample + 1, 1)
-            guard epochLength > 1 else { return }
-
-            let midY = size.height / 2
-            let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
-            let xScale = size.width / CGFloat(max(epochLength - 1, 1))
-            let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
-
-            var baseline = Path()
-            baseline.move(to: CGPoint(x: 0, y: midY))
-            baseline.addLine(to: CGPoint(x: size.width, y: midY))
-            context.stroke(baseline, with: .color(.secondary.opacity(0.28)), lineWidth: 0.75)
-
-            let stimulusX = CGFloat(first.stimulusOffsetSamples) * xScale
-            var stimulus = Path()
-            stimulus.move(to: CGPoint(x: stimulusX, y: 0))
-            stimulus.addLine(to: CGPoint(x: stimulusX, y: size.height))
-            context.stroke(stimulus, with: .color(.green.opacity(0.7)), lineWidth: 1)
-
-            if let highlightRelativeSample {
-                let clamped = min(max(highlightRelativeSample, 0), epochLength - 1)
-                let cursorX = CGFloat(clamped) * xScale
-                var cursor = Path()
-                cursor.move(to: CGPoint(x: cursorX, y: 0))
-                cursor.addLine(to: CGPoint(x: cursorX, y: size.height))
-                context.stroke(cursor, with: .color(.yellow), lineWidth: 1.5)
-            }
-
-            for (index, segment) in segments.enumerated() {
-                guard segment.startSample >= 0, segment.endSample < channel.count else { continue }
-                let color = index < colors.count ? colors[index] : .accentColor
-
-                var path = Path()
-                path.move(
-                    to: CGPoint(
-                        x: 0,
-                        y: midY - CGFloat(channel[segment.startSample]) * pointsPerMicrovolt
-                    )
-                )
-                for localSample in stride(from: sampleStep, through: epochLength - 1, by: sampleStep) {
-                    let sample = segment.startSample + localSample
-                    guard sample < channel.count else { break }
-                    path.addLine(
-                        to: CGPoint(
-                            x: CGFloat(localSample) * xScale,
-                            y: midY - CGFloat(channel[sample]) * pointsPerMicrovolt
-                        )
-                    )
-                }
-                context.stroke(path, with: .color(color), lineWidth: 1.1)
-            }
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
-        }
-    }
-}
-
-/// Compact wrapping legend of colored category labels.
-private struct FlowLegend: View {
-    let items: [(String, Color)]
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            legendRow
-            ScrollView(.horizontal, showsIndicators: false) { legendRow }
-        }
-    }
-
-    private var legendRow: some View {
-        HStack(spacing: 12) {
-            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(item.1)
-                        .frame(width: 9, height: 9)
-                    Text(item.0)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-        }
-    }
-}
-
-private struct ButterflyConditionPlot: View {
-    let data: [[Float]]
-    let segment: EpochSegment
-    let hiddenChannels: Set<Int>
-    let amplitudeScale: Double
-    let color: Color
-    var highlightRelativeSample: Int? = nil
-    /// Per-sample grand-average noise amplitude (µV) shaded as a ± band.
-    var noiseCurve: [Float]? = nil
-
-    var body: some View {
-        Canvas { context, size in
-            guard segment.startSample >= 0,
-                  segment.endSample >= segment.startSample,
-                  !data.isEmpty else { return }
-
-            let epochLength = segment.endSample - segment.startSample + 1
-            guard epochLength > 1 else { return }
-
-            let midY = size.height / 2
-            let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
-            let xScale = size.width / CGFloat(max(epochLength - 1, 1))
-            let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
-
-            // Shaded ± noise band (drawn first, under the traces).
-            if let noiseCurve, noiseCurve.count >= epochLength {
-                var upper = Path()
-                var lower = [CGPoint]()
-                for localSample in stride(from: 0, through: epochLength - 1, by: sampleStep) {
-                    let x = CGFloat(localSample) * xScale
-                    let n = CGFloat(noiseCurve[localSample]) * pointsPerMicrovolt
-                    let top = CGPoint(x: x, y: midY - n)
-                    if localSample == 0 { upper.move(to: top) } else { upper.addLine(to: top) }
-                    lower.append(CGPoint(x: x, y: midY + n))
-                }
-                for point in lower.reversed() { upper.addLine(to: point) }
-                upper.closeSubpath()
-                context.fill(upper, with: .color(color.opacity(0.12)))
-            }
-
-            var baseline = Path()
-            baseline.move(to: CGPoint(x: 0, y: midY))
-            baseline.addLine(to: CGPoint(x: size.width, y: midY))
-            context.stroke(baseline, with: .color(.secondary.opacity(0.28)), lineWidth: 0.75)
-
-            let stimulusX = CGFloat(segment.stimulusOffsetSamples) * xScale
-            var stimulus = Path()
-            stimulus.move(to: CGPoint(x: stimulusX, y: 0))
-            stimulus.addLine(to: CGPoint(x: stimulusX, y: size.height))
-            context.stroke(stimulus, with: .color(.green.opacity(0.75)), lineWidth: 1)
-
-            // Shared topography cursor.
-            if let highlightRelativeSample {
-                let clamped = min(max(highlightRelativeSample, 0), epochLength - 1)
-                let cursorX = CGFloat(clamped) * xScale
-                var cursor = Path()
-                cursor.move(to: CGPoint(x: cursorX, y: 0))
-                cursor.addLine(to: CGPoint(x: cursorX, y: size.height))
-                context.stroke(cursor, with: .color(.yellow), lineWidth: 1.5)
-            }
-
-            for channelIndex in data.indices where !hiddenChannels.contains(channelIndex) {
-                let channel = data[channelIndex]
-                guard segment.endSample < channel.count else { continue }
-
-                var path = Path()
-                path.move(
-                    to: CGPoint(
-                        x: 0,
-                        y: midY - CGFloat(channel[segment.startSample]) * pointsPerMicrovolt
-                    )
-                )
-
-                for localSample in stride(from: sampleStep, through: epochLength - 1, by: sampleStep) {
-                    let sample = segment.startSample + localSample
-                    path.addLine(
-                        to: CGPoint(
-                            x: CGFloat(localSample) * xScale,
-                            y: midY - CGFloat(channel[sample]) * pointsPerMicrovolt
-                        )
-                    )
-                }
-
-                context.stroke(path, with: .color(color.opacity(0.22)), lineWidth: 0.7)
-            }
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
-        }
-    }
-}
-
-private struct ArtifactTemplateAveragePlot: View {
-    let average: ArtifactTemplateAverage
-    let primaryChannel: Int?
-    let highlightedChannels: Set<Int>
-    var fixedScaleMicrovolts: Float? = nil
-    var maximumBackgroundChannels: Int = .max
-    var usesAmplitudeWeightedOpacity = false
-
-    var body: some View {
-        Canvas { context, size in
-            guard let sampleCount = average.allChannelSamples.first?.count, sampleCount > 1 else { return }
-
-            let midY = size.height / 2
-            let maxAbs = max(fixedScaleMicrovolts ?? average.allChannelSamples.flatMap { $0.map(abs) }.max() ?? 1, 1)
-            let yScale = (size.height * 0.42) / CGFloat(maxAbs)
-            let xScale = size.width / CGFloat(sampleCount - 1)
-            let peakByChannel = Dictionary(uniqueKeysWithValues: average.channelSummaries.map {
-                ($0.channelIndex, $0.peakAbsoluteMicrovolts)
-            })
-            let strongestBackgroundChannels = Set(
-                average.channelSummaries
-                    .map(\.channelIndex)
-                    .filter { primaryChannel != $0 && !highlightedChannels.contains($0) }
-                    .prefix(maximumBackgroundChannels)
-            )
-
-            var baseline = Path()
-            baseline.move(to: CGPoint(x: 0, y: midY))
-            baseline.addLine(to: CGPoint(x: size.width, y: midY))
-            context.stroke(baseline, with: .color(.secondary.opacity(0.28)), lineWidth: 0.75)
-
-            for channelIndex in average.allChannelSamples.indices {
-                let samples = average.allChannelSamples[channelIndex]
-                guard samples.count == sampleCount else { continue }
-
-                var path = Path()
-                path.move(to: CGPoint(x: 0, y: midY - CGFloat(samples[0]) * yScale))
-                let sampleStep = max(sampleCount / max(Int(size.width), 1), 1)
-                for sample in stride(from: sampleStep, through: sampleCount - 1, by: sampleStep) {
-                    path.addLine(
-                        to: CGPoint(
-                            x: CGFloat(sample) * xScale,
-                            y: midY - CGFloat(samples[sample]) * yScale
-                        )
-                    )
-                }
-
-                let isPrimary = primaryChannel == channelIndex
-                let isHighlighted = highlightedChannels.contains(channelIndex)
-                if !isPrimary,
-                   !isHighlighted,
-                   maximumBackgroundChannels != .max,
-                   !strongestBackgroundChannels.contains(channelIndex) {
-                    continue
-                }
-
-                let strokeColor: Color
-                let lineWidth: CGFloat
-                if isPrimary {
-                    strokeColor = .blue
-                    lineWidth = 1.75
-                } else if isHighlighted {
-                    strokeColor = .accentColor
-                    lineWidth = 1.35
-                } else {
-                    let opacity: Double
-                    if usesAmplitudeWeightedOpacity {
-                        let relativePeak = Double(max(peakByChannel[channelIndex] ?? 0, 0) / maxAbs)
-                        opacity = min(max(0.06 + relativePeak * 0.18, 0.06), 0.24)
-                    } else {
-                        opacity = 0.22
-                    }
-                    strokeColor = .secondary.opacity(opacity)
-                    lineWidth = 0.65
-                }
-                context.stroke(path, with: .color(strokeColor), lineWidth: lineWidth)
-            }
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
-        }
-    }
-}
-
-private struct ICATimeCoursePreview: View {
-    let samples: [Double]
-    let visibleRange: ClosedRange<Int>?
-    @State private var isExpanded = false
-    @State private var hoverTask: Task<Void, Never>?
-
-    var body: some View {
-        ICATimeCoursePlot(samples: samples, visibleRange: visibleRange)
-            .frame(height: 64)
-            .contentShape(Rectangle())
-            .onHover { isHovering in
-                hoverTask?.cancel()
-                if isHovering {
-                    hoverTask = Task {
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        guard !Task.isCancelled else { return }
-                        await MainActor.run {
-                            isExpanded = true
-                        }
-                    }
-                } else {
-                    isExpanded = false
-                }
-            }
-            .onDisappear {
-                hoverTask?.cancel()
-            }
-            .popover(isPresented: $isExpanded, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Component Time Course")
-                        .font(.headline)
-                    ICATimeCoursePlot(samples: samples, visibleRange: visibleRange)
-                        .frame(width: 720, height: 260)
-                }
-                .padding(14)
-            }
-            .help("Hover for 2 seconds to expand the component time course.")
-    }
-}
-
-private struct ICATimeCoursePlot: View {
-    let samples: [Double]
-    let visibleRange: ClosedRange<Int>?
-
-    var body: some View {
-        Canvas { context, size in
-            guard samples.count > 1,
-                  let range = clippedRange(visibleRange, count: samples.count),
-                  range.upperBound > range.lowerBound else { return }
-
-            let midY = size.height / 2
-            let scale = robustScale(samples, in: range)
-            let yScale = (size.height * 0.42) / CGFloat(scale.amplitude)
-            let binCount = max(Int(size.width.rounded(.down)), 2)
-            let visibleCount = range.upperBound - range.lowerBound + 1
-
-            var baseline = Path()
-            baseline.move(to: CGPoint(x: 0, y: midY))
-            baseline.addLine(to: CGPoint(x: size.width, y: midY))
-            context.stroke(baseline, with: .color(.secondary.opacity(0.25)), lineWidth: 0.75)
-
-            var trace = Path()
-            var didStartTrace = false
-
-            for bin in 0..<binCount {
-                let start = range.lowerBound + bin * visibleCount / binCount
-                let end = max(start + 1, range.lowerBound + (bin + 1) * visibleCount / binCount)
-                let boundedEnd = min(end, samples.count)
-                var sum = 0.0
-                var count = 0
-
-                for index in start..<boundedEnd {
-                    let value = samples[index]
-                    guard value.isFinite else { continue }
-                    sum += clamp(value - scale.center, to: -scale.amplitude...scale.amplitude)
-                    count += 1
-                }
-
-                guard count > 0 else { continue }
-
-                let x = CGFloat(bin) / CGFloat(max(binCount - 1, 1)) * size.width
-                let meanY = midY - CGFloat(sum / Double(count)) * yScale
-                if didStartTrace {
-                    trace.addLine(to: CGPoint(x: x, y: meanY))
-                } else {
-                    trace.move(to: CGPoint(x: x, y: meanY))
-                    didStartTrace = true
-                }
-            }
-
-            context.stroke(trace, with: .color(.accentColor), lineWidth: 1.2)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
-        }
-    }
-
-    private func clippedRange(_ range: ClosedRange<Int>?, count: Int) -> ClosedRange<Int>? {
-        guard count > 1 else { return nil }
-        let fallback = 0...(count - 1)
-        guard let range else { return fallback }
-        let lower = min(max(range.lowerBound, 0), count - 1)
-        let upper = min(max(range.upperBound, lower), count - 1)
-        return lower...upper
-    }
-
-    private func robustScale(_ values: [Double], in range: ClosedRange<Int>) -> (center: Double, amplitude: Double) {
-        guard !values.isEmpty, range.upperBound >= range.lowerBound else {
-            return (0, 1)
-        }
-
-        let visibleCount = range.upperBound - range.lowerBound + 1
-        let edgeTrim = min(visibleCount / 100, 100)
-        let lowerBound = min(range.lowerBound + edgeTrim, values.count - 1)
-        let upperBound = min(max(range.upperBound - edgeTrim + 1, lowerBound + 1), values.count)
-        let scaleStride = max((upperBound - lowerBound) / 5_000, 1)
-        var scaledValues: [Double] = []
-        scaledValues.reserveCapacity((upperBound - lowerBound) / scaleStride + 1)
-
-        for index in stride(from: lowerBound, to: upperBound, by: scaleStride) {
-            let value = values[index]
-            if value.isFinite {
-                scaledValues.append(value)
-            }
-        }
-
-        guard scaledValues.count > 1 else {
-            let fallback = values.first(where: { $0.isFinite }) ?? 0
-            return (fallback, 1)
-        }
-
-        scaledValues.sort()
-        let low = SignalStatistics.percentile(scaledValues, fraction: 0.02)
-        let high = SignalStatistics.percentile(scaledValues, fraction: 0.98)
-        let center = SignalStatistics.percentile(scaledValues, fraction: 0.50)
-        let amplitude = max(abs(high - center), abs(low - center), 1e-9)
-        return (center, amplitude)
-    }
-
-    private func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {
-        min(max(value, range.lowerBound), range.upperBound)
-    }
-}
-
-/// Pinned physio (PNS) trace pane, sharing the EEG time axis. Mirrors
-/// `EventTrackView`: it is offset-driven (not its own scroll view) so it stays
-/// fixed while the EEG channels scroll vertically and aligns horizontally with
-/// the waveform cursor.
-private struct PhysioTrackView: View {
-    let signal: MFFSignalData
-    let ranges: [ClosedRange<Float>]
-    let scaleFactors: [Int: Double]
-    let maxScaledChannels: Set<Int>
-    let flippedPolarity: Set<Int>
-    let rowHeight: CGFloat
-    let eegSamplingRate: Double
-    let sampleStride: Int
-    let timeScale: Double
-    let contentOffset: CGFloat
-    let viewportWidth: CGFloat
-
-    var body: some View {
-        Canvas { context, size in
-            guard signal.samplingRate > 0, eegSamplingRate > 0, sampleStride > 0,
-                  size.width > 0 else { return }
-            let pxPerSecond = eegSamplingRate / Double(sampleStride) * timeScale
-            guard pxPerSecond > 0 else { return }
-
-            let pnsSR = signal.samplingRate
-            let tStart = max(0, Double(contentOffset) / pxPerSecond)
-            let tEnd = Double(contentOffset + size.width) / pxPerSecond
-
-            for (c, channel) in signal.data.enumerated() {
-                let rowTop = CGFloat(c) * rowHeight
-                let midY = rowTop + rowHeight / 2
-                let usable = rowHeight - 8
-
-                // Row baseline.
-                var baseline = Path()
-                baseline.move(to: CGPoint(x: 0, y: rowTop + rowHeight - 2))
-                baseline.addLine(to: CGPoint(x: size.width, y: rowTop + rowHeight - 2))
-                context.stroke(baseline, with: .color(.secondary.opacity(0.12)), lineWidth: 0.5)
-
-                guard !channel.isEmpty else { continue }
-                let startSample = max(0, Int(tStart * pnsSR))
-                let endSample = min(channel.count - 1, Int(tEnd * pnsSR) + 1)
-                guard endSample > startSample else { continue }
-
-                let maxScaled = maxScaledChannels.contains(c)
-                let fallbackRange = c < ranges.count
-                    ? ranges[c]
-                    : (channel.min() ?? -1)...(channel.max() ?? 1)
-                let range: ClosedRange<Float>
-                if maxScaled {
-                    let scanStep = max(1, (endSample - startSample) / 5_000)
-                    var lo = Float.greatestFiniteMagnitude
-                    var hi = -Float.greatestFiniteMagnitude
-                    var k = startSample
-                    while k <= endSample {
-                        let value = channel[k]
-                        if value.isFinite {
-                            lo = min(lo, value)
-                            hi = max(hi, value)
-                        }
-                        k += scanStep
-                    }
-                    range = lo < hi ? lo...hi : fallbackRange
-                } else {
-                    range = fallbackRange
-                }
-
-                let span = max(range.upperBound - range.lowerBound, .leastNonzeroMagnitude)
-                let center = (range.lowerBound + range.upperBound) / 2
-                let scaleFactor = maxScaled
-                    ? CGFloat(1)
-                    : CGFloat(min(max(scaleFactors[c] ?? 1, 1), 64))
-                let polarity: CGFloat = flippedPolarity.contains(c) ? -1 : 1
-                let yScale = usable / CGFloat(span) * scaleFactor
-                let minY = rowTop + 4
-                let maxY = rowTop + rowHeight - 4
-                // Decimate to ~1 point per pixel.
-                let step = max(1, (endSample - startSample) / max(1, Int(size.width)))
-
-                var path = Path()
-                var started = false
-                var j = startSample
-                while j <= endSample {
-                    let x = CGFloat(Double(j) / pnsSR * pxPerSecond) - contentOffset
-                    let centered = CGFloat(channel[j] - center) * polarity
-                    let rawY = midY - centered * yScale
-                    let y = min(max(rawY, minY), maxY)
-                    if started {
-                        path.addLine(to: CGPoint(x: x, y: y))
-                    } else {
-                        path.move(to: CGPoint(x: x, y: y))
-                        started = true
-                    }
-                    j += step
-                }
-                context.stroke(path, with: .color(.pink), lineWidth: 1)
-            }
-        }
-        .frame(height: CGFloat(signal.numberOfChannels) * rowHeight)
-        .frame(maxWidth: .infinity)
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
-        }
-    }
-}
-
-private struct EventTrackView: View {
-    /// Maximum number of vertical lanes events are staggered across, and the
-    /// extra height each lane beyond the first adds to the track.
-    static let maxLanes = 3
-    static let laneSpacing: CGFloat = 18
-
-    let events: [MFFEvent]
-    let samplingRate: Double
-    let timeScale: Double
-    let sampleStride: Int
-    /// True horizontal scroll offset of the waveform content, used so event
-    /// markers line up with the waveform cursor.
-    let contentOffset: CGFloat
-    let visibleRange: ClosedRange<CGFloat>
-    let viewportWidth: CGFloat
-    /// Number of distinct source lanes events are staggered into.
-    var laneCount: Int = 1
-
-    /// Event whose detail popover is currently shown (tap a flag to open).
-    @State private var poppedEvent: MFFEvent?
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .controlBackgroundColor))
-
-            Canvas { context, size in
-                guard samplingRate > 0 else { return }
-                let baselineY = size.height - 16
-                var baseline = Path()
-                baseline.move(to: CGPoint(x: 0, y: baselineY))
-                baseline.addLine(to: CGPoint(x: size.width, y: baselineY))
-                context.stroke(baseline, with: .color(.secondary.opacity(0.3)), lineWidth: 1)
-
-                for event in visibleEvents {
-                    let x = localXPosition(for: event)
-                    let style = style(for: event)
-                    var marker = Path()
-                    // Stem starts at this source's lane (just below its label).
-                    marker.move(to: CGPoint(x: x, y: style.laneY + 4))
-                    marker.addLine(to: CGPoint(x: x, y: baselineY))
-                    context.stroke(marker, with: .color(style.color), lineWidth: 1)
-                }
-            }
-
-            ForEach(visibleEvents) { event in
-                eventFlag(event)
-            }
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
-        }
-    }
-
-    private var visibleEvents: [MFFEvent] {
-        events.filter { visibleRange.contains(globalXPosition(for: $0)) }
-    }
-
-    private func globalXPosition(for event: MFFEvent) -> CGFloat {
-        guard samplingRate > 0 else { return 0 }
-        let plottedIndex = event.beginTimeSeconds * samplingRate / Double(sampleStride)
-        return CGFloat(plottedIndex) * CGFloat(timeScale)
-    }
-
-    private func localXPosition(for event: MFFEvent) -> CGFloat {
-        // Position relative to the true scroll offset (not the buffered
-        // culling range) so markers align with the waveform cursor.
-        globalXPosition(for: event) - contentOffset
-    }
-
-    private func style(for event: MFFEvent) -> EventMarkerStyle {
-        let sources = Array(Set(events.map(\.sourceFile))).sorted()
-        let sourceIndex = sources.firstIndex(of: event.sourceFile) ?? 0
-        let palette: [Color] = [.orange, .blue, .green, .red, .pink, .teal, .indigo, .brown]
-        let lane = sourceIndex % max(laneCount, 1)
-        return EventMarkerStyle(
-            color: palette[sourceIndex % palette.count],
-            laneY: 4 + CGFloat(lane) * Self.laneSpacing
-        )
-    }
-
-    /// A single tappable event flag (code capsule) positioned in its lane.
-    @ViewBuilder
-    private func eventFlag(_ event: MFFEvent) -> some View {
-        let x = localXPosition(for: event)
-        let style = style(for: event)
-        let isPopped = Binding(
-            get: { poppedEvent == event },
-            set: { if !$0 { poppedEvent = nil } }
-        )
-        Text(event.code)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(style.color.opacity(0.15), in: Capsule())
-            .foregroundStyle(style.color)
-            .help(tooltip(for: event))
-            .contentShape(Capsule())
-            .onTapGesture { poppedEvent = event }
-            .popover(isPresented: isPopped) {
-                eventDetailPopover(event, color: style.color)
-            }
-            .offset(x: min(max(x + 4, 0), max(viewportWidth - 70, 0)), y: style.laneY)
-    }
-
-    /// Tap-to-open detail popover listing every populated field of the event.
-    @ViewBuilder
-    private func eventDetailPopover(_ event: MFFEvent, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(event.code)
-                .font(.headline)
-                .foregroundStyle(color)
-            Divider()
-            eventDetailRow("Label", event.label)
-            eventDetailRow("Description", event.eventDescription)
-            eventDetailRow("Cell", event.cell)
-            eventDetailRow("Onset", String(format: "%.3f s", event.beginTimeSeconds))
-            if let duration = event.durationSeconds {
-                eventDetailRow("Duration", duration >= 1
-                    ? String(format: "%.3f s", duration)
-                    : String(format: "%.0f ms", duration * 1000))
-            }
-            eventDetailRow("Source", event.sourceFile)
-        }
-        .padding(14)
-        .frame(minWidth: 220, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private func eventDetailRow(_ label: String, _ value: String?) -> some View {
-        if let value, !value.isEmpty {
-            HStack(alignment: .top, spacing: 8) {
-                Text(label)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 78, alignment: .leading)
-                Text(value)
-                    .font(.caption)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    /// Multi-line hover tooltip listing every populated field of the event.
-    private func tooltip(for event: MFFEvent) -> String {
-        var lines: [String] = ["Code: \(event.code)"]
-        if let label = event.label { lines.append("Label: \(label)") }
-        if let description = event.eventDescription { lines.append("Description: \(description)") }
-        if let cell = event.cell { lines.append("Cell: \(cell)") }
-        lines.append(String(format: "Onset: %.3f s", event.beginTimeSeconds))
-        if let duration = event.durationSeconds {
-            lines.append(duration >= 1
-                ? String(format: "Duration: %.3f s", duration)
-                : String(format: "Duration: %.0f ms", duration * 1000))
-        }
-        lines.append("Source: \(event.sourceFile)")
-        return lines.joined(separator: "\n")
-    }
-}
-
-private enum BCGDetectionMethod: String, CaseIterable, Identifiable {
+enum BCGDetectionMethod: String, CaseIterable, Identifiable {
     case periodicity    = "periodicity"
     case spatialPCA     = "spatialPCA"
     case cardiacPowerMap = "cardiacPowerMap"

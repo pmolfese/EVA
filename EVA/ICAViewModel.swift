@@ -19,6 +19,12 @@ import SwiftUI
 
 @MainActor
 final class ICAViewModel: ObservableObject {
+    init() {
+        let d = ProcessingDefaults.shared
+        method = d.icaMethod
+        componentCount = d.icaComponentCount
+    }
+
     // MARK: Sheet / run state
     @Published var showsSheet = false
     @Published var isRunning = false
