@@ -96,7 +96,7 @@ enum ArtifactTopographyMode: String, CaseIterable, Identifiable, Codable, Sendab
     var id: String { rawValue }
 
     /// Whether topography scanning is requested.
-    var isEnabled: Bool { self != .off }
+    nonisolated var isEnabled: Bool { self != .off }
 }
 
 struct ArtifactTemplateDetectionResult: Sendable {
@@ -477,7 +477,7 @@ nonisolated enum ArtifactTemplateDetector {
         nonisolated(unsafe) let chunkHitsPtr = UnsafeMutablePointer<[(sample: Int, score: Float)]>.allocate(capacity: coreCount)
         chunkHitsPtr.initialize(from: &chunkHits, count: coreCount)
         let lock = NSLock()
-        var globalCompleted = 0
+        nonisolated(unsafe) var globalCompleted = 0
 
         evaConcurrentPerform(iterations: coreCount) { chunkIdx in
             let startD = chunkIdx * chunkSize
@@ -518,7 +518,7 @@ nonisolated enum ArtifactTemplateDetector {
         chunkHitsPtr.deallocate()
         progress?(sampleCount, sampleCount)
 
-        var hits = chunkHits.flatMap { $0 }
+        let hits = chunkHits.flatMap { $0 }
 
         let merged = mergeTopography(hits: hits, mergeSamples: mergeSamples)
         let events = merged.enumerated().map { index, hit -> MFFEvent in
@@ -571,7 +571,7 @@ nonisolated enum ArtifactTemplateDetector {
         let exemplarEndD   = min(exemplarEnd / decimation, totalDecimatedSamples)
         let trajectoryLength = max(exemplarEndD - exemplarStartD, 2)
 
-        var referenceTrajectory = [[Float]]()
+        nonisolated(unsafe) var referenceTrajectory = [[Float]]()
         var referenceGFP = [Float]()          // raw GFP per frame, used as scoring weight
         referenceTrajectory.reserveCapacity(trajectoryLength)
         referenceGFP.reserveCapacity(trajectoryLength)
@@ -634,7 +634,7 @@ nonisolated enum ArtifactTemplateDetector {
         // Memory: totalDecimatedSamples × channelIndices.count × 4 bytes.
         // At a typical downsample rate of 20–30 Hz and 64 channels over 30 min,
         // this is ~(36 000 × 64 × 4) ≈ 9 MB — well within budget.
-        var allNormalized = [[Float]](repeating: [], count: totalDecimatedSamples)
+        nonisolated(unsafe) var allNormalized = [[Float]](repeating: [], count: totalDecimatedSamples)
         for dSample in 0..<totalDecimatedSamples {
             let sample = dSample * decimation
             var rawMap = [Float](repeating: 0, count: channelIndices.count)
@@ -671,7 +671,7 @@ nonisolated enum ArtifactTemplateDetector {
         let metric = configuration.topographyMetric
         let threshold = configuration.matchThreshold
         let lock = NSLock()
-        var globalCompleted = 0
+        nonisolated(unsafe) var globalCompleted = 0
 
         evaConcurrentPerform(iterations: coreCount) { chunkIdx in
             let startIdx = chunkIdx * chunkSize
@@ -734,7 +734,7 @@ nonisolated enum ArtifactTemplateDetector {
         chunkHitsPtr2.deallocate()
         progress?(sampleCount, sampleCount)
 
-        var hits = chunkHits.flatMap { $0 }
+        let hits = chunkHits.flatMap { $0 }
 
         let merged = mergeTopography(hits: hits, mergeSamples: mergeSamples)
         let events = merged.enumerated().map { index, hit -> MFFEvent in

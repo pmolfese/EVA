@@ -88,7 +88,7 @@ enum BadChannelPolicy: String, CaseIterable, Identifiable, Sendable {
 /// Per-category counts for the sanity table. When the file carries an `eva.xml`
 /// with rejection detail, `totalTrials` > `goodTrials` and `exclusionReasons`
 /// is populated; otherwise `totalTrials == goodTrials` (only survivors known).
-struct CategorySummary: Identifiable, Sendable {
+nonisolated struct CategorySummary: Identifiable, Sendable {
     var id: String { name }
     let name: String
     let totalTrials: Int
@@ -118,7 +118,7 @@ enum CompatibilityFlag: Sendable, Hashable {
 }
 
 /// One row of the combine sanity table.
-struct RecordingSummary: Identifiable, Sendable {
+nonisolated struct RecordingSummary: Identifiable, Sendable {
     let id = UUID()
     let url: URL
     let fileName: String
@@ -214,7 +214,7 @@ nonisolated enum CategoryMatcher {
 
 /// Provenance recorded into the combined package's `eva.xml` + log for
 /// reproducibility.
-struct CombineProvenance: Codable, Sendable {
+nonisolated struct CombineProvenance: Codable, Sendable {
     struct Contributor: Codable, Sendable {
         let fileName: String
         let goodTrials: Int

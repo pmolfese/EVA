@@ -71,6 +71,9 @@ struct WaveformView: View {
     @State private var commandKeyMonitor: Any?
     @State private var showsEventsPanel = false
     @State private var selectedEventID: MFFEvent.ID?
+    /// Artifact event whose window is highlighted in the waveform (tap its flag).
+    @State private var highlightedArtifactEvent: MFFEvent?
+    @State private var highlightedArtifactColor: Color = .orange
     @State private var selectedEventCodes = Set<String>()
     @State private var displayedEventsCache = WaveformDisplayedEventsCache.empty
     @State private var eventTrackSourceSummary = EventTrackSourceSummary.empty
@@ -87,6 +90,10 @@ struct WaveformView: View {
     @State private var waveformContentMinX: CGFloat = 0
     @State private var detectsEyeBlinkArtifacts = false
     @State private var detectsEyeMovementArtifacts = false
+    /// Raw text buffers for the threshold-panel ocular-channel override fields
+    /// (kept out of the config so mid-typing doesn't reparse the entry).
+    @State private var blinkChannelOverrideText = ""
+    @State private var movementChannelOverrideText = ""
     @State private var detectsECGArtifacts = false
     @State private var showsECGDetectionSheet = false
     // BCG detection
@@ -356,7 +363,6 @@ struct WaveformView: View {
             segHealth.showsDetails = true
         }
         .onChange(of: chanHealth.detailsRequest) { _, _ in
-            channels.showsHealth = true
             chanHealth.showsDetails = true
         }
         .onChange(of: channelGoodnessSettingsRequest) { _, _ in
@@ -670,6 +676,9 @@ struct WaveformView: View {
         .sheet(isPresented: $showsECGDetectionSheet) {
             ecgDetectionSheet(for: continuousSignal)
         }
+        .sheet(isPresented: $artifactVM.showsThresholdSheet) {
+            eyeThresholdSettingsSheet(for: continuousSignal)
+        }
         .sheet(isPresented: $bcg.showsSheet) {
             bcgDetectionSheet(for: continuousSignal, selection: activeSelectionRange(in: continuousSignal))
                 .onAppear { autoSelectBCGProxySetIfEnabled(for: continuousSignal) }
@@ -737,8 +746,25 @@ struct WaveformView: View {
         .task(id: artifactDetectionRequestID(for: continuousSignal)) {
             await updateArtifactEvents(for: continuousSignal)
         }
-        .task(id: channelHealthRequestID(for: continuousSignal)) {
-            refreshChannelHealthIfNeeded(for: continuousSignal)
+        .task(id: channelHealthSignature(for: continuousSignal)) {
+            // Channel health is now run on demand (tap a badge). A major state
+            // change (new filter/gradient/ICA/artifact repair/interpolation)
+            // changes the signature and resets the badges to empty; the user
+            // re-runs when ready.
+            resetChannelHealthForStateChange()
+        }
+        .onChange(of: chanHealth.detailsRequest) { _, _ in
+            // Opening the details sheet runs health if it hasn't been yet.
+            runChannelHealthOnDemand(for: continuousSignal)
+        }
+        .onChange(of: channels.healthRefreshToken) { _, _ in
+            // Menu "Run / Refresh Channel Health" forces a recompute.
+            runChannelHealthOnDemand(for: continuousSignal, force: true)
+        }
+        .onChange(of: channels.interpolated.keys.sorted()) { oldKeys, newKeys in
+            // Interpolating (or un-interpolating) a channel updates only that
+            // channel's badge; the rest of the run is preserved.
+            recomputeChannelHealthForInterpolation(oldKeys: oldKeys, newKeys: newKeys, signal: continuousSignal)
         }
         .task(id: segmentHealthRequestID(for: signal)) {
             refreshSegmentHealthIfNeeded(for: signal)
@@ -914,25 +940,23 @@ struct WaveformView: View {
                 Divider()
 
                 Picker("Method", selection: $artifactVM.detectionMethod) {
-                    ForEach(ArtifactDetectionMethod.allCases) { method in
+                    ForEach(ArtifactDetectionMethod.selectableCases) { method in
                         Text(method.rawValue)
                             .tag(method)
                     }
                 }
                 .pickerStyle(.inline)
 
-                if artifactVM.detectionMethod == .threshold, detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts {
+                if artifactVM.detectionMethod == .threshold {
                     Divider()
-                    Text("Threshold: ±150 µV on EGI VEOG/HEOG channels")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if artifactVM.detectionMethod == .template {
-                    Divider()
-                    Text("Right-click a highlighted waveform region to define a template.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Button("Threshold Settings…") {
+                        artifactVM.showsThresholdSheet = true
+                    }
+                    if !detectsEyeBlinkArtifacts, !detectsEyeMovementArtifacts {
+                        Text("Enable Eye Blink or Eye Movement above to detect.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 if artifactVM.detectionMethod == .ica {
@@ -1312,7 +1336,22 @@ struct WaveformView: View {
                     contentOffset: horizontalOffset,
                     visibleRange: visibleHorizontalRange,
                     viewportWidth: horizontalViewportWidth,
-                    laneCount: eventLaneCount
+                    laneCount: eventLaneCount,
+                    onSelectEvent: { event, color in
+                        // Toggle: tapping the highlighted flag again clears it.
+                        // Only artifact-detection events carry a centered window;
+                        // imported MFF events use onset+forward duration, so they
+                        // are not highlighted with this centered band.
+                        if highlightedArtifactEvent?.id == event.id {
+                            highlightedArtifactEvent = nil
+                        } else if event.durationSeconds != nil,
+                                  event.sourceFile == EyeArtifactThresholdDetector.sourceFile {
+                            highlightedArtifactEvent = event
+                            highlightedArtifactColor = color
+                        } else {
+                            highlightedArtifactEvent = nil
+                        }
+                    }
                 )
                 .frame(maxWidth: .infinity, minHeight: dynamicEventTrackHeight, maxHeight: dynamicEventTrackHeight)
                 .background(
@@ -1350,6 +1389,7 @@ struct WaveformView: View {
                         .overlay(alignment: .topLeading) { segmentHealthOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { epochBoundaryOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { selectionOverlay(for: signal) }
+                        .overlay(alignment: .topLeading) { artifactHighlightOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { cursorOverlay(for: signal) }
                         .contentShape(Rectangle())
                         .background(
@@ -1862,12 +1902,15 @@ struct WaveformView: View {
             .foregroundStyle(channelColor(index))
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if channels.showsHealth {
-                ChannelHealthBadge(
-                    result: channels.healthResults[index],
-                    isAnalyzing: channels.isAnalyzingHealth
-                )
-            }
+            ChannelHealthBadge(
+                result: channels.healthResults[index],
+                isAnalyzing: channels.isAnalyzingHealth,
+                onActivate: {
+                    if let signal = continuousProcessedSignal {
+                        runChannelHealthOnDemand(for: signal)
+                    }
+                }
+            )
         }
         .opacity(isHidden ? 0.4 : 1)
         .frame(maxWidth: .infinity, minHeight: channelRowHeight, alignment: .leading)
@@ -1940,6 +1983,7 @@ struct WaveformView: View {
         channels.hidden.removeAll()
         channels.bad.removeAll()
         channels.interpolated.removeAll()
+        channels.interpolationSources.removeAll()
         channels.clearHealthResults()
         electrodeGeometry = recording.electrodeGeometry
         ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
@@ -2136,6 +2180,37 @@ struct WaveformView: View {
         }
     }
 
+    /// Translucent band spanning the window of the tapped artifact event, drawn
+    /// in the event's flag color. The flag sits at the peak (event onset), so the
+    /// window is centered on it using the event's recorded duration.
+    @ViewBuilder
+    private func artifactHighlightOverlay(for signal: MFFSignalData) -> some View {
+        if let event = highlightedArtifactEvent,
+           let duration = event.durationSeconds, duration > 0,
+           signal.samplingRate > 0,
+           let sampleCount = signal.data.first?.count, sampleCount > 0 {
+            let halfWindow = duration / 2
+            let startSample = Int(((event.beginTimeSeconds - halfWindow) * signal.samplingRate).rounded())
+            let endSample = Int(((event.beginTimeSeconds + halfWindow) * signal.samplingRate).rounded())
+            let lower = min(max(startSample, 0), sampleCount - 1)
+            let upper = min(max(endSample, lower + 1), sampleCount)
+            let lowerX = contentX(forSample: lower, in: signal)
+            let upperX = contentX(forSample: upper, in: signal)
+            Rectangle()
+                .fill(highlightedArtifactColor.opacity(0.18))
+                .frame(width: max(upperX - lowerX, 2))
+                .frame(maxHeight: .infinity)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(highlightedArtifactColor.opacity(0.7)).frame(width: 1)
+                }
+                .overlay(alignment: .trailing) {
+                    Rectangle().fill(highlightedArtifactColor.opacity(0.7)).frame(width: 1)
+                }
+                .offset(x: lowerX)
+                .allowsHitTesting(false)
+        }
+    }
+
     @ViewBuilder
     private func segmentHealthOverlay(for signal: MFFSignalData) -> some View {
         if segHealth.shows,
@@ -2194,6 +2269,7 @@ struct WaveformView: View {
                     dragSelectionStartSample = nil
                     dragSelectionEndSample = nil
                     lastWaveformClick = nil
+                    highlightedArtifactEvent = nil
                     return
                 }
 
@@ -8690,6 +8766,217 @@ struct WaveformView: View {
         }
     }
 
+    // MARK: - Eye artifact threshold settings sheet
+
+    private func eyeThresholdSettingsSheet(for signal: MFFSignalData) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Ocular Artifact Thresholds")
+                    .font(.headline)
+                Text("Tune the threshold detector for eye blinks and eye movements independently. Each tab's toggle controls whether that artifact is detected — enable one or both.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding([.horizontal, .top], 20)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            TabView {
+                eyeThresholdTab(
+                    title: "Eye Blink",
+                    kind: .blink,
+                    enabled: $detectsEyeBlinkArtifacts,
+                    config: $artifactVM.blinkThresholdConfig,
+                    channelText: $blinkChannelOverrideText,
+                    signal: signal
+                )
+                .tabItem { Text("Eye Blink") }
+
+                eyeThresholdTab(
+                    title: "Eye Movement",
+                    kind: .movement,
+                    enabled: $detectsEyeMovementArtifacts,
+                    config: $artifactVM.movementThresholdConfig,
+                    channelText: $movementChannelOverrideText,
+                    signal: signal
+                )
+                .tabItem { Text("Eye Movement") }
+            }
+            .padding(20)
+
+            Divider()
+
+            HStack {
+                Button("Restore Defaults") {
+                    artifactVM.blinkThresholdConfig = .defaults(for: .blink)
+                    artifactVM.movementThresholdConfig = .defaults(for: .movement)
+                    blinkChannelOverrideText = ""
+                    movementChannelOverrideText = ""
+                }
+                Spacer()
+                Button("Done") {
+                    artifactVM.showsThresholdSheet = false
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding([.horizontal, .bottom], 20)
+            .padding(.top, 12)
+        }
+        .frame(width: 520, height: 560)
+        .onAppear {
+            blinkChannelOverrideText = channelOverrideText(artifactVM.blinkThresholdConfig.channelOverride)
+            movementChannelOverrideText = channelOverrideText(artifactVM.movementThresholdConfig.channelOverride)
+        }
+    }
+
+    @ViewBuilder
+    private func eyeThresholdTab(
+        title: String,
+        kind: EyeArtifactKind,
+        enabled: Binding<Bool>,
+        config: Binding<EyeArtifactThresholdConfiguration>,
+        channelText: Binding<String>,
+        signal: MFFSignalData
+    ) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Toggle("Detect \(title)", isOn: enabled)
+                    .toggleStyle(.switch)
+                    .font(.callout.weight(.semibold))
+
+                Group {
+                    thresholdSection("Amplitude") {
+                        thresholdFloatRow("Minimum", value: config.amplitudeMinMicrovolts,
+                                          unit: "µV", range: 10...500, step: 5)
+                        thresholdFloatRow("Maximum", value: config.amplitudeMaxMicrovolts,
+                                          unit: "µV", range: 0...2000, step: 25,
+                                          caption: "0 = no cap; higher peaks are rejected as saturation.")
+                        Picker("Polarity", selection: config.polarity) {
+                            ForEach(EyeArtifactPolarity.allCases) { p in Text(p.rawValue).tag(p) }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    thresholdSection("Timing") {
+                        thresholdDoubleRow("Rise window", value: config.riseWindowSeconds,
+                                           unit: "s", range: 0...2, step: 0.05, fraction: 2,
+                                           caption: "Baseline→peak must complete within this time. 0 = unconstrained.")
+                        thresholdDoubleRow("Min duration", value: config.minDurationSeconds,
+                                           unit: "s", range: 0...1, step: 0.01, fraction: 2)
+                        thresholdDoubleRow("Max duration", value: config.maxDurationSeconds,
+                                           unit: "s", range: 0...5, step: 0.05, fraction: 2,
+                                           caption: "0 = no cap.")
+                        thresholdDoubleRow("Merge gap", value: config.mergeGapSeconds,
+                                           unit: "s", range: 0...1, step: 0.05, fraction: 2,
+                                           caption: "Events closer than this are fused into one.")
+                    }
+
+                    thresholdSection("Kinematics") {
+                        Toggle("Velocity gate", isOn: config.velocityEnabled)
+                        thresholdFloatRow("Min velocity", value: config.velocityThresholdMicrovoltsPerMillisecond,
+                                          unit: "µV/ms", range: 0...50, step: 0.5, fraction: 1)
+                            .disabled(!config.velocityEnabled.wrappedValue)
+                        Toggle("Acceleration gate", isOn: config.accelerationEnabled)
+                        thresholdFloatRow("Min acceleration", value: config.accelerationThresholdMicrovoltsPerMillisecondSquared,
+                                          unit: "µV/ms²", range: 0...20, step: 0.25, fraction: 2)
+                            .disabled(!config.accelerationEnabled.wrappedValue)
+                    }
+
+                    thresholdSection("Channels") {
+                        HStack {
+                            TextField("auto", text: channelText)
+                                .textFieldStyle(.roundedBorder)
+                                .onChange(of: channelText.wrappedValue) { _, text in
+                                    let parsed = parseChannelList(text, channelCount: signal.numberOfChannels)
+                                    config.wrappedValue.channelOverride = parsed.isEmpty ? nil : parsed
+                                }
+                            Button("Auto") {
+                                channelText.wrappedValue = ""
+                                config.wrappedValue.channelOverride = nil
+                            }
+                        }
+                        Text(channelOverrideCaption(kind: kind, config: config.wrappedValue, signal: signal))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .disabled(!enabled.wrappedValue)
+                .opacity(enabled.wrappedValue ? 1 : 0.5)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func thresholdSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+    }
+
+    @ViewBuilder
+    private func thresholdFloatRow(
+        _ label: String, value: Binding<Float>, unit: String,
+        range: ClosedRange<Float>, step: Float, fraction: Int = 0, caption: String? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label).font(.caption).frame(width: 110, alignment: .leading)
+                TextField(label, value: value, format: .number.precision(.fractionLength(fraction)))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 64)
+                Text(unit).font(.caption).foregroundStyle(.secondary).frame(width: 44, alignment: .leading)
+                Slider(value: value, in: range, step: step)
+            }
+            if let caption {
+                Text(caption).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func thresholdDoubleRow(
+        _ label: String, value: Binding<Double>, unit: String,
+        range: ClosedRange<Double>, step: Double, fraction: Int, caption: String? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label).font(.caption).frame(width: 110, alignment: .leading)
+                TextField(label, value: value, format: .number.precision(.fractionLength(fraction)))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 64)
+                Text(unit).font(.caption).foregroundStyle(.secondary).frame(width: 44, alignment: .leading)
+                Slider(value: value, in: range, step: step)
+            }
+            if let caption {
+                Text(caption).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func channelOverrideText(_ indices: [Int]?) -> String {
+        guard let indices, !indices.isEmpty else { return "" }
+        return indices.map { String($0 + 1) }.joined(separator: ", ")
+    }
+
+    private func channelOverrideCaption(
+        kind: EyeArtifactKind, config: EyeArtifactThresholdConfiguration, signal: MFFSignalData
+    ) -> String {
+        if let override = config.channelOverride, !override.isEmpty {
+            let valid = override.filter { $0 >= 0 && $0 < signal.numberOfChannels }
+            return "Scanning \(valid.count) channel\(valid.count == 1 ? "" : "s"). Leave blank for the automatic set."
+        }
+        let auto = EyeArtifactThresholdDetector.autoOcularChannelIndices(kind: kind, channelCount: signal.numberOfChannels)
+        let names = auto.map { String($0 + 1) }.joined(separator: ", ")
+        return "Automatic (net-based): channels \(names)."
+    }
+
     // MARK: - BCG Detection sheet
 
     @ViewBuilder
@@ -9133,7 +9420,6 @@ struct WaveformView: View {
         let sr          = signal.samplingRate
         let duration    = signal.duration
         let threshold   = bcg.thresholdSD
-        let winSec      = bcg.windowSeconds
         let method      = bcg.method
 
         let times: [Double]
@@ -9727,6 +10013,8 @@ struct WaveformView: View {
             "\(signal.data.first?.count ?? 0)",
             "\(detectsEyeBlinkArtifacts)",
             "\(detectsEyeMovementArtifacts)",
+            "\(artifactVM.blinkThresholdConfig.hashValue)",
+            "\(artifactVM.movementThresholdConfig.hashValue)",
             "\(detectsECGArtifacts)",
             ecgDetectionSelectedPNSChannels.sorted().map(String.init).joined(separator: ","),
             ecgDetectionProxyChannels,
@@ -9771,6 +10059,8 @@ struct WaveformView: View {
         let detectBlinks = detectsEyeBlinkArtifacts
         let detectMovements = detectsEyeMovementArtifacts
         let detectECG = detectsECGArtifacts
+        let blinkConfig = artifactVM.blinkThresholdConfig
+        let movementConfig = artifactVM.movementThresholdConfig
         let ecgConfiguration = ECGDetectionConfiguration(
             algorithm: ecgDetectionAlgorithm,
             thresholdSD: ecgDetectionThresholdSD,
@@ -9785,7 +10075,8 @@ struct WaveformView: View {
                         kind: .blink,
                         channels: sourceData,
                         samplingRate: samplingRate,
-                        duration: duration
+                        duration: duration,
+                        configuration: blinkConfig
                     )
                 }
             }
@@ -9795,7 +10086,8 @@ struct WaveformView: View {
                         kind: .movement,
                         channels: sourceData,
                         samplingRate: samplingRate,
-                        duration: duration
+                        duration: duration,
+                        configuration: movementConfig
                     )
                 }
             }
@@ -9837,15 +10129,10 @@ struct WaveformView: View {
 
     // MARK: - Channel health
 
-    private func channelHealthRequestID(for signal: MFFSignalData) -> String {
-        [
-            "\(channels.showsHealth)",
-            "\(channels.healthRefreshToken)",
-            channelHealthSignature(for: signal)
-        ].joined(separator: "|")
-    }
-
     private func channelHealthSignature(for signal: MFFSignalData) -> String {
+        // Interpolation is deliberately excluded: it changes only one channel,
+        // so it does not wipe the whole health run — instead a targeted
+        // recompute updates just the interpolated channel's badge.
         return [
             signal.signalURL.path,
             signal.signalType,
@@ -9856,8 +10143,7 @@ struct WaveformView: View {
             "\(ica.cleanedSignal != nil)",
             "\(filter.output != nil)",
             "\(artifactVM.cleanedSignal != nil)",
-            "\(artifactVM.cleaningIsEnabled)",
-            channels.interpolated.keys.sorted().map(String.init).joined(separator: ",")
+            "\(artifactVM.cleaningIsEnabled)"
         ].joined(separator: "|")
     }
 
@@ -9989,23 +10275,135 @@ struct WaveformView: View {
         }
     }
 
+    /// The continuous (non-epoched) processed signal the health badges score,
+    /// mirroring the `body` pipeline so a badge tap can run health from any row
+    /// (rows only carry the possibly-epoched display signal). `nil` pre-load.
+    private var continuousProcessedSignal: MFFSignalData? {
+        guard let rawSignal = recording.signal else { return nil }
+        let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+        let preArtifact = filter.output ?? base
+        let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
+        let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? processed) : processed
+        return applyInterpolations(to: waveletStage)
+    }
+
+    /// Resets the channel-health badges to their empty state after a major
+    /// processing change. Does not auto-run; the user taps a badge to re-run.
     @MainActor
-    private func refreshChannelHealthIfNeeded(for signal: MFFSignalData) {
+    private func resetChannelHealthForStateChange() {
+        chanHealth.task?.cancel()
+        chanHealth.task = nil
+        chanHealth.signature = nil
+        channels.clearHealthResults()
+        channels.showsHealth = false
+        chanHealth.statusMessage = nil
+    }
+
+    /// Runs channel health for the first time in the current state (tap a badge
+    /// or the menu). No-ops if a scan is running or results already exist for
+    /// this exact state; pass `force` to recompute regardless.
+    @MainActor
+    private func runChannelHealthOnDemand(for signal: MFFSignalData, force: Bool = false) {
+        guard !channels.isAnalyzingHealth else { return }
         let signature = channelHealthSignature(for: signal)
-
-        guard channels.showsHealth else {
-            chanHealth.task?.cancel()
-            chanHealth.task = nil
-            chanHealth.signature = nil
-            channels.clearHealthResults()
-            chanHealth.statusMessage = nil
+        if !force, !channels.healthResults.isEmpty, chanHealth.signature == signature {
             return
         }
+        channels.showsHealth = true
+        startChannelHealthScan(for: signal, signature: signature)
+    }
 
-        guard chanHealth.signature != signature || channels.healthResults.isEmpty else {
-            return
+    /// Updates channel health after an interpolation change, touching only the
+    /// affected channels' badges and leaving every other result in place.
+    /// No-ops if health hasn't been run yet or a scan is already going.
+    ///
+    /// Newly interpolated channels can be estimated cheaply by averaging their
+    /// spline-contributing channels (a Preferences toggle) — good for modest
+    /// hardware. Un-interpolated channels (now back to real data) always need a
+    /// real analysis, as does the estimate's fallback.
+    @MainActor
+    private func recomputeChannelHealthForInterpolation(oldKeys: [Int], newKeys: [Int], signal: MFFSignalData) {
+        guard !channels.healthResults.isEmpty, !channels.isAnalyzingHealth else { return }
+        let added = Set(newKeys).subtracting(oldKeys)
+        let removed = Set(oldKeys).subtracting(newKeys)
+        guard !added.isEmpty || !removed.isEmpty else { return }
+
+        // Removals revert to real data, so they always need a real analysis.
+        var needsFullAnalysis = removed
+
+        if ProcessingDefaults.shared.interpolatedHealthFromNeighbors {
+            for channel in added {
+                if let estimate = averagedNeighborHealth(for: channel) {
+                    channels.healthResults[channel] = estimate
+                } else {
+                    needsFullAnalysis.insert(channel) // no contributors with scores yet
+                }
+            }
+        } else {
+            needsFullAnalysis.formUnion(added)
         }
 
+        guard !needsFullAnalysis.isEmpty else { return }
+
+        let affected = needsFullAnalysis
+        let layout = recording.sensorLayout
+        let impedances = recording.signal?.impedancesKOhm
+        let baseConfig = goodnessSettings.base
+        let spectralConfig = goodnessSettings.spectral
+        let ransacConfig = goodnessSettings.ransac
+        let sourceSignal = signal
+
+        Task { @MainActor in
+            let analysis = await Task.detached(priority: .utility) {
+                ChannelHealthAnalyzer.analyze(
+                    signal: sourceSignal,
+                    layout: layout,
+                    base: baseConfig,
+                    spectral: spectralConfig,
+                    ransac: ransacConfig,
+                    impedancesKOhm: impedances
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+            for channel in affected {
+                channels.healthResults[channel] = analysis.resultsByChannel[channel]
+            }
+        }
+    }
+
+    /// Estimates an interpolated channel's health as the spline-weighted average
+    /// of its contributing channels' goodness. Returns `nil` when the channel
+    /// has no recorded contributors, or none of them have a health score yet
+    /// (caller then falls back to a real analysis).
+    @MainActor
+    private func averagedNeighborHealth(for channel: Int) -> ChannelHealthResult? {
+        guard let source = channels.interpolationSources[channel] else { return nil }
+
+        var weightedGood = 0.0
+        var weightTotal = 0.0
+        var count = 0
+        for (contributor, weight) in zip(source.indices, source.weights) {
+            guard let result = channels.healthResults[contributor] else { continue }
+            let w = Double(abs(weight))
+            weightedGood += w * Double(result.goodPercentage)
+            weightTotal += w
+            count += 1
+        }
+        guard weightTotal > 0, count > 0 else { return nil }
+
+        let good = Int((weightedGood / weightTotal).rounded())
+        return ChannelHealthResult(
+            channelIndex: channel,
+            goodPercentage: good,
+            grade: HealthScoring.grade(for: Double(good) / 100),
+            summary: "Estimated from \(count) contributing channel\(count == 1 ? "" : "s") (interpolated).",
+            metrics: []
+        )
+    }
+
+    @MainActor
+    private func startChannelHealthScan(for signal: MFFSignalData, signature: String) {
         chanHealth.task?.cancel()
         chanHealth.signature = signature
         channels.healthResults = [:]
@@ -10653,6 +11051,7 @@ struct WaveformView: View {
         }
 
         channels.interpolated[index] = series
+        channels.interpolationSources[index] = (indices, weights.map(Float.init))
         channels.bad.remove(index)
         channelStatusMessage = "Interpolated Ch \(index + 1) from \(indices.count) neighbors."
         channelStatusIsError = false
@@ -10664,6 +11063,7 @@ struct WaveformView: View {
     /// when the gradient/filter pipeline changes.
     private func invalidateInterpolations() {
         channels.interpolated.removeAll()
+        channels.interpolationSources.removeAll()
     }
 
     /// Clears every derived buffer (filters, re-reference, MRI correction, ICA,
@@ -11503,7 +11903,7 @@ private struct AveragedTopomapSample: Identifiable {
     var id: String { "\(category)-\(sample)" }
 }
 
-private struct PSABuildResult {
+private nonisolated struct PSABuildResult {
     let signal: MFFSignalData
     let segments: [EpochSegment]
     let message: String
@@ -11632,7 +12032,7 @@ private struct PSABuildResult {
 }
 
 /// Captures all inputs needed to build PSA epochs off the main thread.
-private struct PSABuildJob: Sendable {
+private nonisolated struct PSABuildJob: Sendable {
     let signal: MFFSignalData
     let events: [MFFEvent]
     let categoriesBySegmentValue: [String: String]
@@ -11861,6 +12261,10 @@ enum ArtifactDetectionMethod: String, CaseIterable, Identifiable {
     case ica = "ICA"
 
     var id: String { rawValue }
+
+    /// Methods the user can pick directly. `.template` is entered implicitly by
+    /// drawing a selection and defining a template, so it is not offered here.
+    static var selectableCases: [ArtifactDetectionMethod] { [.threshold, .ica] }
 }
 
 enum PSASegmentField: String, CaseIterable, Identifiable {

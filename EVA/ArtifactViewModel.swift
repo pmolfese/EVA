@@ -27,6 +27,12 @@ final class ArtifactViewModel: ObservableObject {
     /// Bumped by upstream pipeline stages (filter/gradient) to force a re-detect.
     @Published var detectionRefreshToken = 0
 
+    // MARK: Threshold detector settings
+    /// Two-tab config panel for the threshold-based ocular detector.
+    @Published var showsThresholdSheet = false
+    @Published var blinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
+    @Published var movementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
+
     // MARK: Cleaning
     @Published var showsCleaningSheet = false
     @Published var isCleaning = false

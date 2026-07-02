@@ -199,7 +199,7 @@ nonisolated enum MFFWriter {
               let document = try? XMLDocument(data: data, options: [.documentTidyXML]),
               let root = document.rootElement() else { return nil }
         removeDescendants(named: "calibrations", from: root)
-        return try? document.xmlData(options: [.nodePrettyPrint])
+        return document.xmlData(options: [.nodePrettyPrint])
     }
 
     private static func writePNSSetXML(pns: MFFSignalData, to packageURL: URL) throws {

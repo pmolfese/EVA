@@ -242,7 +242,7 @@ nonisolated enum ArtifactCleaner {
             }
         }
 
-        var contributions: [OBSVarianceContribution] = []
+        nonisolated(unsafe) var contributions: [OBSVarianceContribution] = []
         contributions.reserveCapacity(channels.count)
         let lock = NSLock()
 
@@ -592,7 +592,7 @@ nonisolated enum ArtifactCleaner {
             }
         }
 
-        var bases: [OBSChannelBasis] = []
+        nonisolated(unsafe) var bases: [OBSChannelBasis] = []
         bases.reserveCapacity(channels.count)
         let lock = NSLock()
         let batchSize = boundedWorkerCount

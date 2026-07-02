@@ -799,6 +799,9 @@ struct EventTrackView: View {
     let viewportWidth: CGFloat
     /// Number of distinct source lanes events are staggered into.
     var laneCount: Int = 1
+    /// Called when a flag is tapped, with the event and its flag color, so the
+    /// parent can highlight the artifact's window in the waveform.
+    var onSelectEvent: ((MFFEvent, Color) -> Void)? = nil
 
     /// Event whose detail popover is currently shown (tap a flag to open).
     @State private var poppedEvent: MFFEvent?
@@ -949,7 +952,10 @@ struct EventTrackView: View {
             .foregroundStyle(style.color)
             .help(tooltip(for: event))
             .contentShape(Capsule())
-            .onTapGesture { poppedEvent = event }
+            .onTapGesture {
+                poppedEvent = event
+                onSelectEvent?(event, style.color)
+            }
             .popover(isPresented: isPopped) {
                 eventDetailPopover(event, color: style.color)
             }

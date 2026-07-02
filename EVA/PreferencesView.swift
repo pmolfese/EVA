@@ -65,6 +65,16 @@ private struct ProcessingDefaultsView: View {
             }
 
             Section {
+                Toggle("Estimate interpolated-channel health from neighbors", isOn: $defaults.interpolatedHealthFromNeighbors)
+            } header: {
+                Text("Channel Health")
+            } footer: {
+                Text("When on, interpolating a channel averages the health of its spline-contributing channels — fast, ideal on modest hardware. When off, the montage is fully re-analyzed for an exact score.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 HStack {
                     Spacer()
                     Button("Restore Defaults") { defaults.restoreDefaults() }

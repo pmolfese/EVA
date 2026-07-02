@@ -364,6 +364,9 @@ struct SegmentHealthMetricRow: View {
 struct ChannelHealthBadge: View {
     let result: ChannelHealthResult?
     let isAnalyzing: Bool
+    /// Invoked when an empty badge is tapped, to run channel health for the
+    /// first time in the current processing state.
+    var onActivate: (() -> Void)? = nil
     @State private var showsDetails = false
     @State private var pinsDetails = false
 
@@ -405,10 +408,14 @@ struct ChannelHealthBadge: View {
             }
         }
         .onTapGesture {
-            guard result != nil else { return }
-            pinsDetails.toggle()
-            showsDetails = pinsDetails
+            if result != nil {
+                pinsDetails.toggle()
+                showsDetails = pinsDetails
+            } else if !isAnalyzing {
+                onActivate?()
+            }
         }
+        .help(result == nil && !isAnalyzing ? "Click to run channel health" : "")
         .popover(isPresented: $showsDetails, arrowEdge: .trailing) {
             if let result {
                 ChannelHealthPopover(result: result)
@@ -419,7 +426,7 @@ struct ChannelHealthBadge: View {
                 pinsDetails = false
             }
         }
-        .accessibilityLabel(result.map { "Channel health \($0.goodPercentage) percent good" } ?? "Channel health pending")
+        .accessibilityLabel(result.map { "Channel health \($0.goodPercentage) percent good" } ?? "Channel health, not yet run, click to run")
     }
 }
 
@@ -720,11 +727,13 @@ struct ChannelHealthPopover: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Divider()
+            if !result.metrics.isEmpty {
+                Divider()
 
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(result.metrics) { metric in
-                    ChannelHealthMetricRow(metric: metric)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(result.metrics) { metric in
+                        ChannelHealthMetricRow(metric: metric)
+                    }
                 }
             }
         }

@@ -36,6 +36,12 @@ final class ProcessingDefaults {
     var bcgAutoSelectProxySet: Bool { didSet { save() } }
     var bcgDefaultMethodRaw: String { didSet { save() } }
 
+    // MARK: Channel-health defaults
+    /// When on, an interpolated channel's health is estimated by averaging its
+    /// spline-contributing channels rather than a full montage recompute — much
+    /// cheaper on modest hardware.
+    var interpolatedHealthFromNeighbors: Bool { didSet { save() } }
+
     private static let key = "ProcessingDefaults.v1"
 
     init() {
@@ -49,6 +55,7 @@ final class ProcessingDefaults {
         icaComponentCount = stored.icaComponentCount
         bcgAutoSelectProxySet = stored.bcgAutoSelectProxySet
         bcgDefaultMethodRaw = stored.bcgDefaultMethodRaw
+        interpolatedHealthFromNeighbors = stored.interpolatedHealthFromNeighbors
     }
 
     func restoreDefaults() {
@@ -61,6 +68,7 @@ final class ProcessingDefaults {
         icaComponentCount = d.icaComponentCount
         bcgAutoSelectProxySet = d.bcgAutoSelectProxySet
         bcgDefaultMethodRaw = d.bcgDefaultMethodRaw
+        interpolatedHealthFromNeighbors = d.interpolatedHealthFromNeighbors
     }
 
     private func save() {
@@ -72,7 +80,8 @@ final class ProcessingDefaults {
             icaMethodRaw: icaMethod.rawValue,
             icaComponentCount: icaComponentCount,
             bcgAutoSelectProxySet: bcgAutoSelectProxySet,
-            bcgDefaultMethodRaw: bcgDefaultMethodRaw
+            bcgDefaultMethodRaw: bcgDefaultMethodRaw,
+            interpolatedHealthFromNeighbors: interpolatedHealthFromNeighbors
         )
         if let data = try? JSONEncoder().encode(stored) {
             UserDefaults.standard.set(data, forKey: Self.key)
@@ -89,13 +98,15 @@ final class ProcessingDefaults {
         var icaComponentCount = 20
         var bcgAutoSelectProxySet = false
         var bcgDefaultMethodRaw = "periodicity"
+        var interpolatedHealthFromNeighbors = true
 
         static let defaults = Stored()
 
         init(filterHighPassHz: Double = 0.1, filterLowPassHz: Double = 30.0,
              filterNotch60: Bool = false, filterAverageReference: Bool = false,
              icaMethodRaw: String = ICAMethod.picard.rawValue, icaComponentCount: Int = 20,
-             bcgAutoSelectProxySet: Bool = false, bcgDefaultMethodRaw: String = "periodicity") {
+             bcgAutoSelectProxySet: Bool = false, bcgDefaultMethodRaw: String = "periodicity",
+             interpolatedHealthFromNeighbors: Bool = true) {
             self.filterHighPassHz = filterHighPassHz
             self.filterLowPassHz = filterLowPassHz
             self.filterNotch60 = filterNotch60
@@ -104,6 +115,7 @@ final class ProcessingDefaults {
             self.icaComponentCount = icaComponentCount
             self.bcgAutoSelectProxySet = bcgAutoSelectProxySet
             self.bcgDefaultMethodRaw = bcgDefaultMethodRaw
+            self.interpolatedHealthFromNeighbors = interpolatedHealthFromNeighbors
         }
 
         init(from decoder: Decoder) throws {
@@ -116,6 +128,7 @@ final class ProcessingDefaults {
             icaComponentCount = try c.decodeIfPresent(Int.self, forKey: .icaComponentCount) ?? 20
             bcgAutoSelectProxySet = try c.decodeIfPresent(Bool.self, forKey: .bcgAutoSelectProxySet) ?? false
             bcgDefaultMethodRaw = try c.decodeIfPresent(String.self, forKey: .bcgDefaultMethodRaw) ?? "periodicity"
+            interpolatedHealthFromNeighbors = try c.decodeIfPresent(Bool.self, forKey: .interpolatedHealthFromNeighbors) ?? true
         }
     }
 }

@@ -47,7 +47,7 @@ struct FastrCorrector {
         case moosmann
     }
 
-    enum OBSMode: Sendable, Equatable {
+    nonisolated enum OBSMode: Sendable, Equatable {
         case off
         case auto
         case fixed(Int)
@@ -166,7 +166,7 @@ struct FastrCorrector {
         )
 
         let progressLock = NSLock()
-        var completed = 0
+        nonisolated(unsafe) var completed = 0
         let totalUnits = channels.count
 
         var result = channels
@@ -596,7 +596,7 @@ struct FastrCorrector {
         for i in speedRows.indices where speedRows[i] <= thresholdMm { speedRows[i] = 0 }
 
         // Front-pad / trim to the volume count.
-        var speed = [Double](repeating: 0, count: n)
+        nonisolated(unsafe) var speed = [Double](repeating: 0, count: n)
         let diffN = n - motion.count
         if diffN >= 0 {
             for i in 0..<motion.count { speed[i + diffN] = speedRows[i] }
@@ -611,7 +611,7 @@ struct FastrCorrector {
 
         // Prefix sums of speed so cumulative motion cost is O(1) per (i,j) pair
         // instead of O(n) inside the inner loop.
-        var prefix = [Double](repeating: 0, count: n + 1)
+        nonisolated(unsafe) var prefix = [Double](repeating: 0, count: n + 1)
         for i in 0..<n { prefix[i + 1] = prefix[i] + speed[i] }
 
         var neighbors = [[Int]](repeating: [], count: n)
@@ -787,7 +787,7 @@ struct FastrCorrector {
     /// Encapsulates epoch alignment (integer cross-correlation + optional
     /// sub-sample fractional shift). Alignment is computed on one channel and the
     /// resulting integer markers are shared across channels.
-    private struct Aligner {
+    private nonisolated struct Aligner {
         let markersUp: [Int]
         let prePeak: Int
         let postPeak: Int

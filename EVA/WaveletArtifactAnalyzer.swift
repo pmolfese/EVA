@@ -638,8 +638,8 @@ nonisolated enum WaveletArtifactAnalyzer {
             }
         }
 
-        var results = Array<ChannelWaveletData?>(repeating: nil, count: channelIndices.count)
-        var completedCount = 0
+        nonisolated(unsafe) var results = Array<ChannelWaveletData?>(repeating: nil, count: channelIndices.count)
+        nonisolated(unsafe) var completedCount = 0
         let resultLock = NSLock()
         let progressLock = NSLock()
 
