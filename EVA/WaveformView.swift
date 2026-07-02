@@ -202,8 +202,24 @@ struct WaveformView: View {
     private let topomapPanelWidth: CGFloat = 320
     private let butterflyPanelWidth: CGFloat = 360
     private let overlaidCategoriesPanelWidth: CGFloat = 380
+    private let amplitudeScaleBounds: ClosedRange<Double> = 1...5_000
     private let physioScaleOptions: [Double] = [8, 16, 32, 64]
     private let physioScaleBounds: ClosedRange<Double> = 1...64
+
+    private var amplitudeScaleSliderBounds: ClosedRange<Double> {
+        log10(amplitudeScaleBounds.lowerBound)...log10(amplitudeScaleBounds.upperBound)
+    }
+
+    private var amplitudeScaleSliderBinding: Binding<Double> {
+        Binding(
+            get: {
+                log10(min(max(amplitudeScale, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound))
+            },
+            set: { value in
+                amplitudeScale = roundedAmplitudeScale(pow(10, value))
+            }
+        )
+    }
 
     private var artifactMenuControls: ArtifactMenuControls {
         ArtifactMenuControls(
@@ -394,6 +410,7 @@ struct WaveformView: View {
             electrodeGeometry = recording.electrodeGeometry
         }
         ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
+        ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
         adoptOnDiskEpochsIfPresent()
     }
 
@@ -734,18 +751,40 @@ struct WaveformView: View {
         showsToolbarButtonLabels ? label : nil
     }
 
+    private func roundedAmplitudeScale(_ value: Double) -> Double {
+        let clamped = min(max(value, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound)
+        if clamped < 100 {
+            return clamped.rounded()
+        }
+        if clamped < 1_000 {
+            return (clamped / 10).rounded() * 10
+        }
+        return (clamped / 100).rounded() * 100
+    }
+
+    private func formatAmplitudeScale(_ value: Double) -> String {
+        if value < 100 {
+            return String(Int(value.rounded()))
+        }
+        if value < 1_000 {
+            return String(Int((value / 10).rounded() * 10))
+        }
+        return String(Int((value / 100).rounded() * 100))
+    }
+
     private func controls(for signal: MFFSignalData, base: MFFSignalData, waveletInput: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Text("Amplitude")
+                    Text("Scale")
                         .font(.caption.weight(.semibold))
                         .frame(width: 72, alignment: .leading)
-                    Slider(value: $amplitudeScale, in: 10...1000, step: 10)
+                    Slider(value: amplitudeScaleSliderBinding, in: amplitudeScaleSliderBounds)
                         .frame(width: 170)
-                    Text("\(Int(amplitudeScale)) µV")
+                        .help("Lower values make traces taller.")
+                    Text("±\(formatAmplitudeScale(amplitudeScale)) µV")
                         .font(.caption.monospacedDigit())
-                        .frame(width: 64, alignment: .trailing)
+                        .frame(width: 86, alignment: .trailing)
                 }
                 HStack(spacing: 8) {
                     Text("Time Scale")
@@ -1904,6 +1943,7 @@ struct WaveformView: View {
         channels.clearHealthResults()
         electrodeGeometry = recording.electrodeGeometry
         ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
+        ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
         physioRanges = Self.computePhysioRanges(displayedPhysioSignal())
         channelStatusMessage = message
         channelStatusIsError = false
