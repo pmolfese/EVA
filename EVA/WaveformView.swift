@@ -189,7 +189,10 @@ struct WaveformView: View {
     @State private var isExportingMFF = false
     @State private var mffExportStatusMessage: String?
 
-    private let sampleStride = 5
+    /// Keep the time slider visually comparable across sampling rates. The old
+    /// fixed stride of 5 samples at 1000 Hz displayed about 200 plotted points/s.
+    private let referenceDisplaySampleRate = 1_000.0
+    private let referenceDisplaySampleStride = 5
     private let channelRowHeight: CGFloat = 70
     private let channelOverflowHeight: CGFloat = 28
     private let eventTrackHeight: CGFloat = 64
@@ -1233,6 +1236,7 @@ struct WaveformView: View {
     @ViewBuilder
     private func waveformArea(for signal: MFFSignalData, events: [MFFEvent], isShowingEpochs: Bool) -> some View {
         let plotWidth = plotWidth(for: signal)
+        let displayStride = displaySampleStride(for: signal)
 
         // Stagger events from different source XML files into vertical lanes so
         // overlapping markers/labels stay legible. Cap the lane count so the
@@ -1265,7 +1269,7 @@ struct WaveformView: View {
                     events: events,
                     samplingRate: signal.samplingRate,
                     timeScale: timeScale,
-                    sampleStride: sampleStride,
+                    sampleStride: displayStride,
                     contentOffset: horizontalOffset,
                     visibleRange: visibleHorizontalRange,
                     viewportWidth: horizontalViewportWidth,
@@ -1305,9 +1309,9 @@ struct WaveformView: View {
                         // selection band growing during a drag cannot relayout or
                         // shift the topomap cursor's rendering.
                         .overlay(alignment: .topLeading) { segmentHealthOverlay(for: signal) }
-                        .overlay(alignment: .topLeading) { epochBoundaryOverlay() }
+                        .overlay(alignment: .topLeading) { epochBoundaryOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { selectionOverlay(for: signal) }
-                        .overlay(alignment: .topLeading) { cursorOverlay() }
+                        .overlay(alignment: .topLeading) { cursorOverlay(for: signal) }
                         .contentShape(Rectangle())
                         .background(
                             GeometryReader { proxy in
@@ -1585,7 +1589,7 @@ struct WaveformView: View {
                         flippedPolarity: physioFlippedPolarity,
                         rowHeight: rowHeight,
                         eegSamplingRate: eegSamplingRate,
-                        sampleStride: sampleStride,
+                        sampleStride: displaySampleStride(for: eegSamplingRate),
                         timeScale: timeScale,
                         contentOffset: horizontalOffset,
                         viewportWidth: horizontalViewportWidth
@@ -1981,7 +1985,7 @@ struct WaveformView: View {
             samples: channels.hidden.contains(index) ? [] : channel,
             amplitudeScale: amplitudeScale,
             timeScale: timeScale,
-            sampleStride: sampleStride,
+            sampleStride: displaySampleStride(for: signal),
             visibleRange: visibleHorizontalRange,
             nominalHeight: channelRowHeight,
             color: channelColor(index)
@@ -2053,13 +2057,13 @@ struct WaveformView: View {
     /// stack. Vivid orange so it is unmistakably distinct from the blue
     /// selection band.
     @ViewBuilder
-    private func cursorOverlay() -> some View {
+    private func cursorOverlay(for signal: MFFSignalData) -> some View {
         if let topomapSample {
             Rectangle()
                 .fill(Color.orange)
                 .frame(width: 2)
                 .frame(maxHeight: .infinity)
-                .offset(x: contentX(forSample: topomapSample) - 1)
+                .offset(x: contentX(forSample: topomapSample, in: signal) - 1)
                 .allowsHitTesting(false)
         }
     }
@@ -2070,8 +2074,8 @@ struct WaveformView: View {
     @ViewBuilder
     private func selectionOverlay(for signal: MFFSignalData) -> some View {
         if let range = activeSelectionRange(in: signal) {
-            let lowerX = contentX(forSample: range.lowerBound)
-            let upperX = contentX(forSample: range.upperBound)
+            let lowerX = contentX(forSample: range.lowerBound, in: signal)
+            let upperX = contentX(forSample: range.upperBound, in: signal)
             let selectionColor = Color(nsColor: .systemBlue)
             Rectangle()
                 .fill(selectionColor.opacity(0.16))
@@ -2102,8 +2106,8 @@ struct WaveformView: View {
                 ForEach(results) { result in
                     let start = min(max(result.startSample, 0), sampleCount - 1)
                     let end = min(max(result.endSample + 1, start + 1), sampleCount)
-                    let startX = contentX(forSample: start)
-                    let endX = contentX(forSample: end)
+                    let startX = contentX(forSample: start, in: signal)
+                    let endX = contentX(forSample: end, in: signal)
                     SegmentHealthBand(
                         result: result,
                         showsMouseOverHealth: segHealth.showsMouseOver
@@ -2215,14 +2219,14 @@ struct WaveformView: View {
 
     /// Green dividers between concatenated epochs.
     @ViewBuilder
-    private func epochBoundaryOverlay() -> some View {
+    private func epochBoundaryOverlay(for signal: MFFSignalData) -> some View {
         if epoching.epochedSignal != nil {
             ForEach(epoching.epochSegments.dropFirst()) { segment in
                 Rectangle()
                     .fill(Color.green)
                     .frame(width: 2)
                     .frame(maxHeight: .infinity)
-                    .offset(x: contentX(forSample: segment.startSample) - 1)
+                    .offset(x: contentX(forSample: segment.startSample, in: signal) - 1)
                     .allowsHitTesting(false)
             }
         }
@@ -3685,7 +3689,7 @@ struct WaveformView: View {
         selectedEventID = nil
 
         let plotWidth = plotWidth(for: signal)
-        let centerX = (contentX(forSample: lower) + contentX(forSample: upper + 1)) / 2
+        let centerX = (contentX(forSample: lower, in: signal) + contentX(forSample: upper + 1, in: signal)) / 2
         let viewportCenter = max(horizontalViewportWidth / 2, 1)
         let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
         let clampedOffset = min(max(centerX - viewportCenter, 0), maxOffset)
@@ -7694,8 +7698,6 @@ struct WaveformView: View {
                 .help("Re-reference to the common average: subtract the mean across all channels at each time point. Removes shared reference signal.")
 
             HStack {
-                Text("Precision")
-                    .font(.caption.weight(.semibold))
                 Spacer()
                 Picker("Precision", selection: $filter.precision) {
                     ForEach(FilterPrecision.allCases) { precision in
@@ -7703,7 +7705,7 @@ struct WaveformView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .frame(width: 110)
+                .frame(width: 190)
                 .help("Auto uses Float for routine filters, Double for numerically risky settings, and retries in Double if Float becomes unstable.")
             }
 
@@ -10754,8 +10756,21 @@ struct WaveformView: View {
 
     private func plotWidth(for signal: MFFSignalData) -> CGFloat {
         let sampleCount = signal.data.first?.count ?? 0
-        let displayedPoints = max(sampleCount / sampleStride, 1)
+        let displayedPoints = max(sampleCount / displaySampleStride(for: signal), 1)
         return max(CGFloat(displayedPoints) * CGFloat(timeScale), 600)
+    }
+
+    private var targetDisplaySamplesPerSecond: Double {
+        referenceDisplaySampleRate / Double(referenceDisplaySampleStride)
+    }
+
+    private func displaySampleStride(for signal: MFFSignalData) -> Int {
+        displaySampleStride(for: signal.samplingRate)
+    }
+
+    private func displaySampleStride(for samplingRate: Double) -> Int {
+        guard samplingRate > 0 else { return referenceDisplaySampleStride }
+        return max(Int((samplingRate / targetDisplaySamplesPerSecond).rounded()), 1)
     }
 
     private var visibleHorizontalRange: ClosedRange<CGFloat> {
@@ -10768,12 +10783,12 @@ struct WaveformView: View {
     private func sampleIndex(forContentX x: CGFloat, in signal: MFFSignalData) -> Int {
         let sampleCount = signal.data.first?.count ?? 1
         let plottedIndex = x / max(CGFloat(timeScale), 0.001)
-        let sample = Int((plottedIndex * CGFloat(sampleStride)).rounded())
+        let sample = Int((plottedIndex * CGFloat(displaySampleStride(for: signal))).rounded())
         return min(max(sample, 0), max(sampleCount - 1, 0))
     }
 
-    private func contentX(forSample sample: Int) -> CGFloat {
-        (CGFloat(sample) / CGFloat(sampleStride)) * CGFloat(timeScale)
+    private func contentX(forSample sample: Int, in signal: MFFSignalData) -> CGFloat {
+        (CGFloat(sample) / CGFloat(displaySampleStride(for: signal))) * CGFloat(timeScale)
     }
 
     private func topomapValues(at sample: Int, in signal: MFFSignalData) -> [Double] {
@@ -10785,8 +10800,8 @@ struct WaveformView: View {
     private func jumpToEvent(_ event: MFFEvent, in signal: MFFSignalData) {
         selectedEventID = event.id
         let plotWidth = plotWidth(for: signal)
-        let plottedIndex = event.beginTimeSeconds * signal.samplingRate / Double(sampleStride)
-        let targetX = CGFloat(plottedIndex) * CGFloat(timeScale)
+        let targetSample = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
+        let targetX = contentX(forSample: targetSample, in: signal)
         let viewportCenter = max(horizontalViewportWidth / 2, 1)
         let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
         let clampedOffset = min(max(targetX - viewportCenter, 0), maxOffset)
@@ -10812,7 +10827,7 @@ struct WaveformView: View {
         selectedEventID = nil
 
         let plotWidth = plotWidth(for: signal)
-        let segmentCenterX = (contentX(forSample: lower) + contentX(forSample: upper + 1)) / 2
+        let segmentCenterX = (contentX(forSample: lower, in: signal) + contentX(forSample: upper + 1, in: signal)) / 2
         let viewportCenter = max(horizontalViewportWidth / 2, 1)
         let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
         let clampedOffset = min(max(segmentCenterX - viewportCenter, 0), maxOffset)
