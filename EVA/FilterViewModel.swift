@@ -26,19 +26,42 @@
 import Combine
 import SwiftUI
 
+private enum FilterViewModelError: LocalizedError {
+    case invalidCutoff(field: String, value: String)
+    case noFilterOperation
+
+    var errorDescription: String? {
+        switch self {
+        case let .invalidCutoff(field, value):
+            return "\(field) cutoff '\(value)' is not a valid number. Leave it blank to turn that cutoff off."
+        case .noFilterOperation:
+            return "Enter a high-pass or low-pass cutoff, enable line-noise filtering, or enable average reference."
+        }
+    }
+}
+
+private struct FilterCutoffs: Sendable {
+    var highPassHz: Double?
+    var lowPassHz: Double?
+
+    var hasFrequencyFilter: Bool {
+        highPassHz != nil || lowPassHz != nil
+    }
+}
+
 @MainActor
 final class FilterViewModel: ObservableObject {
     init() {
         let d = ProcessingDefaults.shared
-        lowCutoff = d.filterHighPassHz
-        highCutoff = d.filterLowPassHz
+        highPassCutoffText = Self.cutoffText(d.filterHighPassHz)
+        lowPassCutoffText = Self.cutoffText(d.filterLowPassHz)
         notch60HzEnabled = d.filterNotch60
         averageReference = d.filterAverageReference
     }
 
     // MARK: Parameters (portable → eva.xml / replay)
-    @Published var lowCutoff = 0.1
-    @Published var highCutoff = 30.0
+    @Published var highPassCutoffText = "0.1"
+    @Published var lowPassCutoffText = "30"
     @Published var highPassSlope = FilterSlope.dB24
     @Published var lowPassSlope = FilterSlope.dB24
     @Published var notch60HzEnabled = false
@@ -49,6 +72,7 @@ final class FilterViewModel: ObservableObject {
     @Published var lineNoiseStrength = 1.0
     @Published var averageReference = false
     @Published var filterPNS = true
+    @Published var precision = FilterPrecision.auto
 
     // MARK: UI state
     @Published var showsPopover = false
@@ -68,7 +92,31 @@ final class FilterViewModel: ObservableObject {
     /// Source signal type of the PNS input, for change detection.
     @Published var pnsInputSignalType: String?
 
+    private var activeRequestID = UUID()
+
     var isActive: Bool { output != nil }
+
+    /// Compatibility bridge for code/tests that still treat the high-pass edge as
+    /// the old "low cutoff" number.
+    var lowCutoff: Double {
+        get { highPassCutoff ?? 0.1 }
+        set { highPassCutoffText = Self.cutoffText(newValue) }
+    }
+
+    /// Compatibility bridge for code/tests that still treat the low-pass edge as
+    /// the old "high cutoff" number.
+    var highCutoff: Double {
+        get { lowPassCutoff ?? 30 }
+        set { lowPassCutoffText = Self.cutoffText(newValue) }
+    }
+
+    var highPassCutoff: Double? {
+        Self.optionalCutoffValue(from: highPassCutoffText)
+    }
+
+    var lowPassCutoff: Double? {
+        Self.optionalCutoffValue(from: lowPassCutoffText)
+    }
 
     // MARK: Derived
 
@@ -77,21 +125,53 @@ final class FilterViewModel: ObservableObject {
         return notch60HzEnabled ? .notch : lineNoiseMode
     }
 
+    var frequencySummary: String? {
+        guard let cutoffs = try? currentCutoffs() else { return "Invalid cutoff" }
+        switch (cutoffs.highPassHz, cutoffs.lowPassHz) {
+        case let (highPass?, lowPass?):
+            return "Butterworth \(Self.formattedCutoff(highPass))-\(Self.formattedCutoff(lowPass)) Hz"
+        case let (highPass?, nil):
+            return "Butterworth high-pass \(Self.formattedCutoff(highPass)) Hz"
+        case let (nil, lowPass?):
+            return "Butterworth low-pass \(Self.formattedCutoff(lowPass)) Hz"
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    var activeFilterSummary: String {
+        var parts: [String] = []
+        if let frequencySummary {
+            parts.append(frequencySummary)
+        }
+        if let lineNoiseDescription {
+            parts.append(lineNoiseDescription)
+        }
+        if averageReference {
+            parts.append("average reference")
+        }
+        return parts.isEmpty ? "No filter" : parts.joined(separator: " + ")
+    }
+
     var lineNoiseSummary: String {
+        lineNoiseDescription.map { " + \($0)" } ?? ""
+    }
+
+    private var lineNoiseDescription: String? {
         switch activeLineNoiseMode {
         case .off:
-            return ""
+            return nil
         case .notch:
-            return " + \(String(format: "%.1f", lineNoiseFrequency)) Hz notch"
+            return "\(String(format: "%.1f", lineNoiseFrequency)) Hz notch"
         case .adaptiveCleanLine:
             let harmonics = lineNoiseHarmonics > 1 ? " x\(lineNoiseHarmonics)" : ""
-            return " + CleanLine \(String(format: "%.1f", lineNoiseFrequency)) Hz\(harmonics)"
+            return "CleanLine \(String(format: "%.1f", lineNoiseFrequency)) Hz\(harmonics)"
         }
     }
 
     func resetToDefaults() {
-        lowCutoff = 0.1
-        highCutoff = 30
+        highPassCutoffText = "0.1"
+        lowPassCutoffText = "30"
         notch60HzEnabled = false
         lineNoiseMode = .off
         lineNoiseFrequency = 60
@@ -99,22 +179,27 @@ final class FilterViewModel: ObservableObject {
         lineNoiseWindowSeconds = 4
         lineNoiseStrength = 1
         averageReference = false
+        precision = .auto
     }
 
     // MARK: - eva.xml / replay bridge
 
     /// Portable parameters for the eva.xml `filter` step.
     var parameters: [String: String] {
-        var params: [String: String] = [
-            "highPassHz": String(format: "%.3g", lowCutoff),
-            "lowPassHz": String(format: "%.3g", highCutoff),
-            "averageReference": "\(averageReference)"
-        ]
+        let cutoffs = try? currentCutoffs()
+        var params: [String: String] = ["averageReference": "\(averageReference)"]
+        if let highPassHz = cutoffs?.highPassHz {
+            params["highPassHz"] = String(format: "%.3g", highPassHz)
+        }
+        if let lowPassHz = cutoffs?.lowPassHz {
+            params["lowPassHz"] = String(format: "%.3g", lowPassHz)
+        }
         if notch60HzEnabled { params["notchHz"] = "60" }
         if lineNoiseMode != .off {
             params["lineNoiseHz"] = String(format: "%.0f", lineNoiseFrequency)
             params["lineNoiseHarmonics"] = "\(lineNoiseHarmonics)"
         }
+        params["precision"] = precision.rawValue
         return params
     }
 
@@ -128,15 +213,30 @@ final class FilterViewModel: ObservableObject {
         excludedChannels: Set<Int>,
         onApplied: @escaping () -> Void
     ) {
+        let cutoffs: FilterCutoffs
+        do {
+            cutoffs = try currentCutoffs()
+            guard cutoffs.hasFrequencyFilter || activeLineNoiseMode != .off || averageReference else {
+                throw FilterViewModelError.noFilterOperation
+            }
+        } catch {
+            statusMessage = error.localizedDescription
+            statusIsError = true
+            return
+        }
+
         isFiltering = true
         progress = 0
         statusMessage = nil
         statusIsError = false
 
+        let requestID = UUID()
+        activeRequestID = requestID
+
         let sourceData = signal.data
         let samplingRate = signal.samplingRate
-        let lowCutoff = self.lowCutoff
-        let highCutoff = self.highCutoff
+        let highPassCutoff = cutoffs.highPassHz
+        let lowPassCutoff = cutoffs.lowPassHz
         let highPassSlope = self.highPassSlope
         let lowPassSlope = self.lowPassSlope
         let lineNoiseMode = activeLineNoiseMode
@@ -145,6 +245,8 @@ final class FilterViewModel: ObservableObject {
         let lineNoiseWindowSeconds = self.lineNoiseWindowSeconds
         let lineNoiseStrength = self.lineNoiseStrength
         let averageReference = self.averageReference
+        let precision = self.precision
+        let filterSummary = activeFilterSummary
 
         if lineNoiseMode == .adaptiveCleanLine {
             statusMessage = "Filtering, then applying adaptive CleanLine..."
@@ -158,12 +260,13 @@ final class FilterViewModel: ObservableObject {
         Task {
             do {
                 let pnsEnabled = pnsInput != nil
+
                 let result = try await Task.detached(priority: .userInitiated) {
                     let filteredData = try await Self.filteredChannels(
                         sourceData,
                         samplingRate: samplingRate,
-                        lowCutoff: lowCutoff,
-                        highCutoff: highCutoff,
+                        lowCutoff: highPassCutoff,
+                        highCutoff: lowPassCutoff,
                         highPassSlope: highPassSlope,
                         lowPassSlope: lowPassSlope,
                         lineNoiseMode: lineNoiseMode,
@@ -172,6 +275,7 @@ final class FilterViewModel: ObservableObject {
                         lineNoiseWindowSeconds: lineNoiseWindowSeconds,
                         lineNoiseStrength: lineNoiseStrength,
                         averageReference: averageReference,
+                        precision: precision,
                         excludedChannels: excludedChannels,
                         progress: { fraction in
                             progressContinuation.yield(pnsEnabled ? 0.70 * fraction : fraction)
@@ -183,8 +287,8 @@ final class FilterViewModel: ObservableObject {
                         filteredPNSData = try await Self.filteredChannels(
                             pnsInput.data,
                             samplingRate: pnsInput.samplingRate,
-                            lowCutoff: lowCutoff,
-                            highCutoff: highCutoff,
+                            lowCutoff: highPassCutoff,
+                            highCutoff: lowPassCutoff,
                             highPassSlope: highPassSlope,
                             lowPassSlope: lowPassSlope,
                             lineNoiseMode: lineNoiseMode,
@@ -193,6 +297,7 @@ final class FilterViewModel: ObservableObject {
                             lineNoiseWindowSeconds: lineNoiseWindowSeconds,
                             lineNoiseStrength: lineNoiseStrength,
                             averageReference: false,
+                            precision: precision,
                             excludedChannels: [],
                             progress: { fraction in
                                 progressContinuation.yield(0.70 + 0.30 * fraction)
@@ -205,6 +310,8 @@ final class FilterViewModel: ObservableObject {
                 }.value
                 progressContinuation.finish()
                 progressTask.cancel()
+
+                guard activeRequestID == requestID else { return }
 
                 output = signal.replacingData(result.0)
                 if let pnsInput, let filteredPNSData = result.1 {
@@ -225,30 +332,36 @@ final class FilterViewModel: ObservableObject {
                     pnsInputSignalType = nil
                 }
                 onApplied()
-                statusMessage = "Applied Butterworth \(String(format: "%.1f", lowCutoff))-\(String(format: "%.1f", highCutoff)) Hz\(lineNoiseSummary)\(averageReference ? " + average reference" : "")\(pnsInput == nil ? "" : " + PNS")."
+                statusMessage = "Applied \(filterSummary)\(pnsInput == nil ? "" : " + PNS")."
                 statusIsError = false
             } catch {
                 progressContinuation.finish()
                 progressTask.cancel()
+                guard activeRequestID == requestID else { return }
                 statusMessage = error.localizedDescription
                 statusIsError = true
             }
-            isFiltering = false
+            if activeRequestID == requestID {
+                isFiltering = false
+            }
         }
     }
 
     /// Clears the filter outputs and calls `onCleared` for cross-domain invalidation.
     func clear(onCleared: () -> Void) {
+        activeRequestID = UUID()
+        isFiltering = false
         output = nil
         pnsOutput = nil
         pnsInputSignalType = nil
         onCleared()
-        statusMessage = "Removed band-pass filter."
+        statusMessage = "Removed filter."
         statusIsError = false
     }
 
     /// Directly sets the EEG output (used by the ICA re-filter restore path).
     func setOutput(_ signal: MFFSignalData?) {
+        activeRequestID = UUID()
         output = signal
     }
 
@@ -257,8 +370,8 @@ final class FilterViewModel: ObservableObject {
     nonisolated static func filteredChannels(
         _ sourceData: [[Float]],
         samplingRate: Double,
-        lowCutoff: Double,
-        highCutoff: Double,
+        lowCutoff: Double?,
+        highCutoff: Double?,
         highPassSlope: FilterSlope = .dB24,
         lowPassSlope: FilterSlope = .dB24,
         lineNoiseMode: FilterLineNoiseMode,
@@ -267,6 +380,7 @@ final class FilterViewModel: ObservableObject {
         lineNoiseWindowSeconds: Double,
         lineNoiseStrength: Double,
         averageReference: Bool,
+        precision: FilterPrecision = .auto,
         excludedChannels: Set<Int>,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> [[Float]] {
@@ -280,6 +394,7 @@ final class FilterViewModel: ObservableObject {
             lowPassSlope: lowPassSlope,
             notch60HzEnabled: notchEnabled,
             notchFrequency: notchFrequency,
+            precision: precision,
             progress: { fraction in
                 progress(lineNoiseMode == .adaptiveCleanLine ? 0.62 * fraction : fraction)
             }
@@ -299,5 +414,35 @@ final class FilterViewModel: ObservableObject {
             EEGSignalFilter.averageReferenceInPlace(&bandPassed, excluding: excludedChannels)
         }
         return bandPassed
+    }
+
+    private func currentCutoffs() throws -> FilterCutoffs {
+        FilterCutoffs(
+            highPassHz: try Self.parseCutoff(highPassCutoffText, field: "High-pass"),
+            lowPassHz: try Self.parseCutoff(lowPassCutoffText, field: "Low-pass")
+        )
+    }
+
+    private static func parseCutoff(_ text: String, field: String) throws -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let value = Double(trimmed) else {
+            throw FilterViewModelError.invalidCutoff(field: field, value: trimmed)
+        }
+        return value
+    }
+
+    private static func optionalCutoffValue(from text: String) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return Double(trimmed)
+    }
+
+    private static func cutoffText(_ value: Double) -> String {
+        String(format: "%.3g", value)
+    }
+
+    private static func formattedCutoff(_ value: Double) -> String {
+        String(format: "%.3g", value)
     }
 }

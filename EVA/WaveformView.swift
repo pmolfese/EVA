@@ -58,6 +58,8 @@ struct WaveformView: View {
     @Environment(ProcessingDefaults.self) private var processingDefaults
     @Query private var markers: [UserMarker]
 
+    @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
+
     @State private var amplitudeScale: Double = 100
     @State private var timeScale: Double = 1
     @State private var horizontalOffset: CGFloat = 0
@@ -70,11 +72,13 @@ struct WaveformView: View {
     @State private var showsEventsPanel = false
     @State private var selectedEventID: MFFEvent.ID?
     @State private var selectedEventCodes = Set<String>()
+    @State private var displayedEventsCache = WaveformDisplayedEventsCache.empty
+    @State private var eventTrackSourceSummary = EventTrackSourceSummary.empty
     @State private var topomapSample: Int?
     @State private var selectedSampleRange: ClosedRange<Int>?
     @State private var dragSelectionStartSample: Int?
     @State private var dragSelectionEndSample: Int?
-    @State private var waveformContextSample: Int?
+    @State private var eventTrackContextSample: Int?
     /// Timestamp of the last stationary click, used to detect a double-click
     /// manually inside the single waveform interaction gesture.
     @State private var lastWaveformClick: (time: Date, x: CGFloat)?
@@ -135,6 +139,7 @@ struct WaveformView: View {
     @StateObject private var epoching = EpochingViewModel()
     @State private var segmentedEpochSignal: MFFSignalData?
     @State private var segmentedEpochSegments: [EpochSegment] = []
+    @StateObject private var eegAnalysis = EEGAnalysisViewModel()
 
     // Band-pass / notch filtering (applied to the active base signal).
     /// Filtering domain (band-pass / line-noise / average-reference), extracted
@@ -442,6 +447,54 @@ struct WaveformView: View {
         return (signal.events + overlays).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
     }
 
+    private func displayedEventsCacheKey(
+        for signal: MFFSignalData,
+        includeContinuousOverlays: Bool,
+        mapContinuousOverlaysIntoEpochs: Bool
+    ) -> WaveformDisplayedEventsCache.Key {
+        WaveformDisplayedEventsCache.Key(
+            signalURLPath: signal.signalURL.path,
+            signalType: signal.signalType,
+            signalEvents: EventTrackEventSignature(events: signal.events),
+            userMarkers: markers
+                .filter { $0.packageName == recording.packageName }
+                .map {
+                    WaveformUserMarkerSignature(
+                        idHash: $0.persistentModelID.hashValue,
+                        timeSeconds: $0.timeSeconds,
+                        note: $0.note
+                    )
+                },
+            artifactEvents: EventTrackEventSignature(events: artifactVM.events),
+            definedArtifacts: template.definedArtifacts.map {
+                WaveformDefinedArtifactSignature(
+                    id: $0.id,
+                    events: EventTrackEventSignature(events: $0.events)
+                )
+            },
+            epochSegments: WaveformEpochSegmentSignature(segments: epoching.epochSegments),
+            includeContinuousOverlays: includeContinuousOverlays,
+            mapContinuousOverlaysIntoEpochs: mapContinuousOverlaysIntoEpochs
+        )
+    }
+
+    private func refreshDisplayedEventsCache(
+        for signal: MFFSignalData,
+        includeContinuousOverlays: Bool,
+        mapContinuousOverlaysIntoEpochs: Bool,
+        key: WaveformDisplayedEventsCache.Key
+    ) {
+        guard displayedEventsCache.key != key else { return }
+        displayedEventsCache = WaveformDisplayedEventsCache(
+            key: key,
+            events: displayedEvents(
+                for: signal,
+                includeContinuousOverlays: includeContinuousOverlays,
+                mapContinuousOverlaysIntoEpochs: mapContinuousOverlaysIntoEpochs
+            )
+        )
+    }
+
     private func continuousOverlayEventsForDisplay() -> [MFFEvent] {
         var events = userMarkerEvents
         var seen = Set(events)
@@ -511,11 +564,18 @@ struct WaveformView: View {
         continuousSignal: MFFSignalData
     ) -> some View {
         let isShowingEpochs = epoching.epochedSignal != nil
-        let events = displayedEvents(
+        let eventCacheKey = displayedEventsCacheKey(
             for: signal,
             includeContinuousOverlays: true,
             mapContinuousOverlaysIntoEpochs: isShowingEpochs
         )
+        let events = displayedEventsCache.key == eventCacheKey
+            ? displayedEventsCache.events
+            : displayedEvents(
+                for: signal,
+                includeContinuousOverlays: true,
+                mapContinuousOverlaysIntoEpochs: isShowingEpochs
+            )
 
         VStack(spacing: 0) {
             // Full-width button bar — side panels below must not shrink it.
@@ -562,6 +622,22 @@ struct WaveformView: View {
                 }
             }
         }
+        .onAppear {
+            refreshDisplayedEventsCache(
+                for: signal,
+                includeContinuousOverlays: true,
+                mapContinuousOverlaysIntoEpochs: isShowingEpochs,
+                key: eventCacheKey
+            )
+        }
+        .onChange(of: eventCacheKey) { _, newKey in
+            refreshDisplayedEventsCache(
+                for: signal,
+                includeContinuousOverlays: true,
+                mapContinuousOverlaysIntoEpochs: isShowingEpochs,
+                key: newKey
+            )
+        }
         .sheet(isPresented: $epoching.showsSheet) {
             psaSheet(for: continuousSignal)
         }
@@ -586,6 +662,21 @@ struct WaveformView: View {
         }
         .sheet(isPresented: $ica.showsSheet) {
             icaSheet(for: base)
+        }
+        .sheet(isPresented: $eegAnalysis.showsSheet) {
+            EEGAnalysisSheet(
+                viewModel: eegAnalysis,
+                packageName: recording.packageName,
+                signal: continuousSignal,
+                processing: eegAnalysisProcessingSnapshot(),
+                artifactSources: eegArtifactRejectionSources(),
+                excludedChannelIndices: channels.bad,
+                channelSets: ChannelSetStore.shared.allSets,
+                sensorLayout: recording.sensorLayout,
+                onClose: {
+                    eegAnalysis.showsSheet = false
+                }
+            )
         }
         .sheet(isPresented: $chanHealth.showsDetails) {
             channelHealthDetailsSheet(for: continuousSignal)
@@ -636,6 +727,10 @@ struct WaveformView: View {
 
     // MARK: - Controls
 
+    private func toolbarButtonLabel(_ label: String) -> String? {
+        showsToolbarButtonLabels ? label : nil
+    }
+
     private func controls(for signal: MFFSignalData, base: MFFSignalData, waveletInput: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
@@ -665,7 +760,11 @@ struct WaveformView: View {
             Button {
                 gradient.showsPopover.toggle()
             } label: {
-                ToolbarIcon(name: "icon.mri", isActive: gradient.correctedSignal != nil)
+                ToolbarIcon(
+                    name: "icon.mri",
+                    label: toolbarButtonLabel("MRI"),
+                    isActive: gradient.correctedSignal != nil
+                )
             }
             .buttonStyle(.plain)
             .accessibilityLabel("MRI")
@@ -680,14 +779,18 @@ struct WaveformView: View {
             Button {
                 filter.showsPopover.toggle()
             } label: {
-                ToolbarIcon(name: "icon.filter", isActive: filter.output != nil)
+                ToolbarIcon(
+                    name: "icon.filter",
+                    label: toolbarButtonLabel("FILTER"),
+                    isActive: filter.output != nil
+                )
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Filter")
             .disabled(filter.isFiltering)
             .help(filter.output != nil
-                ? "Active: Butterworth \(String(format: "%.1f", filter.lowCutoff))–\(String(format: "%.1f", filter.highCutoff)) Hz\(filter.lineNoiseSummary)\(filter.averageReference ? " + avg ref" : "")"
-                : "Apply a band-pass / notch / average-reference filter")
+                ? "Active: \(filter.activeFilterSummary)"
+                : "Apply a cutoff / notch / average-reference filter")
             .popover(isPresented: $filter.showsPopover, arrowEdge: .bottom) {
                 filterPopover(for: base)
             }
@@ -800,7 +903,11 @@ struct WaveformView: View {
                         .foregroundStyle(.secondary)
                 }
             } label: {
-                ToolbarIcon(name: "icon.artifacts", isActive: artifactsAreActive)
+                ToolbarIcon(
+                    name: "icon.artifacts",
+                    label: toolbarButtonLabel("ARTIFACTS"),
+                    isActive: artifactsAreActive
+                )
             }
             .menuIndicator(.hidden)
             .buttonStyle(.plain)
@@ -840,7 +947,11 @@ struct WaveformView: View {
                     }
                 }
             } label: {
-                ToolbarIcon(name: "icon.process", isActive: epoching.epochedSignal != nil)
+                ToolbarIcon(
+                    name: "icon.process",
+                    label: toolbarButtonLabel("PROCESS"),
+                    isActive: epoching.epochedSignal != nil
+                )
             }
             .menuIndicator(.hidden)
             .buttonStyle(.plain)
@@ -848,9 +959,27 @@ struct WaveformView: View {
             .help("Segment the recording into event-locked epochs")
 
             Button {
+                eegAnalysis.syncArtifactSources(eegArtifactRejectionSources())
+                eegAnalysis.showsSheet = true
+            } label: {
+                ToolbarIcon(
+                    name: "icon.eeg-processing",
+                    label: toolbarButtonLabel("EEG"),
+                    isActive: eegAnalysis.result != nil
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("EEG Processing")
+            .help(eegAnalysis.result == nil ? "Continuous EEG analysis tools" : "EEG analysis results ready")
+
+            Button {
                 showsEventsPanel.toggle()
             } label: {
-                ToolbarIcon(name: "icon.events", isActive: showsEventsPanel)
+                ToolbarIcon(
+                    name: "icon.events",
+                    label: toolbarButtonLabel("EVENTS"),
+                    isActive: showsEventsPanel
+                )
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Events")
@@ -1108,7 +1237,11 @@ struct WaveformView: View {
         // Stagger events from different source XML files into vertical lanes so
         // overlapping markers/labels stay legible. Cap the lane count so the
         // track doesn't grow without bound.
-        let eventLaneCount = max(min(Set(events.map(\.sourceFile)).count, EventTrackView.maxLanes), 1)
+        let eventSignature = EventTrackEventSignature(events: events)
+        let sourceSummary = eventTrackSourceSummary.signature == eventSignature
+            ? eventTrackSourceSummary
+            : EventTrackSourceSummary(events: events, signature: eventSignature)
+        let eventLaneCount = max(min(sourceSummary.sourceCount, EventTrackView.maxLanes), 1)
         let dynamicEventTrackHeight = eventTrackHeight + CGFloat(eventLaneCount - 1) * EventTrackView.laneSpacing
 
         VStack(spacing: 0) {
@@ -1139,6 +1272,15 @@ struct WaveformView: View {
                     laneCount: eventLaneCount
                 )
                 .frame(maxWidth: .infinity, minHeight: dynamicEventTrackHeight, maxHeight: dynamicEventTrackHeight)
+                .background(
+                    WaveformRightClickMonitor { point in
+                        eventTrackContextSample = sampleIndex(forContentX: point.x + horizontalOffset, in: signal)
+                    }
+                )
+                .contentShape(Rectangle())
+                .contextMenu {
+                    splitFileContextMenu(for: signal)
+                }
             }
             .padding(.horizontal, 20)
             .padding(.top, 20)
@@ -1166,11 +1308,6 @@ struct WaveformView: View {
                         .overlay(alignment: .topLeading) { epochBoundaryOverlay() }
                         .overlay(alignment: .topLeading) { selectionOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { cursorOverlay() }
-                        .background(
-                            WaveformRightClickMonitor { point in
-                                waveformContextSample = sampleIndex(forContentX: point.x, in: signal)
-                            }
-                        )
                         .contentShape(Rectangle())
                         .background(
                             GeometryReader { proxy in
@@ -1255,6 +1392,17 @@ struct WaveformView: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .onAppear {
+            refreshEventTrackSourceSummary(events: events, signature: eventSignature)
+        }
+        .onChange(of: eventSignature) { _, newSignature in
+            refreshEventTrackSourceSummary(events: events, signature: newSignature)
+        }
+    }
+
+    private func refreshEventTrackSourceSummary(events: [MFFEvent], signature: EventTrackEventSignature) {
+        guard eventTrackSourceSummary.signature != signature else { return }
+        eventTrackSourceSummary = EventTrackSourceSummary(events: events, signature: signature)
     }
 
     // MARK: - Physio (PNS) pane
@@ -1271,8 +1419,8 @@ struct WaveformView: View {
         let base: MFFSignalData?
         if let pnsBase = pnsFilterBaseSignal() {
             if filter.filterPNS,
-               let filteredPNS = filter.pnsOutput,
-               filter.pnsInputSignalType == pnsBase.signalType {
+                      let filteredPNS = filter.pnsOutput,
+                      filter.pnsInputSignalType == pnsBase.signalType {
                 base = filteredPNS
             } else {
                 base = pnsBase
@@ -1562,6 +1710,7 @@ struct WaveformView: View {
 
     @ViewBuilder
     private func physioChannelContextMenu(index: Int, name: String) -> some View {
+        let realPhysioCount = recording.pnsSignal?.numberOfChannels ?? 0
         let currentScale = physioScaleFactor(for: index)
         let isMaxScaled = physioMaxScaledChannels.contains(index)
         let isFlipped = physioFlippedPolarity.contains(index)
@@ -1574,7 +1723,13 @@ struct WaveformView: View {
 
         Divider()
 
-        Divider()
+        if index < realPhysioCount {
+            Button("Move to EEG") {
+                movePhysioChannelToEEG(index: index, name: name)
+            }
+
+            Divider()
+        }
 
         if !isMaxScaled {
             VStack(alignment: .leading, spacing: 4) {
@@ -1692,6 +1847,11 @@ struct WaveformView: View {
 
             Divider()
             Button(isHidden ? "Show Trace" : "Hide Trace") { toggleHidden(index) }
+
+            Divider()
+            Button("Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio") {
+                moveEEGChannelToPhysio(index: index, in: signal)
+            }
         }
     }
 
@@ -1701,6 +1861,117 @@ struct WaveformView: View {
         } else {
             channels.hidden.insert(index)
         }
+    }
+
+    private func moveEEGChannelToPhysio(index: Int, in signal: MFFSignalData) {
+        let name = eegChannelDisplayName(index: index, signal: signal)
+        guard confirmChannelRoleEditReset(action: "Move \(name) to Physio") else { return }
+
+        let insertIndex = recording.pnsSignal?.numberOfChannels ?? 0
+        do {
+            let movedName = try recording.moveEEGChannelToPhysio(index: index)
+            insertPhysioDisplayState(at: insertIndex)
+            showsPhysioChannels = true
+            finishChannelRoleEdit(message: "Moved \(movedName) to Physio. Export to save the channel role change.")
+        } catch {
+            channelStatusMessage = error.localizedDescription
+            channelStatusIsError = true
+        }
+    }
+
+    private func movePhysioChannelToEEG(index: Int, name: String) {
+        guard confirmChannelRoleEditReset(action: "Move \(name) to EEG") else { return }
+
+        do {
+            let movedName = try recording.movePhysioChannelToEEG(index: index)
+            removePhysioDisplayState(at: index)
+            finishChannelRoleEdit(message: "Moved \(movedName) to EEG. Export to save the channel role change.")
+        } catch {
+            channelStatusMessage = error.localizedDescription
+            channelStatusIsError = true
+        }
+    }
+
+    private func finishChannelRoleEdit(message: String) {
+        resetToOriginalData()
+        channels.hidden.removeAll()
+        channels.bad.removeAll()
+        channels.interpolated.removeAll()
+        channels.clearHealthResults()
+        electrodeGeometry = recording.electrodeGeometry
+        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
+        physioRanges = Self.computePhysioRanges(displayedPhysioSignal())
+        channelStatusMessage = message
+        channelStatusIsError = false
+    }
+
+    private func confirmChannelRoleEditReset(action: String) -> Bool {
+        guard hasDerivedChannelRoleState else { return true }
+
+        let alert = NSAlert()
+        alert.messageText = "\(action)?"
+        alert.informativeText = "This in-memory channel role edit will clear current filters, MRI/ICA/artifact results, epochs, interpolations, channel marks, and health results. The source file on disk will not change until the next export."
+        alert.addButton(withTitle: "Move Channel")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private var hasDerivedChannelRoleState: Bool {
+        filter.output != nil
+            || filter.pnsOutput != nil
+            || gradient.correctedSignal != nil
+            || gradient.correctedPNSSignal != nil
+            || ica.cleanedSignal != nil
+            || ica.decomposition != nil
+            || artifactVM.cleanedSignal != nil
+            || !artifactVM.events.isEmpty
+            || !template.definedArtifacts.isEmpty
+            || wavelet.reducedSignal != nil
+            || epoching.epochedSignal != nil
+            || eegAnalysis.result != nil
+            || eegAnalysis.isRunning
+            || !channels.hidden.isEmpty
+            || !channels.bad.isEmpty
+            || !channels.interpolated.isEmpty
+            || !channels.healthResults.isEmpty
+    }
+
+    private func insertPhysioDisplayState(at index: Int) {
+        physioChannelRenames = shiftPhysioDictionaryKeys(physioChannelRenames, insertingAt: index)
+        physioScaleFactors = shiftPhysioDictionaryKeys(physioScaleFactors, insertingAt: index)
+        physioMaxScaledChannels = shiftPhysioSet(physioMaxScaledChannels, insertingAt: index)
+        physioFlippedPolarity = shiftPhysioSet(physioFlippedPolarity, insertingAt: index)
+    }
+
+    private func removePhysioDisplayState(at index: Int) {
+        physioChannelRenames = shiftPhysioDictionaryKeys(physioChannelRenames, removingAt: index)
+        physioScaleFactors = shiftPhysioDictionaryKeys(physioScaleFactors, removingAt: index)
+        physioMaxScaledChannels = shiftPhysioSet(physioMaxScaledChannels, removingAt: index)
+        physioFlippedPolarity = shiftPhysioSet(physioFlippedPolarity, removingAt: index)
+    }
+
+    private func shiftPhysioDictionaryKeys<Value>(_ values: [Int: Value], insertingAt index: Int) -> [Int: Value] {
+        Dictionary(uniqueKeysWithValues: values.map { key, value in
+            (key >= index ? key + 1 : key, value)
+        })
+    }
+
+    private func shiftPhysioDictionaryKeys<Value>(_ values: [Int: Value], removingAt index: Int) -> [Int: Value] {
+        Dictionary(uniqueKeysWithValues: values.compactMap { key, value in
+            guard key != index else { return nil }
+            return (key > index ? key - 1 : key, value)
+        })
+    }
+
+    private func shiftPhysioSet(_ values: Set<Int>, insertingAt index: Int) -> Set<Int> {
+        Set(values.map { $0 >= index ? $0 + 1 : $0 })
+    }
+
+    private func shiftPhysioSet(_ values: Set<Int>, removingAt index: Int) -> Set<Int> {
+        Set(values.compactMap { value in
+            guard value != index else { return nil }
+            return value > index ? value - 1 : value
+        })
     }
 
     @ViewBuilder
@@ -1735,14 +2006,16 @@ struct WaveformView: View {
             .disabled(activeSelectionRange(in: signal) == nil)
 
             Divider()
-            waveformSplitContextMenu(for: signal)
+            Button("Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio") {
+                moveEEGChannelToPhysio(index: index, in: signal)
+            }
         }
         .accessibilityLabel("Channel \(index + 1)")
         .zIndex(1)
     }
 
     @ViewBuilder
-    private func waveformSplitContextMenu(for signal: MFFSignalData) -> some View {
+    private func splitFileContextMenu(for signal: MFFSignalData) -> some View {
         if let sample = splitSampleForContextMenu(in: signal) {
             Menu("Split File") {
                 Button("Save Left Segment…") {
@@ -1773,7 +2046,7 @@ struct WaveformView: View {
         guard let sampleCount = signal.data.first?.count, sampleCount > 1 else { return nil }
         let fallbackX = horizontalOffset + max(horizontalViewportWidth / 2, 0)
         let fallback = sampleIndex(forContentX: fallbackX, in: signal)
-        return min(max(waveformContextSample ?? fallback, 1), sampleCount - 1)
+        return min(max(eventTrackContextSample ?? fallback, 1), sampleCount - 1)
     }
 
     /// Vertical cursor at the topomap sample, drawn once across the channel
@@ -4854,7 +5127,13 @@ struct WaveformView: View {
         let config = wavelet.config
         let mode = wavelet.mode
         let cores = wavelet.coreCount
-        let analysisBand = (low: filter.lowCutoff, high: filter.highCutoff)
+        let analysisBand: (low: Double, high: Double)? = {
+            guard let low = filter.highPassCutoff,
+                  let high = filter.lowPassCutoff else {
+                return nil
+            }
+            return (low, high)
+        }()
         // Leave bad channels untouched; reduce everything else.
         let reduceIndices = input.data.indices.filter { !channels.bad.contains($0) }
 
@@ -4882,6 +5161,7 @@ struct WaveformView: View {
             // ERP path: assess variance retained within the analysis band, as HAPPE does.
             var bandRetained: Double?
             if mode.assessesInBand,
+               let analysisBand,
                analysisBand.high > analysisBand.low,
                analysisBand.high < input.samplingRate / 2 {
                 bandRetained = await Task.detached(priority: .utility) {
@@ -5784,8 +6064,10 @@ struct WaveformView: View {
         let excludedComponents = decomposition.excludedComponents
         let shouldRestoreFilter = filter.output != nil
         let beforeDisplaySignal = filter.output ?? signal
-        let restoredFilterLowCutoff = filter.lowCutoff
-        let restoredFilterHighCutoff = filter.highCutoff
+        let restoredFilterHighPassCutoff = filter.highPassCutoff
+        let restoredFilterLowPassCutoff = filter.lowPassCutoff
+        let restoredFilterHighPassCutoffText = filter.highPassCutoffText
+        let restoredFilterLowPassCutoffText = filter.lowPassCutoffText
         let restoredNotch60HzEnabled = filter.notch60HzEnabled
         let restoredAmplitudeScale = amplitudeScale
         let restoredTimeScale = timeScale
@@ -5847,8 +6129,8 @@ struct WaveformView: View {
                         try await EEGSignalFilter.bandPass(
                             channels: cleaned.data,
                             samplingRate: cleaned.samplingRate,
-                            lowCutoff: restoredFilterLowCutoff,
-                            highCutoff: restoredFilterHighCutoff,
+                            lowCutoff: restoredFilterHighPassCutoff,
+                            highCutoff: restoredFilterLowPassCutoff,
                             notch60HzEnabled: restoredNotch60HzEnabled
                         )
                     }.value
@@ -5882,8 +6164,8 @@ struct WaveformView: View {
                 decomposition: decomposition,
                 excludedComponents: excludedComponents
             )
-            filter.lowCutoff = restoredFilterLowCutoff
-            filter.highCutoff = restoredFilterHighCutoff
+            filter.highPassCutoffText = restoredFilterHighPassCutoffText
+            filter.lowPassCutoffText = restoredFilterLowPassCutoffText
             filter.notch60HzEnabled = restoredNotch60HzEnabled
             amplitudeScale = restoredAmplitudeScale
             timeScale = restoredTimeScale
@@ -5955,7 +6237,7 @@ struct WaveformView: View {
             "ICA cleaned active: \(ica.cleanedSignal == nil ? "no" : "yes")",
             "ICA removal in progress: \(ica.isRemovingComponents ? "yes" : "no")",
             "Filter active: \(filter.output == nil ? "no" : "yes")",
-            "Filter settings: \(String(format: "%.2f", filter.lowCutoff))-\(String(format: "%.2f", filter.highCutoff)) Hz, notch \(filter.notch60HzEnabled ? "on" : "off")",
+            "Filter settings: \(filter.activeFilterSummary)",
             "Interpolated channels: \(channels.interpolated.keys.sorted().map { "\($0 + 1)" }.joined(separator: ", ").nilIfEmpty ?? "none")",
             "Bad channels: \(channels.bad.sorted().map { "\($0 + 1)" }.joined(separator: ", ").nilIfEmpty ?? "none")",
             "Hidden channels: \(channels.hidden.sorted().map { "\($0 + 1)" }.joined(separator: ", ").nilIfEmpty ?? "none")",
@@ -7216,17 +7498,7 @@ struct WaveformView: View {
             ))
         }
         if filter.output != nil {
-            var params: [String: String] = [
-                "highPassHz": String(format: "%.3g", filter.lowCutoff),
-                "lowPassHz": String(format: "%.3g", filter.highCutoff),
-                "averageReference": "\(filter.averageReference)"
-            ]
-            if filter.notch60HzEnabled { params["notchHz"] = "60" }
-            if filter.lineNoiseMode != .off {
-                params["lineNoiseHz"] = String(format: "%.0f", filter.lineNoiseFrequency)
-                params["lineNoiseHarmonics"] = "\(filter.lineNoiseHarmonics)"
-            }
-            script.append(EVAProcessingStep(operation: .filter, parameters: params))
+            script.append(EVAProcessingStep(operation: .filter, parameters: filter.parameters))
         }
         if artifactVM.cleaningIsEnabled {
             script.append(EVAProcessingStep(operation: .artifactClean, parameters: [:]))
@@ -7297,17 +7569,21 @@ struct WaveformView: View {
         }
 
         return VStack(alignment: .leading, spacing: 14) {
-            Text("Band-pass Filter")
+            Text("Filter")
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("High-Pass Cutoff (Hz)")
                     .font(.caption.weight(.semibold))
                 HStack {
-                    TextField("Low", value: $filter.lowCutoff, format: .number.precision(.fractionLength(1)))
+                    TextField("Off", text: $filter.highPassCutoffText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
-                    Stepper("", value: $filter.lowCutoff, in: 0.1...100, step: 0.1)
+                        .help("Leave blank for no high-pass cutoff.")
+                    Stepper("", value: Binding<Double>(
+                        get: { filter.highPassCutoff ?? 0.1 },
+                        set: { filter.lowCutoff = $0 }
+                    ), in: 0.1...100, step: 0.1)
                         .labelsHidden()
                     Picker("HP Slope", selection: $filter.highPassSlope) {
                         ForEach(FilterSlope.allCases) { slope in
@@ -7316,6 +7592,7 @@ struct WaveformView: View {
                     }
                     .labelsHidden()
                     .frame(width: 100)
+                    .disabled(filter.highPassCutoff == nil)
                     .help("High-pass rolloff slope. 12 dB/oct (2-pole) is gentler and produces less ringing near the cutoff; 24 dB/oct (4-pole) is steeper. Both are applied zero-phase (forward+backward pass).")
                 }
             }
@@ -7324,10 +7601,14 @@ struct WaveformView: View {
                 Text("Low-Pass Cutoff (Hz)")
                     .font(.caption.weight(.semibold))
                 HStack {
-                    TextField("High", value: $filter.highCutoff, format: .number.precision(.fractionLength(1)))
+                    TextField("Off", text: $filter.lowPassCutoffText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
-                    Stepper("", value: $filter.highCutoff, in: 0.5...200, step: 0.5)
+                        .help("Leave blank for no low-pass cutoff.")
+                    Stepper("", value: Binding<Double>(
+                        get: { filter.lowPassCutoff ?? 30 },
+                        set: { filter.highCutoff = $0 }
+                    ), in: 0.5...200, step: 0.5)
                         .labelsHidden()
                     Picker("LP Slope", selection: $filter.lowPassSlope) {
                         ForEach(FilterSlope.allCases) { slope in
@@ -7336,6 +7617,7 @@ struct WaveformView: View {
                     }
                     .labelsHidden()
                     .frame(width: 100)
+                    .disabled(filter.lowPassCutoff == nil)
                     .help("Low-pass rolloff slope. 24 dB/oct is a common choice for BCG preprocessing; 48 dB/oct gives a sharper brick-wall rolloff at the cost of more ringing. Both are zero-phase.")
                 }
             }
@@ -7411,10 +7693,24 @@ struct WaveformView: View {
             Toggle("Average reference", isOn: $filter.averageReference)
                 .help("Re-reference to the common average: subtract the mean across all channels at each time point. Removes shared reference signal.")
 
+            HStack {
+                Text("Precision")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Picker("Precision", selection: $filter.precision) {
+                    ForEach(FilterPrecision.allCases) { precision in
+                        Text(precision.label).tag(precision)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 110)
+                .help("Auto uses Float for routine filters, Double for numerically risky settings, and retries in Double if Float becomes unstable.")
+            }
+
             if recording.pnsSignal != nil {
                 Toggle("Filter PNS", isOn: $filter.filterPNS)
                     .font(.caption)
-                    .help("Apply the band-pass and line-noise filter to physio/PNS channels. Average reference is EEG-only.")
+                    .help("Apply the cutoff and line-noise filter to physio/PNS channels. Average reference is EEG-only.")
             }
 
             HStack {
@@ -9307,6 +9603,81 @@ struct WaveformView: View {
         return "Artifact detection"
     }
 
+    private func eegAnalysisProcessingSnapshot() -> EEGAnalysisProcessingSnapshot {
+        var parts = ["original"]
+        if gradient.correctedSignal != nil {
+            parts.append("MRI-corrected")
+        }
+        if ica.cleanedSignal != nil {
+            parts.append("ICA-cleaned")
+        }
+        if filter.output != nil {
+            parts.append("filtered")
+        }
+        if artifactVM.cleanedSignal != nil, artifactVM.cleaningIsEnabled {
+            parts.append("artifact-cleaned")
+        }
+        if wavelet.reducedSignal != nil, wavelet.isEnabled {
+            parts.append("wavelet-reduced")
+        }
+        if !channels.interpolated.isEmpty {
+            parts.append("interpolated")
+        }
+
+        return EEGAnalysisProcessingSnapshot(
+            signalDescription: "Current working signal: \(parts.joined(separator: " → "))",
+            gradientCorrected: gradient.correctedSignal != nil,
+            icaCleaned: ica.cleanedSignal != nil,
+            filtered: filter.output != nil,
+            filterLowCutoffHz: filter.output == nil ? nil : filter.highPassCutoff,
+            filterHighCutoffHz: filter.output == nil ? nil : filter.lowPassCutoff,
+            notch60HzEnabled: filter.output == nil ? nil : filter.notch60HzEnabled,
+            averageReferenced: filter.output == nil ? nil : filter.averageReference,
+            artifactCleaned: artifactVM.cleanedSignal != nil,
+            artifactCleaningVisible: artifactVM.cleanedSignal != nil && artifactVM.cleaningIsEnabled,
+            waveletReduced: wavelet.reducedSignal != nil,
+            waveletReductionVisible: wavelet.reducedSignal != nil && wavelet.isEnabled,
+            interpolatedChannelIndices: channels.interpolated.keys.sorted(),
+            markedBadChannelIndices: channels.bad.sorted()
+        )
+    }
+
+    private func eegArtifactRejectionSources() -> [EEGArtifactRejectionSource] {
+        var sources: [EEGArtifactRejectionSource] = []
+        var definedEvents = Set<MFFEvent>()
+
+        for artifact in template.definedArtifacts where !artifact.events.isEmpty {
+            for event in artifact.events {
+                definedEvents.insert(event)
+            }
+            sources.append(
+                EEGArtifactRejectionSource(
+                    id: artifact.id.uuidString,
+                    name: artifact.name,
+                    eventCode: artifact.eventCode,
+                    windowSizeSeconds: artifact.windowSizeSeconds,
+                    events: artifact.events
+                )
+            )
+        }
+
+        let detectorEvents = artifactVM.events.filter { !definedEvents.contains($0) }
+        if !detectorEvents.isEmpty {
+            let codes = Array(Set(detectorEvents.map(\.code))).sorted().joined(separator: ", ")
+            sources.append(
+                EEGArtifactRejectionSource(
+                    id: "current-detector-events",
+                    name: "Current Detector Events",
+                    eventCode: codes.isEmpty ? "Detected" : codes,
+                    windowSizeSeconds: 0.25,
+                    events: detectorEvents
+                )
+            )
+        }
+
+        return sources.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
     private func artifactDetectionRequestID(for signal: MFFSignalData) -> String {
         return [
             signal.signalURL.path,
@@ -9751,8 +10122,8 @@ struct WaveformView: View {
             gradientCorrected: gradient.correctedSignal != nil,
             icaCleaned: ica.cleanedSignal != nil,
             filtered: filter.output != nil,
-            filterLowCutoffHz: filter.output == nil ? nil : filter.lowCutoff,
-            filterHighCutoffHz: filter.output == nil ? nil : filter.highCutoff,
+            filterLowCutoffHz: filter.output == nil ? nil : filter.highPassCutoff,
+            filterHighCutoffHz: filter.output == nil ? nil : filter.lowPassCutoff,
             notch60HzEnabled: filter.output == nil ? nil : filter.notch60HzEnabled,
             averageReferenced: filter.output == nil ? nil : filter.averageReference,
             artifactCleaned: artifactVM.cleanedSignal != nil,
@@ -10162,8 +10533,8 @@ struct WaveformView: View {
             gradientCorrected: gradient.correctedSignal != nil,
             icaCleaned: ica.cleanedSignal != nil,
             filtered: filter.output != nil,
-            filterLowCutoffHz: filter.output == nil ? nil : filter.lowCutoff,
-            filterHighCutoffHz: filter.output == nil ? nil : filter.highCutoff,
+            filterLowCutoffHz: filter.output == nil ? nil : filter.highPassCutoff,
+            filterHighCutoffHz: filter.output == nil ? nil : filter.lowPassCutoff,
             notch60HzEnabled: filter.output == nil ? nil : filter.notch60HzEnabled,
             averageReferenced: filter.output == nil ? nil : filter.averageReference,
             artifactCleaned: artifactVM.cleanedSignal != nil,
@@ -10308,6 +10679,12 @@ struct WaveformView: View {
         channelStatusMessage = nil
         chanHealth.statusMessage = nil
         segHealth.statusMessage = nil
+        if eegAnalysis.isRunning {
+            eegAnalysis.cancel()
+        }
+        eegAnalysis.result = nil
+        eegAnalysis.statusMessage = nil
+        eegAnalysis.progress = 0
         ica.lastReconstructionDebugReport = nil
 
         // Interpolations, epochs, and the dependent selection/topomap state.
@@ -10758,29 +11135,45 @@ struct ArtifactScanSignature: Equatable {
 /// identical size regardless of how the system button/menu styles add padding.
 struct ToolbarIcon: View {
     let name: String
+    var label: String? = nil
     var isActive: Bool = false
+    var inactiveForeground: Color = .primary
 
     private let size = CGSize(width: 77, height: 58)
+    private var hasLabel: Bool {
+        label?.isEmpty == false
+    }
 
     var body: some View {
-        Image(name)
-            .renderingMode(.template)
-            .resizable()
-            .scaledToFit()
-            .frame(width: 33, height: 33)
-            .foregroundStyle(isActive ? Color.white : Color.primary)
-            .frame(width: size.width, height: size.height)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isActive
-                          ? Color.accentColor
-                          : Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
-            )
-            .contentShape(Rectangle())
+        VStack(spacing: hasLabel ? 3 : 0) {
+            Image(name)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: hasLabel ? 24 : 33, height: hasLabel ? 24 : 33)
+                .foregroundStyle(isActive ? Color.white : inactiveForeground)
+
+            if let label, !label.isEmpty {
+                Text(label.uppercased())
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(isActive ? Color.white : inactiveForeground)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: size.width - 10, height: 10)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isActive
+                      ? Color.accentColor
+                      : Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
+        )
+        .contentShape(Rectangle())
     }
 }
 
@@ -10938,6 +11331,64 @@ private struct HorizontalViewport: Equatable {
     let width: CGFloat
 }
 
+private struct WaveformDisplayedEventsCache {
+    struct Key: Equatable {
+        let signalURLPath: String
+        let signalType: String
+        let signalEvents: EventTrackEventSignature
+        let userMarkers: [WaveformUserMarkerSignature]
+        let artifactEvents: EventTrackEventSignature
+        let definedArtifacts: [WaveformDefinedArtifactSignature]
+        let epochSegments: WaveformEpochSegmentSignature
+        let includeContinuousOverlays: Bool
+        let mapContinuousOverlaysIntoEpochs: Bool
+
+        static let empty = Key(
+            signalURLPath: "",
+            signalType: "",
+            signalEvents: .empty,
+            userMarkers: [],
+            artifactEvents: .empty,
+            definedArtifacts: [],
+            epochSegments: .empty,
+            includeContinuousOverlays: false,
+            mapContinuousOverlaysIntoEpochs: false
+        )
+    }
+
+    let key: Key
+    let events: [MFFEvent]
+
+    static let empty = WaveformDisplayedEventsCache(key: .empty, events: [])
+}
+
+private struct WaveformUserMarkerSignature: Equatable {
+    let idHash: Int
+    let timeSeconds: Double
+    let note: String
+}
+
+private struct WaveformDefinedArtifactSignature: Equatable {
+    let id: UUID
+    let events: EventTrackEventSignature
+}
+
+private struct WaveformEpochSegmentSignature: Equatable {
+    let count: Int
+    let firstID: EpochSegment.ID?
+    let middleID: EpochSegment.ID?
+    let lastID: EpochSegment.ID?
+
+    static let empty = WaveformEpochSegmentSignature(segments: [])
+
+    init(segments: [EpochSegment]) {
+        count = segments.count
+        let middleIndex = segments.isEmpty ? nil : segments.index(segments.startIndex, offsetBy: segments.count / 2)
+        firstID = segments.first?.id
+        middleID = middleIndex.map { segments[$0].id }
+        lastID = segments.last?.id
+    }
+}
 
 private struct EventSummary: Identifiable {
     let code: String

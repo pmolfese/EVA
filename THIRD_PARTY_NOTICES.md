@@ -50,10 +50,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## mffpy
 
 - EVA file: `EVA/MFFWriter.swift`
-- Redistributed fixtures: `EVA/Fixtures/example_1.mff`,
-  `EVA/Fixtures/example_1.mfz`, `EVA/Fixtures/example_2.mff`,
-  `EVA/Fixtures/example_2.json`, `EVA/Fixtures/example_3.mff`,
-  `EVA/Fixtures/example_4.mff`, `EVA/Fixtures/example_5.mff`
+- Redistributed fixtures: `EVATests/Fixtures/example_1.mff`,
+  `EVATests/Fixtures/example_1.mfz`, `EVATests/Fixtures/example_2.mff`,
+  `EVATests/Fixtures/example_2.json`, `EVATests/Fixtures/example_3.mff`,
+  `EVATests/Fixtures/example_4.mff`, `EVATests/Fixtures/example_5.mff`
 - Upstream project: https://github.com/BEL-Public/mffpy
 - Upstream license: Apache License 2.0
 - Compatibility: Apache-2.0 is compatible with GPL-3.0-only distribution.
@@ -65,7 +65,7 @@ writer implementation, especially `mffpy/bin_writer.py`,
 The example recordings under `Fixtures/` are redistributed unmodified from the
 mffpy `examples/` directory and are used by EVA solely as read-only test
 fixtures. A copy of the Apache License 2.0, together with the upstream copyright
-notice, is included at `EVA/Fixtures/LICENSE-mffpy.txt`.
+notice, is included at `EVATests/Fixtures/LICENSE-mffpy.txt`.
 
 Copyright 2019 Brain Electrophysiology Laboratory Company LLC
 

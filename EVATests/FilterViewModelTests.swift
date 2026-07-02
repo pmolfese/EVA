@@ -38,6 +38,39 @@ struct FilterViewModelTests {
         #expect(params["lowPassHz"] == "40")
         #expect(params["averageReference"] == "true")
         #expect(params["notchHz"] == "60")
+        #expect(params["precision"] == "auto")
+    }
+
+    @MainActor
+    @Test func precisionDefaultsToAutoAndCanBeSerialized() {
+        let vm = FilterViewModel()
+        #expect(vm.precision == .auto)
+        #expect(vm.parameters["precision"] == "auto")
+
+        vm.precision = .float
+        #expect(vm.parameters["precision"] == "float")
+
+        vm.precision = .double
+        #expect(vm.parameters["precision"] == "double")
+    }
+
+    @MainActor
+    @Test func blankCutoffFieldsOmitThatFilterEdge() {
+        let vm = FilterViewModel()
+
+        vm.lowCutoff = 0.5
+        vm.lowPassCutoffText = ""
+        var params = vm.parameters
+        #expect(params["highPassHz"] == "0.5")
+        #expect(params["lowPassHz"] == nil)
+        #expect(vm.frequencySummary == "Butterworth high-pass 0.5 Hz")
+
+        vm.highPassCutoffText = ""
+        vm.highCutoff = 30
+        params = vm.parameters
+        #expect(params["highPassHz"] == nil)
+        #expect(params["lowPassHz"] == "30")
+        #expect(vm.frequencySummary == "Butterworth low-pass 30 Hz")
     }
 
     @MainActor

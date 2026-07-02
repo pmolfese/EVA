@@ -21,6 +21,10 @@
 
 import SwiftUI
 
+nonisolated enum ToolbarButtonLabels {
+    static let storageKey = "toolbarButtonLabelsVisible"
+}
+
 @Observable
 final class ChannelModel {
     /// Channels whose trace is not drawn (row stays in place).
@@ -315,6 +319,8 @@ struct FileExportCommands: View {
 
 /// Menu-bar View commands for the focused waveform window.
 struct ViewCommands: View {
+    @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
+
     @FocusedValue(\.icaDebugReportRequest) private var reportRequest
     @FocusedValue(\.resetToOriginalRequest) private var resetRequest
     @FocusedValue(\.psaViewControls) private var psaControls
@@ -322,6 +328,12 @@ struct ViewCommands: View {
     @FocusedValue(\.physioViewControls) private var physioControls
 
     var body: some View {
+        Button(showsToolbarButtonLabels ? "Hide Button Labels" : "Show Button Labels") {
+            showsToolbarButtonLabels.toggle()
+        }
+
+        Divider()
+
         if let physioControls, physioControls.hasPhysio {
             Button(physioControls.showsPhysio.wrappedValue
                    ? "Hide Physio Channels"

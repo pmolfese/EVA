@@ -19,6 +19,181 @@ struct EventMarkerStyle {
     let color: Color
     /// Vertical offset of this event's label (and stem top) — its source lane.
     let laneY: CGFloat
+    let sourceIndex: Int
+}
+
+nonisolated enum EventTrackConstants {
+    static let maxLanes = 3
+    static let laneSpacing: CGFloat = 18
+    static let denseMarkerThreshold = 180
+}
+
+nonisolated struct EventTrackEventSignature: Equatable {
+    let count: Int
+    let firstID: MFFEvent.ID?
+    let middleID: MFFEvent.ID?
+    let lastID: MFFEvent.ID?
+    let firstTime: Double?
+    let middleTime: Double?
+    let lastTime: Double?
+    let firstSource: String?
+    let middleSource: String?
+    let lastSource: String?
+
+    static let empty = EventTrackEventSignature(events: [])
+
+    init(events: [MFFEvent]) {
+        count = events.count
+        let middleIndex = events.isEmpty ? nil : events.index(events.startIndex, offsetBy: events.count / 2)
+        firstID = events.first?.id
+        middleID = middleIndex.map { events[$0].id }
+        lastID = events.last?.id
+        firstTime = events.first?.beginTimeSeconds
+        middleTime = middleIndex.map { events[$0].beginTimeSeconds }
+        lastTime = events.last?.beginTimeSeconds
+        firstSource = events.first?.sourceFile
+        middleSource = middleIndex.map { events[$0].sourceFile }
+        lastSource = events.last?.sourceFile
+    }
+}
+
+nonisolated struct EventTrackSourceSummary: Equatable {
+    let signature: EventTrackEventSignature
+    let sourceCount: Int
+
+    static let empty = EventTrackSourceSummary(events: [])
+
+    init(events: [MFFEvent], signature: EventTrackEventSignature = EventTrackEventSignature(events: [])) {
+        let resolvedSignature = signature.count == events.count ? signature : EventTrackEventSignature(events: events)
+        self.signature = resolvedSignature
+        self.sourceCount = Set(events.map(\.sourceFile)).count
+    }
+}
+
+nonisolated struct EventTrackMarker: Identifiable {
+    var id: MFFEvent.ID { event.id }
+    let event: MFFEvent
+    let globalX: CGFloat
+    let style: EventMarkerStyle
+}
+
+nonisolated struct EventTrackIndex {
+    struct Key: Equatable {
+        let events: EventTrackEventSignature
+        let samplingRate: Double
+        let timeScale: Double
+        let sampleStride: Int
+        let laneCount: Int
+
+        static let empty = Key(
+            events: .empty,
+            samplingRate: 0,
+            timeScale: 0,
+            sampleStride: 1,
+            laneCount: 1
+        )
+    }
+
+    static let empty = EventTrackIndex(key: .empty, markers: [])
+
+    let key: Key
+    let markers: [EventTrackMarker]
+
+    init(
+        events: [MFFEvent],
+        samplingRate: Double,
+        timeScale: Double,
+        sampleStride: Int,
+        laneCount: Int,
+        signature: EventTrackEventSignature = EventTrackEventSignature(events: [])
+    ) {
+        let resolvedSignature = signature.count == events.count ? signature : EventTrackEventSignature(events: events)
+        let key = Key(
+            events: resolvedSignature,
+            samplingRate: samplingRate,
+            timeScale: timeScale,
+            sampleStride: max(sampleStride, 1),
+            laneCount: max(laneCount, 1)
+        )
+
+        guard samplingRate > 0, timeScale > 0 else {
+            self.init(key: key, markers: [])
+            return
+        }
+
+        let sources = Array(Set(events.map(\.sourceFile))).sorted()
+        let sourceIndices = Dictionary(uniqueKeysWithValues: sources.enumerated().map { ($1, $0) })
+        let palette: [Color] = [.orange, .blue, .green, .red, .pink, .teal, .indigo, .brown]
+        let markers = events.map { event in
+            let sourceIndex = sourceIndices[event.sourceFile] ?? 0
+            let plottedIndex = event.beginTimeSeconds * samplingRate / Double(key.sampleStride)
+            let lane = sourceIndex % key.laneCount
+            let style = EventMarkerStyle(
+                color: palette[sourceIndex % palette.count],
+                laneY: 4 + CGFloat(lane) * EventTrackConstants.laneSpacing,
+                sourceIndex: sourceIndex
+            )
+            return EventTrackMarker(
+                event: event,
+                globalX: CGFloat(plottedIndex) * CGFloat(timeScale),
+                style: style
+            )
+        }
+        .sorted {
+            if $0.globalX == $1.globalX {
+                return $0.event.id < $1.event.id
+            }
+            return $0.globalX < $1.globalX
+        }
+
+        self.init(key: key, markers: markers)
+    }
+
+    private init(key: Key, markers: [EventTrackMarker]) {
+        self.key = key
+        self.markers = markers
+    }
+
+    func visibleMarkers(in visibleRange: ClosedRange<CGFloat>) -> [EventTrackMarker] {
+        guard !markers.isEmpty else { return [] }
+        let lower = lowerBound(for: visibleRange.lowerBound)
+        let upper = upperBound(for: visibleRange.upperBound)
+        guard lower < upper else { return [] }
+        return Array(markers[lower..<upper])
+    }
+
+    private func lowerBound(for x: CGFloat) -> Int {
+        var low = 0
+        var high = markers.count
+        while low < high {
+            let mid = (low + high) / 2
+            if markers[mid].globalX < x {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+
+    private func upperBound(for x: CGFloat) -> Int {
+        var low = 0
+        var high = markers.count
+        while low < high {
+            let mid = (low + high) / 2
+            if markers[mid].globalX <= x {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+}
+
+private struct DenseMarkerPixel: Hashable {
+    let sourceIndex: Int
+    let x: Int
 }
 
 struct WaveformPlot: View {
@@ -609,8 +784,9 @@ struct PhysioTrackView: View {
 struct EventTrackView: View {
     /// Maximum number of vertical lanes events are staggered across, and the
     /// extra height each lane beyond the first adds to the track.
-    static let maxLanes = 3
-    static let laneSpacing: CGFloat = 18
+    static let maxLanes = EventTrackConstants.maxLanes
+    static let laneSpacing = EventTrackConstants.laneSpacing
+    static let denseMarkerThreshold = EventTrackConstants.denseMarkerThreshold
 
     let events: [MFFEvent]
     let samplingRate: Double
@@ -626,8 +802,30 @@ struct EventTrackView: View {
 
     /// Event whose detail popover is currently shown (tap a flag to open).
     @State private var poppedEvent: MFFEvent?
+    @State private var eventIndex = EventTrackIndex.empty
 
     var body: some View {
+        let signature = EventTrackEventSignature(events: events)
+        let key = EventTrackIndex.Key(
+            events: signature,
+            samplingRate: samplingRate,
+            timeScale: timeScale,
+            sampleStride: max(sampleStride, 1),
+            laneCount: max(laneCount, 1)
+        )
+        let index = eventIndex.key == key
+            ? eventIndex
+            : EventTrackIndex(
+                events: events,
+                samplingRate: samplingRate,
+                timeScale: timeScale,
+                sampleStride: sampleStride,
+                laneCount: laneCount,
+                signature: signature
+            )
+        let visibleMarkers = index.visibleMarkers(in: visibleRange)
+        let drawsFlags = Self.drawsEventFlags(visibleMarkerCount: visibleMarkers.count)
+
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color(nsColor: .controlBackgroundColor))
@@ -640,59 +838,105 @@ struct EventTrackView: View {
                 baseline.addLine(to: CGPoint(x: size.width, y: baselineY))
                 context.stroke(baseline, with: .color(.secondary.opacity(0.3)), lineWidth: 1)
 
-                for event in visibleEvents {
-                    let x = localXPosition(for: event)
-                    let style = style(for: event)
-                    var marker = Path()
-                    // Stem starts at this source's lane (just below its label).
-                    marker.move(to: CGPoint(x: x, y: style.laneY + 4))
-                    marker.addLine(to: CGPoint(x: x, y: baselineY))
-                    context.stroke(marker, with: .color(style.color), lineWidth: 1)
+                if drawsFlags {
+                    drawIndividualMarkers(visibleMarkers, in: &context, baselineY: baselineY)
+                } else {
+                    drawDenseMarkers(visibleMarkers, in: &context, baselineY: baselineY)
                 }
             }
 
-            ForEach(visibleEvents) { event in
-                eventFlag(event)
+            if drawsFlags {
+                ForEach(visibleMarkers) { marker in
+                    eventFlag(marker)
+                }
             }
         }
         .overlay {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
         }
+        .onAppear {
+            updateEventIndexIfNeeded(key: key, signature: signature)
+        }
+        .onChange(of: key) { _, newKey in
+            updateEventIndexIfNeeded(key: newKey, signature: signature)
+        }
     }
 
-    private var visibleEvents: [MFFEvent] {
-        events.filter { visibleRange.contains(globalXPosition(for: $0)) }
+    nonisolated static func drawsEventFlags(visibleMarkerCount: Int) -> Bool {
+        visibleMarkerCount <= EventTrackConstants.denseMarkerThreshold
     }
 
-    private func globalXPosition(for event: MFFEvent) -> CGFloat {
-        guard samplingRate > 0 else { return 0 }
-        let plottedIndex = event.beginTimeSeconds * samplingRate / Double(sampleStride)
-        return CGFloat(plottedIndex) * CGFloat(timeScale)
+    private func updateEventIndexIfNeeded(key: EventTrackIndex.Key, signature: EventTrackEventSignature) {
+        guard eventIndex.key != key else { return }
+        eventIndex = EventTrackIndex(
+            events: events,
+            samplingRate: samplingRate,
+            timeScale: timeScale,
+            sampleStride: sampleStride,
+            laneCount: laneCount,
+            signature: signature
+        )
     }
 
-    private func localXPosition(for event: MFFEvent) -> CGFloat {
+    private func localXPosition(for marker: EventTrackMarker) -> CGFloat {
         // Position relative to the true scroll offset (not the buffered
         // culling range) so markers align with the waveform cursor.
-        globalXPosition(for: event) - contentOffset
+        marker.globalX - contentOffset
     }
 
-    private func style(for event: MFFEvent) -> EventMarkerStyle {
-        let sources = Array(Set(events.map(\.sourceFile))).sorted()
-        let sourceIndex = sources.firstIndex(of: event.sourceFile) ?? 0
-        let palette: [Color] = [.orange, .blue, .green, .red, .pink, .teal, .indigo, .brown]
-        let lane = sourceIndex % max(laneCount, 1)
-        return EventMarkerStyle(
-            color: palette[sourceIndex % palette.count],
-            laneY: 4 + CGFloat(lane) * Self.laneSpacing
-        )
+    private func drawIndividualMarkers(
+        _ markers: [EventTrackMarker],
+        in context: inout GraphicsContext,
+        baselineY: CGFloat
+    ) {
+        for marker in markers {
+            let x = localXPosition(for: marker)
+            var path = Path()
+            // Stem starts at this source's lane (just below its label).
+            path.move(to: CGPoint(x: x, y: marker.style.laneY + 4))
+            path.addLine(to: CGPoint(x: x, y: baselineY))
+            context.stroke(path, with: .color(marker.style.color), lineWidth: 1)
+        }
+    }
+
+    private func drawDenseMarkers(
+        _ markers: [EventTrackMarker],
+        in context: inout GraphicsContext,
+        baselineY: CGFloat
+    ) {
+        var pathsBySource: [Int: Path] = [:]
+        var stylesBySource: [Int: EventMarkerStyle] = [:]
+        var drawnPixels = Set<DenseMarkerPixel>()
+
+        for marker in markers {
+            let x = localXPosition(for: marker)
+            guard x >= 0, x <= viewportWidth else { continue }
+            let roundedX = Int(x.rounded())
+            let pixel = DenseMarkerPixel(sourceIndex: marker.style.sourceIndex, x: roundedX)
+            guard drawnPixels.insert(pixel).inserted else { continue }
+
+            stylesBySource[marker.style.sourceIndex] = marker.style
+            var path = pathsBySource[marker.style.sourceIndex] ?? Path()
+            let drawX = CGFloat(roundedX)
+            path.move(to: CGPoint(x: drawX, y: marker.style.laneY + 6))
+            path.addLine(to: CGPoint(x: drawX, y: baselineY))
+            pathsBySource[marker.style.sourceIndex] = path
+        }
+
+        for sourceIndex in pathsBySource.keys.sorted() {
+            guard let path = pathsBySource[sourceIndex],
+                  let style = stylesBySource[sourceIndex] else { continue }
+            context.stroke(path, with: .color(style.color.opacity(0.75)), lineWidth: 1)
+        }
     }
 
     /// A single tappable event flag (code capsule) positioned in its lane.
     @ViewBuilder
-    private func eventFlag(_ event: MFFEvent) -> some View {
-        let x = localXPosition(for: event)
-        let style = style(for: event)
+    private func eventFlag(_ marker: EventTrackMarker) -> some View {
+        let event = marker.event
+        let x = localXPosition(for: marker)
+        let style = marker.style
         let isPopped = Binding(
             get: { poppedEvent == event },
             set: { if !$0 { poppedEvent = nil } }

@@ -54,6 +54,46 @@ struct EEGSignalFilterTests {
         #expect(highRatio < 0.3, "high tone not attenuated: \(highRatio)")
     }
 
+    @Test func highPassOnlyAllowsBlankLowPassCutoff() async throws {
+        let inBand = SyntheticSignal.sine(frequency: 10, samplingRate: samplingRate, count: count)
+        let lowDrift = SyntheticSignal.sine(frequency: 0.2, samplingRate: samplingRate, count: count)
+
+        let filtered = try await EEGSignalFilter.bandPass(
+            channels: [inBand, lowDrift],
+            samplingRate: samplingRate,
+            lowCutoff: 1,
+            highCutoff: nil
+        )
+
+        func interiorRMS(_ v: [Float]) -> Double { rms(Array(v[400..<(count - 400)])) }
+
+        let inBandRatio = interiorRMS(filtered[0]) / rms(Array(inBand[400..<(count - 400)]))
+        #expect(inBandRatio > 0.7, "in-band attenuated too much: \(inBandRatio)")
+
+        let driftRatio = interiorRMS(filtered[1]) / rms(Array(lowDrift[400..<(count - 400)]))
+        #expect(driftRatio < 0.3, "low drift not attenuated: \(driftRatio)")
+    }
+
+    @Test func lowPassOnlyAllowsBlankHighPassCutoff() async throws {
+        let inBand = SyntheticSignal.sine(frequency: 10, samplingRate: samplingRate, count: count)
+        let highTone = SyntheticSignal.sine(frequency: 90, samplingRate: samplingRate, count: count)
+
+        let filtered = try await EEGSignalFilter.bandPass(
+            channels: [inBand, highTone],
+            samplingRate: samplingRate,
+            lowCutoff: nil,
+            highCutoff: 40
+        )
+
+        func interiorRMS(_ v: [Float]) -> Double { rms(Array(v[400..<(count - 400)])) }
+
+        let inBandRatio = interiorRMS(filtered[0]) / rms(Array(inBand[400..<(count - 400)]))
+        #expect(inBandRatio > 0.7, "in-band attenuated too much: \(inBandRatio)")
+
+        let highRatio = interiorRMS(filtered[1]) / rms(Array(highTone[400..<(count - 400)]))
+        #expect(highRatio < 0.3, "high tone not attenuated: \(highRatio)")
+    }
+
     @Test func bandPassRejectsInvalidRange() async {
         await #expect(throws: EEGSignalFilterError.self) {
             _ = try await EEGSignalFilter.bandPass(
@@ -63,6 +103,73 @@ struct EEGSignalFilterTests {
                 highCutoff: 10 // high <= low
             )
         }
+    }
+
+    @Test func lowHighPassAtHighSampleRateStaysFinite() async throws {
+        let highRate = 5_000.0
+        let sampleCount = 150_000
+        let channel = (0..<sampleCount).map { sample -> Float in
+            let t = Double(sample) / highRate
+            return Float(
+                250 * sin(2 * Double.pi * 10 * t)
+                + 1_500 * sin(2 * Double.pi * 0.03 * t)
+                + 20
+            )
+        }
+
+        let filtered = try await EEGSignalFilter.bandPass(
+            channels: [channel],
+            samplingRate: highRate,
+            lowCutoff: 0.1,
+            highCutoff: 30
+        )
+
+        let outputIsFinite = filtered[0].allSatisfy { $0.isFinite }
+        #expect(outputIsFinite)
+        #expect(rms(filtered[0]) < rms(channel))
+    }
+
+    @Test func explicitFloatPrecisionProducesFiniteRoutineFilter() async throws {
+        let inBand = SyntheticSignal.sine(frequency: 10, samplingRate: samplingRate, count: count)
+        let highTone = SyntheticSignal.sine(frequency: 90, samplingRate: samplingRate, count: count)
+
+        let filtered = try await EEGSignalFilter.bandPass(
+            channels: [inBand, highTone],
+            samplingRate: samplingRate,
+            lowCutoff: nil,
+            highCutoff: 40,
+            precision: .float
+        )
+
+        #expect(filtered.count == 2)
+        #expect(filtered[0].allSatisfy { $0.isFinite })
+        #expect(filtered[1].allSatisfy { $0.isFinite })
+    }
+
+    @Test func autoPrecisionUsesDoubleForVeryLowNormalizedHighPass() async throws {
+        let highRate = 5_000.0
+        let sampleCount = 20_000
+        let channel = SyntheticSignal.sine(frequency: 10, samplingRate: highRate, count: sampleCount)
+
+        let auto = try await EEGSignalFilter.bandPass(
+            channels: [channel],
+            samplingRate: highRate,
+            lowCutoff: 0.1,
+            highCutoff: 30,
+            precision: .auto
+        )
+        let double = try await EEGSignalFilter.bandPass(
+            channels: [channel],
+            samplingRate: highRate,
+            lowCutoff: 0.1,
+            highCutoff: 30,
+            precision: .double
+        )
+
+        let maxDifference = zip(auto[0], double[0]).reduce(Float(0)) { current, pair in
+            max(current, abs(pair.0 - pair.1))
+        }
+        #expect(maxDifference < 1e-5)
     }
 
     @Test func bandPassRejectsZeroSamplingRate() async {

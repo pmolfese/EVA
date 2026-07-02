@@ -51,7 +51,7 @@ L1–L3 are largely done and tested. L5 exists but is bloated. **L4 is what we b
 ## 3. Current state / what's done
 
 - **Regression-test foundation** (branch `refactor`): ~17 suites / ~38 tests, green.
-  Covers L1/L2/L3 engines via public entry points + mffpy fixtures under `EVA/Fixtures/`.
+  Covers L1/L2/L3 engines via public entry points + mffpy fixtures under `EVATests/Fixtures/`.
   Does NOT cover the ~323 in-view privates — those get tested per-slice as extracted.
 - **Combine-era additions** (already L2/L3/L4-shaped, good precedents to follow):
   `EVAProcessingScript` + `eva.xml`, `EVAProcessLog`, `MultiRecordingModels`, `EpochSNR`,
