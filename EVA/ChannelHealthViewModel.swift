@@ -19,6 +19,14 @@ import SwiftUI
 
 @MainActor
 final class ChannelHealthViewModel: ObservableObject {
+    /// Held directly so this VM can read channel state itself — see
+    /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
+    let store: RecordingStore
+
+    init(store: RecordingStore) {
+        self.store = store
+    }
+
     @Published var statusMessage: String?
     @Published var signature: String?
     @Published var task: Task<Void, Never>?

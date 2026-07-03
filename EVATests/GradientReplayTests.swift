@@ -20,7 +20,7 @@ struct GradientReplayTests {
 
     @MainActor
     @Test func gradientApplyParametersRoundTrip() {
-        let a = GradientViewModel()
+        let a = GradientViewModel(store: RecordingStore())
         a.method = .fastr
         a.trMarkerCode = "TR"
         a.windowBefore = 3
@@ -31,7 +31,7 @@ struct GradientReplayTests {
         a.excludeHighMotion = true
         a.motionFDThreshold = 0.35
 
-        let b = GradientViewModel()
+        let b = GradientViewModel(store: RecordingStore())
         b.apply(parameters: a.parameters)
 
         #expect(b.parameters == a.parameters)
@@ -47,14 +47,14 @@ struct GradientReplayTests {
 
     @MainActor
     @Test func aasGradientOmitsFastrKeysButRoundTrips() {
-        let a = GradientViewModel()
+        let a = GradientViewModel(store: RecordingStore())
         a.method = .aas
         a.windowBefore = 2
         a.windowAfter = 2
 
         #expect(a.parameters["slices"] == nil) // FASTR-only keys absent for AAS
 
-        let b = GradientViewModel()
+        let b = GradientViewModel(store: RecordingStore())
         b.apply(parameters: a.parameters)
         #expect(b.method == .aas)
         #expect(b.parameters == a.parameters)

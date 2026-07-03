@@ -24,7 +24,7 @@ struct FilterReplayTests {
     /// config drives the same transform the interactive button would.
     @MainActor
     @Test func filterApplyParametersRoundTrip() {
-        let a = FilterViewModel()
+        let a = FilterViewModel(store: RecordingStore())
         a.lowCutoff = 0.5      // high-pass edge
         a.highCutoff = 40      // low-pass edge
         a.averageReference = true
@@ -34,7 +34,7 @@ struct FilterReplayTests {
         a.precision = .double
 
         let params = a.parameters
-        let b = FilterViewModel()
+        let b = FilterViewModel(store: RecordingStore())
         b.apply(parameters: params)
 
         #expect(b.parameters == params)
@@ -46,7 +46,7 @@ struct FilterReplayTests {
 
     @MainActor
     @Test func applyParametersHandlesMissingKeys() {
-        let vm = FilterViewModel()
+        let vm = FilterViewModel(store: RecordingStore())
         vm.notch60HzEnabled = true
         vm.averageReference = true
         vm.apply(parameters: [:])
@@ -59,12 +59,12 @@ struct FilterReplayTests {
 
     @MainActor
     @Test func applyParametersRestoresCleanLineMode() {
-        let a = FilterViewModel()
+        let a = FilterViewModel(store: RecordingStore())
         a.lineNoiseMode = .adaptiveCleanLine
         a.lineNoiseFrequency = 50
         a.lineNoiseHarmonics = 3
 
-        let b = FilterViewModel()
+        let b = FilterViewModel(store: RecordingStore())
         b.apply(parameters: a.parameters)
 
         #expect(b.activeLineNoiseMode == .adaptiveCleanLine)
@@ -75,11 +75,11 @@ struct FilterReplayTests {
 
     @MainActor
     @Test func notchModeRoundTrips() {
-        let a = FilterViewModel()
+        let a = FilterViewModel(store: RecordingStore())
         a.lineNoiseMode = .off
         a.notch60HzEnabled = true
 
-        let b = FilterViewModel()
+        let b = FilterViewModel(store: RecordingStore())
         b.apply(parameters: a.parameters)
 
         #expect(b.activeLineNoiseMode == .notch)

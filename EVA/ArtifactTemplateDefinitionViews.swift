@@ -539,9 +539,10 @@ extension WaveformView {
         if isRunning {
             HStack(spacing: 10) {
                 if template.scanTotal > 0 {
-                    ProgressView(value: Double(template.scanCompleted), total: Double(template.scanTotal))
+                    let fraction = Double(template.scanCompleted) / Double(template.scanTotal)
+                    ProgressView(value: fraction)
                         .frame(width: 100)
-                    Text("\(template.scanCompleted) / \(template.scanTotal)")
+                    Text("\(Int((fraction * 100).rounded()))%")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 } else {
@@ -1367,7 +1368,8 @@ extension WaveformView {
                             artifact: artifact.wrappedValue,
                             beforeSignal: signal,
                             afterSignal: cleanedSignal,
-                            layout: layout
+                            layout: layout,
+                            cleaningPreviewCache: template.cleaningPreviewCache
                         )
                     }
                 } else {

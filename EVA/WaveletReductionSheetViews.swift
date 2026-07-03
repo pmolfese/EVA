@@ -70,75 +70,77 @@ extension WaveformView {
         waveletReductionTask?.cancel()
         let sessionID = recordingSessionID
         waveletReductionTask = Task { @MainActor in
-            let worker = Task.detached(priority: .userInitiated) {
-                WaveletReducer.reduce(
-                    signal: input,
-                    channelIndices: Array(reduceIndices),
-                    configuration: config,
-                    coreCount: cores
-                ) { fraction in
-                    progressContinuation.yield(fraction * (mode.assessesInBand ? 0.8 : 1.0))
-                }
-            }
-            let result = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                    progressContinuation.finish()
-                }
-            )
-
-            // ERP path: assess variance retained within the analysis band, as HAPPE does.
-            var bandRetained: Double?
-            if !Task.isCancelled,
-               sessionID == recordingSessionID,
-               mode.assessesInBand,
-               let analysisBand,
-               analysisBand.high > analysisBand.low,
-               analysisBand.high < input.samplingRate / 2 {
-                let bandWorker = Task.detached(priority: .utility) {
-                    await bandLimitedVarianceRetained(
-                        original: input,
-                        cleaned: result.cleaned,
+            await processingQueue.run("Wavelet Reduction") { [self] in
+                let worker = Task.detached(priority: .userInitiated) {
+                    WaveletReducer.reduce(
+                        signal: input,
                         channelIndices: Array(reduceIndices),
-                        band: analysisBand
-                    )
+                        configuration: config,
+                        coreCount: cores
+                    ) { fraction in
+                        progressContinuation.yield(fraction * (mode.assessesInBand ? 0.8 : 1.0))
+                    }
                 }
-                bandRetained = await withTaskCancellationHandler(
+                let result = await withTaskCancellationHandler(
                     operation: {
-                        await bandWorker.value
+                        await worker.value
                     },
                     onCancel: {
-                        bandWorker.cancel()
+                        worker.cancel()
+                        progressContinuation.finish()
                     }
                 )
+
+                // ERP path: assess variance retained within the analysis band, as HAPPE does.
+                var bandRetained: Double?
+                if !Task.isCancelled,
+                   sessionID == recordingSessionID,
+                   mode.assessesInBand,
+                   let analysisBand,
+                   analysisBand.high > analysisBand.low,
+                   analysisBand.high < input.samplingRate / 2 {
+                    let bandWorker = Task.detached(priority: .utility) {
+                        await bandLimitedVarianceRetained(
+                            original: input,
+                            cleaned: result.cleaned,
+                            channelIndices: Array(reduceIndices),
+                            band: analysisBand
+                        )
+                    }
+                    bandRetained = await withTaskCancellationHandler(
+                        operation: {
+                            await bandWorker.value
+                        },
+                        onCancel: {
+                            bandWorker.cancel()
+                        }
+                    )
+                }
+
+                progressContinuation.finish()
+                progressTask.cancel()
+
+                guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+                wavelet.reducedSignal = result.cleaned
+                wavelet.artifact = result.artifact
+                wavelet.result = result
+                wavelet.bandVarianceRetained = bandRetained
+                wavelet.candidates = WaveletReducer.findCandidates(
+                    artifact: result.artifact,
+                    channelIndices: Array(reduceIndices),
+                    maxCount: 40
+                )
+                wavelet.selectedCandidateID = wavelet.candidates.first?.id
+                wavelet.isEnabled = true
+                wavelet.isRunning = false
+                wavelet.progress = 1
+                let varianceText = String(format: "%.1f%%", result.varianceRetainedPercent)
+                wavelet.statusMessage = "Reduced \(reduceIndices.count) channels · \(varianceText) variance retained · r \(String(format: "%.2f", result.meanCorrelation))"
+                invalidateEpochsForSignalChange()
+                invalidateInterpolations()
+                artifactVM.detectionRefreshToken += 1
+                waveletReductionTask = nil
             }
-
-            progressContinuation.finish()
-            progressTask.cancel()
-
-            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
-            wavelet.reducedSignal = result.cleaned
-            wavelet.artifact = result.artifact
-            wavelet.result = result
-            wavelet.bandVarianceRetained = bandRetained
-            wavelet.candidates = WaveletReducer.findCandidates(
-                artifact: result.artifact,
-                channelIndices: Array(reduceIndices),
-                maxCount: 40
-            )
-            wavelet.selectedCandidateID = wavelet.candidates.first?.id
-            wavelet.isEnabled = true
-            wavelet.isRunning = false
-            wavelet.progress = 1
-            let varianceText = String(format: "%.1f%%", result.varianceRetainedPercent)
-            wavelet.statusMessage = "Reduced \(reduceIndices.count) channels · \(varianceText) variance retained · r \(String(format: "%.2f", result.meanCorrelation))"
-            invalidateEpochsForSignalChange()
-            invalidateInterpolations()
-            artifactVM.detectionRefreshToken += 1
-            waveletReductionTask = nil
         }
     }
 
@@ -201,55 +203,88 @@ extension WaveformView {
         artifactCleaningTask?.cancel()
         let sessionID = recordingSessionID
         artifactCleaningTask = Task {
-            let worker = Task.detached(priority: .userInitiated) {
-                ArtifactCleaner.cleanedSignal(
-                    from: signal,
-                    artifacts: artifacts,
-                    excluding: badChannels
-                ) { progress in
-                    progressContinuation.yield(progress)
+            await processingQueue.run("Artifact Cleaning") { [self] in
+                let worker = Task.detached(priority: .userInitiated) {
+                    ArtifactCleaner.cleanedSignal(
+                        from: signal,
+                        artifacts: artifacts,
+                        excluding: badChannels
+                    ) { progress in
+                        progressContinuation.yield(progress)
+                    }
                 }
-            }
-            let outcome = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                    progressContinuation.finish()
-                }
-            )
-            progressContinuation.finish()
-            progressTask.cancel()
+                let outcome = await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
+                    }
+                )
+                progressContinuation.finish()
+                progressTask.cancel()
 
-            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
-            artifactVM.cleanedSignal = outcome.signal
-            artifactVM.cleaningIsEnabled = true
-            artifactVM.cleaningSummaries = outcome.summaries
-            let summariesByID = Dictionary(uniqueKeysWithValues: outcome.summaries.map { ($0.artifactID, $0) })
-            let now = Date()
-            for index in template.definedArtifacts.indices {
-                if summariesByID[template.definedArtifacts[index].id] != nil,
-                   template.definedArtifacts[index].cleaningMethod.removesArtifact {
-                    template.definedArtifacts[index].appliedMethod = template.definedArtifacts[index].cleaningMethod
-                    template.definedArtifacts[index].cleanedAt = now
-                } else {
-                    template.definedArtifacts[index].appliedMethod = nil
-                    template.definedArtifacts[index].cleanedAt = nil
+                guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+                artifactVM.cleanedSignal = outcome.signal
+                artifactVM.cleaningIsEnabled = true
+                artifactVM.cleaningSummaries = outcome.summaries
+                let summariesByID = Dictionary(uniqueKeysWithValues: outcome.summaries.map { ($0.artifactID, $0) })
+                let now = Date()
+                for index in template.definedArtifacts.indices {
+                    if summariesByID[template.definedArtifacts[index].id] != nil,
+                       template.definedArtifacts[index].cleaningMethod.removesArtifact {
+                        template.definedArtifacts[index].appliedMethod = template.definedArtifacts[index].cleaningMethod
+                        template.definedArtifacts[index].cleanedAt = now
+                    } else {
+                        template.definedArtifacts[index].appliedMethod = nil
+                        template.definedArtifacts[index].cleanedAt = nil
+                    }
                 }
-            }
 
-            artifactVM.cleaningStatusMessage = artifactCleaningSummaryText(outcome.summaries)
-            artifactVM.statusMessage = artifactVM.cleaningStatusMessage
-            artifactVM.detectionRefreshToken += 1
-            invalidateEpochsForSignalChange()
-            invalidateInterpolations()
-            artifactVM.cleaningProgress = nil
-            artifactVM.isCleaning = false
-            artifactCleaningTask = nil
-            if replay.state.isAwaitingDecision {
-                artifactVM.showsCleaningSheet = false
-                replay.resume(.proceed)
+                artifactVM.cleaningStatusMessage = artifactCleaningSummaryText(outcome.summaries)
+                artifactVM.statusMessage = artifactVM.cleaningStatusMessage
+                artifactVM.detectionRefreshToken += 1
+                invalidateEpochsForSignalChange()
+                invalidateInterpolations()
+                artifactVM.cleaningProgress = nil
+                artifactVM.isCleaning = false
+                artifactCleaningTask = nil
+                if replay.state.isAwaitingDecision {
+                    artifactVM.showsCleaningSheet = false
+                    replay.resume(.proceed)
+                }
+                precomputeCleaningPreviews(beforeSignal: signal, afterSignal: outcome.signal)
+            }
+        }
+    }
+
+    /// Precomputes the before/after hover-preview data for every applied
+    /// artifact right after Apply finishes, so the mouse-over preview becomes
+    /// a cache lookup instead of recomputing a per-artifact average (over all
+    /// events × channels) from scratch on every hover.
+    private func precomputeCleaningPreviews(beforeSignal: MFFSignalData, afterSignal: MFFSignalData) {
+        let appliedArtifacts = template.definedArtifacts.filter { $0.appliedMethod != nil }
+        guard !appliedArtifacts.isEmpty else { return }
+        let sessionID = recordingSessionID
+        Task.detached(priority: .utility) {
+            var entries: [(String, ArtifactCleaningPreviewData)] = []
+            entries.reserveCapacity(appliedArtifacts.count)
+            for artifact in appliedArtifacts {
+                guard let method = artifact.appliedMethod else { continue }
+                let key = ArtifactCleaningPreview.cacheKey(artifactID: artifact.id, method: method.rawValue, afterSignal: afterSignal)
+                let data = ArtifactCleaningPreview.makePreviewData(
+                    artifact: artifact,
+                    beforeSignal: beforeSignal,
+                    afterSignal: afterSignal
+                )
+                entries.append((key, data))
+            }
+            await MainActor.run {
+                guard sessionID == self.recordingSessionID else { return }
+                for (key, data) in entries {
+                    self.template.cleaningPreviewCache[key] = data
+                }
             }
         }
     }

@@ -19,7 +19,7 @@ struct GradientViewModelTests {
 
     @MainActor
     @Test func parametersReflectMethodAndWindow() {
-        let vm = GradientViewModel()
+        let vm = GradientViewModel(store: RecordingStore())
         vm.method = .fastr
         vm.trMarkerCode = "TREV"
         vm.windowBefore = 3
@@ -35,7 +35,7 @@ struct GradientViewModelTests {
 
     @MainActor
     @Test func highMotionSetEmptyWhenDisabled() {
-        let vm = GradientViewModel()
+        let vm = GradientViewModel(store: RecordingStore())
         vm.excludeHighMotion = false
         #expect(vm.highMotionVolumeSet().isEmpty)
     }

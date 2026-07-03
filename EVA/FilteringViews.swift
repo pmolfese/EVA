@@ -199,15 +199,16 @@ extension WaveformView {
         filterTask?.cancel()
         let sessionID = recordingSessionID
         filterTask = Task {
-            await filter.apply(
-                to: signal,
-                pnsInput: pnsInput,
-                excludedChannels: channels.bad,
-                onApplied: { [self] in
-                    guard sessionID == recordingSessionID else { return }
-                    postFilterInvalidation()
-                }
-            )
+            await processingQueue.run("Filter") { [self] in
+                await filter.apply(
+                    to: signal,
+                    pnsInput: pnsInput,
+                    onApplied: { [self] in
+                        guard sessionID == recordingSessionID else { return }
+                        postFilterInvalidation()
+                    }
+                )
+            }
             if !Task.isCancelled, sessionID == recordingSessionID {
                 filterTask = nil
             }
@@ -284,7 +285,6 @@ extension WaveformView {
                 await filter.apply(
                     to: base,
                     pnsInput: pnsInput,
-                    excludedChannels: channels.bad,
                     onApplied: { [self] in postFilterInvalidation() }
                 )
 

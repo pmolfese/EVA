@@ -26,7 +26,7 @@ struct EpochingViewModelTests {
 
     @MainActor
     @Test func defaultsMatchExpectedInitialState() {
-        let vm = EpochingViewModel()
+        let vm = EpochingViewModel(store: RecordingStore())
         #expect(!vm.showsSheet)
         #expect(vm.selectedEventCodes.isEmpty)
         #expect(vm.skipEyeBlinks)
@@ -41,7 +41,7 @@ struct EpochingViewModelTests {
 
     @MainActor
     @Test func parametersReflectAverageReferenceToggle() {
-        let vm = EpochingViewModel()
+        let vm = EpochingViewModel(store: RecordingStore())
         vm.averageReference = true
         #expect(vm.parameters["averageReference"] == "true")
         vm.averageReference = false
@@ -50,7 +50,7 @@ struct EpochingViewModelTests {
 
     @MainActor
     @Test func skippedArtifactSelectionIsIndependentOfKnownArtifacts() {
-        let vm = EpochingViewModel()
+        let vm = EpochingViewModel(store: RecordingStore())
         let id1 = DefinedArtifact.ID()
         let id2 = DefinedArtifact.ID()
         vm.knownArtifactIDsForRejection = [id1, id2]
@@ -63,7 +63,7 @@ struct EpochingViewModelTests {
 
     @MainActor
     @Test func categoryNamesAndTimingMarkersAreIndependentDictionaries() {
-        let vm = EpochingViewModel()
+        let vm = EpochingViewModel(store: RecordingStore())
         vm.categoryNames["1"] = "Target"
         vm.timingMarkerValuesBySegmentValue["1"] = "TREV"
         vm.timingMarkerEnabledValues.insert("1")

@@ -51,7 +51,15 @@ private struct FilterCutoffs: Sendable {
 
 @MainActor
 final class FilterViewModel: ObservableObject {
-    init() {
+    /// Held directly (not threaded through per-call parameters) so this VM can
+    /// read channel exclusions itself — the first slice of the RecordingStore
+    /// direct-injection pass (REFACTOR.md). Lets a future consumer (a second
+    /// averagedView window, a headless path) construct this VM against a
+    /// RecordingStore without going through WaveformView.
+    let store: RecordingStore
+
+    init(store: RecordingStore) {
+        self.store = store
         let d = ProcessingDefaults.shared
         highPassCutoffText = Self.cutoffText(d.filterHighPassHz)
         lowPassCutoffText = Self.cutoffText(d.filterLowPassHz)
@@ -242,9 +250,9 @@ final class FilterViewModel: ObservableObject {
     func apply(
         to signal: MFFSignalData,
         pnsInput: MFFSignalData?,
-        excludedChannels: Set<Int>,
         onApplied: @escaping () -> Void
     ) async {
+        let excludedChannels = store.channels.bad
         let cutoffs: FilterCutoffs
         do {
             cutoffs = try currentCutoffs()

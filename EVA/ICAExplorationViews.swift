@@ -434,6 +434,7 @@ extension WaveformView {
         icaTask?.cancel()
         let sessionID = recordingSessionID
         icaTask = Task {
+          await processingQueue.run("ICA") { [self] in
             do {
                 let worker = Task.detached(priority: .userInitiated) {
                     try Task.checkCancellation()
@@ -544,6 +545,7 @@ extension WaveformView {
                 icaTask = nil
             }
             onComplete?()
+          }
         }
     }
 
@@ -605,6 +607,7 @@ extension WaveformView {
         icaRemovalTask?.cancel()
         let sessionID = recordingSessionID
         icaRemovalTask = Task {
+          await processingQueue.run("ICA Component Removal") { [self] in
             var reconstructionActivationSignal: MFFSignalData?
             if let fitFilter = decomposition.fitFilter {
                 do {
@@ -721,6 +724,7 @@ extension WaveformView {
             icaRemovalTask = nil
             // Applying components resolves an interactive-replay decision pause.
             if replay.state.isAwaitingDecision { replay.resume(.proceed) }
+          }
         }
     }
 

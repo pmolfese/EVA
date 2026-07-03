@@ -23,7 +23,7 @@ struct ChannelHealthViewModelTests {
 
     @MainActor
     @Test func defaultsMatchExpectedInitialState() {
-        let vm = ChannelHealthViewModel()
+        let vm = ChannelHealthViewModel(store: RecordingStore())
         #expect(vm.statusMessage == nil)
         #expect(vm.signature == nil)
         #expect(vm.task == nil)
@@ -33,7 +33,7 @@ struct ChannelHealthViewModelTests {
 
     @MainActor
     @Test func detailsRequestIncrementsIndependentlyOfShowsDetails() {
-        let vm = ChannelHealthViewModel()
+        let vm = ChannelHealthViewModel(store: RecordingStore())
         vm.showsDetails = true
         vm.detailsRequest += 1
         vm.detailsRequest += 1
@@ -44,7 +44,7 @@ struct ChannelHealthViewModelTests {
 
     @MainActor
     @Test func trackedTaskCanBeCancelledThroughTheStore() async {
-        let vm = ChannelHealthViewModel()
+        let vm = ChannelHealthViewModel(store: RecordingStore())
         var didRun = false
         vm.task = Task {
             didRun = true

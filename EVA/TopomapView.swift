@@ -54,6 +54,14 @@ struct TopomapView: View {
     let showsLayoutName: Bool
     let colorBarPlacement: TopomapColorBarPlacement
     let minimumMapHeight: CGFloat
+    /// Resolves a channel index to its display name, for the hover tooltip.
+    /// When nil, the tooltip falls back to "Ch <index+1>".
+    let channelName: ((Int) -> String)?
+    /// Called when the user clicks a channel on the map (nearest electrode
+    /// within the hit-test radius). Nil disables tap handling entirely.
+    let onTapChannel: ((Int) -> Void)?
+
+    @State private var hoveredChannel: Int?
 
     init(
         layout: SensorLayout,
@@ -66,7 +74,9 @@ struct TopomapView: View {
         showsHeader: Bool = true,
         showsLayoutName: Bool = true,
         colorBarPlacement: TopomapColorBarPlacement = .bottom,
-        minimumMapHeight: CGFloat = 260
+        minimumMapHeight: CGFloat = 260,
+        channelName: ((Int) -> String)? = nil,
+        onTapChannel: ((Int) -> Void)? = nil
     ) {
         self.layout = layout
         self.values = values
@@ -77,6 +87,8 @@ struct TopomapView: View {
         self.unitLabel = unitLabel
         self.showsHeader = showsHeader
         self.showsLayoutName = showsLayoutName
+        self.channelName = channelName
+        self.onTapChannel = onTapChannel
         self.colorBarPlacement = colorBarPlacement
         self.minimumMapHeight = minimumMapHeight
     }
@@ -118,9 +130,80 @@ struct TopomapView: View {
                 draw(in: &context, size: size)
             }
             .frame(width: side, height: side)
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    hoveredChannel = nearestChannel(at: location, in: CGSize(width: side, height: side))
+                case .ended:
+                    hoveredChannel = nil
+                }
+            }
+            .simultaneousGesture(
+                SpatialTapGesture()
+                    .onEnded { value in
+                        guard let onTapChannel,
+                              let channel = nearestChannel(at: value.location, in: CGSize(width: side, height: side))
+                        else { return }
+                        onTapChannel(channel)
+                    }
+            )
+            .overlay(alignment: .topLeading) { hoverTooltip(side: side) }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minHeight: minimumMapHeight)
+    }
+
+    /// Nearest electrode to `location` (in the canvas's own coordinate space),
+    /// within a generous hit radius — mouse precision is looser than the tiny
+    /// electrode dots themselves.
+    private func nearestChannel(at location: CGPoint, in size: CGSize) -> Int? {
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let radius = min(size.width, size.height) / 2 * 0.86
+        let hitRadius: CGFloat = 14
+
+        var best: (channel: Int, distanceSquared: CGFloat)?
+        for sensor in activeSensors {
+            let p = CGPoint(
+                x: center.x + CGFloat(sensor.x) * radius,
+                y: center.y - CGFloat(sensor.y) * radius
+            )
+            let dx = p.x - location.x
+            let dy = p.y - location.y
+            let d2 = dx * dx + dy * dy
+            if best == nil || d2 < best!.distanceSquared {
+                best = (sensor.channelIndex, d2)
+            }
+        }
+        guard let best, best.distanceSquared <= hitRadius * hitRadius else { return nil }
+        return best.channel
+    }
+
+    @ViewBuilder
+    private func hoverTooltip(side: CGFloat) -> some View {
+        if let hoveredChannel, let sensor = activeSensors.first(where: { $0.channelIndex == hoveredChannel }) {
+            let name = channelName?(hoveredChannel) ?? "Ch \(hoveredChannel + 1)"
+            let center = CGPoint(x: side / 2, y: side / 2)
+            let radius = side / 2 * 0.86
+            let point = CGPoint(x: center.x + CGFloat(sensor.x) * radius, y: center.y - CGFloat(sensor.y) * radius)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name)
+                    .font(.caption.weight(.semibold))
+                if let v = value(for: sensor) {
+                    Text(String(format: "%.1f µV", v))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .shadow(radius: 2, y: 1)
+            .fixedSize()
+            .position(x: min(max(point.x, 40), side - 40), y: max(point.y - 22, 14))
+            .allowsHitTesting(false)
+        }
     }
 
     /// Maps a µV value to the diverging colormap's -1…1 axis. With a manual
@@ -288,23 +371,37 @@ struct TopomapView: View {
     // MARK: - Color
 
     /// Color-bar end labels + unit: z-scale in σ, manual range in µV, else ±auto.
-    private var barLabels: (low: String, high: String, unit: String) {
+    /// `lowMicrovolts`/`highMicrovolts` are populated only for the z-score scale,
+    /// giving the SD-equivalent µV value at each end (mean ± sigma·sd) so the
+    /// colorbar still reads in physical units even while scaled by SD.
+    private var barLabels: (low: String, high: String, unit: String, lowMicrovolts: String?, highMicrovolts: String?) {
         if let z = zScaling {
-            return (String(format: "−%.1f", z.sigma), String(format: "+%.1f", z.sigma), "SD")
+            let span = z.sigma * z.sd
+            return (
+                String(format: "−%.1f", z.sigma), String(format: "+%.1f", z.sigma), "SD",
+                String(format: "%.1f µV", z.mean - span), String(format: "%.1f µV", z.mean + span)
+            )
         }
         if let colorRange {
-            return (String(format: "%.1f", colorRange.lowerBound), String(format: "%+.1f", colorRange.upperBound), unitLabel)
+            return (String(format: "%.1f", colorRange.lowerBound), String(format: "%+.1f", colorRange.upperBound), unitLabel, nil, nil)
         }
         let s = scale
-        return (String(format: "%.1f", -s), String(format: "%+.1f", s), unitLabel)
+        return (String(format: "%.1f", -s), String(format: "%+.1f", s), unitLabel, nil, nil)
     }
 
     private var horizontalColorBar: some View {
         let labels = barLabels
         return HStack(spacing: 8) {
-            Text(labels.low)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+            VStack(spacing: 1) {
+                Text(labels.low)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if let lowMicrovolts = labels.lowMicrovolts {
+                    Text(lowMicrovolts)
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
 
             LinearGradient(
                 colors: stride(from: -1.0, through: 1.0, by: 0.1).map { divergingColor(forNormalized: $0) },
@@ -314,18 +411,32 @@ struct TopomapView: View {
             .frame(height: 12)
             .clipShape(Capsule())
 
-            Text("\(labels.high) \(labels.unit)")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+            VStack(spacing: 1) {
+                Text("\(labels.high) \(labels.unit)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if let highMicrovolts = labels.highMicrovolts {
+                    Text(highMicrovolts)
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
         }
     }
 
     private var verticalColorBar: some View {
         let labels = barLabels
         return VStack(spacing: 6) {
-            Text(labels.high)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+            VStack(spacing: 1) {
+                Text(labels.high)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if let highMicrovolts = labels.highMicrovolts {
+                    Text(highMicrovolts)
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
 
             LinearGradient(
                 colors: stride(from: 1.0, through: -1.0, by: -0.1).map { divergingColor(forNormalized: $0) },
@@ -335,15 +446,22 @@ struct TopomapView: View {
             .frame(width: 12, height: max(80, minimumMapHeight * 0.70))
             .clipShape(Capsule())
 
-            Text(labels.low)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+            VStack(spacing: 1) {
+                Text(labels.low)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if let lowMicrovolts = labels.lowMicrovolts {
+                    Text(lowMicrovolts)
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
 
             Text(labels.unit)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
-        .frame(width: 34)
+        .frame(width: 46)
     }
 
     /// Diverging blue–white–red map. `normalized` is expected in roughly -1...1.

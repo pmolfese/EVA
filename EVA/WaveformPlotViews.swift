@@ -360,8 +360,56 @@ struct ButterflyConditionPlot: View {
     var highlightRelativeSample: Int? = nil
     /// Per-sample grand-average noise amplitude (µV) shaded as a ± band.
     var noiseCurve: [Float]? = nil
+    /// Resolves a channel index to its display name, for the hover badge.
+    var channelName: ((Int) -> String)? = nil
+    /// Called when the user clicks the trace nearest the cursor.
+    var onTapChannel: ((Int) -> Void)? = nil
+
+    @State private var hoveredChannel: Int?
 
     var body: some View {
+        GeometryReader { proxy in
+            plotCanvas
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let location):
+                        hoveredChannel = nearestButterflyChannel(
+                            at: location, in: proxy.size, data: data,
+                            startSample: segment.startSample, endSample: segment.endSample,
+                            hiddenChannels: hiddenChannels, amplitudeScale: amplitudeScale
+                        )
+                    case .ended:
+                        hoveredChannel = nil
+                    }
+                }
+                .simultaneousGesture(
+                    SpatialTapGesture().onEnded { value in
+                        guard let onTapChannel,
+                              let channel = nearestButterflyChannel(
+                                  at: value.location, in: proxy.size, data: data,
+                                  startSample: segment.startSample, endSample: segment.endSample,
+                                  hiddenChannels: hiddenChannels, amplitudeScale: amplitudeScale
+                              )
+                        else { return }
+                        onTapChannel(channel)
+                    }
+                )
+                .overlay(alignment: .topTrailing) {
+                    if let hoveredChannel {
+                        ButterflyChannelBadge(name: channelName?(hoveredChannel) ?? "Ch \(hoveredChannel + 1)")
+                            .padding(6)
+                            .allowsHitTesting(false)
+                    }
+                }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
+        }
+    }
+
+    private var plotCanvas: some View {
         Canvas { context, size in
             guard segment.startSample >= 0,
                   segment.endSample >= segment.startSample,
@@ -437,10 +485,46 @@ struct ButterflyConditionPlot: View {
                 context.stroke(path, with: .color(color.opacity(0.22)), lineWidth: 0.7)
             }
         }
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
+    }
+}
+
+/// Nearest-trace hit test shared by `ButterflyConditionPlot`/`OverlayButterflyPlot`:
+/// at the hovered/tapped x, finds the visible channel whose trace y is closest.
+private func nearestButterflyChannel(
+    at location: CGPoint, in size: CGSize, data: [[Float]],
+    startSample: Int, endSample: Int, hiddenChannels: Set<Int>, amplitudeScale: Double
+) -> Int? {
+    guard endSample > startSample, size.width > 0 else { return nil }
+    let epochLength = endSample - startSample + 1
+    let midY = size.height / 2
+    let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
+    let xScale = size.width / CGFloat(max(epochLength - 1, 1))
+    let localSample = min(max(Int((location.x / xScale).rounded()), 0), epochLength - 1)
+    let sample = startSample + localSample
+
+    var best: (channel: Int, distance: CGFloat)?
+    for channelIndex in data.indices where !hiddenChannels.contains(channelIndex) {
+        let channel = data[channelIndex]
+        guard sample < channel.count else { continue }
+        let y: CGFloat = midY - CGFloat(channel[sample]) * pointsPerMicrovolt
+        let distance: CGFloat = abs(y - location.y)
+        if best == nil || distance < best!.distance {
+            best = (channelIndex, distance)
         }
+    }
+    guard let best, best.distance <= 10 else { return nil }
+    return best.channel
+}
+
+private struct ButterflyChannelBadge: View {
+    let name: String
+    var body: some View {
+        Text(name)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
+            .shadow(radius: 2, y: 1)
     }
 }
 
@@ -534,8 +618,58 @@ struct OverlayButterflyPlot: View {
     let hiddenChannels: Set<Int>
     let amplitudeScale: Double
     var highlightRelativeSample: Int? = nil
+    /// Resolves a channel index to its display name, for the hover badge.
+    var channelName: ((Int) -> String)? = nil
+    /// Called when the user clicks the trace nearest the cursor.
+    var onTapChannel: ((Int) -> Void)? = nil
+
+    @State private var hoveredChannel: Int?
 
     var body: some View {
+        GeometryReader { proxy in
+            plotCanvas
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let location):
+                        hoveredChannel = nearestButterflyChannel(
+                            at: location, in: proxy.size, data: data,
+                            startSample: segments.first?.startSample ?? 0,
+                            endSample: segments.first?.endSample ?? 0,
+                            hiddenChannels: hiddenChannels, amplitudeScale: amplitudeScale
+                        )
+                    case .ended:
+                        hoveredChannel = nil
+                    }
+                }
+                .simultaneousGesture(
+                    SpatialTapGesture().onEnded { value in
+                        guard let onTapChannel,
+                              let channel = nearestButterflyChannel(
+                                  at: value.location, in: proxy.size, data: data,
+                                  startSample: segments.first?.startSample ?? 0,
+                                  endSample: segments.first?.endSample ?? 0,
+                                  hiddenChannels: hiddenChannels, amplitudeScale: amplitudeScale
+                              )
+                        else { return }
+                        onTapChannel(channel)
+                    }
+                )
+                .overlay(alignment: .topTrailing) {
+                    if let hoveredChannel {
+                        ButterflyChannelBadge(name: channelName?(hoveredChannel) ?? "Ch \(hoveredChannel + 1)")
+                            .padding(6)
+                            .allowsHitTesting(false)
+                    }
+                }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
+        }
+    }
+
+    private var plotCanvas: some View {
         Canvas { context, size in
             guard let first = segments.first, !data.isEmpty else { return }
             let epochLength = first.endSample - first.startSample + 1
@@ -582,10 +716,6 @@ struct OverlayButterflyPlot: View {
                     context.stroke(path, with: .color(color.opacity(0.30)), lineWidth: 0.7)
                 }
             }
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
         }
     }
 }

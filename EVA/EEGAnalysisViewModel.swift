@@ -20,6 +20,14 @@ import Foundation
 
 @MainActor
 final class EEGAnalysisViewModel: ObservableObject {
+    /// Held directly so this VM can read channel state itself — see
+    /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
+    let store: RecordingStore
+
+    init(store: RecordingStore) {
+        self.store = store
+    }
+
     @Published var showsSheet = false
 
     @Published var segmentLengthSeconds = 4.0
@@ -137,33 +145,35 @@ final class EEGAnalysisViewModel: ObservableObject {
         }
 
         task = Task { @MainActor in
-            let worker = Task.detached(priority: .userInitiated) {
-                await EEGAnalysisEngine.analyze(
-                    request: request,
-                    progress: { fraction in
-                        progressContinuation.yield(fraction)
+            await self.store.processingQueue.run("EEG Analysis") { [self] in
+                let worker = Task.detached(priority: .userInitiated) {
+                    await EEGAnalysisEngine.analyze(
+                        request: request,
+                        progress: { fraction in
+                            progressContinuation.yield(fraction)
+                        }
+                    )
+                }
+
+                let output = await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
                     }
                 )
+
+                progressContinuation.finish()
+                progressTask.cancel()
+
+                guard !Task.isCancelled else { return }
+                result = output
+                isRunning = false
+                progress = 1
+                statusMessage = "EEG analysis complete: \(output.segments.includedSegmentCount)/\(output.segments.totalSegmentCount) segments kept."
             }
-
-            let output = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                    progressContinuation.finish()
-                }
-            )
-
-            progressContinuation.finish()
-            progressTask.cancel()
-
-            guard !Task.isCancelled else { return }
-            result = output
-            isRunning = false
-            progress = 1
-            statusMessage = "EEG analysis complete: \(output.segments.includedSegmentCount)/\(output.segments.totalSegmentCount) segments kept."
         }
     }
 

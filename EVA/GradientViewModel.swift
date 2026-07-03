@@ -27,6 +27,14 @@ import SwiftUI
 
 @MainActor
 final class GradientViewModel: ObservableObject {
+    /// Held directly so this VM can read channel state itself — see
+    /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
+    let store: RecordingStore
+
+    init(store: RecordingStore) {
+        self.store = store
+    }
+
     // MARK: Results
     @Published var correctedSignal: MFFSignalData?
     @Published var correctedPNSSignal: MFFSignalData?

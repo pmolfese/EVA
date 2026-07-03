@@ -123,46 +123,61 @@ struct EEGSignalFilter {
             throw EEGSignalFilterError.invalidBandpassRange(lowCutoff: lowCutoff, highCutoff: highCutoff, nyquist: nyquist)
         }
 
-        return try await withThrowingTaskGroup(of: (Int, [Float]).self) { group in
-            let highPassStages = lowCutoff.map {
-                BiquadCoefficients.butterworth(
-                    cutoff: $0,
-                    samplingRate: samplingRate,
-                    poles: highPassSlope.designPoles,
-                    type: .highPass
-                )
-            } ?? []
-            let lowPassStages = highCutoff.map {
-                BiquadCoefficients.butterworth(
-                    cutoff: $0,
-                    samplingRate: samplingRate,
-                    poles: lowPassSlope.designPoles,
-                    type: .lowPass
-                )
-            } ?? []
-            let notchFilter = BiquadCoefficients.notch(
-                centerFrequency: notchFrequency,
+        let highPassStages = lowCutoff.map {
+            BiquadCoefficients.butterworth(
+                cutoff: $0,
                 samplingRate: samplingRate,
-                q: 30
+                poles: highPassSlope.designPoles,
+                type: .highPass
             )
-
-            // The high-pass (low cutoff) sets the edge-transient length; pad the
-            // reflected boundary to cover it so the startup ripple stays outside
-            // the data we keep instead of garbling the first/last samples.
-            let paddingReference = lowCutoff ?? highCutoff ?? (notch60HzEnabled ? notchFrequency : nil)
-            let paddingCount = transientPadding(lowCutoff: paddingReference ?? 0, samplingRate: samplingRate)
-            let automaticPrecision = automaticPrecision(
+        } ?? []
+        let lowPassStages = highCutoff.map {
+            BiquadCoefficients.butterworth(
+                cutoff: $0,
                 samplingRate: samplingRate,
-                lowCutoff: lowCutoff,
-                highCutoff: highCutoff,
-                highPassSlope: highPassSlope,
-                lowPassSlope: lowPassSlope
+                poles: lowPassSlope.designPoles,
+                type: .lowPass
             )
+        } ?? []
+        let notchFilter = BiquadCoefficients.notch(
+            centerFrequency: notchFrequency,
+            samplingRate: samplingRate,
+            q: 30
+        )
 
-            for (index, channel) in channels.enumerated() {
-                group.addTask {
-                    let result = try filterChannel(
-                        channel,
+        // The high-pass (low cutoff) sets the edge-transient length; pad the
+        // reflected boundary to cover it so the startup ripple stays outside
+        // the data we keep instead of garbling the first/last samples.
+        let paddingReference = lowCutoff ?? highCutoff ?? (notch60HzEnabled ? notchFrequency : nil)
+        let paddingCount = transientPadding(lowCutoff: paddingReference ?? 0, samplingRate: samplingRate)
+        let automaticPrecision = automaticPrecision(
+            samplingRate: samplingRate,
+            lowCutoff: lowCutoff,
+            highCutoff: highCutoff,
+            highPassSlope: highPassSlope,
+            lowPassSlope: lowPassSlope
+        )
+
+        let total = max(channels.count, 1)
+        let reportEvery = max(1, total / 100)
+        let progressLock = NSLock()
+        nonisolated(unsafe) var completed = 0
+        nonisolated(unsafe) var firstError: Error?
+
+        var filteredChannels = Array(repeating: [Float](), count: channels.count)
+        filteredChannels.withUnsafeMutableBufferPointer { out in
+            // Each iteration writes a distinct index; bounded to evaMaxWorkers
+            // instead of one task per channel — an unbounded task-per-channel
+            // fan-out here both risked oversubscribing the machine on large
+            // channel counts AND made progress reporting look like "0% then
+            // 100%": with far more ready tasks than cores, all channels crawl
+            // forward together and finish in a last-moment clump instead of
+            // completing steadily throughout the run.
+            nonisolated(unsafe) let out = out
+            evaConcurrentPerform(iterations: channels.count) { index in
+                do {
+                    out[index] = try filterChannel(
+                        channels[index],
                         channelIndex: index,
                         requestedPrecision: precision,
                         automaticPrecision: automaticPrecision,
@@ -172,24 +187,24 @@ struct EEGSignalFilter {
                         notchEnabled: notch60HzEnabled && notchFrequency < nyquist,
                         paddingCount: paddingCount
                     )
-                    return (index, result)
+                } catch {
+                    progressLock.lock()
+                    if firstError == nil { firstError = error }
+                    progressLock.unlock()
                 }
-            }
 
-            var filteredChannels = Array(repeating: [Float](), count: channels.count)
-            let total = max(channels.count, 1)
-            let reportEvery = max(1, total / 100)
-            var completed = 0
-            for try await (index, filteredChannel) in group {
-                filteredChannels[index] = filteredChannel
+                progressLock.lock()
                 completed += 1
-                if let progress, completed % reportEvery == 0 || completed == total {
-                    progress(Double(completed) / Double(total))
+                let done = completed
+                progressLock.unlock()
+                if let progress, done % reportEvery == 0 || done == total {
+                    progress(Double(done) / Double(total))
                 }
             }
-
-            return filteredChannels
         }
+
+        if let firstError { throw firstError }
+        return filteredChannels
     }
 
     nonisolated static func adaptiveLineNoiseReduction(
@@ -216,35 +231,39 @@ struct EEGSignalFilter {
             return channels
         }
 
-        return await withTaskGroup(of: (Int, [Float]).self) { group in
-            let boundedWindow = max(windowSeconds, 0.5)
-            let boundedStrength = min(max(strength, 0.1), 1.5)
-            for (index, channel) in channels.enumerated() {
-                group.addTask {
-                    let cleaned = adaptiveLineNoiseChannel(
-                        channel,
-                        samplingRate: samplingRate,
-                        frequencies: frequencies,
-                        windowSeconds: boundedWindow,
-                        strength: boundedStrength
-                    )
-                    return (index, cleaned)
-                }
-            }
+        let boundedWindow = max(windowSeconds, 0.5)
+        let boundedStrength = min(max(strength, 0.1), 1.5)
+        let total = max(channels.count, 1)
+        let reportEvery = max(1, total / 100)
+        let progressLock = NSLock()
+        nonisolated(unsafe) var completed = 0
 
-            var cleanedChannels = Array(repeating: [Float](), count: channels.count)
-            let total = max(channels.count, 1)
-            let reportEvery = max(1, total / 100)
-            var completed = 0
-            for await (index, cleanedChannel) in group {
-                cleanedChannels[index] = cleanedChannel
-                completed += 1
-                if let progress, completed % reportEvery == 0 || completed == total {
-                    progress(Double(completed) / Double(total))
+        var cleanedChannels = Array(repeating: [Float](), count: channels.count)
+        cleanedChannels.withUnsafeMutableBufferPointer { out in
+            // Each iteration writes a distinct index, so concurrent writes don't
+            // overlap; bounded to evaMaxWorkers so this can't oversubscribe the
+            // machine the way an unbounded task-per-channel fan-out could.
+            nonisolated(unsafe) let out = out
+            evaConcurrentPerform(iterations: channels.count) { index in
+                out[index] = adaptiveLineNoiseChannel(
+                    channels[index],
+                    samplingRate: samplingRate,
+                    frequencies: frequencies,
+                    windowSeconds: boundedWindow,
+                    strength: boundedStrength
+                )
+                if let progress {
+                    progressLock.lock()
+                    completed += 1
+                    let done = completed
+                    progressLock.unlock()
+                    if done % reportEvery == 0 || done == total {
+                        progress(Double(done) / Double(total))
+                    }
                 }
             }
-            return cleanedChannels
         }
+        return cleanedChannels
     }
 
     /// Common-average reference: subtract the instantaneous mean across all

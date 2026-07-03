@@ -19,6 +19,14 @@ import SwiftUI
 
 @MainActor
 final class EpochingViewModel: ObservableObject {
+    /// Held directly so this VM can read channel state itself — see
+    /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
+    let store: RecordingStore
+
+    init(store: RecordingStore) {
+        self.store = store
+    }
+
     // MARK: Sheet / selection
     @Published var showsSheet = false
     @Published var segmentField = PSASegmentField.code
@@ -35,6 +43,11 @@ final class EpochingViewModel: ObservableObject {
 
     // MARK: Category naming / timing markers
     @Published var categoryNames = [String: String]()
+    /// Named groups that pool several event codes into one shared category for
+    /// averaging, IN ADDITION to each code's own category (not instead of it) —
+    /// e.g. "face" = {happy, sad, angry} produces segments for "face" as well as
+    /// segments for "happy"/"sad"/"angry" individually. Value = member codes.
+    @Published var categoryGroups = [String: Set<String>]()
     @Published var timingMarkerEnabledValues = Set<String>()
     @Published var timingMarkerValuesBySegmentValue = [String: String]()
     @Published var timingTolerance = 0.5
@@ -46,10 +59,35 @@ final class EpochingViewModel: ObservableObject {
     @Published var skippedDefinedArtifactIDs = Set<DefinedArtifact.ID>()
     @Published var knownArtifactIDsForRejection = Set<DefinedArtifact.ID>()
 
+    // MARK: Per-epoch bad-channel interpolation
+    /// Detects and interpolates channels that are only bad WITHIN a given
+    /// epoch (transient per-trial artifacts a whole-recording health scan
+    /// misses), instead of rejecting the whole epoch or leaving it uncorrected.
+    @Published var interpolatesBadChannelsPerEpoch = false
+    @Published var epochBadChannelThresholds = EpochBadChannelThresholds()
+    @Published var showsEpochBadChannelOptions = false
+    /// When a channel is flagged bad in at least this fraction of epochs, mark
+    /// it bad for the whole recording and interpolate it there instead of
+    /// leaving it as a per-epoch-only correction.
+    @Published var escalatesBadChannelsToGlobal = false
+    @Published var escalationThresholdPercent = 50.0
+    /// One line per channel escalated by the last Apply, e.g. "Ch12: bad in
+    /// 62% of epochs (31/50)" — surfaced in the status message and folded
+    /// into the exported eva.log via `currentProcessingScript()`.
+    @Published var escalatedChannelSummaries: [String] = []
+    /// One line per channel flagged bad in at least one epoch by the last
+    /// Apply, e.g. "Ch12 (14 of 120 epochs)" — including channels that never
+    /// crossed the escalation threshold. Surfaced in the status message and
+    /// folded into the exported eva.log via `currentProcessingScript()`.
+    @Published var epochBadChannelSummary: [String] = []
+
     // MARK: Run state
     @Published var statusMessage: String?
     @Published var isApplying = false
     @Published var phaseMessage: String?
+    /// Fraction complete (0...1) while segmenting; nil for indeterminate
+    /// phases (e.g. averaging), which fall back to a spinner.
+    @Published var segmentingProgress: Double?
 
     // MARK: Results
     @Published var epochedSignal: MFFSignalData?
@@ -162,10 +200,13 @@ final class EpochingViewModel: ObservableObject {
         eventSearchText = ""
         selectedEventCodes.removeAll()
         categoryNames.removeAll()
+        categoryGroups.removeAll()
         timingMarkerEnabledValues.removeAll()
         timingMarkerValuesBySegmentValue.removeAll()
         skippedDefinedArtifactIDs.removeAll()
         knownArtifactIDsForRejection.removeAll()
+        escalatedChannelSummaries.removeAll()
+        epochBadChannelSummary.removeAll()
         statusMessage = nil
         isApplying = false
         phaseMessage = nil

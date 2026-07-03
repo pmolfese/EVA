@@ -30,6 +30,10 @@ extension WaveformView {
         for summary in summaries where epoching.categoryNames[summary.code] == nil {
             epoching.categoryNames[summary.code] = summary.code
         }
+        epoching.categoryGroups = epoching.categoryGroups.compactMapValues { members -> Set<String>? in
+            let stillAvailable = members.intersection(availableValues)
+            return stillAvailable.count >= 2 ? stillAvailable : nil
+        }
         var enabledTimingValues = epoching.timingMarkerEnabledValues.intersection(availableValues)
         var timingMarkerValues = epoching.timingMarkerValuesBySegmentValue.filter { segmentValue, timingValue in
             availableValues.contains(segmentValue)
@@ -90,6 +94,10 @@ extension WaveformView {
                 HStack {
                     Text("Segment On")
                         .font(.caption.weight(.semibold))
+                        .fixedSize()
+
+                    Spacer(minLength: 10)
+
                     Picker("Segment On", selection: segmentFieldBinding) {
                         ForEach(PSASegmentField.allCases) { field in
                             Text(field.rawValue).tag(field)
@@ -116,6 +124,21 @@ extension WaveformView {
                         .foregroundStyle(.secondary)
                         .help("Clear filter")
                     }
+
+                    Spacer(minLength: 10)
+
+                    Button {
+                        categoryGroupSelectedCodes.removeAll()
+                        categoryGroupName = ""
+                        showsCategoryGroupPopover = true
+                    } label: {
+                        Label("Group…", systemImage: "plus.circle")
+                    }
+                    .disabled(allSummaries.isEmpty)
+                    .help("Combine several event codes/labels into one pooled category for averaging.")
+                    .popover(isPresented: $showsCategoryGroupPopover) {
+                        categoryGroupPopover(allSummaries: allSummaries)
+                    }
                 }
 
                 if allSummaries.isEmpty {
@@ -139,6 +162,12 @@ extension WaveformView {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(summaries) { summary in
                                 psaSegmentEventRow(summary: summary, allSummaries: allSummaries)
+                            }
+                            if !epoching.categoryGroups.isEmpty {
+                                Divider().padding(.vertical, 2)
+                                ForEach(epoching.categoryGroups.keys.sorted(), id: \.self) { groupName in
+                                    psaCategoryGroupRow(groupName: groupName, allSummaries: allSummaries)
+                                }
                             }
                         }
                         .padding(10)
@@ -219,6 +248,23 @@ extension WaveformView {
                 }
                 .disabled(!epoching.skipIfContainsArtifact)
                 .padding(.leading, 18)
+
+                HStack(spacing: 8) {
+                    Toggle("Interpolate bad channels per epoch", isOn: $epoching.interpolatesBadChannelsPerEpoch)
+                        .help("Detects channels that are only bad WITHIN a given epoch (min/max/slope/acceleration) and interpolates just that epoch, instead of leaving a transient per-trial artifact uncorrected.")
+                    Button {
+                        epoching.showsEpochBadChannelOptions = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!epoching.interpolatesBadChannelsPerEpoch)
+                    .help("Set the min/max/slope/acceleration thresholds that define a bad channel within one epoch.")
+                    .popover(isPresented: $epoching.showsEpochBadChannelOptions) {
+                        epochBadChannelOptionsPopover()
+                    }
+                }
+
                 Toggle("Average by category", isOn: $epoching.averageOnApply)
                 Toggle("Average reference", isOn: $epoching.averageReference)
                     .help("Re-reference to the common average of the good channels (excludes bad channels, uses interpolated values).")
@@ -234,8 +280,14 @@ extension WaveformView {
 
             HStack {
                 if epoching.isApplying {
-                    ProgressView()
-                        .controlSize(.small)
+                    if let segmentingProgress = epoching.segmentingProgress {
+                        ProgressView(value: segmentingProgress)
+                            .controlSize(.small)
+                            .frame(width: 80)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
                     Text(epoching.phaseMessage ?? "Working…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -348,6 +400,110 @@ extension WaveformView {
         )
     }
 
+    private var maxBadChannelPercentBinding: Binding<Double> {
+        Binding(
+            get: { epoching.epochBadChannelThresholds.maxBadChannelFraction * 100 },
+            set: { epoching.epochBadChannelThresholds.maxBadChannelFraction = max(0, min($0, 100)) / 100 }
+        )
+    }
+
+    /// e.g. " (~26 of 256 channels)" — shows what the percent means for the
+    /// currently loaded net, since the setting is a fraction, not a count.
+    private var maxBadChannelCountCaption: String {
+        guard let channelCount = recording.signal?.numberOfChannels, channelCount > 0 else { return "" }
+        let count = Int((epoching.epochBadChannelThresholds.maxBadChannelFraction * Double(channelCount)).rounded())
+        return " (~\(count) of \(channelCount) channels)"
+    }
+
+    /// Thresholds that define a "bad" channel WITHIN one epoch (absolute µV
+    /// bounds, not the whole-recording ratio-vs-median scoring ChannelHealth
+    /// uses — an epoch window is too short for a stable median).
+    @ViewBuilder
+    func epochBadChannelOptionsPopover() -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Per-epoch bad-channel thresholds")
+                .font(.headline)
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                GridRow {
+                    Text("Min (µV)")
+                        .font(.caption.weight(.semibold))
+                    TextField("Min", value: $epoching.epochBadChannelThresholds.minMicrovolts, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                }
+                GridRow {
+                    Text("Max (µV)")
+                        .font(.caption.weight(.semibold))
+                    TextField("Max", value: $epoching.epochBadChannelThresholds.maxMicrovolts, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                }
+                GridRow {
+                    Text("Max slope (µV/sample)")
+                        .font(.caption.weight(.semibold))
+                    TextField("Slope", value: $epoching.epochBadChannelThresholds.maxSlopeMicrovoltsPerSample, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                }
+                GridRow {
+                    Text("Max acceleration (µV/sample)")
+                        .font(.caption.weight(.semibold))
+                    TextField("Acceleration", value: $epoching.epochBadChannelThresholds.maxAccelerationMicrovoltsPerSample, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                }
+                GridRow {
+                    Text("Reject epoch if bad channels >")
+                        .font(.caption.weight(.semibold))
+                    HStack(spacing: 4) {
+                        TextField("Percent", value: maxBadChannelPercentBinding, format: .number.precision(.fractionLength(0)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 50)
+                        Text("%\(maxBadChannelCountCaption)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Text("A channel is flagged bad for an epoch if any sample falls outside min/max, or the sample-to-sample change (slope) or change-in-slope (acceleration) exceeds these limits. Flagged channels are interpolated for just that epoch — unless too many channels are bad at once, in which case the whole epoch is rejected instead (and the expensive interpolation is skipped for it).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 280)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            Toggle("Escalate to globally bad if flagged in", isOn: $epoching.escalatesBadChannelsToGlobal)
+                .help("A channel that's flagged bad in enough epochs is more likely a genuinely bad channel than a per-trial artifact — mark it bad for the whole recording and interpolate it there instead of just per-epoch.")
+
+            HStack(spacing: 4) {
+                TextField(
+                    "Percent",
+                    value: $epoching.escalationThresholdPercent,
+                    format: .number.precision(.fractionLength(0))
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 44)
+                Text("% of epochs")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .disabled(!epoching.escalatesBadChannelsToGlobal)
+            .padding(.leading, 18)
+
+            HStack {
+                Spacer()
+                Button("Reset to Defaults") {
+                    epoching.epochBadChannelThresholds = EpochBadChannelThresholds()
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 320)
+    }
+
     func psaEventCodeBinding(_ code: String) -> Binding<Bool> {
         Binding(
             get: { epoching.selectedEventCodes.contains(code) },
@@ -360,6 +516,167 @@ extension WaveformView {
                 } else {
                     epoching.selectedEventCodes.remove(code)
                     epoching.timingMarkerEnabledValues.remove(code)
+                }
+            }
+        )
+    }
+
+    /// Combines several event codes/labels into one shared category name.
+    /// Pooling happens for free at averaging time — `buildEpochs`/averaging
+    /// groups segments by `EpochSegment.category`, so codes sharing a category
+    /// name pool into one averaged trace, while each code stays individually
+    /// selectable/toggleable (the group isn't a distinct data structure).
+    @ViewBuilder
+    func categoryGroupPopover(allSummaries: [EventSummary]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Group into Category")
+                .font(.headline)
+            Text("Pools the selected codes/labels into one category for averaging. Each one stays individually selectable.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("Category name (e.g. \"emotional\")", text: $categoryGroupName)
+                .textFieldStyle(.roundedBorder)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(allSummaries) { summary in
+                        Toggle(isOn: Binding(
+                            get: { categoryGroupSelectedCodes.contains(summary.code) },
+                            set: { isOn in
+                                if isOn { categoryGroupSelectedCodes.insert(summary.code) }
+                                else { categoryGroupSelectedCodes.remove(summary.code) }
+                            }
+                        )) {
+                            HStack(spacing: 6) {
+                                Text(summary.code)
+                                    .font(.system(.body, design: .monospaced))
+                                Text("(\(epoching.categoryNames[summary.code] ?? summary.code))")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(4)
+            }
+            .frame(maxHeight: 220)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    showsCategoryGroupPopover = false
+                }
+                Button("Create Group") {
+                    applyCategoryGroup()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(categoryGroupSelectedCodes.count < 2
+                    || categoryGroupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(width: 320)
+    }
+
+    /// Creates a pooled group — each member code keeps its own category (set
+    /// via `psaCategoryBinding`, untouched here); the group adds a second,
+    /// shared category on top, so both the group's segments and each member's
+    /// own segments get produced (see `selectedPSACategoriesByCode`).
+    func applyCategoryGroup() {
+        let name = categoryGroupName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, categoryGroupSelectedCodes.count >= 2 else { return }
+        epoching.categoryGroups[name] = categoryGroupSelectedCodes
+        for code in categoryGroupSelectedCodes {
+            epoching.selectedEventCodes.insert(code)
+            if epoching.categoryNames[code]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                epoching.categoryNames[code] = code
+            }
+        }
+        showsCategoryGroupPopover = false
+        categoryGroupSelectedCodes.removeAll()
+        categoryGroupName = ""
+    }
+
+    /// A row for a pooled category group, styled like `psaSegmentEventRow` so
+    /// it sits in the same list. The DIN toggle is a bulk shortcut: it applies
+    /// each member's OWN nearest-marker DIN setting (no separate group-level
+    /// timing config) — the group's segments always share timing with that
+    /// member's own individually-tagged segments.
+    func psaCategoryGroupRow(groupName: String, allSummaries: [EventSummary]) -> some View {
+        let members = epoching.categoryGroups[groupName] ?? []
+        let selectedMembers = members.intersection(epoching.selectedEventCodes)
+        let totalCount = allSummaries.filter { members.contains($0.code) }.reduce(0) { $0 + $1.count }
+
+        return HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "square.stack.3d.up.fill")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(groupName)
+                        .font(.system(.body, design: .monospaced).weight(.semibold))
+                    Text("\(selectedMembers.count) of \(members.count) codes")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 150, alignment: .leading)
+
+            Text("\(totalCount)")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
+
+            Text(groupName)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 170, alignment: .leading)
+                .help("Pooled category — produces averaged segments for the group in addition to each member's own category.")
+
+            Toggle("DIN", isOn: psaCategoryGroupDINBinding(members: members, allSummaries: allSummaries))
+                .toggleStyle(.checkbox)
+                .disabled(selectedMembers.isEmpty)
+                .help("Enable each member code's own nearest-marker DIN pairing, all at once.")
+
+            Spacer(minLength: 0)
+                .frame(width: 128)
+
+            Button {
+                epoching.categoryGroups.removeValue(forKey: groupName)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Remove this group. Member codes keep their own individual categories.")
+        }
+    }
+
+    /// Bulk DIN toggle for a group: on = enable each selected member's own
+    /// DIN pairing (seeding a default marker if it has none yet); off =
+    /// disable DIN for all of them. Never introduces a separate group-level
+    /// timing config.
+    func psaCategoryGroupDINBinding(members: Set<String>, allSummaries: [EventSummary]) -> Binding<Bool> {
+        Binding(
+            get: {
+                let selectedMembers = members.intersection(epoching.selectedEventCodes)
+                guard !selectedMembers.isEmpty else { return false }
+                return selectedMembers.allSatisfy { epoching.timingMarkerEnabledValues.contains($0) }
+            },
+            set: { isOn in
+                for member in members.intersection(epoching.selectedEventCodes) {
+                    let options = psaTimingMarkerOptions(in: allSummaries, excluding: member)
+                    if isOn {
+                        guard !options.isEmpty else { continue }
+                        epoching.timingMarkerEnabledValues.insert(member)
+                        if let current = epoching.timingMarkerValuesBySegmentValue[member],
+                           options.contains(where: { $0.code == current }) {
+                            continue
+                        }
+                        epoching.timingMarkerValuesBySegmentValue[member] = options.first?.code
+                    } else {
+                        epoching.timingMarkerEnabledValues.remove(member)
+                    }
                 }
             }
         )
@@ -421,12 +738,22 @@ extension WaveformView {
             && selectedPSATimingMarkersBySegmentValue(events: events) != nil
     }
 
-    func selectedPSACategoriesByCode() -> [String: String]? {
-        var categoriesByCode = [String: String]()
+    /// Segment value (code) → categories its epochs are filed under: its own
+    /// category, plus the category of any pooled group it's a member of (a
+    /// selected code that belongs to a group produces segments for both).
+    func selectedPSACategoriesByCode() -> [String: [String]]? {
+        var categoriesByCode = [String: [String]]()
         for code in epoching.selectedEventCodes {
             let category = (epoching.categoryNames[code] ?? code).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !category.isEmpty else { return nil }
-            categoriesByCode[code] = category
+            categoriesByCode[code] = [category]
+        }
+        for (groupName, members) in epoching.categoryGroups {
+            let category = groupName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !category.isEmpty else { continue }
+            for member in members where epoching.selectedEventCodes.contains(member) {
+                categoriesByCode[member, default: []].append(category)
+            }
         }
         return categoriesByCode
     }
@@ -448,6 +775,12 @@ extension WaveformView {
     func applyPSA(to signal: MFFSignalData) async {
         // Validate and capture all inputs on the main actor before going off-thread.
         guard let job = psaBuildJob(from: signal) else { return }
+        await processingQueue.run("PSA Segmentation") { [self] in
+            await applyPSACore(to: signal, job: job)
+        }
+    }
+
+    private func applyPSACore(to signal: MFFSignalData, job: PSABuildJob) async {
         let sessionID = recordingSessionID
         let shouldAverage = epoching.averageOnApply
         let shouldAvgRef = epoching.averageReference
@@ -457,9 +790,17 @@ extension WaveformView {
 
         epoching.isApplying = true
         epoching.phaseMessage = "Segmenting…"
+        epoching.segmentingProgress = nil
+
+        let (progressContinuation, progressTask) = ProgressBridge.make { [self] (update: EpochBuildProgress) in
+            epoching.phaseMessage = "Segmenting… (\(update.completed) of \(update.total))"
+            epoching.segmentingProgress = update.fraction
+        }
 
         let buildWorker = Task.detached(priority: .userInitiated) {
-            job.buildEpochs()
+            await job.buildEpochs { completed, total in
+                progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
+            }
         }
         let built = await withTaskCancellationHandler(
             operation: {
@@ -469,12 +810,31 @@ extension WaveformView {
                 buildWorker.cancel()
             }
         )
+        progressContinuation.finish()
+        progressTask.cancel()
+        epoching.segmentingProgress = nil
 
-        guard !Task.isCancelled, sessionID == recordingSessionID, let built else {
+        guard !Task.isCancelled, sessionID == recordingSessionID else {
             epoching.isApplying = false
             epoching.phaseMessage = nil
             return
         }
+        guard let built else {
+            epoching.isApplying = false
+            epoching.phaseMessage = nil
+            epoching.statusMessage = "No trials survived PSA segmentation. All candidate epochs were rejected, skipped, or out of bounds."
+            return
+        }
+
+        // Captured from the RAW (pre-average) build — per-trial bad-channel
+        // detection only exists at this stage; `average()`/`postProcessed()`
+        // below construct fresh `PSABuildResult`s that don't carry it, so
+        // relying on `finalResult.message` for this would silently lose it
+        // whenever averaging is on (which `average()` always overwrites with
+        // its own "N categories, N epochs averaged" message).
+        let epochBadChannelCounts = built.epochBadChannelCounts
+        let totalEpochsEvaluated = built.totalEpochsEvaluated
+        let rejectedForTooManyBadChannels = built.rejectedForTooManyBadChannels
 
         // Keep raw epochs as source so post-processing can be toggled later.
         segmentedEpochSignal = built.signal
@@ -539,8 +899,37 @@ extension WaveformView {
         epoching.epochedSignal = finalResult.signal
         epoching.epochSegments = finalResult.segments
         epoching.isAveraged = wasAveraged
-        if !wasAveraged { epoching.showsButterflyPlot = false }
-        epoching.statusMessage = finalResult.message + suffix
+        if wasAveraged {
+            epoching.showsButterflyPlot = true
+        } else {
+            epoching.showsButterflyPlot = false
+        }
+        // Bad-channel reporting is composed here (not read off finalResult.message)
+        // because average()/postProcessed() replace the message wholesale —
+        // relying on it would silently drop this whenever averaging is on.
+        var statusText = finalResult.message + suffix
+        epoching.epochBadChannelSummary = []
+        if epoching.interpolatesBadChannelsPerEpoch, totalEpochsEvaluated > 0, !epochBadChannelCounts.isEmpty {
+            let segmentBadChannels = epochBadChannelCounts.keys.sorted().map { "Ch\($0 + 1)" }
+            epoching.epochBadChannelSummary = epochBadChannelCounts.keys.sorted().map {
+                "Ch\($0 + 1) (\(epochBadChannelCounts[$0] ?? 0) of \(totalEpochsEvaluated) epochs)"
+            }
+            statusText += " · \(epochBadChannelCounts.count) channel\(epochBadChannelCounts.count == 1 ? "" : "s") bad in \u{2265}1 epoch (\(segmentBadChannels.joined(separator: ", ")))"
+            if rejectedForTooManyBadChannels > 0 {
+                statusText += " · \(rejectedForTooManyBadChannels) epoch\(rejectedForTooManyBadChannels == 1 ? "" : "s") rejected for too many bad channels"
+            }
+        }
+        epoching.statusMessage = statusText
+        escalateBadChannelsIfNeeded(
+            counts: epochBadChannelCounts,
+            totalEpochs: totalEpochsEvaluated,
+            continuousSignal: signal
+        )
+        if epoching.interpolatesBadChannelsPerEpoch, !channels.bad.isEmpty {
+            let recordingBadChannels = channels.bad.sorted().map { "Ch\($0 + 1)" }
+            epoching.statusMessage = (epoching.statusMessage ?? "")
+                + " · Recording bad channels (\(channels.bad.count)): \(recordingBadChannels.joined(separator: ", "))"
+        }
         selectedSampleRange = nil
         dragSelectionStartSample = nil
         dragSelectionEndSample = nil
@@ -551,6 +940,44 @@ extension WaveformView {
         epoching.isApplying = false
         epoching.phaseMessage = nil
         epoching.showsSheet = false
+    }
+
+    /// If enabled, marks any channel flagged bad in at least
+    /// `escalationThresholdPercent`% of epochs bad for the WHOLE recording
+    /// and interpolates it there — reuses `interpolate(_:in:)`, so it also
+    /// patches `epoching.epochedSignal` in place (see that function) rather
+    /// than discarding the averages just computed. NOTE: does not patch
+    /// `segmentedEpochSignal` (the pre-average raw-epoch cache) — toggling
+    /// post-processing after an escalation will re-derive from the
+    /// pre-escalation raw epochs. A known, narrow gap, not fixed here.
+    private func escalateBadChannelsIfNeeded(
+        counts: [Int: Int],
+        totalEpochs: Int,
+        continuousSignal: MFFSignalData
+    ) {
+        guard epoching.escalatesBadChannelsToGlobal, totalEpochs > 0, !counts.isEmpty else {
+            epoching.escalatedChannelSummaries = []
+            return
+        }
+        let thresholdFraction = epoching.escalationThresholdPercent / 100
+        let toEscalate = counts
+            .filter { Double($0.value) / Double(totalEpochs) >= thresholdFraction }
+            .sorted { $0.key < $1.key }
+        guard !toEscalate.isEmpty else {
+            epoching.escalatedChannelSummaries = []
+            return
+        }
+
+        var summaries: [String] = []
+        summaries.reserveCapacity(toEscalate.count)
+        for (channelIndex, count) in toEscalate {
+            interpolate(channelIndex, in: continuousSignal)
+            let percent = Double(count) / Double(totalEpochs) * 100
+            summaries.append("Ch\(channelIndex + 1): bad in \(String(format: "%.0f", percent))% of epochs (\(count)/\(totalEpochs))")
+        }
+        epoching.escalatedChannelSummaries = summaries
+        epoching.statusMessage = (epoching.statusMessage ?? "")
+            + " · Escalated \(toEscalate.count) channel\(toEscalate.count == 1 ? "" : "s") to globally bad."
     }
 
     /// Validates PSA inputs on the main actor and packages them into a Sendable job
@@ -601,10 +1028,14 @@ extension WaveformView {
             epochLength: epochLength,
             psaOffset: epoching.offset,
             sampleCount: sampleCount,
-            colorIndices: categoryColorIndices(for: Array(categoriesBySegmentValue.values)),
+            colorIndices: categoryColorIndices(for: categoriesBySegmentValue.values.flatMap { $0 }),
             skipIfContainsArtifact: epoching.skipIfContainsArtifact && epoching.segmentField != .artifact,
             artifactRejectionLabel: psaArtifactRejectionLabel(),
-            timingTolerance: epoching.timingTolerance
+            timingTolerance: epoching.timingTolerance,
+            interpolatesBadChannelsPerEpoch: epoching.interpolatesBadChannelsPerEpoch,
+            epochBadChannelThresholds: epoching.epochBadChannelThresholds,
+            electrodePositions: electrodeGeometry?.positions ?? [:],
+            globallyBadChannels: channels.bad
         )
     }
 

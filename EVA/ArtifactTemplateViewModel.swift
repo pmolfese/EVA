@@ -20,6 +20,14 @@ import SwiftUI
 
 @MainActor
 final class ArtifactTemplateViewModel: ObservableObject {
+    /// Held directly so this VM can read channel state itself — see
+    /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
+    let store: RecordingStore
+
+    init(store: RecordingStore) {
+        self.store = store
+    }
+
     // MARK: Sheet / definition
     @Published var showsSheet = false
     @Published var selectionRange: ClosedRange<Int>?
@@ -69,6 +77,10 @@ final class ArtifactTemplateViewModel: ObservableObject {
     @Published var deletionRequest: DefinedArtifact.ID?
     @Published var deleteAllRequest = 0
     @Published var obsVarianceReportCache = [String: OBSPCAVarianceReport]()
+    /// Precomputed hover-preview data, keyed by `ArtifactCleaningPreview.cacheKey`.
+    /// Populated right after Apply finishes (see `applyArtifactCleaning(to:)`)
+    /// so hovering the preview button is a lookup, not a live recompute.
+    @Published var cleaningPreviewCache = [String: ArtifactCleaningPreviewData]()
 
     func resetForClose() {
         showsSheet = false
@@ -89,5 +101,6 @@ final class ArtifactTemplateViewModel: ObservableObject {
         definedArtifacts = []
         deletionRequest = nil
         obsVarianceReportCache.removeAll()
+        cleaningPreviewCache.removeAll()
     }
 }

@@ -56,7 +56,7 @@ struct MFFFileTypeTests {
 
     @MainActor
     @Test func overlaySelectionResolvesAllAndToggles() {
-        let vm = EpochingViewModel()
+        let vm = EpochingViewModel(store: RecordingStore())
         let available = ["A", "B", "C"]
 
         // Empty selection resolves to "all".
@@ -80,7 +80,7 @@ struct MFFFileTypeTests {
 
     @MainActor
     @Test func displayCategoryHonorsRenames() {
-        let vm = EpochingViewModel()
+        let vm = EpochingViewModel(store: RecordingStore())
         #expect(vm.displayCategory("A") == "A")
         vm.categoryRenames["A"] = "Target"
         #expect(vm.displayCategory("A") == "Target")

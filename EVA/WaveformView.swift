@@ -117,7 +117,7 @@ struct WaveformView: View {
     @State var showsECGDetectionSheet = false
     // BCG detection
     // BCG detection domain, extracted into an L4 store (REFACTOR.md).
-    @StateObject var bcg = BCGDetectionViewModel()
+    @StateObject var bcg: BCGDetectionViewModel
     /// Stable UUID so re-running detection updates the existing DefinedArtifact rather than appending a new one.
     let bcgDefinedArtifactID = UUID()
     @State var ecgDetectionSelectedPNSChannels = Set<Int>()
@@ -131,10 +131,10 @@ struct WaveformView: View {
     @State var ecgAlgorithmResults: [ECGDetectionAlgorithm: ECGAlgorithmResult] = [:]
     // Artifact detection + cleaning domain, extracted into an L4 store. See
     // REFACTOR.md slice 5.
-    @StateObject var artifactVM = ArtifactViewModel()
+    @StateObject var artifactVM: ArtifactViewModel
     // "Define Artifact" template-detection domain, extracted into an L4 store
     // (REFACTOR.md — analysis-domain slice).
-    @StateObject var template = ArtifactTemplateViewModel()
+    @StateObject var template: ArtifactTemplateViewModel
     @State var showsWaveletArtifactExplorer = false
     @State var isRunningWaveletArtifactExplorer = false
     @State var waveletExplorerProgress = 0.0
@@ -159,21 +159,21 @@ struct WaveformView: View {
     @State var waveletExplorerMaximumCandidates = 80
     // ICA decomposition + component removal, extracted into an L4 store. See
     // REFACTOR.md slice 6.
-    @StateObject var ica = ICAViewModel()
+    @StateObject var ica: ICAViewModel
     // PSA epoching / averaging + averaged-data display, extracted into an L4
     // store. See REFACTOR.md slice 4.
-    @StateObject var epoching = EpochingViewModel()
+    @StateObject var epoching: EpochingViewModel
     @State var segmentedEpochSignal: MFFSignalData?
     @State var segmentedEpochSegments: [EpochSegment] = []
-    @StateObject var eegAnalysis = EEGAnalysisViewModel()
+    @StateObject var eegAnalysis: EEGAnalysisViewModel
 
     // Band-pass / notch filtering (applied to the active base signal).
     /// Filtering domain (band-pass / line-noise / average-reference), extracted
     /// into an L4 store. See REFACTOR.md.
-    @StateObject var filter = FilterViewModel()
+    @StateObject var filter: FilterViewModel
     // Wavelet artifact reduction (HAPPE-style) pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
-    @StateObject var wavelet = WaveletReductionViewModel()
+    @StateObject var wavelet: WaveletReductionViewModel
     @State var channelStatusIsError = false
     // Scrollable status history (newest first), shown when the status area is clicked.
     @State private var statusHistory: [StatusHistoryEntry] = []
@@ -197,25 +197,40 @@ struct WaveformView: View {
 
     // MRI gradient-artifact removal domain (AAS / FASTR / FARM / Moosmann),
     // extracted into an L4 store. See REFACTOR.md slice 2.
-    @StateObject var gradient = GradientViewModel()
+    @StateObject var gradient: GradientViewModel
     @StateObject var replay = ReplayController()
 
     // Per-channel state, shared with the menu-bar Channels commands.
     var channels: ChannelModel { recordingStore.channels }
+    /// Serializes major processing operations (filter, gradient, ICA, wavelet
+    /// reduction, artifact cleaning, channel/segment health, PSA, BCG, EEG
+    /// analysis) so at most one runs at a time even if triggered back to
+    /// back. Lives on `RecordingStore` (not owned here) so standalone VMs
+    /// that only hold `store` can reach it too.
+    var processingQueue: ProcessingQueue { recordingStore.processingQueue }
     @State var electrodeGeometry: ElectrodeGeometry?
     @State var channelStatusMessage: String?
     @State private var channelLabelMetricsExportRequest = 0
     // Channel-health coordination, extracted into an L4 store (REFACTOR.md).
-    @StateObject var chanHealth = ChannelHealthViewModel()
+    @StateObject var chanHealth: ChannelHealthViewModel
     @State private var showsChannelGoodnessSettings = false
     @State private var channelGoodnessSettingsRequest = 0
     // Segment-health domain, extracted into an L4 store (REFACTOR.md).
-    @StateObject var segHealth = SegmentHealthViewModel()
+    @StateObject var segHealth: SegmentHealthViewModel
     @State private var resetToOriginalRequest = 0
     @State private var mffExportRequest = 0
     @State private var copyProcessingRequest = 0
     @State private var datasetInfoRequest = 0
     @State private var showsDatasetInfo = false
+    /// Set to scroll the channel list to that row (e.g. from a topomap/butterfly
+    /// click); `.scrollPosition(id:)` on the vertical channel ScrollView consumes it.
+    @State var scrollToChannelRequest: Int?
+    @State var showsChannelInspector = false
+    @State var channelInspectorSelection: ChannelInspectorSelection = .channel(0)
+    @State var channelInspectorOverlayEnabled = true
+    @State var showsCategoryGroupPopover = false
+    @State var categoryGroupName = ""
+    @State var categoryGroupSelectedCodes = Set<String>()
     @State var isExportingMFF = false
     @State var mffExportStatusMessage: String?
     @State var recordingSessionID = UUID()
@@ -318,6 +333,30 @@ struct WaveformView: View {
             isAnalyzing: channels.isAnalyzingHealth,
             progress: channels.healthProgress
         )
+    }
+
+    /// Custom init so every domain VM can hold the SAME `RecordingStore` instance
+    /// directly (RecordingStore direct-injection pass, REFACTOR.md) instead of
+    /// reading channel/viewport state through WaveformView's forwarding
+    /// properties. Properties not listed here keep their inline default values —
+    /// Swift only requires explicit assignment for properties whose default
+    /// needs to change (here, `store` must be the SAME instance across
+    /// `recordingStore` and every VM, not each's own default `RecordingStore()`).
+    init(recording: MFFRecording) {
+        self.recording = recording
+        let store = RecordingStore()
+        _recordingStore = State(initialValue: store)
+        _bcg = StateObject(wrappedValue: BCGDetectionViewModel(store: store))
+        _artifactVM = StateObject(wrappedValue: ArtifactViewModel(store: store))
+        _template = StateObject(wrappedValue: ArtifactTemplateViewModel(store: store))
+        _ica = StateObject(wrappedValue: ICAViewModel(store: store))
+        _epoching = StateObject(wrappedValue: EpochingViewModel(store: store))
+        _eegAnalysis = StateObject(wrappedValue: EEGAnalysisViewModel(store: store))
+        _filter = StateObject(wrappedValue: FilterViewModel(store: store))
+        _wavelet = StateObject(wrappedValue: WaveletReductionViewModel(store: store))
+        _gradient = StateObject(wrappedValue: GradientViewModel(store: store))
+        _chanHealth = StateObject(wrappedValue: ChannelHealthViewModel(store: store))
+        _segHealth = StateObject(wrappedValue: SegmentHealthViewModel(store: store))
     }
 
     var body: some View {
@@ -538,6 +577,7 @@ struct WaveformView: View {
     private func displayedEvents(
         for signal: MFFSignalData,
         includeContinuousOverlays: Bool = true,
+        includeArtifactOverlays: Bool = true,
         mapContinuousOverlaysIntoEpochs: Bool = false
     ) -> [MFFEvent] {
         guard includeContinuousOverlays else {
@@ -545,14 +585,15 @@ struct WaveformView: View {
         }
 
         let overlays = mapContinuousOverlaysIntoEpochs
-            ? epochedContinuousOverlayEvents(for: signal)
-            : continuousOverlayEventsForDisplay()
+            ? epochedContinuousOverlayEvents(for: signal, includeArtifactOverlays: includeArtifactOverlays)
+            : continuousOverlayEventsForDisplay(includeArtifactOverlays: includeArtifactOverlays)
         return (signal.events + overlays).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
     }
 
     private func displayedEventsCacheKey(
         for signal: MFFSignalData,
         includeContinuousOverlays: Bool,
+        includeArtifactOverlays: Bool,
         mapContinuousOverlaysIntoEpochs: Bool
     ) -> WaveformDisplayedEventsCache.Key {
         WaveformDisplayedEventsCache.Key(
@@ -577,6 +618,7 @@ struct WaveformView: View {
             },
             epochSegments: WaveformEpochSegmentSignature(segments: epoching.epochSegments),
             includeContinuousOverlays: includeContinuousOverlays,
+            includeArtifactOverlays: includeArtifactOverlays,
             mapContinuousOverlaysIntoEpochs: mapContinuousOverlaysIntoEpochs
         )
     }
@@ -584,6 +626,7 @@ struct WaveformView: View {
     private func refreshDisplayedEventsCache(
         for signal: MFFSignalData,
         includeContinuousOverlays: Bool,
+        includeArtifactOverlays: Bool,
         mapContinuousOverlaysIntoEpochs: Bool,
         key: WaveformDisplayedEventsCache.Key
     ) {
@@ -593,14 +636,17 @@ struct WaveformView: View {
             events: displayedEvents(
                 for: signal,
                 includeContinuousOverlays: includeContinuousOverlays,
+                includeArtifactOverlays: includeArtifactOverlays,
                 mapContinuousOverlaysIntoEpochs: mapContinuousOverlaysIntoEpochs
             )
         )
     }
 
-    private func continuousOverlayEventsForDisplay() -> [MFFEvent] {
+    private func continuousOverlayEventsForDisplay(includeArtifactOverlays: Bool = true) -> [MFFEvent] {
         var events = userMarkerEvents
         var seen = Set(events)
+
+        guard includeArtifactOverlays else { return events }
 
         for event in template.definedArtifacts.flatMap(\.events) where seen.insert(event).inserted {
             events.append(event)
@@ -612,14 +658,17 @@ struct WaveformView: View {
         return events
     }
 
-    private func epochedContinuousOverlayEvents(for signal: MFFSignalData) -> [MFFEvent] {
+    private func epochedContinuousOverlayEvents(
+        for signal: MFFSignalData,
+        includeArtifactOverlays: Bool = true
+    ) -> [MFFEvent] {
         guard epoching.epochedSignal != nil,
               signal.samplingRate > 0,
               !epoching.epochSegments.isEmpty else {
             return []
         }
 
-        return continuousOverlayEventsForDisplay()
+        return continuousOverlayEventsForDisplay(includeArtifactOverlays: includeArtifactOverlays)
             .flatMap { event in
                 epoching.epochSegments.compactMap { segment in
                     epochedOverlayEvent(event, in: segment, samplingRate: signal.samplingRate)
@@ -667,9 +716,11 @@ struct WaveformView: View {
         continuousSignal: MFFSignalData
     ) -> some View {
         let isShowingEpochs = epoching.epochedSignal != nil
+        let includeArtifactOverlays = !epoching.isAveraged
         let eventCacheKey = displayedEventsCacheKey(
             for: signal,
             includeContinuousOverlays: true,
+            includeArtifactOverlays: includeArtifactOverlays,
             mapContinuousOverlaysIntoEpochs: isShowingEpochs
         )
         let events = displayedEventsCache.key == eventCacheKey
@@ -677,6 +728,7 @@ struct WaveformView: View {
             : displayedEvents(
                 for: signal,
                 includeContinuousOverlays: true,
+                includeArtifactOverlays: includeArtifactOverlays,
                 mapContinuousOverlaysIntoEpochs: isShowingEpochs
             )
 
@@ -729,6 +781,7 @@ struct WaveformView: View {
             refreshDisplayedEventsCache(
                 for: signal,
                 includeContinuousOverlays: true,
+                includeArtifactOverlays: includeArtifactOverlays,
                 mapContinuousOverlaysIntoEpochs: isShowingEpochs,
                 key: eventCacheKey
             )
@@ -737,6 +790,7 @@ struct WaveformView: View {
             refreshDisplayedEventsCache(
                 for: signal,
                 includeContinuousOverlays: true,
+                includeArtifactOverlays: includeArtifactOverlays,
                 mapContinuousOverlaysIntoEpochs: isShowingEpochs,
                 key: newKey
             )
@@ -782,6 +836,9 @@ struct WaveformView: View {
                 onStart: { startInteractiveReplay() },
                 onCancel: { replay.reset() }
             )
+        }
+        .sheet(isPresented: $showsChannelInspector) {
+            channelInspectorSheet(for: continuousSignal)
         }
         .sheet(isPresented: $showsDatasetInfo) {
             DatasetInfoSheet(
@@ -1472,6 +1529,7 @@ struct WaveformView: View {
                     LazyVStack(alignment: .leading, spacing: rowSpacing) {
                         ForEach(channelIndices(in: signal), id: \.self) { index in
                             channelLabel(index: index, signal: signal)
+                                .id(index)
                         }
                     }
                     .frame(width: labelColumnWidth, alignment: .topLeading)
@@ -1525,6 +1583,7 @@ struct WaveformView: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 16)
             }
+            .scrollPosition(id: $scrollToChannelRequest, anchor: .center)
 
             // Pinned physio (PNS) pane: always visible below the EEG channels
             // (separated by a gap), sharing the EEG time axis. Like the events
@@ -1612,7 +1671,9 @@ struct WaveformView: View {
                     layout: layout,
                     values: topomapValues(at: sample, in: signal),
                     timeSeconds: signal.samplingRate > 0 ? Double(sample) / signal.samplingRate : 0,
-                    fixedScale: nil
+                    fixedScale: nil,
+                    channelName: { eegChannelDisplayName(index: $0, signal: signal) },
+                    onTapChannel: { openChannelInspector(channel: $0) }
                 )
                 Spacer(minLength: 0)
             } else {
@@ -1807,7 +1868,47 @@ struct WaveformView: View {
         channelStatusMessage = "Interpolated Ch \(index + 1) from \(indices.count) neighbors."
         channelStatusIsError = false
         artifactVM.detectionRefreshToken += 1
-        invalidateEpochsForSignalChange()
+
+        // Averaging is linear, so applying the SAME interpolation weights to the
+        // already-averaged epoched signal's other channels reproduces exactly
+        // what re-running PSA after interpolating would have produced — patch it
+        // in place instead of discarding the averages (invalidateEpochsForSignalChange).
+        // NOTE: `segmentedEpochSignal` is NOT a reliable "on-disk pre-segmented
+        // file" signal — PSAEpochingViews.applyPSA sets it on every in-app PSA
+        // run too (as a raw-epochs cache), so gating on it here was wrong: it
+        // made this branch never fire after any normal PSA apply, silently
+        // falling through to invalidateEpochsForSignalChange() every time
+        // (previously masked; surfaced once something else called interpolate()
+        // right after an Apply, e.g. the bad-channel escalation feature).
+        if reinterpolateEpochedSignal(index, indices: indices, weights: weights) {
+            // Averages patched in place — segmentation/averages remain intact.
+        } else {
+            invalidateEpochsForSignalChange()
+        }
+    }
+
+    /// Re-derives channel `index` in the already-averaged `epoching.epochedSignal`
+    /// using the SAME per-source weights just computed for the continuous signal,
+    /// so an interpolation doesn't force re-running PSA. Returns false (no-op) if
+    /// there's no averaged result yet, or the epoched signal doesn't have the
+    /// same channel layout (stale/mismatched — safer to fall back to invalidating).
+    private func reinterpolateEpochedSignal(_ index: Int, indices: [Int], weights: [Double]) -> Bool {
+        guard let epoched = epoching.epochedSignal,
+              epoched.data.indices.contains(index),
+              indices.allSatisfy({ epoched.data.indices.contains($0) })
+        else { return false }
+
+        let length = epoched.data[index].count
+        var series = [Float](repeating: 0, count: length)
+        for (channelIndex, weight) in zip(indices, weights) {
+            let source = epoched.data[channelIndex]
+            guard source.count == length else { return false }
+            vDSP.add(multiplication: (source, Float(weight)), series, result: &series)
+        }
+        var newData = epoched.data
+        newData[index] = series
+        epoching.epochedSignal = epoched.replacingData(newData)
+        return true
     }
 
     /// Interpolated channels are derived from the source data, so they go stale

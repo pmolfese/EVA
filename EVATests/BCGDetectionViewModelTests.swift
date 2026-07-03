@@ -27,7 +27,7 @@ struct BCGDetectionViewModelTests {
         defer { ProcessingDefaults.shared.bcgDefaultMethodRaw = original }
 
         ProcessingDefaults.shared.bcgDefaultMethodRaw = "spatialPCA"
-        let vm = BCGDetectionViewModel()
+        let vm = BCGDetectionViewModel(store: RecordingStore())
         #expect(vm.method == .spatialPCA)
     }
 
@@ -37,13 +37,13 @@ struct BCGDetectionViewModelTests {
         defer { ProcessingDefaults.shared.bcgDefaultMethodRaw = original }
 
         ProcessingDefaults.shared.bcgDefaultMethodRaw = "not-a-real-method"
-        let vm = BCGDetectionViewModel()
+        let vm = BCGDetectionViewModel(store: RecordingStore())
         #expect(vm.method == .periodicity)
     }
 
     @MainActor
     @Test func defaultsMatchExpectedInitialState() {
-        let vm = BCGDetectionViewModel()
+        let vm = BCGDetectionViewModel(store: RecordingStore())
         #expect(!vm.detectsArtifacts)
         #expect(!vm.showsSheet)
         #expect(vm.eventCode == "BCG")
@@ -61,7 +61,7 @@ struct BCGDetectionViewModelTests {
 
     @MainActor
     @Test func publishedPropertiesAreIndependentlyMutable() {
-        let vm = BCGDetectionViewModel()
+        let vm = BCGDetectionViewModel(store: RecordingStore())
         vm.method = .qrsLocking
         vm.windowSeconds = 0.5
         vm.thresholdSD = 3.0

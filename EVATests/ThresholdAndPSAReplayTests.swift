@@ -45,7 +45,7 @@ struct ThresholdAndPSAReplayTests {
 
     @MainActor
     @Test func epochingParametersRoundTrip() {
-        let a = EpochingViewModel()
+        let a = EpochingViewModel(store: RecordingStore())
         a.preStimulus = 0.15
         a.postStimulus = 0.6
         a.offset = 0.02
@@ -63,7 +63,7 @@ struct ThresholdAndPSAReplayTests {
         #expect(p["eventCodes"] == "STD,TAR") // sorted
         #expect(p["category.TAR"] == "Target")
 
-        let b = EpochingViewModel()
+        let b = EpochingViewModel(store: RecordingStore())
         b.apply(parameters: p)
         #expect(b.preStimulus == 0.15)
         #expect(b.postStimulus == 0.6)

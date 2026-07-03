@@ -300,6 +300,7 @@ struct WaveformDisplayedEventsCache {
         let definedArtifacts: [WaveformDefinedArtifactSignature]
         let epochSegments: WaveformEpochSegmentSignature
         let includeContinuousOverlays: Bool
+        let includeArtifactOverlays: Bool
         let mapContinuousOverlaysIntoEpochs: Bool
 
         static let empty = Key(
@@ -311,6 +312,7 @@ struct WaveformDisplayedEventsCache {
             definedArtifacts: [],
             epochSegments: .empty,
             includeContinuousOverlays: false,
+            includeArtifactOverlays: false,
             mapContinuousOverlaysIntoEpochs: false
         )
     }
@@ -411,6 +413,18 @@ nonisolated struct PSABuildResult {
     let signal: MFFSignalData
     let segments: [EpochSegment]
     let message: String
+    /// Channel index → number of epochs that flagged it bad, when per-epoch
+    /// bad-channel interpolation was enabled. Empty when the feature was off.
+    var epochBadChannelCounts: [Int: Int] = [:]
+    /// Epoch count the above counts are a fraction of (== accepted epochs).
+    var totalEpochsEvaluated: Int = 0
+    /// Epochs dropped entirely for exceeding the bad-channel-fraction limit.
+    /// NOTE: these three fields describe the RAW (pre-average) build only —
+    /// `average()`/`postProcessed()` below construct fresh `PSABuildResult`s
+    /// that don't carry them forward. Callers that need this after averaging
+    /// must capture it from the raw `buildEpochs()` result directly (see
+    /// `applyPSA(to:)`), not from `finalResult`.
+    var rejectedForTooManyBadChannels: Int = 0
 
     /// Averages each category's epochs. Runs off the main thread.
     func average(colorIndices: [String: Int]) -> PSABuildResult? {
@@ -539,7 +553,11 @@ nonisolated struct PSABuildResult {
 nonisolated struct PSABuildJob: Sendable {
     let signal: MFFSignalData
     let events: [MFFEvent]
-    let categoriesBySegmentValue: [String: String]
+    /// Segment value (code/label) → categories that value's epochs are filed
+    /// under. Usually one entry (the code's own category); a code that also
+    /// belongs to a pooled group carries a second entry for the group's
+    /// category, producing a duplicate epoch tagged with each category.
+    let categoriesBySegmentValue: [String: [String]]
     let timingMarkersBySegmentValue: [String: String]
     let timingEventsBySegmentValue: [String: [MFFEvent]]
     let artifactEventsForRejection: [MFFEvent]
@@ -551,19 +569,46 @@ nonisolated struct PSABuildJob: Sendable {
     let skipIfContainsArtifact: Bool
     let artifactRejectionLabel: String
     let timingTolerance: Double
+    /// Per-epoch bad-channel detection + interpolation (distinct from the
+    /// whole-recording `channels.bad` set below, which is still excluded from
+    /// being used as an interpolation source either way).
+    let interpolatesBadChannelsPerEpoch: Bool
+    let epochBadChannelThresholds: EpochBadChannelThresholds
+    let electrodePositions: [Int: SIMD3<Double>]
+    let globallyBadChannels: Set<Int>
 
-    func buildEpochs() -> PSABuildResult? {
-        var epochedData = Array(repeating: [Float](), count: signal.numberOfChannels)
-        var epochedEvents: [MFFEvent] = []
-        var segments: [EpochSegment] = []
+    /// One accepted (event, category) pairing, cheap to compute — everything
+    /// EXCEPT the per-channel sample extraction and (optional) per-epoch
+    /// bad-channel interpolation, which is the expensive, fully-independent
+    /// part done in parallel below.
+    private struct AcceptedEpochJob: Sendable {
+        let startSample: Int
+        let category: String
+        let sourceEventID: String
+        let sourceCode: String
+        let anchorTimeSeconds: Double
+        let segmentValue: String
+        let timingMarkerValue: String?
+    }
+
+    /// Builds epochs. `progress` (if given) is called after each epoch's slice
+    /// finishes processing — `(completed, total)` — so the caller can report a
+    /// percentage/count instead of an indeterminate spinner. May be called from
+    /// a background thread/task; hop to the main actor inside the closure if
+    /// updating UI state directly.
+    func buildEpochs(progress: (@Sendable (Int, Int) -> Void)? = nil) async -> PSABuildResult? {
+        // PASS 1 (sequential, cheap): decide which (event, category) pairs are
+        // accepted and their final order — identical logic/skip-counting to
+        // before, just without touching channel data yet.
+        var jobs: [AcceptedEpochJob] = []
         var skippedOutOfBounds = 0
         var skippedArtifacts = 0
         var skippedTimingMarkers = 0
         var timingAdjusted = 0
-        var accepted = 0
 
         for event in events {
-            guard let category = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""] else { continue }
+            guard let categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""],
+                  !categories.isEmpty else { continue }
             let segmentValue: String = categoriesBySegmentValue[event.code] != nil ? event.code : (event.label ?? event.code)
             let anchorTimeSeconds: Double
             let timingMarkerValue = timingMarkersBySegmentValue[event.code] ?? timingMarkersBySegmentValue[event.label ?? ""]
@@ -596,34 +641,150 @@ nonisolated struct PSABuildJob: Sendable {
             }
 
             guard signal.data.indices.allSatisfy({ signal.data[$0].count >= endSample }) else { continue }
-            for channelIndex in signal.data.indices {
-                epochedData[channelIndex].append(contentsOf: signal.data[channelIndex][startSample..<endSample])
+
+            // One event can feed multiple categories (its own + any pooled
+            // group it belongs to) — one job per category, duplicating the epoch.
+            for category in categories {
+                jobs.append(AcceptedEpochJob(
+                    startSample: startSample,
+                    category: category,
+                    sourceEventID: event.id,
+                    sourceCode: event.code,
+                    anchorTimeSeconds: anchorTimeSeconds,
+                    segmentValue: segmentValue,
+                    timingMarkerValue: timingMarkerValue
+                ))
+            }
+        }
+
+        guard !jobs.isEmpty else { return nil }
+
+        // PASS 2 (parallel): each job independently extracts its own channel
+        // slice and, if enabled, runs per-epoch bad-channel detection +
+        // spherical-spline interpolation — the expensive, fully-independent
+        // part (this is what got slower with interpolation on; it's also
+        // exactly what parallelizes cleanly, since no job touches another
+        // job's data). Indexed by the job's PASS-1 position so PASS 3 can
+        // reassemble in the original, deterministic order regardless of which
+        // task happens to finish first.
+        var slices = [[[Float]]?](repeating: nil, count: jobs.count)
+        var jobBadChannels = [Set<Int>?](repeating: nil, count: jobs.count)
+        let total = jobs.count
+        let progressLock = NSLock()
+        nonisolated(unsafe) var completed = 0
+        nonisolated(unsafe) var rejectedForTooManyBadChannels = 0
+        let maxBadChannelsPerEpoch = Int((epochBadChannelThresholds.maxBadChannelFraction * Double(signal.numberOfChannels)).rounded())
+        // Shared across all workers: identical (target, good-set) pairs recur
+        // across most epochs (a bad channel tends to stay bad trial after
+        // trial), so caching turns a repeated O(n³) spline solve into an O(1)
+        // lookup for every epoch after the first that sees a given combination.
+        let weightCache = SphericalSplineWeightCache()
+        slices.withUnsafeMutableBufferPointer { out in
+            jobBadChannels.withUnsafeMutableBufferPointer { badOut in
+                // Each iteration writes a distinct index; bounded to
+                // evaMaxWorkers so a large epoch count can't spawn one task
+                // per epoch and oversubscribe the machine (this was an
+                // unbounded `withTaskGroup` fan-out before — the reported
+                // "computer locked up" cause).
+                nonisolated(unsafe) let out = out
+                nonisolated(unsafe) let badOut = badOut
+                evaConcurrentPerform(iterations: jobs.count) { jobIndex in
+                    let job = jobs[jobIndex]
+                    let jobEndSample = job.startSample + epochLength
+                    var slice = signal.data.map { Array($0[job.startSample..<jobEndSample]) }
+                    if interpolatesBadChannelsPerEpoch {
+                        let range = 0..<epochLength
+                        let epochBadChannels = EpochBadChannelDetector.detectBadChannels(
+                            in: slice,
+                            range: range,
+                            thresholds: epochBadChannelThresholds,
+                            excluding: globallyBadChannels
+                        )
+                        // Recorded even for a rejected epoch — a channel bad
+                        // enough to help reject the epoch is still a
+                        // legitimate "bad in this trial" data point for the
+                        // escalate-to-globally-bad decision below.
+                        badOut[jobIndex] = epochBadChannels
+                        if epochBadChannels.count > maxBadChannelsPerEpoch {
+                            // Too messy to trust — reject the whole epoch
+                            // instead of interpolating. Skipping the spline
+                            // fit here is also the point: it's the expensive
+                            // step, and it'd be thrown away regardless.
+                            progressLock.lock()
+                            rejectedForTooManyBadChannels += 1
+                            completed += 1
+                            let done = completed
+                            progressLock.unlock()
+                            progress?(done, total)
+                            return
+                        }
+                        EpochBadChannelDetector.interpolate(
+                            badChannels: epochBadChannels,
+                            in: &slice,
+                            range: range,
+                            positions: electrodePositions,
+                            excludingGloballyBad: globallyBadChannels,
+                            weightCache: weightCache
+                        )
+                    }
+                    out[jobIndex] = slice
+                    progressLock.lock()
+                    completed += 1
+                    let done = completed
+                    progressLock.unlock()
+                    progress?(done, total)
+                }
+            }
+        }
+
+        // Aggregate how many epochs flagged each channel bad, for reporting
+        // and for the caller's "escalate to globally bad" decision. Rejected
+        // epochs (too messy) don't contribute — they were never interpolated.
+        var epochBadChannelCounts: [Int: Int] = [:]
+        if interpolatesBadChannelsPerEpoch {
+            for badSet in jobBadChannels {
+                guard let badSet else { continue }
+                for channel in badSet {
+                    epochBadChannelCounts[channel, default: 0] += 1
+                }
+            }
+        }
+
+        // PASS 3 (sequential, cheap concatenation): reassemble in job order.
+        var epochedData = Array(repeating: [Float](), count: signal.numberOfChannels)
+        var epochedEvents: [MFFEvent] = []
+        var segments: [EpochSegment] = []
+
+        for (jobIndex, job) in jobs.enumerated() {
+            guard let slice = slices[jobIndex] else { continue }
+            for channelIndex in epochedData.indices {
+                epochedData[channelIndex].append(contentsOf: slice[channelIndex])
             }
 
-            let epochStart = accepted * epochLength
+            let epochStart = jobIndex * epochLength
             let stimulusSample = epochStart + preSamples
             let stimulusTime = Double(stimulusSample) / signal.samplingRate
             epochedEvents.append(MFFEvent(
-                id: "psa-\(accepted)-\(event.id)",
-                code: category,
+                id: "psa-\(jobIndex)-\(job.sourceEventID)",
+                code: job.category,
                 beginTimeSeconds: stimulusTime,
                 rawBeginTime: String(format: "%.6f", stimulusTime),
-                sourceFile: timingMarkerValue.map { "PSA: \(segmentValue) via \($0)" } ?? "PSA: \(segmentValue)"
+                sourceFile: job.timingMarkerValue.map { "PSA: \(job.segmentValue) via \($0)" } ?? "PSA: \(job.segmentValue)"
             ))
             segments.append(EpochSegment(
                 startSample: epochStart,
                 endSample: epochStart + epochLength - 1,
                 stimulusOffsetSamples: preSamples,
-                category: category,
-                sourceCode: event.code,
-                sourceTimeSeconds: anchorTimeSeconds,
-                colorIndex: colorIndices[category] ?? 0,
+                category: job.category,
+                sourceCode: job.sourceCode,
+                sourceTimeSeconds: job.anchorTimeSeconds,
+                colorIndex: colorIndices[job.category] ?? 0,
                 contributingEpochCount: 1
             ))
-            accepted += 1
         }
 
-        guard accepted > 0, let totalSamples = epochedData.first?.count, totalSamples > 0 else { return nil }
+        let accepted = segments.count
+        guard let totalSamples = epochedData.first?.count, totalSamples > 0 else { return nil }
 
         let epochedSignal = MFFSignalData(
             signalURL: signal.signalURL,
@@ -641,7 +802,20 @@ nonisolated struct PSABuildJob: Sendable {
         if timingAdjusted > 0 { message += ", \(timingAdjusted) timing adjusted" }
         if skippedTimingMarkers > 0 { message += ", \(skippedTimingMarkers) missing timing marker" }
         if skippedOutOfBounds > 0 { message += ", \(skippedOutOfBounds) out of bounds" }
-        return PSABuildResult(signal: epochedSignal, segments: segments, message: message)
+        if interpolatesBadChannelsPerEpoch {
+            message += ", \(epochBadChannelCounts.count) channel\(epochBadChannelCounts.count == 1 ? "" : "s") bad in at least one epoch"
+            if rejectedForTooManyBadChannels > 0 {
+                message += ", \(rejectedForTooManyBadChannels) epoch\(rejectedForTooManyBadChannels == 1 ? "" : "s") rejected for too many bad channels"
+            }
+        }
+        return PSABuildResult(
+            signal: epochedSignal,
+            segments: segments,
+            message: message,
+            epochBadChannelCounts: epochBadChannelCounts,
+            totalEpochsEvaluated: jobs.count,
+            rejectedForTooManyBadChannels: rejectedForTooManyBadChannels
+        )
     }
 
     private func nearestEvent(to event: MFFEvent, in candidates: [MFFEvent]) -> MFFEvent? {
@@ -746,6 +920,14 @@ struct WaveformRightClickMonitor: NSViewRepresentable {
 struct ICAProgressUpdate: Sendable {
     var fraction: Double
     var message: String
+}
+
+/// Progress update from `PSABuildJob.buildEpochs(progress:)` — how many of the
+/// job's epochs have finished their (parallel) per-channel slice/interpolation.
+struct EpochBuildProgress: Sendable {
+    var completed: Int
+    var total: Int
+    var fraction: Double { total > 0 ? Double(completed) / Double(total) : 0 }
 }
 
 

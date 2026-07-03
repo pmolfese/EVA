@@ -386,11 +386,13 @@ extension WaveformView {
     /// Awaitable dispatcher shared by the interactive Apply button (wrapped in a
     /// Task) and the replay coordinator (awaited) — one code path per method.
     func applyGradientCorrection(to signal: MFFSignalData?) async {
-        switch gradient.method {
-        case .aas:
-            await removeGradientArtifact(from: signal)
-        case .fastr, .moosmann, .farm:
-            await removeGradientArtifactFASTR(from: signal)
+        await processingQueue.run("Gradient Correction") { [self] in
+            switch gradient.method {
+            case .aas:
+                await removeGradientArtifact(from: signal)
+            case .fastr, .moosmann, .farm:
+                await removeGradientArtifactFASTR(from: signal)
+            }
         }
     }
 

@@ -29,4 +29,11 @@ final class RecordingStore {
     var horizontalOffset: CGFloat = 0
     var horizontalViewportWidth: CGFloat = 1
     var horizontalScrollPosition = ScrollPosition(idType: Int.self, x: 0)
+
+    /// Serializes major processing operations (filter, gradient, ICA, wavelet
+    /// reduction, artifact cleaning, channel/segment health, PSA, BCG, EEG
+    /// analysis) so at most one runs at a time. Lives here (not on
+    /// WaveformView) so standalone VMs that only hold `store` — not a
+    /// WaveformView reference — can reach it too.
+    let processingQueue = ProcessingQueue()
 }

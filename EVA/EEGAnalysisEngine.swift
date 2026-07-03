@@ -388,41 +388,44 @@ nonisolated enum EEGAnalysisEngine {
     ) async -> EEGSpectralAnalysisResult? {
         guard !segments.isEmpty, !channelIndices.isEmpty, !bands.isEmpty else { return nil }
 
-        var channelResults: [EEGSpectralChannelResult] = []
-        channelResults.reserveCapacity(channelIndices.count)
-        var binHzAccumulator = 0.0
-        var binHzCount = 0
+        let total = max(channelIndices.count, 1)
+        var works = [SpectralChannelWork?](repeating: nil, count: channelIndices.count)
+        let progressLock = NSLock()
+        nonisolated(unsafe) var completed = 0
 
-        await withTaskGroup(of: SpectralChannelWork?.self) { group in
-            for channelIndex in channelIndices {
-                group.addTask {
-                    spectralChannelWork(
-                        signal: signal,
-                        segments: segments,
-                        bands: bands,
-                        channelIndex: channelIndex
-                    )
-                }
-            }
-
-            let total = max(channelIndices.count, 1)
-            var completed = 0
-            for await work in group {
+        works.withUnsafeMutableBufferPointer { out in
+            // Each iteration writes a distinct index; bounded to evaMaxWorkers
+            // so a large channel count can't spawn unbounded concurrent tasks.
+            nonisolated(unsafe) let out = out
+            evaConcurrentPerform(iterations: channelIndices.count) { i in
+                guard !Task.isCancelled else { return }
+                out[i] = spectralChannelWork(
+                    signal: signal,
+                    segments: segments,
+                    bands: bands,
+                    channelIndex: channelIndices[i]
+                )
+                progressLock.lock()
                 completed += 1
-                if Task.isCancelled {
-                    group.cancelAll()
-                    continue
-                }
-                if let work {
-                    channelResults.append(work.result)
-                    binHzAccumulator += work.binHz
-                    binHzCount += 1
-                }
-                progress?(Double(completed) / Double(total))
+                let done = completed
+                progressLock.unlock()
+                progress?(Double(done) / Double(total))
             }
         }
 
         if Task.isCancelled { return nil }
+
+        var channelResults: [EEGSpectralChannelResult] = []
+        channelResults.reserveCapacity(channelIndices.count)
+        var binHzAccumulator = 0.0
+        var binHzCount = 0
+        for work in works {
+            guard let work else { continue }
+            channelResults.append(work.result)
+            binHzAccumulator += work.binHz
+            binHzCount += 1
+        }
+
         guard !channelResults.isEmpty else { return nil }
 
         let summaries = bands.map { band in
@@ -598,41 +601,34 @@ nonisolated enum EEGAnalysisEngine {
         progress: (@Sendable (Double) -> Void)?
     ) async -> [(node: EEGConnectivityNode, spectra: [BandWindowSpectrum])] {
         guard !nodes.isEmpty else { return [] }
-        var output: [NodeSpectraWork] = []
-        output.reserveCapacity(nodes.count)
+        let total = max(nodes.count, 1)
+        var works = [NodeSpectraWork?](repeating: nil, count: nodes.count)
+        let progressLock = NSLock()
+        nonisolated(unsafe) var completed = 0
 
-        await withTaskGroup(of: NodeSpectraWork?.self) { group in
-            for (offset, node) in nodes.enumerated() {
-                group.addTask {
-                    if Task.isCancelled { return nil }
-                    guard let nodeSpectra = bandWindowSpectra(
-                        signal: signal,
-                        segments: segments,
-                        node: node,
-                        band: band
-                    ), !nodeSpectra.isEmpty else {
-                        return nil
-                    }
-                    return NodeSpectraWork(offset: offset, node: node, spectra: nodeSpectra)
+        works.withUnsafeMutableBufferPointer { out in
+            // Each iteration writes a distinct index; bounded to evaMaxWorkers.
+            nonisolated(unsafe) let out = out
+            evaConcurrentPerform(iterations: nodes.count) { offset in
+                guard !Task.isCancelled else { return }
+                if let nodeSpectra = bandWindowSpectra(
+                    signal: signal,
+                    segments: segments,
+                    node: nodes[offset],
+                    band: band
+                ), !nodeSpectra.isEmpty {
+                    out[offset] = NodeSpectraWork(offset: offset, node: nodes[offset], spectra: nodeSpectra)
                 }
-            }
-
-            let total = max(nodes.count, 1)
-            var completed = 0
-            for await work in group {
+                progressLock.lock()
                 completed += 1
-                if Task.isCancelled {
-                    group.cancelAll()
-                    continue
-                }
-                if let work {
-                    output.append(work)
-                }
-                progress?(Double(completed) / Double(total))
+                let done = completed
+                progressLock.unlock()
+                progress?(Double(done) / Double(total))
             }
         }
 
-        return output
+        return works
+            .compactMap { $0 }
             .sorted { $0.offset < $1.offset }
             .map { (node: $0.node, spectra: $0.spectra) }
     }
@@ -656,22 +652,25 @@ nonisolated enum EEGAnalysisEngine {
         }
 
         let pairCount = max(pairIndices.count, 1)
-        var results: [ConnectivityPairWork] = []
-        results.reserveCapacity(pairCount)
+        var works = [ConnectivityPairWork?](repeating: nil, count: pairIndices.count)
+        let progressLock = NSLock()
+        nonisolated(unsafe) var completed = 0
 
-        await withTaskGroup(of: ConnectivityPairWork?.self) { group in
-            for pair in pairIndices {
-                group.addTask {
-                    if Task.isCancelled { return nil }
-                    let metricValues = connectivityMetrics(
-                        spectraA: spectra[pair.left].spectra,
-                        spectraB: spectra[pair.right].spectra,
-                        metrics: metrics
-                    )
-                    guard !metricValues.isEmpty else {
-                        return ConnectivityPairWork(pairIndex: pair.pairIndex, result: nil)
-                    }
-                    return ConnectivityPairWork(
+        works.withUnsafeMutableBufferPointer { out in
+            // Each iteration writes a distinct index; bounded to evaMaxWorkers —
+            // pair count is O(n²) in node count, so this is the fan-out most
+            // likely to oversubscribe the machine if left unbounded.
+            nonisolated(unsafe) let out = out
+            evaConcurrentPerform(iterations: pairIndices.count) { i in
+                guard !Task.isCancelled else { return }
+                let pair = pairIndices[i]
+                let metricValues = connectivityMetrics(
+                    spectraA: spectra[pair.left].spectra,
+                    spectraB: spectra[pair.right].spectra,
+                    metrics: metrics
+                )
+                if !metricValues.isEmpty {
+                    out[i] = ConnectivityPairWork(
                         pairIndex: pair.pairIndex,
                         result: EEGConnectivityPairResult(
                             scope: spectra[pair.left].node.scope,
@@ -681,25 +680,18 @@ nonisolated enum EEGAnalysisEngine {
                         )
                     )
                 }
-            }
-
-            var completed = 0
-            for await work in group {
+                progressLock.lock()
                 completed += 1
-                if Task.isCancelled {
-                    group.cancelAll()
-                    continue
-                }
-                if let work, work.result != nil {
-                    results.append(work)
-                }
-                if completed % 64 == 0 || completed == pairCount {
-                    progress?(progressBase + progressWeight * Double(completed) / Double(pairCount))
+                let done = completed
+                progressLock.unlock()
+                if done % 64 == 0 || done == pairCount {
+                    progress?(progressBase + progressWeight * Double(done) / Double(pairCount))
                 }
             }
         }
 
-        return results
+        return works
+            .compactMap { $0 }
             .sorted { $0.pairIndex < $1.pairIndex }
             .compactMap(\.result)
     }

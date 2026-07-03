@@ -380,10 +380,29 @@ extension WaveformView {
         if epoching.epochedSignal != nil, !epoching.selectedEventCodes.isEmpty {
             script.append(EVAProcessingStep(operation: .segment, parameters: epoching.parameters))
         }
+        // Per-epoch bad-channel detection results are subject-specific (which
+        // channels were flaky varies per recording), so this is a SEPARATE
+        // provenance-only step rather than folded into the portable `.segment`
+        // params above — Copy Processing must not try to "replay" this list
+        // onto another file's channel layout.
+        if !epoching.epochBadChannelSummary.isEmpty {
+            script.append(EVAProcessingStep(
+                operation: .segment,
+                parameters: ["epochBadChannels": epoching.epochBadChannelSummary.joined(separator: "; ")],
+                replayable: false,
+                note: "Channels flagged bad in at least one epoch during per-epoch bad-channel detection; subject-specific."
+            ))
+        }
         if !channels.interpolated.isEmpty {
+            var interpolateParams = ["channels": channels.interpolated.keys.sorted().map { String($0 + 1) }.joined(separator: ",")]
+            if !epoching.escalatedChannelSummaries.isEmpty {
+                // Folded into the parameters (not just `note`) so it shows up
+                // in the exported eva.log, which prints operation + params.
+                interpolateParams["escalatedFromPerEpochDetection"] = epoching.escalatedChannelSummaries.joined(separator: "; ")
+            }
             script.append(EVAProcessingStep(
                 operation: .interpolateChannels,
-                parameters: ["channels": channels.interpolated.keys.sorted().map { String($0 + 1) }.joined(separator: ",")],
+                parameters: interpolateParams,
                 replayable: false,
                 note: "Interpolated channel indices are subject-specific."
             ))

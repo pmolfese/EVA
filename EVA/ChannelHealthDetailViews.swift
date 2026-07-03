@@ -97,65 +97,67 @@ extension WaveformView {
         }
 
         chanHealth.task = Task { @MainActor in
-            let worker = Task.detached(priority: .utility) {
-                let baseAnalysis: ChannelHealthAnalysis
-                if shouldRefreshBase {
-                    baseAnalysis = ChannelHealthAnalyzer.analyze(
-                        signal: signal,
-                        layout: layout,
-                        base: baseConfig,
-                        spectral: spectralConfig,
-                        ransac: ransacConfig,
-                        impedancesKOhm: impedances,
-                        progress: { fraction in
-                            progressContinuation.yield(0.42 * fraction)
-                        }
+            await processingQueue.run("Channel Health") { [self] in
+                let worker = Task.detached(priority: .utility) {
+                    let baseAnalysis: ChannelHealthAnalysis
+                    if shouldRefreshBase {
+                        baseAnalysis = ChannelHealthAnalyzer.analyze(
+                            signal: signal,
+                            layout: layout,
+                            base: baseConfig,
+                            spectral: spectralConfig,
+                            ransac: ransacConfig,
+                            impedancesKOhm: impedances,
+                            progress: { fraction in
+                                progressContinuation.yield(0.42 * fraction)
+                            }
+                        )
+                    } else {
+                        progressContinuation.yield(0.08)
+                        baseAnalysis = ChannelHealthAnalysis(resultsByChannel: existingResults)
+                    }
+
+                    let waveletStart = shouldRefreshBase ? 0.42 : 0.08
+                    let waveletSpan = shouldRefreshBase ? 0.55 : 0.89
+                    let waveletResults = WaveletArtifactAnalyzer.channelGoodness(
+                        in: signal,
+                        configuration: configuration
+                    ) { update in
+                        progressContinuation.yield(waveletStart + waveletSpan * update.fraction)
+                    }
+                    progressContinuation.yield(0.98)
+                    return ChannelHealthAnalyzer.addingWaveletMetrics(
+                        to: baseAnalysis,
+                        waveletResults: waveletResults
                     )
-                } else {
-                    progressContinuation.yield(0.08)
-                    baseAnalysis = ChannelHealthAnalysis(resultsByChannel: existingResults)
                 }
 
-                let waveletStart = shouldRefreshBase ? 0.42 : 0.08
-                let waveletSpan = shouldRefreshBase ? 0.55 : 0.89
-                let waveletResults = WaveletArtifactAnalyzer.channelGoodness(
-                    in: signal,
-                    configuration: configuration
-                ) { update in
-                    progressContinuation.yield(waveletStart + waveletSpan * update.fraction)
-                }
-                progressContinuation.yield(0.98)
-                return ChannelHealthAnalyzer.addingWaveletMetrics(
-                    to: baseAnalysis,
-                    waveletResults: waveletResults
+                let analysis = await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
+                    }
                 )
-            }
 
-            let analysis = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                    progressContinuation.finish()
+                progressContinuation.finish()
+                progressTask.cancel()
+
+                guard !Task.isCancelled,
+                      channels.showsHealth,
+                      chanHealth.signature == signature else {
+                    return
                 }
-            )
 
-            progressContinuation.finish()
-            progressTask.cancel()
-
-            guard !Task.isCancelled,
-                  channels.showsHealth,
-                  chanHealth.signature == signature else {
-                return
+                channels.healthResults = analysis.resultsByChannel
+                channels.isAnalyzingHealth = false
+                channels.healthProgress = 1
+                chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
+                    ? "No wavelet channel-goodness metrics available."
+                    : "Wavelet channel goodness updated \(analysis.resultsByChannel.count) channels."
             }
-
-            channels.healthResults = analysis.resultsByChannel
-            channels.isAnalyzingHealth = false
-            channels.healthProgress = 1
-            chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
-                ? "No wavelet channel-goodness metrics available."
-                : "Wavelet channel goodness updated \(analysis.resultsByChannel.count) channels."
         }
     }
 
@@ -240,30 +242,32 @@ extension WaveformView {
 
         chanHealth.task?.cancel()
         chanHealth.task = Task { @MainActor in
-            let worker = Task.detached(priority: .utility) {
-                ChannelHealthAnalyzer.analyze(
-                    signal: sourceSignal,
-                    layout: layout,
-                    base: baseConfig,
-                    spectral: spectralConfig,
-                    ransac: ransacConfig,
-                    impedancesKOhm: impedances
-                )
-            }
-            let analysis = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
+            await processingQueue.run("Channel Health") { [self] in
+                let worker = Task.detached(priority: .utility) {
+                    ChannelHealthAnalyzer.analyze(
+                        signal: sourceSignal,
+                        layout: layout,
+                        base: baseConfig,
+                        spectral: spectralConfig,
+                        ransac: ransacConfig,
+                        impedancesKOhm: impedances
+                    )
                 }
-            )
+                let analysis = await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                    }
+                )
 
-            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
-            for channel in affected {
-                channels.healthResults[channel] = analysis.resultsByChannel[channel]
+                guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+                for channel in affected {
+                    channels.healthResults[channel] = analysis.resultsByChannel[channel]
+                }
+                chanHealth.task = nil
             }
-            chanHealth.task = nil
         }
     }
 
@@ -317,45 +321,47 @@ extension WaveformView {
         }
 
         chanHealth.task = Task { @MainActor in
-            let worker = Task.detached(priority: .utility) {
-                ChannelHealthAnalyzer.analyze(
-                    signal: sourceSignal,
-                    layout: layout,
-                    base: baseConfig,
-                    spectral: spectralConfig,
-                    ransac: ransacConfig,
-                    impedancesKOhm: impedances,
-                    progress: { fraction in
-                        progressContinuation.yield(fraction)
+            await processingQueue.run("Channel Health") { [self] in
+                let worker = Task.detached(priority: .utility) {
+                    ChannelHealthAnalyzer.analyze(
+                        signal: sourceSignal,
+                        layout: layout,
+                        base: baseConfig,
+                        spectral: spectralConfig,
+                        ransac: ransacConfig,
+                        impedancesKOhm: impedances,
+                        progress: { fraction in
+                            progressContinuation.yield(fraction)
+                        }
+                    )
+                }
+
+                let analysis = await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
                     }
                 )
-            }
 
-            let analysis = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                    progressContinuation.finish()
+                progressContinuation.finish()
+                progressTask.cancel()
+
+                guard !Task.isCancelled,
+                      channels.showsHealth,
+                      chanHealth.signature == signature else {
+                    return
                 }
-            )
 
-            progressContinuation.finish()
-            progressTask.cancel()
-
-            guard !Task.isCancelled,
-                  channels.showsHealth,
-                  chanHealth.signature == signature else {
-                return
+                channels.healthResults = analysis.resultsByChannel
+                channels.isAnalyzingHealth = false
+                channels.healthProgress = 1
+                chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
+                    ? "No channel health metrics available."
+                    : "Channel health scored \(analysis.resultsByChannel.count) channels."
             }
-
-            channels.healthResults = analysis.resultsByChannel
-            channels.isAnalyzingHealth = false
-            channels.healthProgress = 1
-            chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
-                ? "No channel health metrics available."
-                : "Channel health scored \(analysis.resultsByChannel.count) channels."
         }
     }
 
@@ -396,60 +402,62 @@ extension WaveformView {
         }
 
         chanHealth.task = Task { @MainActor in
-            let worker = Task.detached(priority: .utility) {
-                do {
-                    let analysis = ChannelHealthAnalyzer.analyze(
-                        signal: signal,
-                        layout: layout,
-                        base: baseConfig,
-                        spectral: spectralConfig,
-                        ransac: ransacConfig,
-                        impedancesKOhm: impedances,
-                        progress: { fraction in
-                            progressContinuation.yield(0.85 * fraction)
-                        }
-                    )
-                    let export = SavedChannelHealthDataset.make(
-                        packageName: packageName,
-                        signal: signal,
-                        processing: processing,
-                        hiddenChannelIndices: hiddenChannels,
-                        analysis: analysis
-                    )
-                    progressContinuation.yield(0.92)
+            await processingQueue.run("Channel Health") { [self] in
+                let worker = Task.detached(priority: .utility) {
+                    do {
+                        let analysis = ChannelHealthAnalyzer.analyze(
+                            signal: signal,
+                            layout: layout,
+                            base: baseConfig,
+                            spectral: spectralConfig,
+                            ransac: ransacConfig,
+                            impedancesKOhm: impedances,
+                            progress: { fraction in
+                                progressContinuation.yield(0.85 * fraction)
+                            }
+                        )
+                        let export = SavedChannelHealthDataset.make(
+                            packageName: packageName,
+                            signal: signal,
+                            processing: processing,
+                            hiddenChannelIndices: hiddenChannels,
+                            analysis: analysis
+                        )
+                        progressContinuation.yield(0.92)
 
-                    let encoder = JSONEncoder()
-                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                    encoder.dateEncodingStrategy = .iso8601
-                    let data = try encoder.encode(export)
-                    progressContinuation.yield(0.97)
-                    try data.write(to: url, options: .atomic)
-                    return Result<Int, Error>.success(export.channels.count)
-                } catch {
-                    return Result<Int, Error>.failure(error)
+                        let encoder = JSONEncoder()
+                        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                        encoder.dateEncodingStrategy = .iso8601
+                        let data = try encoder.encode(export)
+                        progressContinuation.yield(0.97)
+                        try data.write(to: url, options: .atomic)
+                        return Result<Int, Error>.success(export.channels.count)
+                    } catch {
+                        return Result<Int, Error>.failure(error)
+                    }
                 }
-            }
-            let result = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                    progressContinuation.finish()
+                let result = await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
+                    }
+                )
+
+                progressContinuation.finish()
+                progressTask.cancel()
+                channels.isAnalyzingHealth = false
+
+                switch result {
+                case .success(let channelCount):
+                    channels.healthProgress = 1
+                    chanHealth.statusMessage = "Saved labels and metrics for \(channelCount) channels: \(url.lastPathComponent)"
+                case .failure(let error):
+                    channels.healthProgress = 0
+                    chanHealth.statusMessage = error.localizedDescription
                 }
-            )
-
-            progressContinuation.finish()
-            progressTask.cancel()
-            channels.isAnalyzingHealth = false
-
-            switch result {
-            case .success(let channelCount):
-                channels.healthProgress = 1
-                chanHealth.statusMessage = "Saved labels and metrics for \(channelCount) channels: \(url.lastPathComponent)"
-            case .failure(let error):
-                channels.healthProgress = 0
-                chanHealth.statusMessage = error.localizedDescription
             }
         }
     }

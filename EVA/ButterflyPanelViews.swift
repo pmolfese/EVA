@@ -65,7 +65,9 @@ extension WaveformView {
                                     colors: overlaySegments.map { epochColor(for: $0.colorIndex) },
                                     hiddenChannels: channels.hidden,
                                     amplitudeScale: amplitudeScale,
-                                    highlightRelativeSample: epoching.butterflyTopomapRelativeSample
+                                    highlightRelativeSample: epoching.butterflyTopomapRelativeSample,
+                                    channelName: { eegChannelDisplayName(index: $0, signal: signal) },
+                                    onTapChannel: { scrollToChannelRequest = $0 }
                                 )
                                 .contentShape(Rectangle())
                                 .simultaneousGesture(
@@ -119,7 +121,9 @@ extension WaveformView {
                                         highlightRelativeSample: epoching.butterflyTopomapRelativeSample,
                                         noiseCurve: (epoching.showsNoiseBand && !recording.noiseCurvesByCategory.isEmpty)
                                             ? recording.noiseCurvesByCategory[segment.category]
-                                            : nil
+                                            : nil,
+                                        channelName: { eegChannelDisplayName(index: $0, signal: signal) },
+                                        onTapChannel: { scrollToChannelRequest = $0 }
                                     )
                                     .contentShape(Rectangle())
                                     .simultaneousGesture(
@@ -342,7 +346,9 @@ extension WaveformView {
                                         timeSeconds: entry.latencySeconds,
                                         fixedScale: autoScale,
                                         colorRange: colorRange,
-                                        zScaling: zScaling
+                                        zScaling: zScaling,
+                                        channelName: { eegChannelDisplayName(index: $0, signal: signal) },
+                                        onTapChannel: { openChannelInspector(channel: $0) }
                                     )
                                     .frame(height: 320)
                                 }

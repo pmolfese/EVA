@@ -19,6 +19,14 @@ import SwiftUI
 
 @MainActor
 final class ArtifactViewModel: ObservableObject {
+    /// Held directly so this VM can read channel state itself — see
+    /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
+    let store: RecordingStore
+
+    init(store: RecordingStore) {
+        self.store = store
+    }
+
     // MARK: Detection
     @Published var detectionMethod = ArtifactDetectionMethod.threshold
     @Published var events: [MFFEvent] = []

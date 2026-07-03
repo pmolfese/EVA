@@ -453,6 +453,12 @@ extension WaveformView {
     }
 
     func runBCGDetection(signal: MFFSignalData, selection: ClosedRange<Int>?) async {
+        await processingQueue.run("BCG Detection") { [self] in
+            await runBCGDetectionCore(signal: signal, selection: selection)
+        }
+    }
+
+    private func runBCGDetectionCore(signal: MFFSignalData, selection: ClosedRange<Int>?) async {
         let sessionID = recordingSessionID
         bcg.isRunning = true
         bcg.status = "Detecting…"
@@ -628,6 +634,12 @@ extension WaveformView {
     }
 
     func runBCGRefinement(signal: MFFSignalData) async {
+        await processingQueue.run("BCG Refinement") { [self] in
+            await runBCGRefinementCore(signal: signal)
+        }
+    }
+
+    private func runBCGRefinementCore(signal: MFFSignalData) async {
         let sessionID = recordingSessionID
         let existingTimes = artifactVM.events
             .filter { $0.sourceFile == BCGDetector.sourceFile }

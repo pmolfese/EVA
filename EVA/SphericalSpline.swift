@@ -75,6 +75,69 @@ enum SphericalSpline {
         return (indices, Array(solution[0..<n]))
     }
 
+    /// Computes interpolation weights for MULTIPLE targets that share the
+    /// SAME `good` electrode set — the common case within one epoch when
+    /// several channels are bad at once. The system matrix (built from
+    /// `good` alone) is identical for every target; only the right-hand side
+    /// depends on the target's position. Factoring that matrix ONCE (LU via
+    /// `LinearAlgebra.factorLinearSystem`) and reusing it for each target's
+    /// solve turns N independent O(n³) solves into one O(n³) factorization
+    /// plus N O(n²) solves — the "shared factorization" optimization.
+    /// Falls back to solving each target independently if the factorization
+    /// fails (singular system / LAPACK unavailable).
+    static func interpolationWeightsBatch(
+        targets: [Int],
+        good: [Int],
+        positions: [Int: SIMD3<Double>],
+        order m: Int = 4,
+        terms: Int = 40,
+        lambda: Double = 1e-5
+    ) -> [Int: (indices: [Int], weights: [Double])] {
+        let indices = good.filter { positions[$0] != nil }
+        let n = indices.count
+        guard n >= 3 else { return [:] }
+        let pos = indices.map { positions[$0]! }
+        let size = n + 1
+
+        var a = [Double](repeating: 0, count: size * size)
+        for i in 0..<n {
+            for j in 0..<n {
+                let dot = simd_dot(pos[i], pos[j])
+                a[i * size + j] = g(dot, order: m, terms: terms)
+            }
+            a[i * size + i] += lambda
+            a[i * size + n] = 1
+            a[n * size + i] = 1
+        }
+        a[n * size + n] = 0
+
+        let factorization = LinearAlgebra.factorLinearSystem(a: a, size: size)
+
+        var results: [Int: (indices: [Int], weights: [Double])] = [:]
+        results.reserveCapacity(targets.count)
+        for target in targets {
+            guard let targetPos = positions[target] else { continue }
+            var rhs = [Double](repeating: 0, count: size)
+            for i in 0..<n {
+                rhs[i] = g(simd_dot(targetPos, pos[i]), order: m, terms: terms)
+            }
+            rhs[n] = 1
+
+            if let solution = factorization?.solve(rhs) {
+                results[target] = (indices, Array(solution[0..<n]))
+            } else {
+                // Factorization unavailable/singular for this matrix — solve
+                // this target's system independently as a fallback.
+                var aCopy = a
+                var rhsCopy = rhs
+                if let solution = LinearAlgebra.solveLinearSystem(a: &aCopy, b: &rhsCopy, size: size) {
+                    results[target] = (indices, Array(solution[0..<n]))
+                }
+            }
+        }
+        return results
+    }
+
     /// Perrin g-function: g(x) = 1/(4π) Σₙ (2n+1)/(n(n+1))^m · Pₙ(x).
     private static func g(_ x: Double, order m: Int, terms: Int) -> Double {
         let cosine = max(-1, min(1, x))

@@ -115,6 +115,7 @@ struct ArtifactCleaningPreviewButton: View {
     let beforeSignal: MFFSignalData
     let afterSignal: MFFSignalData?
     let layout: SensorLayout?
+    var cleaningPreviewCache: [String: ArtifactCleaningPreviewData] = [:]
 
     var body: some View {
         HoverPinnedPreviewButton(helpText: "Preview artifact cleanup") {
@@ -122,7 +123,14 @@ struct ArtifactCleaningPreviewButton: View {
                 artifact: artifact,
                 beforeSignal: beforeSignal,
                 afterSignal: afterSignal,
-                layout: layout
+                layout: layout,
+                cachedPreviewData: cleaningPreviewCache[
+                    ArtifactCleaningPreview.cacheKey(
+                        artifactID: artifact.id,
+                        method: artifact.appliedMethod?.rawValue ?? artifact.cleaningMethod.rawValue,
+                        afterSignal: afterSignal
+                    )
+                ]
             )
         }
     }
@@ -794,18 +802,32 @@ struct ArtifactCleaningPreview: View {
     let beforeSignal: MFFSignalData
     let afterSignal: MFFSignalData?
     let layout: SensorLayout?
+    /// Precomputed at Apply time (see `applyArtifactCleaning(to:)` +
+    /// `ArtifactTemplateViewModel.cleaningPreviewCache`). When present for
+    /// `previewLoadID`, hovering skips `loadPreview()`'s live recompute
+    /// entirely — this is the common case once the user has applied cleaning.
+    var cachedPreviewData: ArtifactCleaningPreviewData?
 
     @State private var previewData: ArtifactCleaningPreviewData?
     @State private var isLoadingPreview = false
     @State private var magnifiesResidual = false
 
-    private var previewLoadID: String {
+    /// Shared with the precompute step so cache keys always match.
+    static func cacheKey(artifactID: DefinedArtifact.ID, method: String, afterSignal: MFFSignalData?) -> String {
         [
-            artifact.id.uuidString,
-            artifact.appliedMethod?.rawValue ?? artifact.cleaningMethod.rawValue,
+            artifactID.uuidString,
+            method,
             afterSignal?.signalType ?? "no-after",
             String(afterSignal?.duration ?? 0)
         ].joined(separator: "-")
+    }
+
+    private var previewLoadID: String {
+        Self.cacheKey(
+            artifactID: artifact.id,
+            method: artifact.appliedMethod?.rawValue ?? artifact.cleaningMethod.rawValue,
+            afterSignal: afterSignal
+        )
     }
 
     private var previewHeight: CGFloat {
@@ -896,6 +918,12 @@ struct ArtifactCleaningPreview: View {
 
     @MainActor
     private func loadPreview() async {
+        if let cachedPreviewData {
+            // Common case: Apply already precomputed this — instant, no spinner.
+            previewData = cachedPreviewData
+            isLoadingPreview = false
+            return
+        }
         isLoadingPreview = true
         previewData = nil
         let artifact = artifact
@@ -1067,7 +1095,12 @@ struct ArtifactCleaningPreview: View {
         }
     }
 
-    nonisolated private static func makePreviewData(
+    /// Not `private` — called directly (off the main thread) to precompute and
+    /// cache preview data right after Apply finishes, so hovering the preview
+    /// button becomes a cache lookup instead of a live recompute. See
+    /// `applyArtifactCleaning(to:)` in WaveletReductionSheetViews.swift and
+    /// `ArtifactTemplateViewModel.cleaningPreviewCache`.
+    nonisolated static func makePreviewData(
         artifact: DefinedArtifact,
         beforeSignal: MFFSignalData,
         afterSignal: MFFSignalData?
@@ -1181,28 +1214,44 @@ struct ArtifactCleaningPreview: View {
         let firstCenter = Double(edgeSamples - 1) / 2
         let lastCenter = Double(windowSamples - edgeSamples) + firstCenter
         let baselineDenominator = max(lastCenter - firstCenter, 1)
-        var averages = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
-        var accepted = 0
+        // Event-level bounds filtering first (channel-independent), so the
+        // per-channel work below — the expensive part — can run in parallel
+        // over channels with a fixed, shared `accepted` divisor, matching the
+        // original (serial, event-outer) accumulation semantics exactly.
+        struct ValidWindow { let start: Int; let end: Int }
+        var validWindows: [ValidWindow] = []
+        validWindows.reserveCapacity(artifact.events.count)
         for event in artifact.events {
             let center = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
             let start = center - windowSamples / 2
             let end = start + windowSamples
             guard start >= 0, end <= sampleCount else { continue }
-
-            for channelIndex in signal.data.indices where signal.data[channelIndex].count >= end {
-                let channelData = signal.data[channelIndex]
-                let firstMean = mean(channelData, start: start, count: edgeSamples)
-                let lastMean = mean(channelData, start: end - edgeSamples, count: edgeSamples)
-                let slope = (lastMean - firstMean) / baselineDenominator
-                for offset in 0..<windowSamples {
-                    let baseline = firstMean + slope * (Double(offset) - firstCenter)
-                    averages[channelIndex][offset] += Float(Double(channelData[start + offset]) - baseline)
-                }
-            }
-            accepted += 1
+            validWindows.append(ValidWindow(start: start, end: end))
         }
-
+        let accepted = validWindows.count
         guard accepted > 0 else { return nil }
+
+        var averages = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
+        averages.withUnsafeMutableBufferPointer { out in
+            // Each iteration writes a distinct channel row; bounded to
+            // evaMaxWorkers so a large channel count can't oversubscribe.
+            nonisolated(unsafe) let out = out
+            evaConcurrentPerform(iterations: signal.data.count) { channelIndex in
+                let channelData = signal.data[channelIndex]
+                var accumulated = [Float](repeating: 0, count: windowSamples)
+                for window in validWindows {
+                    guard channelData.count >= window.end else { continue }
+                    let firstMean = mean(channelData, start: window.start, count: edgeSamples)
+                    let lastMean = mean(channelData, start: window.end - edgeSamples, count: edgeSamples)
+                    let slope = (lastMean - firstMean) / baselineDenominator
+                    for offset in 0..<windowSamples {
+                        let baseline = firstMean + slope * (Double(offset) - firstCenter)
+                        accumulated[offset] += Float(Double(channelData[window.start + offset]) - baseline)
+                    }
+                }
+                out[channelIndex] = accumulated
+            }
+        }
         let divisor = Float(accepted)
         for channelIndex in averages.indices {
             for sample in averages[channelIndex].indices {

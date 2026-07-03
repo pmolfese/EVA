@@ -19,7 +19,7 @@ struct ProcessingStoreTests {
 
     @MainActor
     @Test func waveletDefaultsAndClear() {
-        let vm = WaveletReductionViewModel()
+        let vm = WaveletReductionViewModel(store: RecordingStore())
         #expect(vm.isEnabled)
         #expect(vm.reducedSignal == nil)
         vm.candidates = []
@@ -30,7 +30,7 @@ struct ProcessingStoreTests {
 
     @MainActor
     @Test func epochingParameters() {
-        let vm = EpochingViewModel()
+        let vm = EpochingViewModel(store: RecordingStore())
         vm.preStimulus = 0.1
         vm.postStimulus = 0.5
         vm.baselineCorrected = true
@@ -42,7 +42,7 @@ struct ProcessingStoreTests {
 
     @MainActor
     @Test func artifactDefaults() {
-        let vm = ArtifactViewModel()
+        let vm = ArtifactViewModel(store: RecordingStore())
         #expect(vm.cleaningIsEnabled)
         #expect(vm.events.isEmpty)
         #expect(!vm.isCleaningActive)
@@ -50,7 +50,7 @@ struct ProcessingStoreTests {
 
     @MainActor
     @Test func icaParameters() {
-        let vm = ICAViewModel()
+        let vm = ICAViewModel(store: RecordingStore())
         vm.method = .picard
         vm.componentCount = 25
         let p = vm.parameters
@@ -62,7 +62,7 @@ struct ProcessingStoreTests {
     // eva.xml records them (previously dropped / omitted).
     @MainActor
     @Test func gradientAndWaveletExposeCaptureParameters() {
-        #expect(GradientViewModel().parameters["method"] != nil)
-        #expect(WaveletReductionViewModel().parameters["mode"] != nil)
+        #expect(GradientViewModel(store: RecordingStore()).parameters["method"] != nil)
+        #expect(WaveletReductionViewModel(store: RecordingStore()).parameters["mode"] != nil)
     }
 }

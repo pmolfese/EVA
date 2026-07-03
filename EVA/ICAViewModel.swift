@@ -19,7 +19,12 @@ import SwiftUI
 
 @MainActor
 final class ICAViewModel: ObservableObject {
-    init() {
+    /// Held directly so this VM can read channel state itself — see
+    /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
+    let store: RecordingStore
+
+    init(store: RecordingStore) {
+        self.store = store
         let d = ProcessingDefaults.shared
         method = d.icaMethod
         componentCount = d.icaComponentCount

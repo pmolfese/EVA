@@ -237,43 +237,45 @@ extension WaveformView {
         }
 
         segHealth.task = Task { @MainActor in
-            let worker = Task.detached(priority: .utility) {
-                SegmentHealthAnalyzer.analyze(
-                    signal: sourceSignal,
-                    segments: segments,
-                    excludedChannelIndices: excludedChannels,
-                    artifactIntervals: artifactIntervals,
-                    progress: { fraction in
-                        progressContinuation.yield(fraction)
+            await processingQueue.run("Segment Health") { [self] in
+                let worker = Task.detached(priority: .utility) {
+                    SegmentHealthAnalyzer.analyze(
+                        signal: sourceSignal,
+                        segments: segments,
+                        excludedChannelIndices: excludedChannels,
+                        artifactIntervals: artifactIntervals,
+                        progress: { fraction in
+                            progressContinuation.yield(fraction)
+                        }
+                    )
+                }
+
+                let analysis = await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
                     }
                 )
-            }
 
-            let analysis = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                    progressContinuation.finish()
+                progressContinuation.finish()
+                progressTask.cancel()
+
+                guard !Task.isCancelled,
+                      segHealth.shows,
+                      segHealth.signature == signature else {
+                    return
                 }
-            )
 
-            progressContinuation.finish()
-            progressTask.cancel()
-
-            guard !Task.isCancelled,
-                  segHealth.shows,
-                  segHealth.signature == signature else {
-                return
+                segHealth.analysis = analysis
+                segHealth.isAnalyzing = false
+                segHealth.progress = 1
+                segHealth.statusMessage = analysis.results.isEmpty
+                    ? "No segment health metrics available."
+                    : "Segment health scored \(analysis.results.count) segments."
             }
-
-            segHealth.analysis = analysis
-            segHealth.isAnalyzing = false
-            segHealth.progress = 1
-            segHealth.statusMessage = analysis.results.isEmpty
-                ? "No segment health metrics available."
-                : "Segment health scored \(analysis.results.count) segments."
         }
     }
 
@@ -337,66 +339,68 @@ extension WaveformView {
         }
 
         segHealth.task = Task { @MainActor in
-            let worker = Task.detached(priority: .utility) {
-                do {
-                    let analysis: SegmentHealthAnalysis
-                    if let reusableAnalysis {
-                        analysis = reusableAnalysis
-                        progressContinuation.yield(0.85)
-                    } else {
-                        analysis = SegmentHealthAnalyzer.analyze(
+            await processingQueue.run("Segment Health") { [self] in
+                let worker = Task.detached(priority: .utility) {
+                    do {
+                        let analysis: SegmentHealthAnalysis
+                        if let reusableAnalysis {
+                            analysis = reusableAnalysis
+                            progressContinuation.yield(0.85)
+                        } else {
+                            analysis = SegmentHealthAnalyzer.analyze(
+                                signal: signal,
+                                segments: segments,
+                                excludedChannelIndices: excludedChannels,
+                                artifactIntervals: artifactIntervals,
+                                progress: { fraction in
+                                    progressContinuation.yield(0.85 * fraction)
+                                }
+                            )
+                        }
+
+                        let export = SavedSegmentHealthDataset.make(
+                            packageName: packageName,
                             signal: signal,
-                            segments: segments,
-                            excludedChannelIndices: excludedChannels,
-                            artifactIntervals: artifactIntervals,
-                            progress: { fraction in
-                                progressContinuation.yield(0.85 * fraction)
-                            }
+                            processing: processing,
+                            analysis: analysis
                         )
+                        progressContinuation.yield(0.92)
+
+                        let encoder = JSONEncoder()
+                        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                        encoder.dateEncodingStrategy = .iso8601
+                        let data = try encoder.encode(export)
+                        progressContinuation.yield(0.97)
+                        try data.write(to: url, options: .atomic)
+                        return Result<(Int, SegmentHealthAnalysis), Error>.success((export.segments.count, analysis))
+                    } catch {
+                        return Result<(Int, SegmentHealthAnalysis), Error>.failure(error)
                     }
-
-                    let export = SavedSegmentHealthDataset.make(
-                        packageName: packageName,
-                        signal: signal,
-                        processing: processing,
-                        analysis: analysis
-                    )
-                    progressContinuation.yield(0.92)
-
-                    let encoder = JSONEncoder()
-                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                    encoder.dateEncodingStrategy = .iso8601
-                    let data = try encoder.encode(export)
-                    progressContinuation.yield(0.97)
-                    try data.write(to: url, options: .atomic)
-                    return Result<(Int, SegmentHealthAnalysis), Error>.success((export.segments.count, analysis))
-                } catch {
-                    return Result<(Int, SegmentHealthAnalysis), Error>.failure(error)
                 }
-            }
-            let result = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                    progressContinuation.finish()
+                let result = await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
+                    }
+                )
+
+                progressContinuation.finish()
+                progressTask.cancel()
+                segHealth.isAnalyzing = false
+
+                switch result {
+                case .success(let payload):
+                    segHealth.progress = 1
+                    segHealth.signature = signature
+                    segHealth.analysis = payload.1
+                    segHealth.statusMessage = "Saved metrics for \(payload.0) segments: \(url.lastPathComponent)"
+                case .failure(let error):
+                    segHealth.progress = 0
+                    segHealth.statusMessage = error.localizedDescription
                 }
-            )
-
-            progressContinuation.finish()
-            progressTask.cancel()
-            segHealth.isAnalyzing = false
-
-            switch result {
-            case .success(let payload):
-                segHealth.progress = 1
-                segHealth.signature = signature
-                segHealth.analysis = payload.1
-                segHealth.statusMessage = "Saved metrics for \(payload.0) segments: \(url.lastPathComponent)"
-            case .failure(let error):
-                segHealth.progress = 0
-                segHealth.statusMessage = error.localizedDescription
             }
         }
     }

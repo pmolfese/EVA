@@ -27,7 +27,7 @@ struct FilterViewModelTests {
 
     @MainActor
     @Test func parametersReflectSettings() {
-        let vm = FilterViewModel()
+        let vm = FilterViewModel(store: RecordingStore())
         vm.lowCutoff = 0.5
         vm.highCutoff = 40
         vm.averageReference = true
@@ -47,7 +47,7 @@ struct FilterViewModelTests {
 
     @MainActor
     @Test func precisionDefaultsToAutoAndCanBeSerialized() {
-        let vm = FilterViewModel()
+        let vm = FilterViewModel(store: RecordingStore())
         #expect(vm.precision == .auto)
         #expect(vm.parameters["precision"] == "auto")
 
@@ -60,7 +60,7 @@ struct FilterViewModelTests {
 
     @MainActor
     @Test func blankCutoffFieldsOmitThatFilterEdge() {
-        let vm = FilterViewModel()
+        let vm = FilterViewModel(store: RecordingStore())
 
         vm.lowCutoff = 0.5
         vm.lowPassCutoffText = ""
@@ -79,7 +79,7 @@ struct FilterViewModelTests {
 
     @MainActor
     @Test func activeLineNoiseModeFollowsNotchToggle() {
-        let vm = FilterViewModel()
+        let vm = FilterViewModel(store: RecordingStore())
         vm.lineNoiseMode = .off
         vm.notch60HzEnabled = true
         #expect(vm.activeLineNoiseMode == .notch)
