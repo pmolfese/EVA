@@ -63,11 +63,27 @@ struct WaveformView: View {
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
 
-    @State var amplitudeScale: Double = 100
-    @State var timeScale: Double = 1
-    @State var horizontalOffset: CGFloat = 0
-    @State var horizontalViewportWidth: CGFloat = 1
-    @State var horizontalScrollPosition = ScrollPosition(idType: Int.self, x: 0)
+    @State var recordingStore = RecordingStore()
+    var amplitudeScale: Double {
+        get { recordingStore.amplitudeScale }
+        nonmutating set { recordingStore.amplitudeScale = newValue }
+    }
+    var timeScale: Double {
+        get { recordingStore.timeScale }
+        nonmutating set { recordingStore.timeScale = newValue }
+    }
+    var horizontalOffset: CGFloat {
+        get { recordingStore.horizontalOffset }
+        nonmutating set { recordingStore.horizontalOffset = newValue }
+    }
+    var horizontalViewportWidth: CGFloat {
+        get { recordingStore.horizontalViewportWidth }
+        nonmutating set { recordingStore.horizontalViewportWidth = newValue }
+    }
+    var horizontalScrollPosition: ScrollPosition {
+        get { recordingStore.horizontalScrollPosition }
+        nonmutating set { recordingStore.horizontalScrollPosition = newValue }
+    }
     @State var horizontalJumpValue: Double = 0
     @State var isSyncingSliderFromScroll = false
     @State var isCommandKeyPressed = false
@@ -185,7 +201,7 @@ struct WaveformView: View {
     @StateObject var replay = ReplayController()
 
     // Per-channel state, shared with the menu-bar Channels commands.
-    @State var channels = ChannelModel()
+    var channels: ChannelModel { recordingStore.channels }
     @State var electrodeGeometry: ElectrodeGeometry?
     @State var channelStatusMessage: String?
     @State private var channelLabelMetricsExportRequest = 0
@@ -899,7 +915,7 @@ struct WaveformView: View {
                     Text("Time Scale")
                         .font(.caption.weight(.semibold))
                         .frame(width: 72, alignment: .leading)
-                    Slider(value: $timeScale, in: 0.2...8, step: 0.1)
+                    Slider(value: Binding(get: { timeScale }, set: { timeScale = $0 }), in: 0.2...8, step: 0.1)
                         .frame(width: 170)
                     Text(String(format: "%.1fx", timeScale))
                         .font(.caption.monospacedDigit())
@@ -1486,7 +1502,7 @@ struct WaveformView: View {
                         .gesture(waveformInteractionGesture(in: signal))
                         .padding(.trailing, 20)
                     }
-                    .scrollPosition($horizontalScrollPosition)
+                    .scrollPosition(Binding(get: { horizontalScrollPosition }, set: { horizontalScrollPosition = $0 }))
                     .scrollIndicators(.visible, axes: .horizontal)
                     .onScrollGeometryChange(
                         for: HorizontalViewport.self,
