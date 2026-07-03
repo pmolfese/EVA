@@ -91,4 +91,56 @@ nonisolated struct EyeArtifactThresholdConfiguration: Sendable, Codable, Equatab
             )
         }
     }
+
+    // MARK: - Flat eva.xml parameters (human-readable, one <param> per field)
+
+    /// Emits each field as its own prefixed key (e.g. `blink.amplitudeMinMicrovolts`),
+    /// so eva.xml stays readable to naive parsers instead of a JSON blob.
+    func flatParameters(prefix: String) -> [String: String] {
+        var p: [String: String] = [
+            "\(prefix).amplitudeMinMicrovolts": Self.num(amplitudeMinMicrovolts),
+            "\(prefix).amplitudeMaxMicrovolts": Self.num(amplitudeMaxMicrovolts),
+            "\(prefix).riseWindowSeconds": Self.num(riseWindowSeconds),
+            "\(prefix).minDurationSeconds": Self.num(minDurationSeconds),
+            "\(prefix).maxDurationSeconds": Self.num(maxDurationSeconds),
+            "\(prefix).mergeGapSeconds": Self.num(mergeGapSeconds),
+            "\(prefix).polarity": polarity.rawValue,
+            "\(prefix).velocityEnabled": "\(velocityEnabled)",
+            "\(prefix).velocityThreshold": Self.num(velocityThresholdMicrovoltsPerMillisecond),
+            "\(prefix).accelerationEnabled": "\(accelerationEnabled)",
+            "\(prefix).accelerationThreshold": Self.num(accelerationThresholdMicrovoltsPerMillisecondSquared)
+        ]
+        if let channels = channelOverride, !channels.isEmpty {
+            p["\(prefix).channels"] = channels.map { String($0 + 1) }.joined(separator: ",") // 1-based
+        }
+        return p
+    }
+
+    /// Rebuilds a config from flat params, starting from `base` for any missing key.
+    static func fromFlatParameters(_ p: [String: String], prefix: String,
+                                   base: EyeArtifactThresholdConfiguration) -> EyeArtifactThresholdConfiguration {
+        var c = base
+        if let v = p["\(prefix).amplitudeMinMicrovolts"].flatMap(Float.init) { c.amplitudeMinMicrovolts = v }
+        if let v = p["\(prefix).amplitudeMaxMicrovolts"].flatMap(Float.init) { c.amplitudeMaxMicrovolts = v }
+        if let v = p["\(prefix).riseWindowSeconds"].flatMap(Double.init) { c.riseWindowSeconds = v }
+        if let v = p["\(prefix).minDurationSeconds"].flatMap(Double.init) { c.minDurationSeconds = v }
+        if let v = p["\(prefix).maxDurationSeconds"].flatMap(Double.init) { c.maxDurationSeconds = v }
+        if let v = p["\(prefix).mergeGapSeconds"].flatMap(Double.init) { c.mergeGapSeconds = v }
+        if let v = p["\(prefix).polarity"].flatMap(EyeArtifactPolarity.init(rawValue:)) { c.polarity = v }
+        if let v = p["\(prefix).velocityEnabled"] { c.velocityEnabled = (v == "true") }
+        if let v = p["\(prefix).velocityThreshold"].flatMap(Float.init) { c.velocityThresholdMicrovoltsPerMillisecond = v }
+        if let v = p["\(prefix).accelerationEnabled"] { c.accelerationEnabled = (v == "true") }
+        if let v = p["\(prefix).accelerationThreshold"].flatMap(Float.init) { c.accelerationThresholdMicrovoltsPerMillisecondSquared = v }
+        if let s = p["\(prefix).channels"] {
+            let idx = s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }.map { $0 - 1 }
+            c.channelOverride = idx.isEmpty ? nil : idx
+        }
+        return c
+    }
+
+    /// Compact numeric string (drops trailing `.0` for whole numbers).
+    private static func num(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(value)
+    }
+    private static func num(_ value: Float) -> String { num(Double(value)) }
 }

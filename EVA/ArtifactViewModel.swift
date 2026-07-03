@@ -43,4 +43,19 @@ final class ArtifactViewModel: ObservableObject {
     @Published var cleaningIsEnabled = true
 
     var isCleaningActive: Bool { cleanedSignal != nil }
+
+    func resetForClose() {
+        events = []
+        isDetecting = false
+        statusMessage = nil
+        detectionRefreshToken += 1
+        showsThresholdSheet = false
+        showsCleaningSheet = false
+        isCleaning = false
+        cleaningStatusMessage = nil
+        cleaningSummaries = []
+        cleaningProgress = nil
+        cleanedSignal = nil
+        cleaningIsEnabled = true
+    }
 }

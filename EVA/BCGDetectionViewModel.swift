@@ -56,4 +56,14 @@ final class BCGDetectionViewModel: ObservableObject {
     @Published var refinedKeptCount: Int?
     @Published var isRefining = false
     @Published var rejectFraction = 0.20
+
+    func resetForClose() {
+        detectsArtifacts = false
+        showsSheet = false
+        isRunning = false
+        status = nil
+        refinedTemplate = nil
+        refinedKeptCount = nil
+        isRefining = false
+    }
 }

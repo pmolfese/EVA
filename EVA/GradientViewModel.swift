@@ -74,6 +74,18 @@ final class GradientViewModel: ObservableObject {
         correctedPNSSignal = nil
     }
 
+    func resetForClose() {
+        correctedSignal = nil
+        correctedPNSSignal = nil
+        isProcessing = false
+        progress = 0
+        statusMessage = nil
+        statusIsError = false
+        showsPopover = false
+        showsMethodHelp = false
+        showsMotionConfig = false
+    }
+
     /// Volume indices flagged as high-motion (FD > threshold), or empty when the
     /// user hasn't enabled exclusion / motion isn't loaded.
     func highMotionVolumeSet() -> Set<Int> {
@@ -101,5 +113,23 @@ final class GradientViewModel: ObservableObject {
             params["motionFDThreshold"] = String(format: "%.2f", motionFDThreshold)
         }
         return params
+    }
+
+    /// Deserialization inverse of `parameters` for Copy Processing / replay.
+    /// Missing keys leave the current value untouched. Motion data itself is
+    /// subject-specific (loaded per-recording), so only the threshold is carried;
+    /// exclusion no-ops gracefully when the target file has no motion params.
+    func apply(parameters p: [String: String]) {
+        if let m = p["method"].flatMap(MRIGradientMethod.init(rawValue:)) { method = m }
+        if let c = p["trMarkerCode"] { trMarkerCode = c }
+        if let v = p["windowBefore"].flatMap(Int.init) { windowBefore = v }
+        if let v = p["windowAfter"].flatMap(Int.init) { windowAfter = v }
+        if let v = p["slices"].flatMap(Int.init) { fastrSlices = v }
+        if let v = p["obs"] { fastrOBSAuto = (v == "true") }
+        if let v = p["anc"] { fastrANC = (v == "true") }
+        if let v = p["motionFDThreshold"].flatMap(Double.init) {
+            motionFDThreshold = v
+            excludeHighMotion = true
+        }
     }
 }

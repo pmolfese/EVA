@@ -353,6 +353,7 @@ private nonisolated enum BrainVisionSignalReader {
         switch orientation {
         case "MULTIPLEXED":
             for sample in 0..<sampleCount {
+                if (sample & 0x3ff) == 0 { try Task.checkCancellation() }
                 for channel in 0..<channelCount {
                     data[channel][sample] = Float(try valueAt(bytes, offset) * scales[channel])
                     offset += valueByteCount
@@ -360,6 +361,7 @@ private nonisolated enum BrainVisionSignalReader {
             }
         case "VECTORIZED":
             for channel in 0..<channelCount {
+                try Task.checkCancellation()
                 for sample in 0..<sampleCount {
                     data[channel][sample] = Float(try valueAt(bytes, offset) * scales[channel])
                     offset += valueByteCount
@@ -387,6 +389,7 @@ private nonisolated enum BrainVisionSignalReader {
         let sampleCount = values.count / channelCount
         var data = Array(repeating: [Float](repeating: 0, count: sampleCount), count: channelCount)
         for sample in 0..<sampleCount {
+            if (sample & 0x3ff) == 0 { try Task.checkCancellation() }
             for channel in 0..<channelCount {
                 data[channel][sample] = Float(values[sample * channelCount + channel] * scales[channel])
             }
@@ -508,6 +511,7 @@ private nonisolated enum EDFSignalReader {
         var data = Array(repeating: [Float](repeating: 0, count: sampleCount), count: dataChannels.count)
         var dataOffset = headerByteCount
         for record in 0..<actualRecordCount {
+            if (record & 0x3f) == 0 { try Task.checkCancellation() }
             for signalIndex in 0..<signalCount {
                 let count = samplesPerRecord[signalIndex]
                 let outIndex = dataChannels.firstIndex(of: signalIndex)
@@ -604,6 +608,7 @@ private nonisolated enum PersystSignalReader {
         var data = Array(repeating: [Float](repeating: 0, count: sampleCount), count: channelCount)
         var offset = 0
         for sample in 0..<sampleCount {
+            if (sample & 0x3ff) == 0 { try Task.checkCancellation() }
             for channel in 0..<channelCount {
                 let raw: Double
                 if dataType == 7 {
@@ -884,6 +889,7 @@ private nonisolated enum BESAGenericReader {
         switch order {
         case "multiplexed":
             for sample in 0..<sampleCount {
+                if (sample & 0x3ff) == 0 { try Task.checkCancellation() }
                 for channel in 0..<channelCount {
                     let index = sample * channelCount + channel
                     guard index < values.count else { continue }
@@ -892,6 +898,7 @@ private nonisolated enum BESAGenericReader {
             }
         case "vectorized":
             for channel in 0..<channelCount {
+                try Task.checkCancellation()
                 for sample in 0..<sampleCount {
                     let index = channel * sampleCount + sample
                     guard index < values.count else { continue }

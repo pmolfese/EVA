@@ -44,6 +44,7 @@ nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable 
         case mriGradientCorrection
         case waveletReduce
         case artifactClean
+        case thresholdArtifactDetection
         case icaClean
         case bcgDetection
         case ecgDetection
@@ -69,6 +70,33 @@ nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable 
     /// Per-category trial rejection, for `average` steps. Empty otherwise.
     var rejections: [CategoryRejection] = []
     var appliedAt: Date = Date()
+}
+
+/// How a captured step behaves during interactive replay.
+nonisolated enum ReplayInteraction: Equatable {
+    /// Portable — applied automatically with no pause (filter, threshold detection).
+    case auto
+    /// Applied automatically, but pauses first so the user can review/edit its
+    /// parameters in the existing panel (MRI gradient — TR-skip/motion/window).
+    case review
+    /// Requires a human decision: an automated part runs, then replay pauses for
+    /// the user to make a subject-specific choice (ICA component removal).
+    case decision
+    /// Not replayable and not surfaced as a pause (interpolation, bad marks,
+    /// per-subject artifact cleaning, wavelet — for now).
+    case skip
+}
+
+extension EVAProcessingStep {
+    /// Pure classification of this step for the interactive replay engine.
+    var replayInteraction: ReplayInteraction {
+        switch operation {
+        case .filter, .thresholdArtifactDetection, .segment: return .auto
+        case .mriGradientCorrection: return .review
+        case .icaClean: return .decision
+        default: return .skip
+        }
+    }
 }
 
 /// An ordered list of processing steps — the shared abstraction behind both
@@ -126,7 +154,22 @@ nonisolated enum EVAProcessingScriptXML {
 
     /// Reads `eva.xml` from an MFF package directory, if present.
     static func read(fromPackage packageURL: URL) -> EVAProcessingScript? {
-        let url = packageURL.appendingPathComponent(fileName)
+        read(fromFile: packageURL.appendingPathComponent(fileName))
+    }
+
+    /// Reads a script from a standalone `eva.xml` (or MFF package directory)
+    /// chosen by the user. If `url` is a package directory, its `eva.xml` is read.
+    static func read(fromFile url: URL) -> EVAProcessingScript? {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        if exists, isDirectory.boolValue {
+            // A package/directory was picked — read its eva.xml.
+            return parse(fileURL: url.appendingPathComponent(fileName))
+        }
+        return parse(fileURL: url)
+    }
+
+    private static func parse(fileURL url: URL) -> EVAProcessingScript? {
         guard let data = try? Data(contentsOf: url),
               let doc = try? XMLDocument(data: data),
               let root = doc.rootElement() else { return nil }

@@ -79,25 +79,35 @@ final class MFFRecording: ObservableObject, Identifiable {
     private(set) var loadStatusMessage = "Preparing to read recording"
     private(set) var loadDetailMessage: String?
 
+    private var activeLoadRequestID = UUID()
+    private var loadTask: Task<LoadResult, Never>?
+    private var isClosed = false
+
     init(packageURL: URL, securityScopedURLs: [URL] = []) {
         self.packageURL = packageURL
         self.packageName = packageURL.lastPathComponent
         self.securityScopedURLs = securityScopedURLs
     }
 
+    deinit {
+        loadTask?.cancel()
+    }
+
     @MainActor
     func loadIfNeeded() async {
-        guard isLoading, signal == nil, loadError == nil else { return }
+        guard isLoading, signal == nil, loadError == nil, !isClosed else { return }
 
         let url = packageURL
         let scopedURLs = securityScopedURLs
+        let requestID = UUID()
+        activeLoadRequestID = requestID
         objectWillChange.send()
         loadProgress = 0
         loadStatusMessage = "Opening \(packageName)"
         loadDetailMessage = nil
 
         let (progressContinuation, progressTask) = ProgressBridge.make { (update: SignalImportProgress) in
-            guard self.isLoading else { return }
+            guard self.isLoading, !self.isClosed, self.activeLoadRequestID == requestID else { return }
             self.objectWillChange.send()
             self.loadProgress = update.fraction
             self.loadStatusMessage = update.message
@@ -113,13 +123,31 @@ final class MFFRecording: ObservableObject, Identifiable {
             ))
         }
 
-        let result = await Task.detached(priority: .userInitiated) {
+        let worker = Task.detached(priority: .userInitiated) {
             Self.load(packageURL: url, securityScopedURLs: scopedURLs, progress: progressHandler)
-        }.value
+        }
+        loadTask = worker
+        let result = await withTaskCancellationHandler(
+            operation: {
+                await worker.value
+            },
+            onCancel: {
+                worker.cancel()
+                progressContinuation.finish()
+            }
+        )
         progressContinuation.finish()
         progressTask.cancel()
 
+        guard !Task.isCancelled, !isClosed, activeLoadRequestID == requestID else {
+            if activeLoadRequestID == requestID {
+                loadTask = nil
+            }
+            return
+        }
+
         objectWillChange.send()
+        loadTask = nil
         signal = result.signal
         pnsSignal = result.pnsSignal
         sensorLayout = result.layout
@@ -133,6 +161,26 @@ final class MFFRecording: ObservableObject, Identifiable {
         loadStatusMessage = result.error == nil ? "Loaded" : "Load failed"
         loadDetailMessage = result.antiAliasTimingCorrection?.loadingMessage
         isLoading = false
+    }
+
+    @MainActor
+    func tearDownForClose() {
+        objectWillChange.send()
+        isClosed = true
+        activeLoadRequestID = UUID()
+        loadTask?.cancel()
+        loadTask = nil
+        signal = nil
+        pnsSignal = nil
+        sensorLayout = nil
+        electrodeGeometry = nil
+        antiAliasTimingCorrection = nil
+        noiseCurvesByCategory = [:]
+        loadError = nil
+        isLoading = false
+        loadProgress = nil
+        loadStatusMessage = "Closed"
+        loadDetailMessage = nil
     }
 
     @MainActor
@@ -179,6 +227,7 @@ final class MFFRecording: ObservableObject, Identifiable {
             epochSegments: currentSignal.epochSegments,
             isSegmented: currentSignal.isSegmented,
             isAveraged: currentSignal.isAveraged,
+            isGrandAverage: currentSignal.isGrandAverage,
             impedancesKOhm: impedances
         )
 
@@ -236,6 +285,7 @@ final class MFFRecording: ObservableObject, Identifiable {
             epochSegments: currentSignal.epochSegments,
             isSegmented: currentSignal.isSegmented,
             isAveraged: currentSignal.isAveraged,
+            isGrandAverage: currentSignal.isGrandAverage,
             impedancesKOhm: impedances
         )
 
@@ -346,13 +396,23 @@ final class MFFRecording: ObservableObject, Identifiable {
         }
 
         do {
+            try Task.checkCancellation()
             let imported = try SignalImportReader.load(from: packageURL, progress: progress)
+            try Task.checkCancellation()
             return LoadResult(
                 signal: imported.signal,
                 pnsSignal: imported.pnsSignal,
                 layout: imported.layout,
                 geometry: imported.geometry,
                 antiAliasTimingCorrection: imported.antiAliasTimingCorrection,
+                error: nil
+            )
+        } catch is CancellationError {
+            return LoadResult(
+                signal: nil,
+                layout: nil,
+                geometry: nil,
+                antiAliasTimingCorrection: nil,
                 error: nil
             )
         } catch {

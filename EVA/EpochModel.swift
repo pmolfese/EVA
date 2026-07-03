@@ -26,8 +26,14 @@ nonisolated struct EpochSegment: Identifiable, Sendable {
     let sourceTimeSeconds: Double
     let colorIndex: Int
     let contributingEpochCount: Int
+    /// Contributing subject/group id for grand-average segments (one seg per
+    /// subject per category). `nil` for ordinary averages/epochs. `var` with a
+    /// default so it joins the memberwise init while existing sites omit it.
+    var subject: String? = nil
 
     var id: String {
-        "\(startSample)-\(endSample)-\(category)-\(sourceCode)-\(sourceTimeSeconds)-\(contributingEpochCount)"
+        // `subject` disambiguates grand-average segments that share category +
+        // sample range across subjects.
+        "\(startSample)-\(endSample)-\(category)-\(sourceCode)-\(sourceTimeSeconds)-\(contributingEpochCount)-\(subject ?? "")"
     }
 }

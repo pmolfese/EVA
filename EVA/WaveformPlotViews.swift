@@ -444,6 +444,152 @@ struct ButterflyConditionPlot: View {
     }
 }
 
+/// Vertical topomap color-scale control (shown while ⌘ is held): µV min/max with
+/// an optional symmetry lock, or a Z-score scale of ±N SD about the mean.
+struct TopomapScaleControl: View {
+    @Binding var mode: EpochingViewModel.TopomapScaleMode
+    // µV
+    @Binding var symmetric: Bool
+    @Binding var minValue: Double
+    @Binding var maxValue: Double
+    let autoScale: Double
+    let onAutoMicrovolts: () -> Void
+    // Z-score
+    @Binding var sigma: Double
+    @Binding var zMean: Double
+    @Binding var zSD: Double
+    let onAutoZ: () -> Void
+
+    var body: some View {
+        let limit = Swift.max(autoScale * 3, 1)
+        VStack(spacing: 8) {
+            Picker("", selection: $mode) {
+                ForEach(EpochingViewModel.TopomapScaleMode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 96)
+
+            if mode == .microvolts {
+                Toggle("Symmetric", isOn: $symmetric)
+                    .toggleStyle(.checkbox)
+                    .font(.caption2)
+                numField("Max", $maxValue)
+                VerticalSlider(value: $maxValue, range: 0...limit)
+                if !symmetric {
+                    VerticalSlider(value: $minValue, range: -limit...0)
+                    numField("Min", $minValue)
+                } else {
+                    Text("± max").font(.caption2).foregroundStyle(.secondary)
+                }
+                Button("Auto") { onAutoMicrovolts() }.font(.caption2).buttonStyle(.borderless)
+            } else {
+                numField("± SD", $sigma)
+                numField("Mean", $zMean)
+                numField("SD", $zSD)
+                Button("Auto") { onAutoZ() }.font(.caption2).buttonStyle(.borderless)
+                Text("color = ±SD\nabout the mean")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(8)
+        .frame(width: 92)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .help("Adjust the topomap color scale. µV min/max (tighter = more intense) or a Z-score ±SD scale.")
+    }
+
+    @ViewBuilder
+    private func numField(_ label: String, _ value: Binding<Double>) -> some View {
+        VStack(spacing: 1) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            TextField("", value: value, format: .number.precision(.fractionLength(1)))
+                .textFieldStyle(.roundedBorder)
+                .font(.caption2.monospacedDigit())
+                .frame(width: 62)
+        }
+    }
+}
+
+/// A Slider rotated to run vertically.
+struct VerticalSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+
+    var body: some View {
+        Slider(value: $value, in: range)
+            .frame(width: 130)
+            .rotationEffect(.degrees(-90))
+            .frame(width: 30, height: 130)
+    }
+}
+
+/// Overlays the all-channel butterfly of two or more conditions on shared axes,
+/// each condition in its own color — for publication comparison figures.
+struct OverlayButterflyPlot: View {
+    let data: [[Float]]
+    let segments: [EpochSegment]
+    let colors: [Color]
+    let hiddenChannels: Set<Int>
+    let amplitudeScale: Double
+    var highlightRelativeSample: Int? = nil
+
+    var body: some View {
+        Canvas { context, size in
+            guard let first = segments.first, !data.isEmpty else { return }
+            let epochLength = first.endSample - first.startSample + 1
+            guard epochLength > 1 else { return }
+
+            let midY = size.height / 2
+            let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
+            let xScale = size.width / CGFloat(max(epochLength - 1, 1))
+            let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
+
+            var baseline = Path()
+            baseline.move(to: CGPoint(x: 0, y: midY))
+            baseline.addLine(to: CGPoint(x: size.width, y: midY))
+            context.stroke(baseline, with: .color(.secondary.opacity(0.28)), lineWidth: 0.75)
+
+            let stimulusX = CGFloat(first.stimulusOffsetSamples) * xScale
+            var stimulus = Path()
+            stimulus.move(to: CGPoint(x: stimulusX, y: 0))
+            stimulus.addLine(to: CGPoint(x: stimulusX, y: size.height))
+            context.stroke(stimulus, with: .color(.green.opacity(0.75)), lineWidth: 1)
+
+            if let highlightRelativeSample {
+                let clamped = min(max(highlightRelativeSample, 0), epochLength - 1)
+                let cursorX = CGFloat(clamped) * xScale
+                var cursor = Path()
+                cursor.move(to: CGPoint(x: cursorX, y: 0))
+                cursor.addLine(to: CGPoint(x: cursorX, y: size.height))
+                context.stroke(cursor, with: .color(.yellow), lineWidth: 1.5)
+            }
+
+            for (index, segment) in segments.enumerated() {
+                let color = index < colors.count ? colors[index] : .accentColor
+                for channelIndex in data.indices where !hiddenChannels.contains(channelIndex) {
+                    let channel = data[channelIndex]
+                    guard segment.startSample >= 0, segment.endSample < channel.count else { continue }
+                    var path = Path()
+                    path.move(to: CGPoint(x: 0, y: midY - CGFloat(channel[segment.startSample]) * pointsPerMicrovolt))
+                    for localSample in stride(from: sampleStep, through: epochLength - 1, by: sampleStep) {
+                        let sample = segment.startSample + localSample
+                        guard sample < channel.count else { break }
+                        path.addLine(to: CGPoint(x: CGFloat(localSample) * xScale,
+                                                 y: midY - CGFloat(channel[sample]) * pointsPerMicrovolt))
+                    }
+                    context.stroke(path, with: .color(color.opacity(0.30)), lineWidth: 0.7)
+                }
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
+        }
+    }
+}
+
 struct ArtifactTemplateAveragePlot: View {
     let average: ArtifactTemplateAverage
     let primaryChannel: Int?

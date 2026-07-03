@@ -93,6 +93,7 @@ final class FilterViewModel: ObservableObject {
     @Published var pnsInputSignalType: String?
 
     private var activeRequestID = UUID()
+    private var activeWorker: Task<([[Float]], [[Float]]?), Error>?
 
     var isActive: Bool { output != nil }
 
@@ -194,7 +195,11 @@ final class FilterViewModel: ObservableObject {
         if let lowPassHz = cutoffs?.lowPassHz {
             params["lowPassHz"] = String(format: "%.3g", lowPassHz)
         }
+        params["highPassSlope"] = "\(highPassSlope.rawValue)"
+        params["lowPassSlope"] = "\(lowPassSlope.rawValue)"
         if notch60HzEnabled { params["notchHz"] = "60" }
+        // Explicit mode disambiguates notch vs adaptive CleanLine on replay.
+        params["lineNoiseMode"] = activeLineNoiseMode.rawValue
         if lineNoiseMode != .off {
             params["lineNoiseHz"] = String(format: "%.0f", lineNoiseFrequency)
             params["lineNoiseHarmonics"] = "\(lineNoiseHarmonics)"
@@ -203,16 +208,43 @@ final class FilterViewModel: ObservableObject {
         return params
     }
 
+    /// Deserialization inverse of `parameters`: seed the store from a portable
+    /// eva.xml `filter` step (used by Copy Processing / replay). Missing keys
+    /// leave the current, defaults-seeded value untouched.
+    func apply(parameters p: [String: String]) {
+        highPassCutoffText = p["highPassHz"] ?? ""
+        lowPassCutoffText = p["lowPassHz"] ?? ""
+        if let v = p["highPassSlope"].flatMap(Int.init), let s = FilterSlope(rawValue: v) { highPassSlope = s }
+        if let v = p["lowPassSlope"].flatMap(Int.init), let s = FilterSlope(rawValue: v) { lowPassSlope = s }
+        notch60HzEnabled = p["notchHz"] != nil
+        switch p["lineNoiseMode"].flatMap(FilterLineNoiseMode.init(rawValue:)) {
+        case .adaptiveCleanLine:
+            lineNoiseMode = .adaptiveCleanLine
+        case .notch, .off:
+            lineNoiseMode = .off // active mode becomes .notch via notch60HzEnabled
+        case nil:
+            // Legacy eva.xml without the explicit mode key: infer from frequency.
+            lineNoiseMode = p["lineNoiseHz"] != nil ? .adaptiveCleanLine : .off
+        }
+        if let hz = p["lineNoiseHz"].flatMap(Double.init) { lineNoiseFrequency = hz }
+        if let h = p["lineNoiseHarmonics"].flatMap(Int.init) { lineNoiseHarmonics = h }
+        averageReference = p["averageReference"] == "true"
+        if let prec = p["precision"].flatMap(FilterPrecision.init(rawValue:)) { precision = prec }
+    }
+
     // MARK: - Apply / clear
 
     /// Filters `signal` (and optionally `pnsInput`) off the main thread, updates
     /// the outputs, and calls `onApplied` for cross-domain invalidation.
+    /// `async` so the replay coordinator can await filter completion before the
+    /// next pipeline step; the interactive caller wraps it in a `Task`. Both use
+    /// this one method — there is no separate replay path.
     func apply(
         to signal: MFFSignalData,
         pnsInput: MFFSignalData?,
         excludedChannels: Set<Int>,
         onApplied: @escaping () -> Void
-    ) {
+    ) async {
         let cutoffs: FilterCutoffs
         do {
             cutoffs = try currentCutoffs()
@@ -232,6 +264,7 @@ final class FilterViewModel: ObservableObject {
 
         let requestID = UUID()
         activeRequestID = requestID
+        activeWorker?.cancel()
 
         let sourceData = signal.data
         let samplingRate = signal.samplingRate
@@ -257,11 +290,10 @@ final class FilterViewModel: ObservableObject {
             self?.progress = fraction
         }
 
-        Task {
-            do {
-                let pnsEnabled = pnsInput != nil
+        do {
+            let pnsEnabled = pnsInput != nil
 
-                let result = try await Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) {
                     let filteredData = try await Self.filteredChannels(
                         sourceData,
                         samplingRate: samplingRate,
@@ -307,11 +339,22 @@ final class FilterViewModel: ObservableObject {
                         filteredPNSData = nil
                     }
                     return (filteredData, filteredPNSData)
-                }.value
+                }
+                activeWorker = worker
+                let result = try await withTaskCancellationHandler(
+                    operation: {
+                        try await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
+                    }
+                )
                 progressContinuation.finish()
                 progressTask.cancel()
 
-                guard activeRequestID == requestID else { return }
+                guard activeRequestID == requestID, !Task.isCancelled else { return }
+                activeWorker = nil
 
                 output = signal.replacingData(result.0)
                 if let pnsInput, let filteredPNSData = result.1 {
@@ -338,18 +381,21 @@ final class FilterViewModel: ObservableObject {
                 progressContinuation.finish()
                 progressTask.cancel()
                 guard activeRequestID == requestID else { return }
+                activeWorker = nil
                 statusMessage = error.localizedDescription
                 statusIsError = true
             }
             if activeRequestID == requestID {
+                activeWorker = nil
                 isFiltering = false
             }
-        }
     }
 
     /// Clears the filter outputs and calls `onCleared` for cross-domain invalidation.
     func clear(onCleared: () -> Void) {
         activeRequestID = UUID()
+        activeWorker?.cancel()
+        activeWorker = nil
         isFiltering = false
         output = nil
         pnsOutput = nil
@@ -362,7 +408,28 @@ final class FilterViewModel: ObservableObject {
     /// Directly sets the EEG output (used by the ICA re-filter restore path).
     func setOutput(_ signal: MFFSignalData?) {
         activeRequestID = UUID()
+        activeWorker?.cancel()
+        activeWorker = nil
         output = signal
+    }
+
+    func cancelInFlightWork() {
+        activeRequestID = UUID()
+        activeWorker?.cancel()
+        activeWorker = nil
+        isFiltering = false
+        progress = 0
+    }
+
+    func resetForClose() {
+        cancelInFlightWork()
+        showsPopover = false
+        showsLineNoiseOptions = false
+        statusMessage = nil
+        statusIsError = false
+        output = nil
+        pnsOutput = nil
+        pnsInputSignalType = nil
     }
 
     // MARK: - Transform (L3 orchestration)

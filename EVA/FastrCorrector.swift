@@ -119,6 +119,7 @@ struct FastrCorrector {
         samplingRate: Double,
         progress: (@Sendable (Double) -> Void)? = nil
     ) throws -> [[Float]] {
+        try Task.checkCancellation()
         guard volumeTriggers.count >= 2 else {
             throw FastrError.tooFewTriggers(volumeTriggers.count)
         }
@@ -178,6 +179,7 @@ struct FastrCorrector {
         nonisolated(unsafe) let resultPtr = UnsafeMutablePointer<[Float]>.allocate(capacity: channels.count)
         resultPtr.initialize(from: &result, count: channels.count)
         evaConcurrentPerform(iterations: channels.count) { c in
+            guard !Task.isCancelled else { return }
             let raw = channels[c].map(Double.init)
             let corrected = correctChannel(
                 raw: raw,

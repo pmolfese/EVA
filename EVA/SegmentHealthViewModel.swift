@@ -34,4 +34,17 @@ final class SegmentHealthViewModel: ObservableObject {
     // MARK: Menu request tokens
     @Published var detailsRequest = 0
     @Published var refreshRequest = 0
+
+    func resetForClose() {
+        task?.cancel()
+        task = nil
+        shows = false
+        showsMouseOver = false
+        showsDetails = false
+        analysis = nil
+        isAnalyzing = false
+        progress = 0
+        statusMessage = nil
+        signature = nil
+    }
 }

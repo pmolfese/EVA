@@ -69,4 +69,25 @@ final class ArtifactTemplateViewModel: ObservableObject {
     @Published var deletionRequest: DefinedArtifact.ID?
     @Published var deleteAllRequest = 0
     @Published var obsVarianceReportCache = [String: OBSPCAVarianceReport]()
+
+    func resetForClose() {
+        showsSheet = false
+        selectionRange = nil
+        clickedChannel = nil
+        definedArtifactID = nil
+        confirmedSource = nil
+        isRefreshingTopography = false
+        topographyRefreshGeneration += 1
+        trajectorySelectedFrame = nil
+        lastScanSignature = nil
+        isApplying = false
+        scanCompleted = 0
+        scanTotal = 0
+        result = nil
+        selectedChannel = nil
+        statusMessage = nil
+        definedArtifacts = []
+        deletionRequest = nil
+        obsVarianceReportCache.removeAll()
+    }
 }

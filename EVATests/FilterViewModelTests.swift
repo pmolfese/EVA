@@ -39,6 +39,10 @@ struct FilterViewModelTests {
         #expect(params["averageReference"] == "true")
         #expect(params["notchHz"] == "60")
         #expect(params["precision"] == "auto")
+        // Enriched keys for exact replay.
+        #expect(params["highPassSlope"] == "24")
+        #expect(params["lowPassSlope"] == "24")
+        #expect(params["lineNoiseMode"] == "IIR Notch")
     }
 
     @MainActor

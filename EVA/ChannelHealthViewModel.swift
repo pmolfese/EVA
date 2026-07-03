@@ -24,4 +24,12 @@ final class ChannelHealthViewModel: ObservableObject {
     @Published var task: Task<Void, Never>?
     @Published var showsDetails = false
     @Published var detailsRequest = 0
+
+    func resetForClose() {
+        task?.cancel()
+        task = nil
+        statusMessage = nil
+        signature = nil
+        showsDetails = false
+    }
 }

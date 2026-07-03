@@ -175,6 +175,17 @@ final class EEGAnalysisViewModel: ObservableObject {
         statusMessage = "EEG analysis cancelled."
     }
 
+    func resetForClose() {
+        task?.cancel()
+        task = nil
+        showsSheet = false
+        isRunning = false
+        progress = 0
+        statusMessage = nil
+        result = nil
+        hasInitializedArtifactSources = false
+    }
+
     func jsonData() throws -> Data {
         guard let result else { return Data() }
         let export = EEGAnalysisEngine.exportResult(result, options: exportOptions)

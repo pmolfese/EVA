@@ -67,4 +67,26 @@ final class ICAViewModel: ObservableObject {
             "averageReference": "\(usesAverageReference)"
         ]
     }
+
+    /// Deserialization inverse of `parameters` for Copy Processing / replay. The
+    /// portable decomposition settings are restored; which components to remove
+    /// stays a per-subject decision made in the sheet.
+    func apply(parameters p: [String: String]) {
+        if let m = p["method"].flatMap(ICAMethod.init(rawValue:)) { method = m }
+        if let c = p["components"].flatMap(Int.init) { componentCount = c }
+        if let a = p["averageReference"] { usesAverageReference = (a == "true") }
+    }
+
+    func resetForClose() {
+        showsSheet = false
+        isRunning = false
+        progress = 0
+        progressMessage = ""
+        statusMessage = nil
+        isRemovingComponents = false
+        decomposition = nil
+        cleanedSignal = nil
+        debugReportSerial = 0
+        lastReconstructionDebugReport = nil
+    }
 }

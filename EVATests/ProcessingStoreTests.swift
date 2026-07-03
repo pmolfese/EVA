@@ -57,4 +57,12 @@ struct ProcessingStoreTests {
         #expect(p["method"] == "picard")
         #expect(p["components"] == "25")
     }
+
+    // Faithful-capture: gradient and wavelet steps must carry real params so
+    // eva.xml records them (previously dropped / omitted).
+    @MainActor
+    @Test func gradientAndWaveletExposeCaptureParameters() {
+        #expect(GradientViewModel().parameters["method"] != nil)
+        #expect(WaveletReductionViewModel().parameters["mode"] != nil)
+    }
 }

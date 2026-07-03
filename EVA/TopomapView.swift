@@ -26,6 +26,13 @@ enum TopomapColorBarPlacement {
     case trailing
 }
 
+/// Z-score color scaling for a topomap: color spans mean ± sigma·sd.
+struct TopomapZScaling: Equatable {
+    let mean: Double
+    let sd: Double
+    let sigma: Double
+}
+
 struct TopomapView: View {
     let layout: SensorLayout
     /// Per-channel potential (µV) at the chosen sample, indexed by channel.
@@ -34,8 +41,17 @@ struct TopomapView: View {
     /// When non-nil, fixes the symmetric color scale to ±this value (µV).
     /// When nil, the scale auto-fits to the data at this time point.
     let fixedScale: Double?
+    /// Manual asymmetric color limits (min µV, max µV). Overrides `fixedScale`.
+    /// 0 stays white; tightening a side toward 0 intensifies that color.
+    let colorRange: ClosedRange<Double>?
+    /// Z-score scaling: color spans mean ± sigma·sd (white at the mean).
+    /// Overrides both `colorRange` and `fixedScale`.
+    let zScaling: TopomapZScaling?
     let unitLabel: String
     let showsHeader: Bool
+    /// When false, the net-layout name is omitted from the header (the latency is
+    /// still shown) — used for exported figures.
+    let showsLayoutName: Bool
     let colorBarPlacement: TopomapColorBarPlacement
     let minimumMapHeight: CGFloat
 
@@ -44,8 +60,11 @@ struct TopomapView: View {
         values: [Double],
         timeSeconds: Double,
         fixedScale: Double?,
+        colorRange: ClosedRange<Double>? = nil,
+        zScaling: TopomapZScaling? = nil,
         unitLabel: String = "µV",
         showsHeader: Bool = true,
+        showsLayoutName: Bool = true,
         colorBarPlacement: TopomapColorBarPlacement = .bottom,
         minimumMapHeight: CGFloat = 260
     ) {
@@ -53,8 +72,11 @@ struct TopomapView: View {
         self.values = values
         self.timeSeconds = timeSeconds
         self.fixedScale = fixedScale
+        self.colorRange = colorRange
+        self.zScaling = zScaling
         self.unitLabel = unitLabel
         self.showsHeader = showsHeader
+        self.showsLayoutName = showsLayoutName
         self.colorBarPlacement = colorBarPlacement
         self.minimumMapHeight = minimumMapHeight
     }
@@ -65,8 +87,10 @@ struct TopomapView: View {
         VStack(spacing: 12) {
             if showsHeader {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(layout.name.isEmpty ? "Topography" : layout.name)
-                        .font(.headline)
+                    if showsLayoutName {
+                        Text(layout.name.isEmpty ? "Topography" : layout.name)
+                            .font(.headline)
+                    }
                     Spacer()
                     Text(String(format: "t = %.3f s", timeSeconds))
                         .font(.caption.monospacedDigit())
@@ -97,6 +121,26 @@ struct TopomapView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minHeight: minimumMapHeight)
+    }
+
+    /// Maps a µV value to the diverging colormap's -1…1 axis. With a manual
+    /// `colorRange`, each side is scaled independently (0 stays white), so a
+    /// tighter limit saturates that color faster. With `zScaling`, the map is
+    /// linear and centered on the mean (white = mean, ±1 = ±sigma·sd).
+    private func normalized(_ value: Double) -> Double {
+        if let z = zScaling, z.sd > 0, z.sigma > 0 {
+            return Swift.max(Swift.min((value - z.mean) / (z.sigma * z.sd), 1), -1)
+        }
+        if let colorRange {
+            if value >= 0 {
+                let upper = colorRange.upperBound
+                return upper > 0 ? Swift.min(value / upper, 1) : (value > 0 ? 1 : 0)
+            } else {
+                let lowerMag = -colorRange.lowerBound
+                return lowerMag > 0 ? Swift.max(value / lowerMag, -1) : -1
+            }
+        }
+        return Swift.max(Swift.min(value / scale, 1), -1)
     }
 
     private var scale: Double {
@@ -182,7 +226,7 @@ struct TopomapView: View {
                 let dy = y - center.y
                 if dx * dx + dy * dy <= radiusSquared {
                     let interpolated = idwValue(at: CGPoint(x: x, y: y), points: points)
-                    let color = divergingColor(forNormalized: interpolated / scale)
+                    let color = divergingColor(forNormalized: normalized(interpolated))
                     let cell = CGRect(x: x, y: y, width: step, height: step)
                     context.fill(Path(cell), with: .color(color))
                 }
@@ -243,10 +287,22 @@ struct TopomapView: View {
 
     // MARK: - Color
 
+    /// Color-bar end labels + unit: z-scale in σ, manual range in µV, else ±auto.
+    private var barLabels: (low: String, high: String, unit: String) {
+        if let z = zScaling {
+            return (String(format: "−%.1f", z.sigma), String(format: "+%.1f", z.sigma), "SD")
+        }
+        if let colorRange {
+            return (String(format: "%.1f", colorRange.lowerBound), String(format: "%+.1f", colorRange.upperBound), unitLabel)
+        }
+        let s = scale
+        return (String(format: "%.1f", -s), String(format: "%+.1f", s), unitLabel)
+    }
+
     private var horizontalColorBar: some View {
-        let currentScale = scale
+        let labels = barLabels
         return HStack(spacing: 8) {
-            Text(String(format: "%.1f", -currentScale))
+            Text(labels.low)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
 
@@ -258,16 +314,16 @@ struct TopomapView: View {
             .frame(height: 12)
             .clipShape(Capsule())
 
-            Text(String(format: "+%.1f %@", currentScale, unitLabel))
+            Text("\(labels.high) \(labels.unit)")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
     }
 
     private var verticalColorBar: some View {
-        let currentScale = scale
+        let labels = barLabels
         return VStack(spacing: 6) {
-            Text(String(format: "+%.1f", currentScale))
+            Text(labels.high)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
 
@@ -279,11 +335,11 @@ struct TopomapView: View {
             .frame(width: 12, height: max(80, minimumMapHeight * 0.70))
             .clipShape(Capsule())
 
-            Text(String(format: "%.1f", -currentScale))
+            Text(labels.low)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            Text(unitLabel)
+            Text(labels.unit)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
