@@ -1,0 +1,62 @@
+//
+//  MFFFileType.swift
+//  EVA
+//
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  SPDX-License-Identifier: GPL-3.0-only
+//
+//  How EVA classifies a loaded MFF: continuous, segmented, averaged, or grand
+//  average. Surfaced (and, session-only, overridable) in the Dataset Info panel.
+//
+
+import Foundation
+
+nonisolated enum MFFFileType: String, CaseIterable, Identifiable, Sendable {
+    case continuous
+    case segmented
+    case averaged
+    case grandAverage
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .continuous: return "Continuous"
+        case .segmented: return "Segmented"
+        case .averaged: return "Averaged"
+        case .grandAverage: return "Grand Average"
+        }
+    }
+}
+
+extension MFFSignalData {
+    /// The type EVA detected on load, from the on-disk epoch/category structure.
+    var detectedFileType: MFFFileType {
+        if isGrandAverage { return .grandAverage }
+        if isAveraged { return .averaged }
+        if isSegmented { return .segmented }
+        return .continuous
+    }
+
+    /// Distinct subject/group ids across the epoch segments (grand averages only).
+    var subjects: [String] {
+        var seen: [String] = []
+        for segment in epochSegments {
+            if let subject = segment.subject, !seen.contains(subject) { seen.append(subject) }
+        }
+        return seen
+    }
+
+    var hasMultipleSubjects: Bool { subjects.count > 1 }
+
+    /// Distinct category names in first-appearance order.
+    var categories: [String] {
+        var seen: [String] = []
+        for segment in epochSegments where !seen.contains(segment.category) {
+            seen.append(segment.category)
+        }
+        return seen
+    }
+}

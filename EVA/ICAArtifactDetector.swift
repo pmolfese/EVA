@@ -171,6 +171,7 @@ nonisolated enum ICAArtifactDetector {
             throw ICAError.emptySignal
         }
 
+        try Task.checkCancellation()
         progress?(0.02)
         let decimation = Downsampler.factor(sourceRate: signal.samplingRate, targetRate: configuration.downsampleRate)
         let analysisSamplingRate = Downsampler.effectiveRate(sourceRate: signal.samplingRate, factor: decimation)
@@ -183,10 +184,12 @@ nonisolated enum ICAArtifactDetector {
         let channelCount = prepared.count
         let maximumComponentCount = min(max(configuration.componentCount, 1), channelCount)
         let centered = center(prepared)
+        try Task.checkCancellation()
         progress?(0.10)
         let covariance = covarianceMatrix(centered.samples, sampleCount: sampleCount)
         progress?(0.18)
         let eigen = LinearAlgebra.symmetricEigenDecomposition(covariance)
+        try Task.checkCancellation()
         progress?(0.34)
         let ordered = eigen.values.indices.sorted { eigen.values[$0] > eigen.values[$1] }
         let selected = selectedPCAIndices(
@@ -203,6 +206,7 @@ nonisolated enum ICAArtifactDetector {
         let whitening = whiteningMatrix(eigenvectors: eigen.vectors, eigenvalues: eigen.values, selected: selected)
         let dewhitening = dewhiteningMatrix(eigenvectors: eigen.vectors, eigenvalues: eigen.values, selected: selected)
         let whitened = multiply(whitening, centered.samples)
+        try Task.checkCancellation()
         progress?(0.42)
         let infomax = solveICA(
             whitened,
@@ -215,6 +219,7 @@ nonisolated enum ICAArtifactDetector {
                 progress?(0.42 + 0.44 * fraction)
             }
         )
+        try Task.checkCancellation()
         progress?(0.88)
         let sources = multiply(infomax.unmixing, whitened)
         let inverseRotation = pseudoInverse(infomax.unmixing)
@@ -703,6 +708,10 @@ nonisolated private func solveICA(
     // Pack whitened data into one contiguous row-major Float buffer.
     var packed = [Float](repeating: 0, count: features * samples)
     for feature in 0..<features {
+        guard !Task.isCancelled else {
+            progress?(1.0)
+            return (LinearAlgebra.identity(features), 0, 0)
+        }
         let row = data[feature]
         let base = feature * samples
         let count = min(samples, row.count)
@@ -915,6 +924,7 @@ nonisolated private func infomaxFloat(
     let degreesPerRadian = 180.0 / Double.pi
 
     while iterations < maxIterations {
+        guard !Task.isCancelled else { break }
         var order = Array(0..<samples)
         deterministicShuffle(&order, seed: iterations + 1)
         var weightsBlewUp = false
@@ -1154,6 +1164,7 @@ nonisolated private func fastICAFloat(
     var finalChange = Double.infinity
 
     while iterations < maxIterations {
+        guard !Task.isCancelled else { break }
         // u = W · X
         blasSGEMM(transA: false, transB: false,
                   m: features, n: samples, k: features,
@@ -1336,6 +1347,7 @@ nonisolated private func picardFloat(
     computeGradientAndHessian()
 
     while iterations < maxIterations {
+        guard !Task.isCancelled else { break }
         // L-BFGS two-loop recursion to build the search direction.
         var q = gradient
         let m = sMemory.count

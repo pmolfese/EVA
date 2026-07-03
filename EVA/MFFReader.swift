@@ -59,6 +59,10 @@ nonisolated struct MFFSignalData: Sendable {
     /// True when each epoch is a category *average* (one segment per category,
     /// each built from multiple trials), i.e. an ERP/averaged file.
     let isAveraged: Bool
+    /// True when the file is a *grand* average — categories are contributed by
+    /// more than one subject/group (EGI marks each seg `<name>Average</name>`
+    /// with `#seg == 1` plus a `subj` key).
+    let isGrandAverage: Bool
     /// Per-channel electrode impedance in kΩ from the MFF `ICAL` calibration
     /// (info1.xml), indexed by channel. `nil` when the file records no impedance
     /// measurement; individual entries are `NaN` for channels with no value.
@@ -77,6 +81,7 @@ nonisolated struct MFFSignalData: Sendable {
         epochSegments: [EpochSegment] = [],
         isSegmented: Bool = false,
         isAveraged: Bool = false,
+        isGrandAverage: Bool = false,
         impedancesKOhm: [Float]? = nil
     ) {
         self.signalURL = signalURL
@@ -91,6 +96,7 @@ nonisolated struct MFFSignalData: Sendable {
         self.epochSegments = epochSegments
         self.isSegmented = isSegmented
         self.isAveraged = isAveraged
+        self.isGrandAverage = isGrandAverage
         self.impedancesKOhm = impedancesKOhm
     }
 
@@ -110,6 +116,7 @@ nonisolated struct MFFSignalData: Sendable {
             epochSegments: epochSegments,
             isSegmented: isSegmented,
             isAveraged: isAveraged,
+            isGrandAverage: isGrandAverage,
             impedancesKOhm: impedancesKOhm
         )
     }
@@ -283,6 +290,7 @@ nonisolated final class MFFReader {
             epochSegments: epochInfo?.segments ?? [],
             isSegmented: epochInfo != nil,
             isAveraged: epochInfo?.isAveraged ?? false,
+            isGrandAverage: epochInfo?.isGrandAverage ?? false,
             impedancesKOhm: impedances
         )
     }
@@ -943,6 +951,7 @@ nonisolated final class MFFReader {
         let segments: [EpochSegment]
         let events: [MFFEvent]
         let isAveraged: Bool
+        let isGrandAverage: Bool
     }
 
     private struct EpochBlockRange {
@@ -958,6 +967,13 @@ nonisolated final class MFFReader {
         let endTimeMicroseconds: Double
         let eventTimeMicroseconds: Double
         let contributingEpochCount: Int
+        /// True when the segment is an EGI `<seg><name>Average</name>`. Grand
+        /// averages mark every seg this way with `#seg == 1` (each contributor is
+        /// one subject/group average, not N trials).
+        let isAverage: Bool
+        /// Contributing subject/group id from the `subj` key, when present (grand
+        /// averages carry one seg per subject/group under each category).
+        let subject: String?
     }
 
     /// Reads `epochs.xml` + `categories.xml`. When the package is segmented or
@@ -1022,7 +1038,8 @@ nonisolated final class MFFReader {
                     sourceCode: segment.category,
                     sourceTimeSeconds: Double(startSample + stimulusOffset) / samplingRate,
                     colorIndex: colorIndices[segment.category] ?? 0,
-                    contributingEpochCount: segment.contributingEpochCount
+                    contributingEpochCount: segment.contributingEpochCount,
+                    subject: segment.subject
                 )
             )
         }
@@ -1041,8 +1058,23 @@ nonisolated final class MFFReader {
             )
         }
 
-        let isAveraged = segments.allSatisfy { $0.contributingEpochCount > 1 }
-        return OnDiskEpochInfo(segments: segments, events: events, isAveraged: isAveraged)
+        // A file is averaged when every segment is either a multi-trial average
+        // (#seg > 1) OR an EGI `<name>Average</name>` segment (grand averages use
+        // #seg == 1, so the name is the reliable marker).
+        let isAveraged = categorySegments.allSatisfy { $0.contributingEpochCount > 1 || $0.isAverage }
+        // Grand average = averaged AND the same category is contributed by more
+        // than one segment (one per subject/group), or segments carry subject ids.
+        let distinctCategories = Set(categorySegments.map(\.category)).count
+        let categoriesRepeat = distinctCategories < categorySegments.count
+        let hasSubjects = categorySegments.contains { $0.subject != nil }
+        let isGrandAverage = isAveraged && (categoriesRepeat || hasSubjects)
+
+        return OnDiskEpochInfo(
+            segments: segments,
+            events: events,
+            isAveraged: isAveraged,
+            isGrandAverage: isGrandAverage
+        )
     }
 
     /// Assigns a stable color index to each category in first-appearance order.
@@ -1136,18 +1168,37 @@ nonisolated final class MFFReader {
                     continue
                 }
                 let eventTime = value("evtBegin") ?? beginTime
+                let segName = children.first { sanitizedTagName($0.name) == "name" }?
+                    .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
                 segments.append(
                     CategorySegment(
                         category: categoryName,
                         beginTimeMicroseconds: beginTime,
                         endTimeMicroseconds: endTime,
                         eventTimeMicroseconds: eventTime,
-                        contributingEpochCount: segmentContributingCount(in: seg)
+                        contributingEpochCount: segmentContributingCount(in: seg),
+                        isAverage: segName?.caseInsensitiveCompare("Average") == .orderedSame,
+                        subject: segmentKeyData(in: seg, keyCode: "subj")
                     )
                 )
             }
         }
         return segments
+    }
+
+    /// Returns the `<data>` value of a segment `<key>` with the given `keyCode`
+    /// (e.g. `subj`, `FILE`), or nil when absent.
+    private func segmentKeyData(in seg: XMLElement, keyCode: String) -> String? {
+        for key in descendants(named: "key", in: seg) {
+            let keyChildren = (key.children ?? []).compactMap { $0 as? XMLElement }
+            let code = keyChildren.first { sanitizedTagName($0.name) == "keyCode" }?
+                .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard code == keyCode else { continue }
+            let data = keyChildren.first { sanitizedTagName($0.name) == "data" }?
+                .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let data, !data.isEmpty { return data }
+        }
+        return nil
     }
 
     /// The `#seg` key records how many trials were averaged into a segment;
@@ -1187,6 +1238,7 @@ nonisolated final class MFFReader {
         var lastReportedProgress = 0.0
 
         while try handle.offset() < fileSize {
+            try Task.checkCancellation()
             let flag = try Int(readInt32(from: handle, signalURL: signalURL))
 
             let header: SignalHeader
@@ -1226,6 +1278,7 @@ nonisolated final class MFFReader {
             )
 
             for index in sampleMatrix.indices {
+                try Task.checkCancellation()
                 allChannels[index].append(contentsOf: sampleMatrix[index])
             }
 

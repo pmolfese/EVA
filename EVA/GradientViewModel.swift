@@ -74,6 +74,18 @@ final class GradientViewModel: ObservableObject {
         correctedPNSSignal = nil
     }
 
+    func resetForClose() {
+        correctedSignal = nil
+        correctedPNSSignal = nil
+        isProcessing = false
+        progress = 0
+        statusMessage = nil
+        statusIsError = false
+        showsPopover = false
+        showsMethodHelp = false
+        showsMotionConfig = false
+    }
+
     /// Volume indices flagged as high-motion (FD > threshold), or empty when the
     /// user hasn't enabled exclusion / motion isn't loaded.
     func highMotionVolumeSet() -> Set<Int> {

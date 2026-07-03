@@ -42,6 +42,11 @@ final class ChannelSetStore {
         loadUserSets()
     }
 
+    func clearActiveRecordingContext() {
+        activeSensorLayout = nil
+        activeChannelNames = nil
+    }
+
     // MARK: - Built-in sets
 
     static let builtInSets: [ChannelSet] = [

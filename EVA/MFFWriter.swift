@@ -103,6 +103,11 @@ nonisolated enum MFFWriter {
                 to: packageURL
             )
             try writeEpochsXML(blocks: blocks, sampleRate: sampleRate, to: packageURL)
+            // Segmented / averaged exports need categories.xml so EVA (and other
+            // MFF readers) recognize the epoch/category structure on reopen.
+            if kind != .continuous, !segments.isEmpty {
+                try writeCategoriesXML(blocks: blocks, sampleRate: sampleRate, to: packageURL)
+            }
             try writeEventsXML(signal: signal, blocks: blocks, sampleRate: sampleRate, kind: kind, to: packageURL)
             try writeSensorLayoutXML(signal: signal, to: packageURL)
             copyOriginalFileIfPresent(named: "coordinates.xml", sourceSignalURL: signal.signalURL, to: packageURL)
@@ -436,6 +441,63 @@ nonisolated enum MFFWriter {
 \(body)</epochs>
 """
         try xml.write(to: packageURL.appendingPathComponent("epochs.xml"), atomically: true, encoding: .utf8)
+    }
+
+    /// Writes `categories.xml` describing each segment/average, on the same
+    /// concatenated microsecond timeline as `epochs.xml`. One `<cat>` per distinct
+    /// category (first-appearance order), one `<seg>` per block, with the `#seg`
+    /// key carrying the contributing-trial count so averaged files read back as
+    /// averaged (EGI/MFF convention that EVA's own reader parses).
+    private static func writeCategoriesXML(blocks: [ExportBlock], sampleRate: Int, to packageURL: URL) throws {
+        struct Seg { let begin: Int; let end: Int; let evt: Int; let count: Int }
+        var order: [String] = []
+        var segsByCategory: [String: [Seg]] = [:]
+        var cursor = 0
+        for block in blocks {
+            let duration = Int((Double(block.sampleCount) / Double(sampleRate) * 1_000_000).rounded())
+            let begin = cursor
+            let end = begin + duration
+            let evt = begin + Int((Double(block.stimulusOffsetSamples ?? 0) / Double(sampleRate) * 1_000_000).rounded())
+            if segsByCategory[block.category] == nil { order.append(block.category) }
+            segsByCategory[block.category, default: []].append(
+                Seg(begin: begin, end: end, evt: evt, count: max(block.contributingEpochCount, 1))
+            )
+            cursor = end
+        }
+
+        var body = ""
+        for category in order {
+            var segsXML = ""
+            for seg in segsByCategory[category] ?? [] {
+                segsXML += """
+      <seg>
+        <beginTime>\(seg.begin)</beginTime>
+        <endTime>\(seg.end)</endTime>
+        <evtBegin>\(seg.evt)</evtBegin>
+        <evtEnd>\(seg.evt)</evtEnd>
+        <keys>
+          <key><keyCode>#seg</keyCode><data dataType="short">\(seg.count)</data></key>
+        </keys>
+      </seg>
+
+"""
+            }
+            body += """
+  <cat>
+    <name>\(xmlEscape(category))</name>
+    <segments>
+\(segsXML)    </segments>
+  </cat>
+
+"""
+        }
+
+        let xml = """
+<?xml version="1.0" encoding="UTF-8"?>
+<categories>
+\(body)</categories>
+"""
+        try xml.write(to: packageURL.appendingPathComponent("categories.xml"), atomically: true, encoding: .utf8)
     }
 
     private static func writeEventsXML(

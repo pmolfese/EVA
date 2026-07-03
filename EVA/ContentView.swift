@@ -28,6 +28,9 @@ struct CombineRequest: Identifiable {
 struct ContentView: View {
     @Binding var recording: MFFRecording?
     @Binding var openRecordingRequest: Int
+    @Binding var batchSetupRequest: Int
+
+    @Environment(BatchController.self) private var batch
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
 
@@ -36,6 +39,8 @@ struct ContentView: View {
     @State private var openError: String?
     /// Multiple .mff files dropped at once → present the combine sheet.
     @State private var combineRequest: CombineRequest?
+    @State private var showsBatchSetup = false
+    @State private var batchSummary: BatchController.BatchSummary?
 
     var body: some View {
         Group {
@@ -79,6 +84,34 @@ struct ContentView: View {
                 onCancel: { combineRequest = nil }
             )
         }
+        .sheet(isPresented: $showsBatchSetup) {
+            BatchSetupSheet(onCancel: { showsBatchSetup = false },
+                            onStart: { showsBatchSetup = false })
+        }
+        .onChange(of: batchSetupRequest) { _, _ in
+            if batch.isActive == false { showsBatchSetup = true }
+        }
+        .onChange(of: batch.currentIndex) { _, idx in
+            // Batch drives the open recording: swap to the current job's file, or
+            // present the summary when the run ends.
+            guard batch.isActive, idx >= 0, let url = batch.currentJobURL else {
+                if let s = batch.summary { batchSummary = s }
+                return
+            }
+            recording?.tearDownForClose()
+            ChannelSetStore.shared.clearActiveRecordingContext()
+            recording = MFFRecording(packageURL: url) // fresh UUID → .id() rebuilds
+        }
+        .alert("Batch complete", isPresented: Binding(
+            get: { batchSummary != nil },
+            set: { if !$0 { batchSummary = nil } }
+        )) {
+            Button("OK") { batchSummary = nil }
+        } message: {
+            if let s = batchSummary {
+                Text(batchSummaryMessage(s))
+            }
+        }
         .background(WindowAccessor(autosaveName: "EVAMainWindow",
                                    hasRecording: recording != nil,
                                    onConfirmedClose: closeRecording))
@@ -88,7 +121,16 @@ struct ContentView: View {
     /// state. Because `WaveformView` is keyed by `recording.id`, dropping the
     /// recording discards all of its per-recording in-memory state; opening a
     /// new file builds a brand-new view.
+    private func batchSummaryMessage(_ s: BatchController.BatchSummary) -> String {
+        var lines = ["Processed \(s.done) of \(s.total)."]
+        if s.skipped > 0 { lines.append("Skipped \(s.skipped).") }
+        if !s.failed.isEmpty { lines.append("Failed:\n" + s.failed.joined(separator: "\n")) }
+        return lines.joined(separator: "\n")
+    }
+
     private func closeRecording() {
+        recording?.tearDownForClose()
+        ChannelSetStore.shared.clearActiveRecordingContext()
         recording = nil
         openError = nil
         isDropTargeted = false
@@ -403,5 +445,6 @@ private struct WindowAccessor: NSViewRepresentable {
 }
 
 #Preview {
-    ContentView(recording: .constant(nil), openRecordingRequest: .constant(0))
+    ContentView(recording: .constant(nil), openRecordingRequest: .constant(0), batchSetupRequest: .constant(0))
+        .environment(BatchController())
 }

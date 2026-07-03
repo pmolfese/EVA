@@ -87,6 +87,7 @@ struct GradientRemover {
         excludedTRs: Set<Int> = [],
         progress: (@Sendable (Double) -> Void)? = nil
     ) throws -> [[Float]] {
+        try Task.checkCancellation()
         guard trSamples.count >= 2 else { throw GradientRemoverError.tooFewTRTriggers(trSamples.count) }
 
         // Determine an evenly spaced TR grid from the trigger gaps.
@@ -128,6 +129,7 @@ struct GradientRemover {
             // overlap; the buffer pointer is shared read-only metadata.
             nonisolated(unsafe) let out = out
             evaConcurrentPerform(iterations: channelCount) { c in
+                guard !Task.isCancelled else { return }
                 out[c] = correctChannel(
                     channels[c],
                     offset: offset,
@@ -170,6 +172,7 @@ struct GradientRemover {
         var detrended = [[Float]]()
         detrended.reserveCapacity(nTR)
         for n in 0..<nTR {
+            guard !Task.isCancelled else { return channel }
             let start = offset + n * spacing
             detrended.append(linearDetrend(Array(channel[start..<(start + spacing)])))
         }
@@ -179,6 +182,7 @@ struct GradientRemover {
         var corrected = [Float](repeating: 0, count: spacing)
 
         for n in 0..<nTR {
+            guard !Task.isCancelled else { return channel }
             let start = offset + n * spacing
 
             // Edge TRs get no template (Python `get_tr_template`): detrended only.

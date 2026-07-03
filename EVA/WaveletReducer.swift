@@ -260,6 +260,7 @@ nonisolated enum WaveletReducer {
         if workerCount <= 1 {
             var completed = 0
             for channelIndex in indices {
+                guard !Task.isCancelled else { break }
                 store(channelIndex, process(channelIndex))
                 completed += 1
                 progress?(Double(completed) / Double(total))
@@ -270,6 +271,7 @@ nonisolated enum WaveletReducer {
             evaConcurrentPerform(iterations: workerCount) { worker in
                 var offset = worker
                 while offset < indices.count {
+                    guard !Task.isCancelled else { return }
                     let channelIndex = indices[offset]
                     let result = process(channelIndex)
                     lock.lock()

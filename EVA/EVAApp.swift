@@ -23,17 +23,21 @@ import SwiftUI
 struct EVAApp: App {
     @State private var recording: MFFRecording?
     @State private var openRecordingRequest = 0
+    @State private var batchSetupRequest = 0
     @State private var goodnessSettings = ChannelGoodnessSettings()
     @State private var processingDefaults = ProcessingDefaults.shared
+    @State private var batch = BatchController()
 
     var body: some Scene {
         WindowGroup {
             ContentView(
                 recording: $recording,
-                openRecordingRequest: $openRecordingRequest
+                openRecordingRequest: $openRecordingRequest,
+                batchSetupRequest: $batchSetupRequest
             )
             .environment(goodnessSettings)
             .environment(processingDefaults)
+            .environment(batch)
         }
         .modelContainer(for: UserMarker.self)
         .defaultSize(Self.defaultWindowSize)
@@ -43,6 +47,11 @@ struct EVAApp: App {
                     openRecordingRequest += 1
                 }
                 .keyboardShortcut("o", modifiers: .command)
+
+                Button("Batch Process...") {
+                    batchSetupRequest += 1
+                }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
             }
 
             CommandGroup(after: .newItem) {

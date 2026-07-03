@@ -51,6 +51,14 @@ final class WaveletReductionViewModel: ObservableObject {
         selectedCandidateID = nil
     }
 
+    func resetForClose() {
+        clearResults()
+        isRunning = false
+        progress = 0
+        statusMessage = nil
+        showsSheet = false
+    }
+
     var parameters: [String: String] {
         ["mode": String(describing: mode)]
     }

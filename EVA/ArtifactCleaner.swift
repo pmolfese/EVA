@@ -311,6 +311,7 @@ nonisolated enum ArtifactCleaner {
         var completedEvents = 0
 
         for (index, artifact) in artifactsToClean.enumerated() {
+            guard !Task.isCancelled else { break }
             let startingCompletedEvents = completedEvents
 
             let reportProgress: (ArtifactCleaningProgressPhase, Int, String?) -> Void = { phase, artifactCompletedEvents, detail in

@@ -93,6 +93,7 @@ final class FilterViewModel: ObservableObject {
     @Published var pnsInputSignalType: String?
 
     private var activeRequestID = UUID()
+    private var activeWorker: Task<([[Float]], [[Float]]?), Error>?
 
     var isActive: Bool { output != nil }
 
@@ -263,6 +264,7 @@ final class FilterViewModel: ObservableObject {
 
         let requestID = UUID()
         activeRequestID = requestID
+        activeWorker?.cancel()
 
         let sourceData = signal.data
         let samplingRate = signal.samplingRate
@@ -291,7 +293,7 @@ final class FilterViewModel: ObservableObject {
         do {
             let pnsEnabled = pnsInput != nil
 
-            let result = try await Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) {
                     let filteredData = try await Self.filteredChannels(
                         sourceData,
                         samplingRate: samplingRate,
@@ -337,11 +339,22 @@ final class FilterViewModel: ObservableObject {
                         filteredPNSData = nil
                     }
                     return (filteredData, filteredPNSData)
-                }.value
+                }
+                activeWorker = worker
+                let result = try await withTaskCancellationHandler(
+                    operation: {
+                        try await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
+                    }
+                )
                 progressContinuation.finish()
                 progressTask.cancel()
 
-                guard activeRequestID == requestID else { return }
+                guard activeRequestID == requestID, !Task.isCancelled else { return }
+                activeWorker = nil
 
                 output = signal.replacingData(result.0)
                 if let pnsInput, let filteredPNSData = result.1 {
@@ -368,10 +381,12 @@ final class FilterViewModel: ObservableObject {
                 progressContinuation.finish()
                 progressTask.cancel()
                 guard activeRequestID == requestID else { return }
+                activeWorker = nil
                 statusMessage = error.localizedDescription
                 statusIsError = true
             }
             if activeRequestID == requestID {
+                activeWorker = nil
                 isFiltering = false
             }
     }
@@ -379,6 +394,8 @@ final class FilterViewModel: ObservableObject {
     /// Clears the filter outputs and calls `onCleared` for cross-domain invalidation.
     func clear(onCleared: () -> Void) {
         activeRequestID = UUID()
+        activeWorker?.cancel()
+        activeWorker = nil
         isFiltering = false
         output = nil
         pnsOutput = nil
@@ -391,7 +408,28 @@ final class FilterViewModel: ObservableObject {
     /// Directly sets the EEG output (used by the ICA re-filter restore path).
     func setOutput(_ signal: MFFSignalData?) {
         activeRequestID = UUID()
+        activeWorker?.cancel()
+        activeWorker = nil
         output = signal
+    }
+
+    func cancelInFlightWork() {
+        activeRequestID = UUID()
+        activeWorker?.cancel()
+        activeWorker = nil
+        isFiltering = false
+        progress = 0
+    }
+
+    func resetForClose() {
+        cancelInFlightWork()
+        showsPopover = false
+        showsLineNoiseOptions = false
+        statusMessage = nil
+        statusIsError = false
+        output = nil
+        pnsOutput = nil
+        pnsInputSignalType = nil
     }
 
     // MARK: - Transform (L3 orchestration)

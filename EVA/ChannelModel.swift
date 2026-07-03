@@ -241,6 +241,15 @@ extension FocusedValues {
         typealias Value = Binding<Int>
     }
 
+    var datasetInfoRequest: Binding<Int>? {
+        get { self[DatasetInfoRequestKey.self] }
+        set { self[DatasetInfoRequestKey.self] = newValue }
+    }
+
+    private struct DatasetInfoRequestKey: FocusedValueKey {
+        typealias Value = Binding<Int>
+    }
+
     var physioViewControls: PhysioViewControls? {
         get { self[PhysioViewControlsKey.self] }
         set { self[PhysioViewControlsKey.self] = newValue }
@@ -318,8 +327,15 @@ struct ChannelHealthViewControls {
 struct FileExportCommands: View {
     @FocusedValue(\.mffExportRequest) private var mffExportRequest
     @FocusedValue(\.copyProcessingRequest) private var copyProcessingRequest
+    @FocusedValue(\.datasetInfoRequest) private var datasetInfoRequest
 
     var body: some View {
+        Button("Dataset Info...") {
+            datasetInfoRequest?.wrappedValue += 1
+        }
+        .keyboardShortcut("i", modifiers: .command)
+        .disabled(datasetInfoRequest == nil)
+
         Button("Export to MFF...") {
             mffExportRequest?.wrappedValue += 1
         }

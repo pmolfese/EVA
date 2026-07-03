@@ -56,6 +56,9 @@ struct WaveformView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ChannelGoodnessSettings.self) private var goodnessSettings
     @Environment(ProcessingDefaults.self) private var processingDefaults
+    @Environment(BatchController.self) private var batch
+    /// Guards batch auto-start to once per freshly-built (per-recording) view.
+    @State private var batchStarted = false
     @Query private var markers: [UserMarker]
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
@@ -179,6 +182,7 @@ struct WaveformView: View {
     // MRI gradient-artifact removal domain (AAS / FASTR / FARM / Moosmann),
     // extracted into an L4 store. See REFACTOR.md slice 2.
     @StateObject private var gradient = GradientViewModel()
+    @StateObject private var replay = ReplayController()
 
     // Per-channel state, shared with the menu-bar Channels commands.
     @State private var channels = ChannelModel()
@@ -194,8 +198,25 @@ struct WaveformView: View {
     @State private var resetToOriginalRequest = 0
     @State private var mffExportRequest = 0
     @State private var copyProcessingRequest = 0
+    @State private var datasetInfoRequest = 0
+    @State private var showsDatasetInfo = false
     @State private var isExportingMFF = false
     @State private var mffExportStatusMessage: String?
+    @State private var recordingSessionID = UUID()
+    @State private var waveletExplorerTask: Task<Void, Never>?
+    @State private var topographyTask: Task<Void, Never>?
+    @State private var artifactTemplateTask: Task<Void, Never>?
+    @State private var waveletReductionTask: Task<Void, Never>?
+    @State private var artifactCleaningTask: Task<Void, Never>?
+    @State private var icaTask: Task<Void, Never>?
+    @State private var icaRemovalTask: Task<Void, Never>?
+    @State private var psaTask: Task<Void, Never>?
+    @State private var filterTask: Task<Void, Never>?
+    @State private var gradientTask: Task<Void, Never>?
+    @State private var replayTask: Task<Void, Never>?
+    @State private var mffExportTask: Task<Void, Never>?
+    @State private var bcgTask: Task<Void, Never>?
+    @State private var bcgRefinementTask: Task<Void, Never>?
 
     /// Keep the time slider visually comparable across sampling rates. The old
     /// fixed stride of 5 samples at 1000 Hz displayed about 200 plotted points/s.
@@ -354,12 +375,17 @@ struct WaveformView: View {
         .focusedSceneValue(\.channelHealthViewControls, channelHealthControls)
         .focusedSceneValue(\.mffExportRequest, $mffExportRequest)
         .focusedSceneValue(\.copyProcessingRequest, $copyProcessingRequest)
+        .focusedSceneValue(\.datasetInfoRequest, $datasetInfoRequest)
         .focusedSceneValue(\.physioViewControls, physioViewControls)
     }
 
-    /// Split out of `body` so each modifier chain stays small enough for the
-    /// Swift type-checker.
+    /// Split out of `body` (and further split below) so each modifier chain stays
+    /// small enough for the Swift type-checker.
     private func installEventHandlers(on content: some View) -> some View {
+        installEpochAndLifecycleHandlers(on: installRequestHandlers(on: content))
+    }
+
+    private func installRequestHandlers(on content: some View) -> some View {
         content
         .onChange(of: resetToOriginalRequest) { _, _ in
             resetToOriginalData()
@@ -369,6 +395,9 @@ struct WaveformView: View {
         }
         .onChange(of: copyProcessingRequest) { _, _ in
             importProcessingFromOtherFile()
+        }
+        .onChange(of: datasetInfoRequest) { _, _ in
+            showsDatasetInfo = true
         }
         .onChange(of: channelLabelMetricsExportRequest) { _, _ in
             saveChannelLabelMetricsJSON()
@@ -383,6 +412,10 @@ struct WaveformView: View {
         .onChange(of: channelGoodnessSettingsRequest) { _, _ in
             showsChannelGoodnessSettings = true
         }
+    }
+
+    private func installEpochAndLifecycleHandlers(on content: some View) -> some View {
+        content
         .onChange(of: template.deletionRequest) { _, artifactID in
             guard let artifactID else { return }
             deleteDefinedArtifact(id: artifactID)
@@ -417,11 +450,7 @@ struct WaveformView: View {
             installCommandKeyMonitor()
         }
         .onDisappear {
-            removeCommandKeyMonitor()
-            chanHealth.task?.cancel()
-            chanHealth.task = nil
-            segHealth.task?.cancel()
-            segHealth.task = nil
+            tearDownRecordingSessionForClose()
         }
     }
 
@@ -433,6 +462,23 @@ struct WaveformView: View {
         ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
         ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
         adoptOnDiskEpochsIfPresent()
+        autoStartBatchIfNeeded()
+    }
+
+    /// When a Batch run swaps this file in, auto-configure the replay from the
+    /// shared batch config and start it (once). Load failures are reported so the
+    /// batch advances past a bad file.
+    private func autoStartBatchIfNeeded() {
+        guard batch.isActive, !batchStarted, batch.matches(recording: recording) else { return }
+        guard recording.signal != nil else {
+            batch.completeCurrent(.failed(recording.loadError ?? "Could not load recording."))
+            return
+        }
+        guard let script = batch.script else { return }
+        batchStarted = true
+        replay.configure(fromBatch: batch, script: script)
+        batch.setStatus(.processing)
+        startInteractiveReplay()
     }
 
     /// When the opened file was segmented or category-averaged by other software,
@@ -707,6 +753,21 @@ struct WaveformView: View {
         .sheet(isPresented: $ica.showsSheet) {
             icaSheet(for: base)
         }
+        .sheet(isPresented: $replay.showsConfigPane) {
+            ReplayConfigSheet(
+                controller: replay,
+                onStart: { startInteractiveReplay() },
+                onCancel: { replay.reset() }
+            )
+        }
+        .sheet(isPresented: $showsDatasetInfo) {
+            DatasetInfoSheet(
+                recording: recording,
+                epoching: epoching,
+                onClose: { showsDatasetInfo = false }
+            )
+        }
+        .overlay(alignment: .top) { replayBanner() }
         .sheet(isPresented: $eegAnalysis.showsSheet) {
             EEGAnalysisSheet(
                 viewModel: eegAnalysis,
@@ -2448,7 +2509,14 @@ struct WaveformView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if !recording.noiseCurvesByCategory.isEmpty {
+                if epoching.isAveraged {
+                    overlayConditionsMenu()
+                    Toggle("Overlay", isOn: $epoching.showsOverlayButterfly)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                        .help("Overlay the selected conditions on shared axes, each in its own color.")
+                }
+                if !recording.noiseCurvesByCategory.isEmpty, !epoching.showsOverlayButterfly {
                     Toggle("Noise band", isOn: $epoching.showsNoiseBand)
                         .toggleStyle(.checkbox)
                         .font(.caption)
@@ -2470,12 +2538,54 @@ struct WaveformView: View {
             Divider()
 
             if epoching.isAveraged, !epoching.epochSegments.isEmpty {
+                let overlaySegments = selectedOverlaySegments()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        ForEach(epoching.epochSegments) { segment in
+                    if epoching.showsOverlayButterfly {
+                        VStack(alignment: .leading, spacing: 10) {
+                            FlowLegend(items: overlayLegendItems())
+                            GeometryReader { proxy in
+                                OverlayButterflyPlot(
+                                    data: signal.data,
+                                    segments: overlaySegments,
+                                    colors: overlaySegments.map { epochColor(for: $0.colorIndex) },
+                                    hiddenChannels: channels.hidden,
+                                    amplitudeScale: amplitudeScale,
+                                    highlightRelativeSample: epoching.butterflyTopomapRelativeSample
+                                )
+                                .contentShape(Rectangle())
+                                .simultaneousGesture(
+                                    SpatialTapGesture(count: 2, coordinateSpace: .local)
+                                        .onEnded { value in
+                                            guard let first = overlaySegments.first else { return }
+                                            epoching.butterflyTopomapRelativeSample = relativeSample(
+                                                forButterflyX: value.location.x, width: proxy.size.width, segment: first)
+                                            topomapSample = nil
+                                        }
+                                )
+                                .help("Double-click to compare topographies at this latency.")
+                                .contextMenu {
+                                    figureSaveMenu(title: "Butterfly Overlay",
+                                                   legend: overlayLegendItems(),
+                                                   size: CGSize(width: 820, height: 300)) {
+                                        OverlayButterflyPlot(
+                                            data: signal.data,
+                                            segments: overlaySegments,
+                                            colors: overlaySegments.map { epochColor(for: $0.colorIndex) },
+                                            hiddenChannels: channels.hidden,
+                                            amplitudeScale: amplitudeScale
+                                        )
+                                    }
+                                }
+                            }
+                            .frame(height: 220)
+                        }
+                        .padding(16)
+                    } else {
+                        VStack(alignment: .leading, spacing: 14) {
+                            ForEach(overlaySegments) { segment in
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack(alignment: .firstTextBaseline) {
-                                    Label(segment.category, systemImage: "waveform.path.ecg")
+                                    Label(epoching.displayCategory(segment.category), systemImage: "waveform.path.ecg")
                                         .font(.caption.weight(.semibold))
                                         .foregroundStyle(epochColor(for: segment.colorIndex))
                                     Spacer()
@@ -2521,14 +2631,30 @@ struct WaveformView: View {
                                             }
                                     )
                                     .help("Double-click to compare topographies at this latency. Drag the yellow line to move it.")
+                                    .contextMenu {
+                                        figureSaveMenu(title: "\(epoching.displayCategory(segment.category)) Butterfly",
+                                                       legend: [(epoching.displayCategory(segment.category), epochColor(for: segment.colorIndex))],
+                                                       size: CGSize(width: 820, height: 300)) {
+                                            ButterflyConditionPlot(
+                                                data: signal.data,
+                                                segment: segment,
+                                                hiddenChannels: channels.hidden,
+                                                amplitudeScale: amplitudeScale,
+                                                color: epochColor(for: segment.colorIndex),
+                                                noiseCurve: (epoching.showsNoiseBand && !recording.noiseCurvesByCategory.isEmpty)
+                                                    ? recording.noiseCurvesByCategory[segment.category] : nil
+                                            )
+                                        }
+                                    }
                                 }
                                 .frame(height: 150)
                             }
                             .padding(10)
                             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                            }
                         }
+                        .padding(16)
                     }
-                    .padding(16)
                 }
             } else {
                 ContentUnavailableView(
@@ -2543,17 +2669,19 @@ struct WaveformView: View {
 
     private func overlaidCategoriesPanel(for signal: MFFSignalData) -> some View {
         let visibleChannels = signal.data.indices.filter { !channels.hidden.contains($0) }
-        let colors = epoching.epochSegments.map { epochColor(for: $0.colorIndex) }
+        let overlaySegments = selectedOverlaySegments()
+        let colors = overlaySegments.map { epochColor(for: $0.colorIndex) }
         return VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Overlaid Categories")
                         .font(.headline)
-                    Text("All category averages, per channel")
+                    Text("Selected category averages, per channel")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if epoching.isAveraged { overlayConditionsMenu() }
                 Button {
                     epoching.showsOverlaidCategories = false
                 } label: {
@@ -2569,8 +2697,8 @@ struct WaveformView: View {
             Divider()
 
             if epoching.isAveraged, !epoching.epochSegments.isEmpty {
-                // Category color legend.
-                FlowLegend(items: epoching.epochSegments.map { ($0.category, epochColor(for: $0.colorIndex)) })
+                // Category color legend (renamed labels for figures).
+                FlowLegend(items: overlayLegendItems())
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
 
@@ -2588,7 +2716,7 @@ struct WaveformView: View {
                                     OverlaidCategoryChannelPlot(
                                         data: signal.data,
                                         channelIndex: channelIndex,
-                                        segments: epoching.epochSegments,
+                                        segments: overlaySegments,
                                         colors: colors,
                                         amplitudeScale: amplitudeScale,
                                         highlightRelativeSample: epoching.butterflyTopomapRelativeSample
@@ -2620,6 +2748,19 @@ struct WaveformView: View {
                                             }
                                     )
                                     .help("Double-click to show a topomap for every category at this latency. Drag the yellow line to move it.")
+                                    .contextMenu {
+                                        figureSaveMenu(title: "Ch \(channelIndex + 1) Overlay",
+                                                       legend: overlayLegendItems(),
+                                                       size: CGSize(width: 820, height: 220)) {
+                                            OverlaidCategoryChannelPlot(
+                                                data: signal.data,
+                                                channelIndex: channelIndex,
+                                                segments: overlaySegments,
+                                                colors: colors,
+                                                amplitudeScale: amplitudeScale
+                                            )
+                                        }
+                                    }
                                 }
                                 .frame(height: 88)
                             }
@@ -2668,25 +2809,68 @@ struct WaveformView: View {
 
             if let layout = recording.sensorLayout {
                 let samples = averagedTopomapSamples(relativeSample: relativeSample, in: signal)
-                let scale = fixedTopomapScale(for: samples.map(\.sample), in: signal)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ForEach(samples) { entry in
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(entry.category)
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(epochColor(for: entry.colorIndex))
-                                TopomapView(
-                                    layout: layout,
-                                    values: topomapValues(at: entry.sample, in: signal),
-                                    timeSeconds: entry.latencySeconds,
-                                    fixedScale: scale
-                                )
-                                .frame(height: 320)
+                let autoScale = fixedTopomapScale(for: samples.map(\.sample), in: signal) ?? 1
+                let autoZ = topomapAutoZ(samples: samples, in: signal)
+                let colorRange = topomapColorRange()
+                let zScaling = topomapZScaling(auto: autoZ)
+                HStack(spacing: 0) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            ForEach(samples) { entry in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(epoching.displayCategory(entry.category))
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(epochColor(for: entry.colorIndex))
+                                    TopomapView(
+                                        layout: layout,
+                                        values: topomapValues(at: entry.sample, in: signal),
+                                        timeSeconds: entry.latencySeconds,
+                                        fixedScale: autoScale,
+                                        colorRange: colorRange,
+                                        zScaling: zScaling
+                                    )
+                                    .frame(height: 320)
+                                }
+                            }
+                        }
+                        .padding(16)
+                        .contextMenu {
+                            figureSaveMenu(
+                                title: "Topographies",
+                                legend: [],
+                                size: CGSize(width: CGFloat(max(samples.count, 1)) * 280, height: 300)
+                            ) {
+                                topomapsFigure(samples: samples, layout: layout, scale: autoScale, colorRange: colorRange, zScaling: zScaling, signal: signal)
                             }
                         }
                     }
-                    .padding(16)
+
+                    if isCommandKeyPressed {
+                        TopomapScaleControl(
+                            mode: $epoching.topomapScaleMode,
+                            symmetric: $epoching.topomapSymmetric,
+                            minValue: topomapMinBinding,
+                            maxValue: topomapMaxBinding,
+                            autoScale: autoScale,
+                            onAutoMicrovolts: {
+                                epoching.topomapScaleManual = false
+                                seedTopomapScale(autoScale: autoScale, autoZ: autoZ)
+                            },
+                            sigma: $epoching.topomapZSigma,
+                            zMean: topomapZMeanBinding,
+                            zSD: topomapZSDBinding,
+                            onAutoZ: {
+                                epoching.topomapZManual = false
+                                seedTopomapScale(autoScale: autoScale, autoZ: autoZ)
+                            }
+                        )
+                        .padding(.trailing, 10)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
+                .onAppear { seedTopomapScale(autoScale: autoScale, autoZ: autoZ) }
+                .onChange(of: epoching.topomapSymmetric) { _, sym in
+                    if sym { epoching.topomapScaleMin = -epoching.topomapScaleMax }
                 }
             } else {
                 ContentUnavailableView(
@@ -2699,6 +2883,103 @@ struct WaveformView: View {
         }
     }
 
+    /// The manual µV color range (nil to auto-scale). Only in µV mode.
+    private func topomapColorRange() -> ClosedRange<Double>? {
+        guard epoching.topomapScaleMode == .microvolts,
+              epoching.topomapScaleManual,
+              epoching.topomapScaleMin < epoching.topomapScaleMax else { return nil }
+        return epoching.topomapScaleMin...epoching.topomapScaleMax
+    }
+
+    /// The effective z-score scaling, or nil when not in Z mode. `auto` is the
+    /// mean/SD computed across the displayed maps.
+    private func topomapZScaling(auto: (mean: Double, sd: Double)) -> TopomapZScaling? {
+        guard epoching.topomapScaleMode == .zScore else { return nil }
+        let mean = epoching.topomapZManual ? epoching.topomapZMean : auto.mean
+        let sd = epoching.topomapZManual ? epoching.topomapZSD : auto.sd
+        guard sd > 0, epoching.topomapZSigma > 0 else { return nil }
+        return TopomapZScaling(mean: mean, sd: sd, sigma: epoching.topomapZSigma)
+    }
+
+    private var topomapMinBinding: Binding<Double> {
+        Binding(get: { epoching.topomapScaleMin }, set: { value in
+            epoching.topomapScaleMin = value
+            if epoching.topomapSymmetric { epoching.topomapScaleMax = -value }
+            epoching.topomapScaleManual = true
+        })
+    }
+
+    private var topomapMaxBinding: Binding<Double> {
+        Binding(get: { epoching.topomapScaleMax }, set: { value in
+            epoching.topomapScaleMax = value
+            if epoching.topomapSymmetric { epoching.topomapScaleMin = -value }
+            epoching.topomapScaleManual = true
+        })
+    }
+
+    private var topomapZMeanBinding: Binding<Double> {
+        Binding(get: { epoching.topomapZMean }, set: { epoching.topomapZMean = $0; epoching.topomapZManual = true })
+    }
+
+    private var topomapZSDBinding: Binding<Double> {
+        Binding(get: { epoching.topomapZSD }, set: { epoching.topomapZSD = $0; epoching.topomapZManual = true })
+    }
+
+    /// Seeds µV min/max and z mean/SD from the data so the ⌘ control opens at the
+    /// current auto values (only while the respective mode is still auto).
+    private func seedTopomapScale(autoScale: Double, autoZ: (mean: Double, sd: Double)) {
+        if !epoching.topomapScaleManual {
+            epoching.topomapScaleMax = autoScale
+            epoching.topomapScaleMin = -autoScale
+        }
+        if !epoching.topomapZManual {
+            epoching.topomapZMean = autoZ.mean
+            epoching.topomapZSD = autoZ.sd
+        }
+    }
+
+    /// Mean and (population) standard deviation of the values feeding the maps.
+    private func topomapAutoZ(samples: [AveragedTopomapSample], in signal: MFFSignalData) -> (mean: Double, sd: Double) {
+        let values = samples.flatMap { topomapValues(at: $0.sample, in: signal) }
+        guard !values.isEmpty else { return (0, 1) }
+        let mean = values.reduce(0, +) / Double(values.count)
+        let variance = values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(values.count)
+        let sd = variance.squareRoot()
+        return (mean, sd > 0 ? sd : 1)
+    }
+
+    /// Standalone, side-by-side arrangement of all displayed topomaps for export
+    /// (one labeled map per selected condition, shared color scale).
+    @ViewBuilder
+    private func topomapsFigure(
+        samples: [AveragedTopomapSample],
+        layout: SensorLayout,
+        scale: Double?,
+        colorRange: ClosedRange<Double>?,
+        zScaling: TopomapZScaling?,
+        signal: MFFSignalData
+    ) -> some View {
+        HStack(alignment: .top, spacing: 16) {
+            ForEach(samples) { entry in
+                VStack(spacing: 6) {
+                    Text(epoching.displayCategory(entry.category))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(epochColor(for: entry.colorIndex))
+                    TopomapView(
+                        layout: layout,
+                        values: topomapValues(at: entry.sample, in: signal),
+                        timeSeconds: entry.latencySeconds,
+                        fixedScale: scale,
+                        colorRange: colorRange,
+                        zScaling: zScaling,
+                        showsLayoutName: false
+                    )
+                    .frame(width: 250, height: 250)
+                }
+            }
+        }
+    }
+
     private func relativeSample(forButterflyX x: CGFloat, width: CGFloat, segment: EpochSegment) -> Int {
         let epochLength = max(segment.endSample - segment.startSample + 1, 1)
         let normalized = min(max(x / max(width, 1), 0), 1)
@@ -2706,7 +2987,7 @@ struct WaveformView: View {
     }
 
     private func averagedTopomapSamples(relativeSample: Int, in signal: MFFSignalData) -> [AveragedTopomapSample] {
-        epoching.epochSegments.compactMap { segment in
+        selectedOverlaySegments().compactMap { segment in
             let epochLength = max(segment.endSample - segment.startSample + 1, 1)
             let localSample = min(max(relativeSample, 0), epochLength - 1)
             let sample = min(segment.startSample + localSample, segment.endSample)
@@ -3762,22 +4043,35 @@ struct WaveformView: View {
             maximumCandidates: waveletExplorerMaximumCandidates
         )
 
-        Task {
-            let result = await Task.detached(priority: .userInitiated) {
+        waveletExplorerTask?.cancel()
+        let sessionID = recordingSessionID
+        waveletExplorerTask = Task {
+            let worker = Task.detached(priority: .userInitiated) {
                 WaveletArtifactAnalyzer.explore(in: signal, configuration: configuration) { update in
                     Task { @MainActor in
                         publishWaveletExplorerProgress(update, generation: generation)
                     }
                 }
-            }.value
+            }
+            let result = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                }
+            )
 
-            guard generation == waveletExplorerRunGeneration else { return }
+            guard !Task.isCancelled,
+                  sessionID == recordingSessionID,
+                  generation == waveletExplorerRunGeneration else { return }
             waveletExplorerResult = result
             waveletExplorerProgress = 1
             waveletExplorerStatusTitle = "Wavelet artifact explorer scan complete"
             waveletExplorerStatusDetail = "\(result.candidates.count) candidates across \(result.channelCount) channels over \(String(format: "%.1f", result.analyzedDurationSeconds)) seconds."
             waveletExplorerStatusMessage = "\(result.candidates.count) wavelet candidates found"
             isRunningWaveletArtifactExplorer = false
+            waveletExplorerTask = nil
         }
     }
 
@@ -4514,22 +4808,35 @@ struct WaveformView: View {
         template.isRefreshingTopography = true
         template.scanCompleted = 0
         template.scanTotal = 0
-        Task {
-            let outcome = await Task.detached(priority: .userInitiated) {
+        topographyTask?.cancel()
+        let sessionID = recordingSessionID
+        topographyTask = Task {
+            let worker = Task.detached(priority: .userInitiated) {
                 ArtifactTemplateDetector.detectTopography(in: signal, configuration: configuration) { completed, total in
                     Task { @MainActor in
                         self.template.scanCompleted = completed
                         self.template.scanTotal = total
                     }
                 }
-            }.value
+            }
+            let outcome = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                }
+            )
             // Ignore stale completions: a newer refresh has superseded this one
             // and will publish its own result (and clear the spinner).
-            guard generation == template.topographyRefreshGeneration else { return }
+            guard !Task.isCancelled,
+                  sessionID == recordingSessionID,
+                  generation == template.topographyRefreshGeneration else { return }
             template.result?.topographyEvents = outcome.events
             template.result?.topographyReference = outcome.reference
             template.trajectorySelectedFrame = nil
             template.isRefreshingTopography = false
+            topographyTask = nil
         }
     }
 
@@ -4873,16 +5180,27 @@ struct WaveformView: View {
         template.scanTotal = 0
 
         let signature = artifactScanSignature
-        Task {
-            let result = await Task.detached(priority: .userInitiated) {
+        artifactTemplateTask?.cancel()
+        let sessionID = recordingSessionID
+        artifactTemplateTask = Task {
+            let worker = Task.detached(priority: .userInitiated) {
                 ArtifactTemplateDetector.detect(in: signal, configuration: configuration) { completed, total in
                     Task { @MainActor in
                         self.template.scanCompleted = completed
                         self.template.scanTotal = total
                     }
                 }
-            }.value
+            }
+            let result = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                }
+            )
 
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             template.result = result
             template.lastScanSignature = signature
             template.selectedChannel = nil
@@ -4896,6 +5214,7 @@ struct WaveformView: View {
                 ? "\(result.topographyEvents.count) topography matches"
                 : "\(result.selectedEvents.count) template matches"
             template.isApplying = false
+            artifactTemplateTask = nil
         }
     }
 
@@ -5281,8 +5600,10 @@ struct WaveformView: View {
             wavelet.progress = min(max(fraction, 0), 1)
         }
 
-        Task { @MainActor in
-            let result = await Task.detached(priority: .userInitiated) {
+        waveletReductionTask?.cancel()
+        let sessionID = recordingSessionID
+        waveletReductionTask = Task { @MainActor in
+            let worker = Task.detached(priority: .userInitiated) {
                 WaveletReducer.reduce(
                     signal: input,
                     channelIndices: Array(reduceIndices),
@@ -5291,27 +5612,47 @@ struct WaveformView: View {
                 ) { fraction in
                     progressContinuation.yield(fraction * (mode.assessesInBand ? 0.8 : 1.0))
                 }
-            }.value
+            }
+            let result = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
 
             // ERP path: assess variance retained within the analysis band, as HAPPE does.
             var bandRetained: Double?
-            if mode.assessesInBand,
+            if !Task.isCancelled,
+               sessionID == recordingSessionID,
+               mode.assessesInBand,
                let analysisBand,
                analysisBand.high > analysisBand.low,
                analysisBand.high < input.samplingRate / 2 {
-                bandRetained = await Task.detached(priority: .utility) {
+                let bandWorker = Task.detached(priority: .utility) {
                     await bandLimitedVarianceRetained(
                         original: input,
                         cleaned: result.cleaned,
                         channelIndices: Array(reduceIndices),
                         band: analysisBand
                     )
-                }.value
+                }
+                bandRetained = await withTaskCancellationHandler(
+                    operation: {
+                        await bandWorker.value
+                    },
+                    onCancel: {
+                        bandWorker.cancel()
+                    }
+                )
             }
 
             progressContinuation.finish()
             progressTask.cancel()
 
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             wavelet.reducedSignal = result.cleaned
             wavelet.artifact = result.artifact
             wavelet.result = result
@@ -5330,6 +5671,7 @@ struct WaveformView: View {
             invalidateEpochsForSignalChange()
             invalidateInterpolations()
             artifactVM.detectionRefreshToken += 1
+            waveletReductionTask = nil
         }
     }
 
@@ -5389,8 +5731,10 @@ struct WaveformView: View {
             artifactVM.cleaningProgress = progress
         }
 
-        Task {
-            let outcome = await Task.detached(priority: .userInitiated) {
+        artifactCleaningTask?.cancel()
+        let sessionID = recordingSessionID
+        artifactCleaningTask = Task {
+            let worker = Task.detached(priority: .userInitiated) {
                 ArtifactCleaner.cleanedSignal(
                     from: signal,
                     artifacts: artifacts,
@@ -5398,10 +5742,20 @@ struct WaveformView: View {
                 ) { progress in
                     progressContinuation.yield(progress)
                 }
-            }.value
+            }
+            let outcome = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
             progressContinuation.finish()
             progressTask.cancel()
 
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             artifactVM.cleanedSignal = outcome.signal
             artifactVM.cleaningIsEnabled = true
             artifactVM.cleaningSummaries = outcome.summaries
@@ -5425,6 +5779,7 @@ struct WaveformView: View {
             invalidateInterpolations()
             artifactVM.cleaningProgress = nil
             artifactVM.isCleaning = false
+            artifactCleaningTask = nil
         }
     }
 
@@ -5852,6 +6207,8 @@ struct WaveformView: View {
 
                 Button("Close") {
                     ica.showsSheet = false
+                    // Closing without removing components skips this replay step.
+                    if replay.state.isAwaitingDecision { replay.resume(.skip) }
                 }
             }
 
@@ -6042,7 +6399,7 @@ struct WaveformView: View {
         return lowerSource...upperSource
     }
 
-    private func runICA(on signal: MFFSignalData) {
+    private func runICA(on signal: MFFSignalData, onComplete: (@MainActor () -> Void)? = nil) {
         ica.isRunning = true
         ica.progress = 0
         ica.progressMessage = "Preparing ICA..."
@@ -6053,6 +6410,7 @@ struct WaveformView: View {
         if ica.usesFitFilter, fitHighCutoff <= fitLowCutoff {
             ica.isRunning = false
             ica.statusMessage = "ICA fit filter needs a high cutoff above the low cutoff."
+            onComplete?()
             return
         }
 
@@ -6078,9 +6436,12 @@ struct WaveformView: View {
             ica.progressMessage = update.message
         }
 
-        Task {
+        icaTask?.cancel()
+        let sessionID = recordingSessionID
+        icaTask = Task {
             do {
-                let decomposition = try await Task.detached(priority: .userInitiated) {
+                let worker = Task.detached(priority: .userInitiated) {
+                    try Task.checkCancellation()
                     let fitSignal: MFFSignalData
                     if let fitFilter = configuration.fitFilter {
                         let filteredData = try await EEGSignalFilter.bandPass(
@@ -6113,7 +6474,8 @@ struct WaveformView: View {
                         fitSignal = signal
                     }
 
-                    return try ICAArtifactDetector.fit(
+                    try Task.checkCancellation()
+                    let decomposition = try ICAArtifactDetector.fit(
                         signal: fitSignal,
                         configuration: configuration,
                         progress: { fraction in
@@ -6126,9 +6488,21 @@ struct WaveformView: View {
                             )
                         }
                     )
-                }.value
+                    try Task.checkCancellation()
+                    return decomposition
+                }
+                let decomposition = try await withTaskCancellationHandler(
+                    operation: {
+                        try await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                        progressContinuation.finish()
+                    }
+                )
                 progressContinuation.finish()
                 progressTask.cancel()
+                guard !Task.isCancelled, sessionID == recordingSessionID else { return }
                 ica.progress = 1
                 ica.progressMessage = "ICA complete"
                 var labeledDecomposition = decomposition
@@ -6160,13 +6534,29 @@ struct WaveformView: View {
                 } else {
                     ica.statusMessage = "ICA finished in \(decomposition.iterations) iterations after learning-rate backoff."
                 }
+            } catch is CancellationError {
+                progressContinuation.finish()
+                progressTask.cancel()
             } catch {
                 progressContinuation.finish()
                 progressTask.cancel()
+                guard sessionID == recordingSessionID else { return }
                 ica.statusMessage = error.localizedDescription
                 ica.progressMessage = "ICA failed"
             }
-            ica.isRunning = false
+            if sessionID == recordingSessionID {
+                ica.isRunning = false
+                icaTask = nil
+            }
+            onComplete?()
+        }
+    }
+
+    /// Awaitable wrapper around `runICA` for the interactive replay loop.
+    @MainActor
+    private func runICADecomposition(on signal: MFFSignalData) async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            runICA(on: signal, onComplete: { cont.resume() })
         }
     }
 
@@ -6217,7 +6607,9 @@ struct WaveformView: View {
         """
         ica.statusMessage = "Reconstructing EEG..."
 
-        Task {
+        icaRemovalTask?.cancel()
+        let sessionID = recordingSessionID
+        icaRemovalTask = Task {
             var reconstructionActivationSignal: MFFSignalData?
             if let fitFilter = decomposition.fitFilter {
                 do {
@@ -6247,20 +6639,30 @@ struct WaveformView: View {
                 }
             }
 
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             ica.statusMessage = "Reconstructing EEG..."
-            let cleaned = await Task.detached(priority: .userInitiated) {
+            let cleaningWorker = Task.detached(priority: .userInitiated) {
                 ICAArtifactDetector.cleanedSignal(
                     from: signal,
                     activationSignal: reconstructionActivationSignal,
                     decomposition: decomposition,
                     excluding: excludedComponents
                 )
-            }.value
+            }
+            let cleaned = await withTaskCancellationHandler(
+                operation: {
+                    await cleaningWorker.value
+                },
+                onCancel: {
+                    cleaningWorker.cancel()
+                }
+            )
 
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             var restoredFilteredSignal: MFFSignalData?
             if shouldRestoreFilter {
                 do {
-                    let filteredData = try await Task.detached(priority: .userInitiated) {
+                    let filterWorker = Task.detached(priority: .userInitiated) {
                         try await EEGSignalFilter.bandPass(
                             channels: cleaned.data,
                             samplingRate: cleaned.samplingRate,
@@ -6268,7 +6670,15 @@ struct WaveformView: View {
                             highCutoff: restoredFilterLowPassCutoff,
                             notch60HzEnabled: restoredNotch60HzEnabled
                         )
-                    }.value
+                    }
+                    let filteredData = try await withTaskCancellationHandler(
+                        operation: {
+                            try await filterWorker.value
+                        },
+                        onCancel: {
+                            filterWorker.cancel()
+                        }
+                    )
 
                     restoredFilteredSignal = MFFSignalData(
                         signalURL: cleaned.signalURL,
@@ -6287,6 +6697,7 @@ struct WaveformView: View {
                 }
             }
 
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             ica.cleanedSignal = cleaned
             filter.output = restoredFilteredSignal
             clearAppliedArtifactCleaning()
@@ -6312,6 +6723,9 @@ struct WaveformView: View {
             invalidateInterpolations()
             ica.isRemovingComponents = false
             ica.showsSheet = false
+            icaRemovalTask = nil
+            // Applying components resolves an interactive-replay decision pause.
+            if replay.state.isAwaitingDecision { replay.resume(.proceed) }
         }
     }
 
@@ -6753,7 +7167,13 @@ struct WaveformView: View {
                 }
                 .disabled(epoching.isApplying)
                 Button("Apply") {
-                    Task { await applyPSA(to: signal) }
+                    psaTask?.cancel()
+                    psaTask = Task {
+                        await applyPSA(to: signal)
+                        if !Task.isCancelled {
+                            psaTask = nil
+                        }
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canApplyPSA(events: events) || epoching.isApplying)
@@ -6949,6 +7369,7 @@ struct WaveformView: View {
     private func applyPSA(to signal: MFFSignalData) async {
         // Validate and capture all inputs on the main actor before going off-thread.
         guard let job = psaBuildJob(from: signal) else { return }
+        let sessionID = recordingSessionID
         let shouldAverage = epoching.averageOnApply
         let shouldAvgRef = epoching.averageReference
         let shouldBaseline = epoching.baselineCorrected
@@ -6958,11 +7379,19 @@ struct WaveformView: View {
         epoching.isApplying = true
         epoching.phaseMessage = "Segmenting…"
 
-        let built = await Task.detached(priority: .userInitiated) {
+        let buildWorker = Task.detached(priority: .userInitiated) {
             job.buildEpochs()
-        }.value
+        }
+        let built = await withTaskCancellationHandler(
+            operation: {
+                await buildWorker.value
+            },
+            onCancel: {
+                buildWorker.cancel()
+            }
+        )
 
-        guard let built else {
+        guard !Task.isCancelled, sessionID == recordingSessionID, let built else {
             epoching.isApplying = false
             epoching.phaseMessage = nil
             return
@@ -6977,28 +7406,57 @@ struct WaveformView: View {
         if shouldAverage {
             epoching.phaseMessage = "Averaging…"
             let colorIndices = categoryColorIndices(for: built.segments.map(\.category))
-            let averagedOpt = await Task.detached(priority: .userInitiated) {
+            let averageWorker = Task.detached(priority: .userInitiated) {
                 built.average(colorIndices: colorIndices)
-            }.value
-            guard let averaged = averagedOpt else {
+            }
+            let averagedOpt = await withTaskCancellationHandler(
+                operation: {
+                    await averageWorker.value
+                },
+                onCancel: {
+                    averageWorker.cancel()
+                }
+            )
+            guard !Task.isCancelled, sessionID == recordingSessionID, let averaged = averagedOpt else {
                 epoching.isApplying = false
                 epoching.phaseMessage = nil
                 epoching.statusMessage = "No averages could be computed."
                 return
             }
             epoching.phaseMessage = "Post-processing…"
-            finalResult = await Task.detached(priority: .userInitiated) {
+            let postWorker = Task.detached(priority: .userInitiated) {
                 averaged.postProcessed(averageReference: shouldAvgRef, baselineCorrect: shouldBaseline, badChannels: badChannels)
-            }.value
+            }
+            finalResult = await withTaskCancellationHandler(
+                operation: {
+                    await postWorker.value
+                },
+                onCancel: {
+                    postWorker.cancel()
+                }
+            )
             wasAveraged = true
         } else {
             epoching.phaseMessage = "Post-processing…"
-            finalResult = await Task.detached(priority: .userInitiated) {
+            let postWorker = Task.detached(priority: .userInitiated) {
                 built.postProcessed(averageReference: shouldAvgRef, baselineCorrect: shouldBaseline, badChannels: badChannels)
-            }.value
+            }
+            finalResult = await withTaskCancellationHandler(
+                operation: {
+                    await postWorker.value
+                },
+                onCancel: {
+                    postWorker.cancel()
+                }
+            )
             wasAveraged = false
         }
 
+        guard !Task.isCancelled, sessionID == recordingSessionID else {
+            epoching.isApplying = false
+            epoching.phaseMessage = nil
+            return
+        }
         epoching.epochedSignal = finalResult.signal
         epoching.epochSegments = finalResult.segments
         epoching.isAveraged = wasAveraged
@@ -7180,17 +7638,36 @@ struct WaveformView: View {
             message: "\(segmentedEpochSegments.count) epochs"
         )
         let colorIndices = categoryColorIndices(for: base.segments.map(\.category))
-        Task {
-            let averagedOpt = await Task.detached(priority: .userInitiated) {
+        psaTask?.cancel()
+        let sessionID = recordingSessionID
+        psaTask = Task {
+            let averageWorker = Task.detached(priority: .userInitiated) {
                 base.average(colorIndices: colorIndices)
-            }.value
-            guard let averaged = averagedOpt else {
+            }
+            let averagedOpt = await withTaskCancellationHandler(
+                operation: {
+                    await averageWorker.value
+                },
+                onCancel: {
+                    averageWorker.cancel()
+                }
+            )
+            guard !Task.isCancelled, sessionID == recordingSessionID, let averaged = averagedOpt else {
                 epoching.statusMessage = "No averages could be computed."
                 return
             }
-            let display = await Task.detached(priority: .userInitiated) {
+            let displayWorker = Task.detached(priority: .userInitiated) {
                 averaged.postProcessed(averageReference: shouldAvgRef, baselineCorrect: shouldBaseline, badChannels: badChannels)
-            }.value
+            }
+            let display = await withTaskCancellationHandler(
+                operation: {
+                    await displayWorker.value
+                },
+                onCancel: {
+                    displayWorker.cancel()
+                }
+            )
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             epoching.epochedSignal = display.signal
             epoching.epochSegments = display.segments
             epoching.isAveraged = true
@@ -7202,6 +7679,7 @@ struct WaveformView: View {
             selectedEventCodes.removeAll()
             horizontalScrollPosition.scrollTo(x: 0)
             epoching.statusMessage = averaged.message + suffix
+            psaTask = nil
         }
     }
 
@@ -7296,23 +7774,43 @@ struct WaveformView: View {
         )
         let isAveraged = epoching.isAveraged
         let colorIndices = categoryColorIndices(for: base.segments.map(\.category))
-        Task {
+        psaTask?.cancel()
+        let sessionID = recordingSessionID
+        psaTask = Task {
             let result: PSABuildResult
             if isAveraged {
-                let averagedOpt2 = await Task.detached(priority: .userInitiated) {
+                let averageWorker = Task.detached(priority: .userInitiated) {
                     base.average(colorIndices: colorIndices)
-                }.value
-                guard let averaged = averagedOpt2 else { return }
+                }
+                let averagedOpt2 = await withTaskCancellationHandler(
+                    operation: {
+                        await averageWorker.value
+                    },
+                    onCancel: {
+                        averageWorker.cancel()
+                    }
+                )
+                guard !Task.isCancelled, sessionID == recordingSessionID, let averaged = averagedOpt2 else { return }
                 result = averaged
             } else {
                 result = base
             }
-            let display = await Task.detached(priority: .userInitiated) {
+            let displayWorker = Task.detached(priority: .userInitiated) {
                 result.postProcessed(averageReference: shouldAvgRef, baselineCorrect: shouldBaseline, badChannels: badChannels)
-            }.value
+            }
+            let display = await withTaskCancellationHandler(
+                operation: {
+                    await displayWorker.value
+                },
+                onCancel: {
+                    displayWorker.cancel()
+                }
+            )
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             epoching.epochedSignal = display.signal
             epoching.epochSegments = display.segments
             epoching.statusMessage = result.message + suffix
+            psaTask = nil
         }
     }
 
@@ -7356,6 +7854,86 @@ struct WaveformView: View {
         return palette[index % palette.count]
     }
 
+    // MARK: - Multi-condition overlay helpers
+
+    /// Distinct categories among the adopted segments, in first-appearance order.
+    private func overlayAvailableCategories() -> [String] {
+        var seen: [String] = []
+        for segment in epoching.epochSegments where !seen.contains(segment.category) {
+            seen.append(segment.category)
+        }
+        return seen
+    }
+
+    /// Segments whose category is in the current overlay selection.
+    private func selectedOverlaySegments() -> [EpochSegment] {
+        let available = overlayAvailableCategories()
+        let selected = epoching.overlayCategories(available: available)
+        return epoching.epochSegments.filter { selected.contains($0.category) }
+    }
+
+    /// Legend: one entry per selected category (deduped, renamed), in order.
+    private func overlayLegendItems() -> [(String, Color)] {
+        let available = overlayAvailableCategories()
+        let selected = epoching.overlayCategories(available: available)
+        var seen = Set<String>()
+        var items: [(String, Color)] = []
+        for segment in epoching.epochSegments
+        where selected.contains(segment.category) && seen.insert(segment.category).inserted {
+            items.append((epoching.displayCategory(segment.category), epochColor(for: segment.colorIndex)))
+        }
+        return items
+    }
+
+    /// A menu of category toggles for choosing which conditions to overlay.
+    @ViewBuilder
+    private func overlayConditionsMenu() -> some View {
+        let available = overlayAvailableCategories()
+        Menu {
+            ForEach(available, id: \.self) { category in
+                Toggle(epoching.displayCategory(category), isOn: Binding(
+                    get: { epoching.isOverlaySelected(category, available: available) },
+                    set: { _ in epoching.toggleOverlayCategory(category, available: available) }
+                ))
+            }
+        } label: {
+            Label("Conditions", systemImage: "line.3.horizontal.decrease.circle")
+                .font(.caption)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Choose which conditions to overlay.")
+    }
+
+    /// A right-click "Save Figure As…" submenu that renders `figure` (wrapped in a
+    /// white FigureCard with title + legend) to PNG / JPEG / PDF.
+    @ViewBuilder
+    private func figureSaveMenu<Figure: View>(
+        title: String,
+        legend: [(String, Color)],
+        size: CGSize,
+        @ViewBuilder figure: @escaping () -> Figure
+    ) -> some View {
+        Menu("Save Figure As…") {
+            ForEach(FigureFormat.allCases) { format in
+                Button(format.label) {
+                    FigureExporter.save(
+                        FigureCard(title: title, legend: legend, size: size, content: figure),
+                        defaultName: figureFileName(title),
+                        format: format
+                    )
+                }
+            }
+        }
+    }
+
+    private func figureFileName(_ title: String) -> String {
+        let base = (recording.packageName as NSString).deletingPathExtension
+        let safeTitle = title.replacingOccurrences(of: " ", with: "-")
+            .components(separatedBy: CharacterSet(charactersIn: "/:")).joined()
+        return "\(base)-\(safeTitle)"
+    }
+
     private func categoryColorIndices(for categories: [String]) -> [String: Int] {
         let uniqueCategories = Array(Set(categories)).sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
@@ -7372,39 +7950,23 @@ struct WaveformView: View {
     /// are captured but skipped until their round-trip lands.
     private func importProcessingFromOtherFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.mff]
+        panel.allowedContentTypes = [.mff, .xml]
         panel.canChooseDirectories = true // MFF is a directory package
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Copy Processing"
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        guard let script = EVAProcessingScriptXML.read(fromPackage: url) else {
+        // Accept either an MFF package (reads its eva.xml) or a standalone eva.xml.
+        guard let script = EVAProcessingScriptXML.read(fromFile: url) else {
             filter.statusMessage = "No eva.xml found in \(url.lastPathComponent)."
             filter.statusIsError = true
             return
         }
 
-        Task {
-            await replay(script)
-            let applied = script.replayableSteps
-                .map(\.operation)
-                .filter { [.mriGradientCorrection, .filter, .thresholdArtifactDetection].contains($0) }
-            let names = applied.map(replayOperationLabel).joined(separator: ", ")
-            filter.statusMessage = applied.isEmpty
-                ? "No replayable steps found in \(url.lastPathComponent)."
-                : "Copied processing (\(names)) from \(url.lastPathComponent)."
-            filter.statusIsError = false
-        }
-    }
-
-    private func replayOperationLabel(_ op: EVAProcessingStep.Operation) -> String {
-        switch op {
-        case .mriGradientCorrection: return "MRI gradient"
-        case .filter: return "filter"
-        case .thresholdArtifactDetection: return "artifact detection"
-        default: return op.rawValue
-        }
+        // Present the config pane; the user reviews steps and clicks Start, which
+        // launches `interactiveReplay()` via `startInteractiveReplay()`.
+        replay.configure(script: script, sourceName: url.lastPathComponent)
     }
 
     // MARK: - MFF export
@@ -7432,40 +7994,64 @@ struct WaveformView: View {
         // Capture the active processing pipeline for eva.xml + the process log.
         let processingScript = currentProcessingScript()
 
-        Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                do {
-                    try MFFWriter.write(
-                        signal: snapshot.signal,
-                        pnsSignal: pnsForExport,
-                        segments: snapshot.segments,
-                        kind: snapshot.kind,
-                        to: url
-                    )
-                    // Stamp the exported package with the processing record + log.
-                    try? EVAProcessingScriptXML.write(processingScript, toPackage: url)
-                    let log = EVAProcessLog(header: "EVA export — \(url.lastPathComponent)")
-                    for step in processingScript.steps {
-                        let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
-                        log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
-                    }
-                    try? log.write(toPackage: url)
-                    return Result<URL, Error>.success(url)
-                } catch {
-                    return Result<URL, Error>.failure(error)
-                }
-            }.value
+        mffExportTask?.cancel()
+        let sessionID = recordingSessionID
+        mffExportTask = Task {
+            let result = await performMFFExport(
+                snapshot: snapshot,
+                pnsForExport: pnsForExport,
+                script: processingScript,
+                to: url
+            )
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            isExportingMFF = false
+            switch result {
+            case .success(let outputURL):
+                mffExportStatusMessage = "Exported \(snapshot.kind.statusName) MFF: \(outputURL.lastPathComponent)"
+            case .failure(let error):
+                mffExportStatusMessage = error.localizedDescription
+            }
+            mffExportTask = nil
+        }
+    }
 
-            await MainActor.run {
-                isExportingMFF = false
-                switch result {
-                case .success(let outputURL):
-                    mffExportStatusMessage = "Exported \(snapshot.kind.statusName) MFF: \(outputURL.lastPathComponent)"
-                case .failure(let error):
-                    mffExportStatusMessage = error.localizedDescription
+    /// Panel-free MFF export — the core shared by the interactive Save panel and
+    /// replay finish-and-export (the seam Batch produces outputs through). Writes
+    /// the package plus its `eva.xml` provenance and process log.
+    @MainActor
+    private func performMFFExport(
+        snapshot: MFFExportSnapshot,
+        pnsForExport: MFFSignalData?,
+        script: EVAProcessingScript,
+        to url: URL
+    ) async -> Result<URL, Error> {
+        let worker = Task.detached(priority: .userInitiated) {
+            do {
+                try Task.checkCancellation()
+                try MFFWriter.write(
+                    signal: snapshot.signal,
+                    pnsSignal: pnsForExport,
+                    segments: snapshot.segments,
+                    kind: snapshot.kind,
+                    to: url
+                )
+                try? EVAProcessingScriptXML.write(script, toPackage: url)
+                let log = EVAProcessLog(header: "EVA export — \(url.lastPathComponent)")
+                for step in script.steps {
+                    let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
+                    log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
                 }
+                try? log.write(toPackage: url)
+                try Task.checkCancellation()
+                return Result<URL, Error>.success(url)
+            } catch {
+                return Result<URL, Error>.failure(error)
             }
         }
+        return await withTaskCancellationHandler(
+            operation: { await worker.value },
+            onCancel: { worker.cancel() }
+        )
     }
 
     private func pnsSignalForMFFExport() -> MFFSignalData? {
@@ -7527,9 +8113,12 @@ struct WaveformView: View {
         isExportingMFF = true
         mffExportStatusMessage = "Splitting MFF at \(formattedEventTime(splitTime))..."
 
-        Task {
-            let result = await Task.detached(priority: .userInitiated) {
+        mffExportTask?.cancel()
+        let sessionID = recordingSessionID
+        mffExportTask = Task {
+            let worker = Task.detached(priority: .userInitiated) {
                 do {
+                    try Task.checkCancellation()
                     for output in outputs {
                         let pnsSlice = try pnsForExport.map {
                             try MFFSignalSplitter.slice(
@@ -7568,13 +8157,23 @@ struct WaveformView: View {
                             log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
                         }
                         try? log.write(toPackage: output.url)
+                        try Task.checkCancellation()
                     }
                     return Result<[URL], Error>.success(outputs.map(\.url))
                 } catch {
                     return Result<[URL], Error>.failure(error)
                 }
-            }.value
+            }
+            let result = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                }
+            )
 
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             await MainActor.run {
                 isExportingMFF = false
                 switch result {
@@ -7585,6 +8184,7 @@ struct WaveformView: View {
                     mffExportStatusMessage = error.localizedDescription
                 }
             }
+            mffExportTask = nil
         }
     }
 
@@ -7702,9 +8302,15 @@ struct WaveformView: View {
                 "eyeBlink": "\(detectsEyeBlinkArtifacts)",
                 "eyeMovement": "\(detectsEyeMovementArtifacts)"
             ]
-            if let s = encodedThresholdConfig(artifactVM.blinkThresholdConfig) { p["blinkConfig"] = s }
-            if let s = encodedThresholdConfig(artifactVM.movementThresholdConfig) { p["movementConfig"] = s }
+            // Flat, readable params (one <param> per field) rather than a JSON blob.
+            p.merge(artifactVM.blinkThresholdConfig.flatParameters(prefix: "blink")) { a, _ in a }
+            p.merge(artifactVM.movementThresholdConfig.flatParameters(prefix: "movement")) { a, _ in a }
             script.append(EVAProcessingStep(operation: .thresholdArtifactDetection, parameters: p))
+        }
+        // PSA: segment (+ optional baseline / average) is portable when the target
+        // has the same event codes. Replayable.
+        if epoching.epochedSignal != nil, !epoching.selectedEventCodes.isEmpty {
+            script.append(EVAProcessingStep(operation: .segment, parameters: epoching.parameters))
         }
         if !channels.interpolated.isEmpty {
             script.append(EVAProcessingStep(
@@ -7722,16 +8328,6 @@ struct WaveformView: View {
             ))
         }
         return script
-    }
-
-    /// JSON-encodes an eye-artifact threshold config for an eva.xml param.
-    private func encodedThresholdConfig(_ config: EyeArtifactThresholdConfiguration) -> String? {
-        (try? JSONEncoder().encode(config)).flatMap { String(data: $0, encoding: .utf8) }
-    }
-
-    private func decodedThresholdConfig(_ string: String?) -> EyeArtifactThresholdConfiguration? {
-        guard let data = string?.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(EyeArtifactThresholdConfiguration.self, from: data)
     }
 
     private func currentMFFExportSnapshot() -> MFFExportSnapshot? {
@@ -7953,13 +8549,21 @@ struct WaveformView: View {
         let pnsInput = filter.filterPNS ? pnsFilterBaseSignal() : nil
         // The interactive path fires the shared async apply without awaiting;
         // the replay coordinator awaits the same method (one code path).
-        Task {
+        filterTask?.cancel()
+        let sessionID = recordingSessionID
+        filterTask = Task {
             await filter.apply(
                 to: signal,
                 pnsInput: pnsInput,
                 excludedChannels: channels.bad,
-                onApplied: { [self] in postFilterInvalidation() }
+                onApplied: { [self] in
+                    guard sessionID == recordingSessionID else { return }
+                    postFilterInvalidation()
+                }
             )
+            if !Task.isCancelled, sessionID == recordingSessionID {
+                filterTask = nil
+            }
         }
     }
 
@@ -7971,22 +8575,63 @@ struct WaveformView: View {
         invalidateInterpolations()
     }
 
-    /// Re-applies a saved processing script's replayable steps to the current
-    /// recording, in canonical chain order, driving the same apply-functions the
-    /// interactive UI uses. Awaits each stage so downstream stages start from the
-    /// settled output. Extend the switch as more stages gain a round-trip.
+    /// Launches the interactive replay once the user confirms the config pane.
+    private func startInteractiveReplay() {
+        replay.showsConfigPane = false
+        replayTask?.cancel()
+        let sessionID = recordingSessionID
+        replayTask = Task {
+            await interactiveReplay()
+            guard sessionID == recordingSessionID else { return }
+            replayTask = nil
+        }
+    }
+
+    /// Re-applies the configured steps to the current recording, in canonical
+    /// chain order, driving the SAME apply-functions the interactive UI uses.
+    /// Pauses (via the controller's async gate) for review/decision steps, then
+    /// resumes. Awaits each transform so downstream steps see settled output.
     @MainActor
-    private func replay(_ script: EVAProcessingScript) async {
-        guard let rawSignal = recording.signal else { return }
-        for step in script.replayableSteps {
-            switch step.operation {
+    private func interactiveReplay() async {
+        guard let rawSignal = recording.signal else { replay.state = .finished; return }
+        let actions = replay.plannedActions()
+
+        loop: for action in actions {
+            let params = replay.parameters(forStep: action.stepIndex)
+            replay.state = .running(index: action.stepIndex)
+
+            switch action.operation {
             case .mriGradientCorrection:
-                gradient.apply(parameters: step.parameters)
+                gradient.apply(parameters: params)
+                if action.gate == .review {
+                    gradient.showsPopover = true
+                    let decision = await replay.gate(.awaitingReview(index: action.stepIndex),
+                        banner: .init(title: "Review MRI Gradient Correction",
+                                      detail: "Adjust TR-skip, motion, or window in the panel, then Apply.",
+                                      showsSkip: true, progress: nil))
+                    gradient.showsPopover = false
+                    switch decision {
+                    case .cancel: break loop
+                    case .skip: continue loop
+                    case .proceed: break
+                    }
+                }
                 await applyGradientCorrection(to: rawSignal)
 
             case .filter:
-                filter.apply(parameters: step.parameters)
-                // Source per body's chain: filter builds on ICA/gradient if present.
+                filter.apply(parameters: params)
+                // Auto step: a review gate (Review-Each mode) is banner-only — no
+                // popover — so the loop remains the sole applier (no double-apply).
+                if action.gate == .review {
+                    switch await replay.gate(.awaitingReview(index: action.stepIndex),
+                        banner: .init(title: "Apply Filter?",
+                                      detail: "\(filter.activeFilterSummary). Continue to apply.",
+                                      showsSkip: true, progress: nil)) {
+                    case .cancel: break loop
+                    case .skip: continue loop
+                    case .proceed: break
+                    }
+                }
                 let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
                 let pnsInput = filter.filterPNS ? pnsFilterBaseSignal() : nil
                 await filter.apply(
@@ -7997,22 +8642,145 @@ struct WaveformView: View {
                 )
 
             case .thresholdArtifactDetection:
-                // Portable ocular threshold detection: set method + configs and
-                // let the artifactDetection task re-run (analysis, not a transform
-                // feeding later steps — no await needed).
                 artifactVM.detectionMethod = .threshold
-                detectsEyeBlinkArtifacts = step.parameters["eyeBlink"] == "true"
-                detectsEyeMovementArtifacts = step.parameters["eyeMovement"] == "true"
-                if let c = decodedThresholdConfig(step.parameters["blinkConfig"]) {
-                    artifactVM.blinkThresholdConfig = c
+                detectsEyeBlinkArtifacts = params["eyeBlink"] == "true"
+                detectsEyeMovementArtifacts = params["eyeMovement"] == "true"
+                artifactVM.blinkThresholdConfig = .fromFlatParameters(params, prefix: "blink",
+                    base: artifactVM.blinkThresholdConfig)
+                artifactVM.movementThresholdConfig = .fromFlatParameters(params, prefix: "movement",
+                    base: artifactVM.movementThresholdConfig)
+
+            case .icaClean:
+                // Auto-run the (portable) decomposition, then pause for the
+                // subject-specific component-removal decision.
+                ica.apply(parameters: params)
+                replay.banner = .init(title: "Running ICA…", detail: "Decomposing components.",
+                                      showsSkip: false, progress: nil)
+                let base = gradient.correctedSignal ?? rawSignal
+                await runICADecomposition(on: base)
+                guard ica.decomposition != nil else { replay.banner = nil; continue loop }
+                openICASheet(for: base)
+                switch await replay.gate(.awaitingDecision(index: action.stepIndex),
+                    banner: .init(title: "Select ICA Components",
+                                  detail: "Choose components to remove, then Remove — or Close to skip.",
+                                  showsSkip: true, progress: nil)) {
+                case .cancel: ica.showsSheet = false; break loop
+                case .skip, .proceed: break // .proceed = applied; .skip = closed unapplied
                 }
-                if let c = decodedThresholdConfig(step.parameters["movementConfig"]) {
-                    artifactVM.movementThresholdConfig = c
+
+            case .segment:
+                // Automate PSA: segment (+ baseline / average per params), then
+                // open the butterfly plot when an average was produced.
+                epoching.apply(parameters: params)
+                if let psaSignal = continuousProcessedSignal {
+                    await applyPSA(to: psaSignal)
+                    if epoching.isAveraged { epoching.showsButterflyPlot = true }
                 }
 
             default:
-                continue // wavelet / other stages land in later slices
+                continue loop
             }
+        }
+
+        if Task.isCancelled {
+            replay.banner = nil
+            replay.state = .cancelled
+            if batch.isActive, batch.matches(recording: recording) {
+                batch.completeCurrent(.skipped) // per-file Cancel → skip + advance
+            }
+            return
+        }
+
+        // Finish-and-export: the seam Batch produces outputs through.
+        if replay.exportWhenFinished, let folder = replay.outputFolder {
+            await exportReplayResult(to: folder)
+        }
+
+        replay.banner = nil
+        replay.state = .finished
+
+        // Advance the batch only after export has fully completed above.
+        if batch.isActive, batch.matches(recording: recording) {
+            batch.completeCurrent(.done)
+        }
+    }
+
+    /// Writes the processed recording to `<folder>/<name>-processed.mff` (with its
+    /// eva.xml) after an interactive replay finishes. Panel-free so Batch can call
+    /// it per file. Uses renamed PNS without the synthetic-channel prompt.
+    @MainActor
+    private func exportReplayResult(to folder: URL) async {
+        guard let snapshot = currentMFFExportSnapshot() else { return }
+        let base = (recording.packageName as NSString).deletingPathExtension
+        let url = folder.appendingPathComponent("\(base)-processed.mff")
+        replay.banner = .init(title: "Exporting…", detail: url.lastPathComponent,
+                              showsSkip: false, progress: nil)
+        let result = await performMFFExport(
+            snapshot: snapshot,
+            pnsForExport: pnsSignalWithRenames(),
+            script: currentProcessingScript(),
+            to: url
+        )
+        switch result {
+        case .success(let out):
+            filter.statusMessage = "Processed + exported \(out.lastPathComponent)."
+            filter.statusIsError = false
+        case .failure(let error):
+            filter.statusMessage = "Export failed: \(error.localizedDescription)"
+            filter.statusIsError = true
+        }
+    }
+
+    /// Top banner shown while an interactive replay is running or paused.
+    @ViewBuilder
+    private func replayBanner() -> some View {
+        if let info = replay.banner {
+            HStack(spacing: 12) {
+                if replay.state.isAwaiting {
+                    Image(systemName: "pause.circle.fill")
+                        .foregroundStyle(.orange)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    if batch.isActive, let job = batch.currentJob {
+                        Text("File \(batch.currentIndex + 1) of \(batch.jobs.count) · \(job.name)")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    }
+                    Text(info.title).font(.callout.weight(.semibold))
+                    Text(info.detail).font(.caption).foregroundStyle(.secondary)
+                }
+
+                if ica.isRunning {
+                    ProgressView(value: ica.progress).frame(width: 120)
+                }
+
+                Spacer(minLength: 12)
+
+                if replay.state.isAwaiting {
+                    Button("Continue") { replay.resume(.proceed) }
+                        .keyboardShortcut(.defaultAction)
+                    if info.showsSkip {
+                        Button("Skip") { replay.resume(.skip) }
+                    }
+                }
+                // In batch, Cancel skips just this file; Stop Batch ends the run.
+                Button(batch.isActive ? "Skip File" : "Cancel", role: .cancel) { replay.cancel() }
+                if batch.isActive {
+                    Button("Stop Batch") {
+                        batch.stop()
+                        replay.cancel()
+                    }
+                }
+            }
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.orange.opacity(0.35)))
+            .shadow(radius: 6)
+            .padding(12)
+            .frame(maxWidth: 640)
         }
     }
 
@@ -8250,8 +9018,20 @@ struct WaveformView: View {
                 Spacer()
 
                 Button("Apply") {
-                    Task { await applyGradientCorrection(to: signal) }
                     gradient.showsPopover = false
+                    if replay.state.isAwaitingReview {
+                        // During replay the loop applies after the gate resolves.
+                        replay.resume(.proceed)
+                    } else {
+                        gradientTask?.cancel()
+                        let sessionID = recordingSessionID
+                        gradientTask = Task {
+                            await applyGradientCorrection(to: signal)
+                            if !Task.isCancelled, sessionID == recordingSessionID {
+                                gradientTask = nil
+                            }
+                        }
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canApply)
@@ -8423,74 +9203,92 @@ struct WaveformView: View {
             gradient.progress = fraction
         }
 
-        await Task {
-            do {
-                let hasPNS = pnsInput != nil
-                let result = try await Task.detached(priority: .userInitiated) {
-                    let correctedData = try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs) { fraction in
-                        progressContinuation.yield(hasPNS ? 0.70 * fraction : fraction)
-                    }
-                    let correctedPNSData: [[Float]]?
-                    if let pnsInput {
-                        correctedPNSData = try GradientRemover.correct(channels: pnsInput.data, trSamples: pnsTRSamples, window: window, excludedTRs: excludedTRs) { fraction in
-                            progressContinuation.yield(0.70 + 0.30 * fraction)
-                        }
-                    } else {
-                        correctedPNSData = nil
-                    }
-                    return (correctedData, correctedPNSData)
-                }.value
-                progressContinuation.finish()
-                progressTask.cancel()
-
-                gradient.correctedSignal = MFFSignalData(
-                    signalURL: signalURL,
-                    signalType: signalType,
-                    numberOfChannels: numberOfChannels,
-                    samplingRate: samplingRate,
-                    duration: duration,
-                    recordingStartTime: recordingStartTime,
-                    events: events,
-                    data: result.0,
-                    channelNames: signal.channelNames
-                )
-                if let pnsInput, let correctedPNSData = result.1 {
-                    gradient.correctedPNSSignal = MFFSignalData(
-                        signalURL: pnsInput.signalURL,
-                        signalType: "\(pnsInput.signalType) MRI",
-                        numberOfChannels: pnsInput.numberOfChannels,
-                        samplingRate: pnsInput.samplingRate,
-                        duration: pnsInput.duration,
-                        recordingStartTime: pnsInput.recordingStartTime,
-                        events: pnsInput.events,
-                        data: correctedPNSData,
-                        channelNames: pnsInput.channelNames
-                    )
-                } else {
-                    gradient.correctedPNSSignal = nil
+        let sessionID = recordingSessionID
+        do {
+            let hasPNS = pnsInput != nil
+            let worker = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                let correctedData = try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs) { fraction in
+                    progressContinuation.yield(hasPNS ? 0.70 * fraction : fraction)
                 }
-                // The base signal changed, so any band-pass filter computed on
-                // the old base is stale.
-                ica.cleanedSignal = nil
-                ica.decomposition = nil
-                filter.output = nil
-                filter.pnsOutput = nil
-                filter.pnsInputSignalType = nil
-                clearAppliedArtifactCleaning()
-                gradient.statusMessage = "Applied MRI gradient artifact correction (\(gradient.trMarkerCode) markers, template window \(window.before) pre / \(window.after) post TRs\(excludedCount > 0 ? ", \(excludedCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
-                gradient.statusIsError = false
-                artifactVM.detectionRefreshToken += 1
-                invalidateEpochsForSignalChange()
-                invalidateInterpolations()
-            } catch {
-                progressContinuation.finish()
-                progressTask.cancel()
-                gradient.statusMessage = error.localizedDescription
-                gradient.statusIsError = true
+                try Task.checkCancellation()
+                let correctedPNSData: [[Float]]?
+                if let pnsInput {
+                    correctedPNSData = try GradientRemover.correct(channels: pnsInput.data, trSamples: pnsTRSamples, window: window, excludedTRs: excludedTRs) { fraction in
+                        progressContinuation.yield(0.70 + 0.30 * fraction)
+                    }
+                } else {
+                    correctedPNSData = nil
+                }
+                try Task.checkCancellation()
+                return (correctedData, correctedPNSData)
             }
+            let result = try await withTaskCancellationHandler(
+                operation: {
+                    try await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
+            progressContinuation.finish()
+            progressTask.cancel()
 
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            gradient.correctedSignal = MFFSignalData(
+                signalURL: signalURL,
+                signalType: signalType,
+                numberOfChannels: numberOfChannels,
+                samplingRate: samplingRate,
+                duration: duration,
+                recordingStartTime: recordingStartTime,
+                events: events,
+                data: result.0,
+                channelNames: signal.channelNames
+            )
+            if let pnsInput, let correctedPNSData = result.1 {
+                gradient.correctedPNSSignal = MFFSignalData(
+                    signalURL: pnsInput.signalURL,
+                    signalType: "\(pnsInput.signalType) MRI",
+                    numberOfChannels: pnsInput.numberOfChannels,
+                    samplingRate: pnsInput.samplingRate,
+                    duration: pnsInput.duration,
+                    recordingStartTime: pnsInput.recordingStartTime,
+                    events: pnsInput.events,
+                    data: correctedPNSData,
+                    channelNames: pnsInput.channelNames
+                )
+            } else {
+                gradient.correctedPNSSignal = nil
+            }
+            // The base signal changed, so any band-pass filter computed on
+            // the old base is stale.
+            ica.cleanedSignal = nil
+            ica.decomposition = nil
+            filter.output = nil
+            filter.pnsOutput = nil
+            filter.pnsInputSignalType = nil
+            clearAppliedArtifactCleaning()
+            gradient.statusMessage = "Applied MRI gradient artifact correction (\(gradient.trMarkerCode) markers, template window \(window.before) pre / \(window.after) post TRs\(excludedCount > 0 ? ", \(excludedCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
+            gradient.statusIsError = false
+            artifactVM.detectionRefreshToken += 1
+            invalidateEpochsForSignalChange()
+            invalidateInterpolations()
+        } catch is CancellationError {
+            progressContinuation.finish()
+            progressTask.cancel()
+        } catch {
+            progressContinuation.finish()
+            progressTask.cancel()
+            guard sessionID == recordingSessionID else { return }
+            gradient.statusMessage = error.localizedDescription
+            gradient.statusIsError = true
+        }
+
+        if sessionID == recordingSessionID {
             gradient.isProcessing = false
-        }.value
+        }
     }
 
     private func removeGradientArtifactFASTR(from signal: MFFSignalData?) async {
@@ -8541,82 +9339,100 @@ struct WaveformView: View {
             gradient.progress = fraction
         }
 
-        await Task {
-            do {
-                let hasPNS = pnsInput != nil
-                let result = try await Task.detached(priority: .userInitiated) {
-                    let correctedData = try FastrCorrector.correct(
-                        channels: sourceData,
-                        volumeTriggers: trSamples,
-                        config: configCopy,
-                        samplingRate: samplingRate
-                    ) { fraction in
-                        progressContinuation.yield(hasPNS ? 0.70 * fraction : fraction)
-                    }
-                    let correctedPNSData: [[Float]]?
-                    if let pnsInput {
-                        correctedPNSData = try FastrCorrector.correct(
-                            channels: pnsInput.data,
-                            volumeTriggers: pnsTRSamples,
-                            config: configCopy,
-                            samplingRate: pnsInput.samplingRate
-                        ) { fraction in
-                            progressContinuation.yield(0.70 + 0.30 * fraction)
-                        }
-                    } else {
-                        correctedPNSData = nil
-                    }
-                    return (correctedData, correctedPNSData)
-                }.value
-                progressContinuation.finish()
-                progressTask.cancel()
-
-                gradient.correctedSignal = MFFSignalData(
-                    signalURL: signalURL,
-                    signalType: signalType,
-                    numberOfChannels: numberOfChannels,
-                    samplingRate: samplingRate,
-                    duration: duration,
-                    recordingStartTime: recordingStartTime,
-                    events: events,
-                    data: result.0,
-                    channelNames: signal.channelNames
-                )
-                if let pnsInput, let correctedPNSData = result.1 {
-                    gradient.correctedPNSSignal = MFFSignalData(
-                        signalURL: pnsInput.signalURL,
-                        signalType: "\(pnsInput.signalType) MRI",
-                        numberOfChannels: pnsInput.numberOfChannels,
-                        samplingRate: pnsInput.samplingRate,
-                        duration: pnsInput.duration,
-                        recordingStartTime: pnsInput.recordingStartTime,
-                        events: pnsInput.events,
-                        data: correctedPNSData,
-                        channelNames: pnsInput.channelNames
-                    )
-                } else {
-                    gradient.correctedPNSSignal = nil
+        let sessionID = recordingSessionID
+        do {
+            let hasPNS = pnsInput != nil
+            let worker = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                let correctedData = try FastrCorrector.correct(
+                    channels: sourceData,
+                    volumeTriggers: trSamples,
+                    config: configCopy,
+                    samplingRate: samplingRate
+                ) { fraction in
+                    progressContinuation.yield(hasPNS ? 0.70 * fraction : fraction)
                 }
-                ica.cleanedSignal = nil
-                ica.decomposition = nil
-                filter.output = nil
-                filter.pnsOutput = nil
-                filter.pnsInputSignalType = nil
-                clearAppliedArtifactCleaning()
-                gradient.statusMessage = "Applied \(methodName) correction (\(gradient.trMarkerCode) markers, \(slices) slice\(slices == 1 ? "" : "s")/volume\(gradient.fastrOBSAuto ? ", OBS" : "")\(gradient.fastrANC ? ", ANC" : "")\(censoredCount > 0 ? ", \(censoredCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
-                gradient.statusIsError = false
-                artifactVM.detectionRefreshToken += 1
-                invalidateEpochsForSignalChange()
-                invalidateInterpolations()
-            } catch {
-                progressContinuation.finish()
-                progressTask.cancel()
-                gradient.statusMessage = error.localizedDescription
-                gradient.statusIsError = true
+                try Task.checkCancellation()
+                let correctedPNSData: [[Float]]?
+                if let pnsInput {
+                    correctedPNSData = try FastrCorrector.correct(
+                        channels: pnsInput.data,
+                        volumeTriggers: pnsTRSamples,
+                        config: configCopy,
+                        samplingRate: pnsInput.samplingRate
+                    ) { fraction in
+                        progressContinuation.yield(0.70 + 0.30 * fraction)
+                    }
+                } else {
+                    correctedPNSData = nil
+                }
+                try Task.checkCancellation()
+                return (correctedData, correctedPNSData)
             }
+            let result = try await withTaskCancellationHandler(
+                operation: {
+                    try await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
+            progressContinuation.finish()
+            progressTask.cancel()
 
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            gradient.correctedSignal = MFFSignalData(
+                signalURL: signalURL,
+                signalType: signalType,
+                numberOfChannels: numberOfChannels,
+                samplingRate: samplingRate,
+                duration: duration,
+                recordingStartTime: recordingStartTime,
+                events: events,
+                data: result.0,
+                channelNames: signal.channelNames
+            )
+            if let pnsInput, let correctedPNSData = result.1 {
+                gradient.correctedPNSSignal = MFFSignalData(
+                    signalURL: pnsInput.signalURL,
+                    signalType: "\(pnsInput.signalType) MRI",
+                    numberOfChannels: pnsInput.numberOfChannels,
+                    samplingRate: pnsInput.samplingRate,
+                    duration: pnsInput.duration,
+                    recordingStartTime: pnsInput.recordingStartTime,
+                    events: pnsInput.events,
+                    data: correctedPNSData,
+                    channelNames: pnsInput.channelNames
+                )
+            } else {
+                gradient.correctedPNSSignal = nil
+            }
+            ica.cleanedSignal = nil
+            ica.decomposition = nil
+            filter.output = nil
+            filter.pnsOutput = nil
+            filter.pnsInputSignalType = nil
+            clearAppliedArtifactCleaning()
+            gradient.statusMessage = "Applied \(methodName) correction (\(gradient.trMarkerCode) markers, \(slices) slice\(slices == 1 ? "" : "s")/volume\(gradient.fastrOBSAuto ? ", OBS" : "")\(gradient.fastrANC ? ", ANC" : "")\(censoredCount > 0 ? ", \(censoredCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
+            gradient.statusIsError = false
+            artifactVM.detectionRefreshToken += 1
+            invalidateEpochsForSignalChange()
+            invalidateInterpolations()
+        } catch is CancellationError {
+            progressContinuation.finish()
+            progressTask.cancel()
+        } catch {
+            progressContinuation.finish()
+            progressTask.cancel()
+            guard sessionID == recordingSessionID else { return }
+            gradient.statusMessage = error.localizedDescription
+            gradient.statusIsError = true
+        }
+
+        if sessionID == recordingSessionID {
             gradient.isProcessing = false
-        }.value
+        }
     }
 
     /// Tooltip for the Apply button explaining why it may be disabled.
@@ -9313,12 +10129,26 @@ struct WaveformView: View {
                 }
                 if bcg.method == .spatialPCA && bcg.detectsArtifacts {
                     Button("Refine") {
-                        Task { await runBCGRefinement(signal: signal) }
+                        bcgRefinementTask?.cancel()
+                        let sessionID = recordingSessionID
+                        bcgRefinementTask = Task {
+                            await runBCGRefinement(signal: signal)
+                            if !Task.isCancelled, sessionID == recordingSessionID {
+                                bcgRefinementTask = nil
+                            }
+                        }
                     }
                     .disabled(bcg.isRefining || bcg.isRunning)
                 }
                 Button("Detect BCG") {
-                    Task { await runBCGDetection(signal: signal, selection: selection) }
+                    bcgTask?.cancel()
+                    let sessionID = recordingSessionID
+                    bcgTask = Task {
+                        await runBCGDetection(signal: signal, selection: selection)
+                        if !Task.isCancelled, sessionID == recordingSessionID {
+                            bcgTask = nil
+                        }
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(bcg.isRunning || (bcg.method == .qrsLocking && !detectsECGArtifacts))
@@ -9554,6 +10384,7 @@ struct WaveformView: View {
     }
 
     private func runBCGDetection(signal: MFFSignalData, selection: ClosedRange<Int>?) async {
+        let sessionID = recordingSessionID
         bcg.isRunning = true
         bcg.status = "Detecting…"
         bcg.refinedTemplate = nil
@@ -9632,10 +10463,18 @@ struct WaveformView: View {
                     minimumRRSeconds: minRR,
                     polarity: .either
                 )
-                times = await Task.detached(priority: .userInitiated) {
+                let worker = Task.detached(priority: .userInitiated) {
                     RWaveDetector.detect(sources: [source], configuration: config)
                         .map(\.beginTimeSeconds)
-                }.value
+                }
+                times = await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                    }
+                )
             } else {
                 times = []
             }
@@ -9658,10 +10497,18 @@ struct WaveformView: View {
                 minimumRRSeconds: minRR,
                 polarity: .either
             )
-            times = await Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) {
                 RWaveDetector.detect(sources: [source], configuration: config)
                     .map(\.beginTimeSeconds)
-            }.value
+            }
+            times = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                }
+            )
 
         case .qrsLocking:
             let qrsTimes = artifactVM.events
@@ -9674,6 +10521,7 @@ struct WaveformView: View {
             )
         }
 
+        guard !Task.isCancelled, sessionID == recordingSessionID else { return }
         let code    = bcg.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
         let useCode = code.isEmpty ? BCGDetector.eventCode : code
 
@@ -9711,6 +10559,7 @@ struct WaveformView: View {
     }
 
     private func runBCGRefinement(signal: MFFSignalData) async {
+        let sessionID = recordingSessionID
         let existingTimes = artifactVM.events
             .filter { $0.sourceFile == BCGDetector.sourceFile }
             .map { $0.beginTimeSeconds }
@@ -9734,6 +10583,7 @@ struct WaveformView: View {
             thresholdSD: bcg.thresholdSD
         )
 
+        guard !Task.isCancelled, sessionID == recordingSessionID else { return }
         guard let (newTimes, templateValues, keptCount) = result else {
             bcg.status = "⚠ Not enough detected events to refine"
             bcg.isRefining = false
@@ -10222,7 +11072,8 @@ struct WaveformView: View {
         let detectedEvents = await withTaskGroup(of: [MFFEvent].self) { group in
             if detectBlinks {
                 group.addTask(priority: .userInitiated) {
-                    EyeArtifactThresholdDetector.detect(
+                    guard !Task.isCancelled else { return [] }
+                    return EyeArtifactThresholdDetector.detect(
                         kind: .blink,
                         channels: sourceData,
                         samplingRate: samplingRate,
@@ -10233,7 +11084,8 @@ struct WaveformView: View {
             }
             if detectMovements {
                 group.addTask(priority: .userInitiated) {
-                    EyeArtifactThresholdDetector.detect(
+                    guard !Task.isCancelled else { return [] }
+                    return EyeArtifactThresholdDetector.detect(
                         kind: .movement,
                         channels: sourceData,
                         samplingRate: samplingRate,
@@ -10244,7 +11096,8 @@ struct WaveformView: View {
             }
             if detectECG, !ecgSources.isEmpty {
                 group.addTask(priority: .userInitiated) {
-                    RWaveDetector.detect(sources: ecgSources, configuration: ecgConfiguration)
+                    guard !Task.isCancelled else { return [] }
+                    return RWaveDetector.detect(sources: ecgSources, configuration: ecgConfiguration)
                 }
             }
             var events: [MFFEvent] = []
@@ -10252,6 +11105,7 @@ struct WaveformView: View {
             return events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
         }
 
+        guard !Task.isCancelled else { return }
         artifactVM.events = detectedEvents
         artifactVM.statusMessage = artifactDetectionSummary(for: detectedEvents)
         artifactVM.isDetecting = false
@@ -10503,9 +11357,11 @@ struct WaveformView: View {
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
         let sourceSignal = signal
+        let sessionID = recordingSessionID
 
-        Task { @MainActor in
-            let analysis = await Task.detached(priority: .utility) {
+        chanHealth.task?.cancel()
+        chanHealth.task = Task { @MainActor in
+            let worker = Task.detached(priority: .utility) {
                 ChannelHealthAnalyzer.analyze(
                     signal: sourceSignal,
                     layout: layout,
@@ -10514,12 +11370,21 @@ struct WaveformView: View {
                     ransac: ransacConfig,
                     impedancesKOhm: impedances
                 )
-            }.value
+            }
+            let analysis = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                }
+            )
 
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             for channel in affected {
                 channels.healthResults[channel] = analysis.resultsByChannel[channel]
             }
+            chanHealth.task = nil
         }
     }
 
@@ -10652,7 +11517,7 @@ struct WaveformView: View {
         }
 
         chanHealth.task = Task { @MainActor in
-            let result = await Task.detached(priority: .utility) {
+            let worker = Task.detached(priority: .utility) {
                 do {
                     let analysis = ChannelHealthAnalyzer.analyze(
                         signal: signal,
@@ -10684,7 +11549,16 @@ struct WaveformView: View {
                 } catch {
                     return Result<Int, Error>.failure(error)
                 }
-            }.value
+            }
+            let result = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
 
             progressContinuation.finish()
             progressTask.cancel()
@@ -11055,7 +11929,7 @@ struct WaveformView: View {
         }
 
         segHealth.task = Task { @MainActor in
-            let result = await Task.detached(priority: .utility) {
+            let worker = Task.detached(priority: .utility) {
                 do {
                     let analysis: SegmentHealthAnalysis
                     if let reusableAnalysis {
@@ -11091,7 +11965,16 @@ struct WaveformView: View {
                 } catch {
                     return Result<(Int, SegmentHealthAnalysis), Error>.failure(error)
                 }
-            }.value
+            }
+            let result = await withTaskCancellationHandler(
+                operation: {
+                    await worker.value
+                },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
 
             progressContinuation.finish()
             progressTask.cancel()
@@ -11215,6 +12098,130 @@ struct WaveformView: View {
     private func invalidateInterpolations() {
         channels.interpolated.removeAll()
         channels.interpolationSources.removeAll()
+    }
+
+    private func tearDownRecordingSessionForClose() {
+        recordingSessionID = UUID()
+        cancelInFlightRecordingTasks()
+        clearRecordingStateForClose()
+        recording.tearDownForClose()
+        ChannelSetStore.shared.clearActiveRecordingContext()
+    }
+
+    private func cancelInFlightRecordingTasks() {
+        waveletExplorerTask?.cancel()
+        waveletExplorerTask = nil
+        topographyTask?.cancel()
+        topographyTask = nil
+        artifactTemplateTask?.cancel()
+        artifactTemplateTask = nil
+        waveletReductionTask?.cancel()
+        waveletReductionTask = nil
+        artifactCleaningTask?.cancel()
+        artifactCleaningTask = nil
+        icaTask?.cancel()
+        icaTask = nil
+        icaRemovalTask?.cancel()
+        icaRemovalTask = nil
+        psaTask?.cancel()
+        psaTask = nil
+        filterTask?.cancel()
+        filterTask = nil
+        gradientTask?.cancel()
+        gradientTask = nil
+        replayTask?.cancel()
+        replayTask = nil
+        mffExportTask?.cancel()
+        mffExportTask = nil
+        bcgTask?.cancel()
+        bcgTask = nil
+        bcgRefinementTask?.cancel()
+        bcgRefinementTask = nil
+
+        filter.cancelInFlightWork()
+        chanHealth.resetForClose()
+        segHealth.resetForClose()
+        eegAnalysis.resetForClose()
+    }
+
+    private func clearRecordingStateForClose() {
+        removeCommandKeyMonitor()
+
+        filter.resetForClose()
+        ica.resetForClose()
+        gradient.resetForClose()
+        artifactVM.resetForClose()
+        template.resetForClose()
+        wavelet.resetForClose()
+        epoching.resetForClose()
+        bcg.resetForClose()
+        eegAnalysis.resetForClose()
+        chanHealth.resetForClose()
+        segHealth.resetForClose()
+
+        segmentedEpochSignal = nil
+        segmentedEpochSegments = []
+        syntheticPNSChannels = []
+        displayedEventsCache = .empty
+        eventTrackSourceSummary = .empty
+        selectedEventID = nil
+        highlightedArtifactEvent = nil
+        selectedEventCodes.removeAll()
+        topomapSample = nil
+        selectedSampleRange = nil
+        dragSelectionStartSample = nil
+        dragSelectionEndSample = nil
+        eventTrackContextSample = nil
+        lastWaveformClick = nil
+        waveformContentMinX = 0
+
+        detectsEyeBlinkArtifacts = false
+        detectsEyeMovementArtifacts = false
+        blinkChannelOverrideText = ""
+        movementChannelOverrideText = ""
+        detectsECGArtifacts = false
+        showsECGDetectionSheet = false
+        ecgDetectionSelectedPNSChannels.removeAll()
+        ecgDetectionProxyChannels = ""
+        ecgProxyChannelSetID = nil
+        isEstimatingECGDetection = false
+        ecgAlgorithmResults = [:]
+
+        isRunningWaveletArtifactExplorer = false
+        showsWaveletArtifactExplorer = false
+        waveletExplorerProgress = 0
+        waveletExplorerStatusTitle = ""
+        waveletExplorerStatusDetail = ""
+        waveletExplorerStatusMessage = nil
+        waveletExplorerLog = []
+        waveletExplorerResult = nil
+        waveletExplorerRunGeneration += 1
+
+        statusHistory = []
+        lastRecordedStatusBySource = [:]
+        showsStatusHistory = false
+        showsPhysioChannels = true
+        physioRanges = []
+        physioScaleFactors = [:]
+        physioMaxScaledChannels = []
+        physioFlippedPolarity = []
+        physioChannelRenames = [:]
+        physioRenameTarget = nil
+        physioRenameText = ""
+
+        channels.hidden.removeAll()
+        channels.bad.removeAll()
+        channels.interpolated.removeAll()
+        channels.interpolationSources.removeAll()
+        channels.clearHealthResults()
+        channels.showsHealth = false
+        channels.healthRefreshToken = 0
+        electrodeGeometry = nil
+        channelStatusMessage = nil
+        channelStatusIsError = false
+        showsChannelGoodnessSettings = false
+        mffExportStatusMessage = nil
+        isExportingMFF = false
     }
 
     /// Clears every derived buffer (filters, re-reference, MRI correction, ICA,
