@@ -30,10 +30,10 @@ struct ReplayControllerTests {
         #expect(EVAProcessingStep(operation: .thresholdArtifactDetection).replayInteraction == .auto)
         #expect(EVAProcessingStep(operation: .mriGradientCorrection).replayInteraction == .review)
         #expect(EVAProcessingStep(operation: .icaClean).replayInteraction == .decision)
+        #expect(EVAProcessingStep(operation: .artifactClean).replayInteraction == .decision)
         #expect(EVAProcessingStep(operation: .interpolateChannels).replayInteraction == .skip)
         #expect(EVAProcessingStep(operation: .markBad).replayInteraction == .skip)
         #expect(EVAProcessingStep(operation: .waveletReduce).replayInteraction == .skip)
-        #expect(EVAProcessingStep(operation: .artifactClean).replayInteraction == .skip)
     }
 
     @Test func fullAutoGatesGradientReviewAndICADecisionOnly() {
@@ -45,6 +45,12 @@ struct ReplayControllerTests {
         #expect(actions.first { $0.operation == .mriGradientCorrection }?.gate == .review)
         #expect(actions.first { $0.operation == .filter }?.gate == nil)
         #expect(actions.first { $0.operation == .icaClean }?.gate == .decision)
+    }
+
+    @Test func artifactCleanGatesAsDecision() {
+        let c = ReplayController()
+        c.configure(script: script([.filter, .artifactClean]), sourceName: "A")
+        #expect(c.plannedActions().first { $0.operation == .artifactClean }?.gate == .decision)
     }
 
     @Test func reviewEachGatesAutoSteps() {

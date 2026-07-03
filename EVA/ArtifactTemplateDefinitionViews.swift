@@ -1314,6 +1314,8 @@ extension WaveformView {
 
                 Button("Close") {
                     artifactVM.showsCleaningSheet = false
+                    // Closing without applying cleaning skips this replay step.
+                    if replay.state.isAwaitingDecision { replay.resume(.skip) }
                 }
                 .keyboardShortcut(.cancelAction)
 

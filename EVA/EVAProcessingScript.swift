@@ -83,7 +83,7 @@ nonisolated enum ReplayInteraction: Equatable {
     /// the user to make a subject-specific choice (ICA component removal).
     case decision
     /// Not replayable and not surfaced as a pause (interpolation, bad marks,
-    /// per-subject artifact cleaning, wavelet — for now).
+    /// wavelet — for now).
     case skip
 }
 
@@ -93,7 +93,7 @@ extension EVAProcessingStep {
         switch operation {
         case .filter, .thresholdArtifactDetection, .segment: return .auto
         case .mriGradientCorrection: return .review
-        case .icaClean: return .decision
+        case .icaClean, .artifactClean: return .decision
         default: return .skip
         }
     }

@@ -247,6 +247,10 @@ extension WaveformView {
             artifactVM.cleaningProgress = nil
             artifactVM.isCleaning = false
             artifactCleaningTask = nil
+            if replay.state.isAwaitingDecision {
+                artifactVM.showsCleaningSheet = false
+                replay.resume(.proceed)
+            }
         }
     }
 

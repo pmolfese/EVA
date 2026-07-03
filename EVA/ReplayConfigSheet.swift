@@ -163,7 +163,7 @@ struct ReplayConfigSheet: View {
         switch kind {
         case .auto: return "Runs automatically"
         case .review: return "Review parameters, then runs"
-        case .decision: return "Auto-runs, then pauses for your decision"
+        case .decision: return "Pauses for your decision"
         case .skip: return "Subject-specific — not copied"
         }
     }

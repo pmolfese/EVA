@@ -315,6 +315,19 @@ extension WaveformView {
                 case .skip, .proceed: break // .proceed = applied; .skip = closed unapplied
                 }
 
+            case .artifactClean:
+                // No automated part — artifact templates are drawn per subject.
+                // Pause immediately; the user defines/cleans via the normal UI
+                // (Define Artifact, Clean Artifacts) and resolves the gate from
+                // there (Apply → .proceed, Close-without-cleaning → .skip).
+                switch await replay.gate(.awaitingDecision(index: action.stepIndex),
+                    banner: .init(title: "Define & Clean Artifacts",
+                                  detail: "Draw artifact templates and Apply cleaning, then Continue — or Skip to leave this file unclean.",
+                                  showsSkip: true, progress: nil)) {
+                case .cancel: artifactVM.showsCleaningSheet = false; break loop
+                case .skip, .proceed: break
+                }
+
             case .segment:
                 // Automate PSA: segment (+ baseline / average per params), then
                 // open the butterfly plot when an average was produced.
