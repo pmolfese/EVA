@@ -22,6 +22,11 @@ final class EVAWorkflowUITests: XCTestCase {
         dismissSystemDialogs()
     }
 
+    override func tearDownWithError() throws {
+        attach("99-final-\(sanitizedTestName)")
+        app = nil
+    }
+
     // MARK: - Workflow 1: flanker — filter/notch, ocular artifacts, PSA segment+average
 
     @MainActor
@@ -373,5 +378,11 @@ final class EVAWorkflowUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private var sanitizedTestName: String {
+        name
+            .replacingOccurrences(of: "EVAWorkflowUITests.", with: "")
+            .replacingOccurrences(of: "()", with: "")
     }
 }
