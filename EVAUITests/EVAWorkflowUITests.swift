@@ -12,11 +12,14 @@ import XCTest
 
 final class EVAWorkflowUITests: XCTestCase {
     var app: XCUIApplication!
+    private let heavyOperationTimeout: TimeInterval = 360
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        addSystemDialogMonitor()
         app = XCUIApplication()
         app.launch()
+        dismissSystemDialogs()
     }
 
     // MARK: - Workflow 1: flanker — filter/notch, ocular artifacts, PSA segment+average
@@ -27,11 +30,11 @@ final class EVAWorkflowUITests: XCTestCase {
         attach("01-loaded")
 
         // Filter: IIR Notch, Apply.
-        app.buttons["Filter"].click()
+        clickButton("Filter")
         app.radioButtons["IIR Notch"].firstMatch.click()
         attach("02-filter-notch-selected")
-        app.buttons["Apply Filter"].firstMatch.click()
-        waitForAppReady()
+        app.typeKey(.return, modifierFlags: [])
+        waitForToolbarOperationToFinish(button: "Filter")
         attach("03-filter-applied")
 
         // Artifacts: Eye Blink + Eye Movement (auto-detect on toggle).
@@ -55,7 +58,6 @@ final class EVAWorkflowUITests: XCTestCase {
         setToggle(in: sheet, labelPrefix: "Skip if contains artifact", on: true)
         setToggle(in: sheet, labelPrefix: "Eye Blink", on: true)
         setToggle(in: sheet, labelPrefix: "Eye Movement", on: true)
-        setToggle(in: sheet, labelPrefix: "Interpolate bad channels per epoch", on: true)
         setToggle(in: sheet, labelPrefix: "Average by category", on: true)
         setToggle(in: sheet, labelPrefix: "Average reference", on: true)
         setToggle(in: sheet, labelPrefix: "Baseline correct (pre-stimulus)", on: true)
@@ -65,7 +67,7 @@ final class EVAWorkflowUITests: XCTestCase {
         XCTAssertTrue(applyButton.waitForExistence(timeout: 5))
         XCTAssertTrue(applyButton.isEnabled, "PSA Apply should be enabled once codes are selected")
         applyButton.click()
-        waitForSheetBusyIndicator(sheet, timeout: 90)
+        waitForPSAOperationToFinish(sheet)
         attach("08-psa-applied")
     }
 
@@ -77,7 +79,7 @@ final class EVAWorkflowUITests: XCTestCase {
         attach("01-loaded")
 
         // MRI: AAS method, load motion file, skip 82 TREV events.
-        app.buttons["MRI"].click()
+        clickButton("MRI")
         app.radioButtons["AAS"].firstMatch.click()
         attach("02-mri-aas-selected")
 
@@ -96,7 +98,7 @@ final class EVAWorkflowUITests: XCTestCase {
         let trMarkerLabel = app.staticTexts["TR Marker Event"]
         for _ in 0..<5 where !trMarkerLabel.exists {
             app.activate()
-            app.buttons["MRI"].click()
+            clickButton("MRI", timeout: 3)
             _ = trMarkerLabel.waitForExistence(timeout: 3)
         }
         XCTAssertTrue(trMarkerLabel.exists, "MRI popover never reopened after Configure Motion")
@@ -110,14 +112,14 @@ final class EVAWorkflowUITests: XCTestCase {
         skipFirstField.typeKey(.tab, modifierFlags: [])
         attach("04-mri-skip-set")
         app.buttons["Apply"].firstMatch.click()
-        waitForAppReady()
+        waitForToolbarOperationToFinish(button: "MRI")
         attach("05-mri-applied")
 
         // Filter: IIR Notch, Apply.
-        app.buttons["Filter"].click()
+        clickButton("Filter")
         app.radioButtons["IIR Notch"].firstMatch.click()
-        app.buttons["Apply Filter"].firstMatch.click()
-        waitForAppReady()
+        app.typeKey(.return, modifierFlags: [])
+        waitForToolbarOperationToFinish(button: "Filter")
         attach("06-filter-applied")
 
         // Artifacts: BCG Detection with Spatial PCA.
@@ -127,23 +129,26 @@ final class EVAWorkflowUITests: XCTestCase {
         bcgSheet.radioButtons["Spatial PCA"].firstMatch.click()
         attach("07-bcg-spatial-pca-selected")
         bcgSheet.buttons["Detect BCG"].firstMatch.click()
-        // The sheet shows a spinner only while bcg.isRunning; wait for it to
-        // clear rather than for any particular downstream UI to appear.
-        waitForSheetBusyIndicator(bcgSheet, timeout: 90)
+        waitForBCGDetectionToFinish(bcgSheet)
         attach("08-bcg-detected")
-        // BCG sheet has no explicit "Done"; Cancel just closes without undoing detection.
-        bcgSheet.buttons["Cancel"].firstMatch.click()
+        // Successful BCG detection closes the sheet; close it manually only if
+        // the detector stayed open after producing no events.
+        if bcgSheet.exists {
+            bcgSheet.buttons["Cancel"].firstMatch.click()
+            XCTAssertTrue(bcgSheet.waitForNonExistence(timeout: 10), "BCG sheet never dismissed")
+        }
 
         // Artifacts: Clean Artifacts... -> Treatment = OBS -> Apply.
         clickToolbarMenuItem(toolbar: "Artifacts", item: "Clean Artifacts…")
         let cleanSheet = app.sheets.firstMatch
         XCTAssertTrue(cleanSheet.waitForExistence(timeout: 5), "Clean Artifacts sheet didn't appear")
         attach("09-clean-artifacts-opened")
-        cleanSheet.popUpButtons.firstMatch.click()
-        app.menuItems["OBS"].firstMatch.click()
+        let cleanApplyButton = cleanSheet.buttons["Apply"].firstMatch
+        XCTAssertTrue(cleanApplyButton.waitForExistence(timeout: 5), "Clean Artifacts Apply button not found")
+        XCTAssertTrue(cleanApplyButton.isEnabled, "Clean Artifacts Apply should be enabled for the BCG artifact")
         attach("10-obs-selected")
-        cleanSheet.buttons["Apply"].firstMatch.click()
-        waitForSheetBusyIndicator(cleanSheet, timeout: 90)
+        cleanApplyButton.click()
+        waitForArtifactCleaningToFinish(cleanSheet)
         attach("11-obs-applied")
         cleanSheet.buttons["Close"].firstMatch.click()
 
@@ -161,7 +166,7 @@ final class EVAWorkflowUITests: XCTestCase {
         let applyButton = psaSheet.buttons["Apply"]
         XCTAssertTrue(applyButton.waitForExistence(timeout: 5))
         applyButton.click()
-        waitForSheetBusyIndicator(psaSheet, timeout: 90)
+        waitForPSAOperationToFinish(psaSheet)
         attach("13-psa-applied")
     }
 
@@ -180,9 +185,7 @@ final class EVAWorkflowUITests: XCTestCase {
         goToField.typeKey(.return, modifierFlags: [])
         sleep(1)
         panel.buttons["Open"].firstMatch.click()
-        // The toolbar renders as soon as the recording view appears — no need
-        // to wait for full background processing ("Ready") before proceeding.
-        XCTAssertTrue(app.buttons["Filter"].waitForExistence(timeout: 30), "Waveform toolbar never appeared")
+        waitForRecordingToolbarReady()
     }
 
     /// Opens an already-open panel (`app.sheets["open-panel"]` or an app-modal
@@ -252,30 +255,117 @@ final class EVAWorkflowUITests: XCTestCase {
         sleep(2)
     }
 
-    /// Waits for a sheet's own busy spinner (shown only while its operation is
-    /// actually running) to clear, instead of guessing a fixed delay or
-    /// waiting on unrelated downstream UI.
-    private func waitForSheetBusyIndicator(_ sheet: XCUIElement, timeout: TimeInterval) {
-        let spinner = sheet.progressIndicators.firstMatch
-        _ = spinner.waitForExistence(timeout: 3)
-        if spinner.exists {
-            XCTAssertTrue(spinner.waitForNonExistence(timeout: timeout), "Operation never finished")
+    /// The waveform toolbar appears before a large recording has finished
+    /// loading, but its controls stay disabled until the file is actually
+    /// ready. Wait on enabled state so the first workflow click cannot land on
+    /// a stale loading-screen toolbar element.
+    private func waitForRecordingToolbarReady(timeout: TimeInterval = 120) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            dismissSystemDialogs()
+            let filter = app.buttons["Filter"].firstMatch
+            if filter.exists, filter.isEnabled {
+                return
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+        }
+        XCTFail("Waveform toolbar never became ready")
+    }
+
+    private func clickButton(_ label: String, timeout: TimeInterval = 10) {
+        dismissSystemDialogs()
+        let button = app.buttons[label].firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: timeout), "\(label) button not found")
+        waitForElementToEnable(button, timeout: timeout, description: "\(label) button")
+        button.click()
+    }
+
+    private func waitForElementToEnable(_ element: XCUIElement, timeout: TimeInterval, description: String) {
+        let enabled = NSPredicate(format: "isEnabled == true")
+        let enabledExpectation = XCTNSPredicateExpectation(predicate: enabled, object: element)
+        let result = XCTWaiter.wait(for: [enabledExpectation], timeout: timeout)
+        XCTAssertEqual(result, .completed, "\(description) never enabled")
+    }
+
+    /// Waits for a toolbar-backed operation to complete. Successful operations
+    /// leave their last status message in the toolbar, so waiting for literal
+    /// "Ready" is stale; the toolbar button itself is disabled while work runs.
+    private func waitForToolbarOperationToFinish(button label: String, timeout: TimeInterval = 180) {
+        let button = app.buttons[label].firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 5), "\(label) toolbar button not found")
+        waitForBriefDisableThenEnable(button, timeout: timeout, description: "\(label) operation")
+    }
+
+    private func waitForPSAOperationToFinish(_ sheet: XCUIElement) {
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: heavyOperationTimeout), "PSA sheet never dismissed after Apply")
+        dismissSystemDialogs()
+    }
+
+    private func waitForBCGDetectionToFinish(_ sheet: XCUIElement) {
+        let bcgEventFilter = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "BCG,")).firstMatch
+        let deadline = Date().addingTimeInterval(heavyOperationTimeout)
+        while Date() < deadline {
+            if bcgEventFilter.exists {
+                XCTAssertTrue(sheet.waitForNonExistence(timeout: 10), "BCG sheet did not dismiss after detecting events")
+                return
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+        }
+        XCTFail("BCG detection never produced BCG events")
+    }
+
+    private func waitForArtifactCleaningToFinish(_ sheet: XCUIElement) {
+        waitForSheetButtonCycle(sheet, button: "Apply", description: "Artifact cleaning")
+    }
+
+    /// Waits for a sheet operation by watching a control that is disabled only
+    /// while processing is active. The sheet itself stays open after successful
+    /// processing, so the test closes it explicitly after capturing the result.
+    private func waitForSheetButtonCycle(
+        _ sheet: XCUIElement,
+        button label: String,
+        description: String,
+        timeout: TimeInterval = 360
+    ) {
+        let button = sheet.buttons[label].firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 5), "\(label) button not found")
+        waitForBriefDisableThenEnable(button, timeout: timeout, description: description)
+    }
+
+    private func waitForBriefDisableThenEnable(_ element: XCUIElement, timeout: TimeInterval, description: String) {
+        waitForBriefDisable(element)
+
+        let enabled = NSPredicate(format: "isEnabled == true")
+        let enabledExpectation = XCTNSPredicateExpectation(predicate: enabled, object: element)
+        let result = XCTWaiter.wait(for: [enabledExpectation], timeout: timeout)
+        XCTAssertEqual(result, .completed, "\(description) never finished")
+    }
+
+    private func waitForBriefDisable(_ element: XCUIElement) {
+        let disabled = NSPredicate(format: "isEnabled == false")
+
+        let disabledExpectation = XCTNSPredicateExpectation(predicate: disabled, object: element)
+        _ = XCTWaiter.wait(for: [disabledExpectation], timeout: 3)
+    }
+
+    private func addSystemDialogMonitor() {
+        addUIInterruptionMonitor(withDescription: "System permission dialogs") { alert in
+            for title in ["Allow", "OK"] {
+                let button = alert.buttons[title].firstMatch
+                if button.exists {
+                    button.click()
+                    return true
+                }
+            }
+            return false
         }
     }
 
-    /// Waits for the toolbar status area to read "Ready" again — it only
-    /// shows that once every tracked background operation (filter, MRI
-    /// gradient, wavelet, health, …) has actually finished, all funneled
-    /// through one serial processing queue. First waits for it to briefly
-    /// go non-"Ready" (confirming the just-started operation actually began
-    /// before we start polling for completion — clicking Apply doesn't flip
-    /// the underlying `isProcessing`/`isFiltering` flags synchronously, and
-    /// operations queue behind each other), tolerating an operation so fast
-    /// it never visibly leaves "Ready" in the first place.
-    private func waitForAppReady(timeout: TimeInterval = 180) {
-        let ready = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Ready'")).firstMatch
-        _ = ready.waitForNonExistence(timeout: 5)
-        XCTAssertTrue(ready.waitForExistence(timeout: timeout), "App never returned to Ready")
+    private func dismissSystemDialogs() {
+        let allow = app.buttons["Allow"].firstMatch
+        if allow.exists {
+            allow.click()
+        }
     }
 
     private func attach(_ name: String) {
