@@ -23,8 +23,11 @@ struct PreferencesView: View {
 
             ChannelGoodnessSettingsView()
                 .tabItem { Label("Channel Goodness", systemImage: "waveform.path.ecg") }
+
+            SegmentGoodnessSettingsView()
+                .tabItem { Label("Segment Goodness", systemImage: "chart.bar.doc.horizontal") }
         }
-        .frame(width: 460, height: 420)
+        .frame(width: 480, height: 560)
     }
 }
 
@@ -62,6 +65,15 @@ private struct ProcessingDefaultsView: View {
 
             Section("BCG") {
                 Toggle("Auto-select proxy channel set on open", isOn: $defaults.bcgAutoSelectProxySet)
+                Picker("Default method", selection: $defaults.bcgDefaultMethod) {
+                    ForEach(BCGDetectionMethod.allCases) { Text($0.tabLabel).tag($0) }
+                }
+            }
+
+            Section("Artifact Detection") {
+                Picker("Default method", selection: $defaults.artifactDetectionDefaultMethod) {
+                    ForEach(ArtifactDetectionMethod.selectableCases) { Text($0.rawValue).tag($0) }
+                }
             }
 
             Section {

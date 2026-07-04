@@ -55,6 +55,7 @@ struct WaveformView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(ChannelGoodnessSettings.self) var goodnessSettings
+    @Environment(SegmentGoodnessSettings.self) var segmentGoodnessSettings
     @Environment(ProcessingDefaults.self) var processingDefaults
     @Environment(BatchController.self) var batch
     /// Guards batch auto-start to once per freshly-built (per-recording) view.

@@ -25,6 +25,7 @@ final class ArtifactViewModel: ObservableObject {
 
     init(store: RecordingStore) {
         self.store = store
+        detectionMethod = ProcessingDefaults.shared.artifactDetectionDefaultMethod
     }
 
     // MARK: Detection

@@ -105,6 +105,7 @@ final class EEGAnalysisViewModel: ObservableObject {
         processing: EEGAnalysisProcessingSnapshot,
         artifactSources: [EEGArtifactRejectionSource],
         excludedChannelIndices: Set<Int>,
+        segmentGoodnessBase: SegmentHealthMetricSettings = .defaults,
         channelSets: [ChannelSet]
     ) {
         guard !isRunning else { return }
@@ -132,6 +133,7 @@ final class EEGAnalysisViewModel: ObservableObject {
             artifactSources: artifactSources,
             selectedArtifactSourceIDs: selectedArtifactSourceIDs,
             excludedChannelIndices: excludedChannelIndices,
+            segmentGoodnessBase: segmentGoodnessBase,
             frequencyBands: frequencyBands,
             connectivityBand: selectedConnectivityBand,
             connectivityMetrics: selectedConnectivityMetrics,

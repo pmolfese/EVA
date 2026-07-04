@@ -232,6 +232,7 @@ extension WaveformView {
         let excludedChannels = channels.bad
         let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
         let sourceSignal = signal
+        let goodnessBase = segmentGoodnessSettings.base
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
             segHealth.progress = min(max(fraction, 0), 1)
         }
@@ -244,6 +245,7 @@ extension WaveformView {
                         segments: segments,
                         excludedChannelIndices: excludedChannels,
                         artifactIntervals: artifactIntervals,
+                        base: goodnessBase,
                         progress: { fraction in
                             progressContinuation.yield(fraction)
                         }
@@ -333,6 +335,7 @@ extension WaveformView {
         let processing = segmentHealthProcessingSnapshot()
         let excludedChannels = channels.bad
         let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
+        let goodnessBase = segmentGoodnessSettings.base
 
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
             segHealth.progress = min(max(fraction, 0), 1)
@@ -352,6 +355,7 @@ extension WaveformView {
                                 segments: segments,
                                 excludedChannelIndices: excludedChannels,
                                 artifactIntervals: artifactIntervals,
+                                base: goodnessBase,
                                 progress: { fraction in
                                     progressContinuation.yield(0.85 * fraction)
                                 }

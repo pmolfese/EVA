@@ -128,6 +128,68 @@ nonisolated struct SegmentHealthBaselines: Codable, Sendable {
     var derivativeRatio: Double
 }
 
+/// Green/red thresholds for the segment-health metrics. "Green" is the value
+/// scoring 1.0 (fully good); "red" scores 0.0 (fully poor); values in between
+/// interpolate. Mirrors `ChannelBaseMetricSettings`.
+nonisolated struct SegmentHealthMetricSettings: Codable, Sendable {
+    /// Finite-sample fraction (lower bound: higher is better).
+    var finiteEnabled: Bool = true
+    var finiteGreen: Double = 0.995
+    var finiteRed: Double = 0.92
+    var finiteWeight: Double = 1.2
+    /// Fraction of channels scored (lower bound: higher is better).
+    var channelCoverageEnabled: Bool = true
+    var channelCoverageGreen: Double = 0.80
+    var channelCoverageRed: Double = 0.45
+    var channelCoverageWeight: Double = 0.6
+    /// GFP p95 vs. typical (upper ratio: lower is better).
+    var gfpEnabled: Bool = true
+    var gfpGreen: Double = 2.0
+    var gfpRed: Double = 5.0
+    var gfpWeight: Double = 1.5
+    /// Segment p95 amplitude vs. typical (upper ratio: lower is better).
+    var amplitudeEnabled: Bool = true
+    var amplitudeGreen: Double = 3.0
+    var amplitudeRed: Double = 8.0
+    var amplitudeWeight: Double = 1.2
+    /// Peak vs. typical p99 (upper ratio: lower is better).
+    var burstEnabled: Bool = true
+    var burstGreen: Double = 8.0
+    var burstRed: Double = 24.0
+    var burstWeight: Double = 1.0
+    /// GFP peak vs. typical (upper ratio: lower is better).
+    var gfpBurstEnabled: Bool = true
+    var gfpBurstGreen: Double = 6.0
+    var gfpBurstRed: Double = 18.0
+    var gfpBurstWeight: Double = 1.0
+    /// Flatline fraction (upper: lower is better).
+    var flatlineGreen: Double = 0.01
+    var flatlineRed: Double = 0.20
+    /// Clipping fraction (upper: lower is better).
+    var clippingGreen: Double = 0.002
+    var clippingRed: Double = 0.08
+    /// Shared enable/weight for the combined Flatline/Clipping dropout metric.
+    var dropoutEnabled: Bool = true
+    var dropoutWeight: Double = 1.1
+    /// Sample-to-sample change vs. typical (upper: lower is better).
+    var fastNoiseEnabled: Bool = true
+    var fastNoiseGreen: Double = 2.0
+    var fastNoiseRed: Double = 5.0
+    var fastNoiseWeight: Double = 1.0
+    /// Block-mean drift vs. typical (upper: lower is better).
+    var slowDriftEnabled: Bool = true
+    var slowDriftGreen: Double = 0.8
+    var slowDriftRed: Double = 2.5
+    var slowDriftWeight: Double = 0.8
+    /// Labeled-artifact window-overlap fraction (upper: lower is better).
+    var artifactEnabled: Bool = true
+    var artifactGreen: Double = 0.02
+    var artifactRed: Double = 0.15
+    var artifactWeight: Double = 2.4
+
+    static let defaults = SegmentHealthMetricSettings()
+}
+
 nonisolated enum SegmentHealthAnalyzer {
     static let continuousWindowSeconds = 2.0
 
@@ -185,6 +247,7 @@ nonisolated enum SegmentHealthAnalyzer {
         segments: [SegmentHealthInputSegment],
         excludedChannelIndices: Set<Int>,
         artifactIntervals: [SegmentHealthArtifactInterval] = [],
+        base: SegmentHealthMetricSettings = .defaults,
         progress: (@Sendable (Double) -> Void)? = nil
     ) -> SegmentHealthAnalysis {
         guard signal.samplingRate > 0,
@@ -217,7 +280,7 @@ nonisolated enum SegmentHealthAnalyzer {
                 baselines: baselines,
                 artifactIntervals: artifactIntervals
             )
-            let result = result(for: segment, summary: summary, baselines: baselines, signal: signal)
+            let result = result(for: segment, summary: summary, baselines: baselines, base: base, signal: signal)
             results.append(result)
             featuresBySegmentID[segment.segmentID] = features(for: summary, baselines: baselines, signal: signal)
             progress?(0.25 + 0.75 * Double(offset + 1) / Double(max(segments.count, 1)))
@@ -465,91 +528,110 @@ nonisolated enum SegmentHealthAnalyzer {
         for segment: SegmentHealthInputSegment,
         summary: SegmentSummary,
         baselines: SegmentHealthBaselines,
+        base: SegmentHealthMetricSettings,
         signal: MFFSignalData
     ) -> SegmentHealthResult {
         let features = features(for: summary, baselines: baselines, signal: signal)
         var metrics: [SegmentHealthMetric] = []
 
-        metrics.append(metric(
-            name: "Finite Samples",
-            score: HealthScoring.scoreLowerBound(summary.finiteFraction, green: 0.995, red: 0.92),
-            detail: "\(HealthScoring.formatPercent(summary.finiteFraction)) finite values",
-            weight: 1.2
-        ))
-
-        metrics.append(metric(
-            name: "Channel Coverage",
-            score: HealthScoring.scoreLowerBound(summary.includedChannelFraction, green: 0.80, red: 0.45),
-            detail: "\(summary.includedChannelCount) of \(signal.numberOfChannels) channels scored",
-            weight: 0.6
-        ))
-
-        metrics.append(metric(
-            name: "Global Field Power",
-            score: HealthScoring.scoreUpperRatio(features.gfpTypicality, green: 2.0, red: 5.0),
-            detail: "GFP p95 \(HealthScoring.formatMicrovolts(summary.gfpP95)), \(HealthScoring.formatRatio(features.gfpTypicality)) typical",
-            weight: 1.5
-        ))
-
-        metrics.append(metric(
-            name: "Segment Amplitude",
-            score: HealthScoring.scoreUpperRatio(features.amplitudeTypicality, green: 3.0, red: 8.0),
-            detail: "p95 \(HealthScoring.formatMicrovolts(summary.p95Abs)), \(HealthScoring.formatRatio(features.amplitudeTypicality)) typical",
-            weight: 1.2
-        ))
-
-        metrics.append(metric(
-            name: "Burst Peaks",
-            score: HealthScoring.scoreUpperRatio(features.burstTypicality, green: 8.0, red: 24.0),
-            detail: "max \(HealthScoring.formatMicrovolts(summary.maxAbs)), \(HealthScoring.formatRatio(features.burstTypicality)) median p99",
-            weight: 1.0
-        ))
-
-        metrics.append(metric(
-            name: "GFP Bursts",
-            score: HealthScoring.scoreUpperRatio(features.gfpBurstTypicality, green: 6.0, red: 18.0),
-            detail: "max GFP \(HealthScoring.formatMicrovolts(summary.gfpMax)), \(HealthScoring.formatRatio(features.gfpBurstTypicality)) typical",
-            weight: 1.0
-        ))
-
-        let dropoutScore = min(
-            HealthScoring.scoreUpperFraction(summary.flatlineFraction, green: 0.01, red: 0.20),
-            HealthScoring.scoreUpperFraction(summary.clippingFraction, green: 0.002, red: 0.08)
-        )
-        metrics.append(metric(
-            name: "Flatline / Clipping",
-            score: dropoutScore,
-            detail: "\(HealthScoring.formatPercent(summary.flatlineFraction)) flat, \(HealthScoring.formatPercent(summary.clippingFraction)) clipped",
-            weight: 1.1
-        ))
-
-        metrics.append(metric(
-            name: "Fast Noise",
-            score: HealthScoring.scoreUpperRatio(features.derivativeTypicality, green: 2.0, red: 5.0),
-            detail: "sample-to-sample change \(HealthScoring.formatRatio(features.derivativeTypicality)) typical",
-            weight: 1.0
-        ))
-
-        if summary.sampleCount >= max(Int((signal.samplingRate * 0.25).rounded()), 2) {
+        if base.finiteEnabled {
             metrics.append(metric(
-                name: "Slow Drift",
-                score: HealthScoring.scoreUpperRatio(features.driftTypicality, green: 0.8, red: 2.5),
-                detail: "early-to-late shift \(HealthScoring.formatMicrovolts(summary.driftRMS))",
-                weight: 0.8
+                name: "Finite Samples",
+                score: HealthScoring.scoreLowerBound(summary.finiteFraction, green: base.finiteGreen, red: base.finiteRed),
+                detail: "\(HealthScoring.formatPercent(summary.finiteFraction)) finite values",
+                weight: base.finiteWeight
             ))
         }
 
-        let artifactScore = summary.artifactCount == 0
-            ? 1
-            : min(HealthScoring.scoreUpperFraction(summary.artifactOverlapFraction, green: 0.02, red: 0.15), 0.15)
-        metrics.append(metric(
-            name: "Labeled Artifacts",
-            score: artifactScore,
-            detail: summary.artifactCount == 0
-                ? "No labeled artifacts in segment"
-                : "\(summary.artifactCount) artifact\(summary.artifactCount == 1 ? "" : "s"), \(HealthScoring.formatPercent(summary.artifactOverlapFraction)) window coverage",
-            weight: 2.4
-        ))
+        if base.channelCoverageEnabled {
+            metrics.append(metric(
+                name: "Channel Coverage",
+                score: HealthScoring.scoreLowerBound(summary.includedChannelFraction, green: base.channelCoverageGreen, red: base.channelCoverageRed),
+                detail: "\(summary.includedChannelCount) of \(signal.numberOfChannels) channels scored",
+                weight: base.channelCoverageWeight
+            ))
+        }
+
+        if base.gfpEnabled {
+            metrics.append(metric(
+                name: "Global Field Power",
+                score: HealthScoring.scoreUpperRatio(features.gfpTypicality, green: base.gfpGreen, red: base.gfpRed),
+                detail: "GFP p95 \(HealthScoring.formatMicrovolts(summary.gfpP95)), \(HealthScoring.formatRatio(features.gfpTypicality)) typical",
+                weight: base.gfpWeight
+            ))
+        }
+
+        if base.amplitudeEnabled {
+            metrics.append(metric(
+                name: "Segment Amplitude",
+                score: HealthScoring.scoreUpperRatio(features.amplitudeTypicality, green: base.amplitudeGreen, red: base.amplitudeRed),
+                detail: "p95 \(HealthScoring.formatMicrovolts(summary.p95Abs)), \(HealthScoring.formatRatio(features.amplitudeTypicality)) typical",
+                weight: base.amplitudeWeight
+            ))
+        }
+
+        if base.burstEnabled {
+            metrics.append(metric(
+                name: "Burst Peaks",
+                score: HealthScoring.scoreUpperRatio(features.burstTypicality, green: base.burstGreen, red: base.burstRed),
+                detail: "max \(HealthScoring.formatMicrovolts(summary.maxAbs)), \(HealthScoring.formatRatio(features.burstTypicality)) median p99",
+                weight: base.burstWeight
+            ))
+        }
+
+        if base.gfpBurstEnabled {
+            metrics.append(metric(
+                name: "GFP Bursts",
+                score: HealthScoring.scoreUpperRatio(features.gfpBurstTypicality, green: base.gfpBurstGreen, red: base.gfpBurstRed),
+                detail: "max GFP \(HealthScoring.formatMicrovolts(summary.gfpMax)), \(HealthScoring.formatRatio(features.gfpBurstTypicality)) typical",
+                weight: base.gfpBurstWeight
+            ))
+        }
+
+        if base.dropoutEnabled {
+            let dropoutScore = min(
+                HealthScoring.scoreUpperFraction(summary.flatlineFraction, green: base.flatlineGreen, red: base.flatlineRed),
+                HealthScoring.scoreUpperFraction(summary.clippingFraction, green: base.clippingGreen, red: base.clippingRed)
+            )
+            metrics.append(metric(
+                name: "Flatline / Clipping",
+                score: dropoutScore,
+                detail: "\(HealthScoring.formatPercent(summary.flatlineFraction)) flat, \(HealthScoring.formatPercent(summary.clippingFraction)) clipped",
+                weight: base.dropoutWeight
+            ))
+        }
+
+        if base.fastNoiseEnabled {
+            metrics.append(metric(
+                name: "Fast Noise",
+                score: HealthScoring.scoreUpperRatio(features.derivativeTypicality, green: base.fastNoiseGreen, red: base.fastNoiseRed),
+                detail: "sample-to-sample change \(HealthScoring.formatRatio(features.derivativeTypicality)) typical",
+                weight: base.fastNoiseWeight
+            ))
+        }
+
+        if base.slowDriftEnabled, summary.sampleCount >= max(Int((signal.samplingRate * 0.25).rounded()), 2) {
+            metrics.append(metric(
+                name: "Slow Drift",
+                score: HealthScoring.scoreUpperRatio(features.driftTypicality, green: base.slowDriftGreen, red: base.slowDriftRed),
+                detail: "early-to-late shift \(HealthScoring.formatMicrovolts(summary.driftRMS))",
+                weight: base.slowDriftWeight
+            ))
+        }
+
+        if base.artifactEnabled {
+            let artifactScore = summary.artifactCount == 0
+                ? 1
+                : min(HealthScoring.scoreUpperFraction(summary.artifactOverlapFraction, green: base.artifactGreen, red: base.artifactRed), 0.15)
+            metrics.append(metric(
+                name: "Labeled Artifacts",
+                score: artifactScore,
+                detail: summary.artifactCount == 0
+                    ? "No labeled artifacts in segment"
+                    : "\(summary.artifactCount) artifact\(summary.artifactCount == 1 ? "" : "s"), \(HealthScoring.formatPercent(summary.artifactOverlapFraction)) window coverage",
+                weight: base.artifactWeight
+            ))
+        }
 
         let weightedTotal = metrics.reduce(0) { $0 + $1.score * $1.weight }
         let weightTotal = metrics.reduce(0) { $0 + $1.weight }

@@ -35,6 +35,7 @@ final class ProcessingDefaults {
         static let icaComponentCount = "icaComponentCount"
         static let bcgAutoSelectProxySet = "bcgAutoSelectProxySet"
         static let bcgDefaultMethodRaw = "bcgDefaultMethodRaw"
+        static let artifactDetectionDefaultMethodRaw = "artifactDetectionDefaultMethodRaw"
         static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
     }
 
@@ -46,7 +47,8 @@ final class ProcessingDefaults {
         static let icaMethod = ICAMethod.picard
         static let icaComponentCount = 20
         static let bcgAutoSelectProxySet = false
-        static let bcgDefaultMethodRaw = "periodicity"
+        static let bcgDefaultMethodRaw = "spatialPCA"
+        static let artifactDetectionDefaultMethodRaw = ArtifactDetectionMethod.threshold.rawValue
         static let interpolatedHealthFromNeighbors = true
     }
 
@@ -88,6 +90,22 @@ final class ProcessingDefaults {
         get { UserDefaults.standard.string(forKey: Keys.bcgDefaultMethodRaw) ?? Defaults.bcgDefaultMethodRaw }
         set { UserDefaults.standard.set(newValue, forKey: Keys.bcgDefaultMethodRaw) }
     }
+    /// Typed convenience over `bcgDefaultMethodRaw`, for binding directly to a `Picker`.
+    var bcgDefaultMethod: BCGDetectionMethod {
+        get { BCGDetectionMethod(rawValue: bcgDefaultMethodRaw) ?? .spatialPCA }
+        set { bcgDefaultMethodRaw = newValue.rawValue }
+    }
+
+    // MARK: Artifact-detection defaults
+    var artifactDetectionDefaultMethodRaw: String {
+        get { UserDefaults.standard.string(forKey: Keys.artifactDetectionDefaultMethodRaw) ?? Defaults.artifactDetectionDefaultMethodRaw }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.artifactDetectionDefaultMethodRaw) }
+    }
+    /// Typed convenience over `artifactDetectionDefaultMethodRaw`, for binding directly to a `Picker`.
+    var artifactDetectionDefaultMethod: ArtifactDetectionMethod {
+        get { ArtifactDetectionMethod(rawValue: artifactDetectionDefaultMethodRaw) ?? .threshold }
+        set { artifactDetectionDefaultMethodRaw = newValue.rawValue }
+    }
 
     // MARK: Channel-health defaults
     /// When on, an interpolated channel's health is estimated by averaging its
@@ -111,6 +129,7 @@ final class ProcessingDefaults {
             Keys.icaComponentCount: Defaults.icaComponentCount,
             Keys.bcgAutoSelectProxySet: Defaults.bcgAutoSelectProxySet,
             Keys.bcgDefaultMethodRaw: Defaults.bcgDefaultMethodRaw,
+            Keys.artifactDetectionDefaultMethodRaw: Defaults.artifactDetectionDefaultMethodRaw,
             Keys.interpolatedHealthFromNeighbors: Defaults.interpolatedHealthFromNeighbors,
         ])
         migrateLegacyBlobIfNeeded()
@@ -142,6 +161,7 @@ final class ProcessingDefaults {
         icaComponentCount = Defaults.icaComponentCount
         bcgAutoSelectProxySet = Defaults.bcgAutoSelectProxySet
         bcgDefaultMethodRaw = Defaults.bcgDefaultMethodRaw
+        artifactDetectionDefaultMethodRaw = Defaults.artifactDetectionDefaultMethodRaw
         interpolatedHealthFromNeighbors = Defaults.interpolatedHealthFromNeighbors
     }
 

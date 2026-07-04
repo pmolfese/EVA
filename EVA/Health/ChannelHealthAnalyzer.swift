@@ -111,6 +111,8 @@ nonisolated struct ChannelHealthBaselines: Codable, Sendable {
 // MARK: - Spectral outlier detection (HAPPE pop_rejchan 'spec')
 
 nonisolated struct ChannelSpectralConfiguration: Codable, Sendable {
+    /// When off, this detector doesn't run and contributes no metric.
+    var isEnabled: Bool = true
     /// Low edge of the power band examined, in Hz.
     var lowFrequencyHz: Double = 1
     /// High edge of the power band examined, in Hz (clamped to Nyquist).
@@ -120,6 +122,8 @@ nonisolated struct ChannelSpectralConfiguration: Codable, Sendable {
     /// Channels with a band-power z-score below the negative of this are
     /// flagged as abnormally quiet. HAPPE keeps this lenient (5.0).
     var lowerZThreshold: Double = 5
+    /// Contribution of this metric to the overall channel health score.
+    var weight: Double = 1.3
 
     static let happeStandard = ChannelSpectralConfiguration()
 }
@@ -137,6 +141,8 @@ nonisolated struct ChannelSpectralResult: Identifiable, Sendable {
 // MARK: - Neighbor-prediction detection (HAPPE clean_rawdata ChannelCriterion)
 
 nonisolated struct ChannelRansacConfiguration: Codable, Sendable {
+    /// When off, this detector doesn't run and contributes no metric.
+    var isEnabled: Bool = true
     /// Minimum acceptable correlation between a channel and its
     /// neighbor-based reconstruction. Below this, the channel is flagged.
     var minimumCorrelation: Double = 0.485
@@ -145,6 +151,8 @@ nonisolated struct ChannelRansacConfiguration: Codable, Sendable {
     /// Length, in seconds, of the sliding window over which correlation is
     /// measured. The median window correlation drives the decision.
     var windowSeconds: Double = 4
+    /// Contribution of this metric to the overall channel health score.
+    var weight: Double = 1.4
 
     static let happeStandard = ChannelRansacConfiguration()
 }
@@ -160,6 +168,64 @@ nonisolated struct ChannelRansacResult: Identifiable, Sendable {
     var id: Int { channelIndex }
 }
 
+// MARK: - Electrode impedance (EGI ICAL quality bands)
+
+/// Configurable EGI-style impedance bands: `great` scores 1.0, `poor` scores
+/// 0.0, with `good`/`fair` as intermediate anchors the score interpolates
+/// through. Only scored when the file recorded an impedance value.
+nonisolated struct ChannelImpedanceSettings: Codable, Sendable {
+    /// When off, impedance is never scored, even for files that recorded it.
+    var isEnabled: Bool = true
+    /// Impedance (kΩ) at or below which a channel scores fully good (1.0).
+    var greatMaxKOhm: Double = 40
+    /// Impedance (kΩ) marking the "good" band edge (score interpolates from
+    /// 1.0 at `greatMaxKOhm` down to `goodScore` here).
+    var goodMaxKOhm: Double = 60
+    var goodScore: Double = 0.78
+    /// Impedance (kΩ) marking the "fair" band edge (score interpolates from
+    /// `goodScore` down to `fairScore` here).
+    var fairMaxKOhm: Double = 70
+    var fairScore: Double = 0.50
+    /// Impedance (kΩ) at or above which a channel scores fully poor (0.0).
+    /// Score interpolates from `fairScore` down to 0.0 between `fairMaxKOhm`
+    /// and this value.
+    var poorMaxKOhm: Double = 120
+    /// Contribution of this metric to the overall channel health score.
+    var weight: Double = 1.4
+
+    static let defaults = ChannelImpedanceSettings()
+
+    func score(forKOhm kOhm: Double) -> Double {
+        guard kOhm.isFinite, kOhm >= 0 else { return 0 }
+        switch kOhm {
+        case ...greatMaxKOhm:
+            return 1.0
+        case greatMaxKOhm...goodMaxKOhm:
+            return Self.interpolate(kOhm, fromLow: greatMaxKOhm, fromHigh: goodMaxKOhm, toLow: 1.0, toHigh: goodScore)
+        case goodMaxKOhm...fairMaxKOhm:
+            return Self.interpolate(kOhm, fromLow: goodMaxKOhm, fromHigh: fairMaxKOhm, toLow: goodScore, toHigh: fairScore)
+        default:
+            return max(0, Self.interpolate(kOhm, fromLow: fairMaxKOhm, fromHigh: poorMaxKOhm, toLow: fairScore, toHigh: 0.0))
+        }
+    }
+
+    /// Human-readable band name for `kOhm`, purely descriptive.
+    func band(forKOhm kOhm: Double) -> String {
+        guard kOhm.isFinite else { return "unknown" }
+        switch kOhm {
+        case ...greatMaxKOhm:  return "great"
+        case greatMaxKOhm...goodMaxKOhm: return "good"
+        case goodMaxKOhm...fairMaxKOhm: return "fair"
+        default: return "poor"
+        }
+    }
+
+    private static func interpolate(_ x: Double, fromLow: Double, fromHigh: Double, toLow: Double, toHigh: Double) -> Double {
+        let t = (x - fromLow) / max(fromHigh - fromLow, 1e-9)
+        return toLow + min(max(t, 0), 1) * (toHigh - toLow)
+    }
+}
+
 // MARK: - Base (core health) metric thresholds
 
 /// Green/red thresholds for the always-on core health metrics. "Green" is the
@@ -167,26 +233,40 @@ nonisolated struct ChannelRansacResult: Identifiable, Sendable {
 /// between interpolate.
 nonisolated struct ChannelBaseMetricSettings: Codable, Sendable {
     /// Finite-sample fraction (lower bound: higher is better).
+    var finiteEnabled: Bool = true
     var finiteGreen: Double = 0.995
     var finiteRed: Double = 0.90
+    var finiteWeight: Double = 1.4
     /// p95 amplitude vs. recording median (two-sided ratio: nearer 1x is better).
+    var amplitudeEnabled: Bool = true
     var amplitudeGreen: Double = 2.5
     var amplitudeRed: Double = 6.0
+    var amplitudeWeight: Double = 1.4
     /// Peak vs. median p99 (upper ratio: lower is better).
+    var burstEnabled: Bool = true
     var burstGreen: Double = 8.0
     var burstRed: Double = 24.0
+    var burstWeight: Double = 1.0
     /// Flatline fraction (upper: lower is better).
+    var flatlineEnabled: Bool = true
     var flatlineGreen: Double = 0.005
     var flatlineRed: Double = 0.15
+    var flatlineWeight: Double = 1.3
     /// Clipping fraction (upper: lower is better).
+    var clippingEnabled: Bool = true
     var clippingGreen: Double = 0.002
     var clippingRed: Double = 0.08
+    var clippingWeight: Double = 1.1
     /// Sample-to-sample change vs. typical (upper: lower is better).
+    var fastNoiseEnabled: Bool = true
     var fastNoiseGreen: Double = 2.0
     var fastNoiseRed: Double = 5.0
+    var fastNoiseWeight: Double = 1.0
     /// Block-mean drift vs. typical (upper: lower is better).
+    var slowDriftEnabled: Bool = true
     var slowDriftGreen: Double = 2.5
     var slowDriftRed: Double = 6.0
+    var slowDriftWeight: Double = 0.8
 
     static let defaults = ChannelBaseMetricSettings()
 }
@@ -198,6 +278,7 @@ nonisolated enum ChannelHealthAnalyzer {
         base: ChannelBaseMetricSettings = ChannelBaseMetricSettings(),
         spectral: ChannelSpectralConfiguration? = nil,
         ransac: ChannelRansacConfiguration? = nil,
+        impedance: ChannelImpedanceSettings = .defaults,
         // Impedance is a stable property of the *recording*, independent of the
         // processing pipeline (filtering, gradient correction, re-referencing),
         // so it is passed explicitly rather than read off the processed signal.
@@ -235,15 +316,16 @@ nonisolated enum ChannelHealthAnalyzer {
         features.reserveCapacity(summaries.count)
         for summary in summaries {
             let neighborScore = neighborScores[summary.channelIndex]
-            let impedance = impedances.flatMap { values in
+            let impedanceKOhm = impedances.flatMap { values in
                 values.indices.contains(summary.channelIndex) ? values[summary.channelIndex] : nil
             }
             let result = result(
                 for: summary,
                 baselines: baselines,
                 base: base,
+                impedance: impedance,
                 neighborScore: neighborScore,
-                impedanceKOhm: impedance
+                impedanceKOhm: impedanceKOhm
             )
             results[summary.channelIndex] = result
             features[summary.channelIndex] = channelFeatures(
@@ -261,13 +343,13 @@ nonisolated enum ChannelHealthAnalyzer {
             analyzedSampleCount: max(sampleCount / max(sampleStride, 1), 1)
         )
 
-        if let spectral {
+        if let spectral, spectral.isEnabled {
             let spectralResults = spectralDetection(signal: signal, configuration: spectral)
-            analysis = addingSpectralMetrics(to: analysis, spectralResults: spectralResults)
+            analysis = addingSpectralMetrics(to: analysis, spectralResults: spectralResults, weight: spectral.weight)
         }
-        if let ransac {
+        if let ransac, ransac.isEnabled {
             let ransacResults = ransacDetection(signal: signal, layout: layout, configuration: ransac)
-            analysis = addingRansacMetrics(to: analysis, ransacResults: ransacResults)
+            analysis = addingRansacMetrics(to: analysis, ransacResults: ransacResults, weight: ransac.weight)
         }
 
         // Spectral-shape metrics (aperiodic slope, muscle band, line harmonics)
@@ -283,7 +365,8 @@ nonisolated enum ChannelHealthAnalyzer {
 
     static func addingWaveletMetrics(
         to analysis: ChannelHealthAnalysis,
-        waveletResults: [Int: WaveletChannelGoodnessResult]
+        waveletResults: [Int: WaveletChannelGoodnessResult],
+        weight: Double = 1.4
     ) -> ChannelHealthAnalysis {
         guard !waveletResults.isEmpty else { return analysis }
         var analysis = analysis
@@ -298,7 +381,7 @@ nonisolated enum ChannelHealthAnalyzer {
                     "peak \(HealthScoring.formatMicrovolts(Double(wavelet.peakArtifactMagnitude)))",
                     "L\(wavelet.dominantLevel)"
                 ].joined(separator: ", "),
-                weight: 1.4
+                weight: weight
             )
             let metrics = result.metrics.filter { $0.name != waveletMetric.name } + [waveletMetric]
             result = recomputedResult(channelIndex: channelIndex, metrics: metrics)
@@ -370,7 +453,8 @@ nonisolated enum ChannelHealthAnalyzer {
 
     static func addingSpectralMetrics(
         to analysis: ChannelHealthAnalysis,
-        spectralResults: [Int: ChannelSpectralResult]
+        spectralResults: [Int: ChannelSpectralResult],
+        weight: Double = 1.3
     ) -> ChannelHealthAnalysis {
         guard !spectralResults.isEmpty else { return analysis }
         var analysis = analysis
@@ -383,7 +467,7 @@ nonisolated enum ChannelHealthAnalyzer {
                 name: "Spectral Outlier",
                 score: spectral.score,
                 detail: detail,
-                weight: 1.3
+                weight: weight
             )
             let metrics = result.metrics.filter { $0.name != spectralMetric.name } + [spectralMetric]
             result = recomputedResult(channelIndex: channelIndex, metrics: metrics)
@@ -736,7 +820,8 @@ nonisolated enum ChannelHealthAnalyzer {
 
     static func addingRansacMetrics(
         to analysis: ChannelHealthAnalysis,
-        ransacResults: [Int: ChannelRansacResult]
+        ransacResults: [Int: ChannelRansacResult],
+        weight: Double = 1.4
     ) -> ChannelHealthAnalysis {
         guard !ransacResults.isEmpty else { return analysis }
         var analysis = analysis
@@ -746,7 +831,7 @@ nonisolated enum ChannelHealthAnalyzer {
                 name: "Neighbor Prediction",
                 score: ransac.score,
                 detail: "median r \(String(format: "%.2f", ransac.medianCorrelation)), \(HealthScoring.formatPercent(ransac.badWindowFraction)) bad windows",
-                weight: 1.4
+                weight: weight
             )
             let metrics = result.metrics.filter { $0.name != ransacMetric.name } + [ransacMetric]
             result = recomputedResult(channelIndex: channelIndex, metrics: metrics)
@@ -929,85 +1014,100 @@ nonisolated enum ChannelHealthAnalyzer {
         for summary: ChannelSummary,
         baselines: ChannelHealthBaselines,
         base: ChannelBaseMetricSettings,
+        impedance: ChannelImpedanceSettings = .defaults,
         neighborScore: Double?,
         impedanceKOhm: Float? = nil
     ) -> ChannelHealthResult {
         var metrics: [ChannelHealthMetric] = []
 
         // Electrode impedance (EGI ICAL), only when the file recorded a value.
-        if let impedanceKOhm, impedanceKOhm.isFinite {
+        if impedance.isEnabled, let impedanceKOhm, impedanceKOhm.isFinite {
             let kOhm = Double(impedanceKOhm)
             metrics.append(metric(
                 name: "Impedance",
-                score: HealthScoring.scoreImpedanceKOhm(kOhm),
-                detail: String(format: "%.0f kΩ (%@)", kOhm, HealthScoring.impedanceBand(kOhm)),
-                weight: 1.4
+                score: impedance.score(forKOhm: kOhm),
+                detail: String(format: "%.0f kΩ (%@)", kOhm, impedance.band(forKOhm: kOhm)),
+                weight: impedance.weight
             ))
         }
 
-        metrics.append(metric(
-            name: "Finite Samples",
-            score: HealthScoring.scoreLowerBound(summary.finiteFraction, green: base.finiteGreen, red: base.finiteRed),
-            detail: "\(HealthScoring.formatPercent(summary.finiteFraction)) finite samples",
-            weight: 1.4
-        ))
-
-        if summary.rms <= 1e-12 || summary.p95Abs <= 1e-12 {
+        if base.finiteEnabled {
             metrics.append(metric(
-                name: "Signal Amplitude",
-                score: 0,
-                detail: "No measurable channel variance",
-                weight: 1.4
-            ))
-        } else {
-            let ratio = summary.p95Abs / baselines.medianP95AbsMicrovolts
-            metrics.append(metric(
-                name: "Signal Amplitude",
-                score: HealthScoring.scoreTwoSidedRatio(ratio, green: base.amplitudeGreen, red: base.amplitudeRed),
-                detail: "p95 \(HealthScoring.formatMicrovolts(summary.p95Abs)), \(HealthScoring.formatRatio(ratio)) typical",
-                weight: 1.4
+                name: "Finite Samples",
+                score: HealthScoring.scoreLowerBound(summary.finiteFraction, green: base.finiteGreen, red: base.finiteRed),
+                detail: "\(HealthScoring.formatPercent(summary.finiteFraction)) finite samples",
+                weight: base.finiteWeight
             ))
         }
 
-        let burstRatio = summary.maxAbs / max(baselines.medianP99AbsMicrovolts, 1e-9)
-        metrics.append(metric(
-            name: "Burst Peaks",
-            score: HealthScoring.scoreUpperRatio(burstRatio, green: base.burstGreen, red: base.burstRed),
-            detail: "max \(HealthScoring.formatMicrovolts(summary.maxAbs)), \(HealthScoring.formatRatio(burstRatio)) median p99",
-            weight: 1.0
-        ))
+        if base.amplitudeEnabled {
+            if summary.rms <= 1e-12 || summary.p95Abs <= 1e-12 {
+                metrics.append(metric(
+                    name: "Signal Amplitude",
+                    score: 0,
+                    detail: "No measurable channel variance",
+                    weight: base.amplitudeWeight
+                ))
+            } else {
+                let ratio = summary.p95Abs / baselines.medianP95AbsMicrovolts
+                metrics.append(metric(
+                    name: "Signal Amplitude",
+                    score: HealthScoring.scoreTwoSidedRatio(ratio, green: base.amplitudeGreen, red: base.amplitudeRed),
+                    detail: "p95 \(HealthScoring.formatMicrovolts(summary.p95Abs)), \(HealthScoring.formatRatio(ratio)) typical",
+                    weight: base.amplitudeWeight
+                ))
+            }
+        }
 
-        metrics.append(metric(
-            name: "Flatline",
-            score: HealthScoring.scoreUpperFraction(summary.flatlineFraction, green: base.flatlineGreen, red: base.flatlineRed),
-            detail: "\(HealthScoring.formatPercent(summary.flatlineFraction)) near-zero / no-change samples",
-            weight: 1.3
-        ))
+        if base.burstEnabled {
+            let burstRatio = summary.maxAbs / max(baselines.medianP99AbsMicrovolts, 1e-9)
+            metrics.append(metric(
+                name: "Burst Peaks",
+                score: HealthScoring.scoreUpperRatio(burstRatio, green: base.burstGreen, red: base.burstRed),
+                detail: "max \(HealthScoring.formatMicrovolts(summary.maxAbs)), \(HealthScoring.formatRatio(burstRatio)) median p99",
+                weight: base.burstWeight
+            ))
+        }
 
-        metrics.append(metric(
-            name: "Clipping",
-            score: HealthScoring.scoreUpperFraction(summary.clippingFraction, green: base.clippingGreen, red: base.clippingRed),
-            detail: "\(HealthScoring.formatPercent(summary.clippingFraction)) samples pinned at rail",
-            weight: 1.1
-        ))
+        if base.flatlineEnabled {
+            metrics.append(metric(
+                name: "Flatline",
+                score: HealthScoring.scoreUpperFraction(summary.flatlineFraction, green: base.flatlineGreen, red: base.flatlineRed),
+                detail: "\(HealthScoring.formatPercent(summary.flatlineFraction)) near-zero / no-change samples",
+                weight: base.flatlineWeight
+            ))
+        }
 
-        let derivativeRatio = summary.differenceRMS / max(summary.rms, 1e-9)
-        let derivativeTypicality = derivativeRatio / baselines.medianDerivativeRatio
-        metrics.append(metric(
-            name: "Fast Noise",
-            score: HealthScoring.scoreUpperRatio(derivativeTypicality, green: base.fastNoiseGreen, red: base.fastNoiseRed),
-            detail: "sample-to-sample change \(HealthScoring.formatRatio(derivativeTypicality)) typical",
-            weight: 1.0
-        ))
+        if base.clippingEnabled {
+            metrics.append(metric(
+                name: "Clipping",
+                score: HealthScoring.scoreUpperFraction(summary.clippingFraction, green: base.clippingGreen, red: base.clippingRed),
+                detail: "\(HealthScoring.formatPercent(summary.clippingFraction)) samples pinned at rail",
+                weight: base.clippingWeight
+            ))
+        }
 
-        let driftRatio = summary.driftRMS / max(summary.rms, 1e-9)
-        let driftTypicality = driftRatio / baselines.medianDriftRatio
-        metrics.append(metric(
-            name: "Slow Drift",
-            score: HealthScoring.scoreUpperRatio(driftTypicality, green: base.slowDriftGreen, red: base.slowDriftRed),
-            detail: "block-mean drift \(HealthScoring.formatRatio(driftTypicality)) typical",
-            weight: 0.8
-        ))
+        if base.fastNoiseEnabled {
+            let derivativeRatio = summary.differenceRMS / max(summary.rms, 1e-9)
+            let derivativeTypicality = derivativeRatio / baselines.medianDerivativeRatio
+            metrics.append(metric(
+                name: "Fast Noise",
+                score: HealthScoring.scoreUpperRatio(derivativeTypicality, green: base.fastNoiseGreen, red: base.fastNoiseRed),
+                detail: "sample-to-sample change \(HealthScoring.formatRatio(derivativeTypicality)) typical",
+                weight: base.fastNoiseWeight
+            ))
+        }
+
+        if base.slowDriftEnabled {
+            let driftRatio = summary.driftRMS / max(summary.rms, 1e-9)
+            let driftTypicality = driftRatio / baselines.medianDriftRatio
+            metrics.append(metric(
+                name: "Slow Drift",
+                score: HealthScoring.scoreUpperRatio(driftTypicality, green: base.slowDriftGreen, red: base.slowDriftRed),
+                detail: "block-mean drift \(HealthScoring.formatRatio(driftTypicality)) typical",
+                weight: base.slowDriftWeight
+            ))
+        }
 
         // Heavy-tailed sample distribution (FASTER): isolated pops/spikes that a
         // single max (Burst Peaks) can miss. Excess kurtosis ≈ 0 for clean EEG.

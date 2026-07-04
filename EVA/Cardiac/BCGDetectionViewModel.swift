@@ -25,7 +25,7 @@ final class BCGDetectionViewModel: ObservableObject {
 
     init(store: RecordingStore) {
         self.store = store
-        method = BCGDetectionMethod(rawValue: ProcessingDefaults.shared.bcgDefaultMethodRaw) ?? .periodicity
+        method = ProcessingDefaults.shared.bcgDefaultMethod
     }
 
     // MARK: Presence / sheet

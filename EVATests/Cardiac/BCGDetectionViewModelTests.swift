@@ -32,13 +32,13 @@ struct BCGDetectionViewModelTests {
     }
 
     @MainActor
-    @Test func fallsBackToPeriodicityForUnknownStoredMethod() {
+    @Test func fallsBackToSpatialPCAForUnknownStoredMethod() {
         let original = ProcessingDefaults.shared.bcgDefaultMethodRaw
         defer { ProcessingDefaults.shared.bcgDefaultMethodRaw = original }
 
         ProcessingDefaults.shared.bcgDefaultMethodRaw = "not-a-real-method"
         let vm = BCGDetectionViewModel(store: RecordingStore())
-        #expect(vm.method == .periodicity)
+        #expect(vm.method == .spatialPCA)
     }
 
     @MainActor

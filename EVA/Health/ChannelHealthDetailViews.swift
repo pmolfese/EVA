@@ -67,6 +67,7 @@ extension WaveformView {
         let layout = recording.sensorLayout
         let impedances = recording.signal?.impedancesKOhm
         let baseConfig = goodnessSettings.base
+        let impedanceConfig = goodnessSettings.impedance
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
         let wavelet = goodnessSettings.wavelet
@@ -107,6 +108,7 @@ extension WaveformView {
                             base: baseConfig,
                             spectral: spectralConfig,
                             ransac: ransacConfig,
+                            impedance: impedanceConfig,
                             impedancesKOhm: impedances,
                             progress: { fraction in
                                 progressContinuation.yield(0.42 * fraction)
@@ -128,7 +130,8 @@ extension WaveformView {
                     progressContinuation.yield(0.98)
                     return ChannelHealthAnalyzer.addingWaveletMetrics(
                         to: baseAnalysis,
-                        waveletResults: waveletResults
+                        waveletResults: waveletResults,
+                        weight: wavelet.weight
                     )
                 }
 
@@ -235,6 +238,7 @@ extension WaveformView {
         let layout = recording.sensorLayout
         let impedances = recording.signal?.impedancesKOhm
         let baseConfig = goodnessSettings.base
+        let impedanceConfig = goodnessSettings.impedance
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
         let sourceSignal = signal
@@ -250,6 +254,7 @@ extension WaveformView {
                         base: baseConfig,
                         spectral: spectralConfig,
                         ransac: ransacConfig,
+                        impedance: impedanceConfig,
                         impedancesKOhm: impedances
                     )
                 }
@@ -314,6 +319,7 @@ extension WaveformView {
         let sourceSignal = signal
         let impedances = recording.signal?.impedancesKOhm
         let baseConfig = goodnessSettings.base
+        let impedanceConfig = goodnessSettings.impedance
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
@@ -329,6 +335,7 @@ extension WaveformView {
                         base: baseConfig,
                         spectral: spectralConfig,
                         ransac: ransacConfig,
+                        impedance: impedanceConfig,
                         impedancesKOhm: impedances,
                         progress: { fraction in
                             progressContinuation.yield(fraction)
@@ -394,6 +401,7 @@ extension WaveformView {
         let processing = channelHealthProcessingSnapshot()
         let hiddenChannels = channels.hidden
         let baseConfig = goodnessSettings.base
+        let impedanceConfig = goodnessSettings.impedance
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
 
@@ -411,6 +419,7 @@ extension WaveformView {
                             base: baseConfig,
                             spectral: spectralConfig,
                             ransac: ransacConfig,
+                            impedance: impedanceConfig,
                             impedancesKOhm: impedances,
                             progress: { fraction in
                                 progressContinuation.yield(0.85 * fraction)

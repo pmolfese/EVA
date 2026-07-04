@@ -28,6 +28,7 @@ nonisolated struct EEGAnalysisRequest: Sendable {
     var artifactSources: [EEGArtifactRejectionSource]
     var selectedArtifactSourceIDs: Set<String>
     var excludedChannelIndices: Set<Int>
+    var segmentGoodnessBase: SegmentHealthMetricSettings = .defaults
     var frequencyBands: [EEGFrequencyBand]
     var connectivityBand: EEGFrequencyBand
     var connectivityMetrics: [EEGConnectivityMetric]
@@ -58,6 +59,7 @@ nonisolated enum EEGAnalysisEngine {
             segments: segments,
             excludedChannelIndices: request.excludedChannelIndices,
             artifactIntervals: artifactIntervals,
+            base: request.segmentGoodnessBase,
             progress: { fraction in
                 progress?(0.04 + 0.24 * fraction)
             }

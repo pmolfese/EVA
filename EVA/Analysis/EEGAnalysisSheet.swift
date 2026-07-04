@@ -21,6 +21,7 @@ import UniformTypeIdentifiers
 
 struct EEGAnalysisSheet: View {
     @ObservedObject var viewModel: EEGAnalysisViewModel
+    @Environment(SegmentGoodnessSettings.self) private var segmentGoodnessSettings
 
     let packageName: String
     let signal: MFFSignalData
@@ -109,6 +110,7 @@ struct EEGAnalysisSheet: View {
                     processing: processing,
                     artifactSources: artifactSources,
                     excludedChannelIndices: excludedChannelIndices,
+                    segmentGoodnessBase: segmentGoodnessSettings.base,
                     channelSets: channelSets
                 )
             }

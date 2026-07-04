@@ -25,6 +25,7 @@ struct EVAApp: App {
     @State private var openRecordingRequest = 0
     @State private var batchSetupRequest = 0
     @State private var goodnessSettings = ChannelGoodnessSettings()
+    @State private var segmentGoodnessSettings = SegmentGoodnessSettings()
     @State private var processingDefaults = ProcessingDefaults.shared
     @State private var batch = BatchController()
 
@@ -36,6 +37,7 @@ struct EVAApp: App {
                 batchSetupRequest: $batchSetupRequest
             )
             .environment(goodnessSettings)
+            .environment(segmentGoodnessSettings)
             .environment(processingDefaults)
             .environment(batch)
         }
@@ -88,6 +90,7 @@ struct EVAApp: App {
         Settings {
             PreferencesView()
                 .environment(goodnessSettings)
+                .environment(segmentGoodnessSettings)
                 .environment(processingDefaults)
         }
     }
