@@ -67,6 +67,12 @@ nonisolated struct MFFSignalData: Sendable {
     /// (info1.xml), indexed by channel. `nil` when the file records no impedance
     /// measurement; individual entries are `NaN` for channels with no value.
     let impedancesKOhm: [Float]?
+    /// Per-channel `<positiveUp>` convention from `pnsSet.xml` (PNS signals only),
+    /// indexed by channel. `true` means a positive sample value is drawn upward
+    /// (the EEG convention); `false` means the sensor's own convention is
+    /// negative-up. `nil` when the signal has no PNS sensor metadata (e.g. EEG,
+    /// or PNS imported from a non-MFF source).
+    let positiveUpFlags: [Bool]?
 
     init(
         signalURL: URL,
@@ -82,7 +88,8 @@ nonisolated struct MFFSignalData: Sendable {
         isSegmented: Bool = false,
         isAveraged: Bool = false,
         isGrandAverage: Bool = false,
-        impedancesKOhm: [Float]? = nil
+        impedancesKOhm: [Float]? = nil,
+        positiveUpFlags: [Bool]? = nil
     ) {
         self.signalURL = signalURL
         self.signalType = signalType
@@ -98,6 +105,7 @@ nonisolated struct MFFSignalData: Sendable {
         self.isAveraged = isAveraged
         self.isGrandAverage = isGrandAverage
         self.impedancesKOhm = impedancesKOhm
+        self.positiveUpFlags = positiveUpFlags
     }
 
     /// Returns a copy with the sample data replaced, preserving all metadata.
@@ -117,7 +125,8 @@ nonisolated struct MFFSignalData: Sendable {
             isSegmented: isSegmented,
             isAveraged: isAveraged,
             isGrandAverage: isGrandAverage,
-            impedancesKOhm: impedancesKOhm
+            impedancesKOhm: impedancesKOhm,
+            positiveUpFlags: positiveUpFlags
         )
     }
 }
@@ -773,6 +782,7 @@ nonisolated final class MFFReader {
         progress?(0.94)
         let recordingStartTime = try parseRecordingStartTime(in: packageURL)
         let channelNames = parsePNSChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
+        let positiveUpFlags = parsePNSPositiveUpFlags(in: packageURL, expectedCount: signalData.numberOfChannels)
         progress?(1)
 
         return MFFSignalData(
@@ -784,7 +794,8 @@ nonisolated final class MFFReader {
             recordingStartTime: recordingStartTime,
             events: [],   // events belong to the primary (EEG) signal
             data: samples,
-            channelNames: channelNames
+            channelNames: channelNames,
+            positiveUpFlags: positiveUpFlags
         )
     }
 
@@ -818,6 +829,40 @@ nonisolated final class MFFReader {
         return names.enumerated().map { index, name in
             name.isEmpty ? "PNS \(index + 1)" : name
         }
+    }
+
+    /// Parses each sensor's `<positiveUp>` convention from `pnsSet.xml`, keyed
+    /// by the sensor `<number>` (0-based, matching the data channel order).
+    /// Defaults missing entries to `true` (EGI's own convention when the tag
+    /// is absent), so callers only need to flip channels explicitly marked
+    /// negative-up.
+    private func parsePNSPositiveUpFlags(in packageURL: URL, expectedCount: Int) -> [Bool]? {
+        let url = packageURL.appendingPathComponent("pnsSet.xml")
+        guard expectedCount > 0, FileManager.default.fileExists(atPath: url.path),
+              let document = try? loadXMLDocument(at: url),
+              let root = document.rootElement() else {
+            return nil
+        }
+
+        var flags = Array(repeating: true, count: expectedCount)
+        var sawAnyFlag = false
+        for sensor in descendants(named: "sensor", in: root) {
+            let children = (sensor.children ?? []).compactMap { $0 as? XMLElement }
+            let number = children
+                .first { sanitizedTagName($0.name) == "number" }?
+                .stringValue
+                .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            guard let positiveUpString = children
+                .first(where: { sanitizedTagName($0.name) == "positiveUp" })?
+                .stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                let number, (0..<expectedCount).contains(number)
+            else { continue }
+            sawAnyFlag = true
+            flags[number] = (positiveUpString as NSString).boolValue
+        }
+
+        return sawAnyFlag ? flags : nil
     }
 
     private func parseEvents(in packageURL: URL) throws -> [MFFEvent] {

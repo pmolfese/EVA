@@ -19,6 +19,20 @@ import SwiftUI
 
 @MainActor
 final class EpochingViewModel: ObservableObject {
+    enum AveragedDisplayMode: String, CaseIterable, Identifiable {
+        case waveform = "Waveform"
+        case averages = "Averages"
+
+        var id: String { rawValue }
+
+        var systemImage: String {
+            switch self {
+            case .waveform: return "waveform.path.ecg"
+            case .averages: return "chart.xyaxis.line"
+            }
+        }
+    }
+
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -99,6 +113,12 @@ final class EpochingViewModel: ObservableObject {
     @Published var showsNoiseBand = true
     @Published var showsOverlaidCategories = false
     @Published var butterflyTopomapRelativeSample: Int?
+    @Published var averagedDisplayMode: AveragedDisplayMode = .waveform
+    @Published var showsAveragesButterfly = true
+    @Published var showsAveragesTopography = true
+    @Published var showsAveragesInspector = true
+    @Published var showsAveragesLog = true
+    @Published var psaExclusionSummary = PSAExclusionSummary()
 
     // MARK: Figure labeling (session-only; never mutates EpochSegment.category)
     /// Category → user-facing display name, for publication figures/legends.
@@ -216,6 +236,12 @@ final class EpochingViewModel: ObservableObject {
         showsButterflyPlot = false
         showsOverlaidCategories = false
         butterflyTopomapRelativeSample = nil
+        averagedDisplayMode = .waveform
+        showsAveragesButterfly = true
+        showsAveragesTopography = true
+        showsAveragesInspector = true
+        showsAveragesLog = true
+        psaExclusionSummary = PSAExclusionSummary()
         categoryRenames.removeAll()
         overlaySelectedCategories.removeAll()
         showsOverlayButterfly = false

@@ -250,6 +250,15 @@ extension FocusedValues {
         typealias Value = Binding<Int>
     }
 
+    var importPhysioRequest: Binding<Int>? {
+        get { self[ImportPhysioRequestKey.self] }
+        set { self[ImportPhysioRequestKey.self] = newValue }
+    }
+
+    private struct ImportPhysioRequestKey: FocusedValueKey {
+        typealias Value = Binding<Int>
+    }
+
     var physioViewControls: PhysioViewControls? {
         get { self[PhysioViewControlsKey.self] }
         set { self[PhysioViewControlsKey.self] = newValue }
@@ -300,6 +309,7 @@ struct ArtifactsCommands: View {
 struct PSAViewControls {
     var showButterfly: Binding<Bool>
     var showOverlaidCategories: Binding<Bool>
+    var averagedDisplayMode: Binding<EpochingViewModel.AveragedDisplayMode>
     var isAveraged: Bool
 }
 
@@ -328,6 +338,7 @@ struct FileExportCommands: View {
     @FocusedValue(\.mffExportRequest) private var mffExportRequest
     @FocusedValue(\.copyProcessingRequest) private var copyProcessingRequest
     @FocusedValue(\.datasetInfoRequest) private var datasetInfoRequest
+    @FocusedValue(\.importPhysioRequest) private var importPhysioRequest
 
     var body: some View {
         Button("Dataset Info...") {
@@ -345,6 +356,13 @@ struct FileExportCommands: View {
             copyProcessingRequest?.wrappedValue += 1
         }
         .disabled(copyProcessingRequest == nil)
+
+        Divider()
+
+        Button("Import Physio...") {
+            importPhysioRequest?.wrappedValue += 1
+        }
+        .disabled(importPhysioRequest == nil)
     }
 }
 
@@ -398,6 +416,20 @@ struct ViewCommands: View {
                 Text("Analyzing \(Int((segmentHealthControls.progress * 100).rounded()))%")
             }
         }
+
+        Divider()
+
+        Button("Show Waveform View") {
+            psaControls?.averagedDisplayMode.wrappedValue = .waveform
+        }
+        .disabled(psaControls?.isAveraged != true)
+        .keyboardShortcut("2", modifiers: .command)
+
+        Button("Show Averages View") {
+            psaControls?.averagedDisplayMode.wrappedValue = .averages
+        }
+        .disabled(psaControls?.isAveraged != true)
+        .keyboardShortcut("3", modifiers: .command)
 
         Divider()
 

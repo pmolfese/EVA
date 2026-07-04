@@ -357,9 +357,9 @@ extension WaveformView {
                         .padding(16)
                         .contextMenu {
                             figureSaveMenu(
-                                title: "Topographies",
+                                title: "Average Topographies",
                                 legend: [],
-                                size: CGSize(width: CGFloat(max(samples.count, 1)) * 280, height: 300)
+                                size: CGSize(width: CGFloat(max(samples.count, 1)) * 300, height: 330)
                             ) {
                                 topomapsFigure(samples: samples, layout: layout, scale: autoScale, colorRange: colorRange, zScaling: zScaling, signal: signal)
                             }
@@ -480,22 +480,36 @@ extension WaveformView {
         zScaling: TopomapZScaling?,
         signal: MFFSignalData
     ) -> some View {
-        HStack(alignment: .top, spacing: 16) {
-            ForEach(samples) { entry in
-                VStack(spacing: 6) {
-                    Text(epoching.displayCategory(entry.category))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(epochColor(for: entry.colorIndex))
-                    TopomapView(
-                        layout: layout,
-                        values: topomapValues(at: entry.sample, in: signal),
-                        timeSeconds: entry.latencySeconds,
-                        fixedScale: scale,
-                        colorRange: colorRange,
-                        zScaling: zScaling,
-                        showsLayoutName: false
-                    )
-                    .frame(width: 250, height: 250)
+        VStack(alignment: .leading, spacing: 10) {
+            if let first = samples.first {
+                Text(String(format: "t = %.3f s", first.latencySeconds))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(alignment: .top, spacing: 16) {
+                ForEach(samples.indices, id: \.self) { index in
+                    let entry = samples[index]
+                    let showsSharedScale = index == samples.index(before: samples.endIndex)
+
+                    VStack(spacing: 6) {
+                        Text(epoching.displayCategory(entry.category))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(epochColor(for: entry.colorIndex))
+                        TopomapView(
+                            layout: layout,
+                            values: topomapValues(at: entry.sample, in: signal),
+                            timeSeconds: entry.latencySeconds,
+                            fixedScale: scale,
+                            colorRange: colorRange,
+                            zScaling: zScaling,
+                            showsHeader: false,
+                            showsLayoutName: false,
+                            colorBarPlacement: showsSharedScale ? .trailing : .none,
+                            minimumMapHeight: 220
+                        )
+                        .frame(width: showsSharedScale ? 300 : 250, height: 250)
+                    }
                 }
             }
         }

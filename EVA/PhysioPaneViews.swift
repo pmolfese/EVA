@@ -116,23 +116,36 @@ extension WaveformView {
         return out
     }
 
-    /// Per-channel display range (min...max over a strided scan) for the physio
-    /// channels, so each trace (ECG, EMG, …) is auto-scaled to its own amplitude.
+    /// Per-channel display range for the physio channels, so each trace (ECG,
+    /// EMG, …) is auto-scaled to its own amplitude. Uses a robust median ±
+    /// scaled-MAD range rather than the raw min/max, so a single large spike
+    /// (a movement artifact, a cable pop) doesn't squash the rest of the
+    /// trace to a flat line; falls back to the full min/max when the
+    /// scaled-MAD range would be no tighter than that anyway.
     nonisolated static func computePhysioRanges(_ signal: MFFSignalData?) -> [ClosedRange<Float>] {
         guard let signal else { return [] }
         return signal.data.map { channel in
             guard !channel.isEmpty else { return Float(-1)...Float(1) }
             let stride = max(1, channel.count / 4000)
-            var lo = Float.greatestFiniteMagnitude
-            var hi = -Float.greatestFiniteMagnitude
+            var samples: [Float] = []
+            samples.reserveCapacity(channel.count / stride + 1)
             var i = 0
             while i < channel.count {
                 let v = channel[i]
-                if v.isFinite { lo = min(lo, v); hi = max(hi, v) }
+                if v.isFinite { samples.append(v) }
                 i += stride
             }
-            if !(lo < hi) { return (hi - 1)...(hi + 1) }   // flat channel
-            return lo...hi
+            guard let lo = samples.min(), let hi = samples.max() else { return Float(-1)...Float(1) }
+            guard lo < hi else { return (hi - 1)...(hi + 1) }   // flat channel
+
+            let sorted = samples.sorted()
+            let median = sorted[sorted.count / 2]
+            let mad = sorted.map { abs($0 - median) }.sorted()[sorted.count / 2]
+            let scaledMAD = mad * 1.4826   // normal-consistent estimator of SD
+            guard scaledMAD > 0 else { return lo...hi }
+            let halfSpan = min(scaledMAD * 6, max(hi - median, median - lo))
+            guard halfSpan > 0 else { return lo...hi }
+            return (median - halfSpan)...(median + halfSpan)
         }
     }
 
@@ -193,7 +206,8 @@ extension WaveformView {
                         sampleStride: displaySampleStride(for: eegSamplingRate),
                         timeScale: timeScale,
                         contentOffset: horizontalOffset,
-                        viewportWidth: horizontalViewportWidth
+                        viewportWidth: horizontalViewportWidth,
+                        names: (0..<pns.numberOfChannels).map { physioChannelName(index: $0, names: names) }
                     )
                     .padding(.top, 16)   // align below the "Physio" header
 

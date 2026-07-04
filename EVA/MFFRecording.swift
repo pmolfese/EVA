@@ -312,6 +312,69 @@ final class MFFRecording: ObservableObject, Identifiable {
         return movedName
     }
 
+    /// Appends externally-imported physio channels (e.g. from a GE scanner
+    /// PPG/RESP log, or a Biopac export) to the PNS signal, creating one if
+    /// none exists yet. Callers must already have resampled every channel to
+    /// `samplingRate`, and matching the existing PNS signal's rate if one is
+    /// present — this only re-validates that invariant, it doesn't resample.
+    /// Each channel is padded/truncated to the existing signal's sample count
+    /// (EEG's if there's no PNS yet) so every channel in the merged signal
+    /// stays the same length, matching the convention `mergingWithSynthetic`
+    /// already relies on for ICA-synthesized channels.
+    @MainActor
+    @discardableResult
+    func appendImportedPhysioChannels(
+        _ channels: [(name: String, samples: [Float])],
+        samplingRate: Double
+    ) -> Bool {
+        guard !channels.isEmpty else { return false }
+        if let currentPNS = pnsSignal, !samplingRatesMatch(currentPNS.samplingRate, samplingRate) {
+            return false
+        }
+
+        let targetCount = pnsSignal?.data.first?.count ?? signal?.data.first?.count ?? channels[0].samples.count
+        func fitted(_ samples: [Float]) -> [Float] {
+            guard targetCount > 0, samples.count != targetCount else { return samples }
+            if samples.count > targetCount { return Array(samples.prefix(targetCount)) }
+            return samples + Array(repeating: samples.last ?? 0, count: targetCount - samples.count)
+        }
+
+        objectWillChange.send()
+        if let currentPNS = pnsSignal {
+            var data = currentPNS.data
+            var names = currentPNS.channelNames ?? (0..<currentPNS.numberOfChannels).map { "PNS \($0 + 1)" }
+            for channel in channels {
+                data.append(fitted(channel.samples))
+                names.append(channel.name)
+            }
+            pnsSignal = MFFSignalData(
+                signalURL: currentPNS.signalURL,
+                signalType: currentPNS.signalType,
+                numberOfChannels: currentPNS.numberOfChannels + channels.count,
+                samplingRate: currentPNS.samplingRate,
+                duration: currentPNS.duration,
+                recordingStartTime: currentPNS.recordingStartTime,
+                events: currentPNS.events,
+                data: data,
+                channelNames: names
+            )
+        } else {
+            let anchor = signal
+            pnsSignal = MFFSignalData(
+                signalURL: anchor?.signalURL ?? packageURL,
+                signalType: "Physio",
+                numberOfChannels: channels.count,
+                samplingRate: samplingRate,
+                duration: anchor?.duration ?? (Double(targetCount) / samplingRate),
+                recordingStartTime: anchor?.recordingStartTime,
+                events: [],
+                data: channels.map { fitted($0.samples) },
+                channelNames: channels.map { $0.name }
+            )
+        }
+        return true
+    }
+
     private struct LoadResult: Sendable {
         var signal: MFFSignalData?
         var pnsSignal: MFFSignalData?

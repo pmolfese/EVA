@@ -222,12 +222,15 @@ struct WaveformView: View {
     @State private var copyProcessingRequest = 0
     @State private var datasetInfoRequest = 0
     @State private var showsDatasetInfo = false
+    @State private var importPhysioRequest = 0
+    @State var showsPhysioImportSheet = false
     /// Set to scroll the channel list to that row (e.g. from a topomap/butterfly
     /// click); `.scrollPosition(id:)` on the vertical channel ScrollView consumes it.
     @State var scrollToChannelRequest: Int?
     @State var showsChannelInspector = false
     @State var channelInspectorSelection: ChannelInspectorSelection = .channel(0)
     @State var channelInspectorOverlayEnabled = true
+    @State var channelInspectorShowsStandardError = false
     @State var showsCategoryGroupPopover = false
     @State var categoryGroupName = ""
     @State var categoryGroupSelectedCodes = Set<String>()
@@ -293,6 +296,7 @@ struct WaveformView: View {
         PSAViewControls(
             showButterfly: $epoching.showsButterflyPlot,
             showOverlaidCategories: $epoching.showsOverlaidCategories,
+            averagedDisplayMode: $epoching.averagedDisplayMode,
             isAveraged: epoching.isAveraged
         )
     }
@@ -431,6 +435,7 @@ struct WaveformView: View {
         .focusedSceneValue(\.mffExportRequest, $mffExportRequest)
         .focusedSceneValue(\.copyProcessingRequest, $copyProcessingRequest)
         .focusedSceneValue(\.datasetInfoRequest, $datasetInfoRequest)
+        .focusedSceneValue(\.importPhysioRequest, $importPhysioRequest)
         .focusedSceneValue(\.physioViewControls, physioViewControls)
     }
 
@@ -453,6 +458,9 @@ struct WaveformView: View {
         }
         .onChange(of: datasetInfoRequest) { _, _ in
             showsDatasetInfo = true
+        }
+        .onChange(of: importPhysioRequest) { _, _ in
+            showsPhysioImportSheet = true
         }
         .onChange(of: channelLabelMetricsExportRequest) { _, _ in
             saveChannelLabelMetricsJSON()
@@ -516,8 +524,23 @@ struct WaveformView: View {
         }
         ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
         ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
+        seedPhysioPolarityDefaultsIfNeeded()
         adoptOnDiskEpochsIfPresent()
         autoStartBatchIfNeeded()
+    }
+
+    /// Honor each PNS sensor's own `<positiveUp>` convention as the initial
+    /// polarity (channels marked negative-up start flipped), instead of
+    /// drawing every physio trace positive-up like EEG. Only seeds channels
+    /// the user hasn't already touched via the per-channel "Flip Polarity"
+    /// control, and only runs once per load (`physioFlippedPolarity` starts
+    /// empty right before this on a fresh recording).
+    private func seedPhysioPolarityDefaultsIfNeeded() {
+        guard physioFlippedPolarity.isEmpty,
+              let flags = recording.pnsSignal?.positiveUpFlags else { return }
+        for (index, positiveUp) in flags.enumerated() where !positiveUp {
+            physioFlippedPolarity.insert(index)
+        }
     }
 
     /// When a Batch run swaps this file in, auto-configure the replay from the
@@ -644,14 +667,14 @@ struct WaveformView: View {
 
     private func continuousOverlayEventsForDisplay(includeArtifactOverlays: Bool = true) -> [MFFEvent] {
         var events = userMarkerEvents
-        var seen = Set(events)
+        var seenIDs = Set(events.map(\.id))
 
         guard includeArtifactOverlays else { return events }
 
-        for event in template.definedArtifacts.flatMap(\.events) where seen.insert(event).inserted {
+        for event in definedArtifactEventList() where seenIDs.insert(event.id).inserted {
             events.append(event)
         }
-        for event in artifactVM.events where seen.insert(event).inserted {
+        for event in artifactVM.events where seenIDs.insert(event.id).inserted {
             events.append(event)
         }
 
@@ -734,48 +757,24 @@ struct WaveformView: View {
 
         VStack(spacing: 0) {
             // Full-width button bar — side panels below must not shrink it.
-            controls(for: signal, base: base, waveletInput: waveletInput, continuousSignal: continuousSignal)
+            if epoching.isAveraged, epoching.averagedDisplayMode == .averages {
+                averagesToolbar(for: signal)
+            } else {
+                controls(for: signal, base: base, waveletInput: waveletInput, continuousSignal: continuousSignal)
+            }
 
             Divider()
 
-            HStack(spacing: 0) {
-                waveformArea(for: signal, events: events, isShowingEpochs: isShowingEpochs)
-
-                if showsEventsPanel {
-                    Divider()
-                    eventsPanel(for: signal, events: events)
-                        .frame(width: eventsPanelWidth)
-                        .background(Color(nsColor: .windowBackgroundColor))
-                }
-
-                if epoching.showsButterflyPlot, epoching.isAveraged {
-                    Divider()
-                    butterflyPanel(for: signal)
-                        .frame(width: butterflyPanelWidth)
-                        .background(Color(nsColor: .windowBackgroundColor))
-                }
-
-                if epoching.showsOverlaidCategories, epoching.isAveraged {
-                    Divider()
-                    overlaidCategoriesPanel(for: signal)
-                        .frame(width: overlaidCategoriesPanelWidth)
-                        .background(Color(nsColor: .windowBackgroundColor))
-                }
-
-                if let topomapSample {
-                    Divider()
-                    topomapPanel(for: signal, sample: topomapSample)
-                        .frame(width: topomapPanelWidth)
-                        .background(Color(nsColor: .windowBackgroundColor))
-                }
-
-                if let relSample = epoching.butterflyTopomapRelativeSample, epoching.isAveraged {
-                    Divider()
-                    averagedTopomapPanel(for: signal, relativeSample: relSample)
-                        .frame(width: topomapPanelWidth)
-                        .background(Color(nsColor: .windowBackgroundColor))
+            Group {
+                if epoching.isAveraged, epoching.averagedDisplayMode == .averages {
+                    averagesWorkspace(for: signal)
+                        .transition(.opacity)
+                } else {
+                    waveformWorkspace(for: signal, events: events, isShowingEpochs: isShowingEpochs)
+                        .transition(.opacity)
                 }
             }
+            .animation(.easeInOut(duration: 0.16), value: epoching.averagedDisplayMode)
         }
         .onAppear {
             refreshDisplayedEventsCache(
@@ -845,6 +844,13 @@ struct WaveformView: View {
                 recording: recording,
                 epoching: epoching,
                 onClose: { showsDatasetInfo = false }
+            )
+        }
+        .sheet(isPresented: $showsPhysioImportSheet) {
+            PhysioImportSheet(
+                recording: recording,
+                onComplete: { showsPhysioImportSheet = false },
+                onCancel: { showsPhysioImportSheet = false }
             )
         }
         .overlay(alignment: .top) { replayBanner() }
@@ -927,6 +933,48 @@ struct WaveformView: View {
         }
     }
 
+    @ViewBuilder
+    private func waveformWorkspace(for signal: MFFSignalData, events: [MFFEvent], isShowingEpochs: Bool) -> some View {
+        HStack(spacing: 0) {
+            waveformArea(for: signal, events: events, isShowingEpochs: isShowingEpochs)
+
+            if showsEventsPanel {
+                Divider()
+                eventsPanel(for: signal, events: events)
+                    .frame(width: eventsPanelWidth)
+                    .background(Color(nsColor: .windowBackgroundColor))
+            }
+
+            if epoching.showsButterflyPlot, epoching.isAveraged {
+                Divider()
+                butterflyPanel(for: signal)
+                    .frame(width: butterflyPanelWidth)
+                    .background(Color(nsColor: .windowBackgroundColor))
+            }
+
+            if epoching.showsOverlaidCategories, epoching.isAveraged {
+                Divider()
+                overlaidCategoriesPanel(for: signal)
+                    .frame(width: overlaidCategoriesPanelWidth)
+                    .background(Color(nsColor: .windowBackgroundColor))
+            }
+
+            if let topomapSample {
+                Divider()
+                topomapPanel(for: signal, sample: topomapSample)
+                    .frame(width: topomapPanelWidth)
+                    .background(Color(nsColor: .windowBackgroundColor))
+            }
+
+            if let relSample = epoching.butterflyTopomapRelativeSample, epoching.isAveraged {
+                Divider()
+                averagedTopomapPanel(for: signal, relativeSample: relSample)
+                    .frame(width: topomapPanelWidth)
+                    .background(Color(nsColor: .windowBackgroundColor))
+            }
+        }
+    }
+
     // MARK: - Controls
 
     private func toolbarButtonLabel(_ label: String) -> String? {
@@ -956,29 +1004,7 @@ struct WaveformView: View {
 
     private func controls(for signal: MFFSignalData, base: MFFSignalData, waveletInput: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
         HStack(spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text("Scale")
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 72, alignment: .leading)
-                    Slider(value: amplitudeScaleSliderBinding, in: amplitudeScaleSliderBounds)
-                        .frame(width: 170)
-                        .help("Lower values make traces taller.")
-                    Text("±\(formatAmplitudeScale(amplitudeScale)) µV")
-                        .font(.caption.monospacedDigit())
-                        .frame(width: 86, alignment: .trailing)
-                }
-                HStack(spacing: 8) {
-                    Text("Time Scale")
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 72, alignment: .leading)
-                    Slider(value: Binding(get: { timeScale }, set: { timeScale = $0 }), in: 0.2...8, step: 0.1)
-                        .frame(width: 170)
-                    Text(String(format: "%.1fx", timeScale))
-                        .font(.caption.monospacedDigit())
-                        .frame(width: 64, alignment: .trailing)
-                }
-            }
+            toolbarScaleControls()
 
             HStack(spacing: 6) {
             Button {
@@ -1217,16 +1243,86 @@ struct WaveformView: View {
 
             Spacer(minLength: 12)
 
-            statusLog()
-                .frame(width: 240)
-
-            Text("\(signal.numberOfChannels) ch · \(Int(signal.samplingRate)) Hz · \(String(format: "%.1f", signal.duration)) s")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            toolbarStatusAndModeControls(for: signal)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    @ViewBuilder
+    func toolbarScaleControls(showsTimeScale: Bool = true) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Scale")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 72, alignment: .leading)
+                Slider(value: amplitudeScaleSliderBinding, in: amplitudeScaleSliderBounds)
+                    .frame(width: 170)
+                    .help("Lower values make traces taller.")
+                Text("±\(formatAmplitudeScale(amplitudeScale)) µV")
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 86, alignment: .trailing)
+            }
+
+            if showsTimeScale {
+                HStack(spacing: 8) {
+                    Text("Time Scale")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 72, alignment: .leading)
+                    Slider(value: Binding(get: { timeScale }, set: { timeScale = $0 }), in: 0.2...8, step: 0.1)
+                        .frame(width: 170)
+                    Text(String(format: "%.1fx", timeScale))
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 64, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    func averagedModePicker() -> some View {
+        Picker("View Mode", selection: $epoching.averagedDisplayMode) {
+            ForEach(EpochingViewModel.AveragedDisplayMode.allCases) { mode in
+                Label(mode.rawValue, systemImage: mode.systemImage)
+                    .tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 220)
+        .help("Switch between waveform rows and the averages workspace.")
+    }
+
+    func toolbarStatusAndModeControls(for signal: MFFSignalData) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                statusLog()
+                    .frame(width: 240)
+
+                Text(recordingToolbarSummary(for: signal))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 240, alignment: .leading)
+            }
+
+            if epoching.isAveraged {
+                averagedModePicker()
+                    .frame(width: 220)
+            }
+        }
+    }
+
+    private func recordingToolbarSummary(for signal: MFFSignalData) -> String {
+        var parts = [String]()
+        if let netName = recording.sensorLayout?.name.trimmingCharacters(in: .whitespacesAndNewlines),
+           !netName.isEmpty {
+            parts.append(netName)
+        }
+        parts.append("\(signal.numberOfChannels) ch")
+        parts.append("\(Int(signal.samplingRate)) Hz")
+        parts.append("\(String(format: "%.1f", signal.duration)) s")
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - Status log
@@ -1302,7 +1398,7 @@ struct WaveformView: View {
     /// Consolidated status/progress area shown at the far right of the toolbar,
     /// so individual buttons no longer push inline messages into the layout.
     @ViewBuilder
-    private func statusLog() -> some View {
+    func statusLog() -> some View {
         Button {
             showsStatusHistory = true
         } label: {
@@ -1495,13 +1591,12 @@ struct WaveformView: View {
                     laneCount: eventLaneCount,
                     onSelectEvent: { event, color in
                         // Toggle: tapping the highlighted flag again clears it.
-                        // Only artifact-detection events carry a centered window;
+                        // Artifact-detection events carry centered windows;
                         // imported MFF events use onset+forward duration, so they
                         // are not highlighted with this centered band.
                         if highlightedArtifactEvent?.id == event.id {
                             highlightedArtifactEvent = nil
-                        } else if event.durationSeconds != nil,
-                                  event.sourceFile == EyeArtifactThresholdDetector.sourceFile {
+                        } else if isCenteredArtifactDetectionEvent(event) {
                             highlightedArtifactEvent = event
                             highlightedArtifactColor = color
                         } else {
@@ -2132,6 +2227,8 @@ struct WaveformView: View {
         dragSelectionEndSample = nil
         topomapSample = nil
         epoching.butterflyTopomapRelativeSample = nil
+        epoching.psaExclusionSummary = PSAExclusionSummary()
+        epoching.averagedDisplayMode = .waveform
         epoching.showsButterflyPlot = false
         epoching.showsOverlaidCategories = false
         segHealth.task?.cancel()

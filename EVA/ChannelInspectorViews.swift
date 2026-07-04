@@ -39,7 +39,7 @@ extension WaveformView {
     }
 
     /// Member channel indices for the selection, clamped to the signal's channel count.
-    private func channelInspectorIndices(for selection: ChannelInspectorSelection, signal: MFFSignalData) -> [Int] {
+    func channelInspectorIndices(for selection: ChannelInspectorSelection, signal: MFFSignalData) -> [Int] {
         switch selection {
         case .channel(let index):
             return signal.data.indices.contains(index) ? [index] : []
@@ -70,6 +70,9 @@ extension WaveformView {
         let selection = channelInspectorSelection
         let indices = channelInspectorIndices(for: selection, signal: signal)
         let segments = epoching.isAveraged ? selectedOverlaySegments() : []
+        let standardErrorBands = channelInspectorShowsStandardError
+            ? channelInspectorStandardErrorBands(for: segments, selection: selection, signal: signal)
+            : [:]
 
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
@@ -92,7 +95,9 @@ extension WaveformView {
                             segments: segments,
                             indices: indices,
                             showsMembers: channelInspectorOverlayEnabled,
-                            colorFor: { epochColor(for: $0) }
+                            amplitudeScale: amplitudeScale,
+                            colorFor: { epochColor(for: $0) },
+                            standardErrorBands: standardErrorBands
                         )
                         .frame(width: 720, height: 320)
                     }
@@ -150,8 +155,30 @@ extension WaveformView {
                         segments: segments,
                         indices: indices,
                         showsMembers: channelInspectorOverlayEnabled,
-                        colorFor: { epochColor(for: $0) }
+                        amplitudeScale: amplitudeScale,
+                        colorFor: { epochColor(for: $0) },
+                        standardErrorBands: standardErrorBands
                     )
+                    .contextMenu {
+                        channelInspectorDisplayMenuItems(selection: selection, signal: signal, segments: segments)
+                        Divider()
+                        figureSaveMenu(
+                            title: channelInspectorTitle(for: selection, signal: signal),
+                            legend: overlayLegendItems(),
+                            size: CGSize(width: 720, height: 320)
+                        ) {
+                            ChannelInspectorPlot(
+                                signal: signal,
+                                segments: segments,
+                                indices: indices,
+                                showsMembers: channelInspectorOverlayEnabled,
+                                amplitudeScale: amplitudeScale,
+                                colorFor: { epochColor(for: $0) },
+                                standardErrorBands: standardErrorBands
+                            )
+                            .frame(width: 720, height: 320)
+                        }
+                    }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 20)
                     .frame(minHeight: 260)
@@ -162,7 +189,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
-    private func channelInspectorChannelMenu(signal: MFFSignalData) -> some View {
+    func channelInspectorChannelMenu(signal: MFFSignalData) -> some View {
         Menu {
             ForEach(signal.data.indices, id: \.self) { index in
                 Button(eegChannelDisplayName(index: index, signal: signal)) {
@@ -178,7 +205,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
-    private func channelInspectorGroupMenu() -> some View {
+    func channelInspectorGroupMenu() -> some View {
         let sets = ChannelSetStore.shared.allSets
         Menu {
             if sets.isEmpty {
@@ -198,22 +225,288 @@ extension WaveformView {
         .fixedSize()
         .disabled(sets.isEmpty)
     }
+
+    @ViewBuilder
+    func channelInspectorDisplayMenuItems(
+        selection: ChannelInspectorSelection,
+        signal: MFFSignalData,
+        segments: [EpochSegment]
+    ) -> some View {
+        if case .channelSet = selection {
+            Toggle("Show faint member lines", isOn: $channelInspectorOverlayEnabled)
+        }
+
+        let canShowStandardError = channelInspectorCanShowStandardError(
+            selection: selection,
+            signal: signal,
+            segments: segments
+        )
+        Toggle("Show standard error", isOn: $channelInspectorShowsStandardError)
+            .disabled(!canShowStandardError)
+
+        if !canShowStandardError {
+            Text("Standard error unavailable")
+        }
+    }
+
+    func channelInspectorCanShowStandardError(
+        selection: ChannelInspectorSelection,
+        signal: MFFSignalData,
+        segments: [EpochSegment]
+    ) -> Bool {
+        let indices = channelInspectorIndices(for: selection, signal: signal)
+        return channelInspectorHasTrialStandardError(for: segments) || indices.count > 1
+    }
+
+    func channelInspectorStandardErrorBands(
+        for segments: [EpochSegment],
+        selection: ChannelInspectorSelection,
+        signal: MFFSignalData
+    ) -> [String: ChannelInspectorStandardErrorBand] {
+        let indices = channelInspectorIndices(for: selection, signal: signal)
+        guard !segments.isEmpty, !indices.isEmpty else { return [:] }
+
+        var bands = channelInspectorTrialStandardErrorBands(for: segments, indices: indices)
+        let channelBands = channelInspectorChannelStandardErrorBands(for: segments, indices: indices, signal: signal)
+        for segment in segments where bands[segment.id] == nil {
+            if let band = channelBands[segment.id] {
+                bands[segment.id] = band
+            }
+        }
+        return bands
+    }
+
+    private func channelInspectorHasTrialStandardError(for segments: [EpochSegment]) -> Bool {
+        guard let rawSignal = segmentedEpochSignal,
+              rawSignal.numberOfChannels > 0,
+              !segmentedEpochSegments.isEmpty,
+              !segments.isEmpty else { return false }
+        let categories = Set(segments.map(\.category))
+        var counts = [String: Int]()
+        for segment in segmentedEpochSegments where categories.contains(segment.category) {
+            guard segment.endSample > segment.startSample else { continue }
+            counts[segment.category, default: 0] += 1
+            if counts[segment.category, default: 0] > 1 { return true }
+        }
+        return false
+    }
+
+    private func channelInspectorTrialStandardErrorBands(
+        for segments: [EpochSegment],
+        indices: [Int]
+    ) -> [String: ChannelInspectorStandardErrorBand] {
+        guard let rawSignal = segmentedEpochSignal,
+              !segmentedEpochSegments.isEmpty else { return [:] }
+        let validIndices = indices.filter { rawSignal.data.indices.contains($0) }
+        guard !validIndices.isEmpty else { return [:] }
+
+        let rawSegmentsByCategory = Dictionary(grouping: segmentedEpochSegments, by: \.category)
+        var bands = [String: ChannelInspectorStandardErrorBand]()
+
+        for segment in segments {
+            let length = max(segment.endSample - segment.startSample + 1, 0)
+            guard length > 1,
+                  let rawSegments = rawSegmentsByCategory[segment.category] else { continue }
+
+            var sums = [Double](repeating: 0, count: length)
+            var sumSquares = [Double](repeating: 0, count: length)
+            var counts = [Int](repeating: 0, count: length)
+
+            for rawSegment in rawSegments {
+                guard rawSegment.endSample - rawSegment.startSample + 1 == length,
+                      let trace = channelInspectorTrialTrace(
+                        rawSignal: rawSignal,
+                        segment: rawSegment,
+                        indices: validIndices,
+                        length: length
+                      ) else { continue }
+
+                for offset in 0..<length {
+                    let value = Double(trace[offset])
+                    guard value.isFinite else { continue }
+                    sums[offset] += value
+                    sumSquares[offset] += value * value
+                    counts[offset] += 1
+                }
+            }
+
+            let contributingTraceCount = counts.max() ?? 0
+            guard contributingTraceCount > 1 else { continue }
+            bands[segment.id] = ChannelInspectorStandardErrorBand(
+                standardErrors: channelInspectorStandardErrors(sums: sums, sumSquares: sumSquares, counts: counts),
+                contributingTraceCount: contributingTraceCount,
+                source: .trials
+            )
+        }
+
+        return bands
+    }
+
+    private func channelInspectorTrialTrace(
+        rawSignal: MFFSignalData,
+        segment: EpochSegment,
+        indices: [Int],
+        length: Int
+    ) -> [Float]? {
+        guard length > 1, segment.startSample >= 0 else { return nil }
+        let endSample = segment.startSample + length - 1
+        let selectedIndices = indices.filter {
+            rawSignal.data.indices.contains($0) && rawSignal.data[$0].count > endSample
+        }
+        guard !selectedIndices.isEmpty else { return nil }
+
+        let referenceIndices: [Int]
+        if epoching.averageReference {
+            referenceIndices = rawSignal.data.indices.filter {
+                !channels.bad.contains($0) && rawSignal.data[$0].count > endSample
+            }
+        } else {
+            referenceIndices = []
+        }
+
+        var trace = [Float](repeating: 0, count: length)
+        for offset in 0..<length {
+            let sample = segment.startSample + offset
+            var referenceMean = 0.0
+            if epoching.averageReference {
+                var referenceSum = 0.0
+                var referenceCount = 0
+                for index in referenceIndices {
+                    let value = Double(rawSignal.data[index][sample])
+                    guard value.isFinite else { continue }
+                    referenceSum += value
+                    referenceCount += 1
+                }
+                if referenceCount > 0 {
+                    referenceMean = referenceSum / Double(referenceCount)
+                }
+            }
+
+            var selectedSum = 0.0
+            var selectedCount = 0
+            for index in selectedIndices {
+                let value = Double(rawSignal.data[index][sample]) - referenceMean
+                guard value.isFinite else { continue }
+                selectedSum += value
+                selectedCount += 1
+            }
+            guard selectedCount > 0 else { return nil }
+            trace[offset] = Float(selectedSum / Double(selectedCount))
+        }
+
+        if epoching.baselineCorrected {
+            let baselineCount = min(max(segment.stimulusOffsetSamples, 0), length)
+            if baselineCount > 0 {
+                var baselineSum = 0.0
+                var baselineN = 0
+                for offset in 0..<baselineCount {
+                    let value = Double(trace[offset])
+                    guard value.isFinite else { continue }
+                    baselineSum += value
+                    baselineN += 1
+                }
+                if baselineN > 0 {
+                    let baseline = Float(baselineSum / Double(baselineN))
+                    for offset in trace.indices {
+                        trace[offset] -= baseline
+                    }
+                }
+            }
+        }
+
+        return trace
+    }
+
+    private func channelInspectorChannelStandardErrorBands(
+        for segments: [EpochSegment],
+        indices: [Int],
+        signal: MFFSignalData
+    ) -> [String: ChannelInspectorStandardErrorBand] {
+        let validIndices = indices.filter { signal.data.indices.contains($0) }
+        guard validIndices.count > 1 else { return [:] }
+
+        var bands = [String: ChannelInspectorStandardErrorBand]()
+        for segment in segments {
+            let length = max(segment.endSample - segment.startSample + 1, 0)
+            guard length > 1 else { continue }
+
+            var sums = [Double](repeating: 0, count: length)
+            var sumSquares = [Double](repeating: 0, count: length)
+            var counts = [Int](repeating: 0, count: length)
+
+            for index in validIndices {
+                guard signal.data[index].count > segment.endSample else { continue }
+                for offset in 0..<length {
+                    let value = Double(signal.data[index][segment.startSample + offset])
+                    guard value.isFinite else { continue }
+                    sums[offset] += value
+                    sumSquares[offset] += value * value
+                    counts[offset] += 1
+                }
+            }
+
+            let contributingTraceCount = counts.max() ?? 0
+            guard contributingTraceCount > 1 else { continue }
+            bands[segment.id] = ChannelInspectorStandardErrorBand(
+                standardErrors: channelInspectorStandardErrors(sums: sums, sumSquares: sumSquares, counts: counts),
+                contributingTraceCount: contributingTraceCount,
+                source: .channels
+            )
+        }
+        return bands
+    }
+
+    private func channelInspectorStandardErrors(
+        sums: [Double],
+        sumSquares: [Double],
+        counts: [Int]
+    ) -> [Float] {
+        sums.indices.map { index in
+            let count = counts[index]
+            guard count > 1 else { return 0 }
+            let n = Double(count)
+            let numerator = max(sumSquares[index] - (sums[index] * sums[index] / n), 0)
+            let variance = numerator / (n - 1)
+            return Float((variance / n).squareRoot())
+        }
+    }
+}
+
+struct ChannelInspectorStandardErrorBand {
+    enum Source {
+        case trials
+        case channels
+
+        var label: String {
+            switch self {
+            case .trials: return "trial SEM"
+            case .channels: return "channel SEM"
+            }
+        }
+    }
+
+    let standardErrors: [Float]
+    let contributingTraceCount: Int
+    let source: Source
 }
 
 /// Overlays one trace per selected category for the chosen channel/Channel-Set.
 /// When the selection is a Channel Set and `showsMembers` is on, each member
 /// channel is drawn faintly behind the averaged trace (same category color,
 /// lower opacity) so the spread across the group is visible.
-private struct ChannelInspectorPlot: View {
+struct ChannelInspectorPlot: View {
     let signal: MFFSignalData
     let segments: [EpochSegment]
     let indices: [Int]
     let showsMembers: Bool
+    let amplitudeScale: Double
     let colorFor: (Int) -> Color
+    var highlightRelativeSample: Int? = nil
+    var standardErrorBands: [String: ChannelInspectorStandardErrorBand] = [:]
 
     var body: some View {
         GeometryReader { proxy in
-            let scale = amplitudeScale
+            let scale = max(amplitudeScale, 1)
             Canvas { context, size in
                 let midY = size.height / 2
                 context.stroke(
@@ -221,9 +514,34 @@ private struct ChannelInspectorPlot: View {
                     with: .color(.secondary.opacity(0.25)), lineWidth: 1
                 )
 
+                if let first = segments.first {
+                    let length = max(first.endSample - first.startSample + 1, 1)
+                    if length > 1 {
+                        let x = CGFloat(first.stimulusOffsetSamples) / CGFloat(length - 1) * size.width
+                        context.stroke(
+                            Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
+                            with: .color(.green.opacity(0.5)), lineWidth: 1
+                        )
+                    }
+                }
+
                 for segment in segments {
                     let color = colorFor(segment.colorIndex)
                     let length = max(segment.endSample - segment.startSample + 1, 1)
+                    let averaged = average(indices: indices, segment: segment)
+
+                    if let band = standardErrorBands[segment.id] {
+                        drawStandardErrorBand(
+                            center: averaged,
+                            standardError: band.standardErrors,
+                            length: length,
+                            size: size,
+                            midY: midY,
+                            scale: scale,
+                            in: &context,
+                            color: color
+                        )
+                    }
 
                     if showsMembers, indices.count > 1 {
                         for index in indices {
@@ -235,16 +553,18 @@ private struct ChannelInspectorPlot: View {
                         }
                     }
 
-                    let averaged = average(indices: indices, segment: segment)
                     draw(averaged, length: length, size: size, midY: midY, scale: scale,
                          in: &context, color: color, opacity: 0.95, lineWidth: 1.6)
+                }
 
-                    // Stimulus marker.
+                if let first = segments.first, let highlightRelativeSample {
+                    let length = max(first.endSample - first.startSample + 1, 1)
                     if length > 1 {
-                        let x = CGFloat(segment.stimulusOffsetSamples) / CGFloat(length - 1) * size.width
+                        let clamped = min(max(highlightRelativeSample, 0), length - 1)
+                        let x = CGFloat(clamped) / CGFloat(length - 1) * size.width
                         context.stroke(
                             Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
-                            with: .color(.green.opacity(0.5)), lineWidth: 1
+                            with: .color(.yellow), lineWidth: 2
                         )
                     }
                 }
@@ -270,12 +590,43 @@ private struct ChannelInspectorPlot: View {
         return sum.map { $0 / n }
     }
 
-    private var amplitudeScale: Double {
-        let allValues = segments.flatMap { segment -> [Float] in
-            average(indices: indices, segment: segment)
+    private func drawStandardErrorBand(
+        center: [Float],
+        standardError: [Float],
+        length: Int,
+        size: CGSize,
+        midY: CGFloat,
+        scale: Double,
+        in context: inout GraphicsContext,
+        color: Color
+    ) {
+        let count = min(center.count, standardError.count, length)
+        guard count > 1, length > 1 else { return }
+
+        var path = Path()
+        for i in 0..<count {
+            let sem = Double(standardError[i]).isFinite ? Double(standardError[i]) : 0
+            let value = Double(center[i]) + sem
+            let x = CGFloat(i) / CGFloat(length - 1) * size.width
+            let y = midY - CGFloat(value / scale) * (size.height / 2) * 0.9
+            if i == 0 {
+                path.move(to: CGPoint(x: x, y: y))
+            } else {
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
         }
-        let maxAbs = allValues.map { abs($0) }.max() ?? 1
-        return Double(maxAbs) > 0 ? Double(maxAbs) : 1
+
+        for i in stride(from: count - 1, through: 0, by: -1) {
+            let sem = Double(standardError[i]).isFinite ? Double(standardError[i]) : 0
+            let value = Double(center[i]) - sem
+            let x = CGFloat(i) / CGFloat(length - 1) * size.width
+            let y = midY - CGFloat(value / scale) * (size.height / 2) * 0.9
+            path.addLine(to: CGPoint(x: x, y: y))
+        }
+        path.closeSubpath()
+
+        context.fill(path, with: .color(color.opacity(0.14)))
+        context.stroke(path, with: .color(color.opacity(0.28)), lineWidth: 0.75)
     }
 
     private func draw(

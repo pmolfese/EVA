@@ -24,6 +24,7 @@ import SwiftUI
 enum TopomapColorBarPlacement {
     case bottom
     case trailing
+    case none
 }
 
 /// Z-score color scaling for a topomap: color spans mean ± sigma·sd.
@@ -54,6 +55,7 @@ struct TopomapView: View {
     let showsLayoutName: Bool
     let colorBarPlacement: TopomapColorBarPlacement
     let minimumMapHeight: CGFloat
+    let contentPadding: CGFloat
     /// Resolves a channel index to its display name, for the hover tooltip.
     /// When nil, the tooltip falls back to "Ch <index+1>".
     let channelName: ((Int) -> String)?
@@ -75,6 +77,7 @@ struct TopomapView: View {
         showsLayoutName: Bool = true,
         colorBarPlacement: TopomapColorBarPlacement = .bottom,
         minimumMapHeight: CGFloat = 260,
+        contentPadding: CGFloat = 16,
         channelName: ((Int) -> String)? = nil,
         onTapChannel: ((Int) -> Void)? = nil
     ) {
@@ -91,6 +94,7 @@ struct TopomapView: View {
         self.onTapChannel = onTapChannel
         self.colorBarPlacement = colorBarPlacement
         self.minimumMapHeight = minimumMapHeight
+        self.contentPadding = contentPadding
     }
 
     private let interpolationPower: Double = 3
@@ -110,17 +114,20 @@ struct TopomapView: View {
                 }
             }
 
-            if colorBarPlacement == .trailing {
+            switch colorBarPlacement {
+            case .trailing:
                 HStack(spacing: 10) {
                     mapCanvas
                     verticalColorBar
                 }
-            } else {
+            case .bottom:
                 mapCanvas
                 horizontalColorBar
+            case .none:
+                mapCanvas
             }
         }
-        .padding(16)
+        .padding(contentPadding)
     }
 
     private var mapCanvas: some View {

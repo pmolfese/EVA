@@ -36,16 +36,66 @@ extension WaveformView {
         return .other
     }
 
-    func nextArtifactTemplateDefaultName(baseName: String = "Eye Blink") -> String {
-        let existingNames = Set(template.definedArtifacts.flatMap { artifact in
-            [artifact.name, artifact.eventCode]
-        }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
-
-        var index = 1
-        while existingNames.contains("A\(index): \(baseName)") {
-            index += 1
+    func artifactTemplateEventCodeSuffix(for type: DefinedArtifactType) -> String {
+        switch type {
+        case .ocular: return "AOC"
+        case .ecg: return "ECG"
+        case .bcg: return "BCG"
+        case .other: return "AOT"
         }
-        return "A\(index): \(baseName)"
+    }
+
+    func artifactTemplateEventCode(for type: DefinedArtifactType, number: Int) -> String {
+        let suffix = artifactTemplateEventCodeSuffix(for: type)
+        let maxTokenLength = max(4 - suffix.count, 1)
+        let decimalToken = "\(number)"
+        let token: String
+        if decimalToken.count <= maxTokenLength {
+            token = decimalToken
+        } else {
+            let base36Token = String(number, radix: 36, uppercase: true)
+            token = base36Token.count <= maxTokenLength ? base36Token : decimalToken
+        }
+        return "\(token)\(suffix)"
+    }
+
+    func artifactTemplateCodeNumber(_ code: String, for type: DefinedArtifactType) -> Int? {
+        let suffix = artifactTemplateEventCodeSuffix(for: type)
+        let upperCode = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard upperCode.hasSuffix(suffix) else { return nil }
+
+        let body = String(upperCode.dropLast(suffix.count))
+        if let decimalNumber = Int(body) {
+            return decimalNumber
+        }
+        return Int(body, radix: 36)
+    }
+
+    func nextArtifactTemplateNumber(for type: DefinedArtifactType) -> Int {
+        let existingArtifacts = template.definedArtifacts.filter { $0.id != template.definedArtifactID }
+        let sameTypeArtifacts = existingArtifacts.filter { $0.type == type }
+        var maxNumber = sameTypeArtifacts.count
+
+        for artifact in sameTypeArtifacts {
+            if let number = artifactTemplateCodeNumber(artifact.eventCode, for: type) {
+                maxNumber = max(maxNumber, number)
+            }
+        }
+
+        let existingCodes = Set(existingArtifacts.map {
+            $0.eventCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        })
+        var candidate = maxNumber + 1
+        while existingCodes.contains(artifactTemplateEventCode(for: type, number: candidate).uppercased()) {
+            candidate += 1
+        }
+        return candidate
+    }
+
+    func applyDefaultArtifactTemplateIdentity(for type: DefinedArtifactType) {
+        let number = nextArtifactTemplateNumber(for: type)
+        template.name = "A\(number): \(type.rawValue)"
+        template.eventCode = artifactTemplateEventCode(for: type, number: number)
     }
 
     func openArtifactTemplateSheet(for signal: MFFSignalData, clickedChannel: Int) {
@@ -54,24 +104,25 @@ extension WaveformView {
             return
         }
 
-        let defaultName = nextArtifactTemplateDefaultName()
         template.selectionRange = range
         template.clickedChannel = clickedChannel
         template.definedArtifactID = nil
-        template.name = defaultName
-        template.eventCode = defaultName
-        template.type = inferredArtifactType(name: defaultName, eventCode: defaultName)
+        template.type = .ocular
+        applyDefaultArtifactTemplateIdentity(for: template.type)
         template.channelScope = .clickedChannel
         template.customChannels = "\(clickedChannel + 1)"
         template.windowSeconds = max(Double(range.upperBound - range.lowerBound + 1) / signal.samplingRate, 0.02)
         template.downsampleRate = min(250, signal.samplingRate)
         template.threshold = 0.70
         template.mergeWindowSeconds = 0.25
+        template.waveformStretchRange = 0
         template.polarity = .same
         template.topographyMode = .off
         template.topographyChannelScope = .allGood
         template.topographyTopN = 16
         template.topographyMetric = .pearson
+        template.trajectoryShiftSeconds = 0.05
+        template.trajectoryScaleRange = 0
         template.trajectoryGFPWeighted = true
         template.trajectorySelectedFrame = nil
         template.definitionPanel = .waveforms
@@ -149,6 +200,9 @@ extension WaveformView {
                 template.topographyMode = .peak
             }
         }
+        .onChange(of: template.type) { _, newType in
+            applyDefaultArtifactTemplateIdentity(for: newType)
+        }
         .onChange(of: template.topographyMode) { _, _ in
             refreshTopographyIfNeeded(for: signal)
         }
@@ -165,6 +219,18 @@ extension WaveformView {
             refreshTopographyIfNeeded(for: signal)
         }
         .onChange(of: template.topographyMetric) { _, _ in
+            refreshTopographyIfNeeded(for: signal)
+        }
+        .onChange(of: template.trajectoryShiftSeconds) { _, _ in
+            guard template.topographyMode == .trajectory else { return }
+            refreshTopographyIfNeeded(for: signal)
+        }
+        .onChange(of: template.trajectoryScaleRange) { _, _ in
+            guard template.topographyMode == .trajectory else { return }
+            refreshTopographyIfNeeded(for: signal)
+        }
+        .onChange(of: template.trajectoryGFPWeighted) { _, _ in
+            guard template.topographyMode == .trajectory else { return }
             refreshTopographyIfNeeded(for: signal)
         }
     }
@@ -295,12 +361,26 @@ extension WaveformView {
                     TextField("Hz", value: $template.downsampleRate, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
-                    Text("Merge")
-                        .font(.caption.weight(.semibold))
+                    ArtifactTemplateFieldLabel(
+                        title: "Merge (s)",
+                        help: "Hits within this time window of each other are merged into one artifact event, keeping the highest-scoring match. This prevents double-counting the same artifact."
+                    )
                     TextField("Merge", value: $template.mergeWindowSeconds, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
                 }
+            }
+
+            GridRow {
+                ArtifactTemplateFieldLabel(
+                    title: "Stretch",
+                    help: "Fractional waveform time-scaling tolerance. 0.10 lets the search shrink or stretch the exemplar window by ±10% before scoring, which helps match artifacts with the same shape but slightly different duration. Set to 0 to keep a fixed window."
+                )
+                TextField("Stretch", value: $template.waveformStretchRange, format: .number.precision(.fractionLength(2)))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+                    .help("0.10 = ±10% stretch/compression.")
+                    .gridCellColumns(3)
             }
         }
     }
@@ -311,11 +391,11 @@ extension WaveformView {
                 GridRow {
                     ArtifactTemplateFieldLabel(
                         title: "Reference",
-                        help: "Scans for the exemplar's scalp voltage map (spatial pattern across electrodes). Window Middle uses the centre sample, Window Peak the highest global field power sample, and Window Average the mean map over the window."
+                        help: "Scans for the exemplar's scalp voltage pattern across electrodes. Middle map, Peak map, and Average map use one reference map. Map sequence uses the whole time course across the highlighted window and can shift or stretch to match artifacts with similar spatial evolution."
                     )
                     Picker("Reference", selection: $template.topographyMode) {
                         ForEach(ArtifactTopographyMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
+                            Text(mode.displayName).tag(mode)
                         }
                     }
                     .labelsHidden()
@@ -387,15 +467,24 @@ extension WaveformView {
                         TextField("Shift", value: $template.trajectoryShiftSeconds, format: .number.precision(.fractionLength(3)))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 80)
+                    }
+                }
 
-                        ArtifactTemplateFieldLabel(
-                            title: "Scale ±",
-                            help: "Fractional time-scale tolerance (0–1). E.g. 0.10 allows the trajectory to be stretched or compressed by ±10%, accommodating heart-rate variation. Set to 0 to disable."
-                        )
-                        HStack(spacing: 8) {
-                            TextField("Scale", value: $template.trajectoryScaleRange, format: .number.precision(.fractionLength(2)))
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 80)
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Stretch",
+                        help: "Fractional time-scale tolerance for Map sequence references. 0.10 lets the map sequence shrink or stretch by ±10% before scoring, which helps match artifacts with the same spatial evolution but slightly different duration. Set to 0 to keep a fixed trajectory length."
+                    )
+                    HStack(spacing: 8) {
+                        TextField("Stretch", value: $template.trajectoryScaleRange, format: .number.precision(.fractionLength(2)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                            .disabled(template.topographyMode != .trajectory)
+                        if template.topographyMode != .trajectory {
+                            Text("Map sequence only")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
                             if let ref = template.result?.topographyReference,
                                let frames = ref.trajectoryFrameCount {
                                 Text("\(frames)-frame trajectory")
@@ -404,7 +493,10 @@ extension WaveformView {
                             }
                         }
                     }
+                    .gridCellColumns(3)
+                }
 
+                if template.topographyMode == .trajectory {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "GFP Weighting",
@@ -442,6 +534,13 @@ extension WaveformView {
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 100)
                 }
+            }
+
+            if template.topographyMode.isEnabled {
+                Text(template.topographyMode.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Text("\(artifactTopographyChannels(in: signal).count) topography channels · bad channels excluded")
@@ -843,7 +942,7 @@ extension WaveformView {
                     ProgressView().controlSize(.mini)
                 }
                 Spacer()
-                Text(topography.mode.rawValue)
+                Text(topography.mode.displayName)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -887,20 +986,19 @@ extension WaveformView {
         }
     }
 
-    /// Horizontal strip of small topomap thumbnails for trajectory mode.
-    /// Each thumbnail shows one sampled frame; a GFP bar above indicates amplitude.
+    /// Horizontal strip of topomap thumbnails for map-sequence mode.
     /// Clicking a thumbnail selects it and updates the large display below.
     @ViewBuilder
     func trajectoryFrameStrip(
         frames: [ArtifactTrajectoryFrame],
         topography: ArtifactTemplateTopography
     ) -> some View {
-        let thumbW: CGFloat = 72
-        let thumbH: CGFloat = 64
+        let thumbW: CGFloat = 126
+        let thumbH: CGFloat = 108
 
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 2) {
-                Text("Trajectory frames")
+                Text("Map sequence frames")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -912,8 +1010,8 @@ extension WaveformView {
                 }
             }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: true) {
+                HStack(spacing: 10) {
                     ForEach(frames) { frame in
                         trajectoryFrameThumb(
                             frame: frame,
@@ -945,8 +1043,9 @@ extension WaveformView {
                         timeSeconds: frame.timeSeconds,
                         fixedScale: nil,
                         showsHeader: false,
-                        colorBarPlacement: .trailing,
-                        minimumMapHeight: thumbH
+                        colorBarPlacement: .none,
+                        minimumMapHeight: thumbH,
+                        contentPadding: 0
                     )
                     .frame(width: thumbW, height: thumbH)
                 } else {
@@ -961,8 +1060,9 @@ extension WaveformView {
             )
 
             Text(String(format: "+%.0f ms", frame.relativeSeconds * 1000))
-                .font(.system(size: 9).monospacedDigit())
+                .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.secondary)
+                .frame(width: thumbW)
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -974,7 +1074,7 @@ extension WaveformView {
         guard let range = template.selectionRange else { return }
         let configuration = artifactTemplateConfiguration(for: signal, range: range)
         upsertDefinedArtifact(from: result, configuration: configuration, source: .waveform)
-        artifactVM.events = template.definedArtifacts.flatMap(\.events)
+        artifactVM.events = definedArtifactEventList()
         selectedEventCodes = [configuration.eventCode]
         showsEventsPanel = true
         template.confirmedSource = .waveform
@@ -988,16 +1088,27 @@ extension WaveformView {
             upsertDefinedArtifact(from: result, configuration: configuration, source: .topography)
         } else if let artifactID = template.definedArtifactID,
                   let index = template.definedArtifacts.firstIndex(where: { $0.id == artifactID }) {
-            template.definedArtifacts[index].events = result.topographyEvents
+            let name = template.definedArtifacts[index].name
+            template.definedArtifacts[index].events = definedArtifactEvents(result.topographyEvents, label: name)
             template.definedArtifacts[index].topography = result.topographyReference
             invalidateOBSVarianceCache(for: artifactID)
             clearAppliedArtifactCleaning()
         }
-        artifactVM.events = template.definedArtifacts.isEmpty ? result.topographyEvents : template.definedArtifacts.flatMap(\.events)
+        artifactVM.events = template.definedArtifacts.isEmpty ? result.topographyEvents : definedArtifactEventList()
         selectedEventCodes = [template.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)]
         showsEventsPanel = true
         template.confirmedSource = .topography
         artifactVM.statusMessage = "\(result.topographyEvents.count) topography matches"
+    }
+
+    func isCenteredArtifactDetectionEvent(_ event: MFFEvent) -> Bool {
+        guard event.durationSeconds != nil else { return false }
+        if event.sourceFile == EyeArtifactThresholdDetector.sourceFile {
+            return true
+        }
+        return template.definedArtifacts.contains { artifact in
+            artifact.events.contains { $0.id == event.id }
+        }
     }
 
     func artifactTemplateChannelChipColor(
@@ -1082,7 +1193,7 @@ extension WaveformView {
             template.selectedChannel = nil
             let source: ArtifactDefinitionResultSource = preferredSource == .topography ? .topography : .waveform
             upsertDefinedArtifact(from: result, configuration: configuration, source: source)
-            artifactVM.events = template.definedArtifacts.flatMap(\.events)
+            artifactVM.events = definedArtifactEventList()
             selectedEventCodes = [configuration.eventCode]
             showsEventsPanel = true
             template.confirmedSource = source
@@ -1101,7 +1212,10 @@ extension WaveformView {
     ) {
         let name = configuration.name.nilIfEmpty ?? "Artifact"
         let eventCode = configuration.eventCode.nilIfEmpty ?? name
-        let selectedEvents = source == .topography ? result.topographyEvents : result.selectedEvents
+        let selectedEvents = definedArtifactEvents(
+            source == .topography ? result.topographyEvents : result.selectedEvents,
+            label: name
+        )
         let artifact = DefinedArtifact(
             id: template.definedArtifactID ?? UUID(),
             type: template.type,
@@ -1136,6 +1250,28 @@ extension WaveformView {
         invalidateOBSVarianceCache(for: artifact.id)
         template.definedArtifactID = artifact.id
         clearAppliedArtifactCleaning()
+    }
+
+    func definedArtifactEvents(_ events: [MFFEvent], label: String) -> [MFFEvent] {
+        events.map { event in
+            MFFEvent(
+                id: event.id,
+                code: event.code,
+                label: label,
+                eventDescription: event.eventDescription,
+                cell: event.cell,
+                beginTimeSeconds: event.beginTimeSeconds,
+                rawBeginTime: event.rawBeginTime,
+                sourceFile: event.sourceFile,
+                durationSeconds: event.durationSeconds
+            )
+        }
+    }
+
+    func definedArtifactEventList() -> [MFFEvent] {
+        template.definedArtifacts.flatMap { artifact in
+            definedArtifactEvents(artifact.events, label: artifact.name)
+        }
     }
 
     func deleteDefinedArtifact(id: DefinedArtifact.ID) {
@@ -1201,7 +1337,7 @@ extension WaveformView {
 
     func refreshAfterDeletingArtifacts(message: String) {
         clearAppliedArtifactCleaning()
-        artifactVM.events = template.definedArtifacts.flatMap(\.events)
+        artifactVM.events = definedArtifactEventList()
         artifactVM.detectionRefreshToken += 1
         artifactVM.statusMessage = template.definedArtifacts.isEmpty ? nil : "\(template.definedArtifacts.count) artifact definitions"
         artifactVM.cleaningStatusMessage = message

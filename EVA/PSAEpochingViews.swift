@@ -835,6 +835,7 @@ extension WaveformView {
         let epochBadChannelCounts = built.epochBadChannelCounts
         let totalEpochsEvaluated = built.totalEpochsEvaluated
         let rejectedForTooManyBadChannels = built.rejectedForTooManyBadChannels
+        var exclusionSummary = built.exclusionSummary
 
         // Keep raw epochs as source so post-processing can be toggled later.
         segmentedEpochSignal = built.signal
@@ -899,10 +900,14 @@ extension WaveformView {
         epoching.epochedSignal = finalResult.signal
         epoching.epochSegments = finalResult.segments
         epoching.isAveraged = wasAveraged
+        exclusionSummary.outputSegments = finalResult.segments.count
+        exclusionSummary.badChannelCount = epochBadChannelCounts.count
+        epoching.psaExclusionSummary = exclusionSummary
         if wasAveraged {
             epoching.showsButterflyPlot = true
         } else {
             epoching.showsButterflyPlot = false
+            epoching.averagedDisplayMode = .waveform
         }
         // Bad-channel reporting is composed here (not read off finalResult.message)
         // because average()/postProcessed() replace the message wholesale —
@@ -1335,6 +1340,8 @@ extension WaveformView {
         dragSelectionEndSample = nil
         topomapSample = nil
         epoching.butterflyTopomapRelativeSample = nil
+        epoching.psaExclusionSummary = PSAExclusionSummary()
+        epoching.averagedDisplayMode = .waveform
         epoching.showsButterflyPlot = false
         selectedEventCodes.removeAll()
         epoching.statusMessage = nil

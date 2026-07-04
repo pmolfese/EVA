@@ -332,6 +332,7 @@ extension WaveformView {
             windowSeconds: template.windowSeconds,
             downsampleRate: template.downsampleRate,
             mergeWindowSeconds: template.mergeWindowSeconds,
+            waveformStretchRange: template.waveformStretchRange,
             polarity: template.polarity,
             range: template.selectionRange
         )
@@ -358,6 +359,7 @@ extension WaveformView {
             windowSizeSeconds: max(template.windowSeconds, 0.01),
             downsampleRate: min(max(template.downsampleRate, 20), signal.samplingRate),
             mergeWindowSeconds: max(template.mergeWindowSeconds, 0.01),
+            waveformStretchRange: min(max(template.waveformStretchRange, 0), 0.75),
             polarity: template.polarity,
             comparisonScopes: artifactTemplateComparisonScopes(in: signal),
             topographyMode: template.topographyMode,

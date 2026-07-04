@@ -29,6 +29,9 @@ struct ArtifactTemplateConfiguration: Sendable {
     var windowSizeSeconds: Double
     var downsampleRate: Double
     var mergeWindowSeconds: Double
+    /// Waveform mode: fractional time-scale variation (0–1). E.g. 0.10 lets
+    /// candidate windows be compressed or stretched by ±10% before correlation.
+    var waveformStretchRange: Double = 0.0
     var polarity: ArtifactTemplatePolarity
     var comparisonScopes: [ArtifactTemplateComparisonScope] = []
     /// When not `.off`, also scans the recording for the scalp topography
@@ -49,7 +52,7 @@ struct ArtifactTemplateConfiguration: Sendable {
     /// Trajectory mode: fractional time-scale variation (0–1). E.g. 0.10
     /// allows the reference trajectory to be stretched or compressed by ±10%,
     /// accommodating heart-rate variation. Set to 0 to disable scaling.
-    var trajectoryScaleRange: Double = 0.10
+    var trajectoryScaleRange: Double = 0.0
     /// Trajectory mode: when true (default), each frame's spatial-correlation
     /// contribution is weighted by the GFP of the reference map at that time
     /// point. This focuses the score on frames where the artifact has strong
@@ -97,6 +100,31 @@ enum ArtifactTopographyMode: String, CaseIterable, Identifiable, Codable, Sendab
 
     /// Whether topography scanning is requested.
     nonisolated var isEnabled: Bool { self != .off }
+
+    var displayName: String {
+        switch self {
+        case .off: return "Off"
+        case .middle: return "Middle map"
+        case .peak: return "Peak map"
+        case .average: return "Average map"
+        case .trajectory: return "Map sequence"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .off:
+            return "Topography matching is disabled."
+        case .middle:
+            return "Uses the scalp voltage map at the middle of the highlighted window."
+        case .peak:
+            return "Uses the scalp voltage map at the strongest point in the highlighted window."
+        case .average:
+            return "Uses the mean scalp voltage map across the highlighted window."
+        case .trajectory:
+            return "Uses the full time sequence of scalp maps across the highlighted window, with optional shift and stretch tolerance."
+        }
+    }
 }
 
 struct ArtifactTemplateDetectionResult: Sendable {
@@ -218,6 +246,7 @@ struct SavedArtifactTemplatePreprocessing: Codable, Sendable {
 struct SavedArtifactTemplateMatching: Codable, Sendable {
     var threshold: Double
     var mergeWindowSeconds: Double
+    var waveformStretchRange: Double
     var polarity: ArtifactTemplatePolarity
 }
 
@@ -526,9 +555,11 @@ nonisolated enum ArtifactTemplateDetector {
             return MFFEvent(
                 id: "artifact-topo-\(index)-\(hit.sample)",
                 code: configuration.eventCode,
+                label: configuration.name,
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
-                sourceFile: String(format: "Topography %.0f%%", configuration.matchThreshold * 100)
+                sourceFile: String(format: "Topography %.0f%%", configuration.matchThreshold * 100),
+                durationSeconds: configuration.windowSizeSeconds
             )
         }
 
@@ -742,9 +773,11 @@ nonisolated enum ArtifactTemplateDetector {
             return MFFEvent(
                 id: "artifact-trajectory-\(index)-\(hit.sample)",
                 code: configuration.eventCode,
+                label: configuration.name,
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
-                sourceFile: String(format: "Trajectory %.0f%%", configuration.matchThreshold * 100)
+                sourceFile: String(format: "Trajectory %.0f%%", configuration.matchThreshold * 100),
+                durationSeconds: configuration.windowSizeSeconds
             )
         }
 
@@ -937,6 +970,11 @@ nonisolated enum ArtifactTemplateDetector {
         let templates = templatePairs.map(\.normalized)
         let weights = templatePairs.map { max(rms($0.original), 0.0001) }
         let totalWeight = max(weights.reduce(0, +), 0.0001)
+        let searchLengths = waveformStretchLengths(
+            baseLength: templateLength,
+            stretchRange: configuration.waveformStretchRange,
+            maxLength: downsampledCount
+        )
         let candidates = candidateStarts(
             channels: downsampledChannels,
             weights: weights,
@@ -944,7 +982,7 @@ nonisolated enum ArtifactTemplateDetector {
         )
         let mergeSamples = max(Int((configuration.mergeWindowSeconds * downsampledRate).rounded()), 1)
 
-        var hits: [(start: Int, score: Float)] = []
+        var hits: [(start: Int, score: Float, durationSamples: Int)] = []
         let totalCandidates = max(candidates.count, 1)
         let reportEvery = max(totalCandidates / 20, 1)
         for (candidateIdx, start) in candidates.enumerated() where start >= 0 && start + templateLength <= downsampledCount {
@@ -953,46 +991,98 @@ nonisolated enum ArtifactTemplateDetector {
                     progress?(candidateIdx * downsampledCount / totalCandidates * decimation, sampleCount)
                 }
             }
-            var weightedScore: Float = 0
-            for channelOffset in downsampledChannels.indices {
-                let channel = downsampledChannels[channelOffset]
-                let window = normalized(Array(channel[start..<(start + templateLength)])).normalized
-                guard !window.isEmpty else { continue }
-                var dot: Float = 0
-                for sample in window.indices {
-                    dot += templates[channelOffset][sample] * window[sample]
+            let center = start + templateLength / 2
+            var bestScore: Float?
+            var bestWindowLength = templateLength
+
+            for windowLength in searchLengths {
+                let candidateStart = center - windowLength / 2
+                guard candidateStart >= 0,
+                      candidateStart + windowLength <= downsampledCount else { continue }
+
+                var weightedScore: Float = 0
+                for channelOffset in downsampledChannels.indices {
+                    let channel = downsampledChannels[channelOffset]
+                    let rawWindow = Array(channel[candidateStart..<(candidateStart + windowLength)])
+                    let comparableWindow: [Float]
+                    if windowLength == templateLength {
+                        comparableWindow = rawWindow
+                    } else {
+                        comparableWindow = resampled(rawWindow, to: templateLength)
+                    }
+                    let window = normalized(comparableWindow).normalized
+                    guard !window.isEmpty else { continue }
+
+                    var dot: Float = 0
+                    for sample in window.indices {
+                        dot += templates[channelOffset][sample] * window[sample]
+                    }
+                    let score: Float
+                    switch configuration.polarity {
+                    case .same:
+                        score = dot
+                    case .opposite:
+                        score = -dot
+                    case .either:
+                        score = abs(dot)
+                    }
+                    weightedScore += score * weights[channelOffset]
                 }
-                let score: Float
-                switch configuration.polarity {
-                case .same:
-                    score = dot
-                case .opposite:
-                    score = -dot
-                case .either:
-                    score = abs(dot)
+
+                let score = weightedScore / totalWeight
+                if bestScore == nil || score > bestScore! {
+                    bestScore = score
+                    bestWindowLength = windowLength
                 }
-                weightedScore += score * weights[channelOffset]
             }
 
-            let score = weightedScore / totalWeight
-            if Double(score) >= configuration.matchThreshold {
-                hits.append((start, score))
+            if let bestScore, Double(bestScore) >= configuration.matchThreshold {
+                hits.append((center, bestScore, bestWindowLength))
             }
         }
 
         progress?(sampleCount, sampleCount)
-        let merged = SignalSelection.mergeNearbyStarts(hits, mergeSamples: mergeSamples)
+        let merged = mergeTemplateHits(hits, mergeSamples: mergeSamples)
         return merged.enumerated().map { index, hit in
-            let centerSample = min(max((hit.start + templateLength / 2) * decimation, 0), sampleCount - 1)
+            let centerSample = min(max(hit.start * decimation, 0), sampleCount - 1)
             let time = Double(centerSample) / signal.samplingRate
             return MFFEvent(
                 id: "artifact-template-\(index)-\(centerSample)",
                 code: configuration.eventCode,
+                label: configuration.name,
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
-                sourceFile: String(format: "Template %.0f%%", configuration.matchThreshold * 100)
+                sourceFile: String(format: "Template %.0f%%", configuration.matchThreshold * 100),
+                durationSeconds: Double(hit.durationSamples) / downsampledRate
             )
         }
+    }
+
+    private static func mergeTemplateHits(
+        _ hits: [(start: Int, score: Float, durationSamples: Int)],
+        mergeSamples: Int
+    ) -> [(start: Int, score: Float, durationSamples: Int)] {
+        let sorted = hits.sorted {
+            $0.start == $1.start ? $0.score > $1.score : $0.start < $1.start
+        }
+        var merged: [(start: Int, score: Float, durationSamples: Int)] = []
+
+        for hit in sorted {
+            guard let last = merged.last else {
+                merged.append(hit)
+                continue
+            }
+
+            if hit.start - last.start <= mergeSamples {
+                if hit.score > last.score {
+                    merged[merged.count - 1] = hit
+                }
+            } else {
+                merged.append(hit)
+            }
+        }
+
+        return merged
     }
 
     private static func candidateStarts(
@@ -1039,6 +1129,41 @@ nonisolated enum ArtifactTemplateDetector {
         }
 
         return Array(Set(candidates)).sorted()
+    }
+
+    private static func waveformStretchLengths(baseLength: Int, stretchRange: Double, maxLength: Int) -> [Int] {
+        let base = min(max(baseLength, 3), max(maxLength, 3))
+        let boundedRange = min(max(stretchRange, 0), 0.75)
+        guard boundedRange > 0.0001 else { return [base] }
+
+        let factors = [
+            1.0 - boundedRange,
+            1.0 - boundedRange * 0.5,
+            1.0,
+            1.0 + boundedRange * 0.5,
+            1.0 + boundedRange
+        ]
+
+        return Array(Set(factors.map { factor in
+            min(max(Int((Double(base) * factor).rounded()), 3), maxLength)
+        })).sorted()
+    }
+
+    private static func resampled(_ samples: [Float], to outputCount: Int) -> [Float] {
+        guard outputCount > 0, !samples.isEmpty else { return [] }
+        guard samples.count != outputCount else { return samples }
+        guard outputCount > 1, samples.count > 1 else {
+            return [Float](repeating: samples[0], count: outputCount)
+        }
+
+        let scale = Double(samples.count - 1) / Double(outputCount - 1)
+        return (0..<outputCount).map { index in
+            let position = Double(index) * scale
+            let lower = Int(position.rounded(.down))
+            let upper = min(lower + 1, samples.count - 1)
+            let fraction = Float(position - Double(lower))
+            return samples[lower] * (1 - fraction) + samples[upper] * fraction
+        }
     }
 
     private static func average(
@@ -1129,7 +1254,7 @@ nonisolated enum ArtifactTemplateDetector {
         }
 
         return SavedArtifactTemplate(
-            schemaVersion: 1,
+            schemaVersion: 2,
             name: configuration.name,
             eventCode: configuration.eventCode,
             createdAt: Date(),
@@ -1147,6 +1272,7 @@ nonisolated enum ArtifactTemplateDetector {
             matching: SavedArtifactTemplateMatching(
                 threshold: configuration.matchThreshold,
                 mergeWindowSeconds: configuration.mergeWindowSeconds,
+                waveformStretchRange: configuration.waveformStretchRange,
                 polarity: configuration.polarity
             ),
             exemplarSamples: exemplarSamples,

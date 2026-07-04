@@ -33,9 +33,18 @@ nonisolated struct EventTrackEventSignature: Equatable {
     let firstID: MFFEvent.ID?
     let middleID: MFFEvent.ID?
     let lastID: MFFEvent.ID?
+    let firstCode: String?
+    let middleCode: String?
+    let lastCode: String?
+    let firstLabel: String?
+    let middleLabel: String?
+    let lastLabel: String?
     let firstTime: Double?
     let middleTime: Double?
     let lastTime: Double?
+    let firstDuration: Double?
+    let middleDuration: Double?
+    let lastDuration: Double?
     let firstSource: String?
     let middleSource: String?
     let lastSource: String?
@@ -48,9 +57,18 @@ nonisolated struct EventTrackEventSignature: Equatable {
         firstID = events.first?.id
         middleID = middleIndex.map { events[$0].id }
         lastID = events.last?.id
+        firstCode = events.first?.code
+        middleCode = middleIndex.map { events[$0].code }
+        lastCode = events.last?.code
+        firstLabel = events.first?.label
+        middleLabel = middleIndex.flatMap { events[$0].label }
+        lastLabel = events.last?.label
         firstTime = events.first?.beginTimeSeconds
         middleTime = middleIndex.map { events[$0].beginTimeSeconds }
         lastTime = events.last?.beginTimeSeconds
+        firstDuration = events.first?.durationSeconds
+        middleDuration = middleIndex.flatMap { events[$0].durationSeconds }
+        lastDuration = events.last?.durationSeconds
         firstSource = events.first?.sourceFile
         middleSource = middleIndex.map { events[$0].sourceFile }
         lastSource = events.last?.sourceFile
@@ -966,6 +984,12 @@ struct PhysioTrackView: View {
     let timeScale: Double
     let contentOffset: CGFloat
     let viewportWidth: CGFloat
+    /// Resolved (possibly user-renamed) channel labels, for the hover tooltip.
+    var names: [String] = []
+
+    @State private var hoveredChannel: Int?
+    @State private var hoveredSample: Int?
+    @State private var hoverLocation: CGPoint = .zero
 
     var body: some View {
         Canvas { context, size in
@@ -1050,9 +1074,66 @@ struct PhysioTrackView: View {
         }
         .frame(height: CGFloat(signal.numberOfChannels) * rowHeight)
         .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let location):
+                guard let row = rowIndex(atY: location.y),
+                      let sampleIdx = sampleIndex(atX: location.x),
+                      signal.data.indices.contains(row),
+                      signal.data[row].indices.contains(sampleIdx)
+                else {
+                    hoveredChannel = nil
+                    return
+                }
+                hoveredChannel = row
+                hoveredSample = sampleIdx
+                hoverLocation = location
+            case .ended:
+                hoveredChannel = nil
+            }
+        }
+        .overlay(alignment: .topLeading) { hoverTooltip }
         .overlay {
             RoundedRectangle(cornerRadius: 6)
                 .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+        }
+    }
+
+    private func rowIndex(atY y: CGFloat) -> Int? {
+        guard rowHeight > 0 else { return nil }
+        let idx = Int(y / rowHeight)
+        return (0..<signal.numberOfChannels).contains(idx) ? idx : nil
+    }
+
+    private func sampleIndex(atX x: CGFloat) -> Int? {
+        guard eegSamplingRate > 0, sampleStride > 0, signal.samplingRate > 0 else { return nil }
+        let pxPerSecond = eegSamplingRate / Double(sampleStride) * timeScale
+        guard pxPerSecond > 0 else { return nil }
+        let t = Double(x + contentOffset) / pxPerSecond
+        guard t.isFinite, t >= 0 else { return nil }
+        return Int((t * signal.samplingRate).rounded())
+    }
+
+    @ViewBuilder
+    private var hoverTooltip: some View {
+        if let hoveredChannel, let hoveredSample,
+           signal.data.indices.contains(hoveredChannel),
+           signal.data[hoveredChannel].indices.contains(hoveredSample) {
+            let value = signal.data[hoveredChannel][hoveredSample]
+            let name = hoveredChannel < names.count ? names[hoveredChannel] : "PNS \(hoveredChannel + 1)"
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name)
+                    .font(.caption.weight(.semibold))
+                Text(String(format: "%.2f", value))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .offset(x: min(hoverLocation.x + 12, viewportWidth - 90), y: max(hoverLocation.y - 28, 0))
+            .allowsHitTesting(false)
         }
     }
 }
@@ -1220,7 +1301,7 @@ struct EventTrackView: View {
             get: { poppedEvent == event },
             set: { if !$0 { poppedEvent = nil } }
         )
-        Text(event.code)
+        Text(ribbonLabel(for: event))
             .font(.caption2.weight(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
@@ -1236,6 +1317,19 @@ struct EventTrackView: View {
                 eventDetailPopover(event, color: style.color)
             }
             .offset(x: min(max(x + 4, 0), max(viewportWidth - 70, 0)), y: style.laneY)
+    }
+
+    private func ribbonLabel(for event: MFFEvent) -> String {
+        if isDefinedArtifactEvent(event), let label = event.label {
+            return label
+        }
+        return event.code
+    }
+
+    private func isDefinedArtifactEvent(_ event: MFFEvent) -> Bool {
+        event.sourceFile.hasPrefix("Template ")
+            || event.sourceFile.hasPrefix("Topography ")
+            || event.sourceFile.hasPrefix("Trajectory ")
     }
 
     /// Tap-to-open detail popover listing every populated field of the event.

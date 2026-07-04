@@ -46,6 +46,7 @@ final class ArtifactTemplateViewModel: ObservableObject {
     @Published var windowSeconds = 0.40
     @Published var downsampleRate = 250.0
     @Published var mergeWindowSeconds = 0.25
+    @Published var waveformStretchRange = 0.0
     @Published var polarity = ArtifactTemplatePolarity.same
 
     // MARK: Topography
@@ -59,7 +60,7 @@ final class ArtifactTemplateViewModel: ObservableObject {
 
     // MARK: Trajectory
     @Published var trajectoryShiftSeconds = 0.05
-    @Published var trajectoryScaleRange = 0.10
+    @Published var trajectoryScaleRange = 0.0
     @Published var trajectoryGFPWeighted = true
     @Published var trajectorySelectedFrame: ArtifactTrajectoryFrame?
 

@@ -109,6 +109,7 @@ struct ArtifactScanSignature: Equatable {
     var windowSeconds: Double
     var downsampleRate: Double
     var mergeWindowSeconds: Double
+    var waveformStretchRange: Double
     var polarity: ArtifactTemplatePolarity
     var range: ClosedRange<Int>?
 }
@@ -409,6 +410,26 @@ struct AveragedTopomapSample: Identifiable {
     var id: String { "\(category)-\(sample)" }
 }
 
+nonisolated struct PSAExclusionSummary: Sendable, Equatable {
+    var candidateEvents = 0
+    var acceptedEpochs = 0
+    var outputSegments = 0
+    var skippedArtifacts = 0
+    var skippedTimingMarkers = 0
+    var skippedOutOfBounds = 0
+    var timingAdjusted = 0
+    var rejectedForTooManyBadChannels = 0
+    var badChannelCount = 0
+
+    var excludedEpochs: Int {
+        skippedArtifacts + skippedTimingMarkers + skippedOutOfBounds + rejectedForTooManyBadChannels
+    }
+
+    var hasExclusions: Bool {
+        excludedEpochs > 0
+    }
+}
+
 nonisolated struct PSABuildResult {
     let signal: MFFSignalData
     let segments: [EpochSegment]
@@ -425,6 +446,7 @@ nonisolated struct PSABuildResult {
     /// must capture it from the raw `buildEpochs()` result directly (see
     /// `applyPSA(to:)`), not from `finalResult`.
     var rejectedForTooManyBadChannels: Int = 0
+    var exclusionSummary = PSAExclusionSummary()
 
     /// Averages each category's epochs. Runs off the main thread.
     func average(colorIndices: [String: Int]) -> PSABuildResult? {
@@ -814,7 +836,18 @@ nonisolated struct PSABuildJob: Sendable {
             message: message,
             epochBadChannelCounts: epochBadChannelCounts,
             totalEpochsEvaluated: jobs.count,
-            rejectedForTooManyBadChannels: rejectedForTooManyBadChannels
+            rejectedForTooManyBadChannels: rejectedForTooManyBadChannels,
+            exclusionSummary: PSAExclusionSummary(
+                candidateEvents: events.count,
+                acceptedEpochs: accepted,
+                outputSegments: segments.count,
+                skippedArtifacts: skippedArtifacts,
+                skippedTimingMarkers: skippedTimingMarkers,
+                skippedOutOfBounds: skippedOutOfBounds,
+                timingAdjusted: timingAdjusted,
+                rejectedForTooManyBadChannels: rejectedForTooManyBadChannels,
+                badChannelCount: epochBadChannelCounts.count
+            )
         )
     }
 

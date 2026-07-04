@@ -13,6 +13,11 @@
 //  state and read their initial values from this shared, UserDefaults-backed
 //  store. Edited in the Preferences window (⌘,).
 //
+//  Each setting is a computed property reading/writing its own UserDefaults
+//  key directly (registered with a default via `register(defaults:)`), so
+//  @Observable can track get/set the same as a stored property, unlike
+//  @AppStorage (which only publishes changes when used directly on a View).
+//
 
 import SwiftUI
 
@@ -21,75 +26,127 @@ import SwiftUI
 final class ProcessingDefaults {
     static let shared = ProcessingDefaults()
 
+    private enum Keys {
+        static let filterHighPassHz = "filterHighPassHz"
+        static let filterLowPassHz = "filterLowPassHz"
+        static let filterNotch60 = "filterNotch60"
+        static let filterAverageReference = "filterAverageReference"
+        static let icaMethod = "icaMethod"
+        static let icaComponentCount = "icaComponentCount"
+        static let bcgAutoSelectProxySet = "bcgAutoSelectProxySet"
+        static let bcgDefaultMethodRaw = "bcgDefaultMethodRaw"
+        static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
+    }
+
+    private enum Defaults {
+        static let filterHighPassHz = 0.1
+        static let filterLowPassHz = 30.0
+        static let filterNotch60 = false
+        static let filterAverageReference = false
+        static let icaMethod = ICAMethod.picard
+        static let icaComponentCount = 20
+        static let bcgAutoSelectProxySet = false
+        static let bcgDefaultMethodRaw = "periodicity"
+        static let interpolatedHealthFromNeighbors = true
+    }
+
     // MARK: Filter defaults
-    var filterHighPassHz: Double { didSet { save() } }
-    var filterLowPassHz: Double { didSet { save() } }
-    var filterNotch60: Bool { didSet { save() } }
-    var filterAverageReference: Bool { didSet { save() } }
+    var filterHighPassHz: Double {
+        get { UserDefaults.standard.double(forKey: Keys.filterHighPassHz) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.filterHighPassHz) }
+    }
+    var filterLowPassHz: Double {
+        get { UserDefaults.standard.double(forKey: Keys.filterLowPassHz) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.filterLowPassHz) }
+    }
+    var filterNotch60: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.filterNotch60) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.filterNotch60) }
+    }
+    var filterAverageReference: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.filterAverageReference) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.filterAverageReference) }
+    }
 
     // MARK: ICA defaults
-    var icaMethod: ICAMethod { didSet { save() } }
-    var icaComponentCount: Int { didSet { save() } }
+    var icaMethod: ICAMethod {
+        get { UserDefaults.standard.string(forKey: Keys.icaMethod).flatMap(ICAMethod.init(rawValue:)) ?? .picard }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Keys.icaMethod) }
+    }
+    var icaComponentCount: Int {
+        get { UserDefaults.standard.integer(forKey: Keys.icaComponentCount) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.icaComponentCount) }
+    }
 
     // MARK: BCG defaults
     /// When on, a compatible built-in BCG proxy set is auto-selected on open.
-    var bcgAutoSelectProxySet: Bool { didSet { save() } }
-    var bcgDefaultMethodRaw: String { didSet { save() } }
+    var bcgAutoSelectProxySet: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.bcgAutoSelectProxySet) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.bcgAutoSelectProxySet) }
+    }
+    var bcgDefaultMethodRaw: String {
+        get { UserDefaults.standard.string(forKey: Keys.bcgDefaultMethodRaw) ?? Defaults.bcgDefaultMethodRaw }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.bcgDefaultMethodRaw) }
+    }
 
     // MARK: Channel-health defaults
     /// When on, an interpolated channel's health is estimated by averaging its
     /// spline-contributing channels rather than a full montage recompute — much
     /// cheaper on modest hardware.
-    var interpolatedHealthFromNeighbors: Bool { didSet { save() } }
+    var interpolatedHealthFromNeighbors: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.interpolatedHealthFromNeighbors) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.interpolatedHealthFromNeighbors) }
+    }
 
-    private static let key = "ProcessingDefaults.v1"
+    /// Legacy single-blob key from before the per-key UserDefaults refactor.
+    private static let legacyKey = "ProcessingDefaults.v1"
 
     init() {
-        let stored = UserDefaults.standard.data(forKey: Self.key)
-            .flatMap { try? JSONDecoder().decode(Stored.self, from: $0) } ?? .defaults
-        filterHighPassHz = stored.filterHighPassHz
-        filterLowPassHz = stored.filterLowPassHz
-        filterNotch60 = stored.filterNotch60
-        filterAverageReference = stored.filterAverageReference
-        icaMethod = ICAMethod(rawValue: stored.icaMethodRaw) ?? .picard
-        icaComponentCount = stored.icaComponentCount
-        bcgAutoSelectProxySet = stored.bcgAutoSelectProxySet
-        bcgDefaultMethodRaw = stored.bcgDefaultMethodRaw
-        interpolatedHealthFromNeighbors = stored.interpolatedHealthFromNeighbors
+        UserDefaults.standard.register(defaults: [
+            Keys.filterHighPassHz: Defaults.filterHighPassHz,
+            Keys.filterLowPassHz: Defaults.filterLowPassHz,
+            Keys.filterNotch60: Defaults.filterNotch60,
+            Keys.filterAverageReference: Defaults.filterAverageReference,
+            Keys.icaMethod: Defaults.icaMethod.rawValue,
+            Keys.icaComponentCount: Defaults.icaComponentCount,
+            Keys.bcgAutoSelectProxySet: Defaults.bcgAutoSelectProxySet,
+            Keys.bcgDefaultMethodRaw: Defaults.bcgDefaultMethodRaw,
+            Keys.interpolatedHealthFromNeighbors: Defaults.interpolatedHealthFromNeighbors,
+        ])
+        migrateLegacyBlobIfNeeded()
+    }
+
+    /// One-time migration from the old single-JSON-blob store so existing
+    /// users don't silently lose their saved preferences on upgrade.
+    private func migrateLegacyBlobIfNeeded() {
+        guard let data = UserDefaults.standard.data(forKey: Self.legacyKey),
+              let legacy = try? JSONDecoder().decode(LegacyStored.self, from: data) else { return }
+        filterHighPassHz = legacy.filterHighPassHz
+        filterLowPassHz = legacy.filterLowPassHz
+        filterNotch60 = legacy.filterNotch60
+        filterAverageReference = legacy.filterAverageReference
+        icaMethod = ICAMethod(rawValue: legacy.icaMethodRaw) ?? .picard
+        icaComponentCount = legacy.icaComponentCount
+        bcgAutoSelectProxySet = legacy.bcgAutoSelectProxySet
+        bcgDefaultMethodRaw = legacy.bcgDefaultMethodRaw
+        interpolatedHealthFromNeighbors = legacy.interpolatedHealthFromNeighbors
+        UserDefaults.standard.removeObject(forKey: Self.legacyKey)
     }
 
     func restoreDefaults() {
-        let d = Stored.defaults
-        filterHighPassHz = d.filterHighPassHz
-        filterLowPassHz = d.filterLowPassHz
-        filterNotch60 = d.filterNotch60
-        filterAverageReference = d.filterAverageReference
-        icaMethod = ICAMethod(rawValue: d.icaMethodRaw) ?? .picard
-        icaComponentCount = d.icaComponentCount
-        bcgAutoSelectProxySet = d.bcgAutoSelectProxySet
-        bcgDefaultMethodRaw = d.bcgDefaultMethodRaw
-        interpolatedHealthFromNeighbors = d.interpolatedHealthFromNeighbors
+        filterHighPassHz = Defaults.filterHighPassHz
+        filterLowPassHz = Defaults.filterLowPassHz
+        filterNotch60 = Defaults.filterNotch60
+        filterAverageReference = Defaults.filterAverageReference
+        icaMethod = Defaults.icaMethod
+        icaComponentCount = Defaults.icaComponentCount
+        bcgAutoSelectProxySet = Defaults.bcgAutoSelectProxySet
+        bcgDefaultMethodRaw = Defaults.bcgDefaultMethodRaw
+        interpolatedHealthFromNeighbors = Defaults.interpolatedHealthFromNeighbors
     }
 
-    private func save() {
-        let stored = Stored(
-            filterHighPassHz: filterHighPassHz,
-            filterLowPassHz: filterLowPassHz,
-            filterNotch60: filterNotch60,
-            filterAverageReference: filterAverageReference,
-            icaMethodRaw: icaMethod.rawValue,
-            icaComponentCount: icaComponentCount,
-            bcgAutoSelectProxySet: bcgAutoSelectProxySet,
-            bcgDefaultMethodRaw: bcgDefaultMethodRaw,
-            interpolatedHealthFromNeighbors: interpolatedHealthFromNeighbors
-        )
-        if let data = try? JSONEncoder().encode(stored) {
-            UserDefaults.standard.set(data, forKey: Self.key)
-        }
-    }
-
-    /// Forward/backward-compatible persisted shape (missing fields fall back).
-    private struct Stored: Codable {
+    /// Shape of the pre-refactor persisted blob, kept only for migration.
+    private struct LegacyStored: Codable {
         var filterHighPassHz = 0.1
         var filterLowPassHz = 30.0
         var filterNotch60 = false
@@ -99,24 +156,6 @@ final class ProcessingDefaults {
         var bcgAutoSelectProxySet = false
         var bcgDefaultMethodRaw = "periodicity"
         var interpolatedHealthFromNeighbors = true
-
-        static let defaults = Stored()
-
-        init(filterHighPassHz: Double = 0.1, filterLowPassHz: Double = 30.0,
-             filterNotch60: Bool = false, filterAverageReference: Bool = false,
-             icaMethodRaw: String = ICAMethod.picard.rawValue, icaComponentCount: Int = 20,
-             bcgAutoSelectProxySet: Bool = false, bcgDefaultMethodRaw: String = "periodicity",
-             interpolatedHealthFromNeighbors: Bool = true) {
-            self.filterHighPassHz = filterHighPassHz
-            self.filterLowPassHz = filterLowPassHz
-            self.filterNotch60 = filterNotch60
-            self.filterAverageReference = filterAverageReference
-            self.icaMethodRaw = icaMethodRaw
-            self.icaComponentCount = icaComponentCount
-            self.bcgAutoSelectProxySet = bcgAutoSelectProxySet
-            self.bcgDefaultMethodRaw = bcgDefaultMethodRaw
-            self.interpolatedHealthFromNeighbors = interpolatedHealthFromNeighbors
-        }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)

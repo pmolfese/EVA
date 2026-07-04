@@ -52,6 +52,15 @@ struct MFFPNSReaderTests {
         #expect(abs(pns.duration - eeg.duration) < 0.05)
     }
 
+    @Test func readsPositiveUpConventionFromPnsSet() throws {
+        // example_3.mff's pnsSet.xml marks both ECG and EMG <positiveUp>false</positiveUp>.
+        let url = Fixtures.url("example_3.mff")
+        let pns = try #require(try MFFReader().loadPNSSignal(from: url))
+        let flags = try #require(pns.positiveUpFlags)
+        #expect(flags.count == pns.numberOfChannels)
+        #expect(flags.allSatisfy { $0 == false })
+    }
+
     @Test func recordingsWithoutPNSReturnNil() throws {
         // example_1.mff has only signal1.bin (EEG), no PNS.
         let url = Fixtures.url("example_1.mff")
