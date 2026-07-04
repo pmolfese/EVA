@@ -71,4 +71,79 @@ struct ArtifactTemplateDetectorTests {
         let result = ArtifactTemplateDetector.detect(in: empty, configuration: config(exemplar: 0...10))
         #expect(result.selectedEvents.isEmpty)
     }
+
+    // MARK: - Trajectory (map sequence) frame exclusion
+
+    /// A rotating 4-channel spatial pattern, distinct per frame `t`, so every
+    /// frame contributes independent information to trajectory scoring.
+    private func trajectoryFramePattern(t: Int, channelCount: Int = 4) -> [Float] {
+        (0..<channelCount).map { c in
+            Float(50 * sin(2 * .pi * Double(c) / Double(channelCount) + Double(t) * 0.3))
+        }
+    }
+
+    private let trajectorySamplingRate = 100.0
+
+    private func trajectoryConfig(
+        exemplar: ClosedRange<Int>,
+        excludedFrames: Set<Int> = []
+    ) -> ArtifactTemplateConfiguration {
+        ArtifactTemplateConfiguration(
+            name: "TrajectoryTest",
+            eventCode: "TRAJ",
+            selectedChannelIndices: [0, 1, 2, 3],
+            comparisonChannelIndices: [0, 1, 2, 3],
+            exemplarRange: exemplar,
+            matchThreshold: 0.85,
+            windowSizeSeconds: 10 / trajectorySamplingRate,
+            downsampleRate: trajectorySamplingRate,
+            mergeWindowSeconds: 0.1,
+            polarity: .same,
+            topographyMode: .trajectory,
+            trajectoryShiftSeconds: 0,
+            trajectoryScaleRange: 0,
+            trajectoryGFPWeighted: false,
+            trajectoryExcludedDisplayFrameIndices: excludedFrames
+        )
+    }
+
+    /// Builds a 4-channel, 400-sample (@ 100 Hz) recording: a clean 10-frame
+    /// reference trajectory at samples 50–59, flat elsewhere, and a second copy
+    /// at samples 200–209 with frame index 5 sign-flipped (perfectly anti-
+    /// correlated) so its mean spatial-correlation score dips just below
+    /// threshold — until that one frame is excluded from scoring.
+    private func trajectorySignal() -> MFFSignalData {
+        let sr = trajectorySamplingRate
+        let total = 400
+        var data = [[Float]](repeating: [Float](repeating: 0, count: total), count: 4)
+        for t in 0..<10 {
+            let clean = trajectoryFramePattern(t: t)
+            for c in 0..<4 {
+                data[c][50 + t] = clean[c]
+                data[c][200 + t] = t == 5 ? -clean[c] : clean[c]
+            }
+        }
+        return SyntheticSignal.make(data, samplingRate: sr)
+    }
+
+    @Test func trajectoryCorruptedFrameDropsScoreBelowThreshold() {
+        let signal = trajectorySignal()
+        let (events, _) = ArtifactTemplateDetector.detectTopography(
+            in: signal,
+            configuration: trajectoryConfig(exemplar: 50...59)
+        )
+        let corruptedMatch = events.contains { abs($0.beginTimeSeconds * 100 - 205) < 6 }
+        #expect(!corruptedMatch, "corrupted-frame copy should score below threshold without exclusion")
+    }
+
+    @Test func excludingCorruptedFrameRestoresMatch() {
+        let signal = trajectorySignal()
+        let (events, reference) = ArtifactTemplateDetector.detectTopography(
+            in: signal,
+            configuration: trajectoryConfig(exemplar: 50...59, excludedFrames: [5])
+        )
+        #expect(reference?.trajectoryFrameCount == 10)
+        let corruptedMatch = events.contains { abs($0.beginTimeSeconds * 100 - 205) < 6 }
+        #expect(corruptedMatch, "excluding the corrupted frame should let the rest of the sequence match")
+    }
 }

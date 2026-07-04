@@ -407,12 +407,21 @@ extension WaveformView {
         )
     }
 
-    /// e.g. " (~26 of 256 channels)" — shows what the percent means for the
-    /// currently loaded net, since the setting is a fraction, not a count.
-    private var maxBadChannelCountCaption: String {
-        guard let channelCount = recording.signal?.numberOfChannels, channelCount > 0 else { return "" }
-        let count = Int((epoching.epochBadChannelThresholds.maxBadChannelFraction * Double(channelCount)).rounded())
-        return " (~\(count) of \(channelCount) channels)"
+    /// e.g. "% (~13 of 129 channels)" in percent mode, or "channels (~10% of
+    /// 129)" in count mode — shows what the current setting means in the
+    /// *other* unit for the currently loaded net.
+    private var maxBadChannelCaption: String {
+        guard let channelCount = recording.signal?.numberOfChannels, channelCount > 0 else {
+            return epoching.epochBadChannelThresholds.usesAbsoluteBadChannelCount ? "channels" : "%"
+        }
+        if epoching.epochBadChannelThresholds.usesAbsoluteBadChannelCount {
+            let count = epoching.epochBadChannelThresholds.maxBadChannelCount
+            let percent = Int((100 * Double(count) / Double(channelCount)).rounded())
+            return "channels (~\(percent)% of \(channelCount))"
+        } else {
+            let count = Int((epoching.epochBadChannelThresholds.maxBadChannelFraction * Double(channelCount)).rounded())
+            return "% (~\(count) of \(channelCount) channels)"
+        }
     }
 
     /// Thresholds that define a "bad" channel WITHIN one epoch (absolute µV
@@ -456,11 +465,25 @@ extension WaveformView {
                 GridRow {
                     Text("Reject epoch if bad channels >")
                         .font(.caption.weight(.semibold))
-                    HStack(spacing: 4) {
-                        TextField("Percent", value: maxBadChannelPercentBinding, format: .number.precision(.fractionLength(0)))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 50)
-                        Text("%\(maxBadChannelCountCaption)")
+                    HStack(spacing: 6) {
+                        if epoching.epochBadChannelThresholds.usesAbsoluteBadChannelCount {
+                            TextField("Count", value: $epoching.epochBadChannelThresholds.maxBadChannelCount, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 50)
+                        } else {
+                            TextField("Percent", value: maxBadChannelPercentBinding, format: .number.precision(.fractionLength(0)))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 50)
+                        }
+                        Picker("Unit", selection: $epoching.epochBadChannelThresholds.usesAbsoluteBadChannelCount) {
+                            Text("%").tag(false)
+                            Text("#").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 70)
+                        .help("Define the reject-epoch threshold as a percentage of the net's channels, or as a fixed channel count.")
+                        Text(maxBadChannelCaption)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

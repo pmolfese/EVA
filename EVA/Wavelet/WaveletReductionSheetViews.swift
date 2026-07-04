@@ -260,7 +260,8 @@ extension WaveformView {
             topographyMetric: template.topographyMetric,
             trajectoryShiftSeconds: template.trajectoryShiftSeconds,
             trajectoryScaleRange: template.trajectoryScaleRange,
-            trajectoryGFPWeighted: template.trajectoryGFPWeighted
+            trajectoryGFPWeighted: template.trajectoryGFPWeighted,
+            trajectoryExcludedDisplayFrameIndices: template.trajectoryExcludedFrameIndices
         )
     }
 
@@ -398,8 +399,44 @@ extension WaveformView {
         return indices.sorted()
     }
 
+    /// Builds the Map sequence (trajectory) block for the exported JSON from
+    /// the current live topography reference and trajectory settings — not
+    /// from `savedTemplate`, which is a snapshot from the last full scan and
+    /// can be stale after a topography-only refresh (shift/scale/GFP-weight/
+    /// excluded-frame changes re-run just the topography scan, not `detect()`).
+    /// Frames the user removed via the frame strip are left out unless
+    /// `template.trajectorySaveJSONIncludesRemovedFrames` is on.
+    func savedArtifactTemplateTrajectory() -> SavedArtifactTemplateTrajectory? {
+        guard template.topographyMode == .trajectory,
+              let reference = template.result?.topographyReference,
+              let frameCount = reference.trajectoryFrameCount,
+              let displayFrames = reference.trajectoryDisplayFrames
+        else { return nil }
+
+        let excluded = template.trajectoryExcludedFrameIndices
+        let framesToSave = template.trajectorySaveJSONIncludesRemovedFrames
+            ? displayFrames
+            : displayFrames.filter { !excluded.contains($0.frameIndex) }
+
+        return SavedArtifactTemplateTrajectory(
+            shiftSeconds: template.trajectoryShiftSeconds,
+            scaleRange: template.trajectoryScaleRange,
+            gfpWeighted: template.trajectoryGFPWeighted,
+            frameCount: frameCount,
+            excludedFrameCount: excluded.count,
+            frames: framesToSave.map {
+                SavedArtifactTemplateTrajectoryFrame(
+                    frameIndex: $0.frameIndex,
+                    relativeSeconds: $0.relativeSeconds,
+                    channelValues: $0.channelValues
+                )
+            }
+        )
+    }
+
     func saveArtifactTemplateJSON(_ saved: SavedArtifactTemplate?) {
-        guard let saved else { return }
+        guard var saved else { return }
+        saved.trajectory = savedArtifactTemplateTrajectory()
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]

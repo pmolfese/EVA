@@ -41,7 +41,17 @@ nonisolated struct EpochBadChannelThresholds: Codable, Sendable, Equatable {
     /// fit from a shrinking pool of "good" neighbors. This also skips the
     /// (expensive) interpolation step entirely for epochs that would be
     /// discarded anyway. Fraction of the net's channel count, default 10%.
+    /// Used unless `usesAbsoluteBadChannelCount` is on.
     var maxBadChannelFraction: Double = 0.10
+    /// Same reject-epoch threshold as `maxBadChannelFraction`, but as a literal
+    /// channel count rather than a fraction of the net — useful when comparing
+    /// recordings across different nets/channel counts where a fixed number of
+    /// bad channels matters more than a fixed proportion. Used only when
+    /// `usesAbsoluteBadChannelCount` is on.
+    var maxBadChannelCount: Int = 13
+    /// Whether the reject-epoch threshold above is read from
+    /// `maxBadChannelCount` (true) or `maxBadChannelFraction` (false, default).
+    var usesAbsoluteBadChannelCount: Bool = false
 }
 
 /// Thread-safe cache of spherical-spline interpolation weights, keyed by

@@ -18,6 +18,7 @@
 //
 
 import Foundation
+import Accelerate
 
 struct ArtifactTemplateConfiguration: Sendable {
     var name: String
@@ -60,6 +61,13 @@ struct ArtifactTemplateConfiguration: Sendable {
     /// for sustained/flat artifacts where the "quiet" periods are part of the
     /// signature you want to match.
     var trajectoryGFPWeighted: Bool = true
+    /// Trajectory mode: indices into the (up to ~10) evenly-spaced display
+    /// frames — see `ArtifactTemplateTopography.trajectoryDisplayFrames` —
+    /// that the user has removed because they don't fit the artifact being
+    /// defined. Excluded frames (and the underlying reference-trajectory
+    /// samples nearest them) contribute zero weight to the spatial-correlation
+    /// score. Empty means every frame is used.
+    var trajectoryExcludedDisplayFrameIndices: Set<Int> = []
 }
 
 /// How the similarity between two scalp maps is scored during topography
@@ -229,6 +237,33 @@ struct SavedArtifactTemplate: Codable, Sendable {
     var exemplarSamples: [[Float]]
     var averageSamples: [[Float]]?
     var averageEventCount: Int
+    /// Present only when topography mode is Map sequence (Trajectory); filled
+    /// in at save time (see `saveArtifactTemplateJSON`), not by the detector.
+    var trajectory: SavedArtifactTemplateTrajectory? = nil
+}
+
+/// The Map sequence (trajectory) reference, as scanned, for inclusion in the
+/// exported JSON. `frames` holds the same up-to-10 evenly-spaced display
+/// frames shown in the "Define Artifact" sheet's frame strip; frames the user
+/// removed there can be left out of `frames` at save time (see
+/// `SavedArtifactTemplate` construction in `saveArtifactTemplateJSON`),
+/// tracked here via `excludedFrameCount` for transparency either way.
+struct SavedArtifactTemplateTrajectory: Codable, Sendable {
+    var shiftSeconds: Double
+    var scaleRange: Double
+    var gfpWeighted: Bool
+    /// Number of full-resolution samples in the reference trajectory.
+    var frameCount: Int
+    /// Number of display frames the user removed from scoring — present
+    /// whether or not those frames are actually included in `frames` below.
+    var excludedFrameCount: Int
+    var frames: [SavedArtifactTemplateTrajectoryFrame]
+}
+
+struct SavedArtifactTemplateTrajectoryFrame: Codable, Sendable {
+    var frameIndex: Int
+    var relativeSeconds: Double
+    var channelValues: [Float]
 }
 
 struct SavedArtifactTemplateChannel: Codable, Sendable {
@@ -525,7 +560,7 @@ nonisolated enum ArtifactTemplateDetector {
                 let normalized = normalizedSpatial(window)
                 if !normalized.isEmpty {
                     var dot: Float = 0
-                    for index in normalized.indices { dot += template[index] * normalized[index] }
+                    vDSP_dotpr(template, 1, normalized, 1, &dot, vDSP_Length(normalized.count))
                     let score: Float
                     switch metric {
                     case .pearson:         score =  dot
@@ -623,12 +658,41 @@ nonisolated enum ArtifactTemplateDetector {
         let actualLength = referenceTrajectory.count
         guard actualLength >= 2 else { return ([], nil) }
 
-        // Weights per frame: GFP-proportional (focuses on amplitude peaks) or uniform.
+        // Sample up to 10 evenly-spaced frames for the display strip (anchors
+        // computed here, ahead of the display-frame section below, because the
+        // excluded-frame weighting needs to assign every full-resolution sample
+        // to its nearest display frame).
+        let displayFrameCount = min(actualLength, 10)
+        let displayAnchors: [Int] = (0..<displayFrameCount).map { fi in
+            fi * (actualLength - 1) / max(displayFrameCount - 1, 1)
+        }
+
+        // Weights per frame: GFP-proportional (focuses on amplitude peaks) or uniform,
+        // then zero out any frame closest to a display frame the user removed
+        // (keyed by that display frame's `frameIndex`, matching `ArtifactTrajectoryFrame.id`).
         let uniform = [Float](repeating: 1.0 / Float(actualLength), count: actualLength)
         let gfpSum = referenceGFP.reduce(Float(0), +)
-        let refWeights: [Float] = configuration.trajectoryGFPWeighted && gfpSum > 0
+        var mutableRefWeights: [Float] = configuration.trajectoryGFPWeighted && gfpSum > 0
             ? referenceGFP.map { $0 / gfpSum }
             : uniform
+        let excludedFrames = configuration.trajectoryExcludedDisplayFrameIndices
+        if !excludedFrames.isEmpty, !displayAnchors.isEmpty {
+            for t in 0..<actualLength {
+                let nearestAnchor = displayAnchors.min(by: { abs($0 - t) < abs($1 - t) }) ?? t
+                if excludedFrames.contains(nearestAnchor) {
+                    mutableRefWeights[t] = 0
+                }
+            }
+            let weightSum = mutableRefWeights.reduce(Float(0), +)
+            if weightSum > 0 {
+                for i in mutableRefWeights.indices { mutableRefWeights[i] /= weightSum }
+            }
+        }
+        // Freeze as immutable before the parallel search below reads it from
+        // concurrently-executing closures (mirrors referenceTrajectory/corrT) —
+        // capturing a mutable `var` there is what caused an intermittent crash
+        // under concurrent test execution (Swift 6 mode flags this as an error).
+        let refWeights = mutableRefWeights
 
         // Middle frame for topomap display (all channels, raw values).
         let middleSampleD = exemplarStartD + actualLength / 2
@@ -639,12 +703,13 @@ nonisolated enum ArtifactTemplateDetector {
             if middleSample < ch.count { channelValues[chIdx] = ch[middleSample] }
         }
 
-        // Sample up to 10 evenly-spaced frames for the display strip.
-        // Each frame captures full-channel raw values so it can be shown as a topomap.
-        let displayFrameCount = min(actualLength, 10)
+        // Sample up to 10 evenly-spaced frames for the display strip
+        // (displayFrameCount/displayAnchors computed earlier, alongside the
+        // exclusion weighting). Each frame captures full-channel raw values so
+        // it can be shown as a topomap.
         let windowStartTime = Double(exemplarStartD * decimation) / sr
         let displayFrames: [ArtifactTrajectoryFrame] = (0..<displayFrameCount).map { fi in
-            let t = fi * (actualLength - 1) / max(displayFrameCount - 1, 1)
+            let t = displayAnchors[fi]
             let dSample = exemplarStartD + t
             let sample  = dSample * decimation
             var fullChannelValues = [Float](repeating: 0, count: signal.numberOfChannels)
@@ -662,18 +727,90 @@ nonisolated enum ArtifactTemplateDetector {
         }
 
         // --- Precompute normalized maps for the whole recording ---
+        // Flattened into one contiguous D × C row-major buffer (D = decimated
+        // sample count, C = channel count) rather than [[Float]], so it can
+        // feed a single matrix multiply below.
         // Memory: totalDecimatedSamples × channelIndices.count × 4 bytes.
         // At a typical downsample rate of 20–30 Hz and 64 channels over 30 min,
         // this is ~(36 000 × 64 × 4) ≈ 9 MB — well within budget.
-        nonisolated(unsafe) var allNormalized = [[Float]](repeating: [], count: totalDecimatedSamples)
+        let channelCount = channelIndices.count
+        nonisolated(unsafe) var allNormalizedFlat = [Float](repeating: 0, count: totalDecimatedSamples * channelCount)
+        nonisolated(unsafe) var validTarget = [Bool](repeating: false, count: totalDecimatedSamples)
         for dSample in 0..<totalDecimatedSamples {
             let sample = dSample * decimation
-            var rawMap = [Float](repeating: 0, count: channelIndices.count)
+            var rawMap = [Float](repeating: 0, count: channelCount)
             for (offset, chIdx) in channelIndices.enumerated() {
                 let ch = signal.data[chIdx]
                 rawMap[offset] = sample < ch.count ? ch[sample] : 0
             }
-            allNormalized[dSample] = normalizedSpatial(rawMap)
+            let normalized = normalizedSpatial(rawMap)
+            guard normalized.count == channelCount else { continue }
+            validTarget[dSample] = true
+            allNormalizedFlat.replaceSubrange(dSample * channelCount..<(dSample + 1) * channelCount, with: normalized)
+        }
+
+        // Reference trajectory, transposed to C × actualLength (small: a few
+        // thousand floats at most) so it can serve as the right-hand side of
+        // the matrix multiply below. A reference frame can itself be invalid
+        // (normalizedSpatial returns [] for a flat/degenerate map — e.g. the
+        // exemplar window's rounded/centered bounds can include a sample just
+        // outside the planted pattern) — track that per t and leave its row
+        // zeroed, so the search below can skip it exactly as the old
+        // candMap.count == refMap.count / !candMap.isEmpty guard did.
+        var refTransposed = [Float](repeating: 0, count: channelCount * actualLength)
+        var mutableValidReference = [Bool](repeating: false, count: actualLength)
+        for t in 0..<actualLength {
+            let refMap = referenceTrajectory[t]
+            guard refMap.count == channelCount else { continue }
+            mutableValidReference[t] = true
+            for c in 0..<channelCount {
+                refTransposed[c * actualLength + t] = refMap[c]
+            }
+        }
+        // Freeze before the parallel search captures it (see refWeights above).
+        let validReference = mutableValidReference
+
+        // One BLAS matrix multiply computes every reference-frame-vs-target-sample
+        // spatial correlation up front: corrT (D × actualLength) = allNormalizedFlat
+        // (D × C) × refTransposed (C × actualLength). This replaces the previous
+        // per-(candidate, shift, scale, frame) channel-count dot product — the
+        // dominant cost of trajectory scanning — with a single precompute pass;
+        // the search below becomes cheap table lookups with no channel factor.
+        nonisolated(unsafe) var corrT = [Float](repeating: 0, count: totalDecimatedSamples * actualLength)
+        if totalDecimatedSamples > 0 {
+            allNormalizedFlat.withUnsafeBufferPointer { a in
+                refTransposed.withUnsafeBufferPointer { b in
+                    corrT.withUnsafeMutableBufferPointer { c in
+                        vDSP_mmul(
+                            a.baseAddress!, 1,
+                            b.baseAddress!, 1,
+                            c.baseAddress!, 1,
+                            vDSP_Length(totalDecimatedSamples),
+                            vDSP_Length(actualLength),
+                            vDSP_Length(channelCount)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Apply the metric's sign/absolute transform once across the whole
+        // matrix rather than per lookup during the search.
+        let metric = configuration.topographyMetric
+        switch metric {
+        case .pearson:
+            break
+        case .negativePearson:
+            corrT.withUnsafeMutableBufferPointer { buf in
+                guard let base = buf.baseAddress, !buf.isEmpty else { return }
+                var negOne: Float = -1
+                vDSP_vsmul(base, 1, &negOne, base, 1, vDSP_Length(buf.count))
+            }
+        case .absolutePearson:
+            corrT.withUnsafeMutableBufferPointer { buf in
+                guard let base = buf.baseAddress, !buf.isEmpty else { return }
+                vDSP_vabs(base, 1, base, 1, vDSP_Length(buf.count))
+            }
         }
 
         // --- Build search grid for time-shift and time-scale ---
@@ -699,11 +836,14 @@ nonisolated enum ArtifactTemplateDetector {
         var chunkHits = [[(sample: Int, score: Float)]](repeating: [], count: coreCount)
         nonisolated(unsafe) let chunkHitsPtr2 = UnsafeMutablePointer<[(sample: Int, score: Float)]>.allocate(capacity: coreCount)
         chunkHitsPtr2.initialize(from: &chunkHits, count: coreCount)
-        let metric = configuration.topographyMetric
         let threshold = configuration.matchThreshold
         let lock = NSLock()
         nonisolated(unsafe) var globalCompleted = 0
 
+        // Each (candidate, shift, scale, frame) combination is now a plain
+        // array lookup into the precomputed `corrT`/`validTarget` — the
+        // channel-count factor was eliminated by the matrix multiply above,
+        // so this loop is much cheaper per iteration than before.
         evaConcurrentPerform(iterations: coreCount) { chunkIdx in
             let startIdx = chunkIdx * chunkSize
             let endIdx   = min(startIdx + chunkSize, totalCandidates)
@@ -724,18 +864,9 @@ nonisolated enum ArtifactTemplateDetector {
                         for t in 0..<actualLength {
                             let mappedT = Int((Double(t) * scale).rounded()) + shift
                             let targetD = candidateStartD + mappedT
-                            guard targetD >= 0, targetD < totalDecimatedSamples else { continue }
-                            let refMap  = referenceTrajectory[t]
-                            let candMap = allNormalized[targetD]
-                            guard candMap.count == refMap.count, !candMap.isEmpty else { continue }
-                            var dot: Float = 0
-                            for i in refMap.indices { dot += refMap[i] * candMap[i] }
-                            let r: Float
-                            switch metric {
-                            case .pearson:         r =  dot
-                            case .negativePearson: r = -dot
-                            case .absolutePearson: r =  abs(dot)
-                            }
+                            guard targetD >= 0, targetD < totalDecimatedSamples,
+                                  validTarget[targetD], validReference[t] else { continue }
+                            let r = corrT[targetD * actualLength + t]
                             let w = refWeights[t]
                             weightedR  += r * w
                             usedWeight += w
@@ -982,66 +1113,96 @@ nonisolated enum ArtifactTemplateDetector {
         )
         let mergeSamples = max(Int((configuration.mergeWindowSeconds * downsampledRate).rounded()), 1)
 
-        var hits: [(start: Int, score: Float, durationSamples: Int)] = []
+        // Candidates are scored in parallel chunks across CPU cores — mirrors
+        // detectTrajectory's/single-map detectTopography's existing pattern.
+        // This loop (and its stretch/scale variant in particular) is the most
+        // expensive part of template matching, since each candidate re-normalizes
+        // and dot-products a full window per channel per search length.
         let totalCandidates = max(candidates.count, 1)
-        let reportEvery = max(totalCandidates / 20, 1)
-        for (candidateIdx, start) in candidates.enumerated() where start >= 0 && start + templateLength <= downsampledCount {
-            defer {
-                if candidateIdx % reportEvery == 0 {
-                    progress?(candidateIdx * downsampledCount / totalCandidates * decimation, sampleCount)
+        let coreCount = evaMaxWorkers
+        let chunkSize = max((candidates.count + coreCount - 1) / coreCount, 1)
+        let polarity = configuration.polarity
+        let matchThreshold = configuration.matchThreshold
+
+        var chunkHits = [[(start: Int, score: Float, durationSamples: Int)]](repeating: [], count: coreCount)
+        nonisolated(unsafe) let chunkHitsPtr = UnsafeMutablePointer<[(start: Int, score: Float, durationSamples: Int)]>.allocate(capacity: coreCount)
+        chunkHitsPtr.initialize(from: &chunkHits, count: coreCount)
+        let lock = NSLock()
+        nonisolated(unsafe) var globalCompleted = 0
+
+        evaConcurrentPerform(iterations: coreCount) { chunkIdx in
+            let startIdx = chunkIdx * chunkSize
+            let endIdx   = min(startIdx + chunkSize, candidates.count)
+            guard startIdx < endIdx else { return }
+
+            var localHits: [(start: Int, score: Float, durationSamples: Int)] = []
+
+            for candidateIdx in startIdx..<endIdx {
+                let start = candidates[candidateIdx]
+                defer {
+                    lock.lock()
+                    globalCompleted += 1
+                    let c = min(globalCompleted * downsampledCount / totalCandidates * decimation, sampleCount)
+                    lock.unlock()
+                    progress?(c, sampleCount)
+                }
+                guard start >= 0, start + templateLength <= downsampledCount else { continue }
+
+                let center = start + templateLength / 2
+                var bestScore: Float?
+                var bestWindowLength = templateLength
+
+                for windowLength in searchLengths {
+                    let candidateStart = center - windowLength / 2
+                    guard candidateStart >= 0,
+                          candidateStart + windowLength <= downsampledCount else { continue }
+
+                    var weightedScore: Float = 0
+                    for channelOffset in downsampledChannels.indices {
+                        let channel = downsampledChannels[channelOffset]
+                        let rawWindow = Array(channel[candidateStart..<(candidateStart + windowLength)])
+                        let comparableWindow: [Float]
+                        if windowLength == templateLength {
+                            comparableWindow = rawWindow
+                        } else {
+                            comparableWindow = resampled(rawWindow, to: templateLength)
+                        }
+                        let window = normalized(comparableWindow).normalized
+                        guard !window.isEmpty else { continue }
+
+                        var dot: Float = 0
+                        vDSP_dotpr(templates[channelOffset], 1, window, 1, &dot, vDSP_Length(window.count))
+                        let score: Float
+                        switch polarity {
+                        case .same:
+                            score = dot
+                        case .opposite:
+                            score = -dot
+                        case .either:
+                            score = abs(dot)
+                        }
+                        weightedScore += score * weights[channelOffset]
+                    }
+
+                    let score = weightedScore / totalWeight
+                    if bestScore == nil || score > bestScore! {
+                        bestScore = score
+                        bestWindowLength = windowLength
+                    }
+                }
+
+                if let bestScore, Double(bestScore) >= matchThreshold {
+                    localHits.append((center, bestScore, bestWindowLength))
                 }
             }
-            let center = start + templateLength / 2
-            var bestScore: Float?
-            var bestWindowLength = templateLength
-
-            for windowLength in searchLengths {
-                let candidateStart = center - windowLength / 2
-                guard candidateStart >= 0,
-                      candidateStart + windowLength <= downsampledCount else { continue }
-
-                var weightedScore: Float = 0
-                for channelOffset in downsampledChannels.indices {
-                    let channel = downsampledChannels[channelOffset]
-                    let rawWindow = Array(channel[candidateStart..<(candidateStart + windowLength)])
-                    let comparableWindow: [Float]
-                    if windowLength == templateLength {
-                        comparableWindow = rawWindow
-                    } else {
-                        comparableWindow = resampled(rawWindow, to: templateLength)
-                    }
-                    let window = normalized(comparableWindow).normalized
-                    guard !window.isEmpty else { continue }
-
-                    var dot: Float = 0
-                    for sample in window.indices {
-                        dot += templates[channelOffset][sample] * window[sample]
-                    }
-                    let score: Float
-                    switch configuration.polarity {
-                    case .same:
-                        score = dot
-                    case .opposite:
-                        score = -dot
-                    case .either:
-                        score = abs(dot)
-                    }
-                    weightedScore += score * weights[channelOffset]
-                }
-
-                let score = weightedScore / totalWeight
-                if bestScore == nil || score > bestScore! {
-                    bestScore = score
-                    bestWindowLength = windowLength
-                }
-            }
-
-            if let bestScore, Double(bestScore) >= configuration.matchThreshold {
-                hits.append((center, bestScore, bestWindowLength))
-            }
+            chunkHitsPtr[chunkIdx] = localHits
         }
-
+        chunkHits = Array(UnsafeBufferPointer(start: chunkHitsPtr, count: coreCount))
+        chunkHitsPtr.deinitialize(count: coreCount)
+        chunkHitsPtr.deallocate()
         progress?(sampleCount, sampleCount)
+
+        let hits = chunkHits.flatMap { $0 }
         let merged = mergeTemplateHits(hits, mergeSamples: mergeSamples)
         return merged.enumerated().map { index, hit in
             let centerSample = min(max(hit.start * decimation, 0), sampleCount - 1)

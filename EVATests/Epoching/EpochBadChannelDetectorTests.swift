@@ -300,4 +300,32 @@ struct PSABuildJobEpochRejectionTests {
         #expect(result?.epochBadChannelCounts[0] == 1)
         #expect(result?.totalEpochsEvaluated == 2)
     }
+
+    @Test func spikedEpochIsInterpolatedWhenBelowAbsoluteCountThreshold() async {
+        // Same spike (1 of 4 channels bad), but expressed as a fixed count
+        // rather than a fraction — 2 tolerated bad channels is still under.
+        let thresholds = EpochBadChannelThresholds(
+            minMicrovolts: -100, maxMicrovolts: 100,
+            maxSlopeMicrovoltsPerSample: 50, maxAccelerationMicrovoltsPerSample: 50,
+            maxBadChannelCount: 2, usesAbsoluteBadChannelCount: true
+        )
+        let result = await makeJob(thresholds: thresholds).buildEpochs()
+        #expect(result?.segments.count == 2) // both epochs kept
+        #expect(result?.epochBadChannelCounts[0] == 1)
+        #expect(result?.totalEpochsEvaluated == 2)
+    }
+
+    @Test func spikedEpochIsRejectedWhenAboveAbsoluteCountThreshold() async {
+        // Same spike, but a 0-channel absolute threshold rejects on any bad channel.
+        let thresholds = EpochBadChannelThresholds(
+            minMicrovolts: -100, maxMicrovolts: 100,
+            maxSlopeMicrovoltsPerSample: 50, maxAccelerationMicrovoltsPerSample: 50,
+            maxBadChannelCount: 0, usesAbsoluteBadChannelCount: true
+        )
+        let result = await makeJob(thresholds: thresholds).buildEpochs()
+        #expect(result?.segments.count == 1)
+        #expect(result?.message.contains("rejected") == true)
+        #expect(result?.epochBadChannelCounts[0] == 1)
+        #expect(result?.totalEpochsEvaluated == 2)
+    }
 }

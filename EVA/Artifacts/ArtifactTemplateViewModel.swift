@@ -62,7 +62,15 @@ final class ArtifactTemplateViewModel: ObservableObject {
     @Published var trajectoryShiftSeconds = 0.05
     @Published var trajectoryScaleRange = 0.0
     @Published var trajectoryGFPWeighted = true
-    @Published var trajectorySelectedFrame: ArtifactTrajectoryFrame?
+    /// `frameIndex` values (see `ArtifactTrajectoryFrame.id`) of map-sequence
+    /// frames the user has removed because they don't fit the artifact —
+    /// excluded from spatial-correlation scoring, not just hidden from display.
+    @Published var trajectoryExcludedFrameIndices: Set<Int> = []
+    /// Whether "Save JSON…" should include map-sequence frames the user
+    /// removed via the frame strip. Off by default: a removed frame no longer
+    /// contributes to scoring, so leaving it out of the exported reference
+    /// keeps the file consistent with what was actually matched against.
+    @Published var trajectorySaveJSONIncludesRemovedFrames = false
 
     // MARK: Scan / run state
     @Published var lastScanSignature: ArtifactScanSignature?
@@ -91,7 +99,8 @@ final class ArtifactTemplateViewModel: ObservableObject {
         confirmedSource = nil
         isRefreshingTopography = false
         topographyRefreshGeneration += 1
-        trajectorySelectedFrame = nil
+        trajectoryExcludedFrameIndices = []
+        trajectorySaveJSONIncludesRemovedFrames = false
         lastScanSignature = nil
         isApplying = false
         scanCompleted = 0

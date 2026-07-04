@@ -93,6 +93,65 @@ struct ArtifactCleanerTests {
         }
     }
 
+    private func windowEnergy(_ data: [[Float]], centers: [Int]) -> Double {
+        centers.reduce(0.0) { total, center in
+            total + data.reduce(0.0) { channelTotal, channel in
+                channelTotal + windowEnergy(channel, center: center)
+            }
+        }
+    }
+
+    private func makeTopographicSignal(
+        centers: [Int],
+        sampleCount: Int
+    ) -> (signal: MFFSignalData, topography: [Float], template: [Float]) {
+        let template = SyntheticSignal.bump(width: windowSamples)
+        let topography: [Float] = [1.0, -0.85, 0.55, -0.40]
+        var data = (0..<topography.count).map { channel -> [Float] in
+            var state = UInt64(channel + 11)
+            return (0..<sampleCount).map { _ -> Float in
+                state = state &* 6364136223846793005 &+ 1
+                return Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 0.05)
+            }
+        }
+
+        for center in centers {
+            let start = center - windowSamples / 2
+            for channel in data.indices {
+                for offset in 0..<windowSamples where data[channel].indices.contains(start + offset) {
+                    data[channel][start + offset] += topography[channel] * template[offset]
+                }
+            }
+        }
+
+        return (SyntheticSignal.make(data, samplingRate: samplingRate), topography, template)
+    }
+
+    private func makeTopographicArtifact(
+        events: [MFFEvent],
+        template: [Float],
+        topography: [Float],
+        strategy: ArtifactOBSStrategy
+    ) -> DefinedArtifact {
+        var artifact = makeArtifact(events: events, template: template, method: .obs)
+        artifact.selectedChannelIndices = Array(topography.indices)
+        artifact.topography = ArtifactTemplateTopography(
+            mode: .peak,
+            referenceSample: Int((events.first?.beginTimeSeconds ?? 0) * samplingRate),
+            referenceTimeSeconds: events.first?.beginTimeSeconds ?? 0,
+            channelValues: topography,
+            channelIndices: Array(topography.indices),
+            matchThreshold: 0.80,
+            matchCount: events.count
+        )
+        artifact.obsStrategy = strategy
+        artifact.obsPCAComponentCount = 1
+        artifact.obsEdgeTaperSeconds = 0
+        artifact.obsUsesOverlapAdd = false
+        artifact.obsClusterCount = 2
+        return artifact
+    }
+
     @Test func regressionSubstantiallyReducesTemplateArtifact() {
         let template = SyntheticSignal.bump(width: windowSamples)
         let centers = [100, 400, 700]
@@ -150,6 +209,37 @@ struct ArtifactCleanerTests {
 
         let (_, summaries) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
         #expect(summaries.isEmpty)
+    }
+
+    @Test func obsStrategiesReduceTopographicArtifactEnergy() {
+        let centers = [120, 260, 400, 540, 680]
+        let (signal, topography, template) = makeTopographicSignal(centers: centers, sampleCount: 820)
+        let events = makeEvents(centers: centers)
+        let strategies: [ArtifactOBSStrategy] = [
+            .standard,
+            .topographyGated,
+            .topographyAligned,
+            .topographyWeighted,
+            .virtualChannel,
+            .clustered,
+            .spatiotemporal
+        ]
+
+        for strategy in strategies {
+            let artifact = makeTopographicArtifact(
+                events: events,
+                template: template,
+                topography: topography,
+                strategy: strategy
+            )
+
+            let (cleaned, summaries) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+            let before = windowEnergy(signal.data, centers: centers)
+            let after = windowEnergy(cleaned.data, centers: centers)
+
+            #expect(summaries.count == 1, "\(strategy.rawValue) should report a cleaning summary")
+            #expect(after < before * 0.70, "\(strategy.rawValue) left too much topographic artifact energy")
+        }
     }
 
     @Test func obsVarianceReportFindsDominantFirstComponent() {

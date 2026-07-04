@@ -708,17 +708,9 @@ extension WaveformView {
             cleaningMethod: .obs
         )
         if let index = template.definedArtifacts.firstIndex(where: { $0.id == bcgDefinedArtifactID }) {
-            let prevMethod    = template.definedArtifacts[index].cleaningMethod
-            let prevOBSComps  = template.definedArtifacts[index].obsPCAComponentCount
-            let prevTaper     = template.definedArtifacts[index].obsEdgeTaperSeconds
-            let prevBaseline  = template.definedArtifacts[index].obsPreservesLocalBaseline
-            let prevOverlap   = template.definedArtifacts[index].obsUsesOverlapAdd
+            let previous = template.definedArtifacts[index]
             template.definedArtifacts[index] = artifact
-            template.definedArtifacts[index].cleaningMethod              = prevMethod
-            template.definedArtifacts[index].obsPCAComponentCount        = prevOBSComps
-            template.definedArtifacts[index].obsEdgeTaperSeconds         = prevTaper
-            template.definedArtifacts[index].obsPreservesLocalBaseline   = prevBaseline
-            template.definedArtifacts[index].obsUsesOverlapAdd           = prevOverlap
+            template.definedArtifacts[index].preserveCleaningSettings(from: previous)
         } else {
             template.definedArtifacts.append(artifact)
         }

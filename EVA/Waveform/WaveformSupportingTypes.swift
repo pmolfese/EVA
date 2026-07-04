@@ -695,7 +695,9 @@ nonisolated struct PSABuildJob: Sendable {
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
         nonisolated(unsafe) var rejectedForTooManyBadChannels = 0
-        let maxBadChannelsPerEpoch = Int((epochBadChannelThresholds.maxBadChannelFraction * Double(signal.numberOfChannels)).rounded())
+        let maxBadChannelsPerEpoch = epochBadChannelThresholds.usesAbsoluteBadChannelCount
+            ? epochBadChannelThresholds.maxBadChannelCount
+            : Int((epochBadChannelThresholds.maxBadChannelFraction * Double(signal.numberOfChannels)).rounded())
         // Shared across all workers: identical (target, good-set) pairs recur
         // across most epochs (a bad channel tends to stay bad trial after
         // trial), so caching turns a repeated O(n³) spline solve into an O(1)

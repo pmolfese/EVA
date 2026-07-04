@@ -505,6 +505,26 @@ struct ArtifactOBSOptionsSheet: View {
         artifact.cleaningMethod == .obs
     }
 
+    private var showsOBSVarianceReport: Bool {
+        guard showsOBSVarianceOptions else { return false }
+        return artifact.obsStrategy != .virtualChannel && artifact.obsStrategy != .spatiotemporal
+    }
+
+    private var hasTopography: Bool {
+        artifact.topography != nil
+    }
+
+    private var obsStrategyBinding: Binding<ArtifactOBSStrategy> {
+        Binding {
+            artifact.obsStrategy
+        } set: { newValue in
+            let bounded = newValue.requiresTopography && !hasTopography ? ArtifactOBSStrategy.standard : newValue
+            guard artifact.obsStrategy != bounded else { return }
+            artifact.obsStrategy = bounded
+            onSettingsChange()
+        }
+    }
+
     private var componentCountBinding: Binding<Int> {
         Binding {
             artifact.obsPCAComponentCount
@@ -518,6 +538,39 @@ struct ArtifactOBSOptionsSheet: View {
 
     private var selectedCumulativeVariance: Double {
         report?.cumulativeVariance(for: artifact.obsPCAComponentCount) ?? 0
+    }
+
+    private var alignmentSearchBinding: Binding<Double> {
+        Binding {
+            artifact.obsAlignmentSearchSeconds
+        } set: { newValue in
+            let bounded = min(max(newValue, 0), DefinedArtifact.maximumOBSAlignmentSearchSeconds)
+            guard abs(artifact.obsAlignmentSearchSeconds - bounded) > 0.0001 else { return }
+            artifact.obsAlignmentSearchSeconds = bounded
+            onSettingsChange()
+        }
+    }
+
+    private var topographyWeightBinding: Binding<Double> {
+        Binding {
+            artifact.obsTopographyWeightStrength
+        } set: { newValue in
+            let bounded = min(max(newValue, 0), 1)
+            guard abs(artifact.obsTopographyWeightStrength - bounded) > 0.0001 else { return }
+            artifact.obsTopographyWeightStrength = bounded
+            onSettingsChange()
+        }
+    }
+
+    private var clusterCountBinding: Binding<Int> {
+        Binding {
+            artifact.obsClusterCount
+        } set: { newValue in
+            let bounded = min(max(newValue, 1), DefinedArtifact.maximumOBSClusterCount)
+            guard artifact.obsClusterCount != bounded else { return }
+            artifact.obsClusterCount = bounded
+            onSettingsChange()
+        }
     }
 
     private var edgeTaperBinding: Binding<Double> {
@@ -555,11 +608,15 @@ struct ArtifactOBSOptionsSheet: View {
         [
             artifact.id.uuidString,
             artifact.cleaningMethod.rawValue,
+            artifact.obsStrategy.rawValue,
             "\(artifact.eventCount)",
             "\(artifact.events.first?.beginTimeSeconds ?? -1)",
             "\(artifact.events.last?.beginTimeSeconds ?? -1)",
             "\(artifact.windowSizeSeconds)",
             "\(artifact.obsEdgeTaperSeconds)",
+            "\(artifact.obsAlignmentSearchSeconds)",
+            "\(artifact.obsTopographyWeightStrength)",
+            "\(artifact.obsClusterCount)",
             "\(signal.signalURL.path)",
             "\(signal.samplingRate)",
             "\(signal.duration)",
@@ -595,6 +652,8 @@ struct ArtifactOBSOptionsSheet: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                obsStrategyControls
             } else {
                 Text("SSP/PCA uses the edge settings below to fade the spatial projection in and out around each event.")
                     .font(.caption)
@@ -633,7 +692,7 @@ struct ArtifactOBSOptionsSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if showsOBSVarianceOptions {
+            if showsOBSVarianceReport {
                 if isLoadingReport {
                     HStack(spacing: 8) {
                         ProgressView()
@@ -653,6 +712,11 @@ struct ArtifactOBSOptionsSheet: View {
                     )
                     .frame(height: 180)
                 }
+            } else if showsOBSVarianceOptions {
+                Text("Residual PCA variance is shown for channel-wise OBS strategies. This strategy uses a different basis geometry.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack {
@@ -664,9 +728,96 @@ struct ArtifactOBSOptionsSheet: View {
             }
         }
         .padding(18)
-        .frame(width: 560)
+        .frame(width: 620)
         .task(id: reportCacheKey) {
             await loadReport()
+        }
+    }
+
+    @ViewBuilder
+    private var obsStrategyControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("OBS strategy")
+                .font(.callout.weight(.medium))
+
+            Picker("OBS strategy", selection: obsStrategyBinding) {
+                ForEach(ArtifactOBSStrategy.allCases) { strategy in
+                    Text(strategy.rawValue)
+                        .tag(strategy)
+                        .disabled(strategy.requiresTopography && !hasTopography)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(width: 260, alignment: .leading)
+            .help("Chooses how OBS builds and applies its artifact basis.")
+
+            HStack(spacing: 6) {
+                Text(artifact.obsStrategy.helpText)
+                if artifact.obsStrategy.isExperimental {
+                    Text("Experimental")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.yellow.opacity(0.25), in: Capsule())
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if artifact.obsStrategy.requiresTopography && !hasTopography {
+                Label("This strategy needs a saved topography reference.", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            switch artifact.obsStrategy {
+            case .standard, .topographyGated:
+                EmptyView()
+            case .topographyAligned:
+                HStack(spacing: 10) {
+                    Text("Search")
+                        .frame(width: 88, alignment: .leading)
+                    Slider(
+                        value: alignmentSearchBinding,
+                        in: 0...DefinedArtifact.maximumOBSAlignmentSearchSeconds,
+                        step: 0.01
+                    )
+                    Text("±\(Int((artifact.obsAlignmentSearchSeconds * 1000).rounded())) ms")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 64, alignment: .trailing)
+                }
+                .help("Maximum event recentering distance when matching the saved topography near each event.")
+            case .topographyWeighted:
+                HStack(spacing: 10) {
+                    Text("Weighting")
+                        .frame(width: 88, alignment: .leading)
+                    Slider(value: topographyWeightBinding, in: 0...1, step: 0.05)
+                    Text(Self.percent(artifact.obsTopographyWeightStrength))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 58, alignment: .trailing)
+                }
+                .help("How strongly the saved topography scales OBS correction strength by channel.")
+            case .virtualChannel:
+                Text("Uses the PCA component count above for the temporal basis fitted on the topography-projected virtual channel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .clustered:
+                Stepper(value: clusterCountBinding, in: 1...DefinedArtifact.maximumOBSClusterCount) {
+                    Text("Clusters: \(artifact.obsClusterCount)")
+                        .font(.caption.monospacedDigit())
+                }
+                .help("Number of amplitude groups used to fit separate OBS bases.")
+            case .spatiotemporal:
+                Text("Uses the PCA component count above for channel-by-time components fitted across event windows.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -733,7 +884,7 @@ struct ArtifactOBSOptionsSheet: View {
 
     @MainActor
     private func loadReport() async {
-        guard showsOBSVarianceOptions else {
+        guard showsOBSVarianceReport else {
             report = nil
             isLoadingReport = false
             return

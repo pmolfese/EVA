@@ -124,7 +124,8 @@ extension WaveformView {
         template.trajectoryShiftSeconds = 0.05
         template.trajectoryScaleRange = 0
         template.trajectoryGFPWeighted = true
-        template.trajectorySelectedFrame = nil
+        template.trajectoryExcludedFrameIndices = []
+        template.trajectorySaveJSONIncludesRemovedFrames = false
         template.definitionPanel = .waveforms
         template.confirmedSource = nil
         template.statusMessage = nil
@@ -170,6 +171,13 @@ extension WaveformView {
                     saveArtifactTemplateJSON(template.result?.savedTemplate)
                 }
                 .disabled(template.result == nil)
+
+                if template.topographyMode == .trajectory, !template.trajectoryExcludedFrameIndices.isEmpty {
+                    Toggle("Include \(template.trajectoryExcludedFrameIndices.count) removed frame(s) in JSON", isOn: $template.trajectorySaveJSONIncludesRemovedFrames)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                        .help("When off, map-sequence frames you removed from the frame strip are left out of the exported JSON's trajectory reference, matching what was actually scored.")
+                }
 
                 Spacer()
 
@@ -230,6 +238,10 @@ extension WaveformView {
             refreshTopographyIfNeeded(for: signal)
         }
         .onChange(of: template.trajectoryGFPWeighted) { _, _ in
+            guard template.topographyMode == .trajectory else { return }
+            refreshTopographyIfNeeded(for: signal)
+        }
+        .onChange(of: template.trajectoryExcludedFrameIndices) { _, _ in
             guard template.topographyMode == .trajectory else { return }
             refreshTopographyIfNeeded(for: signal)
         }
@@ -809,7 +821,6 @@ extension WaveformView {
                   generation == template.topographyRefreshGeneration else { return }
             template.result?.topographyEvents = outcome.events
             template.result?.topographyReference = outcome.reference
-            template.trajectorySelectedFrame = nil
             template.isRefreshingTopography = false
             topographyTask = nil
         }
@@ -947,36 +958,22 @@ extension WaveformView {
                     .foregroundStyle(.secondary)
             }
 
-            // Trajectory strip — only shown when frames are available
+            // Trajectory strip — the frame-by-frame sequence already shows how
+            // the map evolves, so map-sequence mode stops here (no separate
+            // large preview below it — see single-map branch for that).
             if let frames = topography.trajectoryDisplayFrames, frames.count > 1 {
                 trajectoryFrameStrip(frames: frames, topography: topography)
-            }
-
-            // Large topomap — uses selected frame if clicked, else default
-            let displayValues: [Double] = {
-                let vals = template.trajectorySelectedFrame?.channelValues ?? topography.channelValues
-                return vals.map(Double.init)
-            }()
-            let displayTime: Double =
-                template.trajectorySelectedFrame?.timeSeconds ?? topography.referenceTimeSeconds
-
-            if let layout = recording.sensorLayout {
+            } else if let layout = recording.sensorLayout {
                 TopomapView(
                     layout: layout,
-                    values: displayValues,
-                    timeSeconds: displayTime,
+                    values: topography.channelValues.map(Double.init),
+                    timeSeconds: topography.referenceTimeSeconds,
                     fixedScale: nil,
                     showsHeader: false,
                     colorBarPlacement: .trailing,
                     minimumMapHeight: 150
                 )
                 .frame(width: 230, height: 170)
-
-                if let frame = template.trajectorySelectedFrame {
-                    Text(String(format: "+%.0f ms", frame.relativeSeconds * 1000))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
             } else {
                 Text("No sensor layout — topography matching still ran.")
                     .font(.caption)
@@ -986,8 +983,10 @@ extension WaveformView {
         }
     }
 
-    /// Horizontal strip of topomap thumbnails for map-sequence mode.
-    /// Clicking a thumbnail selects it and updates the large display below.
+    /// Horizontal strip of topomap thumbnails for map-sequence mode. Clicking
+    /// the \u{2715} on a frame removes it from the match score; this strip is the
+    /// only scalp-map display for map-sequence mode (no separate large preview
+    /// — the sequence already shows how the map evolves over time).
     @ViewBuilder
     func trajectoryFrameStrip(
         frames: [ArtifactTrajectoryFrame],
@@ -1001,14 +1000,23 @@ extension WaveformView {
                 Text("Map sequence frames")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                if !template.trajectoryExcludedFrameIndices.isEmpty {
+                    Text("· \(template.trajectoryExcludedFrameIndices.count) removed")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
-                if template.trajectorySelectedFrame != nil {
-                    Button("Clear") { template.trajectorySelectedFrame = nil }
+                if !template.trajectoryExcludedFrameIndices.isEmpty {
+                    Button("Restore All") { template.trajectoryExcludedFrameIndices.removeAll() }
                         .font(.caption2)
                         .buttonStyle(.plain)
                         .foregroundStyle(Color.accentColor)
                 }
             }
+
+            Text("Click the \u{2715} to remove a frame from the match score.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
 
             ScrollView(.horizontal, showsIndicators: true) {
                 HStack(spacing: 10) {
@@ -1031,8 +1039,7 @@ extension WaveformView {
         thumbW: CGFloat,
         thumbH: CGFloat
     ) -> some View {
-        let isSelected = template.trajectorySelectedFrame?.frameIndex == frame.frameIndex
-        let borderColor: Color = isSelected ? Color.accentColor : Color.clear
+        let isExcluded = template.trajectoryExcludedFrameIndices.contains(frame.frameIndex)
 
         VStack(spacing: 2) {
             Group {
@@ -1054,19 +1061,29 @@ extension WaveformView {
                         .frame(width: thumbW, height: thumbH)
                 }
             }
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(borderColor, lineWidth: 2)
-            )
+            .opacity(isExcluded ? 0.35 : 1.0)
+            .overlay(alignment: .topTrailing) {
+                Button {
+                    if isExcluded {
+                        template.trajectoryExcludedFrameIndices.remove(frame.frameIndex)
+                    } else {
+                        template.trajectoryExcludedFrameIndices.insert(frame.frameIndex)
+                    }
+                } label: {
+                    Image(systemName: isExcluded ? "arrow.uturn.backward.circle.fill" : "xmark.circle.fill")
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(isExcluded ? Color.accentColor : Color.secondary)
+                        .background(Circle().fill(Color(nsColor: .controlBackgroundColor)))
+                }
+                .buttonStyle(.plain)
+                .help(isExcluded ? "Restore this frame to the match score" : "Remove this frame from the match score")
+                .padding(3)
+            }
 
             Text(String(format: "+%.0f ms", frame.relativeSeconds * 1000))
                 .font(.system(size: 10).monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.secondary.opacity(isExcluded ? 0.6 : 1.0))
                 .frame(width: thumbW)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            template.trajectorySelectedFrame = isSelected ? nil : frame
         }
     }
 
@@ -1226,23 +1243,16 @@ extension WaveformView {
             windowSizeSeconds: configuration.windowSizeSeconds,
             average: result.templateAverage,
             topography: source == .topography ? result.topographyReference : nil,
-            cleaningMethod: .obs,
+            cleaningMethod: source == .topography ? .sspPCA : .obs,
+            obsStrategy: source == .topography ? .topographyAligned : .standard,
             appliedMethod: nil,
             cleanedAt: nil
         )
 
         if let index = template.definedArtifacts.firstIndex(where: { $0.id == artifact.id }) {
-            let previousMethod = template.definedArtifacts[index].cleaningMethod
-            let previousOBSComponentCount = template.definedArtifacts[index].obsPCAComponentCount
-            let previousOBSEdgeTaperSeconds = template.definedArtifacts[index].obsEdgeTaperSeconds
-            let previousOBSPreservesLocalBaseline = template.definedArtifacts[index].obsPreservesLocalBaseline
-            let previousOBSUsesOverlapAdd = template.definedArtifacts[index].obsUsesOverlapAdd
+            let previous = template.definedArtifacts[index]
             template.definedArtifacts[index] = artifact
-            template.definedArtifacts[index].cleaningMethod = previousMethod
-            template.definedArtifacts[index].obsPCAComponentCount = previousOBSComponentCount
-            template.definedArtifacts[index].obsEdgeTaperSeconds = previousOBSEdgeTaperSeconds
-            template.definedArtifacts[index].obsPreservesLocalBaseline = previousOBSPreservesLocalBaseline
-            template.definedArtifacts[index].obsUsesOverlapAdd = previousOBSUsesOverlapAdd
+            template.definedArtifacts[index].preserveCleaningSettings(from: previous)
         } else {
             template.definedArtifacts.append(artifact)
             registerPSADefinedArtifactForRejection(artifact.id)
@@ -1522,8 +1532,8 @@ extension WaveformView {
         """
         Do Nothing: keep the artifact definition but do not alter the data.
         Regress: subtracts the average artifact waveform; useful as a historical/simple comparison.
-        OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; good for repeated blinks, ECG, and BCG-like artifacts.
-        SSP/PCA: projects out stable spatial artifact patterns across channels; useful for consistent topographies, but more global.
+        OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; Options includes topography-aware OBS strategies.
+        SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
         """
     }
 

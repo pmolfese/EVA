@@ -211,6 +211,9 @@ extension WaveformView {
                                 )
                             }
                     )
+                    .overlay {
+                        latencyCursorScrubOverlay(segment: segments[0], relativeSample: currentRelativeSample)
+                    }
                     .contextMenu {
                         figureSaveMenu(
                             title: "Averages Butterfly",
@@ -226,9 +229,6 @@ extension WaveformView {
                                 highlightRelativeSample: currentRelativeSample
                             )
                         }
-                    }
-                    .overlay {
-                        latencyCursorScrubOverlay(segment: segments[0], relativeSample: currentRelativeSample)
                     }
                 }
             }

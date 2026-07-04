@@ -42,11 +42,65 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
     }
 }
 
+enum ArtifactOBSStrategy: String, CaseIterable, Identifiable, Codable, Sendable {
+    case standard = "Standard OBS"
+    case topographyGated = "Topography-gated OBS"
+    case topographyAligned = "Topography-aligned OBS"
+    case topographyWeighted = "Topography-weighted OBS"
+    case virtualChannel = "Virtual-channel OBS"
+    case clustered = "Clustered OBS"
+    case spatiotemporal = "Spatiotemporal OBS"
+
+    var id: String { rawValue }
+
+    nonisolated var requiresTopography: Bool {
+        switch self {
+        case .topographyGated, .topographyAligned, .topographyWeighted, .virtualChannel:
+            return true
+        case .standard, .clustered, .spatiotemporal:
+            return false
+        }
+    }
+
+    nonisolated var isExperimental: Bool {
+        switch self {
+        case .virtualChannel, .clustered, .spatiotemporal:
+            return true
+        case .standard, .topographyGated, .topographyAligned, .topographyWeighted:
+            return false
+        }
+    }
+
+    nonisolated var helpText: String {
+        switch self {
+        case .standard:
+            return "Fits channel-wise OBS bases from the detected event windows."
+        case .topographyGated:
+            return "Uses topography-defined event windows, then fits standard channel-wise OBS from those windows."
+        case .topographyAligned:
+            return "Recenters each event around the strongest nearby match to the saved scalp map before fitting OBS."
+        case .topographyWeighted:
+            return "Fits channel-wise OBS, then scales correction strength by the saved topography map."
+        case .virtualChannel:
+            return "Projects the recording onto the saved topography, fits one temporal OBS basis, then projects the correction back to channels."
+        case .clustered:
+            return "Splits events into amplitude clusters and fits a separate OBS basis for each cluster."
+        case .spatiotemporal:
+            return "Fits a PCA basis over channel-by-time event windows instead of one independent basis per channel."
+        }
+    }
+}
+
 struct DefinedArtifact: Identifiable, Sendable {
     nonisolated static let defaultOBSComponentCount = 2
     nonisolated static let maximumOBSComponentCount = 8
     nonisolated static let defaultOBSEdgeTaperSeconds = 0.10
     nonisolated static let maximumOBSEdgeTaperSeconds = 0.50
+    nonisolated static let defaultOBSAlignmentSearchSeconds = 0.05
+    nonisolated static let maximumOBSAlignmentSearchSeconds = 0.20
+    nonisolated static let defaultOBSTopographyWeightStrength = 0.75
+    nonisolated static let defaultOBSClusterCount = 2
+    nonisolated static let maximumOBSClusterCount = 6
 
     var id = UUID()
     var type: DefinedArtifactType
@@ -58,15 +112,31 @@ struct DefinedArtifact: Identifiable, Sendable {
     var average: ArtifactTemplateAverage?
     var topography: ArtifactTemplateTopography?
     var cleaningMethod: ArtifactCleaningMethod
+    var obsStrategy = ArtifactOBSStrategy.standard
     var obsPCAComponentCount = Self.defaultOBSComponentCount
     var obsEdgeTaperSeconds = Self.defaultOBSEdgeTaperSeconds
     var obsPreservesLocalBaseline = true
     var obsUsesOverlapAdd = true
+    var obsAlignmentSearchSeconds = Self.defaultOBSAlignmentSearchSeconds
+    var obsTopographyWeightStrength = Self.defaultOBSTopographyWeightStrength
+    var obsClusterCount = Self.defaultOBSClusterCount
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
 
     var eventCount: Int {
         events.count
+    }
+
+    mutating func preserveCleaningSettings(from previous: DefinedArtifact) {
+        cleaningMethod = previous.cleaningMethod
+        obsStrategy = previous.obsStrategy
+        obsPCAComponentCount = previous.obsPCAComponentCount
+        obsEdgeTaperSeconds = previous.obsEdgeTaperSeconds
+        obsPreservesLocalBaseline = previous.obsPreservesLocalBaseline
+        obsUsesOverlapAdd = previous.obsUsesOverlapAdd
+        obsAlignmentSearchSeconds = previous.obsAlignmentSearchSeconds
+        obsTopographyWeightStrength = previous.obsTopographyWeightStrength
+        obsClusterCount = previous.obsClusterCount
     }
 }
 
@@ -470,7 +540,7 @@ nonisolated enum ArtifactCleaner {
         let coreWindowMilliseconds = milliseconds(for: coreWindowSamples, samplingRate: signal.samplingRate)
         let edgeTaperMilliseconds = milliseconds(for: edgeTaperSamples, samplingRate: signal.samplingRate)
         setupProgress("Resolving event windows (\(coreWindowMilliseconds) ms core, \(edgeTaperMilliseconds) ms edge taper)")
-        let eventRanges = artifact.events.map {
+        let baseEventRanges = artifact.events.map {
             eventWindow(
                 event: $0,
                 windowSamples: windowSamples,
@@ -478,26 +548,132 @@ nonisolated enum ArtifactCleaner {
                 samplingRate: signal.samplingRate
             )
         }
+        let strategy = resolvedOBSStrategy(for: artifact)
+        let eventRanges = strategy == .topographyAligned
+            ? topographyAlignedEventRanges(
+                artifact: artifact,
+                data: data,
+                fallbackRanges: baseEventRanges,
+                windowSamples: windowSamples,
+                sampleCount: sampleCount,
+                samplingRate: signal.samplingRate
+            )
+            : baseEventRanges
         let ranges = eventRanges.compactMap { $0 }
         guard !ranges.isEmpty else { return 0 }
 
         let channels = SignalSelection.validChannels(in: data, sampleCount: sampleCount)
+        guard !channels.isEmpty else { return 0 }
         let workerCount = workerCount(for: channels.count)
-        setupProgress("Fitting OBS bases from \(min(ranges.count, 80)) sampled windows across \(channels.count) channels on \(workerCount) worker\(workerCount == 1 ? "" : "s")")
-        var cleanedChannels = Set<Int>()
         let componentLimit = max(artifact.obsPCAComponentCount, 0)
         let taper = raisedCosineTaper(count: windowSamples, edgeSamples: edgeTaperSamples)
+        let channelScales = strategy == .topographyWeighted
+            ? topographyCorrectionScales(for: artifact, channels: channels)
+            : [:]
+
+        switch strategy {
+        case .virtualChannel:
+            return applyVirtualChannelOBS(
+                artifact: artifact,
+                data: &data,
+                eventRanges: eventRanges,
+                ranges: ranges,
+                channels: channels,
+                sampleCount: sampleCount,
+                taper: taper,
+                edgeTaperSamples: edgeTaperSamples,
+                componentLimit: componentLimit,
+                setupProgress: setupProgress,
+                finalizingProgress: finalizingProgress,
+                eventProgress: eventProgress
+            ).count
+        case .clustered:
+            return applyClusteredChannelwiseOBS(
+                artifact: artifact,
+                data: &data,
+                eventRanges: eventRanges,
+                channels: channels,
+                sampleCount: sampleCount,
+                windowSamples: windowSamples,
+                edgeTaperSamples: edgeTaperSamples,
+                taper: taper,
+                componentLimit: componentLimit,
+                workerCount: workerCount,
+                setupProgress: setupProgress,
+                finalizingProgress: finalizingProgress,
+                eventProgress: eventProgress
+            ).count
+        case .spatiotemporal:
+            return applySpatiotemporalOBS(
+                artifact: artifact,
+                data: &data,
+                eventRanges: eventRanges,
+                ranges: ranges,
+                channels: channels,
+                sampleCount: sampleCount,
+                taper: taper,
+                edgeTaperSamples: edgeTaperSamples,
+                componentLimit: componentLimit,
+                setupProgress: setupProgress,
+                finalizingProgress: finalizingProgress,
+                eventProgress: eventProgress
+            ).count
+        case .standard, .topographyGated, .topographyAligned, .topographyWeighted:
+            return applyChannelwiseOBS(
+                artifact: artifact,
+                data: &data,
+                eventRanges: eventRanges,
+                ranges: ranges,
+                channels: channels,
+                sampleCount: sampleCount,
+                windowSamples: windowSamples,
+                edgeTaperSamples: edgeTaperSamples,
+                taper: taper,
+                componentLimit: componentLimit,
+                workerCount: workerCount,
+                channelScales: channelScales,
+                setupProgress: setupProgress,
+                finalizingProgress: finalizingProgress,
+                eventProgress: eventProgress
+            ).count
+        }
+    }
+
+    private static func applyChannelwiseOBS(
+        artifact: DefinedArtifact,
+        data: inout [[Float]],
+        eventRanges: [Range<Int>?],
+        ranges: [Range<Int>],
+        channels: [Int],
+        sampleCount: Int,
+        windowSamples: Int,
+        edgeTaperSamples: Int,
+        taper: [Double],
+        componentLimit: Int,
+        workerCount: Int,
+        channelScales: [Int: Double] = [:],
+        setupProgress: (String) -> Void,
+        finalizingProgress: (String) -> Void,
+        eventProgress: (Int) -> Void
+    ) -> Set<Int> {
+        let activeChannels = channels.filter {
+            channelCorrectionScale(for: $0, scales: channelScales) > 1e-6
+        }
+        guard !activeChannels.isEmpty else { return [] }
+
+        setupProgress("Fitting OBS bases from \(min(ranges.count, 80)) sampled windows across \(activeChannels.count) channels on \(workerCount) worker\(workerCount == 1 ? "" : "s")")
         let channelBases = fitOBSChannelBases(
             data: data,
             ranges: ranges,
-            channels: channels,
+            channels: activeChannels,
             componentLimit: componentLimit,
             workerCount: workerCount,
             setupProgress: setupProgress
         )
 
-        guard !channelBases.isEmpty else { return 0 }
+        guard !channelBases.isEmpty else { return [] }
         setupProgress("Prepared \(channelBases.count) channel bases; starting per-event subtraction")
+        var cleanedChannels = Set<Int>()
 
         // Snapshot channel data as an immutable capture so concurrent closures
         // can read it without inout aliasing issues.
@@ -526,7 +702,9 @@ nonisolated enum ArtifactCleaner {
                         preservesLocalBaseline: preservesBaseline,
                         edgeTaperSamples: edgeTaperSamples
                     ) else { return }
-                    accumulators[basisIndex].add(correction, in: range)
+                    let scale = channelCorrectionScale(for: channelBases[basisIndex].channel, scales: channelScales)
+                    guard scale > 1e-6 else { return }
+                    accumulators[basisIndex].add(correction.scaled(by: scale), in: range)
                 }
             }
 
@@ -561,15 +739,524 @@ nonisolated enum ArtifactCleaner {
                 for basisIndex in channelBases.indices {
                     guard let correction = corrections[basisIndex] else { continue }
                     let channel = channelBases[basisIndex].channel
+                    let scale = channelCorrectionScale(for: channel, scales: channelScales)
+                    guard scale > 1e-6 else { continue }
                     for offset in 0..<range.count {
-                        data[channel][range.lowerBound + offset] -= Float(correction.weightedValues[offset])
+                        data[channel][range.lowerBound + offset] -= Float(correction.weightedValues[offset] * scale)
                     }
                     cleanedChannels.insert(channel)
                 }
             }
         }
 
-        return cleanedChannels.count
+        return cleanedChannels
+    }
+
+    private static func applyClusteredChannelwiseOBS(
+        artifact: DefinedArtifact,
+        data: inout [[Float]],
+        eventRanges: [Range<Int>?],
+        channels: [Int],
+        sampleCount: Int,
+        windowSamples: Int,
+        edgeTaperSamples: Int,
+        taper: [Double],
+        componentLimit: Int,
+        workerCount: Int,
+        setupProgress: (String) -> Void,
+        finalizingProgress: (String) -> Void,
+        eventProgress: (Int) -> Void
+    ) -> Set<Int> {
+        let validRanges = eventRanges.compactMap { $0 }
+        let requestedClusters = min(
+            max(artifact.obsClusterCount, 1),
+            DefinedArtifact.maximumOBSClusterCount
+        )
+        let clusterCount = min(requestedClusters, validRanges.count)
+        guard clusterCount > 1 else {
+            return applyChannelwiseOBS(
+                artifact: artifact,
+                data: &data,
+                eventRanges: eventRanges,
+                ranges: validRanges,
+                channels: channels,
+                sampleCount: sampleCount,
+                windowSamples: windowSamples,
+                edgeTaperSamples: edgeTaperSamples,
+                taper: taper,
+                componentLimit: componentLimit,
+                workerCount: workerCount,
+                setupProgress: setupProgress,
+                finalizingProgress: finalizingProgress,
+                eventProgress: eventProgress
+            )
+        }
+
+        let scoredRanges = validRanges.map { range in
+            (range: range, score: clusterScore(data: data, range: range, channels: channels, artifact: artifact))
+        }.sorted { $0.score < $1.score }
+
+        var clusters = [[Range<Int>]](repeating: [], count: clusterCount)
+        for (rank, scoredRange) in scoredRanges.enumerated() {
+            let clusterIndex = min(rank * clusterCount / max(scoredRanges.count, 1), clusterCount - 1)
+            clusters[clusterIndex].append(scoredRange.range)
+        }
+
+        var cleanedChannels = Set<Int>()
+        var completed = 0
+        for (clusterIndex, clusterRanges) in clusters.enumerated() where !clusterRanges.isEmpty {
+            setupProgress("Fitting clustered OBS basis \(clusterIndex + 1) of \(clusterCount) from \(clusterRanges.count) windows")
+            let cleaned = applyChannelwiseOBS(
+                artifact: artifact,
+                data: &data,
+                eventRanges: clusterRanges.map(Optional.some),
+                ranges: clusterRanges,
+                channels: channels,
+                sampleCount: sampleCount,
+                windowSamples: windowSamples,
+                edgeTaperSamples: edgeTaperSamples,
+                taper: taper,
+                componentLimit: componentLimit,
+                workerCount: workerCount,
+                setupProgress: setupProgress,
+                finalizingProgress: finalizingProgress
+            ) { clusterCompleted in
+                eventProgress(completed + clusterCompleted)
+            }
+            cleanedChannels.formUnion(cleaned)
+            completed += clusterRanges.count
+            eventProgress(completed)
+        }
+        return cleanedChannels
+    }
+
+    private static func applyVirtualChannelOBS(
+        artifact: DefinedArtifact,
+        data: inout [[Float]],
+        eventRanges: [Range<Int>?],
+        ranges: [Range<Int>],
+        channels: [Int],
+        sampleCount: Int,
+        taper: [Double],
+        edgeTaperSamples: Int,
+        componentLimit: Int,
+        setupProgress: (String) -> Void,
+        finalizingProgress: (String) -> Void,
+        eventProgress: (Int) -> Void
+    ) -> Set<Int> {
+        guard let topography = artifact.topography,
+              let weights = topographyProjectionWeights(for: topography, channels: channels),
+              !weights.isEmpty else {
+            return []
+        }
+
+        let projectionChannels = channels.filter { weights[$0] != nil }
+        guard !projectionChannels.isEmpty else { return [] }
+
+        setupProgress("Projecting \(projectionChannels.count) channels onto saved topography for virtual-channel OBS")
+        var virtualChannel = [Float](repeating: 0, count: sampleCount)
+        for channel in projectionChannels {
+            guard let weight = weights[channel] else { continue }
+            let scaledWeight = Float(weight)
+            for sample in 0..<min(sampleCount, data[channel].count) {
+                virtualChannel[sample] += data[channel][sample] * scaledWeight
+            }
+        }
+
+        guard let virtualBasis = fitOBSChannelBasis(
+            channel: -1,
+            channelData: virtualChannel,
+            ranges: ranges,
+            componentLimit: componentLimit
+        ) else {
+            return []
+        }
+
+        setupProgress("Prepared virtual-channel OBS basis; projecting corrections back to the topography map")
+        let virtualSnapshot = virtualChannel
+        let preservesBaseline = artifact.obsPreservesLocalBaseline
+        var cleanedChannels = Set<Int>()
+
+        if artifact.obsUsesOverlapAdd {
+            let accumulators = (0..<projectionChannels.count).map { _ in
+                OBSCorrectionAccumulator(sampleCount: sampleCount)
+            }
+
+            for (eventIndex, maybeRange) in eventRanges.enumerated() {
+                defer { eventProgress(eventIndex + 1) }
+                guard let range = maybeRange,
+                      let correction = fittedCorrection(
+                        basis: virtualBasis.basis,
+                        from: virtualSnapshot,
+                        in: range,
+                        taper: taper,
+                        preservesLocalBaseline: preservesBaseline,
+                        edgeTaperSamples: edgeTaperSamples
+                      ) else { continue }
+
+                for (offset, channel) in projectionChannels.enumerated() {
+                    guard let weight = weights[channel] else { continue }
+                    accumulators[offset].add(correction.scaled(by: weight), in: range)
+                }
+            }
+
+            finalizingProgress("Combining overlapping virtual-channel OBS corrections")
+            for (offset, channel) in projectionChannels.enumerated() {
+                accumulators[offset].apply(to: &data[channel])
+                cleanedChannels.insert(channel)
+            }
+        } else {
+            for (eventIndex, maybeRange) in eventRanges.enumerated() {
+                defer { eventProgress(eventIndex + 1) }
+                guard let range = maybeRange,
+                      let correction = fittedCorrection(
+                        basis: virtualBasis.basis,
+                        from: virtualSnapshot,
+                        in: range,
+                        taper: taper,
+                        preservesLocalBaseline: preservesBaseline,
+                        edgeTaperSamples: edgeTaperSamples
+                      ) else { continue }
+
+                for channel in projectionChannels {
+                    guard let weight = weights[channel] else { continue }
+                    for offset in 0..<range.count {
+                        data[channel][range.lowerBound + offset] -= Float(correction.weightedValues[offset] * weight)
+                    }
+                    cleanedChannels.insert(channel)
+                }
+            }
+        }
+
+        return cleanedChannels
+    }
+
+    private static func applySpatiotemporalOBS(
+        artifact: DefinedArtifact,
+        data: inout [[Float]],
+        eventRanges: [Range<Int>?],
+        ranges: [Range<Int>],
+        channels: [Int],
+        sampleCount: Int,
+        taper: [Double],
+        edgeTaperSamples: Int,
+        componentLimit: Int,
+        setupProgress: (String) -> Void,
+        finalizingProgress: (String) -> Void,
+        eventProgress: (Int) -> Void
+    ) -> Set<Int> {
+        guard channels.count > 1 else { return [] }
+
+        setupProgress("Fitting spatiotemporal OBS basis from \(min(ranges.count, 60)) sampled channel-by-time windows")
+        guard let basis = fitSpatiotemporalOBSBasis(
+            data: data,
+            ranges: ranges,
+            channels: channels,
+            componentLimit: componentLimit
+        ) else {
+            return []
+        }
+
+        setupProgress("Prepared \(basis.count) spatiotemporal basis vector\(basis.count == 1 ? "" : "s"); starting per-event subtraction")
+        let preservesBaseline = artifact.obsPreservesLocalBaseline
+        var cleanedChannels = Set<Int>()
+
+        if artifact.obsUsesOverlapAdd {
+            let accumulators = (0..<channels.count).map { _ in
+                OBSCorrectionAccumulator(sampleCount: sampleCount)
+            }
+
+            for (eventIndex, maybeRange) in eventRanges.enumerated() {
+                defer { eventProgress(eventIndex + 1) }
+                guard let range = maybeRange,
+                      let corrections = spatiotemporalCorrections(
+                        basis: basis,
+                        data: data,
+                        range: range,
+                        channels: channels
+                      ) else { continue }
+
+                for (offset, correctionValues) in corrections.enumerated() {
+                    guard let correction = smoothedWindowCorrection(
+                        correctionValues,
+                        taper: taper,
+                        preservesLocalBaseline: preservesBaseline,
+                        edgeTaperSamples: edgeTaperSamples
+                    ) else { continue }
+                    accumulators[offset].add(correction, in: range)
+                }
+            }
+
+            finalizingProgress("Combining overlapping spatiotemporal OBS corrections")
+            for (offset, channel) in channels.enumerated() {
+                accumulators[offset].apply(to: &data[channel])
+                cleanedChannels.insert(channel)
+            }
+        } else {
+            for (eventIndex, maybeRange) in eventRanges.enumerated() {
+                defer { eventProgress(eventIndex + 1) }
+                guard let range = maybeRange,
+                      let corrections = spatiotemporalCorrections(
+                        basis: basis,
+                        data: data,
+                        range: range,
+                        channels: channels
+                      ) else { continue }
+
+                for (channelOffset, channel) in channels.enumerated() {
+                    guard let correction = smoothedWindowCorrection(
+                        corrections[channelOffset],
+                        taper: taper,
+                        preservesLocalBaseline: preservesBaseline,
+                        edgeTaperSamples: edgeTaperSamples
+                    ) else { continue }
+                    for sampleOffset in 0..<range.count {
+                        data[channel][range.lowerBound + sampleOffset] -= Float(correction.weightedValues[sampleOffset])
+                    }
+                    cleanedChannels.insert(channel)
+                }
+            }
+        }
+
+        return cleanedChannels
+    }
+
+    private static func resolvedOBSStrategy(for artifact: DefinedArtifact) -> ArtifactOBSStrategy {
+        let strategy = artifact.obsStrategy
+        if strategy.requiresTopography, artifact.topography == nil {
+            return .standard
+        }
+        return strategy
+    }
+
+    private static func topographyAlignedEventRanges(
+        artifact: DefinedArtifact,
+        data: [[Float]],
+        fallbackRanges: [Range<Int>?],
+        windowSamples: Int,
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> [Range<Int>?] {
+        guard let topography = artifact.topography,
+              let weights = topographyProjectionWeights(
+                for: topography,
+                channels: SignalSelection.validChannels(in: data, sampleCount: sampleCount)
+              ),
+              !weights.isEmpty,
+              samplingRate > 0 else {
+            return fallbackRanges
+        }
+
+        let channels = weights.keys.sorted()
+        let reference = channels.compactMap { weights[$0] }
+        guard reference.count == channels.count, !reference.isEmpty else { return fallbackRanges }
+
+        let searchSamples = Int((
+            min(max(artifact.obsAlignmentSearchSeconds, 0), DefinedArtifact.maximumOBSAlignmentSearchSeconds)
+            * samplingRate
+        ).rounded())
+        guard searchSamples > 0 else { return fallbackRanges }
+
+        return artifact.events.enumerated().map { index, event in
+            let nominalCenter = Int((event.beginTimeSeconds * samplingRate).rounded())
+            let lower = max(nominalCenter - searchSamples, 0)
+            let upper = min(nominalCenter + searchSamples, sampleCount - 1)
+            guard lower <= upper else { return fallbackRanges.indices.contains(index) ? fallbackRanges[index] : nil }
+
+            var bestCenter = nominalCenter
+            var bestScore = -Double.infinity
+            for sample in lower...upper {
+                guard eventWindow(centerSample: sample, windowSamples: windowSamples, sampleCount: sampleCount) != nil else {
+                    continue
+                }
+                let values = channels.map { channel -> Double in
+                    guard data.indices.contains(channel), data[channel].indices.contains(sample) else { return 0 }
+                    return Double(data[channel][sample])
+                }
+                let normalized = normalizedSpatial(values)
+                guard normalized.count == reference.count else { continue }
+                let score = abs(LinearAlgebra.dot(reference, normalized))
+                if score > bestScore {
+                    bestScore = score
+                    bestCenter = sample
+                }
+            }
+
+            return eventWindow(centerSample: bestCenter, windowSamples: windowSamples, sampleCount: sampleCount)
+                ?? (fallbackRanges.indices.contains(index) ? fallbackRanges[index] : nil)
+        }
+    }
+
+    private static func topographyProjectionWeights(
+        for topography: ArtifactTemplateTopography,
+        channels: [Int]
+    ) -> [Int: Double]? {
+        let topographyChannels = Set(topography.channelIndices)
+        let projectionChannels = channels.filter {
+            (topographyChannels.isEmpty || topographyChannels.contains($0))
+                && topography.channelValues.indices.contains($0)
+        }
+        guard projectionChannels.count >= 2 else { return nil }
+
+        let normalized = normalizedSpatial(projectionChannels.map { Double(topography.channelValues[$0]) })
+        guard normalized.count == projectionChannels.count, !normalized.isEmpty else { return nil }
+        return Dictionary(uniqueKeysWithValues: zip(projectionChannels, normalized))
+    }
+
+    private static func topographyCorrectionScales(
+        for artifact: DefinedArtifact,
+        channels: [Int]
+    ) -> [Int: Double] {
+        guard let topography = artifact.topography,
+              let weights = topographyProjectionWeights(for: topography, channels: channels),
+              !weights.isEmpty else {
+            return [:]
+        }
+
+        let strength = min(max(artifact.obsTopographyWeightStrength, 0), 1)
+        let maxWeight = max(weights.values.map { abs($0) }.max() ?? 0, 1e-12)
+        var scales: [Int: Double] = [:]
+        for channel in channels {
+            let normalizedWeight = abs(weights[channel] ?? 0) / maxWeight
+            scales[channel] = (1 - strength) + strength * normalizedWeight
+        }
+        return scales
+    }
+
+    private static func channelCorrectionScale(for channel: Int, scales: [Int: Double]) -> Double {
+        guard !scales.isEmpty else { return 1 }
+        return min(max(scales[channel] ?? 0, 0), 1)
+    }
+
+    private static func clusterScore(
+        data: [[Float]],
+        range: Range<Int>,
+        channels: [Int],
+        artifact: DefinedArtifact
+    ) -> Double {
+        if let topography = artifact.topography,
+           let weights = topographyProjectionWeights(for: topography, channels: channels),
+           !weights.isEmpty {
+            var energy = 0.0
+            for sample in range {
+                var projection = 0.0
+                for channel in channels {
+                    guard let weight = weights[channel],
+                          data.indices.contains(channel),
+                          data[channel].indices.contains(sample) else { continue }
+                    projection += Double(data[channel][sample]) * weight
+                }
+                energy += projection * projection
+            }
+            return sqrt(energy / Double(max(range.count, 1)))
+        }
+
+        let sampledChannels = Array(channels.prefix(8))
+        guard !sampledChannels.isEmpty else { return 0 }
+        var energy = 0.0
+        var count = 0
+        for channel in sampledChannels where data.indices.contains(channel) {
+            for sample in range where data[channel].indices.contains(sample) {
+                let value = Double(data[channel][sample])
+                energy += value * value
+                count += 1
+            }
+        }
+        return sqrt(energy / Double(max(count, 1)))
+    }
+
+    private static func fitSpatiotemporalOBSBasis(
+        data: [[Float]],
+        ranges: [Range<Int>],
+        channels: [Int],
+        componentLimit: Int
+    ) -> [[Double]]? {
+        let windows = sampledRanges(from: ranges, maximumCount: 60).map {
+            flattenedWindow(data: data, range: $0, channels: channels)
+        }
+        guard let sampleCount = windows.first?.count,
+              sampleCount > 0,
+              windows.allSatisfy({ $0.count == sampleCount }) else {
+            return nil
+        }
+
+        let mean = meanDoubleWindow(windows)
+        var basis = [centeredUnitVector(mean)].filter { !$0.isEmpty }
+        if windows.count > 1, componentLimit > 0 {
+            let residuals = windows.map { zip($0, mean).map { $0.0 - $0.1 } }
+            basis += principalComponents(from: residuals, maximumCount: min(componentLimit, windows.count - 1))
+        }
+        return basis.isEmpty ? nil : basis
+    }
+
+    private static func spatiotemporalCorrections(
+        basis: [[Double]],
+        data: [[Float]],
+        range: Range<Int>,
+        channels: [Int]
+    ) -> [[Double]]? {
+        let flattened = flattenedWindow(data: data, range: range, channels: channels)
+        let usableBasis = basis.filter {
+            $0.count == flattened.count && SignalStatistics.vectorEnergy($0) > 1e-12
+        }
+        guard !usableBasis.isEmpty else { return nil }
+
+        let y = centeredVector(flattened)
+        let coefficients = coefficientsForBasis(usableBasis, y: y)
+        guard coefficients.count == usableBasis.count else { return nil }
+
+        var flattenedCorrection = [Double](repeating: 0, count: flattened.count)
+        for offset in flattenedCorrection.indices {
+            for basisIndex in usableBasis.indices {
+                flattenedCorrection[offset] += coefficients[basisIndex] * usableBasis[basisIndex][offset]
+            }
+        }
+
+        var corrections = Array(
+            repeating: [Double](repeating: 0, count: range.count),
+            count: channels.count
+        )
+        for channelOffset in channels.indices {
+            let start = channelOffset * range.count
+            for sampleOffset in 0..<range.count {
+                corrections[channelOffset][sampleOffset] = flattenedCorrection[start + sampleOffset]
+            }
+        }
+        return corrections
+    }
+
+    private static func flattenedWindow(
+        data: [[Float]],
+        range: Range<Int>,
+        channels: [Int]
+    ) -> [Double] {
+        var values: [Double] = []
+        values.reserveCapacity(channels.count * range.count)
+        for channel in channels {
+            guard data.indices.contains(channel) else {
+                values += [Double](repeating: 0, count: range.count)
+                continue
+            }
+            for sample in range {
+                values.append(data[channel].indices.contains(sample) ? Double(data[channel][sample]) : 0)
+            }
+        }
+        return values
+    }
+
+    private static func meanDoubleWindow(_ windows: [[Double]]) -> [Double] {
+        guard let count = windows.first?.count, count > 0 else { return [] }
+        var mean = [Double](repeating: 0, count: count)
+        for window in windows where window.count == count {
+            for sample in 0..<count {
+                mean[sample] += window[sample]
+            }
+        }
+        let divisor = Double(max(windows.count, 1))
+        for sample in mean.indices {
+            mean[sample] /= divisor
+        }
+        return mean
     }
 
     private static func fitOBSChannelBases(
@@ -957,7 +1644,16 @@ nonisolated enum ArtifactCleaner {
     ) -> Range<Int>? {
         guard samplingRate > 0, windowSamples > 1, sampleCount >= windowSamples else { return nil }
         let center = Int((event.beginTimeSeconds * samplingRate).rounded())
-        let start = center - windowSamples / 2
+        return eventWindow(centerSample: center, windowSamples: windowSamples, sampleCount: sampleCount)
+    }
+
+    private static func eventWindow(
+        centerSample: Int,
+        windowSamples: Int,
+        sampleCount: Int
+    ) -> Range<Int>? {
+        guard windowSamples > 1, sampleCount >= windowSamples else { return nil }
+        let start = centerSample - windowSamples / 2
         let end = start + windowSamples
         guard start >= 0, end <= sampleCount else { return nil }
         return start..<end
@@ -1199,11 +1895,23 @@ nonisolated enum ArtifactCleaner {
         return centered
     }
 
+    private static func normalizedSpatial(_ values: [Double]) -> [Double] {
+        centeredUnitVector(values)
+    }
+
 }
 
 nonisolated private struct OBSCorrection {
     var weightedValues: [Double]
     var weights: [Double]
+
+    func scaled(by scale: Double) -> OBSCorrection {
+        guard abs(scale - 1) > 1e-12 else { return self }
+        return OBSCorrection(
+            weightedValues: weightedValues.map { $0 * scale },
+            weights: weights
+        )
+    }
 }
 
 nonisolated private struct OBSChannelBasis: Sendable {
