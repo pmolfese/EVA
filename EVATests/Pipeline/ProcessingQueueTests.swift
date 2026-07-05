@@ -1,0 +1,81 @@
+//
+//  ProcessingQueueTests.swift
+//  EVATests
+//
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
+//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  The U.S. Government authorizes the distribution and modification of this software
+//  subject to the copyleft requirements of the GPL-3.0.
+//  SPDX-License-Identifier: GPL-3.0-only
+//
+
+import Testing
+@testable import EVA
+
+@MainActor
+struct ProcessingQueueTests {
+
+    @Test func operationsRunOneAtATimeNotConcurrently() async {
+        let queue = ProcessingQueue()
+        var concurrentCount = 0
+        var maxConcurrentCount = 0
+        var completionOrder: [String] = []
+
+        async let first: Void = queue.run("first") {
+            concurrentCount += 1
+            maxConcurrentCount = max(maxConcurrentCount, concurrentCount)
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            concurrentCount -= 1
+            completionOrder.append("first")
+        }
+        async let second: Void = queue.run("second") {
+            concurrentCount += 1
+            maxConcurrentCount = max(maxConcurrentCount, concurrentCount)
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            concurrentCount -= 1
+            completionOrder.append("second")
+        }
+
+        _ = await (first, second)
+
+        #expect(maxConcurrentCount == 1)
+        #expect(completionOrder == ["first", "second"]) // FIFO: enqueued first, runs first
+    }
+
+    @Test func queueReflectsCurrentAndWaitingOperations() async {
+        let queue = ProcessingQueue()
+        var snapshotDuringFirst: (current: String?, waiting: [String])?
+
+        async let first: Void = queue.run("Filter") {
+            // Give `second` a moment to enqueue while `first` is still running.
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            snapshotDuringFirst = (queue.currentLabel, queue.waitingLabels)
+        }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        async let second: Void = queue.run("Channel Health") {}
+
+        _ = await (first, second)
+
+        #expect(snapshotDuringFirst?.current == "Filter")
+        #expect(snapshotDuringFirst?.waiting == ["Channel Health"])
+        #expect(queue.isBusy == false)
+        #expect(queue.queue.isEmpty)
+    }
+
+    @Test func isBusyReflectsQueueState() async {
+        let queue = ProcessingQueue()
+        #expect(queue.isBusy == false)
+
+        await queue.run("Solo") {
+            #expect(queue.isBusy == true)
+        }
+
+        #expect(queue.isBusy == false)
+    }
+}
