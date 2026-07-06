@@ -26,7 +26,7 @@ extension WaveformView {
     }
 
     func icaDebugReport(rawSignal: MFFSignalData) -> String {
-        let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+        let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
         let processed = filter.output ?? base
         let visibleRange = visibleSampleRange(in: processed)
 

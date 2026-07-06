@@ -38,6 +38,7 @@ extension WaveformView {
                     Text(method.tabLabel).tag(method)
                 }
             }
+            .labelsHidden()
             .pickerStyle(.segmented)
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
@@ -58,7 +59,7 @@ extension WaveformView {
                     bcgMethodOptions(for: signal, selection: selection)
 
                     // Channel restriction — applies to the GFP-based methods.
-                    if bcg.method != .qrsLocking {
+                    if bcg.method != .qrsLocking && bcg.method != .cwlRegression {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("BCG Channels")
                                 .font(.caption.weight(.semibold))
@@ -75,43 +76,50 @@ extension WaveformView {
                         }
                     }
 
-                    // Shared options
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Output")
-                            .font(.caption.weight(.semibold))
+                    // CWL reference channels — external PNS leads, not detected from the EEG.
+                    if bcg.method == .cwlRegression {
+                        cwlChannelPicker()
+                    }
 
-                        HStack {
-                            Text("Event code")
-                                .font(.caption)
-                                .frame(width: 100, alignment: .leading)
-                            TextField("BCG", text: $bcg.eventCode)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 100)
-                            Text("Window")
-                                .font(.caption)
-                                .padding(.leading, 8)
-                            TextField("s", value: $bcg.windowSeconds, format: .number.precision(.fractionLength(3)))
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 70)
-                            Text("s")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                    // Shared options — not applicable to direct-correction methods (no events produced).
+                    if !bcg.method.isDirectCorrection {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Output")
+                                .font(.caption.weight(.semibold))
 
-                        HStack {
-                            Text("Threshold")
-                                .font(.caption)
-                                .frame(width: 100, alignment: .leading)
-                            TextField("SD", value: $bcg.thresholdSD, format: .number.precision(.fractionLength(1)))
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 70)
-                            Text("robust SD above mean")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Slider(value: $bcg.thresholdSD, in: 1...6, step: 0.25)
+                            HStack {
+                                Text("Event code")
+                                    .font(.caption)
+                                    .frame(width: 100, alignment: .leading)
+                                TextField("BCG", text: $bcg.eventCode)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                                Text("Window")
+                                    .font(.caption)
+                                    .padding(.leading, 8)
+                                TextField("s", value: $bcg.windowSeconds, format: .number.precision(.fractionLength(3)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 70)
+                                Text("s")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            HStack {
+                                Text("Threshold")
+                                    .font(.caption)
+                                    .frame(width: 100, alignment: .leading)
+                                TextField("SD", value: $bcg.thresholdSD, format: .number.precision(.fractionLength(1)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 70)
+                                Text("robust SD above mean")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Slider(value: $bcg.thresholdSD, in: 1...6, step: 0.25)
+                            }
+                            .opacity(bcg.method == .qrsLocking ? 0.35 : 1)
+                            .disabled(bcg.method == .qrsLocking)
                         }
-                        .opacity(bcg.method == .qrsLocking ? 0.35 : 1)
-                        .disabled(bcg.method == .qrsLocking)
                     }
 
                     if let status = bcg.status {
@@ -155,8 +163,9 @@ extension WaveformView {
                                         timeSeconds: 0,
                                         fixedScale: nil,
                                         showsHeader: false,
-                                        colorBarPlacement: .trailing,
-                                        minimumMapHeight: 80
+                                        colorBarPlacement: .none,
+                                        minimumMapHeight: 90,
+                                        contentPadding: 0
                                     )
                                     .frame(width: 90, height: 90)
                                     .clipShape(Circle())
@@ -183,7 +192,14 @@ extension WaveformView {
 
             // Action row
             HStack {
-                if bcg.detectsArtifacts {
+                if bcg.method == .cwlRegression {
+                    if bcg.correctedSignal != nil {
+                        Button("Remove CWL Correction", role: .destructive) {
+                            disableCWLCorrection()
+                            bcg.showsSheet = false
+                        }
+                    }
+                } else if bcg.detectsArtifacts {
                     Button("Disable BCG Detection", role: .destructive) {
                         disableBCGDetection()
                         bcg.showsSheet = false
@@ -209,22 +225,37 @@ extension WaveformView {
                     }
                     .disabled(bcg.isRefining || bcg.isRunning)
                 }
-                Button("Detect BCG") {
-                    bcgTask?.cancel()
-                    let sessionID = recordingSessionID
-                    bcgTask = Task {
-                        await runBCGDetection(signal: signal, selection: selection)
-                        if !Task.isCancelled, sessionID == recordingSessionID {
-                            bcgTask = nil
+                if bcg.method == .cwlRegression {
+                    Button("Correct CWL") {
+                        bcgTask?.cancel()
+                        let sessionID = recordingSessionID
+                        bcgTask = Task {
+                            await runCWLCorrection(signal: signal)
+                            if !Task.isCancelled, sessionID == recordingSessionID {
+                                bcgTask = nil
+                            }
                         }
                     }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(bcg.isRunning || bcg.selectedCWLChannels.isEmpty)
+                } else {
+                    Button("Detect BCG") {
+                        bcgTask?.cancel()
+                        let sessionID = recordingSessionID
+                        bcgTask = Task {
+                            await runBCGDetection(signal: signal, selection: selection)
+                            if !Task.isCancelled, sessionID == recordingSessionID {
+                                bcgTask = nil
+                            }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(bcg.isRunning || (bcg.method == .qrsLocking && !ecg.isEnabled))
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(bcg.isRunning || (bcg.method == .qrsLocking && !ecg.isEnabled))
             }
             .padding(20)
         }
-        .frame(width: 644)
+        .frame(width: 720)
         .disabled(bcg.isRunning || bcg.isRefining)
     }
 
@@ -429,6 +460,51 @@ extension WaveformView {
                 }
                 .help("Typical BCG onset lags the R-wave by 200–400 ms. Start at 300 ms and adjust to align the BCG artifact peak with detected events.")
             }
+
+        case .cwlRegression:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Lag range")
+                    .font(.caption.weight(.semibold))
+                Text("Each CWL channel is regressed at every lag in this range; the fit is subtracted using a sliding window so the coupling can drift across the recording.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Text("Min lag")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    TextField("ms", value: $bcg.cwlLagRangeMinMs, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("Max lag")
+                        .font(.caption)
+                        .padding(.leading, 8)
+                    TextField("ms", value: $bcg.cwlLagRangeMaxMs, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("ms")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Text("Lag step")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    TextField("ms", value: $bcg.cwlLagStepMs, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("Window")
+                        .font(.caption)
+                        .padding(.leading, 8)
+                    TextField("s", value: $bcg.cwlWindowSeconds, format: .number.precision(.fractionLength(1)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("s")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .help("A shorter window adapts faster to drifting coupling but has less data to fit each regression; 3–5 s is a reasonable starting point.")
+            }
         }
     }
 
@@ -594,6 +670,12 @@ extension WaveformView {
                 lagSeconds: bcg.qrsLagMs / 1000.0,
                 recordingDuration: duration
             )
+
+        case .cwlRegression:
+            // Direct-correction method — the action button calls
+            // `runCWLCorrection` instead of this event-detection path; this
+            // case only exists for switch exhaustiveness.
+            times = []
         }
 
         guard !Task.isCancelled, sessionID == recordingSessionID else { return }
@@ -725,5 +807,191 @@ extension WaveformView {
         let median = ipi.sorted()[ipi.count / 2]
         guard median > 0 else { return nil }
         return 60.0 / median
+    }
+
+    // MARK: - CWL regression (direct correction — no events/ArtifactCleaner involved)
+
+    @ViewBuilder
+    func cwlChannelPicker() -> some View {
+        if let pns = displayedPhysioSignal() {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("CWL Channels")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Button("Likely CWL") {
+                        bcg.selectedCWLChannels = Set(likelyCWLPNSChannelIndices(in: pns))
+                    }
+                    Button("All") {
+                        bcg.selectedCWLChannels = Set(pns.data.indices)
+                    }
+                    Button("None") {
+                        bcg.selectedCWLChannels.removeAll()
+                    }
+                }
+                Text("CWL leads are imported as PNS channels, same as ECG/pulse. Select the wire-loop channels to use as regressors.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(pns.data.indices), id: \.self) { index in
+                            Toggle(pnsChannelDisplayName(index: index, signal: pns), isOn: cwlPNSSelectionBinding(for: index))
+                                .font(.caption)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 130)
+            }
+        } else {
+            Label("No PNS channels are loaded. Import the CWL leads as PNS channels first.", systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    func cwlPNSSelectionBinding(for index: Int) -> Binding<Bool> {
+        Binding(
+            get: { bcg.selectedCWLChannels.contains(index) },
+            set: { isSelected in
+                if isSelected {
+                    bcg.selectedCWLChannels.insert(index)
+                } else {
+                    bcg.selectedCWLChannels.remove(index)
+                }
+            }
+        )
+    }
+
+    /// Name-based heuristic for the CWL leads among the imported PNS channels,
+    /// mirroring `likelyECGPNSChannelIndices` — matches common exporter labels
+    /// for carbon-wire-loop pickups.
+    func likelyCWLPNSChannelIndices(in pns: MFFSignalData) -> [Int] {
+        let names = pns.channelNames ?? []
+        let cwlTokens = ["cwl", "wire", "loop", "carbon"]
+        return pns.data.indices.filter { index in
+            guard names.indices.contains(index) else { return false }
+            let lower = names[index].lowercased()
+            return cwlTokens.contains { lower.contains($0) }
+        }
+    }
+
+    /// When the sheet opens on the CWL tab with nothing selected yet, seed
+    /// the picker with the name-based guess so the user isn't starting blank.
+    func prepareCWLDefaults(pns: MFFSignalData?) {
+        guard let pns else {
+            bcg.selectedCWLChannels.removeAll()
+            return
+        }
+        bcg.selectedCWLChannels = bcg.selectedCWLChannels.filter { pns.data.indices.contains($0) }
+        if bcg.selectedCWLChannels.isEmpty {
+            bcg.selectedCWLChannels = Set(likelyCWLPNSChannelIndices(in: pns))
+        }
+    }
+
+    func runCWLCorrection(signal: MFFSignalData) async {
+        await processingQueue.run("CWL Correction") { [self] in
+            await runCWLCorrectionCore(signal: signal)
+        }
+    }
+
+    private func runCWLCorrectionCore(signal: MFFSignalData) async {
+        let sessionID = recordingSessionID
+        guard let pns = displayedPhysioSignal() else {
+            bcg.status = "⚠ No PNS channels loaded — import the CWL leads first."
+            return
+        }
+        let referenceIndices = bcg.selectedCWLChannels.sorted().filter { pns.data.indices.contains($0) }
+        guard !referenceIndices.isEmpty else {
+            bcg.status = "⚠ Select at least one CWL reference channel."
+            return
+        }
+        guard pns.samplingRate == signal.samplingRate, pns.data.first?.count == signal.data.first?.count else {
+            bcg.status = "⚠ PNS and EEG sampling rate/length must match for CWL regression."
+            return
+        }
+
+        bcg.isRunning = true
+        bcg.status = "Correcting…"
+
+        let references = referenceIndices.map { pns.data[$0] }
+        let sourceData = signal.data
+        let sr = signal.samplingRate
+        let lagRange = bcg.cwlLagRangeMinMs...max(bcg.cwlLagRangeMaxMs, bcg.cwlLagRangeMinMs + 1)
+        let lagStep = bcg.cwlLagStepMs
+        let windowSeconds = bcg.cwlWindowSeconds
+
+        let (progressContinuation, progressTask) = ProgressBridge.make { [weak bcg] (fraction: Double) in
+            bcg?.status = "Correcting… \(Int(fraction * 100))%"
+        }
+
+        do {
+            let worker = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                return try CWLCorrector.correct(
+                    eeg: sourceData,
+                    references: references,
+                    samplingRate: sr,
+                    lagRangeMs: lagRange,
+                    lagStepMs: lagStep,
+                    windowSeconds: windowSeconds
+                ) { fraction in
+                    progressContinuation.yield(fraction)
+                }
+            }
+            let correctedData = try await withTaskCancellationHandler(
+                operation: { try await worker.value },
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
+            )
+            progressContinuation.finish()
+            progressTask.cancel()
+            guard !Task.isCancelled, sessionID == recordingSessionID else { bcg.isRunning = false; return }
+
+            bcg.correctedSignal = signal.replacingData(correctedData, signalTypeSuffix: "CWL")
+            bcg.status = "✓ CWL correction applied (\(referenceIndices.count) reference channel\(referenceIndices.count == 1 ? "" : "s"))."
+
+            // Downstream stages built on the old base are now stale — same
+            // cross-domain invalidation as `applyGradientCorrection`, since
+            // `bcg.correctedSignal` sits in the same base-signal chain
+            // between gradient correction and ICA.
+            ica.cleanedSignal = nil
+            ica.decomposition = nil
+            filter.output = nil
+            filter.pnsOutput = nil
+            filter.pnsInputSignalType = nil
+            clearAppliedArtifactCleaning()
+            artifactVM.detectionRefreshToken += 1
+            invalidateEpochsForSignalChange()
+            invalidateInterpolations()
+            bcg.showsSheet = false
+        } catch is CancellationError {
+            progressContinuation.finish()
+            progressTask.cancel()
+        } catch {
+            progressContinuation.finish()
+            progressTask.cancel()
+            bcg.status = error.localizedDescription
+        }
+        bcg.isRunning = false
+    }
+
+    func disableCWLCorrection() {
+        bcg.correctedSignal = nil
+        bcg.status = nil
+        ica.cleanedSignal = nil
+        ica.decomposition = nil
+        filter.output = nil
+        filter.pnsOutput = nil
+        filter.pnsInputSignalType = nil
+        clearAppliedArtifactCleaning()
+        artifactVM.detectionRefreshToken += 1
+        invalidateEpochsForSignalChange()
+        invalidateInterpolations()
     }
 }

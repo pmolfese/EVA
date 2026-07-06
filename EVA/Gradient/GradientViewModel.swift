@@ -112,7 +112,7 @@ final class GradientViewModel: ObservableObject {
             "windowBefore": "\(windowBefore)",
             "windowAfter": "\(windowAfter)"
         ]
-        if method != .aas {
+        if method.isFASTR {
             params["slices"] = "\(fastrSlices)"
             params["obs"] = "\(fastrOBSAuto)"
             params["anc"] = "\(fastrANC)"
@@ -165,7 +165,7 @@ final class GradientViewModel: ObservableObject {
         onApplied: @escaping () -> Void = {}
     ) async {
         switch method {
-        case .aas:
+        case .aas, .mas, .mar:
             await removeGradientArtifact(from: signal, pnsSignal: pnsSignal, onApplied: onApplied)
         case .fastr, .moosmann, .farm:
             await removeGradientArtifactFASTR(from: signal, pnsSignal: pnsSignal, onApplied: onApplied)
@@ -206,18 +206,21 @@ final class GradientViewModel: ObservableObject {
             self?.progress = fraction
         }
 
+        let reducer: GradientRemover.TemplateReducer = method == .aas ? .weightedMean : .median
+        let fit: GradientRemover.TemplateFit = method == .mar ? .regress : .subtract
+
         do {
             let hasPNS = pnsInput != nil
             let sourceData = signal.data
             let worker = Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
-                let correctedData = try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs) { fraction in
+                let correctedData = try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit) { fraction in
                     progressContinuation.yield(hasPNS ? 0.70 * fraction : fraction)
                 }
                 try Task.checkCancellation()
                 let correctedPNSData: [[Float]]?
                 if let pnsInput {
-                    correctedPNSData = try GradientRemover.correct(channels: pnsInput.data, trSamples: pnsTRSamples, window: window, excludedTRs: excludedTRs) { fraction in
+                    correctedPNSData = try GradientRemover.correct(channels: pnsInput.data, trSamples: pnsTRSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit) { fraction in
                         progressContinuation.yield(0.70 + 0.30 * fraction)
                     }
                 } else {
@@ -243,7 +246,7 @@ final class GradientViewModel: ObservableObject {
             } else {
                 correctedPNSSignal = nil
             }
-            statusMessage = "Applied MRI gradient artifact correction (\(trMarkerCode) markers, template window \(window.before) pre / \(window.after) post TRs\(excludedCount > 0 ? ", \(excludedCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
+            statusMessage = "Applied \(method.rawValue) gradient artifact correction (\(trMarkerCode) markers, template window \(window.before) pre / \(window.after) post TRs\(excludedCount > 0 ? ", \(excludedCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
             statusIsError = false
             onApplied()
         } catch is CancellationError {

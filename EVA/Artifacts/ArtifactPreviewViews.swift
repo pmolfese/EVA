@@ -491,6 +491,80 @@ struct ArtifactOBSOptionsButton: View {
     }
 }
 
+struct ArtifactLocalTemplateOptionsButton: View {
+    @Binding var artifact: DefinedArtifact
+    let onSettingsChange: () -> Void
+
+    @State private var showsOptions = false
+
+    var body: some View {
+        Button("Options...") {
+            showsOptions = true
+        }
+        .font(.caption)
+        .popover(isPresented: $showsOptions) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("\(artifact.cleaningMethod.rawValue) Options")
+                    .font(.headline)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Window size")
+                            .font(.caption)
+                        Spacer()
+                        Stepper(
+                            "\(artifact.localTemplateWindowSize) events",
+                            value: Binding(
+                                get: { artifact.localTemplateWindowSize },
+                                set: { newValue in
+                                    artifact.localTemplateWindowSize = newValue
+                                    onSettingsChange()
+                                }
+                            ),
+                            in: DefinedArtifact.minimumLocalTemplateWindowSize...DefinedArtifact.maximumLocalTemplateWindowSize,
+                            step: 2
+                        )
+                    }
+                    Text("Number of neighboring events (centered on the current one) used to build each local template.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Decay factor")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%.2f", artifact.waasDecayFactor))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { artifact.waasDecayFactor },
+                                set: { newValue in
+                                    artifact.waasDecayFactor = newValue
+                                    onSettingsChange()
+                                }
+                            ),
+                            in: 0.5...0.99
+                        )
+                        Text("Weight of an event at distance d is decay^d — lower values favor nearby events more strongly (Goldman 2000).")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(16)
+            .frame(width: 320)
+        }
+    }
+}
+
 struct ArtifactOBSOptionsSheet: View {
     @Binding var artifact: DefinedArtifact
     let signal: MFFSignalData
@@ -1373,7 +1447,7 @@ struct ArtifactCleaningPreview: View {
         var validWindows: [ValidWindow] = []
         validWindows.reserveCapacity(artifact.events.count)
         for event in artifact.events {
-            let center = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
+            let center = Int((event.centerTimeSeconds * signal.samplingRate).rounded())
             let start = center - windowSamples / 2
             let end = start + windowSamples
             guard start >= 0, end <= sampleCount else { continue }

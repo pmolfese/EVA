@@ -20,14 +20,22 @@
 //
 //  Removes MR gradient artifact from simultaneous EEG/fMRI recordings using a
 //  per-TR template: each TR-length segment is linearly detrended, a template is
-//  built from a weighted average of neighboring detrended TRs, and that template
-//  is subtracted from the segment.
+//  built from neighboring detrended TRs, and that template is subtracted from
+//  (AAS/MAS) or regressed out of (MAR) the segment.
 //
 //  TR onsets are the evenly spaced scanner volume triggers — in EGI MFF files
 //  these are the `TREV` events.
 //
 //  Each channel is corrected independently, so the work is run across all CPU
 //  cores, and the per-segment math uses Accelerate (vDSP).
+//
+//  MAS/MAR (median-reduced template, with optional regression fit instead of
+//  plain subtraction) are inspired by the same-named methods in `amri_eeg_gac.m`
+//  from the Advanced MRI (AMRI) section, NINDS, NIH MATLAB toolbox
+//  (https://amri.ninds.nih.gov/software.html; GPL-3.0), itself implementing:
+//  Liu Z, de Zwart JA, van Gelderen P, Kuo L-W, Duyn JH. Statistical feature
+//  extraction for artifact removal from concurrent fMRI-EEG recordings.
+//  NeuroImage (2012), 59(3): 2073-2087. See THIRD_PARTY_NOTICES.md.
 //
 
 import Accelerate
@@ -63,6 +71,28 @@ struct GradientRemover {
         nonisolated static let `default` = Window(before: 4, after: 4)
     }
 
+    /// How the neighboring-TR template is combined. `.weightedMean` is the
+    /// original AAS behavior (before/after weighted by window size);
+    /// `.median` (MAS/MAR) takes the elementwise median across the combined
+    /// before+after donor TRs, which is more robust to an occasional
+    /// corrupted donor volume than a mean ever can be.
+    enum TemplateReducer: Sendable {
+        case weightedMean
+        case median
+    }
+
+    /// Whether the template is subtracted as-is (AAS/MAS) or scaled by a
+    /// least-squares fit before subtracting (AAR/MAR) — the fit lets the
+    /// template's amplitude adapt to slow gradient-artifact drift that a
+    /// fixed 1:1 subtraction can't track. Fit direction matches
+    /// `amri_eeg_gac.m`'s AAR/MAR: `k = dot(y, template) / dot(y, y)`, i.e.
+    /// solving `template ≈ k · y` in least squares, then subtracting `k ·
+    /// template` from `y`.
+    enum TemplateFit: Sendable {
+        case subtract
+        case regress
+    }
+
     /// Runs gradient correction on `channels` (shape: channels × time).
     ///
     /// - Parameters:
@@ -85,6 +115,8 @@ struct GradientRemover {
         window: Window = .default,
         spacingTolerance: Int = 1,
         excludedTRs: Set<Int> = [],
+        reducer: TemplateReducer = .weightedMean,
+        fit: TemplateFit = .subtract,
         progress: (@Sendable (Double) -> Void)? = nil
     ) throws -> [[Float]] {
         try Task.checkCancellation()
@@ -138,7 +170,9 @@ struct GradientRemover {
                     window: window,
                     weightBefore: weightBefore,
                     weightAfter: weightAfter,
-                    excludedTRs: excludedTRs
+                    excludedTRs: excludedTRs,
+                    reducer: reducer,
+                    fit: fit
                 )
 
                 if let progress {
@@ -166,7 +200,9 @@ struct GradientRemover {
         window: Window,
         weightBefore: Float,
         weightAfter: Float,
-        excludedTRs: Set<Int> = []
+        excludedTRs: Set<Int> = [],
+        reducer: TemplateReducer = .weightedMean,
+        fit: TemplateFit = .subtract
     ) -> [Float] {
         // Detrend every TR segment once (Python caches detrended TRs lazily).
         var detrended = [[Float]]()
@@ -211,41 +247,67 @@ struct GradientRemover {
                 continue
             }
 
-            // Renormalize weights when one side has no surviving donors so the
-            // template amplitude stays correct.
-            let wB: Float
-            let wA: Float
-            if !beforeIdx.isEmpty && !afterIdx.isEmpty {
-                wB = weightBefore; wA = weightAfter
-            } else if !beforeIdx.isEmpty {
-                wB = 1; wA = 0
-            } else {
-                wB = 0; wA = 1
+            switch reducer {
+            case .weightedMean:
+                // Renormalize weights when one side has no surviving donors so
+                // the template amplitude stays correct.
+                let wB: Float
+                let wA: Float
+                if !beforeIdx.isEmpty && !afterIdx.isEmpty {
+                    wB = weightBefore; wA = weightAfter
+                } else if !beforeIdx.isEmpty {
+                    wB = 1; wA = 0
+                } else {
+                    wB = 0; wA = 1
+                }
+
+                // template = wB * mean(before TRs) + wA * mean(after TRs)
+                for i in 0..<spacing { template[i] = 0 }
+                if wB > 0 {
+                    accumulateMean(of: detrended, indices: beforeIdx, scale: wB, into: &template)
+                }
+                // CORRECTNESS FIX (diverges from upstream Python on purpose):
+                // The reference gradient_remover computes the "after" part as
+                //   self._get_tr_template_part(n + 1, n + self.window[1] - 1)
+                // i.e. range(n+1, n+window.after-1), which averages only
+                // window.after - 2 TRs (just 2 of the intended 4 with the default
+                // window). That is an off-by-one: weight_after is window.after /
+                // (window.before + window.after) = 0.5, sized for window.after TRs,
+                // and the "before" side uses the full window.before TRs — so the
+                // template is asymmetric and under-counts post-volumes.
+                // We use range(n+1 ..< n+window.after+1) → the full window.after TRs,
+                // symmetric with "before". (Verified against
+                // github.com/nimh-sfim/gradient_remover GradientRemover.py, main.)
+                if wA > 0 {
+                    accumulateMean(of: detrended, indices: afterIdx, scale: wA, into: &template)
+                }
+
+            case .median:
+                // MAS/MAR: elementwise median across the combined before+after
+                // donor TRs — no before/after weighting, since a median doesn't
+                // compose the way a weighted mean does. Robust to an occasional
+                // corrupted donor volume without needing outlier detection.
+                template = elementwiseMedian(of: detrended, indices: beforeIdx + afterIdx, length: spacing)
             }
 
-            // template = wB * mean(before TRs) + wA * mean(after TRs)
-            for i in 0..<spacing { template[i] = 0 }
-            if wB > 0 {
-                accumulateMean(of: detrended, indices: beforeIdx, scale: wB, into: &template)
-            }
-            // CORRECTNESS FIX (diverges from upstream Python on purpose):
-            // The reference gradient_remover computes the "after" part as
-            //   self._get_tr_template_part(n + 1, n + self.window[1] - 1)
-            // i.e. range(n+1, n+window.after-1), which averages only
-            // window.after - 2 TRs (just 2 of the intended 4 with the default
-            // window). That is an off-by-one: weight_after is window.after /
-            // (window.before + window.after) = 0.5, sized for window.after TRs,
-            // and the "before" side uses the full window.before TRs — so the
-            // template is asymmetric and under-counts post-volumes.
-            // We use range(n+1 ..< n+window.after+1) → the full window.after TRs,
-            // symmetric with "before". (Verified against
-            // github.com/nimh-sfim/gradient_remover GradientRemover.py, main.)
-            if wA > 0 {
-                accumulateMean(of: detrended, indices: afterIdx, scale: wA, into: &template)
-            }
+            switch fit {
+            case .subtract:
+                // corrected = detrended[n] - template
+                vDSP.subtract(detrended[n], template, result: &corrected)
 
-            // corrected = detrended[n] - template
-            vDSP.subtract(detrended[n], template, result: &corrected)
+            case .regress:
+                // MAR/AAR: scale the template by a least-squares fit before
+                // subtracting, so its amplitude can adapt to slow gradient
+                // drift a fixed 1:1 subtraction can't track. Matches
+                // amri_eeg_gac.m's AAR/MAR: k = dot(y, template) / dot(y, y),
+                // solving "template ≈ k · y" (y = detrended[n]) in least
+                // squares, then corrected = y - k · template.
+                let k = regressionCoefficient(y: detrended[n], template: template)
+                var scaledTemplate = template
+                var kScalar = k
+                vDSP_vsmul(template, 1, &kScalar, &scaledTemplate, 1, vDSP_Length(spacing))
+                vDSP.subtract(detrended[n], scaledTemplate, result: &corrected)
+            }
             row.replaceSubrange(start..<(start + spacing), with: corrected)
         }
 
@@ -265,6 +327,35 @@ struct GradientRemover {
             // accumulator += factor * segments[tr]
             vDSP.add(multiplication: (segments[tr], factor), accumulator, result: &accumulator)
         }
+    }
+
+    /// Elementwise median of `segments[indices]`, each of length `length`.
+    /// Returns an all-zero template if `indices` is empty.
+    nonisolated private static func elementwiseMedian(
+        of segments: [[Float]],
+        indices: [Int],
+        length: Int
+    ) -> [Float] {
+        guard !indices.isEmpty else { return [Float](repeating: 0, count: length) }
+        var result = [Float](repeating: 0, count: length)
+        var column = [Float](repeating: 0, count: indices.count)
+        for i in 0..<length {
+            for (row, tr) in indices.enumerated() { column[row] = segments[tr][i] }
+            column.sort()
+            let mid = column.count / 2
+            result[i] = column.count % 2 == 0 ? (column[mid - 1] + column[mid]) / 2 : column[mid]
+        }
+        return result
+    }
+
+    /// Least-squares scalar fit of `template ≈ k · y`: `k = dot(y, template) / dot(y, y)`.
+    nonisolated private static func regressionCoefficient(y: [Float], template: [Float]) -> Float {
+        var denom: Float = 0
+        vDSP_dotpr(y, 1, y, 1, &denom, vDSP_Length(y.count))
+        guard denom > 1e-12 else { return 0 }
+        var numer: Float = 0
+        vDSP_dotpr(y, 1, template, 1, &numer, vDSP_Length(y.count))
+        return numer / denom
     }
 
     /// Least-squares linear detrend of a single channel segment

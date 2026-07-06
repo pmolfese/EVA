@@ -1005,8 +1005,17 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
     case virtualECGPCA  = "virtualECGPCA"
     case panTompkinsProxy = "panTompkinsProxy"
     case qrsLocking     = "qrsLocking"
+    case cwlRegression  = "cwlRegression"
 
     var id: String { rawValue }
+
+    /// True for methods that directly correct the signal from an external
+    /// reference (no beat/event detection step). The BCG sheet skips the
+    /// shared event-code/threshold/window controls and swaps the action
+    /// button to "Correct" for these.
+    var isDirectCorrection: Bool {
+        self == .cwlRegression
+    }
 
     var tabLabel: String {
         switch self {
@@ -1016,6 +1025,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
         case .virtualECGPCA:    return "Virtual ECG"
         case .panTompkinsProxy: return "Pan-Tompkins"
         case .qrsLocking:       return "QRS Lock"
+        case .cwlRegression:    return "CWL"
         }
     }
 
@@ -1033,6 +1043,8 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
             return "Run the Pan-Tompkins QRS backbone (bandpass → derivative → squaring → moving-window integration → adaptive thresholding) directly on the BCG-channel group. The high-amplitude proxy deflection has a sharp transient the QRS detector locks onto. Select a BCG channel set below."
         case .qrsLocking:
             return "Offset each detected R-wave by a fixed mechanical delay. Requires ECG / QRS detection to be active. The lag from QRS to BCG onset is typically 200–400 ms — adjust to align peaks."
+        case .cwlRegression:
+            return "Carbon-wire-loop (CWL) correction: no detection step. Each EEG channel is regressed against the selected CWL reference channels at a small range of time lags and the fit is subtracted, in a sliding window that adapts to slowly drifting coupling. Requires CWL leads imported as PNS channels."
         }
     }
 }

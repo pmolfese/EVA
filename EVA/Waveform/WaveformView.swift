@@ -28,6 +28,13 @@ import UniformTypeIdentifiers
 enum MRIGradientMethod: String, CaseIterable, Identifiable {
     /// Average artifact subtraction — the per-TR template in `GradientRemover`.
     case aas = "AAS"
+    /// Median artifact subtraction — same per-TR template, elementwise median
+    /// instead of a weighted mean across donor TRs. Inspired by `amri_eeg_gac.m`
+    /// (AMRI toolbox, NINDS/NIH; see THIRD_PARTY_NOTICES.md).
+    case mas = "MAS"
+    /// Median artifact regression — MAS template, scaled by a least-squares
+    /// fit before subtracting. Inspired by `amri_eeg_gac.m`.
+    case mar = "MAR"
     /// FMRIB Artifact Slice Template Removal (Niazy 2005) with OBS/ANC.
     case fastr = "FASTR"
     /// FASTR with Moosmann (2009) realignment-parameter-informed averaging.
@@ -40,6 +47,8 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .aas: return "AAS"
+        case .mas: return "MAS"
+        case .mar: return "MAR"
         case .fastr: return "FASTR"
         case .moosmann: return "Moosmann"
         case .farm: return "FARM"
@@ -48,6 +57,10 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
 
     /// Whether this method runs the FASTR pipeline (slice/OBS/ANC options apply).
     var isFASTR: Bool { self == .fastr || self == .moosmann || self == .farm }
+
+    /// Whether this method runs through `GradientRemover`'s per-TR template
+    /// path (as opposed to the FASTR pipeline).
+    var isTemplateBased: Bool { self == .aas || self == .mas || self == .mar }
 }
 
 struct WaveformView: View {
@@ -375,7 +388,7 @@ struct WaveformView: View {
                 // band-pass → artifact-cleaned → interpolated-channel overlay.
                 // `base` is what filtering builds on; `preArtifact` is the
                 // reversible source used by Clean Artifacts.
-                let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+                let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
                 let preArtifact = filter.output ?? base
                 let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
                 // Wavelet reduction stage: computed from `processed`, applied
@@ -796,7 +809,10 @@ struct WaveformView: View {
         }
         .sheet(isPresented: $bcg.showsSheet) {
             bcgDetectionSheet(for: continuousSignal, selection: activeSelectionRange(in: continuousSignal))
-                .onAppear { autoSelectBCGProxySetIfEnabled(for: continuousSignal) }
+                .onAppear {
+                    autoSelectBCGProxySetIfEnabled(for: continuousSignal)
+                    prepareCWLDefaults(pns: displayedPhysioSignal())
+                }
         }
         .sheet(isPresented: $waveletExplorer.showsSheet) {
             waveletArtifactExplorerSheet(for: continuousSignal)
@@ -1569,9 +1585,14 @@ struct WaveformView: View {
                     laneCount: eventLaneCount,
                     onSelectEvent: { event, color in
                         // Toggle: tapping the highlighted flag again clears it.
-                        // Artifact-detection events carry centered windows;
-                        // imported MFF events use onset+forward duration, so they
-                        // are not highlighted with this centered band.
+                        // Only artifact-detection events (defined artifacts,
+                        // eye-artifact threshold detection) get this band;
+                        // imported MFF events aren't highlighted this way. The
+                        // band itself centers on `event.centerTimeSeconds`,
+                        // which already accounts for onset-tagged sources
+                        // (Topography/Continuous) vs. center-tagged ones
+                        // (Template/Trajectory/threshold detection) — see
+                        // `MFFEvent.centerTimeSeconds`.
                         if highlightedArtifactEvent?.id == event.id {
                             highlightedArtifactEvent = nil
                         } else if isCenteredArtifactDetectionEvent(event) {

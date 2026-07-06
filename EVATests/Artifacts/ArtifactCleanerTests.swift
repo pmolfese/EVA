@@ -271,6 +271,46 @@ struct ArtifactCleanerTests {
         }
     }
 
+    // MARK: - MFFEvent.centerTimeSeconds
+
+    /// Waveform-template and Trajectory scanning stamp `beginTimeSeconds` as
+    /// the event's *center* directly (a pre-existing quirk of those two
+    /// scanners) — `centerTimeSeconds` must pass that through unchanged, or
+    /// every cleaning method (which centers its window on it) would shift.
+    @Test func centerTimeSecondsPassesThroughForCenterTaggedSources() {
+        let templateEvent = MFFEvent(
+            id: "t", code: "BLINK", beginTimeSeconds: 12.5, rawBeginTime: "12.5",
+            sourceFile: "Template 80%", durationSeconds: 0.3
+        )
+        #expect(templateEvent.centerTimeSeconds == 12.5)
+
+        let trajectoryEvent = MFFEvent(
+            id: "j", code: "BCG", beginTimeSeconds: 4.0, rawBeginTime: "4.0",
+            sourceFile: "Trajectory 85%", durationSeconds: 0.5
+        )
+        #expect(trajectoryEvent.centerTimeSeconds == 4.0)
+    }
+
+    /// Single-map Topography and Continuous-scan events stamp `beginTimeSeconds`
+    /// as the true *onset* — `centerTimeSeconds` must add half the event's own
+    /// (possibly variable) duration to find the middle, or a cleaning window
+    /// centered on it lands near the artifact's leading edge instead, which is
+    /// what motivated this fix (reported as a polarity-looking mismatch on a
+    /// long, variable-duration Continuous-scan artifact).
+    @Test func centerTimeSecondsAddsHalfDurationForOnsetTaggedSources() {
+        let topographyEvent = MFFEvent(
+            id: "p", code: "EYEM", beginTimeSeconds: 10.0, rawBeginTime: "10.0",
+            sourceFile: "Topography 80%", durationSeconds: 0.2
+        )
+        #expect(abs(topographyEvent.centerTimeSeconds - 10.1) < 1e-9)
+
+        let continuousEvent = MFFEvent(
+            id: "c", code: "EYEM", beginTimeSeconds: 20.0, rawBeginTime: "20.0",
+            sourceFile: "Continuous 80%", durationSeconds: 1.2
+        )
+        #expect(abs(continuousEvent.centerTimeSeconds - 20.6) < 1e-9)
+    }
+
     @Test func obsVarianceReportNilWhenNoEventsFallInRange() {
         let template = SyntheticSignal.bump(width: windowSamples)
         // Event far beyond the signal's duration.

@@ -17,8 +17,41 @@
 //  Reversible artifact-cleaning methods built from user-defined artifact
 //  templates and their detected event windows.
 //
+//  MAS/MAR/wAAS/wAAR build a *local* template per event from a moving window
+//  of neighboring events (median, or Goldman-2000 exponentially-weighted mean),
+//  rather than one fixed template for the whole recording — better suited to
+//  quasi-periodic artifacts like BCG whose morphology/amplitude drifts over
+//  the recording. Inspired by the same-named methods in `amri_eeg_cbc.m` from
+//  the Advanced MRI (AMRI) section, NINDS, NIH MATLAB toolbox
+//  (https://amri.ninds.nih.gov/software.html; GPL-3.0), itself implementing:
+//  Liu Z, de Zwart JA, van Gelderen P, Kuo L-W, Duyn JH. Statistical feature
+//  extraction for artifact removal from concurrent fMRI-EEG recordings.
+//  NeuroImage (2012), 59(3): 2073-2087. See THIRD_PARTY_NOTICES.md.
+//
 
 import Foundation
+
+extension MFFEvent {
+    /// This event's true center in time, correcting for the two conventions
+    /// EVA's detectors use for `beginTimeSeconds`: waveform-template matching
+    /// and Trajectory (map-sequence) scanning stamp the *center* sample
+    /// directly; single-map Topography and Continuous-scan topography stamp
+    /// the true *onset* (matching the general Onset+Duration convention used
+    /// everywhere else — see the event detail popover), so their center is
+    /// onset + half their own measured duration, not `beginTimeSeconds` as-is.
+    /// Every place that needs "the middle of this event" (cleaning windows,
+    /// OBS alignment search, averaged-template previews) should read this
+    /// instead of `beginTimeSeconds` directly, or it'll center on the wrong
+    /// sample for onset-tagged events — most visibly wrong for Continuous
+    /// events, whose duration varies per event rather than matching a fixed
+    /// nominal window.
+    var centerTimeSeconds: Double {
+        if sourceFile.hasPrefix("Topography") || sourceFile.hasPrefix("Continuous") {
+            return beginTimeSeconds + (durationSeconds ?? 0) / 2
+        }
+        return beginTimeSeconds
+    }
+}
 
 enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable {
     case ocular = "Ocular Artifact"
@@ -27,6 +60,38 @@ enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable 
     case other = "Other"
 
     var id: String { rawValue }
+
+    /// Suggested minimum spacing between detected events of this type, used
+    /// to pre-fill "Define Artifact"'s merge window (`ArtifactTemplateViewModel
+    /// .mergeWindowSeconds`) when the artifact type is chosen or changed.
+    /// BCG/ECG are quasi-periodic biological signals with a hard physiological
+    /// ceiling on repetition rate (no adult heartbeat exceeds ~240 BPM), so two
+    /// hits closer than that are almost certainly the same beat detected
+    /// twice. This errs on the generous side (240 BPM) instead of a typical
+    /// resting rate, to avoid ever swallowing a genuine second beat during
+    /// tachycardia. Ocular/Other have no such floor, so they keep a
+    /// conservative generic default.
+    var defaultMergeWindowSeconds: Double {
+        switch self {
+        case .bcg, .ecg: return 0.25
+        case .ocular: return 0.20
+        case .other: return 0.25
+        }
+    }
+
+    /// Suggested merge behavior for this type, used to pre-fill "Define
+    /// Artifact"'s merge-behavior control alongside `defaultMergeWindowSeconds`.
+    /// Discard (keep only the best-scoring hit) is the safe default for every
+    /// type — a well-chosen exemplar and threshold shouldn't normally produce
+    /// many overlapping hits. Ocular's long/variable-duration case (one long
+    /// eye movement scoring at several overlapping offsets) is better solved
+    /// by the topography panel's Continuous scan style, which measures a
+    /// genuine variable-length span directly instead of stitching together
+    /// several fixed-width waveform hits — so Extend is available as a manual
+    /// override, but no longer the default for any type.
+    var defaultMergeBehavior: ArtifactTemplateMergeBehavior {
+        .discard
+    }
 }
 
 enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -34,11 +99,27 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
     case regression = "Regress"
     case obs = "OBS"
     case sspPCA = "SSP/PCA"
+    /// Median Artifact Subtraction — local (moving-window) median template.
+    case mas = "MAS"
+    /// Median Artifact Regression — MAS template, least-squares scaled before subtracting.
+    case mar = "MAR"
+    /// Weighted Average Artifact Subtraction (Goldman 2000) — local template
+    /// exponentially weighted by distance from the current event.
+    case waas = "wAAS"
+    /// Weighted Average Artifact Regression — wAAS template, least-squares scaled before subtracting.
+    case waar = "wAAR"
 
     var id: String { rawValue }
 
     nonisolated var removesArtifact: Bool {
         self != .doNothing
+    }
+
+    /// Whether this method builds a per-event *local* template from a moving
+    /// window of neighboring events, as opposed to one fixed global template
+    /// (`.regression`) or a spatial/PCA-based method (`.obs`, `.sspPCA`).
+    nonisolated var isLocalTemplateMethod: Bool {
+        self == .mas || self == .mar || self == .waas || self == .waar
     }
 }
 
@@ -101,6 +182,14 @@ struct DefinedArtifact: Identifiable, Sendable {
     nonisolated static let defaultOBSTopographyWeightStrength = 0.75
     nonisolated static let defaultOBSClusterCount = 2
     nonisolated static let maximumOBSClusterCount = 6
+    /// Moving-window size (in events) for MAS/MAR/wAAS/wAAR local templates.
+    /// Matches `amri_eeg_cbc.m`'s default (`moving_window.size = 21`).
+    nonisolated static let defaultLocalTemplateWindowSize = 21
+    nonisolated static let minimumLocalTemplateWindowSize = 5
+    nonisolated static let maximumLocalTemplateWindowSize = 101
+    /// wAAS/wAAR exponential decay factor. Matches `amri_eeg_cbc.m`'s default
+    /// (`wfactor = 0.9` [Goldman 2000]).
+    nonisolated static let defaultWAASDecayFactor = 0.9
 
     var id = UUID()
     var type: DefinedArtifactType
@@ -120,6 +209,8 @@ struct DefinedArtifact: Identifiable, Sendable {
     var obsAlignmentSearchSeconds = Self.defaultOBSAlignmentSearchSeconds
     var obsTopographyWeightStrength = Self.defaultOBSTopographyWeightStrength
     var obsClusterCount = Self.defaultOBSClusterCount
+    var localTemplateWindowSize = Self.defaultLocalTemplateWindowSize
+    var waasDecayFactor = Self.defaultWAASDecayFactor
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
 
@@ -137,6 +228,8 @@ struct DefinedArtifact: Identifiable, Sendable {
         obsAlignmentSearchSeconds = previous.obsAlignmentSearchSeconds
         obsTopographyWeightStrength = previous.obsTopographyWeightStrength
         obsClusterCount = previous.obsClusterCount
+        localTemplateWindowSize = previous.localTemplateWindowSize
+        waasDecayFactor = previous.waasDecayFactor
     }
 }
 
@@ -444,6 +537,14 @@ nonisolated enum ArtifactCleaner {
                     finalizingProgress: reportFinalizingProgress,
                     eventProgress: reportEventProgress
                 )
+            case .mas, .mar, .waas, .waar:
+                reportSetupProgress("Building local (moving-window) artifact templates")
+                channelCount = applyLocalTemplate(
+                    artifact: artifact,
+                    signal: signal,
+                    data: &data,
+                    eventProgress: reportEventProgress
+                )
             }
 
             if channelCount > 0 {
@@ -522,6 +623,180 @@ nonisolated enum ArtifactCleaner {
         }
 
         return cleanedChannels.count
+    }
+
+    /// MAS/MAR/wAAS/wAAR: builds a *local* template per event from a moving
+    /// window of neighboring events (median for MAS/MAR, Goldman-2000
+    /// exponentially-weighted mean for wAAS/wAAR), then either subtracts it
+    /// directly (MAS/wAAS) or scales it by a least-squares fit first
+    /// (MAR/wAAR) — matching `amri_eeg_cbc.m`'s local-pulse-artifact-template
+    /// logic (see file header for citation).
+    ///
+    /// Each channel is corrected independently (its template only ever draws
+    /// on that same channel's own neighboring epochs), so channels are
+    /// processed across all CPU cores, mirroring `GradientRemover.correct`.
+    /// The donor-event window and wAAS/wAAR weights are purely structural —
+    /// they depend only on which events have a valid window, never on a
+    /// channel's data — so they're computed once up front instead of being
+    /// rebuilt identically for every channel in the montage.
+    private static func applyLocalTemplate(
+        artifact: DefinedArtifact,
+        signal: MFFSignalData,
+        data: inout [[Float]],
+        eventProgress: (Int) -> Void
+    ) -> Int {
+        guard let sampleCount = data.first?.count, sampleCount > 0 else { return 0 }
+
+        let windowSamples = windowSamples(for: artifact, signal: signal)
+        let ranges = artifact.events.map {
+            eventWindow(event: $0, windowSamples: windowSamples, sampleCount: sampleCount, samplingRate: signal.samplingRate)
+        }
+        guard ranges.contains(where: { $0 != nil }) else { return 0 }
+
+        let channels = SignalSelection.validChannels(in: data, sampleCount: sampleCount)
+        guard !channels.isEmpty else { return 0 }
+
+        let half = max(artifact.localTemplateWindowSize, 1) / 2
+        let isWeighted = artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar
+        let regresses = artifact.cleaningMethod == .mar || artifact.cleaningMethod == .waar
+        let decay = artifact.waasDecayFactor
+
+        // Built as plain `let`s (via map, not a mutating loop) so they're
+        // ordinary Sendable values the concurrent closure below can capture
+        // without needing an `unsafe` annotation — a `var` capture, even one
+        // never written to again, can't be proven race-free by the compiler.
+        let validEvents = Set(ranges.indices.filter { ranges[$0] != nil })
+        let donorsByEvent: [[Int]] = ranges.indices.map { eventIndex in
+            guard ranges[eventIndex] != nil else { return [] }
+            let lo = max(0, eventIndex - half)
+            let hi = min(ranges.count - 1, eventIndex + half)
+            return (lo...hi).filter { $0 != eventIndex && validEvents.contains($0) }
+        }
+        let weightsByEvent: [[Double]] = isWeighted
+            ? ranges.indices.map { eventIndex in
+                donorsByEvent[eventIndex].map { pow(decay, abs(Double($0 - eventIndex))) }
+            }
+            : Array(repeating: [], count: ranges.count)
+
+        let progressLock = NSLock()
+        nonisolated(unsafe) var completedChannels = 0
+        let reportEvery = max(1, channels.count / 20)
+        nonisolated(unsafe) var cleanedFlags = [Bool](repeating: false, count: channels.count)
+
+        data.withUnsafeMutableBufferPointer { out in
+            // Each iteration writes a distinct index, so concurrent writes
+            // don't overlap; same pattern as `GradientRemover.correct`.
+            nonisolated(unsafe) let out = out
+            evaConcurrentPerform(iterations: channels.count) { index in
+                guard !Task.isCancelled else { return }
+                let channel = channels[index]
+                let (corrected, cleaned) = correctChannelLocalTemplate(
+                    out[channel],
+                    ranges: ranges,
+                    donorsByEvent: donorsByEvent,
+                    weightsByEvent: weightsByEvent,
+                    isWeighted: isWeighted,
+                    regresses: regresses
+                )
+                out[channel] = corrected
+                cleanedFlags[index] = cleaned
+
+                progressLock.lock()
+                completedChannels += 1
+                let done = completedChannels
+                progressLock.unlock()
+                if done % reportEvery == 0 || done == channels.count {
+                    eventProgress(Int(Double(done) / Double(channels.count) * Double(ranges.count)))
+                }
+            }
+        }
+
+        return cleanedFlags.filter { $0 }.count
+    }
+
+    /// Corrects a single channel's events from its own neighboring epochs.
+    /// Snapshots the channel before any correction from this pass, so donor
+    /// epochs for one event aren't contaminated by an already-corrected
+    /// neighboring event within the same pass.
+    private static func correctChannelLocalTemplate(
+        _ channel: [Float],
+        ranges: [Range<Int>?],
+        donorsByEvent: [[Int]],
+        weightsByEvent: [[Double]],
+        isWeighted: Bool,
+        regresses: Bool
+    ) -> (channel: [Float], cleaned: Bool) {
+        let original = channel
+        var corrected = channel
+        let epochs: [[Float]?] = ranges.map { range in range.map { Array(original[$0]) } }
+        var cleaned = false
+
+        for (eventIndex, range) in ranges.enumerated() {
+            guard let range, let epoch = epochs[eventIndex] else { continue }
+            let donors = donorsByEvent[eventIndex]
+            guard !donors.isEmpty else { continue }
+
+            let template: [Float]
+            if isWeighted {
+                template = elementwiseWeightedMean(
+                    indices: donors,
+                    epochs: epochs,
+                    weights: weightsByEvent[eventIndex],
+                    length: range.count
+                )
+            } else {
+                template = elementwiseMedian(indices: donors, epochs: epochs, length: range.count)
+            }
+
+            if regresses {
+                let k = localRegressionCoefficient(y: epoch, template: template)
+                for i in 0..<range.count { corrected[range.lowerBound + i] -= k * template[i] }
+            } else {
+                for i in 0..<range.count { corrected[range.lowerBound + i] -= template[i] }
+            }
+            cleaned = true
+        }
+        return (corrected, cleaned)
+    }
+
+    /// Elementwise median across `epochs[indices]` (each of length `length`).
+    private static func elementwiseMedian(indices: [Int], epochs: [[Float]?], length: Int) -> [Float] {
+        guard !indices.isEmpty else { return [Float](repeating: 0, count: length) }
+        var result = [Float](repeating: 0, count: length)
+        var column = [Float](repeating: 0, count: indices.count)
+        for i in 0..<length {
+            for (row, idx) in indices.enumerated() { column[row] = epochs[idx]![i] }
+            column.sort()
+            let mid = column.count / 2
+            result[i] = column.count % 2 == 0 ? (column[mid - 1] + column[mid]) / 2 : column[mid]
+        }
+        return result
+    }
+
+    /// Weighted mean across `epochs[indices]` (each of length `length`), normalized by `weights` sum.
+    private static func elementwiseWeightedMean(indices: [Int], epochs: [[Float]?], weights: [Double], length: Int) -> [Float] {
+        guard !indices.isEmpty, indices.count == weights.count else { return [Float](repeating: 0, count: length) }
+        let totalWeight = weights.reduce(0, +)
+        guard totalWeight > 1e-12 else { return [Float](repeating: 0, count: length) }
+        var result = [Double](repeating: 0, count: length)
+        for (idx, weight) in zip(indices, weights) {
+            guard weight > 0, let segment = epochs[idx] else { continue }
+            for i in 0..<length { result[i] += weight * Double(segment[i]) }
+        }
+        return result.map { Float($0 / totalWeight) }
+    }
+
+    /// Least-squares scalar fit of `template ≈ k · y`: `k = dot(y, template) / dot(y, y)`.
+    /// Matches `amri_eeg_gac.m`/`amri_eeg_cbc.m`'s AAR/MAR/wAAR fit direction.
+    private static func localRegressionCoefficient(y: [Float], template: [Float]) -> Float {
+        var denom: Float = 0
+        var numer: Float = 0
+        for i in y.indices {
+            denom += y[i] * y[i]
+            numer += y[i] * template[i]
+        }
+        guard denom > 1e-12 else { return 0 }
+        return numer / denom
     }
 
     private static func applyOBS(
@@ -1058,7 +1333,7 @@ nonisolated enum ArtifactCleaner {
         guard searchSamples > 0 else { return fallbackRanges }
 
         return artifact.events.enumerated().map { index, event in
-            let nominalCenter = Int((event.beginTimeSeconds * samplingRate).rounded())
+            let nominalCenter = Int((event.centerTimeSeconds * samplingRate).rounded())
             let lower = max(nominalCenter - searchSamples, 0)
             let upper = min(nominalCenter + searchSamples, sampleCount - 1)
             guard lower <= upper else { return fallbackRanges.indices.contains(index) ? fallbackRanges[index] : nil }
@@ -1643,7 +1918,7 @@ nonisolated enum ArtifactCleaner {
         samplingRate: Double
     ) -> Range<Int>? {
         guard samplingRate > 0, windowSamples > 1, sampleCount >= windowSamples else { return nil }
-        let center = Int((event.beginTimeSeconds * samplingRate).rounded())
+        let center = Int((event.centerTimeSeconds * samplingRate).rounded())
         return eventWindow(centerSample: center, windowSamples: windowSamples, sampleCount: sampleCount)
     }
 

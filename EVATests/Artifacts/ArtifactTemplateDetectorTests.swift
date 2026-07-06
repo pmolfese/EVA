@@ -54,6 +54,168 @@ struct ArtifactTemplateDetectorTests {
         #expect(result.selectedEvents.count >= 3, "found \(result.selectedEvents.count) of \(positions.count)")
     }
 
+    /// Verifies `waveformStretchRange` actually does something: an artifact
+    /// whose duration differs from the exemplar (simulating natural
+    /// beat-to-beat/blink-to-blink duration variability) should be missed at
+    /// stretch = 0 but recovered once the search is allowed to compress or
+    /// stretch candidate windows before scoring — i.e. it picks whichever
+    /// stretch factor *maximizes* the match score, rather than only ever
+    /// testing the exemplar's exact width.
+    @Test func stretchRecoversArtifactOfDifferentDuration() {
+        let exemplarWidth = 50 // 0.2 s
+        let stretchedWidth = 65 // +30% longer than the exemplar
+        let exemplarPosition = 200
+        let stretchedPosition = 1200
+
+        var data: [[Float]] = (0..<4).map { c in
+            var state = UInt64(c + 1) &* 6364136223846793005 &+ 1
+            return (0..<count).map { _ -> Float in
+                state = state &* 6364136223846793005 &+ 1
+                return Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 2)
+            }
+        }
+        let exemplarShape = SyntheticSignal.bump(width: exemplarWidth)
+        let stretchedShape = SyntheticSignal.bump(width: stretchedWidth)
+        for c in 0..<4 {
+            for k in 0..<exemplarWidth { data[c][exemplarPosition + k] += exemplarShape[k] }
+            for k in 0..<stretchedWidth { data[c][stretchedPosition + k] += stretchedShape[k] }
+        }
+        let signal = SyntheticSignal.make(data, samplingRate: samplingRate)
+        let exemplarRange = exemplarPosition...(exemplarPosition + exemplarWidth - 1)
+
+        var noStretch = config(exemplar: exemplarRange)
+        noStretch.waveformStretchRange = 0
+        let resultNoStretch = ArtifactTemplateDetector.detect(in: signal, configuration: noStretch)
+        let foundStretchedNoStretch = resultNoStretch.selectedEvents.contains {
+            abs($0.beginTimeSeconds - Double(stretchedPosition + stretchedWidth / 2) / samplingRate) < 0.05
+        }
+
+        var withStretch = config(exemplar: exemplarRange)
+        withStretch.waveformStretchRange = 0.3
+        let resultWithStretch = ArtifactTemplateDetector.detect(in: signal, configuration: withStretch)
+        let stretchedEvent = resultWithStretch.selectedEvents.first {
+            abs($0.beginTimeSeconds - Double(stretchedPosition + stretchedWidth / 2) / samplingRate) < 0.05
+        }
+
+        #expect(!foundStretchedNoStretch, "stretch=0 should not match a 30%-longer artifact at this threshold")
+        #expect(stretchedEvent != nil, "stretch=0.3 should recover the 30%-longer artifact")
+
+        // The recovered event's matched duration should reflect the wider
+        // (stretched) window that scored best, not the exemplar's own width —
+        // direct evidence the search picked the *maximizing* stretch factor,
+        // not just the unstretched one.
+        if let stretchedEvent, let duration = stretchedEvent.durationSeconds {
+            let matchedSamples = duration * samplingRate
+            #expect(matchedSamples > Double(exemplarWidth) * 1.1, "matched window (\(matchedSamples) samples) should be wider than the exemplar (\(exemplarWidth))")
+        }
+    }
+
+    /// Reproduces the reported symptom: a single long, continuous artifact
+    /// (e.g. a slow eye movement) is really several exemplar-width sub-segments
+    /// stitched back-to-back, each independently scoring above threshold
+    /// against the (shorter) exemplar. `.discard` keeps only the best of those
+    /// and drops the rest (today's original behavior — reproducing "one long
+    /// movement reported as several separate events"); `.extend` should span
+    /// the whole run into one event covering close to the artifact's true
+    /// duration instead.
+    @Test func extendMergesOneLongArtifactIntoASingleEvent() {
+        let repeats = 3
+        let position = 800
+
+        var data: [[Float]] = (0..<4).map { c in
+            var state = UInt64(c + 1) &* 6364136223846793005 &+ 1
+            return (0..<count).map { _ -> Float in
+                state = state &* 6364136223846793005 &+ 1
+                return Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 2)
+            }
+        }
+        let shape = SyntheticSignal.bump(width: width)
+        for c in 0..<4 {
+            for r in 0..<repeats {
+                let start = position + r * width
+                for k in 0..<width { data[c][start + k] += shape[k] }
+            }
+        }
+        let signal = SyntheticSignal.make(data, samplingRate: samplingRate)
+        let exemplarRange = position...(position + width - 1)
+
+        var discardConfig = config(exemplar: exemplarRange)
+        discardConfig.mergeBehavior = .discard
+        let discardResult = ArtifactTemplateDetector.detect(in: signal, configuration: discardConfig)
+
+        var extendConfig = config(exemplar: exemplarRange)
+        extendConfig.mergeBehavior = .extend
+        let extendResult = ArtifactTemplateDetector.detect(in: signal, configuration: extendConfig)
+
+        #expect(discardResult.selectedEvents.count >= 2, "discard should split the repeated run into multiple events, found \(discardResult.selectedEvents.count)")
+        #expect(extendResult.selectedEvents.count == 1, "extend should collapse the run into a single event, found \(extendResult.selectedEvents.count)")
+
+        if let event = extendResult.selectedEvents.first, let duration = event.durationSeconds {
+            let matchedSamples = duration * samplingRate
+            #expect(matchedSamples > Double(width) * 1.5, "extended event (\(matchedSamples) samples) should cover much more than one exemplar-width window (\(width))")
+        }
+    }
+
+    /// Verifies the Continuous topography scan style: a long span where the
+    /// same fixed cross-channel spatial *ratio* is sustained (only amplitude
+    /// envelopes up and down, like a real eye movement) should be reported as
+    /// ONE event whose measured duration reflects the true span — not chopped
+    /// into several fixed-width windows the way Windowed scanning would.
+    @Test func continuousScanReportsOneVariableDurationEvent() {
+        let spatialShape: [Float] = [1.0, 0.6, -0.6, -1.0]
+        let longWidth = 300 // 1.2 s
+        let position = 800
+
+        var data: [[Float]] = (0..<4).map { c in
+            var state = UInt64(c + 1) &* 6364136223846793005 &+ 1
+            return (0..<count).map { _ -> Float in
+                state = state &* 6364136223846793005 &+ 1
+                return Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 2)
+            }
+        }
+        // A smooth, always-positive envelope (no zero-crossings) times a fixed
+        // spatial ratio across channels — the scalp map's *shape* stays
+        // constant throughout, only its amplitude rises and falls, mirroring
+        // how a real eye movement's topography stays fairly stable while its
+        // amplitude ramps up then back down.
+        let envelope = (0..<longWidth).map { i -> Float in
+            let x = Double(i) / Double(longWidth - 1)
+            return Float(sin(.pi * x)) * 60
+        }
+        for c in 0..<4 {
+            for k in 0..<longWidth {
+                data[c][position + k] += spatialShape[c] * envelope[k]
+            }
+        }
+        let signal = SyntheticSignal.make(data, samplingRate: samplingRate)
+
+        // Exemplar: a short window right at the envelope's peak, used to
+        // derive the Peak-map reference — same as a user highlighting a
+        // brief, clean snippet of the movement.
+        let peakCenter = position + longWidth / 2
+        let exemplarRange = (peakCenter - 10)...(peakCenter + 10)
+
+        var continuousConfig = config(exemplar: exemplarRange)
+        continuousConfig.topographyMode = .peak
+        continuousConfig.topographyChannelIndices = [0, 1, 2, 3]
+        continuousConfig.topographyScanStyle = .continuous
+        continuousConfig.matchThreshold = 0.8
+        continuousConfig.continuousMinDurationSeconds = 0.05
+        continuousConfig.continuousSmoothingSeconds = 0.08
+        continuousConfig.mergeWindowSeconds = 0.1
+
+        let result = ArtifactTemplateDetector.detect(in: signal, configuration: continuousConfig)
+
+        #expect(result.topographyEvents.count == 1, "continuous scan should report one event, found \(result.topographyEvents.count)")
+
+        if let event = result.topographyEvents.first, let duration = event.durationSeconds {
+            let matchedSamples = duration * samplingRate
+            // Should cover a large fraction of the true 300-sample span, not a
+            // small fixed window — the whole point of variable-duration output.
+            #expect(matchedSamples > 100, "continuous event (\(matchedSamples) samples) should cover most of the 300-sample artifact, not a small fixed window")
+        }
+    }
+
     @Test func flatSignalYieldsNoMatches() {
         // Pure low-amplitude noise, no planted artifact: exemplar window is just
         // noise and should not match elsewhere at a 0.8 threshold.

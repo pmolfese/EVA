@@ -335,9 +335,13 @@ extension WaveformView {
            let duration = event.durationSeconds, duration > 0,
            signal.samplingRate > 0,
            let sampleCount = signal.data.first?.count, sampleCount > 0 {
+            // `centerTimeSeconds` (not `beginTimeSeconds`) — Topography/Continuous
+            // events stamp their true onset, not their center, so centering the
+            // band on `beginTimeSeconds` directly would draw it half a duration
+            // too early for those sources.
             let halfWindow = duration / 2
-            let startSample = Int(((event.beginTimeSeconds - halfWindow) * signal.samplingRate).rounded())
-            let endSample = Int(((event.beginTimeSeconds + halfWindow) * signal.samplingRate).rounded())
+            let startSample = Int(((event.centerTimeSeconds - halfWindow) * signal.samplingRate).rounded())
+            let endSample = Int(((event.centerTimeSeconds + halfWindow) * signal.samplingRate).rounded())
             let lower = min(max(startSample, 0), sampleCount - 1)
             let upper = min(max(endSample, lower + 1), sampleCount)
             let lowerX = contentX(forSample: lower, in: signal)

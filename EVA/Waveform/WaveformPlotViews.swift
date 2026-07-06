@@ -1330,6 +1330,7 @@ struct EventTrackView: View {
         event.sourceFile.hasPrefix("Template ")
             || event.sourceFile.hasPrefix("Topography ")
             || event.sourceFile.hasPrefix("Trajectory ")
+            || event.sourceFile.hasPrefix("Continuous ")
     }
 
     /// Tap-to-open detail popover listing every populated field of the event.

@@ -16,6 +16,15 @@ import SwiftUI
 extension WaveformView {
     // MARK: - Artifact template definition
 
+    /// Whether the topography panel is actually running the Continuous scan
+    /// style right now — gated to Ocular artifacts using a single-map
+    /// reference (Map sequence is always its own kind of "continuous").
+    var isContinuousScan: Bool {
+        template.type == .ocular
+            && template.topographyMode != .trajectory
+            && template.topographyScanStyle == .continuous
+    }
+
     func defaultArtifactTemplateChannel(in signal: MFFSignalData) -> Int? {
         signal.data.indices.first { !channels.hidden.contains($0) && !channels.bad.contains($0) }
             ?? signal.data.indices.first { !channels.hidden.contains($0) }
@@ -114,7 +123,8 @@ extension WaveformView {
         template.windowSeconds = max(Double(range.upperBound - range.lowerBound + 1) / signal.samplingRate, 0.02)
         template.downsampleRate = min(250, signal.samplingRate)
         template.threshold = 0.70
-        template.mergeWindowSeconds = 0.25
+        template.mergeWindowSeconds = template.type.defaultMergeWindowSeconds
+        template.mergeBehavior = template.type.defaultMergeBehavior
         template.waveformStretchRange = 0
         template.polarity = .same
         template.topographyMode = .off
@@ -210,8 +220,21 @@ extension WaveformView {
         }
         .onChange(of: template.type) { _, newType in
             applyDefaultArtifactTemplateIdentity(for: newType)
+            template.mergeWindowSeconds = newType.defaultMergeWindowSeconds
+            template.mergeBehavior = newType.defaultMergeBehavior
+            // Continuous topography scanning is gated to Ocular artifacts.
+            if newType != .ocular { template.topographyScanStyle = .windowed }
         }
-        .onChange(of: template.topographyMode) { _, _ in
+        .onChange(of: template.name) { _, _ in
+            refreshDefinedArtifactIdentity()
+        }
+        .onChange(of: template.eventCode) { _, _ in
+            refreshDefinedArtifactIdentity()
+        }
+        .onChange(of: template.topographyMode) { _, newMode in
+            // Continuous scanning only applies to the single-map reference
+            // modes — Map sequence is already its own kind of "continuous".
+            if newMode == .trajectory { template.topographyScanStyle = .windowed }
             refreshTopographyIfNeeded(for: signal)
         }
         .onChange(of: template.topographyChannelScope) { _, _ in
@@ -369,18 +392,9 @@ extension WaveformView {
                     title: "Search Hz",
                     help: "Temporary downsample rate used while searching. Lower values are faster; 250 Hz is usually enough for slow artifacts like blinks."
                 )
-                HStack(spacing: 10) {
-                    TextField("Hz", value: $template.downsampleRate, format: .number.precision(.fractionLength(0)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                    ArtifactTemplateFieldLabel(
-                        title: "Merge (s)",
-                        help: "Hits within this time window of each other are merged into one artifact event, keeping the highest-scoring match. This prevents double-counting the same artifact."
-                    )
-                    TextField("Merge", value: $template.mergeWindowSeconds, format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                }
+                TextField("Hz", value: $template.downsampleRate, format: .number.precision(.fractionLength(0)))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
             }
 
             GridRow {
@@ -392,7 +406,30 @@ extension WaveformView {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 100)
                     .help("0.10 = ±10% stretch/compression.")
-                    .gridCellColumns(3)
+
+                ArtifactTemplateFieldLabel(
+                    title: "Merge (s)",
+                    help: "Hits within this time window of each other are merged into one artifact event, keeping the highest-scoring match. This prevents double-counting the same artifact. Pre-filled from the artifact Type — BCG/ECG default to 0.25 s (a 240 BPM physiological ceiling), since two hits closer than that are almost certainly the same beat; adjust freely."
+                )
+                TextField("Merge", value: $template.mergeWindowSeconds, format: .number.precision(.fractionLength(3)))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
+            }
+
+            GridRow {
+                ArtifactTemplateFieldLabel(
+                    title: "On Merge",
+                    help: "Extend: span merged hits from the first one's onset to the last one's offset, so one long artifact matched at several overlapping offsets is reported as a single event covering its full duration. Discard: keep only the single best-scoring hit and drop the rest (the original behavior) — better suited to point-like, fixed-duration artifacts like a heartbeat. Pre-filled from the artifact Type; adjust freely."
+                )
+                Picker("On Merge", selection: $template.mergeBehavior) {
+                    ForEach(ArtifactTemplateMergeBehavior.allCases) { behavior in
+                        Text(behavior.rawValue).tag(behavior)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 180)
+                .gridCellColumns(3)
             }
         }
     }
@@ -424,6 +461,62 @@ extension WaveformView {
                     }
                     .labelsHidden()
                     .frame(width: 180)
+                }
+
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Scan",
+                        help: "Windowed scores fixed-length candidate windows against the reference map (the original behavior). Continuous instead traces how closely every sample matches the reference and marks each continuous above-threshold stretch as one artifact, so its reported duration reflects how long the topography actually stayed similar — no fixed window length. Only available for Ocular artifacts using a single-map reference (Middle/Peak/Average, not Map sequence)."
+                    )
+                    Picker("Scan", selection: $template.topographyScanStyle) {
+                        ForEach(ArtifactTopographyScanStyle.allCases) { style in
+                            Text(style.rawValue).tag(style)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 180)
+                    .disabled(template.type != .ocular || template.topographyMode == .trajectory)
+
+                    if template.type != .ocular {
+                        Text("Ocular artifacts only")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else if template.topographyMode == .trajectory {
+                        Text("Map sequence is always continuous")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if isContinuousScan {
+                    GridRow {
+                        ArtifactTemplateFieldLabel(
+                            title: "Min Dur (s)",
+                            help: "Shortest contiguous above-threshold run that counts as an artifact. Shorter runs are rejected as noise."
+                        )
+                        TextField("Min", value: $template.continuousMinDurationSeconds, format: .number.precision(.fractionLength(3)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 90)
+
+                        ArtifactTemplateFieldLabel(
+                            title: "Max Dur (s)",
+                            help: "Longest contiguous run allowed; longer runs are rejected. 0 = uncapped."
+                        )
+                        TextField("Max", value: $template.continuousMaxDurationSeconds, format: .number.precision(.fractionLength(3)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 90)
+                    }
+
+                    GridRow {
+                        ArtifactTemplateFieldLabel(
+                            title: "Smoothing (s)",
+                            help: "Boxcar-smooths the per-sample similarity trace over this window before thresholding, so brief noise-driven dips (e.g. a low-amplitude moment mid-movement) don't fragment one continuous artifact into several short runs. Merge (s) below still bridges separate nearby runs afterward."
+                        )
+                        TextField("Smoothing", value: $template.continuousSmoothingSeconds, format: .number.precision(.fractionLength(3)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 90)
+                    }
                 }
 
                 GridRow {
@@ -540,11 +633,30 @@ extension WaveformView {
                 GridRow {
                     ArtifactTemplateFieldLabel(
                         title: "Merge (s)",
-                        help: "Hits within this time window of each other are merged into a single event (keeping the highest-scoring one). Prevents double-counting a single artifact."
+                        help: isContinuousScan
+                            ? "Separate contiguous runs closer than this are bridged into one event."
+                            : "Hits within this time window of each other are merged into a single event (keeping the highest-scoring one). Prevents double-counting a single artifact. Pre-filled from the artifact Type — BCG/ECG default to 0.25 s (a 240 BPM physiological ceiling), since two hits closer than that are almost certainly the same beat; adjust freely."
                     )
                     TextField("Merge", value: $template.mergeWindowSeconds, format: .number.precision(.fractionLength(3)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 100)
+                }
+
+                if !isContinuousScan {
+                    GridRow {
+                        ArtifactTemplateFieldLabel(
+                            title: "On Merge",
+                            help: "Extend: span merged hits from the first one's onset to the last one's offset, so a long artifact matched at several overlapping window positions is reported as a single event covering its full duration. Discard: keep only the single best-scoring hit and drop the rest (the original behavior) — better suited to point-like, fixed-duration artifacts like a heartbeat. Pre-filled from the artifact Type; adjust freely."
+                        )
+                        Picker("On Merge", selection: $template.mergeBehavior) {
+                            ForEach(ArtifactTemplateMergeBehavior.allCases) { behavior in
+                                Text(behavior.rawValue).tag(behavior)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 180)
+                    }
                 }
             }
 
@@ -1262,6 +1374,46 @@ extension WaveformView {
         clearAppliedArtifactCleaning()
     }
 
+    /// Re-stamps the current Name/Event Code onto the already-detected events
+    /// of the in-progress defined artifact, without requiring a rescan —
+    /// renaming doesn't change *which* samples were detected, just how
+    /// they're labeled, so there's no need to redo the (expensive) scan just
+    /// to reflect a text-field edit. No-ops until a scan has actually been
+    /// run/confirmed at least once (`template.definedArtifactID` is nil).
+    func refreshDefinedArtifactIdentity() {
+        guard let artifactID = template.definedArtifactID,
+              let index = template.definedArtifacts.firstIndex(where: { $0.id == artifactID }) else { return }
+
+        let name = template.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Artifact"
+        let eventCode = template.eventCode.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? name
+        let previousEventCode = template.definedArtifacts[index].eventCode
+
+        template.definedArtifacts[index].name = name
+        template.definedArtifacts[index].eventCode = eventCode
+        template.definedArtifacts[index].events = template.definedArtifacts[index].events.map { event in
+            MFFEvent(
+                id: event.id,
+                code: eventCode,
+                label: name,
+                eventDescription: event.eventDescription,
+                cell: event.cell,
+                beginTimeSeconds: event.beginTimeSeconds,
+                rawBeginTime: event.rawBeginTime,
+                sourceFile: event.sourceFile,
+                durationSeconds: event.durationSeconds
+            )
+        }
+
+        artifactVM.events = definedArtifactEventList()
+        // Keep the Events panel's code filter pointed at the (possibly
+        // renamed) code, so the just-renamed events don't silently vanish
+        // from view because the filter still names the old code.
+        if selectedEventCodes.contains(previousEventCode), previousEventCode != eventCode {
+            selectedEventCodes.remove(previousEventCode)
+            selectedEventCodes.insert(eventCode)
+        }
+    }
+
     func definedArtifactEvents(_ events: [MFFEvent], label: String) -> [MFFEvent] {
         events.map { event in
             MFFEvent(
@@ -1504,6 +1656,13 @@ extension WaveformView {
                 )
             }
 
+            if artifact.wrappedValue.cleaningMethod.isLocalTemplateMethod {
+                ArtifactLocalTemplateOptionsButton(
+                    artifact: artifact,
+                    onSettingsChange: clearAppliedArtifactCleaning
+                )
+            }
+
             if let appliedMethod = artifact.wrappedValue.appliedMethod {
                 if appliedMethod == artifact.wrappedValue.cleaningMethod {
                     HStack(spacing: 6) {
@@ -1534,6 +1693,8 @@ extension WaveformView {
         Regress: subtracts the average artifact waveform; useful as a historical/simple comparison.
         OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; Options includes topography-aware OBS strategies.
         SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
+        MAS/MAR: local (moving-window) median template — robust to an occasional distorted event; MAR additionally scales the template by a least-squares fit.
+        wAAS/wAAR: local template exponentially weighted toward nearby events (Goldman 2000); wAAR additionally scales the template by a least-squares fit.
         """
     }
 

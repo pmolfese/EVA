@@ -169,7 +169,7 @@ extension WaveformView {
     /// (rows only carry the possibly-epoched display signal). `nil` pre-load.
     var continuousProcessedSignal: MFFSignalData? {
         guard let rawSignal = recording.signal else { return nil }
-        let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+        let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
         let preArtifact = filter.output ?? base
         let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
         let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? processed) : processed
@@ -473,7 +473,7 @@ extension WaveformView {
 
     func currentChannelLabelMetricsSignal() -> MFFSignalData? {
         guard let rawSignal = recording.signal else { return nil }
-        let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+        let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
         let preArtifact = filter.output ?? base
         return artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
     }
