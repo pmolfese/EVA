@@ -28,6 +28,13 @@ import UniformTypeIdentifiers
 enum MRIGradientMethod: String, CaseIterable, Identifiable {
     /// Average artifact subtraction — the per-TR template in `GradientRemover`.
     case aas = "AAS"
+    /// Median artifact subtraction — same per-TR template, elementwise median
+    /// instead of a weighted mean across donor TRs. Inspired by `amri_eeg_gac.m`
+    /// (AMRI toolbox, NINDS/NIH; see THIRD_PARTY_NOTICES.md).
+    case mas = "MAS"
+    /// Median artifact regression — MAS template, scaled by a least-squares
+    /// fit before subtracting. Inspired by `amri_eeg_gac.m`.
+    case mar = "MAR"
     /// FMRIB Artifact Slice Template Removal (Niazy 2005) with OBS/ANC.
     case fastr = "FASTR"
     /// FASTR with Moosmann (2009) realignment-parameter-informed averaging.
@@ -40,6 +47,8 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .aas: return "AAS"
+        case .mas: return "MAS"
+        case .mar: return "MAR"
         case .fastr: return "FASTR"
         case .moosmann: return "Moosmann"
         case .farm: return "FARM"
@@ -48,6 +57,10 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
 
     /// Whether this method runs the FASTR pipeline (slice/OBS/ANC options apply).
     var isFASTR: Bool { self == .fastr || self == .moosmann || self == .farm }
+
+    /// Whether this method runs through `GradientRemover`'s per-TR template
+    /// path (as opposed to the FASTR pipeline).
+    var isTemplateBased: Bool { self == .aas || self == .mas || self == .mar }
 }
 
 struct WaveformView: View {
@@ -63,6 +76,7 @@ struct WaveformView: View {
     @Query private var markers: [UserMarker]
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
+    @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
 
     @State var recordingStore = RecordingStore()
     var amplitudeScale: Double {
@@ -137,6 +151,10 @@ struct WaveformView: View {
     @StateObject var epoching: EpochingViewModel
     @State var segmentedEpochSignal: MFFSignalData?
     @State var segmentedEpochSegments: [EpochSegment] = []
+    // Single Trial Analysis domain, extracted into an L4 store — reads the
+    // raw per-trial epochs above (segmentedEpochSignal/segmentedEpochSegments),
+    // not epoching's averaged output.
+    @StateObject var singleTrial: SingleTrialAnalysisViewModel
     @StateObject var eegAnalysis: EEGAnalysisViewModel
 
     // Band-pass / notch filtering (applied to the active base signal).
@@ -223,6 +241,7 @@ struct WaveformView: View {
     @State var mffExportTask: Task<Void, Never>?
     @State var bcgTask: Task<Void, Never>?
     @State var bcgRefinementTask: Task<Void, Never>?
+    @State var artifactIdentityRefreshTask: Task<Void, Never>?
 
     /// Keep the time slider visually comparable across sampling rates. The old
     /// fixed stride of 5 samples at 1000 Hz displayed about 200 plotted points/s.
@@ -233,6 +252,8 @@ struct WaveformView: View {
     private let eventTrackHeight: CGFloat = 64
     private let rowSpacing: CGFloat = 12
     let labelColumnWidth: CGFloat = 120
+    private let geometryUpdateQuantum: CGFloat = 0.5
+    private let jumpSliderUpdateQuantum = 0.0005
     private let eventsPanelWidth: CGFloat = 300
     private let topomapPanelWidth: CGFloat = 320
     private let butterflyPanelWidth: CGFloat = 360
@@ -328,6 +349,7 @@ struct WaveformView: View {
         _template = StateObject(wrappedValue: ArtifactTemplateViewModel(store: store))
         _ica = StateObject(wrappedValue: ICAViewModel(store: store))
         _epoching = StateObject(wrappedValue: EpochingViewModel(store: store))
+        _singleTrial = StateObject(wrappedValue: SingleTrialAnalysisViewModel(store: store))
         _eegAnalysis = StateObject(wrappedValue: EEGAnalysisViewModel(store: store))
         _filter = StateObject(wrappedValue: FilterViewModel(store: store))
         _wavelet = StateObject(wrappedValue: WaveletReductionViewModel(store: store))
@@ -375,7 +397,7 @@ struct WaveformView: View {
                 // band-pass → artifact-cleaned → interpolated-channel overlay.
                 // `base` is what filtering builds on; `preArtifact` is the
                 // reversible source used by Clean Artifacts.
-                let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+                let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
                 let preArtifact = filter.output ?? base
                 let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
                 // Wavelet reduction stage: computed from `processed`, applied
@@ -575,7 +597,7 @@ struct WaveformView: View {
     }
 
     /// The signal's own events plus user markers and generated in-memory artifact events, time-sorted.
-    private func displayedEvents(
+    func displayedEvents(
         for signal: MFFSignalData,
         includeContinuousOverlays: Bool = true,
         includeArtifactOverlays: Bool = true,
@@ -732,10 +754,11 @@ struct WaveformView: View {
                 includeArtifactOverlays: includeArtifactOverlays,
                 mapContinuousOverlaysIntoEpochs: isShowingEpochs
             )
+        let displayMode = epoching.isAveraged ? epoching.averagedDisplayMode : .waveform
 
         VStack(spacing: 0) {
             // Full-width button bar — side panels below must not shrink it.
-            if epoching.isAveraged, epoching.averagedDisplayMode == .averages {
+            if displayMode == .averages {
                 averagesToolbar(for: signal)
             } else {
                 controls(for: signal, base: base, waveletInput: waveletInput, continuousSignal: continuousSignal)
@@ -744,15 +767,18 @@ struct WaveformView: View {
             Divider()
 
             Group {
-                if epoching.isAveraged, epoching.averagedDisplayMode == .averages {
+                if displayMode == .averages {
                     averagesWorkspace(for: signal)
+                        .transition(.opacity)
+                } else if displayMode == .trials {
+                    singleTrialAnalysisWorkspace()
                         .transition(.opacity)
                 } else {
                     waveformWorkspace(for: signal, events: events, isShowingEpochs: isShowingEpochs)
                         .transition(.opacity)
                 }
             }
-            .animation(.easeInOut(duration: 0.16), value: epoching.averagedDisplayMode)
+            .animation(.easeInOut(duration: 0.16), value: displayMode)
         }
         .onAppear {
             refreshDisplayedEventsCache(
@@ -796,7 +822,10 @@ struct WaveformView: View {
         }
         .sheet(isPresented: $bcg.showsSheet) {
             bcgDetectionSheet(for: continuousSignal, selection: activeSelectionRange(in: continuousSignal))
-                .onAppear { autoSelectBCGProxySetIfEnabled(for: continuousSignal) }
+                .onAppear {
+                    autoSelectBCGProxySetIfEnabled(for: continuousSignal)
+                    prepareCWLDefaults(pns: displayedPhysioSignal())
+                }
         }
         .sheet(isPresented: $waveletExplorer.showsSheet) {
             waveletArtifactExplorerSheet(for: continuousSignal)
@@ -1267,8 +1296,8 @@ struct WaveformView: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .frame(width: 220)
-        .help("Switch between waveform rows and the averages workspace.")
+        .frame(width: 315)
+        .help("Switch between waveform rows, averages, and single-trial analysis.")
     }
 
     func toolbarStatusAndModeControls(for signal: MFFSignalData) -> some View {
@@ -1286,7 +1315,7 @@ struct WaveformView: View {
 
             if epoching.isAveraged {
                 averagedModePicker()
-                    .frame(width: 220)
+                    .frame(width: 315)
             }
         }
     }
@@ -1569,9 +1598,14 @@ struct WaveformView: View {
                     laneCount: eventLaneCount,
                     onSelectEvent: { event, color in
                         // Toggle: tapping the highlighted flag again clears it.
-                        // Artifact-detection events carry centered windows;
-                        // imported MFF events use onset+forward duration, so they
-                        // are not highlighted with this centered band.
+                        // Only artifact-detection events (defined artifacts,
+                        // eye-artifact threshold detection) get this band;
+                        // imported MFF events aren't highlighted this way. The
+                        // band itself centers on `event.centerTimeSeconds`,
+                        // which already accounts for onset-tagged sources
+                        // (Topography/Continuous) vs. center-tagged ones
+                        // (Template/Trajectory/threshold detection) — see
+                        // `MFFEvent.centerTimeSeconds`.
                         if highlightedArtifactEvent?.id == event.id {
                             highlightedArtifactEvent = nil
                         } else if isCenteredArtifactDetectionEvent(event) {
@@ -1626,7 +1660,7 @@ struct WaveformView: View {
                             GeometryReader { proxy in
                                 Color.clear
                                     .onChange(of: proxy.frame(in: .global).minX, initial: true) { _, newValue in
-                                        waveformContentMinX = newValue
+                                        updateWaveformContentMinX(newValue)
                                     }
                             }
                         )
@@ -1639,17 +1673,12 @@ struct WaveformView: View {
                         for: HorizontalViewport.self,
                         of: { geometry in
                             HorizontalViewport(
-                                offsetX: geometry.contentOffset.x,
-                                width: geometry.containerSize.width
+                                offsetX: quantizedGeometryValue(geometry.contentOffset.x),
+                                width: quantizedGeometryValue(geometry.containerSize.width)
                             )
                         },
                         action: { _, newValue in
-                            horizontalOffset = max(newValue.offsetX, 0)
-                            horizontalViewportWidth = max(newValue.width, 1)
-                            let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
-                            isSyncingSliderFromScroll = true
-                            horizontalJumpValue = maxOffset > 0 ? Double(horizontalOffset / maxOffset) : 0
-                            isSyncingSliderFromScroll = false
+                            updateHorizontalViewport(newValue, plotWidth: plotWidth)
                         }
                     )
                 }
@@ -2028,6 +2057,8 @@ struct WaveformView: View {
         bcgTask = nil
         bcgRefinementTask?.cancel()
         bcgRefinementTask = nil
+        artifactIdentityRefreshTask?.cancel()
+        artifactIdentityRefreshTask = nil
 
         filter.cancelInFlightWork()
         chanHealth.resetForClose()
@@ -2045,6 +2076,7 @@ struct WaveformView: View {
         template.resetForClose()
         wavelet.resetForClose()
         epoching.resetForClose()
+        singleTrial.resetForClose()
         bcg.resetForClose()
         ecg.resetForClose()
         eegAnalysis.resetForClose()
@@ -2248,6 +2280,47 @@ struct WaveformView: View {
     func displaySampleStride(for samplingRate: Double) -> Int {
         guard samplingRate > 0 else { return referenceDisplaySampleStride }
         return max(Int((samplingRate / targetDisplaySamplesPerSecond).rounded()), 1)
+    }
+
+    private func quantizedGeometryValue(_ value: CGFloat) -> CGFloat {
+        guard value.isFinite else { return 0 }
+        return (value / geometryUpdateQuantum).rounded() * geometryUpdateQuantum
+    }
+
+    private func updateWaveformContentMinX(_ newValue: CGFloat) {
+        let nextValue = quantizedGeometryValue(newValue)
+        guard abs(waveformContentMinX - nextValue) >= geometryUpdateQuantum else { return }
+        waveformContentMinX = nextValue
+    }
+
+    private func updateHorizontalViewport(_ viewport: HorizontalViewport, plotWidth: CGFloat) {
+        let nextOffset = max(viewport.offsetX, 0)
+        let nextWidth = max(viewport.width, 1)
+        let offsetChanged = abs(horizontalOffset - nextOffset) >= geometryUpdateQuantum
+        let widthChanged = abs(horizontalViewportWidth - nextWidth) >= geometryUpdateQuantum
+        guard offsetChanged || widthChanged else { return }
+
+        if offsetChanged {
+            horizontalOffset = nextOffset
+        }
+        if widthChanged {
+            horizontalViewportWidth = nextWidth
+        }
+
+        let resolvedOffset = offsetChanged ? nextOffset : horizontalOffset
+        let resolvedWidth = widthChanged ? nextWidth : horizontalViewportWidth
+        let maxOffset = max(plotWidth - resolvedWidth, 0)
+        let nextJumpValue = maxOffset > 0 ? Double(resolvedOffset / maxOffset) : 0
+        updateHorizontalJumpValueFromScroll(nextJumpValue)
+    }
+
+    private func updateHorizontalJumpValueFromScroll(_ newValue: Double) {
+        guard newValue.isFinite else { return }
+        let clamped = min(max(newValue, 0), 1)
+        guard abs(horizontalJumpValue - clamped) >= jumpSliderUpdateQuantum else { return }
+        isSyncingSliderFromScroll = true
+        horizontalJumpValue = clamped
+        isSyncingSliderFromScroll = false
     }
 
     var visibleHorizontalRange: ClosedRange<CGFloat> {

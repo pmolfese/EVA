@@ -280,7 +280,7 @@ extension WaveformView {
                     case .proceed: break
                     }
                 }
-                let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+                let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
                 let pnsInput = filter.filterPNS ? pnsFilterBaseSignal() : nil
                 await filter.apply(
                     to: base,
@@ -303,7 +303,7 @@ extension WaveformView {
                 ica.apply(parameters: params)
                 replay.banner = .init(title: "Running ICA…", detail: "Decomposing components.",
                                       showsSkip: false, progress: nil)
-                let base = gradient.correctedSignal ?? rawSignal
+                let base = bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
                 await runICADecomposition(on: base)
                 guard ica.decomposition != nil else { replay.banner = nil; continue loop }
                 openICASheet(for: base)
@@ -342,7 +342,7 @@ extension WaveformView {
                     case .proceed: break
                     }
                 }
-                let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+                let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
                 let preArtifact = filter.output ?? base
                 let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
                 await applyWaveletReduction(to: processed)

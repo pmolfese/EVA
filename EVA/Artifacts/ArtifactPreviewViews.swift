@@ -491,6 +491,148 @@ struct ArtifactOBSOptionsButton: View {
     }
 }
 
+struct ArtifactLocalTemplateOptionsButton: View {
+    @Binding var artifact: DefinedArtifact
+    let onSettingsChange: () -> Void
+
+    @State private var showsOptions = false
+
+    var body: some View {
+        Button("Options...") {
+            showsOptions = true
+        }
+        .font(.caption)
+        .popover(isPresented: $showsOptions) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("\(artifact.cleaningMethod.rawValue) Options")
+                    .font(.headline)
+
+                if artifact.cleaningMethod.isLocalTemplateMethod {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Window size")
+                                .font(.caption)
+                            Spacer()
+                            Stepper(
+                                "\(artifact.localTemplateWindowSize) events",
+                                value: Binding(
+                                    get: { artifact.localTemplateWindowSize },
+                                    set: { newValue in
+                                        artifact.localTemplateWindowSize = newValue
+                                        onSettingsChange()
+                                    }
+                                ),
+                                in: DefinedArtifact.minimumLocalTemplateWindowSize...DefinedArtifact.maximumLocalTemplateWindowSize,
+                                step: 2
+                            )
+                        }
+                        Text("Number of neighboring events (centered on the current one) used to build each local template.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Decay factor")
+                                    .font(.caption)
+                                Spacer()
+                                Text(String(format: "%.2f", artifact.waasDecayFactor))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Slider(
+                                value: Binding(
+                                    get: { artifact.waasDecayFactor },
+                                    set: { newValue in
+                                        artifact.waasDecayFactor = newValue
+                                        onSettingsChange()
+                                    }
+                                ),
+                                in: 0.5...0.99
+                            )
+                            Text("Weight of an event at distance d is decay^d — lower values favor nearby events more strongly (Goldman 2000).")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(
+                            "Preserve local baseline",
+                            isOn: Binding(
+                                get: { artifact.localTemplatePreservesLocalBaseline },
+                                set: { newValue in
+                                    artifact.localTemplatePreservesLocalBaseline = newValue
+                                    onSettingsChange()
+                                }
+                            )
+                        )
+                        .toggleStyle(.checkbox)
+                        Text("De-trends the correction so it matches the local signal's baseline at both edges of the window, instead of risking a DC/linear-drift step relative to the surrounding signal. Same mechanism as OBS's.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 10) {
+                            Text("Edge taper")
+                                .font(.caption)
+                            Slider(
+                                value: Binding(
+                                    get: { artifact.localTemplateEdgeTaperSeconds },
+                                    set: { newValue in
+                                        artifact.localTemplateEdgeTaperSeconds = min(max(newValue, 0), DefinedArtifact.maximumLocalTemplateEdgeTaperSeconds)
+                                        onSettingsChange()
+                                    }
+                                ),
+                                in: 0...DefinedArtifact.maximumLocalTemplateEdgeTaperSeconds,
+                                step: 0.01
+                            )
+                            Text("\(Int((artifact.localTemplateEdgeTaperSeconds * 1000).rounded())) ms")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 50, alignment: .trailing)
+                        }
+                        Text("Fades the subtraction in/out smoothly over this many seconds at each edge of the window, instead of cutting off sharply at the boundary. Bounded to half the (possibly per-event) window length.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Divider()
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(
+                        "Use each event's own duration",
+                        isOn: Binding(
+                            get: { artifact.usesVariableEventDuration },
+                            set: { newValue in
+                                artifact.usesVariableEventDuration = newValue
+                                onSettingsChange()
+                            }
+                        )
+                    )
+                    .toggleStyle(.checkbox)
+                    Text("Sizes each event's correction window from its own measured duration instead of one shared window — needed for artifacts whose events genuinely vary in length (e.g. Continuous topography scanning). Leave off when events cluster around one duration. Not available for OBS/SSP-PCA, which pool every event into one shared basis and require uniform-length epochs.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(16)
+            .frame(width: 320)
+        }
+    }
+}
+
 struct ArtifactOBSOptionsSheet: View {
     @Binding var artifact: DefinedArtifact
     let signal: MFFSignalData
@@ -512,6 +654,14 @@ struct ArtifactOBSOptionsSheet: View {
 
     private var hasTopography: Bool {
         artifact.topography != nil
+    }
+
+    /// Menu items in a `Picker` can't reliably show a hover tooltip on macOS,
+    /// so the reason a topography-requiring strategy is disabled has to be
+    /// visible in the label itself, not just a `.help()` that won't appear.
+    private func obsStrategyMenuLabel(for strategy: ArtifactOBSStrategy) -> String {
+        guard strategy.requiresTopography, !hasTopography else { return strategy.rawValue }
+        return "\(strategy.rawValue) (run topography scan first)"
     }
 
     private var obsStrategyBinding: Binding<ArtifactOBSStrategy> {
@@ -742,7 +892,7 @@ struct ArtifactOBSOptionsSheet: View {
 
             Picker("OBS strategy", selection: obsStrategyBinding) {
                 ForEach(ArtifactOBSStrategy.allCases) { strategy in
-                    Text(strategy.rawValue)
+                    Text(obsStrategyMenuLabel(for: strategy))
                         .tag(strategy)
                         .disabled(strategy.requiresTopography && !hasTopography)
                 }
@@ -751,6 +901,13 @@ struct ArtifactOBSOptionsSheet: View {
             .labelsHidden()
             .frame(width: 260, alignment: .leading)
             .help("Chooses how OBS builds and applies its artifact basis.")
+
+            if !hasTopography && ArtifactOBSStrategy.allCases.contains(where: \.requiresTopography) {
+                Text("Strategies marked above need a saved topography reference — run a topography scan in Define Artifact first.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(spacing: 6) {
                 Text(artifact.obsStrategy.helpText)
@@ -1373,7 +1530,7 @@ struct ArtifactCleaningPreview: View {
         var validWindows: [ValidWindow] = []
         validWindows.reserveCapacity(artifact.events.count)
         for event in artifact.events {
-            let center = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
+            let center = Int((event.centerTimeSeconds * signal.samplingRate).rounded())
             let start = center - windowSamples / 2
             let end = start + windowSamples
             guard start >= 0, end <= sampleCount else { continue }

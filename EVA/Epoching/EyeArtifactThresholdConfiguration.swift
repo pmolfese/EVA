@@ -51,25 +51,22 @@ nonisolated struct EyeArtifactThresholdConfiguration: Sendable, Codable, Equatab
     var channelOverride: [Int]?
 
     /// Preserves the original hard-coded behaviour (±150 µV, 0.05 s min, 0.25 s
-    /// merge, bipolar, auto channels) as the seed for each kind. Kinds share
-    /// defaults today; split here if they diverge.
+    /// merge, bipolar, auto channels) as the seed for each kind. Extra gates are
+    /// available in the settings sheet, but default to off so "default threshold"
+    /// remains compatible with earlier EVA releases.
     static func defaults(for kind: EyeArtifactKind) -> EyeArtifactThresholdConfiguration {
         switch kind {
         case .blink:
-            // A blink is a fast, brief deflection: it peaks within ~100 ms of
-            // onset and rarely lasts beyond ~500 ms. The rise window and max
-            // duration reject slow drifts that a bare amplitude threshold lets
-            // linger for seconds.
             return EyeArtifactThresholdConfiguration(
                 amplitudeMinMicrovolts: 150,
                 amplitudeMaxMicrovolts: 0,
-                riseWindowSeconds: 0.1,
+                riseWindowSeconds: 0,
                 velocityEnabled: false,
                 velocityThresholdMicrovoltsPerMillisecond: 5,
                 accelerationEnabled: false,
                 accelerationThresholdMicrovoltsPerMillisecondSquared: 2,
                 minDurationSeconds: 0.05,
-                maxDurationSeconds: 0.5,
+                maxDurationSeconds: 0,
                 mergeGapSeconds: 0.25,
                 polarity: .bipolar,
                 channelOverride: nil

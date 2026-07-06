@@ -157,6 +157,7 @@ extension WaveformView {
                         showsMembers: channelInspectorOverlayEnabled,
                         amplitudeScale: amplitudeScale,
                         colorFor: { epochColor(for: $0) },
+                        channelName: { eegChannelDisplayName(index: $0, signal: signal) },
                         standardErrorBands: standardErrorBands
                     )
                     .contextMenu {
@@ -172,10 +173,11 @@ extension WaveformView {
                                 segments: segments,
                                 indices: indices,
                                 showsMembers: channelInspectorOverlayEnabled,
-                                amplitudeScale: amplitudeScale,
-                                colorFor: { epochColor(for: $0) },
-                                standardErrorBands: standardErrorBands
-                            )
+                        amplitudeScale: amplitudeScale,
+                        colorFor: { epochColor(for: $0) },
+                        channelName: { eegChannelDisplayName(index: $0, signal: signal) },
+                        standardErrorBands: standardErrorBands
+                    )
                             .frame(width: 720, height: 320)
                         }
                     }
@@ -501,8 +503,11 @@ struct ChannelInspectorPlot: View {
     let showsMembers: Bool
     let amplitudeScale: Double
     let colorFor: (Int) -> Color
+    var channelName: ((Int) -> String)? = nil
     var highlightRelativeSample: Int? = nil
     var standardErrorBands: [String: ChannelInspectorStandardErrorBand] = [:]
+
+    @State private var hoverInfo: ChannelInspectorHoverInfo?
 
     var body: some View {
         GeometryReader { proxy in
@@ -572,7 +577,119 @@ struct ChannelInspectorPlot: View {
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
             .frame(width: proxy.size.width, height: proxy.size.height)
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    hoverInfo = nearestHoverInfo(at: location, in: proxy.size)
+                case .ended:
+                    hoverInfo = nil
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if let hoverInfo {
+                    ButterflyChannelBadge(
+                        name: hoverInfo.channelLabel,
+                        valueMicrovolts: hoverInfo.valueMicrovolts,
+                        detail: hoverInfo.detail
+                    )
+                    .padding(6)
+                    .allowsHitTesting(false)
+                }
+            }
         }
+    }
+
+    private struct ChannelInspectorHoverInfo {
+        let channelLabel: String
+        let valueMicrovolts: Double
+        let detail: String
+    }
+
+    private func nearestHoverInfo(at location: CGPoint, in size: CGSize) -> ChannelInspectorHoverInfo? {
+        guard let first = segments.first, first.endSample > first.startSample, size.width > 0 else { return nil }
+        let length = first.endSample - first.startSample + 1
+        let midY = size.height / 2
+        let scale = max(amplitudeScale, 1)
+        let xScale = size.width / CGFloat(length - 1)
+        let localSample = min(max(Int((location.x / xScale).rounded()), 0), length - 1)
+        let timeMs = signal.samplingRate > 0
+            ? Double(localSample - first.stimulusOffsetSamples) / signal.samplingRate * 1_000
+            : 0
+
+        var best: (value: Double, distance: CGFloat, label: String, detail: String)?
+        for segment in segments {
+            let length = max(segment.endSample - segment.startSample + 1, 1)
+            guard length > 1, localSample < length else { continue }
+            let averageTrace = average(indices: indices, segment: segment)
+            consider(
+                trace: averageTrace,
+                localSample: localSample,
+                location: location,
+                size: size,
+                midY: midY,
+                scale: scale,
+                label: averageTraceLabel(),
+                detail: "\(segment.category) · Avg · \(Int(timeMs.rounded())) ms",
+                best: &best
+            )
+
+            guard showsMembers, indices.count > 1 else { continue }
+            for index in indices {
+                guard signal.data.indices.contains(index),
+                      signal.data[index].count >= segment.endSample + 1 else { continue }
+                let trace = Array(signal.data[index][segment.startSample...segment.endSample])
+                consider(
+                    trace: trace,
+                    localSample: localSample,
+                    location: location,
+                    size: size,
+                    midY: midY,
+                    scale: scale,
+                    label: displayName(for: index),
+                    detail: "\(segment.category) · Member · \(Int(timeMs.rounded())) ms",
+                    best: &best
+                )
+            }
+        }
+
+        guard let best else { return nil }
+        return ChannelInspectorHoverInfo(
+            channelLabel: best.label,
+            valueMicrovolts: best.value,
+            detail: best.detail
+        )
+    }
+
+    private func consider(
+        trace: [Float],
+        localSample: Int,
+        location: CGPoint,
+        size: CGSize,
+        midY: CGFloat,
+        scale: Double,
+        label: String,
+        detail: String,
+        best: inout (value: Double, distance: CGFloat, label: String, detail: String)?
+    ) {
+        guard trace.indices.contains(localSample) else { return }
+        let value = Double(trace[localSample])
+        let y = midY - CGFloat(value / scale) * (size.height / 2) * 0.9
+        let distance = abs(y - location.y)
+        if best == nil || distance < best!.distance {
+            best = (value: value, distance: distance, label: label, detail: detail)
+        }
+    }
+
+    private func averageTraceLabel() -> String {
+        if indices.count == 1, let index = indices.first {
+            return displayName(for: index)
+        }
+        return "\(indices.count) ch avg"
+    }
+
+    private func displayName(for index: Int) -> String {
+        channelName?(index) ?? "Ch \(index + 1)"
     }
 
     private func average(indices: [Int], segment: EpochSegment) -> [Float] {

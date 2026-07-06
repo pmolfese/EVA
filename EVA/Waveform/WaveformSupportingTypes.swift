@@ -119,6 +119,9 @@ struct ArtifactScanSignature: Equatable {
 /// identical size regardless of how the system button/menu styles add padding.
 struct ToolbarIcon: View {
     let name: String
+    /// When set, renders this SF Symbol instead of the custom `name` asset —
+    /// for entries that don't have a bespoke icon in Assets.xcassets yet.
+    var systemName: String? = nil
     var label: String? = nil
     var isActive: Bool = false
     var inactiveForeground: Color = .primary
@@ -130,10 +133,7 @@ struct ToolbarIcon: View {
 
     var body: some View {
         VStack(spacing: hasLabel ? 3 : 0) {
-            Image(name)
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
+            iconImage
                 .frame(width: hasLabel ? 24 : 33, height: hasLabel ? 24 : 33)
                 .foregroundStyle(isActive ? Color.white : inactiveForeground)
 
@@ -158,6 +158,15 @@ struct ToolbarIcon: View {
                 .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
         )
         .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var iconImage: some View {
+        if let systemName {
+            Image(systemName: systemName).renderingMode(.template).resizable().scaledToFit()
+        } else {
+            Image(name).renderingMode(.template).resizable().scaledToFit()
+        }
     }
 }
 
@@ -415,6 +424,7 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
     var acceptedEpochs = 0
     var outputSegments = 0
     var skippedArtifacts = 0
+    var skippedArtifactBreakdown: [String: Int] = [:]
     var skippedTimingMarkers = 0
     var skippedOutOfBounds = 0
     var timingAdjusted = 0
@@ -583,6 +593,7 @@ nonisolated struct PSABuildJob: Sendable {
     let timingMarkersBySegmentValue: [String: String]
     let timingEventsBySegmentValue: [String: [MFFEvent]]
     let artifactEventsForRejection: [MFFEvent]
+    let artifactEventsForRejectionByLabel: [String: [MFFEvent]]
     let preSamples: Int
     let epochLength: Int
     let psaOffset: Double
@@ -625,8 +636,12 @@ nonisolated struct PSABuildJob: Sendable {
         var jobs: [AcceptedEpochJob] = []
         var skippedOutOfBounds = 0
         var skippedArtifacts = 0
+        var skippedArtifactBreakdown: [String: Int] = [:]
         var skippedTimingMarkers = 0
         var timingAdjusted = 0
+        let artifactRejectionGroups = artifactEventsForRejectionByLabel.isEmpty
+            ? (artifactEventsForRejection.isEmpty ? [:] : [artifactRejectionLabel: artifactEventsForRejection])
+            : artifactEventsForRejectionByLabel
 
         for event in events {
             guard let categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""],
@@ -653,11 +668,21 @@ nonisolated struct PSABuildJob: Sendable {
                 skippedOutOfBounds += 1
                 continue
             }
-            if skipIfContainsArtifact, !artifactEventsForRejection.isEmpty {
+            if skipIfContainsArtifact, !artifactRejectionGroups.isEmpty {
                 let startSeconds = Double(startSample) / signal.samplingRate
                 let endSeconds = Double(endSample) / signal.samplingRate
-                if artifactEventsForRejection.contains(where: { $0.beginTimeSeconds >= startSeconds && $0.beginTimeSeconds <= endSeconds }) {
+                let matchedLabels = artifactRejectionGroups.compactMap { label, events -> String? in
+                    events.contains { artifact in
+                        artifact.beginTimeSeconds >= startSeconds && artifact.beginTimeSeconds <= endSeconds
+                    } ? label : nil
+                }
+                if !matchedLabels.isEmpty {
                     skippedArtifacts += 1
+                    let sortedLabels = matchedLabels.sorted {
+                        $0.localizedStandardCompare($1) == .orderedAscending
+                    }
+                    let breakdownLabel = sortedLabels.joined(separator: " + ")
+                    skippedArtifactBreakdown[breakdownLabel, default: 0] += 1
                     continue
                 }
             }
@@ -844,6 +869,7 @@ nonisolated struct PSABuildJob: Sendable {
                 acceptedEpochs: accepted,
                 outputSegments: segments.count,
                 skippedArtifacts: skippedArtifacts,
+                skippedArtifactBreakdown: skippedArtifactBreakdown,
                 skippedTimingMarkers: skippedTimingMarkers,
                 skippedOutOfBounds: skippedOutOfBounds,
                 timingAdjusted: timingAdjusted,
@@ -1005,8 +1031,17 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
     case virtualECGPCA  = "virtualECGPCA"
     case panTompkinsProxy = "panTompkinsProxy"
     case qrsLocking     = "qrsLocking"
+    case cwlRegression  = "cwlRegression"
 
     var id: String { rawValue }
+
+    /// True for methods that directly correct the signal from an external
+    /// reference (no beat/event detection step). The BCG sheet skips the
+    /// shared event-code/threshold/window controls and swaps the action
+    /// button to "Correct" for these.
+    var isDirectCorrection: Bool {
+        self == .cwlRegression
+    }
 
     var tabLabel: String {
         switch self {
@@ -1016,6 +1051,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
         case .virtualECGPCA:    return "Virtual ECG"
         case .panTompkinsProxy: return "Pan-Tompkins"
         case .qrsLocking:       return "QRS Lock"
+        case .cwlRegression:    return "CWL"
         }
     }
 
@@ -1033,6 +1069,8 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
             return "Run the Pan-Tompkins QRS backbone (bandpass → derivative → squaring → moving-window integration → adaptive thresholding) directly on the BCG-channel group. The high-amplitude proxy deflection has a sharp transient the QRS detector locks onto. Select a BCG channel set below."
         case .qrsLocking:
             return "Offset each detected R-wave by a fixed mechanical delay. Requires ECG / QRS detection to be active. The lag from QRS to BCG onset is typically 200–400 ms — adjust to align peaks."
+        case .cwlRegression:
+            return "Carbon-wire-loop (CWL) correction: no detection step. Each EEG channel is regressed against the selected CWL reference channels at a small range of time lags and the fit is subtracted, in a sliding window that adapts to slowly drifting coupling. Requires CWL leads imported as PNS channels."
         }
     }
 }

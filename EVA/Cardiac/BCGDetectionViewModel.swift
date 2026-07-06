@@ -54,6 +54,14 @@ final class BCGDetectionViewModel: ObservableObject {
     // MARK: Channel restriction
     @Published var channelSetID: ChannelSet.ID?
 
+    // MARK: CWL regression (direct-correction method — see BCGDetectionMethod.cwlRegression)
+    @Published var selectedCWLChannels = Set<Int>()
+    @Published var cwlLagRangeMinMs = -50.0
+    @Published var cwlLagRangeMaxMs = 150.0
+    @Published var cwlLagStepMs = 10.0
+    @Published var cwlWindowSeconds = 4.0
+    @Published var correctedSignal: MFFSignalData?
+
     // MARK: Run / refine state
     @Published var isRunning = false
     @Published var status: String?
@@ -70,5 +78,6 @@ final class BCGDetectionViewModel: ObservableObject {
         refinedTemplate = nil
         refinedKeptCount = nil
         isRefining = false
+        correctedSignal = nil
     }
 }

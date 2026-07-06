@@ -452,6 +452,24 @@ extension WaveformView {
             }
 
             VStack(alignment: .leading, spacing: 4) {
+                Text("MAS — Median Artifact Subtraction")
+                    .font(.subheadline.weight(.semibold))
+                Text("Same per-TR template as AAS, but the template is the elementwise median of neighboring volumes instead of a weighted mean — robust to an occasional corrupted donor volume without needing separate outlier detection. Inspired by the AMRI (Advanced MRI, NINDS/NIH) MATLAB toolbox's `amri_eeg_gac.m`.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("MAR — Median Artifact Regression")
+                    .font(.subheadline.weight(.semibold))
+                Text("The MAS template, scaled by a least-squares fit before subtracting, so its amplitude can track slow gradient-artifact drift a fixed 1:1 subtraction can't. Inspired by `amri_eeg_gac.m`.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
                 Text("FASTR — fMRI Artifact Slice Template Removal")
                     .font(.subheadline.weight(.semibold))
                 Text("Subdivides each volume into slice epochs, aligns them (optionally at sub-sample resolution), subtracts a per-slice template, then removes residual artifact with an Optimal Basis Set (OBS) and optional adaptive noise cancellation (ANC). Better suppression, more parameters (Niazy et al. 2005).")
@@ -484,6 +502,7 @@ extension WaveformView {
                 Text("References")
                     .font(.caption.weight(.semibold))
                 Text("• Allen, Josephs & Turner (2000). NeuroImage 12:230–239.")
+                Text("• Liu, de Zwart, van Gelderen, Kuo & Duyn (2012). NeuroImage 59(3):2073–2087 (MAS/MAR; AMRI toolbox, https://amri.ninds.nih.gov/software.html).")
                 Text("• Niazy, Beckmann, Iannetti, Brady & Smith (2005). NeuroImage 28(3):720–737.")
                 Text("• Moosmann et al. (2009). NeuroImage 45(4):1144–1150.")
                 Text("• van der Meer et al. (2010). NeuroImage 49(3):2495–2505.")

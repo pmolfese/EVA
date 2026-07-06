@@ -15,9 +15,16 @@
 
 import SwiftUI
 
+nonisolated enum EVAGeneralPreferences {
+    static let pixelAdaptiveWaveformRenderingKey = "pixelAdaptiveWaveformRenderingEnabled"
+}
+
 struct PreferencesView: View {
     var body: some View {
         TabView {
+            GeneralPreferencesView()
+                .tabItem { Label("General", systemImage: "gearshape") }
+
             ProcessingDefaultsView()
                 .tabItem { Label("Processing", systemImage: "slider.horizontal.3") }
 
@@ -28,6 +35,28 @@ struct PreferencesView: View {
                 .tabItem { Label("Segment Goodness", systemImage: "chart.bar.doc.horizontal") }
         }
         .frame(width: 480, height: 560)
+    }
+}
+
+private struct GeneralPreferencesView: View {
+    @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) private var pixelAdaptiveWaveformRendering = true
+    @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Pixel-adaptive waveform rendering", isOn: $pixelAdaptiveWaveformRendering)
+                Toggle("Show toolbar button labels", isOn: $showsToolbarButtonLabels)
+            } header: {
+                Text("Interface")
+            } footer: {
+                Text("Pixel-adaptive rendering compresses dense traces to the visible screen resolution while preserving min/max excursions. Turn it off to use the original sample-by-sample path renderer.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding(.top, 4)
     }
 }
 

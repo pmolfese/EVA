@@ -54,6 +54,60 @@ struct EyeArtifactThresholdDetectorTests {
         #expect(abs((events[0].durationSeconds ?? 0) - expectedDuration) <= 1.0 / samplingRate + 1e-6)
     }
 
+    @Test func defaultBlinkConfigPreservesLegacyUnconstrainedTiming() {
+        let channelCount = 129
+        let sampleCount = 1000
+        let samplingRate = 250.0
+        let range = 100..<300 // 800 ms: legacy threshold detection had no max-duration gate.
+        let channels = channelsWithBlink(
+            channelCount: channelCount, sampleCount: sampleCount,
+            blinkChannels: [7], at: range
+        )
+
+        let events = EyeArtifactThresholdDetector.detect(
+            kind: .blink, channels: channels, samplingRate: samplingRate,
+            duration: Double(sampleCount) / samplingRate
+        )
+
+        #expect(events.count == 1)
+    }
+
+    @Test func explicitMaxDurationCanRejectLongBlinkRuns() {
+        let channelCount = 129
+        let sampleCount = 1000
+        let samplingRate = 250.0
+        let channels = channelsWithBlink(
+            channelCount: channelCount, sampleCount: sampleCount,
+            blinkChannels: [7], at: 100..<300
+        )
+        var config = EyeArtifactThresholdConfiguration.defaults(for: .blink)
+        config.maxDurationSeconds = 0.5
+
+        let events = EyeArtifactThresholdDetector.detect(
+            kind: .blink, channels: channels, samplingRate: samplingRate,
+            duration: Double(sampleCount) / samplingRate, configuration: config
+        )
+
+        #expect(events.isEmpty)
+    }
+
+    @Test func mergedRunsUseStrongestPeakForEventTime() {
+        let channelCount = 129
+        let sampleCount = 1000
+        let samplingRate = 250.0
+        var channels = (0..<channelCount).map { _ in [Float](repeating: 0, count: sampleCount) }
+        for i in 100..<115 { channels[7][i] = 200 }
+        for i in 130..<145 { channels[7][i] = 350 }
+
+        let events = EyeArtifactThresholdDetector.detect(
+            kind: .blink, channels: channels, samplingRate: samplingRate,
+            duration: Double(sampleCount) / samplingRate
+        )
+
+        #expect(events.count == 1)
+        #expect(abs((events.first?.beginTimeSeconds ?? 0) - Double(130) / samplingRate) < 1e-9)
+    }
+
     @Test func ignoresBriefSubThresholdDurationBlips() {
         let channelCount = 129
         let sampleCount = 1000

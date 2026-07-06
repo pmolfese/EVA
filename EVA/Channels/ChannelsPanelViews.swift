@@ -84,6 +84,22 @@ extension WaveformView {
             Button("Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio") {
                 moveEEGChannelToPhysio(index: index, in: signal)
             }
+
+            Divider()
+            Menu("Export Channel") {
+                Button("Export as JSON…") {
+                    exportChannelAsJSON(index: index, signal: signal)
+                }
+                Button("Export as JSON with Events…") {
+                    exportChannelAsJSON(index: index, signal: signal, includeEvents: true)
+                }
+                Button("Export as 1D…") {
+                    exportChannelAs1D(index: index, signal: signal)
+                }
+                Button("Export as 1D with Events…") {
+                    exportChannelAs1D(index: index, signal: signal, includeEvents: true)
+                }
+            }
         }
     }
 
@@ -218,7 +234,8 @@ extension WaveformView {
             sampleStride: displaySampleStride(for: signal),
             visibleRange: visibleHorizontalRange,
             nominalHeight: channelRowHeight,
-            color: channelColor(index)
+            color: channelColor(index),
+            usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering
         )
         .frame(width: plotWidth, height: channelRowHeight + (channelOverflowHeight * 2))
         .background {
@@ -335,9 +352,13 @@ extension WaveformView {
            let duration = event.durationSeconds, duration > 0,
            signal.samplingRate > 0,
            let sampleCount = signal.data.first?.count, sampleCount > 0 {
+            // `centerTimeSeconds` (not `beginTimeSeconds`) — Topography/Continuous
+            // events stamp their true onset, not their center, so centering the
+            // band on `beginTimeSeconds` directly would draw it half a duration
+            // too early for those sources.
             let halfWindow = duration / 2
-            let startSample = Int(((event.beginTimeSeconds - halfWindow) * signal.samplingRate).rounded())
-            let endSample = Int(((event.beginTimeSeconds + halfWindow) * signal.samplingRate).rounded())
+            let startSample = Int(((event.centerTimeSeconds - halfWindow) * signal.samplingRate).rounded())
+            let endSample = Int(((event.centerTimeSeconds + halfWindow) * signal.samplingRate).rounded())
             let lower = min(max(startSample, 0), sampleCount - 1)
             let upper = min(max(endSample, lower + 1), sampleCount)
             let lowerX = contentX(forSample: lower, in: signal)
@@ -399,8 +420,10 @@ extension WaveformView {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 guard dragDistance(value) >= Self.dragSelectionThreshold else { return }
-                dragSelectionStartSample = sampleIndex(forContentX: contentX(fromGlobalX: value.startLocation.x), in: signal)
-                dragSelectionEndSample = sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
+                updateLiveDragSelection(
+                    start: sampleIndex(forContentX: contentX(fromGlobalX: value.startLocation.x), in: signal),
+                    end: sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
+                )
             }
             .onEnded { value in
                 if dragDistance(value) >= Self.dragSelectionThreshold {
@@ -410,10 +433,12 @@ extension WaveformView {
                     let lower = min(start, end)
                     let upper = max(start, end)
                     if upper > lower {
-                        selectedSampleRange = lower...upper
+                        let selectedRange = lower...upper
+                        if selectedSampleRange != selectedRange {
+                            selectedSampleRange = selectedRange
+                        }
                     }
-                    dragSelectionStartSample = nil
-                    dragSelectionEndSample = nil
+                    clearLiveDragSelection()
                     lastWaveformClick = nil
                     highlightedArtifactEvent = nil
                     return
@@ -432,6 +457,24 @@ extension WaveformView {
                     lastWaveformClick = (now, clickX)
                 }
             }
+    }
+
+    func updateLiveDragSelection(start: Int, end: Int) {
+        if dragSelectionStartSample != start {
+            dragSelectionStartSample = start
+        }
+        if dragSelectionEndSample != end {
+            dragSelectionEndSample = end
+        }
+    }
+
+    func clearLiveDragSelection() {
+        if dragSelectionStartSample != nil {
+            dragSelectionStartSample = nil
+        }
+        if dragSelectionEndSample != nil {
+            dragSelectionEndSample = nil
+        }
     }
 
     func dragDistance(_ value: DragGesture.Value) -> CGFloat {

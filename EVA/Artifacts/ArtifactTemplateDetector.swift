@@ -30,6 +30,10 @@ struct ArtifactTemplateConfiguration: Sendable {
     var windowSizeSeconds: Double
     var downsampleRate: Double
     var mergeWindowSeconds: Double
+    /// What happens when two hits fall within `mergeWindowSeconds` of each
+    /// other — span them into one event covering their full duration
+    /// (`.extend`), or keep only the best-scoring one (`.discard`).
+    var mergeBehavior: ArtifactTemplateMergeBehavior = .discard
     /// Waveform mode: fractional time-scale variation (0–1). E.g. 0.10 lets
     /// candidate windows be compressed or stretched by ±10% before correlation.
     var waveformStretchRange: Double = 0.0
@@ -45,6 +49,24 @@ struct ArtifactTemplateConfiguration: Sendable {
     /// Cost function for scoring scalp-map similarity. Independent of `polarity`
     /// (which governs the per-channel waveform scan).
     var topographyMetric: ArtifactTopographyMetric = .pearson
+    /// Only meaningful for the single-map reference modes (Middle/Peak/Average
+    /// — Trajectory ignores this and is always its own kind of "continuous").
+    /// `.windowed` is the original fixed-length candidate search; `.continuous`
+    /// instead traces a per-sample similarity-to-reference signal and reports
+    /// each contiguous above-threshold run as one event with its own measured
+    /// duration — no window length or stretch factor involved. Gated to
+    /// Ocular artifacts in the UI (see `DefinedArtifactType`), since a single
+    /// static reference map is a weaker fit for artifacts whose topography
+    /// itself evolves (e.g. BCG), which Trajectory mode already handles.
+    var topographyScanStyle: ArtifactTopographyScanStyle = .windowed
+    /// Continuous mode: minimum run length to count as an event.
+    var continuousMinDurationSeconds: Double = 0.05
+    /// Continuous mode: maximum run length; longer runs are rejected. 0 = uncapped.
+    var continuousMaxDurationSeconds: Double = 0.0
+    /// Continuous mode: boxcar-smooths the per-sample similarity trace over this
+    /// window before thresholding, so brief noise-driven dips near low-amplitude
+    /// moments don't fragment one continuous artifact into several short runs.
+    var continuousSmoothingSeconds: Double = 0.08
     /// Trajectory mode: maximum allowed time shift (seconds) applied to the
     /// reference trajectory when searching for the best-fitting alignment.
     /// Useful for compensating slight beat-to-beat onset jitter. Set to 0 to
@@ -92,6 +114,35 @@ enum ArtifactTemplatePolarity: String, CaseIterable, Identifiable, Codable, Send
     var id: String { rawValue }
 }
 
+/// What happens when two hits fall within `mergeWindowSeconds` of each other.
+enum ArtifactTemplateMergeBehavior: String, CaseIterable, Identifiable, Codable, Sendable {
+    /// Keep only the single highest-scoring hit and drop the rest (the
+    /// original behavior, and the default for every artifact type). Suited to
+    /// artifacts with an intrinsically fixed, point-like duration (e.g. a
+    /// heartbeat/QRS complex) — two hits this close together are almost
+    /// certainly the same event detected twice, not one continuous longer
+    /// one, so extending would fabricate a duration that never existed.
+    case discard = "Discard"
+    /// Span the merged event from the first hit's start to the last hit's end,
+    /// keeping the best score seen across the run. Useful for waveform-matched
+    /// artifacts whose duration genuinely varies — though for Ocular
+    /// artifacts specifically, the Topography panel's Continuous scan style
+    /// measures a true variable-length span directly and is usually the
+    /// better tool for that case.
+    case extend = "Extend"
+
+    var id: String { rawValue }
+
+    var help: String {
+        switch self {
+        case .extend:
+            return "Merged hits are combined into one event spanning from the first hit's start to the last hit's end."
+        case .discard:
+            return "Merged hits keep only the single best-scoring one; the rest are dropped."
+        }
+    }
+}
+
 /// How the reference scalp map is derived from the highlighted exemplar window.
 enum ArtifactTopographyMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case off = "Off"
@@ -131,6 +182,31 @@ enum ArtifactTopographyMode: String, CaseIterable, Identifiable, Codable, Sendab
             return "Uses the mean scalp voltage map across the highlighted window."
         case .trajectory:
             return "Uses the full time sequence of scalp maps across the highlighted window, with optional shift and stretch tolerance."
+        }
+    }
+}
+
+/// How the recording is searched for a single-map topography reference
+/// (Middle/Peak/Average — Trajectory doesn't use this, it's always a sequence
+/// match). Orthogonal to *which* map is the reference: this controls *how*
+/// candidates are found.
+enum ArtifactTopographyScanStyle: String, CaseIterable, Identifiable, Codable, Sendable {
+    /// Score fixed-length candidate windows and keep the best-matching offset
+    /// (the original behavior).
+    case windowed = "Windowed"
+    /// Trace a continuous per-sample similarity-to-reference signal and report
+    /// each contiguous above-threshold run as one event with its own measured
+    /// duration — no fixed window length.
+    case continuous = "Continuous"
+
+    var id: String { rawValue }
+
+    var description: String {
+        switch self {
+        case .windowed:
+            return "Scores fixed-length candidate windows against the reference map and keeps the best-matching offset."
+        case .continuous:
+            return "Traces how closely every sample's scalp map matches the reference, and marks each continuous above-threshold stretch as one artifact — so its reported duration reflects how long the topography actually stayed similar, not a fixed window."
         }
     }
 }
@@ -492,6 +568,17 @@ nonisolated enum ArtifactTemplateDetector {
             )
         }
 
+        if configuration.topographyScanStyle == .continuous {
+            return detectContinuousTopography(
+                signal: signal,
+                channelIndices: channelIndices,
+                exemplarStart: exemplarStart,
+                exemplarEnd: exemplarEnd,
+                configuration: configuration,
+                progress: progress
+            )
+        }
+
         let referenceSample = topographyReferenceSample(
             signal: signal,
             mode: configuration.topographyMode,
@@ -584,7 +671,16 @@ nonisolated enum ArtifactTemplateDetector {
 
         let hits = chunkHits.flatMap { $0 }
 
-        let merged = mergeTopography(hits: hits, mergeSamples: mergeSamples)
+        // `sample` here is already the window's onset (this scan scores one
+        // exact sample per candidate and reports a fixed forward duration),
+        // so it needs no center→onset conversion before merging.
+        let windowSamples = exemplarEnd - exemplarStart
+        let merged = mergeTopography(
+            hits: hits,
+            mergeSamples: mergeSamples,
+            windowSamples: windowSamples,
+            behavior: configuration.mergeBehavior
+        )
         let events = merged.enumerated().map { index, hit -> MFFEvent in
             let time = Double(hit.sample) / signal.samplingRate
             return MFFEvent(
@@ -594,7 +690,7 @@ nonisolated enum ArtifactTemplateDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Topography %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: configuration.windowSizeSeconds
+                durationSeconds: Double(hit.durationSamples) / signal.samplingRate
             )
         }
 
@@ -608,6 +704,195 @@ nonisolated enum ArtifactTemplateDetector {
             matchCount: events.count
         )
         return (events, reference)
+    }
+
+    // MARK: - Continuous topography matching
+
+    /// Traces a continuous per-sample similarity-to-reference signal instead
+    /// of scoring fixed-length candidate windows, and reports each contiguous
+    /// above-threshold run as one event with its own measured onset/offset —
+    /// no window length or stretch factor. See `ArtifactTopographyScanStyle`.
+    private static func detectContinuousTopography(
+        signal: MFFSignalData,
+        channelIndices: [Int],
+        exemplarStart: Int,
+        exemplarEnd: Int,
+        configuration: ArtifactTemplateConfiguration,
+        progress: ProgressHandler? = nil
+    ) -> ([MFFEvent], ArtifactTemplateTopography?) {
+        let referenceSample = topographyReferenceSample(
+            signal: signal,
+            mode: configuration.topographyMode,
+            exemplarStart: exemplarStart,
+            exemplarEnd: exemplarEnd,
+            channelIndices: channelIndices
+        )
+        let channelValues = topographyVector(
+            signal: signal,
+            mode: configuration.topographyMode,
+            referenceSample: referenceSample,
+            exemplarStart: exemplarStart,
+            exemplarEnd: exemplarEnd
+        )
+        let templateRaw = channelIndices.map { channelValues[$0] }
+        let template = normalizedSpatial(templateRaw)
+        guard !template.isEmpty else {
+            return ([], ArtifactTemplateTopography(
+                mode: configuration.topographyMode,
+                referenceSample: referenceSample,
+                referenceTimeSeconds: Double(referenceSample) / signal.samplingRate,
+                channelValues: channelValues,
+                channelIndices: channelIndices,
+                matchThreshold: configuration.matchThreshold,
+                matchCount: 0
+            ))
+        }
+
+        guard let sampleCount = signal.data.first?.count, sampleCount > 0 else { return ([], nil) }
+        let decimation = Downsampler.factor(sourceRate: signal.samplingRate, targetRate: configuration.downsampleRate)
+        let decimatedTotal = (sampleCount + decimation - 1) / decimation
+        guard decimatedTotal > 1 else { return ([], nil) }
+
+        // Per-sample spatial correlation against the single reference map —
+        // one dot product per (decimated) sample, no per-candidate window
+        // search, computed in parallel chunks across CPU cores.
+        let coreCount = evaMaxWorkers
+        let chunkSize = max((decimatedTotal + coreCount - 1) / coreCount, 1)
+        let metric = configuration.topographyMetric
+
+        var trace = [Float](repeating: 0, count: decimatedTotal)
+        let progressLock = NSLock()
+        nonisolated(unsafe) var globalCompleted = 0
+
+        trace.withUnsafeMutableBufferPointer { out in
+            nonisolated(unsafe) let out = out
+            evaConcurrentPerform(iterations: coreCount) { chunkIdx in
+                let startD = chunkIdx * chunkSize
+                let endD = min(startD + chunkSize, decimatedTotal)
+                guard startD < endD else { return }
+
+                var window = [Float](repeating: 0, count: channelIndices.count)
+                for dSample in startD..<endD {
+                    let sample = dSample * decimation
+                    for (offset, channelIndex) in channelIndices.enumerated() {
+                        let channel = signal.data[channelIndex]
+                        window[offset] = sample < channel.count ? channel[sample] : 0
+                    }
+                    let normalized = normalizedSpatial(window)
+                    var score: Float = 0
+                    if !normalized.isEmpty {
+                        var dot: Float = 0
+                        vDSP_dotpr(template, 1, normalized, 1, &dot, vDSP_Length(normalized.count))
+                        switch metric {
+                        case .pearson:         score = dot
+                        case .negativePearson: score = -dot
+                        case .absolutePearson: score = abs(dot)
+                        }
+                    }
+                    out[dSample] = score
+
+                    progressLock.lock()
+                    globalCompleted += 1
+                    let c = min(globalCompleted * decimation, sampleCount)
+                    progressLock.unlock()
+                    progress?(c, sampleCount)
+                }
+            }
+        }
+        progress?(sampleCount, sampleCount)
+
+        // Smooth to suppress brief noise-driven dips near low-amplitude
+        // moments (e.g. mid-movement pauses) that would otherwise fragment
+        // one continuous artifact into several short runs.
+        let decimatedRate = signal.samplingRate / Double(decimation)
+        let smoothWindow = max(Int((configuration.continuousSmoothingSeconds * decimatedRate).rounded()), 1)
+        let smoothed = boxcarSmoothTrace(trace, window: smoothWindow)
+
+        // Threshold-cross into contiguous runs (decimated domain).
+        let threshold = Float(configuration.matchThreshold)
+        var runs: [ClosedRange<Int>] = []
+        var activeStart: Int?
+        var lastAbove: Int?
+        for d in 0..<decimatedTotal {
+            if smoothed[d] >= threshold {
+                if activeStart == nil { activeStart = d }
+                lastAbove = d
+            } else if let start = activeStart, let end = lastAbove {
+                runs.append(start...end)
+                activeStart = nil
+                lastAbove = nil
+            }
+        }
+        if let start = activeStart, let end = lastAbove { runs.append(start...end) }
+
+        // Filter by min/max duration.
+        let minD = max(Int((configuration.continuousMinDurationSeconds * decimatedRate).rounded()), 1)
+        let maxD = configuration.continuousMaxDurationSeconds > 0
+            ? max(Int((configuration.continuousMaxDurationSeconds * decimatedRate).rounded()), minD)
+            : Int.max
+        let filtered = runs.filter {
+            let length = $0.upperBound - $0.lowerBound + 1
+            return length >= minD && length <= maxD
+        }
+
+        // Bridge runs within the merge gap into one — the extend/discard
+        // question from waveform matching doesn't apply here: a contiguous
+        // run is already a single measured span by construction, so there's
+        // no "best of several overlapping hits" to choose between.
+        let mergeGapD = max(Int((configuration.mergeWindowSeconds * decimatedRate).rounded()), 1)
+        var merged: [ClosedRange<Int>] = []
+        for run in filtered {
+            if let last = merged.last, run.lowerBound - last.upperBound <= mergeGapD {
+                merged[merged.count - 1] = last.lowerBound...run.upperBound
+            } else {
+                merged.append(run)
+            }
+        }
+
+        let events = merged.enumerated().map { index, run -> MFFEvent in
+            let startSample = run.lowerBound * decimation
+            let endSample = min((run.upperBound + 1) * decimation, sampleCount) - 1
+            let time = Double(startSample) / signal.samplingRate
+            let duration = Double(endSample - startSample + 1) / signal.samplingRate
+            return MFFEvent(
+                id: "artifact-continuous-\(index)-\(startSample)",
+                code: configuration.eventCode,
+                label: configuration.name,
+                beginTimeSeconds: time,
+                rawBeginTime: String(format: "%.6f", time),
+                sourceFile: String(format: "Continuous %.0f%%", configuration.matchThreshold * 100),
+                durationSeconds: duration
+            )
+        }
+
+        let reference = ArtifactTemplateTopography(
+            mode: configuration.topographyMode,
+            referenceSample: referenceSample,
+            referenceTimeSeconds: Double(referenceSample) / signal.samplingRate,
+            channelValues: channelValues,
+            channelIndices: channelIndices,
+            matchThreshold: configuration.matchThreshold,
+            matchCount: events.count
+        )
+        return (events, reference)
+    }
+
+    /// Simple boxcar (moving-average) smoothing, used to stabilize the
+    /// continuous-scan similarity trace before thresholding.
+    private static func boxcarSmoothTrace(_ x: [Float], window w: Int) -> [Float] {
+        guard w > 1, x.count > w else { return x }
+        let n = x.count
+        let half = w / 2
+        var prefix = [Float](repeating: 0, count: n + 1)
+        for i in 0..<n { prefix[i + 1] = prefix[i] + x[i] }
+        var out = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            let lo = max(0, i - half)
+            let hi = min(n - 1, i + half)
+            let count = Float(hi - lo + 1)
+            out[i] = (prefix[hi + 1] - prefix[lo]) / count
+        }
+        return out
     }
 
     // MARK: - Trajectory topography matching
@@ -898,17 +1183,30 @@ nonisolated enum ArtifactTemplateDetector {
 
         let hits = chunkHits.flatMap { $0 }
 
-        let merged = mergeTopography(hits: hits, mergeSamples: mergeSamples)
+        // `sample` here is each hit's *center* (see `centerSample` above), not
+        // its onset — convert to onset (a uniform per-hit shift, so it changes
+        // nothing about gap comparisons between hits) before merging, then
+        // convert back to center afterward so reported events keep the same
+        // center-based convention this scan has always used.
+        let trajectoryWindowSamples = actualLength * decimation
+        let onsetHits = hits.map { (sample: $0.sample - trajectoryWindowSamples / 2, score: $0.score) }
+        let merged = mergeTopography(
+            hits: onsetHits,
+            mergeSamples: mergeSamples,
+            windowSamples: trajectoryWindowSamples,
+            behavior: configuration.mergeBehavior
+        )
         let events = merged.enumerated().map { index, hit -> MFFEvent in
-            let time = Double(hit.sample) / sr
+            let center = hit.sample + hit.durationSamples / 2
+            let time = Double(center) / sr
             return MFFEvent(
-                id: "artifact-trajectory-\(index)-\(hit.sample)",
+                id: "artifact-trajectory-\(index)-\(center)",
                 code: configuration.eventCode,
                 label: configuration.name,
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Trajectory %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: configuration.windowSizeSeconds
+                durationSeconds: Double(hit.durationSamples) / sr
             )
         }
 
@@ -1019,28 +1317,62 @@ nonisolated enum ArtifactTemplateDetector {
         return centered
     }
 
+    /// Merges topography/trajectory hits, whose `sample` field callers must
+    /// normalize to each hit's *onset* (not center) before calling — every hit
+    /// shares the same fixed `windowSamples` duration in this scan family, so
+    /// there's no per-hit stretch/duration to track like `mergeTemplateHits` has.
     private static func mergeTopography(
         hits: [(sample: Int, score: Float)],
-        mergeSamples: Int
-    ) -> [(sample: Int, score: Float)] {
+        mergeSamples: Int,
+        windowSamples: Int,
+        behavior: ArtifactTemplateMergeBehavior
+    ) -> [(sample: Int, score: Float, durationSamples: Int)] {
         let sorted = hits.sorted {
             $0.sample == $1.sample ? $0.score > $1.score : $0.sample < $1.sample
         }
-        var merged: [(sample: Int, score: Float)] = []
-        for hit in sorted {
-            guard let last = merged.last else {
-                merged.append(hit)
-                continue
-            }
-            if hit.sample - last.sample <= mergeSamples {
-                if hit.score > last.score {
-                    merged[merged.count - 1] = hit
+
+        switch behavior {
+        case .discard:
+            // Original behavior, unchanged: keep only the best-scoring hit
+            // within each merge window; duration stays the fixed window size.
+            var merged: [(sample: Int, score: Float)] = []
+            for hit in sorted {
+                guard let last = merged.last else {
+                    merged.append(hit)
+                    continue
                 }
-            } else {
-                merged.append(hit)
+                if hit.sample - last.sample <= mergeSamples {
+                    if hit.score > last.score {
+                        merged[merged.count - 1] = hit
+                    }
+                } else {
+                    merged.append(hit)
+                }
+            }
+            return merged.map { (sample: $0.sample, score: $0.score, durationSamples: windowSamples) }
+
+        case .extend:
+            // Span a run of overlapping/adjacent hits from the first one's
+            // onset to the last one's offset, so one long artifact matched at
+            // several overlapping candidate offsets is reported as a single
+            // event covering its full extent instead of the single best hit.
+            struct Run { var start: Int; var end: Int; var bestScore: Float }
+            var runs: [Run] = []
+            for hit in sorted {
+                let hitEnd = hit.sample + windowSamples - 1
+                if var last = runs.last, hit.sample - last.end <= mergeSamples {
+                    last.end = max(last.end, hitEnd)
+                    last.bestScore = max(last.bestScore, hit.score)
+                    runs[runs.count - 1] = last
+                } else {
+                    runs.append(Run(start: hit.sample, end: hitEnd, bestScore: hit.score))
+                }
+            }
+            return runs.map { run in
+                let duration = max(run.end - run.start + 1, 1)
+                return (sample: run.start, score: run.bestScore, durationSamples: duration)
             }
         }
-        return merged
     }
 
     private static func singleChannelCounts(
@@ -1203,7 +1535,7 @@ nonisolated enum ArtifactTemplateDetector {
         progress?(sampleCount, sampleCount)
 
         let hits = chunkHits.flatMap { $0 }
-        let merged = mergeTemplateHits(hits, mergeSamples: mergeSamples)
+        let merged = mergeTemplateHits(hits, mergeSamples: mergeSamples, behavior: configuration.mergeBehavior)
         return merged.enumerated().map { index, hit in
             let centerSample = min(max(hit.start * decimation, 0), sampleCount - 1)
             let time = Double(centerSample) / signal.samplingRate
@@ -1221,29 +1553,60 @@ nonisolated enum ArtifactTemplateDetector {
 
     private static func mergeTemplateHits(
         _ hits: [(start: Int, score: Float, durationSamples: Int)],
-        mergeSamples: Int
+        mergeSamples: Int,
+        behavior: ArtifactTemplateMergeBehavior
     ) -> [(start: Int, score: Float, durationSamples: Int)] {
         let sorted = hits.sorted {
             $0.start == $1.start ? $0.score > $1.score : $0.start < $1.start
         }
-        var merged: [(start: Int, score: Float, durationSamples: Int)] = []
 
-        for hit in sorted {
-            guard let last = merged.last else {
-                merged.append(hit)
-                continue
-            }
-
-            if hit.start - last.start <= mergeSamples {
-                if hit.score > last.score {
-                    merged[merged.count - 1] = hit
+        switch behavior {
+        case .discard:
+            // Original behavior, unchanged: gap and replacement both measured
+            // center-to-center (`start` holds each hit's *center* sample —
+            // see the scan loop above), keeping only the better-scoring hit.
+            var merged: [(start: Int, score: Float, durationSamples: Int)] = []
+            for hit in sorted {
+                guard let last = merged.last else {
+                    merged.append(hit)
+                    continue
                 }
-            } else {
-                merged.append(hit)
+                if hit.start - last.start <= mergeSamples {
+                    if hit.score > last.score {
+                        merged[merged.count - 1] = hit
+                    }
+                } else {
+                    merged.append(hit)
+                }
+            }
+            return merged
+
+        case .extend:
+            // Recover each hit's true onset/offset from center ± duration/2,
+            // then span a run of overlapping/adjacent hits from the first
+            // one's onset to the last one's offset — so one long artifact that
+            // scores well at several overlapping candidate offsets is reported
+            // as a single event covering its full measured extent, instead of
+            // discarding all but the best-scoring sub-window.
+            struct Run { var start: Int; var end: Int; var bestScore: Float }
+            var runs: [Run] = []
+            for hit in sorted {
+                let hitStart = hit.start - hit.durationSamples / 2
+                let hitEnd = hitStart + hit.durationSamples - 1
+                if var last = runs.last, hitStart - last.end <= mergeSamples {
+                    last.end = max(last.end, hitEnd)
+                    last.bestScore = max(last.bestScore, hit.score)
+                    runs[runs.count - 1] = last
+                } else {
+                    runs.append(Run(start: hitStart, end: hitEnd, bestScore: hit.score))
+                }
+            }
+            return runs.map { run in
+                let duration = max(run.end - run.start + 1, 1)
+                let center = run.start + duration / 2
+                return (start: center, score: run.bestScore, durationSamples: duration)
             }
         }
-
-        return merged
     }
 
     private static func candidateStarts(
@@ -1310,7 +1673,10 @@ nonisolated enum ArtifactTemplateDetector {
         })).sorted()
     }
 
-    private static func resampled(_ samples: [Float], to outputCount: Int) -> [Float] {
+    /// Linear-interpolation resample, reused by `ArtifactCleaner` for
+    /// variable-event-duration cleaning (fitting a fixed-length template to an
+    /// individual event's own measured length).
+    static func resampled(_ samples: [Float], to outputCount: Int) -> [Float] {
         guard outputCount > 0, !samples.isEmpty else { return [] }
         guard samples.count != outputCount else { return samples }
         guard outputCount > 1, samples.count > 1 else {

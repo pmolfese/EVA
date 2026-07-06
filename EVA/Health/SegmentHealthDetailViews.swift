@@ -411,7 +411,7 @@ extension WaveformView {
 
     func currentSegmentHealthSignal() -> MFFSignalData? {
         guard let rawSignal = recording.signal else { return nil }
-        let base = ica.cleanedSignal ?? gradient.correctedSignal ?? rawSignal
+        let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
         let preArtifact = filter.output ?? base
         let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
         let continuousSignal = applyInterpolations(to: processed)

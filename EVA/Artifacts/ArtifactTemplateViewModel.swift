@@ -46,6 +46,7 @@ final class ArtifactTemplateViewModel: ObservableObject {
     @Published var windowSeconds = 0.40
     @Published var downsampleRate = 250.0
     @Published var mergeWindowSeconds = 0.25
+    @Published var mergeBehavior = ArtifactTemplateMergeBehavior.discard
     @Published var waveformStretchRange = 0.0
     @Published var polarity = ArtifactTemplatePolarity.same
 
@@ -57,6 +58,12 @@ final class ArtifactTemplateViewModel: ObservableObject {
     @Published var topographyMetric = ArtifactTopographyMetric.pearson
     @Published var isRefreshingTopography = false
     @Published var topographyRefreshGeneration = 0
+
+    // MARK: Continuous scan (single-map modes only — see ArtifactTopographyScanStyle)
+    @Published var topographyScanStyle = ArtifactTopographyScanStyle.windowed
+    @Published var continuousMinDurationSeconds = 0.05
+    @Published var continuousMaxDurationSeconds = 0.0
+    @Published var continuousSmoothingSeconds = 0.08
 
     // MARK: Trajectory
     @Published var trajectoryShiftSeconds = 0.05

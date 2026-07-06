@@ -431,6 +431,12 @@ struct ViewCommands: View {
         .disabled(psaControls?.isAveraged != true)
         .keyboardShortcut("3", modifiers: .command)
 
+        Button("Show Trials View") {
+            psaControls?.averagedDisplayMode.wrappedValue = .trials
+        }
+        .disabled(psaControls?.isAveraged != true)
+        .keyboardShortcut("4", modifiers: .command)
+
         Divider()
 
         Button((psaControls?.showButterfly.wrappedValue ?? false) ? "Hide Butterfly" : "Show Butterfly") {

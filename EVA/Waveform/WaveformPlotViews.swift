@@ -222,48 +222,144 @@ struct WaveformPlot: View {
     let visibleRange: ClosedRange<CGFloat>
     let nominalHeight: CGFloat
     var color: Color = .accentColor
+    var usesPixelAdaptiveRendering = true
 
     var body: some View {
         Canvas { context, size in
-            guard samples.count > sampleStride else { return }
+            let safeSampleStride = max(sampleStride, 1)
+            guard samples.count > safeSampleStride else { return }
 
             let xScale = CGFloat(timeScale)
-            let lowerVisibleIndex = max(Int(floor(visibleRange.lowerBound / max(xScale, 0.001))) - 2, 0)
-            let upperVisibleIndex = Int(ceil(visibleRange.upperBound / max(xScale, 0.001))) + 2
-
-            let firstSampleIndex = min(lowerVisibleIndex * sampleStride, samples.count - 1)
-            let lastSampleIndex = min(max(upperVisibleIndex * sampleStride, firstSampleIndex + sampleStride), samples.count - 1)
-            guard lastSampleIndex > firstSampleIndex else { return }
-
             let midY = size.height / 2
             let pointsPerMicrovolt = (nominalHeight / 2) / max(amplitudeScale, 1)
 
-            var path = Path()
-            let firstPlottedIndex = firstSampleIndex / sampleStride
-            path.move(
-                to: CGPoint(
-                    x: CGFloat(firstPlottedIndex) * xScale,
-                    y: midY - CGFloat(samples[firstSampleIndex]) * pointsPerMicrovolt
-                )
-            )
+            strokeBaseline(in: &context, midY: midY)
 
-            for sampleIndex in stride(from: firstSampleIndex + sampleStride, through: lastSampleIndex, by: sampleStride) {
-                let plottedIndex = sampleIndex / sampleStride
-                path.addLine(
-                    to: CGPoint(
-                        x: CGFloat(plottedIndex) * xScale,
-                        y: midY - CGFloat(samples[sampleIndex]) * pointsPerMicrovolt
-                    )
+            if usesPixelAdaptiveRendering, xScale < 1 {
+                drawPixelAdaptiveTrace(
+                    in: &context,
+                    size: size,
+                    xScale: xScale,
+                    sampleStride: safeSampleStride,
+                    midY: midY,
+                    pointsPerMicrovolt: pointsPerMicrovolt
+                )
+            } else {
+                drawSamplePath(
+                    in: &context,
+                    xScale: xScale,
+                    sampleStride: safeSampleStride,
+                    midY: midY,
+                    pointsPerMicrovolt: pointsPerMicrovolt
                 )
             }
-
-            var baseline = Path()
-            baseline.move(to: CGPoint(x: visibleRange.lowerBound, y: midY))
-            baseline.addLine(to: CGPoint(x: visibleRange.upperBound, y: midY))
-
-            context.stroke(baseline, with: .color(.secondary.opacity(0.3)), lineWidth: 0.75)
-            context.stroke(path, with: .color(color), lineWidth: 1)
         }
+    }
+
+    private func drawSamplePath(
+        in context: inout GraphicsContext,
+        xScale: CGFloat,
+        sampleStride: Int,
+        midY: CGFloat,
+        pointsPerMicrovolt: CGFloat
+    ) {
+        let safeXScale = max(xScale, 0.001)
+        let lowerVisibleIndex = max(Int(floor(visibleRange.lowerBound / safeXScale)) - 2, 0)
+        let upperVisibleIndex = Int(ceil(visibleRange.upperBound / safeXScale)) + 2
+
+        let firstSampleIndex = min(lowerVisibleIndex * sampleStride, samples.count - 1)
+        let lastSampleIndex = min(max(upperVisibleIndex * sampleStride, firstSampleIndex + sampleStride), samples.count - 1)
+        guard lastSampleIndex > firstSampleIndex else { return }
+
+        var path = Path()
+        let firstPlottedIndex = firstSampleIndex / sampleStride
+        path.move(
+            to: CGPoint(
+                x: CGFloat(firstPlottedIndex) * xScale,
+                y: yPosition(for: samples[firstSampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
+            )
+        )
+
+        for sampleIndex in stride(from: firstSampleIndex + sampleStride, through: lastSampleIndex, by: sampleStride) {
+            let plottedIndex = sampleIndex / sampleStride
+            path.addLine(
+                to: CGPoint(
+                    x: CGFloat(plottedIndex) * xScale,
+                    y: yPosition(for: samples[sampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
+                )
+            )
+        }
+
+        context.stroke(path, with: .color(color), lineWidth: 1)
+    }
+
+    private func drawPixelAdaptiveTrace(
+        in context: inout GraphicsContext,
+        size: CGSize,
+        xScale: CGFloat,
+        sampleStride: Int,
+        midY: CGFloat,
+        pointsPerMicrovolt: CGFloat
+    ) {
+        let safeXScale = max(xScale, 0.001)
+        let lastPlottedIndex = max((samples.count - 1) / sampleStride, 0)
+        let lowerBucket = max(Int(floor(visibleRange.lowerBound)), 0)
+        let maxBucket = max(Int(ceil(size.width)) - 1, lowerBucket)
+        let upperBucket = min(
+            Int(ceil(visibleRange.upperBound)),
+            maxBucket
+        )
+        guard upperBucket >= lowerBucket else { return }
+
+        var envelope = Path()
+
+        for bucketX in lowerBucket...upperBucket {
+            let bucketStartX = CGFloat(bucketX)
+            let bucketEndX = bucketStartX + 1
+            let firstPlottedIndex = min(
+                max(Int(floor(bucketStartX / safeXScale)), 0),
+                lastPlottedIndex
+            )
+            let lastInBucket = max(
+                firstPlottedIndex,
+                Int(ceil(bucketEndX / safeXScale)) - 1
+            )
+            let lastPlottedInBucket = min(lastInBucket, lastPlottedIndex)
+
+            var minValue = Float.greatestFiniteMagnitude
+            var maxValue = -Float.greatestFiniteMagnitude
+            var plottedIndex = firstPlottedIndex
+            while plottedIndex <= lastPlottedInBucket {
+                let sampleIndex = plottedIndex * sampleStride
+                let value = samples[sampleIndex]
+                if value.isFinite {
+                    minValue = min(minValue, value)
+                    maxValue = max(maxValue, value)
+                }
+                plottedIndex += 1
+            }
+
+            guard minValue <= maxValue else { continue }
+
+            let x = CGFloat(bucketX) + 0.5
+            let minY = yPosition(for: minValue, midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
+            let maxY = yPosition(for: maxValue, midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
+            envelope.move(to: CGPoint(x: x, y: min(minY, maxY)))
+            envelope.addLine(to: CGPoint(x: x, y: max(minY, maxY)))
+        }
+
+        context.stroke(envelope, with: .color(color), lineWidth: 1)
+    }
+
+    private func strokeBaseline(in context: inout GraphicsContext, midY: CGFloat) {
+        var baseline = Path()
+        baseline.move(to: CGPoint(x: visibleRange.lowerBound, y: midY))
+        baseline.addLine(to: CGPoint(x: visibleRange.upperBound, y: midY))
+        context.stroke(baseline, with: .color(.secondary.opacity(0.3)), lineWidth: 0.75)
+    }
+
+    private func yPosition(for value: Float, midY: CGFloat, pointsPerMicrovolt: CGFloat) -> CGFloat {
+        midY - CGFloat(value) * pointsPerMicrovolt
     }
 }
 
@@ -383,7 +479,7 @@ struct ButterflyConditionPlot: View {
     /// Called when the user clicks the trace nearest the cursor.
     var onTapChannel: ((Int) -> Void)? = nil
 
-    @State private var hoveredChannel: Int?
+    @State private var hoveredTrace: ButterflyTraceHit?
 
     var body: some View {
         GeometryReader { proxy in
@@ -392,30 +488,35 @@ struct ButterflyConditionPlot: View {
                 .onContinuousHover { phase in
                     switch phase {
                     case .active(let location):
-                        hoveredChannel = nearestButterflyChannel(
+                        hoveredTrace = nearestButterflyTrace(
                             at: location, in: proxy.size, data: data,
-                            startSample: segment.startSample, endSample: segment.endSample,
-                            hiddenChannels: hiddenChannels, amplitudeScale: amplitudeScale
+                            segments: [segment], hiddenChannels: hiddenChannels,
+                            amplitudeScale: amplitudeScale,
+                            maximumDistance: nil
                         )
                     case .ended:
-                        hoveredChannel = nil
+                        hoveredTrace = nil
                     }
                 }
                 .simultaneousGesture(
                     SpatialTapGesture().onEnded { value in
                         guard let onTapChannel,
-                              let channel = nearestButterflyChannel(
+                              let hit = nearestButterflyTrace(
                                   at: value.location, in: proxy.size, data: data,
-                                  startSample: segment.startSample, endSample: segment.endSample,
-                                  hiddenChannels: hiddenChannels, amplitudeScale: amplitudeScale
+                                  segments: [segment], hiddenChannels: hiddenChannels,
+                                  amplitudeScale: amplitudeScale,
+                                  maximumDistance: nil
                               )
                         else { return }
-                        onTapChannel(channel)
+                        onTapChannel(hit.channel)
                     }
                 )
                 .overlay(alignment: .topTrailing) {
-                    if let hoveredChannel {
-                        ButterflyChannelBadge(name: channelName?(hoveredChannel) ?? "Ch \(hoveredChannel + 1)")
+                    if let hoveredTrace {
+                        ButterflyChannelBadge(
+                            name: channelName?(hoveredTrace.channel) ?? "Ch \(hoveredTrace.channel + 1)",
+                            valueMicrovolts: Double(hoveredTrace.valueMicrovolts)
+                        )
                             .padding(6)
                             .allowsHitTesting(false)
                     }
@@ -506,43 +607,78 @@ struct ButterflyConditionPlot: View {
     }
 }
 
-/// Nearest-trace hit test shared by `ButterflyConditionPlot`/`OverlayButterflyPlot`:
-/// at the hovered/tapped x, finds the visible channel whose trace y is closest.
-private func nearestButterflyChannel(
-    at location: CGPoint, in size: CGSize, data: [[Float]],
-    startSample: Int, endSample: Int, hiddenChannels: Set<Int>, amplitudeScale: Double
-) -> Int? {
-    guard endSample > startSample, size.width > 0 else { return nil }
-    let epochLength = endSample - startSample + 1
-    let midY = size.height / 2
-    let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
-    let xScale = size.width / CGFloat(max(epochLength - 1, 1))
-    let localSample = min(max(Int((location.x / xScale).rounded()), 0), epochLength - 1)
-    let sample = startSample + localSample
-
-    var best: (channel: Int, distance: CGFloat)?
-    for channelIndex in data.indices where !hiddenChannels.contains(channelIndex) {
-        let channel = data[channelIndex]
-        guard sample < channel.count else { continue }
-        let y: CGFloat = midY - CGFloat(channel[sample]) * pointsPerMicrovolt
-        let distance: CGFloat = abs(y - location.y)
-        if best == nil || distance < best!.distance {
-            best = (channelIndex, distance)
-        }
-    }
-    guard let best, best.distance <= 10 else { return nil }
-    return best.channel
+private struct ButterflyTraceHit {
+    let channel: Int
+    let localSample: Int
+    let valueMicrovolts: Float
 }
 
-private struct ButterflyChannelBadge: View {
+/// Nearest-trace hit test shared by `ButterflyConditionPlot`/`OverlayButterflyPlot`:
+/// at the hovered/tapped x, finds the visible trace whose y is closest and
+/// returns the channel plus sampled µV value.
+private func nearestButterflyTrace(
+    at location: CGPoint, in size: CGSize, data: [[Float]],
+    segments: [EpochSegment], hiddenChannels: Set<Int>, amplitudeScale: Double,
+    maximumDistance: CGFloat?
+) -> ButterflyTraceHit? {
+    guard let first = segments.first, first.endSample > first.startSample, size.width > 0 else { return nil }
+    let epochLength = first.endSample - first.startSample + 1
+    let midY = size.height / 2
+    let pointsPerMicrovolt = (size.height * 0.42) / CGFloat(max(amplitudeScale, 1))
+    let xScale = size.width / CGFloat(max(epochLength - 1, 1))
+    let localSample = min(max(Int((location.x / xScale).rounded()), 0), epochLength - 1)
+
+    var best: (hit: ButterflyTraceHit, distance: CGFloat)?
+    for segment in segments {
+        let sample = segment.startSample + localSample
+        guard sample <= segment.endSample else { continue }
+        for channelIndex in data.indices where !hiddenChannels.contains(channelIndex) {
+            let channel = data[channelIndex]
+            guard sample < channel.count else { continue }
+            let value = channel[sample]
+            let y: CGFloat = midY - CGFloat(value) * pointsPerMicrovolt
+            let distance: CGFloat = abs(y - location.y)
+            if best == nil || distance < best!.distance {
+                best = (
+                    hit: ButterflyTraceHit(channel: channelIndex, localSample: localSample, valueMicrovolts: value),
+                    distance: distance
+                )
+            }
+        }
+    }
+    guard let best else { return nil }
+    if let maximumDistance, best.distance > maximumDistance { return nil }
+    return best.hit
+}
+
+struct ButterflyChannelBadge: View {
     let name: String
+    var valueMicrovolts: Double? = nil
+    var detail: String? = nil
+
     var body: some View {
-        Text(name)
-            .font(.caption2.weight(.semibold))
+        VStack(alignment: .trailing, spacing: 1) {
+            Text(name)
+                .font(.caption2.weight(.semibold))
+            if let valueMicrovolts {
+                Text("\(format(valueMicrovolts)) µV")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            if let detail {
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
             .shadow(radius: 2, y: 1)
+    }
+
+    private func format(_ value: Double) -> String {
+        String(format: "%.2f", value)
     }
 }
 
@@ -640,8 +776,12 @@ struct OverlayButterflyPlot: View {
     var channelName: ((Int) -> String)? = nil
     /// Called when the user clicks the trace nearest the cursor.
     var onTapChannel: ((Int) -> Void)? = nil
+    /// When supplied, dragging in the plot previews a latency cursor locally
+    /// and commits the selected relative sample when the drag ends.
+    var onScrubRelativeSample: ((Int) -> Void)? = nil
 
-    @State private var hoveredChannel: Int?
+    @State private var hoveredTrace: ButterflyTraceHit?
+    @State private var liveScrubRelativeSample: Int?
 
     var body: some View {
         GeometryReader { proxy in
@@ -650,32 +790,48 @@ struct OverlayButterflyPlot: View {
                 .onContinuousHover { phase in
                     switch phase {
                     case .active(let location):
-                        hoveredChannel = nearestButterflyChannel(
+                        hoveredTrace = nearestButterflyTrace(
                             at: location, in: proxy.size, data: data,
-                            startSample: segments.first?.startSample ?? 0,
-                            endSample: segments.first?.endSample ?? 0,
-                            hiddenChannels: hiddenChannels, amplitudeScale: amplitudeScale
+                            segments: segments, hiddenChannels: hiddenChannels,
+                            amplitudeScale: amplitudeScale,
+                            maximumDistance: nil
                         )
                     case .ended:
-                        hoveredChannel = nil
+                        hoveredTrace = nil
                     }
                 }
                 .simultaneousGesture(
                     SpatialTapGesture().onEnded { value in
                         guard let onTapChannel,
-                              let channel = nearestButterflyChannel(
+                              let hit = nearestButterflyTrace(
                                   at: value.location, in: proxy.size, data: data,
-                                  startSample: segments.first?.startSample ?? 0,
-                                  endSample: segments.first?.endSample ?? 0,
-                                  hiddenChannels: hiddenChannels, amplitudeScale: amplitudeScale
+                                  segments: segments, hiddenChannels: hiddenChannels,
+                                  amplitudeScale: amplitudeScale,
+                                  maximumDistance: nil
                               )
                         else { return }
-                        onTapChannel(channel)
+                        onTapChannel(hit.channel)
                     }
                 )
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 6, coordinateSpace: .local)
+                        .onChanged { value in
+                            guard onScrubRelativeSample != nil else { return }
+                            liveScrubRelativeSample = relativeSample(forX: value.location.x, width: proxy.size.width)
+                        }
+                        .onEnded { value in
+                            guard let onScrubRelativeSample else { return }
+                            let sample = relativeSample(forX: value.location.x, width: proxy.size.width)
+                            liveScrubRelativeSample = nil
+                            onScrubRelativeSample(sample)
+                        }
+                )
                 .overlay(alignment: .topTrailing) {
-                    if let hoveredChannel {
-                        ButterflyChannelBadge(name: channelName?(hoveredChannel) ?? "Ch \(hoveredChannel + 1)")
+                    if let hoveredTrace {
+                        ButterflyChannelBadge(
+                            name: channelName?(hoveredTrace.channel) ?? "Ch \(hoveredTrace.channel + 1)",
+                            valueMicrovolts: Double(hoveredTrace.valueMicrovolts)
+                        )
                             .padding(6)
                             .allowsHitTesting(false)
                     }
@@ -709,8 +865,8 @@ struct OverlayButterflyPlot: View {
             stimulus.addLine(to: CGPoint(x: stimulusX, y: size.height))
             context.stroke(stimulus, with: .color(.green.opacity(0.75)), lineWidth: 1)
 
-            if let highlightRelativeSample {
-                let clamped = min(max(highlightRelativeSample, 0), epochLength - 1)
+            if let displaySample = liveScrubRelativeSample ?? highlightRelativeSample {
+                let clamped = min(max(displaySample, 0), epochLength - 1)
                 let cursorX = CGFloat(clamped) * xScale
                 var cursor = Path()
                 cursor.move(to: CGPoint(x: cursorX, y: 0))
@@ -735,6 +891,14 @@ struct OverlayButterflyPlot: View {
                 }
             }
         }
+    }
+
+    private func relativeSample(forX x: CGFloat, width: CGFloat) -> Int {
+        guard let first = segments.first else { return 0 }
+        let epochLength = max(first.endSample - first.startSample + 1, 1)
+        guard epochLength > 1, width > 0 else { return 0 }
+        let xScale = width / CGFloat(epochLength - 1)
+        return min(max(Int((x / xScale).rounded()), 0), epochLength - 1)
     }
 }
 
@@ -1330,6 +1494,7 @@ struct EventTrackView: View {
         event.sourceFile.hasPrefix("Template ")
             || event.sourceFile.hasPrefix("Topography ")
             || event.sourceFile.hasPrefix("Trajectory ")
+            || event.sourceFile.hasPrefix("Continuous ")
     }
 
     /// Tap-to-open detail popover listing every populated field of the event.

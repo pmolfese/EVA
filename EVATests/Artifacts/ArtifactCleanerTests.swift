@@ -177,6 +177,33 @@ struct ArtifactCleanerTests {
         }
     }
 
+    /// MAS now applies the same edge-taper + local-baseline mechanism as OBS
+    /// (default on) before subtracting its local template — verifies that
+    /// addition didn't break MAS's core job of substantially reducing a
+    /// repeated planted artifact.
+    @Test func masWithDefaultTaperAndBaselineStillReducesArtifact() {
+        let template = SyntheticSignal.bump(width: windowSamples)
+        let centers = [100, 250, 400, 550, 700]
+        let scales: [Float] = [2.0, 1.8, 2.2, 1.9, 2.1]
+        let sampleCount = 1000
+
+        let channel = makeSignal(template: template, centers: centers, scales: scales, sampleCount: sampleCount)
+        let events = makeEvents(centers: centers)
+        let artifact = makeArtifact(events: events, template: template, method: .mas)
+        let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+
+        let (cleaned, summaries) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+
+        #expect(summaries.count == 1)
+        #expect(summaries[0].method == .mas)
+
+        for center in centers {
+            let before = windowEnergy(channel, center: center)
+            let after = windowEnergy(cleaned.data[0], center: center)
+            #expect(after < before * 0.3, "MAS (with taper + baseline preservation) left too much artifact energy at \(center)")
+        }
+    }
+
     @Test func doNothingLeavesSignalUnchanged() {
         let template = SyntheticSignal.bump(width: windowSamples)
         let centers = [100, 400]
@@ -269,6 +296,111 @@ struct ArtifactCleanerTests {
             #expect(component.cumulativeVariance <= 1.0 + 1e-9)
             previous = component.cumulativeVariance
         }
+    }
+
+    // MARK: - MFFEvent.centerTimeSeconds
+
+    /// Waveform-template and Trajectory scanning stamp `beginTimeSeconds` as
+    /// the event's *center* directly (a pre-existing quirk of those two
+    /// scanners) — `centerTimeSeconds` must pass that through unchanged, or
+    /// every cleaning method (which centers its window on it) would shift.
+    @Test func centerTimeSecondsPassesThroughForCenterTaggedSources() {
+        let templateEvent = MFFEvent(
+            id: "t", code: "BLINK", beginTimeSeconds: 12.5, rawBeginTime: "12.5",
+            sourceFile: "Template 80%", durationSeconds: 0.3
+        )
+        #expect(templateEvent.centerTimeSeconds == 12.5)
+
+        let trajectoryEvent = MFFEvent(
+            id: "j", code: "BCG", beginTimeSeconds: 4.0, rawBeginTime: "4.0",
+            sourceFile: "Trajectory 85%", durationSeconds: 0.5
+        )
+        #expect(trajectoryEvent.centerTimeSeconds == 4.0)
+    }
+
+    /// Single-map Topography and Continuous-scan events stamp `beginTimeSeconds`
+    /// as the true *onset* — `centerTimeSeconds` must add half the event's own
+    /// (possibly variable) duration to find the middle, or a cleaning window
+    /// centered on it lands near the artifact's leading edge instead, which is
+    /// what motivated this fix (reported as a polarity-looking mismatch on a
+    /// long, variable-duration Continuous-scan artifact).
+    @Test func centerTimeSecondsAddsHalfDurationForOnsetTaggedSources() {
+        let topographyEvent = MFFEvent(
+            id: "p", code: "EYEM", beginTimeSeconds: 10.0, rawBeginTime: "10.0",
+            sourceFile: "Topography 80%", durationSeconds: 0.2
+        )
+        #expect(abs(topographyEvent.centerTimeSeconds - 10.1) < 1e-9)
+
+        let continuousEvent = MFFEvent(
+            id: "c", code: "EYEM", beginTimeSeconds: 20.0, rawBeginTime: "20.0",
+            sourceFile: "Continuous 80%", durationSeconds: 1.2
+        )
+        #expect(abs(continuousEvent.centerTimeSeconds - 20.6) < 1e-9)
+    }
+
+    /// Verifies the variable-event-duration toggle actually does something:
+    /// a single event 3x longer than the artifact's saved average template
+    /// should be cleaned much more completely when `usesVariableEventDuration`
+    /// is on (the template is resampled to the event's own measured length)
+    /// than when it's off (the fixed, short base window only corrects a
+    /// small central slice of the long artifact).
+    @Test func variableEventDurationSizesCorrectionToEachEventsOwnLength() {
+        let baseWidth = windowSamples // matches the saved average template
+        let longWidth = baseWidth * 3
+        let sampleCount = 2000
+        let center = 1000
+        let start = center - longWidth / 2
+
+        let baseTemplate = SyntheticSignal.bump(width: baseWidth)
+        let longShape = SyntheticSignal.bump(width: longWidth)
+
+        var state: UInt64 = 99
+        var channel = (0..<sampleCount).map { _ -> Float in
+            state = state &* 6364136223846793005 &+ 1
+            return Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 0.5)
+        }
+        for k in 0..<longWidth where start + k >= 0 && start + k < sampleCount {
+            channel[start + k] += 60 * longShape[k]
+        }
+
+        let event = MFFEvent(
+            id: "long-event",
+            code: "BLINK",
+            beginTimeSeconds: Double(center) / samplingRate,
+            rawBeginTime: String(format: "%.4f", Double(center) / samplingRate),
+            sourceFile: "test",
+            durationSeconds: Double(longWidth) / samplingRate
+        )
+        let average = ArtifactTemplateAverage(
+            samplingRate: samplingRate,
+            windowSizeSeconds: Double(baseWidth) / samplingRate,
+            eventCount: 1,
+            selectedChannelIndices: [0],
+            allChannelSamples: [baseTemplate],
+            channelSummaries: [ArtifactTemplateChannelSummary(channelIndex: 0, peakAbsoluteMicrovolts: 80, rmsMicrovolts: 20)]
+        )
+
+        func residualEnergy(usesVariableEventDuration: Bool) -> Double {
+            var artifact = DefinedArtifact(
+                type: .ocular, name: "Blink", eventCode: "BLINK", events: [event],
+                selectedChannelIndices: [0], windowSizeSeconds: Double(baseWidth) / samplingRate,
+                average: average, topography: nil, cleaningMethod: .regression
+            )
+            artifact.usesVariableEventDuration = usesVariableEventDuration
+            let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+            let (cleaned, _) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+            let s = max(start, 0)
+            let e = min(start + longWidth, cleaned.data[0].count)
+            return (s..<e).reduce(0.0) { total, i in total + Double(cleaned.data[0][i] * cleaned.data[0][i]) }
+        }
+
+        let fixedResidual = residualEnergy(usesVariableEventDuration: false)
+        let variableResidual = residualEnergy(usesVariableEventDuration: true)
+
+        #expect(
+            variableResidual < fixedResidual * 0.6,
+            "variable-duration cleaning (\(variableResidual)) should remove substantially more of the long artifact than the fixed base window (\(fixedResidual))"
+        )
     }
 
     @Test func obsVarianceReportNilWhenNoEventsFallInRange() {
