@@ -150,6 +150,10 @@ struct WaveformView: View {
     @StateObject var epoching: EpochingViewModel
     @State var segmentedEpochSignal: MFFSignalData?
     @State var segmentedEpochSegments: [EpochSegment] = []
+    // Single Trial Analysis domain, extracted into an L4 store — reads the
+    // raw per-trial epochs above (segmentedEpochSignal/segmentedEpochSegments),
+    // not epoching's averaged output.
+    @StateObject var singleTrial: SingleTrialAnalysisViewModel
     @StateObject var eegAnalysis: EEGAnalysisViewModel
 
     // Band-pass / notch filtering (applied to the active base signal).
@@ -342,6 +346,7 @@ struct WaveformView: View {
         _template = StateObject(wrappedValue: ArtifactTemplateViewModel(store: store))
         _ica = StateObject(wrappedValue: ICAViewModel(store: store))
         _epoching = StateObject(wrappedValue: EpochingViewModel(store: store))
+        _singleTrial = StateObject(wrappedValue: SingleTrialAnalysisViewModel(store: store))
         _eegAnalysis = StateObject(wrappedValue: EEGAnalysisViewModel(store: store))
         _filter = StateObject(wrappedValue: FilterViewModel(store: store))
         _wavelet = StateObject(wrappedValue: WaveletReductionViewModel(store: store))
@@ -864,6 +869,9 @@ struct WaveformView: View {
                 }
             )
         }
+        .sheet(isPresented: $singleTrial.showsSheet) {
+            singleTrialAnalysisSheet()
+        }
         .sheet(isPresented: $chanHealth.showsDetails) {
             channelHealthDetailsSheet(for: continuousSignal)
         }
@@ -1200,6 +1208,21 @@ struct WaveformView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Processing")
             .help("Segment the recording into event-locked epochs")
+
+            Button {
+                singleTrial.showsSheet = true
+            } label: {
+                ToolbarIcon(
+                    name: "icon.single-trial",
+                    systemName: "chart.xyaxis.line",
+                    label: toolbarButtonLabel("TRIALS"),
+                    isActive: singleTrial.result != nil
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(segmentedEpochSignal == nil || segmentedEpochSegments.isEmpty)
+            .accessibilityLabel("Single Trial Analysis")
+            .help("Extract per-trial peak/amplitude values from the segmented epochs")
 
             Button {
                 eegAnalysis.syncArtifactSources(eegArtifactRejectionSources())
@@ -2069,6 +2092,7 @@ struct WaveformView: View {
         template.resetForClose()
         wavelet.resetForClose()
         epoching.resetForClose()
+        singleTrial.resetForClose()
         bcg.resetForClose()
         ecg.resetForClose()
         eegAnalysis.resetForClose()

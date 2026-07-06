@@ -119,6 +119,9 @@ struct ArtifactScanSignature: Equatable {
 /// identical size regardless of how the system button/menu styles add padding.
 struct ToolbarIcon: View {
     let name: String
+    /// When set, renders this SF Symbol instead of the custom `name` asset —
+    /// for entries that don't have a bespoke icon in Assets.xcassets yet.
+    var systemName: String? = nil
     var label: String? = nil
     var isActive: Bool = false
     var inactiveForeground: Color = .primary
@@ -130,10 +133,7 @@ struct ToolbarIcon: View {
 
     var body: some View {
         VStack(spacing: hasLabel ? 3 : 0) {
-            Image(name)
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
+            iconImage
                 .frame(width: hasLabel ? 24 : 33, height: hasLabel ? 24 : 33)
                 .foregroundStyle(isActive ? Color.white : inactiveForeground)
 
@@ -158,6 +158,15 @@ struct ToolbarIcon: View {
                 .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
         )
         .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var iconImage: some View {
+        if let systemName {
+            Image(systemName: systemName).renderingMode(.template).resizable().scaledToFit()
+        } else {
+            Image(name).renderingMode(.template).resizable().scaledToFit()
+        }
     }
 }
 
