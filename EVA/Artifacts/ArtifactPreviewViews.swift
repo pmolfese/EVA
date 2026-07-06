@@ -507,56 +507,78 @@ struct ArtifactLocalTemplateOptionsButton: View {
                 Text("\(artifact.cleaningMethod.rawValue) Options")
                     .font(.headline)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Window size")
-                            .font(.caption)
-                        Spacer()
-                        Stepper(
-                            "\(artifact.localTemplateWindowSize) events",
-                            value: Binding(
-                                get: { artifact.localTemplateWindowSize },
-                                set: { newValue in
-                                    artifact.localTemplateWindowSize = newValue
-                                    onSettingsChange()
-                                }
-                            ),
-                            in: DefinedArtifact.minimumLocalTemplateWindowSize...DefinedArtifact.maximumLocalTemplateWindowSize,
-                            step: 2
-                        )
-                    }
-                    Text("Number of neighboring events (centered on the current one) used to build each local template.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar {
-                    Divider()
+                if artifact.cleaningMethod.isLocalTemplateMethod {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text("Decay factor")
+                            Text("Window size")
                                 .font(.caption)
                             Spacer()
-                            Text(String(format: "%.2f", artifact.waasDecayFactor))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                            Stepper(
+                                "\(artifact.localTemplateWindowSize) events",
+                                value: Binding(
+                                    get: { artifact.localTemplateWindowSize },
+                                    set: { newValue in
+                                        artifact.localTemplateWindowSize = newValue
+                                        onSettingsChange()
+                                    }
+                                ),
+                                in: DefinedArtifact.minimumLocalTemplateWindowSize...DefinedArtifact.maximumLocalTemplateWindowSize,
+                                step: 2
+                            )
                         }
-                        Slider(
-                            value: Binding(
-                                get: { artifact.waasDecayFactor },
-                                set: { newValue in
-                                    artifact.waasDecayFactor = newValue
-                                    onSettingsChange()
-                                }
-                            ),
-                            in: 0.5...0.99
-                        )
-                        Text("Weight of an event at distance d is decay^d — lower values favor nearby events more strongly (Goldman 2000).")
+                        Text("Number of neighboring events (centered on the current one) used to build each local template.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+
+                    if artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Decay factor")
+                                    .font(.caption)
+                                Spacer()
+                                Text(String(format: "%.2f", artifact.waasDecayFactor))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Slider(
+                                value: Binding(
+                                    get: { artifact.waasDecayFactor },
+                                    set: { newValue in
+                                        artifact.waasDecayFactor = newValue
+                                        onSettingsChange()
+                                    }
+                                ),
+                                in: 0.5...0.99
+                            )
+                            Text("Weight of an event at distance d is decay^d — lower values favor nearby events more strongly (Goldman 2000).")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    Divider()
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(
+                        "Use each event's own duration",
+                        isOn: Binding(
+                            get: { artifact.usesVariableEventDuration },
+                            set: { newValue in
+                                artifact.usesVariableEventDuration = newValue
+                                onSettingsChange()
+                            }
+                        )
+                    )
+                    .toggleStyle(.checkbox)
+                    Text("Sizes each event's correction window from its own measured duration instead of one shared window — needed for artifacts whose events genuinely vary in length (e.g. Continuous topography scanning). Leave off when events cluster around one duration. Not available for OBS/SSP-PCA, which pool every event into one shared basis and require uniform-length epochs.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(16)

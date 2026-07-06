@@ -311,6 +311,71 @@ struct ArtifactCleanerTests {
         #expect(abs(continuousEvent.centerTimeSeconds - 20.6) < 1e-9)
     }
 
+    /// Verifies the variable-event-duration toggle actually does something:
+    /// a single event 3x longer than the artifact's saved average template
+    /// should be cleaned much more completely when `usesVariableEventDuration`
+    /// is on (the template is resampled to the event's own measured length)
+    /// than when it's off (the fixed, short base window only corrects a
+    /// small central slice of the long artifact).
+    @Test func variableEventDurationSizesCorrectionToEachEventsOwnLength() {
+        let baseWidth = windowSamples // matches the saved average template
+        let longWidth = baseWidth * 3
+        let sampleCount = 2000
+        let center = 1000
+        let start = center - longWidth / 2
+
+        let baseTemplate = SyntheticSignal.bump(width: baseWidth)
+        let longShape = SyntheticSignal.bump(width: longWidth)
+
+        var state: UInt64 = 99
+        var channel = (0..<sampleCount).map { _ -> Float in
+            state = state &* 6364136223846793005 &+ 1
+            return Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 0.5)
+        }
+        for k in 0..<longWidth where start + k >= 0 && start + k < sampleCount {
+            channel[start + k] += 60 * longShape[k]
+        }
+
+        let event = MFFEvent(
+            id: "long-event",
+            code: "BLINK",
+            beginTimeSeconds: Double(center) / samplingRate,
+            rawBeginTime: String(format: "%.4f", Double(center) / samplingRate),
+            sourceFile: "test",
+            durationSeconds: Double(longWidth) / samplingRate
+        )
+        let average = ArtifactTemplateAverage(
+            samplingRate: samplingRate,
+            windowSizeSeconds: Double(baseWidth) / samplingRate,
+            eventCount: 1,
+            selectedChannelIndices: [0],
+            allChannelSamples: [baseTemplate],
+            channelSummaries: [ArtifactTemplateChannelSummary(channelIndex: 0, peakAbsoluteMicrovolts: 80, rmsMicrovolts: 20)]
+        )
+
+        func residualEnergy(usesVariableEventDuration: Bool) -> Double {
+            var artifact = DefinedArtifact(
+                type: .ocular, name: "Blink", eventCode: "BLINK", events: [event],
+                selectedChannelIndices: [0], windowSizeSeconds: Double(baseWidth) / samplingRate,
+                average: average, topography: nil, cleaningMethod: .regression
+            )
+            artifact.usesVariableEventDuration = usesVariableEventDuration
+            let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+            let (cleaned, _) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+            let s = max(start, 0)
+            let e = min(start + longWidth, cleaned.data[0].count)
+            return (s..<e).reduce(0.0) { total, i in total + Double(cleaned.data[0][i] * cleaned.data[0][i]) }
+        }
+
+        let fixedResidual = residualEnergy(usesVariableEventDuration: false)
+        let variableResidual = residualEnergy(usesVariableEventDuration: true)
+
+        #expect(
+            variableResidual < fixedResidual * 0.6,
+            "variable-duration cleaning (\(variableResidual)) should remove substantially more of the long artifact than the fixed base window (\(fixedResidual))"
+        )
+    }
+
     @Test func obsVarianceReportNilWhenNoEventsFallInRange() {
         let template = SyntheticSignal.bump(width: windowSamples)
         // Event far beyond the signal's duration.

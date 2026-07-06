@@ -1656,7 +1656,7 @@ extension WaveformView {
                 )
             }
 
-            if artifact.wrappedValue.cleaningMethod.isLocalTemplateMethod {
+            if artifact.wrappedValue.cleaningMethod.supportsVariableEventDuration {
                 ArtifactLocalTemplateOptionsButton(
                     artifact: artifact,
                     onSettingsChange: clearAppliedArtifactCleaning

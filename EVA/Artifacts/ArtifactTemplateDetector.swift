@@ -1673,7 +1673,10 @@ nonisolated enum ArtifactTemplateDetector {
         })).sorted()
     }
 
-    private static func resampled(_ samples: [Float], to outputCount: Int) -> [Float] {
+    /// Linear-interpolation resample, reused by `ArtifactCleaner` for
+    /// variable-event-duration cleaning (fitting a fixed-length template to an
+    /// individual event's own measured length).
+    static func resampled(_ samples: [Float], to outputCount: Int) -> [Float] {
         guard outputCount > 0, !samples.isEmpty else { return [] }
         guard samples.count != outputCount else { return samples }
         guard outputCount > 1, samples.count > 1 else {

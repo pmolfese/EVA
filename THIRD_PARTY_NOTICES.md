@@ -117,6 +117,52 @@ EVA's MR gradient artifact removal implementation is a Swift translation of the
 upstream template-based gradient remover, with a documented correction to the
 neighboring-TR "after" window.
 
+## CWL-Webinar / CWRegrTool (carbon-wire-loop regression)
+
+- EVA file: `EVA/Cardiac/CWLCorrector.swift`
+- Reference project: https://github.com/brain-products/CWL-Webinar
+  (`CWRegrTool/`)
+- Reference literature: Masterton, R. A. J., Abbott, D. F., Fleming, S. W., &
+  Jackson, G. D. (2007). Measurement and reduction of motion and
+  ballistocardiogram artefacts from simultaneous EEG and fMRI recordings.
+  NeuroImage, 37(1), 202-211.
+- Upstream license (`CWRegrTool/LICENSE.txt`): MIT
+- Compatibility: MIT is compatible with GPL-3.0-only distribution.
+
+No code was copied from CWRegrTool (a MATLAB/EEGLAB plugin); EVA's CWL
+correction is an original Swift implementation of the adaptive regression
+concept — a sliding-window, multi-lag linear regression of each EEG channel
+against the selected CWL reference channels, cross-faded (overlap-add) across
+windows to let the coupling drift over the recording. The rest of the
+CWL-Webinar repository (slides, talk recording, sample data) carries no
+license and is not redistributed with EVA.
+
+## Advanced MRI (AMRI), NINDS, NIH MATLAB toolbox — MAS/MAR/wAAS/wAAR
+
+- EVA files:
+  - `EVA/Gradient/GradientRemover.swift` (MAS/MAR gradient-artifact template
+    reducer/fit options)
+  - `EVA/Artifacts/ArtifactCleaner.swift` (MAS/MAR/wAAS/wAAR local-template
+    artifact cleaning methods)
+- Reference project: https://amri.ninds.nih.gov/software.html
+  (`amri_eeg_gac.m`, `amri_eeg_cbc.m`)
+- Reference literature: Liu Z, de Zwart JA, van Gelderen P, Kuo L-W, Duyn JH.
+  Statistical feature extraction for artifact removal from concurrent
+  fMRI-EEG recordings. NeuroImage (2012), 59(3): 2073-2087.
+- wAAS/wAAR weighting additionally cites: Goldman RI, Stern JM, Engel J Jr,
+  Cohen MS. Acquiring simultaneous EEG and functional MRI. Clinical
+  Neurophysiology (2000), 111(11): 1974-1980.
+- Upstream license (`amri_eeg_gac.m`, `amri_eeg_cbc.m` file headers): GNU
+  General Public License v3.
+- Compatibility: same license as EVA (GPL-3.0-only).
+
+No code was copied from the AMRI toolbox (MATLAB/EEGLAB functions); EVA's
+MAS/MAR (gradient and BCG) and wAAS/wAAR (BCG) are original Swift
+implementations of the same concepts — a median- or exponentially-weighted
+local template built from a moving window of neighboring TRs/events, optionally
+scaled by a least-squares fit (`k = dot(y, template) / dot(y, y)`, matching the
+AMRI toolbox's fit direction) before subtracting.
+
 ## Perrin et al. Spherical Spline Method
 
 - EVA file: `EVA/SphericalSpline.swift`

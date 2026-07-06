@@ -121,6 +121,17 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
     nonisolated var isLocalTemplateMethod: Bool {
         self == .mas || self == .mar || self == .waas || self == .waar
     }
+
+    /// Whether this method can size each event's correction window from that
+    /// event's own measured duration (`DefinedArtifact.usesVariableEventDuration`)
+    /// instead of one shared window for the whole artifact. `.regression` and
+    /// the local-template methods correct one event at a time, so nothing
+    /// stops them from using a per-event length. OBS and SSP/PCA pool every
+    /// event into one shared spatial/temporal basis, which requires
+    /// uniform-length epochs by construction — they can't support this.
+    nonisolated var supportsVariableEventDuration: Bool {
+        self == .regression || isLocalTemplateMethod
+    }
 }
 
 enum ArtifactOBSStrategy: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -211,6 +222,14 @@ struct DefinedArtifact: Identifiable, Sendable {
     var obsClusterCount = Self.defaultOBSClusterCount
     var localTemplateWindowSize = Self.defaultLocalTemplateWindowSize
     var waasDecayFactor = Self.defaultWAASDecayFactor
+    /// When true (and `cleaningMethod.supportsVariableEventDuration`), each
+    /// event's correction window is sized from that event's own measured
+    /// `durationSeconds` instead of one fixed window shared by every event.
+    /// Off by default — a shared fixed window remains correct and simpler for
+    /// artifacts whose events cluster around one duration (the common case);
+    /// this exists for artifacts (typically Continuous topography scanning)
+    /// whose events genuinely vary in length.
+    var usesVariableEventDuration = false
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
 
@@ -230,6 +249,7 @@ struct DefinedArtifact: Identifiable, Sendable {
         obsClusterCount = previous.obsClusterCount
         localTemplateWindowSize = previous.localTemplateWindowSize
         waasDecayFactor = previous.waasDecayFactor
+        usesVariableEventDuration = previous.usesVariableEventDuration
     }
 }
 
@@ -590,39 +610,70 @@ nonisolated enum ArtifactCleaner {
             return 0
         }
 
-        let windowSamples = windowSamples(for: artifact, signal: signal)
+        let baseWindowSamples = windowSamples(for: artifact, signal: signal)
         let channels = SignalSelection.validChannels(in: data, sampleCount: sampleCount)
         var cleanedChannels = Set<Int>()
-        var channelTemplates: [(channel: Int, template: [Double])] = []
+        var channelTemplates: [(channel: Int, rawTemplate: [Float])] = []
 
         for channel in channels {
             guard channel < average.allChannelSamples.count,
-                  average.allChannelSamples[channel].count == windowSamples else {
+                  average.allChannelSamples[channel].count == baseWindowSamples else {
                 continue
             }
-            let template = centeredUnitVector(average.allChannelSamples[channel])
-            guard !template.isEmpty else { continue }
-            channelTemplates.append((channel, template))
+            channelTemplates.append((channel, average.allChannelSamples[channel]))
         }
 
         guard !channelTemplates.isEmpty else { return 0 }
 
         for (eventIndex, event) in artifact.events.enumerated() {
             defer { eventProgress(eventIndex + 1) }
+            let eventWindowLength = eventWindowSamples(
+                for: event,
+                artifact: artifact,
+                fallback: baseWindowSamples,
+                samplingRate: signal.samplingRate
+            )
             guard let range = eventWindow(
                 event: event,
-                windowSamples: windowSamples,
+                windowSamples: eventWindowLength,
                 sampleCount: sampleCount,
                 samplingRate: signal.samplingRate
             ) else { continue }
 
             for channelTemplate in channelTemplates {
-                subtractBasis([channelTemplate.template], from: &data[channelTemplate.channel], in: range)
+                // Fit the saved (fixed-length) average waveform to this
+                // event's own window length when variable-duration is on —
+                // otherwise every event shares the base template as-is.
+                let rawTemplate = eventWindowLength == baseWindowSamples
+                    ? channelTemplate.rawTemplate
+                    : ArtifactTemplateDetector.resampled(channelTemplate.rawTemplate, to: eventWindowLength)
+                let template = centeredUnitVector(rawTemplate)
+                guard !template.isEmpty else { continue }
+                subtractBasis([template], from: &data[channelTemplate.channel], in: range)
                 cleanedChannels.insert(channelTemplate.channel)
             }
         }
 
         return cleanedChannels.count
+    }
+
+    /// The window length (samples) to use for `event`'s own correction,
+    /// honoring `artifact.usesVariableEventDuration` when the method supports
+    /// it and the event actually carries a usable measured duration —
+    /// otherwise every event shares `fallback` (the artifact's one fixed
+    /// window, derived from `windowSamples(for:signal:)`).
+    private static func eventWindowSamples(
+        for event: MFFEvent,
+        artifact: DefinedArtifact,
+        fallback: Int,
+        samplingRate: Double
+    ) -> Int {
+        guard artifact.usesVariableEventDuration,
+              artifact.cleaningMethod.supportsVariableEventDuration,
+              let duration = event.durationSeconds, duration > 0 else {
+            return fallback
+        }
+        return max(Int((duration * samplingRate).rounded()), 3)
     }
 
     /// MAS/MAR/wAAS/wAAR: builds a *local* template per event from a moving
@@ -648,8 +699,9 @@ nonisolated enum ArtifactCleaner {
         guard let sampleCount = data.first?.count, sampleCount > 0 else { return 0 }
 
         let windowSamples = windowSamples(for: artifact, signal: signal)
-        let ranges = artifact.events.map {
-            eventWindow(event: $0, windowSamples: windowSamples, sampleCount: sampleCount, samplingRate: signal.samplingRate)
+        let ranges = artifact.events.map { event -> Range<Int>? in
+            let eventLen = eventWindowSamples(for: event, artifact: artifact, fallback: windowSamples, samplingRate: signal.samplingRate)
+            return eventWindow(event: event, windowSamples: eventLen, sampleCount: sampleCount, samplingRate: signal.samplingRate)
         }
         guard ranges.contains(where: { $0 != nil }) else { return 0 }
 
@@ -759,13 +811,18 @@ nonisolated enum ArtifactCleaner {
         return (corrected, cleaned)
     }
 
-    /// Elementwise median across `epochs[indices]` (each of length `length`).
+    /// Elementwise median across `epochs[indices]` (each resampled to `length`
+    /// first — with variable-event-duration on, a donor event's own epoch may
+    /// be a different length than the current event's, so it's fit to
+    /// `length` before combining, the same way `applyTemplateRegression` fits
+    /// the saved average template to each event's own window).
     private static func elementwiseMedian(indices: [Int], epochs: [[Float]?], length: Int) -> [Float] {
         guard !indices.isEmpty else { return [Float](repeating: 0, count: length) }
+        let resized = resizedDonorEpochs(indices: indices, epochs: epochs, length: length)
         var result = [Float](repeating: 0, count: length)
-        var column = [Float](repeating: 0, count: indices.count)
+        var column = [Float](repeating: 0, count: resized.count)
         for i in 0..<length {
-            for (row, idx) in indices.enumerated() { column[row] = epochs[idx]![i] }
+            for (row, epoch) in resized.enumerated() { column[row] = epoch[i] }
             column.sort()
             let mid = column.count / 2
             result[i] = column.count % 2 == 0 ? (column[mid - 1] + column[mid]) / 2 : column[mid]
@@ -773,7 +830,8 @@ nonisolated enum ArtifactCleaner {
         return result
     }
 
-    /// Weighted mean across `epochs[indices]` (each of length `length`), normalized by `weights` sum.
+    /// Weighted mean across `epochs[indices]` (each resampled to `length`
+    /// first — see `elementwiseMedian`), normalized by `weights` sum.
     private static func elementwiseWeightedMean(indices: [Int], epochs: [[Float]?], weights: [Double], length: Int) -> [Float] {
         guard !indices.isEmpty, indices.count == weights.count else { return [Float](repeating: 0, count: length) }
         let totalWeight = weights.reduce(0, +)
@@ -781,9 +839,20 @@ nonisolated enum ArtifactCleaner {
         var result = [Double](repeating: 0, count: length)
         for (idx, weight) in zip(indices, weights) {
             guard weight > 0, let segment = epochs[idx] else { continue }
-            for i in 0..<length { result[i] += weight * Double(segment[i]) }
+            let resized = segment.count == length ? segment : ArtifactTemplateDetector.resampled(segment, to: length)
+            for i in 0..<length { result[i] += weight * Double(resized[i]) }
         }
         return result.map { Float($0 / totalWeight) }
+    }
+
+    /// Resamples each donor epoch to `length` (a no-op copy when it's already
+    /// that length — the common case when the artifact doesn't use
+    /// variable-event-duration).
+    private static func resizedDonorEpochs(indices: [Int], epochs: [[Float]?], length: Int) -> [[Float]] {
+        indices.map { idx -> [Float] in
+            guard let epoch = epochs[idx] else { return [Float](repeating: 0, count: length) }
+            return epoch.count == length ? epoch : ArtifactTemplateDetector.resampled(epoch, to: length)
+        }
     }
 
     /// Least-squares scalar fit of `template ≈ k · y`: `k = dot(y, template) / dot(y, y)`.
