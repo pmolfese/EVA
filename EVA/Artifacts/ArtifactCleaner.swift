@@ -201,6 +201,10 @@ struct DefinedArtifact: Identifiable, Sendable {
     /// wAAS/wAAR exponential decay factor. Matches `amri_eeg_cbc.m`'s default
     /// (`wfactor = 0.9` [Goldman 2000]).
     nonisolated static let defaultWAASDecayFactor = 0.9
+    /// MAS/MAR/wAAS/wAAR edge taper — same mechanism as OBS's, smaller default
+    /// since local-template windows are typically much shorter than OBS ones.
+    nonisolated static let defaultLocalTemplateEdgeTaperSeconds = 0.05
+    nonisolated static let maximumLocalTemplateEdgeTaperSeconds = 0.25
 
     var id = UUID()
     var type: DefinedArtifactType
@@ -222,6 +226,16 @@ struct DefinedArtifact: Identifiable, Sendable {
     var obsClusterCount = Self.defaultOBSClusterCount
     var localTemplateWindowSize = Self.defaultLocalTemplateWindowSize
     var waasDecayFactor = Self.defaultWAASDecayFactor
+    /// MAS/MAR/wAAS/wAAR: when true, the correction is de-trended so it
+    /// matches the local signal's baseline at both edges of the window
+    /// instead of potentially introducing a DC/linear-drift step — same
+    /// mechanism as `obsPreservesLocalBaseline`.
+    var localTemplatePreservesLocalBaseline = true
+    /// MAS/MAR/wAAS/wAAR: seconds of raised-cosine taper at each edge of the
+    /// correction window, so the subtraction fades in/out smoothly rather
+    /// than cutting off sharply at the window boundary — same mechanism as
+    /// `obsEdgeTaperSeconds`.
+    var localTemplateEdgeTaperSeconds = Self.defaultLocalTemplateEdgeTaperSeconds
     /// When true (and `cleaningMethod.supportsVariableEventDuration`), each
     /// event's correction window is sized from that event's own measured
     /// `durationSeconds` instead of one fixed window shared by every event.
@@ -249,6 +263,8 @@ struct DefinedArtifact: Identifiable, Sendable {
         obsClusterCount = previous.obsClusterCount
         localTemplateWindowSize = previous.localTemplateWindowSize
         waasDecayFactor = previous.waasDecayFactor
+        localTemplatePreservesLocalBaseline = previous.localTemplatePreservesLocalBaseline
+        localTemplateEdgeTaperSeconds = previous.localTemplateEdgeTaperSeconds
         usesVariableEventDuration = previous.usesVariableEventDuration
     }
 }
@@ -712,6 +728,8 @@ nonisolated enum ArtifactCleaner {
         let isWeighted = artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar
         let regresses = artifact.cleaningMethod == .mar || artifact.cleaningMethod == .waar
         let decay = artifact.waasDecayFactor
+        let preservesLocalBaseline = artifact.localTemplatePreservesLocalBaseline
+        let edgeTaperSamplesRaw = max(Int((artifact.localTemplateEdgeTaperSeconds * signal.samplingRate).rounded()), 0)
 
         // Built as plain `let`s (via map, not a mutating loop) so they're
         // ordinary Sendable values the concurrent closure below can capture
@@ -748,7 +766,9 @@ nonisolated enum ArtifactCleaner {
                     donorsByEvent: donorsByEvent,
                     weightsByEvent: weightsByEvent,
                     isWeighted: isWeighted,
-                    regresses: regresses
+                    regresses: regresses,
+                    preservesLocalBaseline: preservesLocalBaseline,
+                    edgeTaperSamplesRaw: edgeTaperSamplesRaw
                 )
                 out[channel] = corrected
                 cleanedFlags[index] = cleaned
@@ -776,7 +796,9 @@ nonisolated enum ArtifactCleaner {
         donorsByEvent: [[Int]],
         weightsByEvent: [[Double]],
         isWeighted: Bool,
-        regresses: Bool
+        regresses: Bool,
+        preservesLocalBaseline: Bool,
+        edgeTaperSamplesRaw: Int
     ) -> (channel: [Float], cleaned: Bool) {
         let original = channel
         var corrected = channel
@@ -800,11 +822,31 @@ nonisolated enum ArtifactCleaner {
                 template = elementwiseMedian(indices: donors, epochs: epochs, length: range.count)
             }
 
+            let rawCorrection: [Double]
             if regresses {
-                let k = localRegressionCoefficient(y: epoch, template: template)
-                for i in 0..<range.count { corrected[range.lowerBound + i] -= k * template[i] }
+                let k = Double(localRegressionCoefficient(y: epoch, template: template))
+                rawCorrection = template.map { k * Double($0) }
             } else {
-                for i in 0..<range.count { corrected[range.lowerBound + i] -= template[i] }
+                rawCorrection = template.map(Double.init)
+            }
+
+            // Same edge-taper + local-baseline mechanism as OBS: fades the
+            // subtraction in/out smoothly at the window boundary instead of
+            // cutting off sharply, and (optionally) de-trends the correction
+            // so it doesn't introduce a DC/linear-drift step relative to the
+            // surrounding signal. Bounded to this event's own (possibly
+            // variable) window so the taper can't exceed half its length.
+            let edgeTaperSamples = min(edgeTaperSamplesRaw, max(range.count / 2 - 1, 0))
+            let taper = raisedCosineTaper(count: range.count, edgeSamples: edgeTaperSamples)
+            guard let smoothed = smoothedWindowCorrection(
+                rawCorrection,
+                taper: taper,
+                preservesLocalBaseline: preservesLocalBaseline,
+                edgeTaperSamples: edgeTaperSamples
+            ) else { continue }
+
+            for i in 0..<range.count {
+                corrected[range.lowerBound + i] -= Float(smoothed.weightedValues[i])
             }
             cleaned = true
         }

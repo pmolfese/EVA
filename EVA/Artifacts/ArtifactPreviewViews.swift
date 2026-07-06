@@ -561,6 +561,54 @@ struct ArtifactLocalTemplateOptionsButton: View {
                     }
 
                     Divider()
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(
+                            "Preserve local baseline",
+                            isOn: Binding(
+                                get: { artifact.localTemplatePreservesLocalBaseline },
+                                set: { newValue in
+                                    artifact.localTemplatePreservesLocalBaseline = newValue
+                                    onSettingsChange()
+                                }
+                            )
+                        )
+                        .toggleStyle(.checkbox)
+                        Text("De-trends the correction so it matches the local signal's baseline at both edges of the window, instead of risking a DC/linear-drift step relative to the surrounding signal. Same mechanism as OBS's.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Edge taper")
+                                .font(.caption)
+                            Spacer()
+                            TextField(
+                                "s",
+                                value: Binding(
+                                    get: { artifact.localTemplateEdgeTaperSeconds },
+                                    set: { newValue in
+                                        artifact.localTemplateEdgeTaperSeconds = min(max(newValue, 0), DefinedArtifact.maximumLocalTemplateEdgeTaperSeconds)
+                                        onSettingsChange()
+                                    }
+                                ),
+                                format: .number.precision(.fractionLength(3))
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                            Text("s")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("Fades the subtraction in/out smoothly over this many seconds at each edge of the window, instead of cutting off sharply at the boundary. Bounded to half the (possibly per-event) window length.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Divider()
                 }
 
                 VStack(alignment: .leading, spacing: 4) {

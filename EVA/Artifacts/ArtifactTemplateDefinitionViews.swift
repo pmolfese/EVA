@@ -1345,6 +1345,15 @@ extension WaveformView {
             source == .topography ? result.topographyEvents : result.selectedEvents,
             label: name
         )
+        // Continuous-scan events (see ArtifactTopographyScanStyle) genuinely
+        // vary in duration, and SSP/PCA — the usual Topography default —
+        // can't use a per-event window (it pools every event into one shared
+        // basis, which needs uniform-length epochs). Default those to Regress
+        // with variable-event-duration on, so a freshly-detected Continuous
+        // artifact is usable out of the box instead of quietly performing
+        // poorly until the user finds and flips both settings themselves.
+        let isContinuousSourced = source == .topography
+            && result.topographyEvents.first?.sourceFile.hasPrefix("Continuous") == true
         let artifact = DefinedArtifact(
             id: template.definedArtifactID ?? UUID(),
             type: template.type,
@@ -1355,8 +1364,9 @@ extension WaveformView {
             windowSizeSeconds: configuration.windowSizeSeconds,
             average: result.templateAverage,
             topography: source == .topography ? result.topographyReference : nil,
-            cleaningMethod: source == .topography ? .sspPCA : .obs,
+            cleaningMethod: isContinuousSourced ? .regression : (source == .topography ? .sspPCA : .obs),
             obsStrategy: source == .topography ? .topographyAligned : .standard,
+            usesVariableEventDuration: isContinuousSourced,
             appliedMethod: nil,
             cleanedAt: nil
         )
@@ -1551,9 +1561,7 @@ extension WaveformView {
                             Text("Name")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
-                            Text("Treatment")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                            ArtifactTemplateFieldLabel(title: "Treatment", help: artifactTreatmentHelpText)
                         }
 
                         Divider()
@@ -1711,6 +1719,8 @@ extension WaveformView {
         SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
         MAS/MAR: local (moving-window) median template — robust to an occasional distorted event; MAR additionally scales the template by a least-squares fit.
         wAAS/wAAR: local template exponentially weighted toward nearby events (Goldman 2000); wAAR additionally scales the template by a least-squares fit.
+
+        Regress and MAS/MAR/wAAS/wAAR can size each event's correction window from that event's own measured duration instead of one shared window — see Options — needed for artifacts whose events genuinely vary in length (auto-enabled for Continuous topography scanning). OBS and SSP/PCA can't: they pool every event into one shared basis, which requires uniform-length epochs.
         """
     }
 

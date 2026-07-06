@@ -177,6 +177,33 @@ struct ArtifactCleanerTests {
         }
     }
 
+    /// MAS now applies the same edge-taper + local-baseline mechanism as OBS
+    /// (default on) before subtracting its local template — verifies that
+    /// addition didn't break MAS's core job of substantially reducing a
+    /// repeated planted artifact.
+    @Test func masWithDefaultTaperAndBaselineStillReducesArtifact() {
+        let template = SyntheticSignal.bump(width: windowSamples)
+        let centers = [100, 250, 400, 550, 700]
+        let scales: [Float] = [2.0, 1.8, 2.2, 1.9, 2.1]
+        let sampleCount = 1000
+
+        let channel = makeSignal(template: template, centers: centers, scales: scales, sampleCount: sampleCount)
+        let events = makeEvents(centers: centers)
+        let artifact = makeArtifact(events: events, template: template, method: .mas)
+        let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+
+        let (cleaned, summaries) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+
+        #expect(summaries.count == 1)
+        #expect(summaries[0].method == .mas)
+
+        for center in centers {
+            let before = windowEnergy(channel, center: center)
+            let after = windowEnergy(cleaned.data[0], center: center)
+            #expect(after < before * 0.3, "MAS (with taper + baseline preservation) left too much artifact energy at \(center)")
+        }
+    }
+
     @Test func doNothingLeavesSignalUnchanged() {
         let template = SyntheticSignal.bump(width: windowSamples)
         let centers = [100, 400]
