@@ -226,10 +226,10 @@ extension WaveformView {
             if newType != .ocular { template.topographyScanStyle = .windowed }
         }
         .onChange(of: template.name) { _, _ in
-            refreshDefinedArtifactIdentity()
+            scheduleDefinedArtifactIdentityRefresh()
         }
         .onChange(of: template.eventCode) { _, _ in
-            refreshDefinedArtifactIdentity()
+            scheduleDefinedArtifactIdentityRefresh()
         }
         .onChange(of: template.topographyMode) { _, newMode in
             // Continuous scanning only applies to the single-map reference
@@ -1372,6 +1372,22 @@ extension WaveformView {
         invalidateOBSVarianceCache(for: artifact.id)
         template.definedArtifactID = artifact.id
         clearAppliedArtifactCleaning()
+    }
+
+    /// Debounces `refreshDefinedArtifactIdentity()` behind the Name/Event Code
+    /// fields' `.onChange` — those fire on every keystroke, and the refresh
+    /// remaps every event in the artifact (plus rebuilds `artifactVM.events`
+    /// from every defined artifact), which is O(events) and was making typing
+    /// visibly laggy for artifacts with more than a couple hundred events
+    /// (routine for Continuous-scan artifacts). Waiting for a short pause in
+    /// typing means the remap runs once per edit instead of once per character.
+    func scheduleDefinedArtifactIdentityRefresh() {
+        artifactIdentityRefreshTask?.cancel()
+        artifactIdentityRefreshTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            refreshDefinedArtifactIdentity()
+        }
     }
 
     /// Re-stamps the current Name/Event Code onto the already-detected events

@@ -236,6 +236,7 @@ struct WaveformView: View {
     @State var mffExportTask: Task<Void, Never>?
     @State var bcgTask: Task<Void, Never>?
     @State var bcgRefinementTask: Task<Void, Never>?
+    @State var artifactIdentityRefreshTask: Task<Void, Never>?
 
     /// Keep the time slider visually comparable across sampling rates. The old
     /// fixed stride of 5 samples at 1000 Hz displayed about 200 plotted points/s.
@@ -2049,6 +2050,8 @@ struct WaveformView: View {
         bcgTask = nil
         bcgRefinementTask?.cancel()
         bcgRefinementTask = nil
+        artifactIdentityRefreshTask?.cancel()
+        artifactIdentityRefreshTask = nil
 
         filter.cancelInFlightWork()
         chanHealth.resetForClose()
