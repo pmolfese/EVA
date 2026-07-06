@@ -90,8 +90,14 @@ extension WaveformView {
                 Button("Export as JSON…") {
                     exportChannelAsJSON(index: index, signal: signal)
                 }
+                Button("Export as JSON with Events…") {
+                    exportChannelAsJSON(index: index, signal: signal, includeEvents: true)
+                }
                 Button("Export as 1D…") {
                     exportChannelAs1D(index: index, signal: signal)
+                }
+                Button("Export as 1D with Events…") {
+                    exportChannelAs1D(index: index, signal: signal, includeEvents: true)
                 }
             }
         }
@@ -228,7 +234,8 @@ extension WaveformView {
             sampleStride: displaySampleStride(for: signal),
             visibleRange: visibleHorizontalRange,
             nominalHeight: channelRowHeight,
-            color: channelColor(index)
+            color: channelColor(index),
+            usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering
         )
         .frame(width: plotWidth, height: channelRowHeight + (channelOverflowHeight * 2))
         .background {

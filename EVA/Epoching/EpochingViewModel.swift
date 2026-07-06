@@ -22,6 +22,7 @@ final class EpochingViewModel: ObservableObject {
     enum AveragedDisplayMode: String, CaseIterable, Identifiable {
         case waveform = "Waveform"
         case averages = "Averages"
+        case trials = "Trials"
 
         var id: String { rawValue }
 
@@ -29,6 +30,7 @@ final class EpochingViewModel: ObservableObject {
             switch self {
             case .waveform: return "waveform.path.ecg"
             case .averages: return "chart.xyaxis.line"
+            case .trials: return "waveform.path.ecg.rectangle"
             }
         }
     }
@@ -352,6 +354,7 @@ final class EpochingViewModel: ObservableObject {
             timingMarkersBySegmentValue: timingMarkersBySegmentValue,
             timingEventsBySegmentValue: timingEventsBySegmentValue,
             artifactEventsForRejection: skipArtifacts ? artifactRejectionEvents : [],
+            artifactEventsForRejectionByLabel: skipArtifacts && !artifactRejectionEvents.isEmpty ? ["artifacts": artifactRejectionEvents] : [:],
             preSamples: preSamples,
             epochLength: epochLength,
             psaOffset: offset,

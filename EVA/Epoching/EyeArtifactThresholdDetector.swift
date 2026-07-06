@@ -44,24 +44,25 @@ nonisolated enum EyeArtifactThresholdDetector {
         channels: [[Float]],
         samplingRate: Double,
         duration: TimeInterval,
-        configuration: EyeArtifactThresholdConfiguration = .defaults(for: .blink)
+        configuration: EyeArtifactThresholdConfiguration? = nil
     ) -> [MFFEvent] {
         guard samplingRate > 0, duration > 0, let sampleCount = channels.first?.count, sampleCount > 0 else {
             return []
         }
 
-        let candidateChannels = resolvedChannels(kind: kind, channels: channels, configuration: configuration)
+        let config = configuration ?? .defaults(for: kind)
+        let candidateChannels = resolvedChannels(kind: kind, channels: channels, configuration: config)
         guard !candidateChannels.isEmpty else { return [] }
 
-        let amplitudeMin = max(configuration.amplitudeMinMicrovolts, 0)
-        let amplitudeMax = configuration.amplitudeMaxMicrovolts   // 0 == no cap
-        let minimumSamples = max(Int((configuration.minDurationSeconds * samplingRate).rounded()), 1)
-        let maximumSamples = configuration.maxDurationSeconds > 0
-            ? max(Int((configuration.maxDurationSeconds * samplingRate).rounded()), minimumSamples)
+        let amplitudeMin = max(config.amplitudeMinMicrovolts, 0)
+        let amplitudeMax = config.amplitudeMaxMicrovolts   // 0 == no cap
+        let minimumSamples = max(Int((config.minDurationSeconds * samplingRate).rounded()), 1)
+        let maximumSamples = config.maxDurationSeconds > 0
+            ? max(Int((config.maxDurationSeconds * samplingRate).rounded()), minimumSamples)
             : Int.max
-        let mergeGapSamples = max(Int((configuration.mergeGapSeconds * samplingRate).rounded()), 1)
-        let riseSamples = configuration.riseWindowSeconds > 0
-            ? max(Int((configuration.riseWindowSeconds * samplingRate).rounded()), 1)
+        let mergeGapSamples = max(Int((config.mergeGapSeconds * samplingRate).rounded()), 1)
+        let riseSamples = config.riseWindowSeconds > 0
+            ? max(Int((config.riseWindowSeconds * samplingRate).rounded()), 1)
             : Int.max
 
         // Per-sample "driving" value = the candidate channel whose signed value
@@ -78,7 +79,7 @@ nonisolated enum EyeArtifactThresholdDetector {
         }
 
         func crosses(_ value: Float) -> Bool {
-            switch configuration.polarity {
+            switch config.polarity {
             case .positive: return value >= amplitudeMin
             case .negative: return value <= -amplitudeMin
             case .bipolar:  return abs(value) >= amplitudeMin
@@ -104,7 +105,6 @@ nonisolated enum EyeArtifactThresholdDetector {
         let samplesPerMs = Float(samplingRate / 1000.0)
 
         var intervals: [ClosedRange<Int>] = []
-        var peaks: [Int] = []
         for run in runs {
             let length = run.upperBound - run.lowerBound + 1
             guard length >= minimumSamples, length <= maximumSamples else { continue }
@@ -120,25 +120,23 @@ nonisolated enum EyeArtifactThresholdDetector {
             // Baseline→peak must complete within the rise window.
             if peakSample - run.lowerBound > riseSamples { continue }
 
-            if configuration.velocityEnabled || configuration.accelerationEnabled {
+            if config.velocityEnabled || config.accelerationEnabled {
                 let (velocity, acceleration) = kinematics(in: run, drive: drive, samplesPerMs: samplesPerMs)
-                if configuration.velocityEnabled,
-                   velocity < configuration.velocityThresholdMicrovoltsPerMillisecond { continue }
-                if configuration.accelerationEnabled,
-                   acceleration < configuration.accelerationThresholdMicrovoltsPerMillisecondSquared { continue }
+                if config.velocityEnabled,
+                   velocity < config.velocityThresholdMicrovoltsPerMillisecond { continue }
+                if config.accelerationEnabled,
+                   acceleration < config.accelerationThresholdMicrovoltsPerMillisecondSquared { continue }
             }
 
             if let last = intervals.last, run.lowerBound - last.upperBound <= mergeGapSamples {
                 intervals[intervals.count - 1] = last.lowerBound...run.upperBound
-                // Keep the earlier peak; adjacent runs are one event.
             } else {
                 intervals.append(run)
-                peaks.append(peakSample)
             }
         }
 
         return intervals.enumerated().map { index, interval in
-            let peakSample = index < peaks.count ? peaks[index] : interval.lowerBound
+            let peakSample = peakSample(in: interval, drive: drive)
             let time = min(max(Double(peakSample) / samplingRate, 0), duration)
             // Flag sits at the peak (centered for OBS); the window span is carried
             // as duration so the UI can highlight the section the artifact covers.
@@ -152,6 +150,19 @@ nonisolated enum EyeArtifactThresholdDetector {
                 durationSeconds: windowSeconds
             )
         }
+    }
+
+    private static func peakSample(in interval: ClosedRange<Int>, drive: [Float]) -> Int {
+        var peakSample = interval.lowerBound
+        var peakMagnitude: Float = 0
+        for sample in interval where drive.indices.contains(sample) {
+            let magnitude = abs(drive[sample])
+            if magnitude > peakMagnitude {
+                peakMagnitude = magnitude
+                peakSample = sample
+            }
+        }
+        return peakSample
     }
 
     /// Peak absolute first / second difference over the run, expressed in

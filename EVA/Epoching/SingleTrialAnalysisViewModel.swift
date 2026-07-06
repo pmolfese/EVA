@@ -44,6 +44,7 @@ final class SingleTrialAnalysisViewModel: ObservableObject {
     @Published var channelScope = SingleTrialChannelScope.singleChannel
     @Published var selectedChannelIndex: Int?
     @Published var selectedChannelSetID: ChannelSet.ID?
+    @Published var showsAllConditionsInButterfly = false
 
     // MARK: Analysis window (ms, relative to stimulus onset) — nil until the
     // user drag-selects a range on the averaged-trace picker.
@@ -72,6 +73,7 @@ final class SingleTrialAnalysisViewModel: ObservableObject {
         channelScope = .singleChannel
         selectedChannelIndex = nil
         selectedChannelSetID = nil
+        showsAllConditionsInButterfly = false
         windowStartMs = nil
         windowEndMs = nil
         result = nil

@@ -493,7 +493,7 @@ extension WaveformView {
             Text("A channel is flagged bad for an epoch if any sample falls outside min/max, or the sample-to-sample change (slope) or change-in-slope (acceleration) exceeds these limits. Flagged channels are interpolated for just that epoch — unless too many channels are bad at once, in which case the whole epoch is rejected instead (and the expensive interpolation is skipped for it).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 280)
+                .frame(width: 294)
                 .fixedSize(horizontal: false, vertical: true)
 
             Divider()
@@ -524,7 +524,7 @@ extension WaveformView {
             }
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(width: 336)
     }
 
     func psaEventCodeBinding(_ code: String) -> Binding<Bool> {
@@ -1045,13 +1045,15 @@ extension WaveformView {
             epoching.statusMessage = "Epoch duration must be greater than zero."
             return nil
         }
+        let artifactEventsByLabel = psaArtifactEventsForRejectionByLabel(in: signal)
         return PSABuildJob(
             signal: signal,
             events: events,
             categoriesBySegmentValue: categoriesBySegmentValue,
             timingMarkersBySegmentValue: timingMarkersBySegmentValue,
             timingEventsBySegmentValue: timingEventsBySegmentValue,
-            artifactEventsForRejection: psaArtifactEventsForRejection(in: signal),
+            artifactEventsForRejection: artifactEventsByLabel.values.flatMap { $0 },
+            artifactEventsForRejectionByLabel: artifactEventsByLabel,
             preSamples: preSamples,
             epochLength: epochLength,
             psaOffset: epoching.offset,
@@ -1095,21 +1097,25 @@ extension WaveformView {
     }
 
     func psaArtifactEventsForRejection(in signal: MFFSignalData) -> [MFFEvent] {
-        // When segmenting on artifacts themselves, don't reject epochs for containing those artifacts.
-        guard epoching.skipIfContainsArtifact, epoching.segmentField != .artifact else { return [] }
+        psaArtifactEventsForRejectionByLabel(in: signal).values.flatMap { $0 }
+    }
 
-        var events: [MFFEvent] = []
+    func psaArtifactEventsForRejectionByLabel(in signal: MFFSignalData) -> [String: [MFFEvent]] {
+        // When segmenting on artifacts themselves, don't reject epochs for containing those artifacts.
+        guard epoching.skipIfContainsArtifact, epoching.segmentField != .artifact else { return [:] }
+
+        var eventsByLabel: [String: [MFFEvent]] = [:]
         if epoching.skipEyeBlinks {
-            events += artifactEventsOrDetection(for: .blink, in: signal)
+            eventsByLabel["Eye Blink", default: []] += artifactEventsOrDetection(for: .blink, in: signal)
         }
         if epoching.skipEyeMovements {
-            events += artifactEventsOrDetection(for: .movement, in: signal)
+            eventsByLabel["Eye Movement", default: []] += artifactEventsOrDetection(for: .movement, in: signal)
         }
-        events += template.definedArtifacts
-            .filter { epoching.skippedDefinedArtifactIDs.contains($0.id) }
-            .flatMap(\.events)
+        for artifact in template.definedArtifacts where epoching.skippedDefinedArtifactIDs.contains(artifact.id) {
+            eventsByLabel[artifact.name, default: []] += artifact.events
+        }
 
-        return events
+        return eventsByLabel.filter { !$0.value.isEmpty }
     }
 
     func artifactEventsOrDetection(for kind: EyeArtifactKind, in signal: MFFSignalData) -> [MFFEvent] {
@@ -1118,11 +1124,15 @@ extension WaveformView {
             return existingEvents
         }
 
+        let configuration = kind == .blink
+            ? artifactVM.blinkThresholdConfig
+            : artifactVM.movementThresholdConfig
         return EyeArtifactThresholdDetector.detect(
             kind: kind,
             channels: signal.data,
             samplingRate: signal.samplingRate,
-            duration: signal.duration
+            duration: signal.duration,
+            configuration: configuration
         )
     }
 

@@ -34,23 +34,39 @@ private struct ChannelExportSeries: Codable {
     var values: [Double]
 }
 
+private struct ChannelExportEvent: Codable {
+    var code: String
+    var label: String?
+    var description: String?
+    var cell: String?
+    var beginTimeSeconds: Double
+    var durationSeconds: Double?
+    var sourceFile: String
+}
+
 private struct ChannelExportPayload: Codable {
     var channel: String
     var samplingRate: Double
     var recording: String
     var series: [ChannelExportSeries]
+    var eventTraces: [ChannelExportSeries]?
+    var events: [ChannelExportEvent]?
 }
 
 extension WaveformView {
     // MARK: - Single-channel export (JSON / AFNI 1D)
 
-    func exportChannelAsJSON(index: Int, signal: MFFSignalData) {
+    func exportChannelAsJSON(index: Int, signal: MFFSignalData, includeEvents: Bool = false) {
         guard let series = channelExportSeries(index: index, signal: signal) else { return }
+        let events = includeEvents ? channelExportEvents(for: signal) : []
+        let eventTraces = includeEvents ? channelExportEventSeries(events: events, signal: signal) : []
         let payload = ChannelExportPayload(
             channel: channelExportName(index: index, signal: signal),
             samplingRate: signal.samplingRate,
             recording: recording.packageName,
-            series: series
+            series: series,
+            eventTraces: includeEvents ? eventTraces : nil,
+            events: includeEvents ? events.map(channelExportEvent) : nil
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -60,14 +76,16 @@ extension WaveformView {
         panel.allowedContentTypes = [.json]
         panel.isExtensionHidden = false
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "\(payload.channel).json"
+        panel.nameFieldStringValue = "\(payload.channel)\(includeEvents ? " with Events" : "").json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? data.write(to: url)
     }
 
-    func exportChannelAs1D(index: Int, signal: MFFSignalData) {
+    func exportChannelAs1D(index: Int, signal: MFFSignalData, includeEvents: Bool = false) {
         guard let series = channelExportSeries(index: index, signal: signal) else { return }
-        let text = channelExport1DText(series: series)
+        let events = includeEvents ? channelExportEvents(for: signal) : []
+        let eventTraces = includeEvents ? channelExportEventSeries(events: events, signal: signal) : []
+        let text = channelExport1DText(series: series + eventTraces)
         guard let data = text.data(using: .utf8) else { return }
 
         let panel = NSSavePanel()
@@ -83,7 +101,7 @@ extension WaveformView {
         panel.allowsOtherFileTypes = true
         panel.isExtensionHidden = false
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "\(channelExportName(index: index, signal: signal)).1D"
+        panel.nameFieldStringValue = "\(channelExportName(index: index, signal: signal))\(includeEvents ? " with Events" : "").1D"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? data.write(to: url)
     }
@@ -118,6 +136,116 @@ extension WaveformView {
         }
         guard !series.isEmpty else { return nil }
         return series
+    }
+
+    /// The same combined event stream shown in the waveform's Events track:
+    /// signal events plus user markers and, for non-averaged views, artifact
+    /// overlay events. In epoch views, continuous overlays are mapped into each
+    /// displayed epoch so sample indices line up with exported channel values.
+    private func channelExportEvents(for signal: MFFSignalData) -> [MFFEvent] {
+        displayedEvents(
+            for: signal,
+            includeContinuousOverlays: true,
+            includeArtifactOverlays: !epoching.isAveraged,
+            mapContinuousOverlaysIntoEpochs: epoching.epochedSignal != nil
+        )
+    }
+
+    private func channelExportEvent(_ event: MFFEvent) -> ChannelExportEvent {
+        ChannelExportEvent(
+            code: event.code,
+            label: event.label,
+            description: event.eventDescription,
+            cell: event.cell,
+            beginTimeSeconds: event.beginTimeSeconds,
+            durationSeconds: event.durationSeconds,
+            sourceFile: event.sourceFile
+        )
+    }
+
+    /// Converts events into sample-aligned 0/1 traces, one trace per event code.
+    /// Averaged conditions are exported as separate per-condition event traces
+    /// so they match the existing per-condition channel columns.
+    private func channelExportEventSeries(events: [MFFEvent], signal: MFFSignalData) -> [ChannelExportSeries] {
+        guard signal.samplingRate > 0,
+              let sampleCount = signal.data.first?.count,
+              sampleCount > 0,
+              !events.isEmpty else { return [] }
+
+        let grouped = Dictionary(grouping: events, by: channelExportEventTraceLabel)
+        let sortedGroups = grouped.sorted {
+            $0.key.localizedStandardCompare($1.key) == .orderedAscending
+        }
+
+        if signal.isAveraged, !signal.epochSegments.isEmpty {
+            return signal.epochSegments.flatMap { segment -> [ChannelExportSeries] in
+                guard segment.startSample >= 0,
+                      segment.endSample >= segment.startSample,
+                      segment.endSample < sampleCount else { return [] }
+                let length = segment.endSample - segment.startSample + 1
+                let startSeconds = Double(segment.startSample) / signal.samplingRate
+                return sortedGroups.map { label, groupedEvents in
+                    ChannelExportSeries(
+                        label: "\(segment.category):event:\(label)",
+                        values: channelExportEventTrace(
+                            events: groupedEvents,
+                            startSeconds: startSeconds,
+                            sampleCount: length,
+                            samplingRate: signal.samplingRate
+                        )
+                    )
+                }
+            }
+        }
+
+        return sortedGroups.map { label, groupedEvents in
+            ChannelExportSeries(
+                label: "event:\(label)",
+                values: channelExportEventTrace(
+                    events: groupedEvents,
+                    startSeconds: 0,
+                    sampleCount: sampleCount,
+                    samplingRate: signal.samplingRate
+                )
+            )
+        }
+    }
+
+    private func channelExportEventTraceLabel(for event: MFFEvent) -> String {
+        let label = event.code.trimmingCharacters(in: .whitespacesAndNewlines)
+        return label.isEmpty ? "Event" : label
+    }
+
+    private func channelExportEventTrace(
+        events: [MFFEvent],
+        startSeconds: Double,
+        sampleCount: Int,
+        samplingRate: Double
+    ) -> [Double] {
+        guard sampleCount > 0, samplingRate > 0 else { return [] }
+        let endSeconds = startSeconds + Double(sampleCount) / samplingRate
+        var values = [Double](repeating: 0, count: sampleCount)
+
+        for event in events {
+            let eventStart = event.beginTimeSeconds
+            let duration = max(event.durationSeconds ?? 0, 0)
+            if duration > 0 {
+                let eventEnd = eventStart + duration
+                guard eventStart < endSeconds, eventEnd >= startSeconds else { continue }
+                let startIndex = max(Int(floor((eventStart - startSeconds) * samplingRate)), 0)
+                let endIndex = min(Int(ceil((eventEnd - startSeconds) * samplingRate)), sampleCount - 1)
+                guard startIndex <= endIndex else { continue }
+                for index in startIndex...endIndex {
+                    values[index] = 1
+                }
+            } else {
+                guard eventStart >= startSeconds, eventStart < endSeconds else { continue }
+                let index = min(max(Int(((eventStart - startSeconds) * samplingRate).rounded()), 0), sampleCount - 1)
+                values[index] = 1
+            }
+        }
+
+        return values
     }
 
     /// Whitespace-delimited columns with a leading `#`-prefixed comment row

@@ -190,7 +190,10 @@ extension WaveformView {
                         amplitudeScale: amplitudeScale,
                         highlightRelativeSample: currentRelativeSample,
                         channelName: { eegChannelDisplayName(index: $0, signal: signal) },
-                        onTapChannel: { channelInspectorSelection = .channel($0) }
+                        onTapChannel: { channelInspectorSelection = .channel($0) },
+                        onScrubRelativeSample: { sample in
+                            setAveragesWorkspaceLatency(sample, segment: segments[0])
+                        }
                     )
                     .contentShape(Rectangle())
                     .simultaneousGesture(
@@ -202,18 +205,6 @@ extension WaveformView {
                                 )
                             }
                     )
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 6, coordinateSpace: .local)
-                            .onChanged { value in
-                                setAveragesWorkspaceLatency(
-                                    relativeSample(forButterflyX: value.location.x, width: proxy.size.width, segment: segments[0]),
-                                    segment: segments[0]
-                                )
-                            }
-                    )
-                    .overlay {
-                        latencyCursorScrubOverlay(segment: segments[0], relativeSample: currentRelativeSample)
-                    }
                     .contextMenu {
                         figureSaveMenu(
                             title: "Averages Butterfly",
@@ -368,12 +359,10 @@ extension WaveformView {
                         showsMembers: channelInspectorOverlayEnabled,
                         amplitudeScale: amplitudeScale,
                         colorFor: { epochColor(for: $0) },
+                        channelName: { eegChannelDisplayName(index: $0, signal: signal) },
                         highlightRelativeSample: relativeSample,
                         standardErrorBands: standardErrorBands
                     )
-                    .overlay {
-                        latencyCursorScrubOverlay(segment: segments[0], relativeSample: relativeSample)
-                    }
                     .contextMenu {
                         channelInspectorDisplayMenuItems(selection: selection, signal: signal, segments: segments)
                         Divider()
@@ -400,44 +389,13 @@ extension WaveformView {
     }
 
     private func averagesLatencyScrubber(segment: EpochSegment, relativeSample: Int) -> some View {
-        let maxIndex = max(segment.endSample - segment.startSample, 0)
-        let range = 0...max(Double(maxIndex), 1)
-
         return averagesPanel(fillHeight: false) {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack {
-                    Text("Latency")
-                        .font(.caption.weight(.semibold))
-                    Text(averagesLatencyText(
-                        segment: segment,
-                        relativeSample: relativeSample,
-                        samplingRate: epoching.epochedSignal?.samplingRate ?? 0
-                    ))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    Spacer()
-                }
-
-                Slider(
-                    value: Binding(
-                        get: { Double(relativeSample) },
-                        set: { setAveragesWorkspaceLatency(Int($0.rounded()), segment: segment) }
-                    ),
-                    in: range,
-                    step: 1
-                )
-                .disabled(maxIndex <= 0)
-
-                HStack {
-                    Text(averagesLatencyText(segment: segment, relativeSample: 0, samplingRate: epoching.epochedSignal?.samplingRate ?? 0))
-                    Spacer()
-                    Text(averagesLatencyText(segment: segment, relativeSample: segment.stimulusOffsetSamples, samplingRate: epoching.epochedSignal?.samplingRate ?? 0))
-                    Spacer()
-                    Text(averagesLatencyText(segment: segment, relativeSample: maxIndex, samplingRate: epoching.epochedSignal?.samplingRate ?? 0))
-                }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-            }
+            AveragesLatencyScrubberControl(
+                segment: segment,
+                relativeSample: relativeSample,
+                samplingRate: epoching.epochedSignal?.samplingRate ?? 0,
+                onCommit: { setAveragesWorkspaceLatency($0, segment: segment) }
+            )
         }
     }
 
@@ -466,6 +424,18 @@ extension WaveformView {
                         averagesLogMetric("Missing timing", value: summary.skippedTimingMarkers)
                         averagesLogMetric("Out of bounds", value: summary.skippedOutOfBounds)
                         averagesLogMetric("Too many bad channels", value: summary.rejectedForTooManyBadChannels)
+                    }
+                }
+
+                if !summary.skippedArtifactBreakdown.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Artifact skip causes")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(artifactSkipBreakdownText(summary.skippedArtifactBreakdown))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
                     }
                 }
 
@@ -498,6 +468,18 @@ extension WaveformView {
                 }
             }
         }
+    }
+
+    private func artifactSkipBreakdownText(_ breakdown: [String: Int]) -> String {
+        breakdown
+            .sorted {
+                if $0.value == $1.value {
+                    return $0.key.localizedStandardCompare($1.key) == .orderedAscending
+                }
+                return $0.value > $1.value
+            }
+            .map { "\($0.key): \($0.value)" }
+            .joined(separator: ", ")
     }
 
     private func averagesLogMetric(_ title: String, value: Int) -> some View {
@@ -551,6 +533,7 @@ extension WaveformView {
                     showsMembers: channelInspectorOverlayEnabled,
                     amplitudeScale: amplitudeScale,
                     colorFor: { epochColor(for: $0) },
+                    channelName: { eegChannelDisplayName(index: $0, signal: signal) },
                     highlightRelativeSample: relativeSample,
                     standardErrorBands: standardErrorBands
                 )
@@ -578,47 +561,6 @@ extension WaveformView {
         topomapSample = nil
     }
 
-    private func setAveragesWorkspaceLatency(forPlotX x: CGFloat, width: CGFloat, segment: EpochSegment) {
-        setAveragesWorkspaceLatency(relativeSample(forButterflyX: x, width: width, segment: segment), segment: segment)
-    }
-
-    private func latencyCursorX(relativeSample: Int, segment: EpochSegment, width: CGFloat) -> CGFloat {
-        let epochLength = max(segment.endSample - segment.startSample + 1, 1)
-        guard epochLength > 1 else { return 0 }
-        let clamped = min(max(relativeSample, 0), epochLength - 1)
-        return CGFloat(clamped) / CGFloat(epochLength - 1) * width
-    }
-
-    private func latencyCursorScrubOverlay(segment: EpochSegment, relativeSample: Int) -> some View {
-        GeometryReader { proxy in
-            let hitWidth: CGFloat = 54
-            let x = latencyCursorX(relativeSample: relativeSample, segment: segment, width: proxy.size.width)
-            let centerX = min(max(x, hitWidth / 2), max(proxy.size.width - hitWidth / 2, hitWidth / 2))
-            let plotMinX = proxy.frame(in: .global).minX
-
-            ZStack(alignment: .topLeading) {
-                Color.clear
-                    .allowsHitTesting(false)
-
-                Rectangle()
-                    .fill(Color(nsColor: .controlAccentColor).opacity(0.01))
-                    .frame(width: hitWidth, height: proxy.size.height)
-                    .position(x: centerX, y: proxy.size.height / 2)
-                    .contentShape(Rectangle())
-                    .highPriorityGesture(
-                        DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                            .onChanged { value in
-                                setAveragesWorkspaceLatency(forPlotX: value.location.x - plotMinX, width: proxy.size.width, segment: segment)
-                            }
-                            .onEnded { value in
-                                setAveragesWorkspaceLatency(forPlotX: value.location.x - plotMinX, width: proxy.size.width, segment: segment)
-                            }
-                    )
-                    .help("Drag to adjust latency across all average views.")
-            }
-        }
-    }
-
     private func averagesWorkspaceRelativeSample(for segments: [EpochSegment]) -> Int {
         guard let first = segments.first else { return 0 }
         let maxIndex = max(first.endSample - first.startSample, 0)
@@ -629,6 +571,72 @@ extension WaveformView {
     }
 
     private func averagesLatencyText(segment: EpochSegment, relativeSample: Int, samplingRate: Double) -> String {
+        guard samplingRate > 0 else { return "0 ms" }
+        let latencyMilliseconds = Double(relativeSample - segment.stimulusOffsetSamples) / samplingRate * 1_000
+        return String(format: "%+.0f ms", latencyMilliseconds)
+    }
+}
+
+private struct AveragesLatencyScrubberControl: View {
+    let segment: EpochSegment
+    let relativeSample: Int
+    let samplingRate: Double
+    let onCommit: (Int) -> Void
+
+    @State private var draftSample: Double?
+
+    private var maxIndex: Int {
+        max(segment.endSample - segment.startSample, 0)
+    }
+
+    private var range: ClosedRange<Double> {
+        0...max(Double(maxIndex), 1)
+    }
+
+    private var displayedSample: Int {
+        min(max(Int((draftSample ?? Double(relativeSample)).rounded()), 0), maxIndex)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("Latency")
+                    .font(.caption.weight(.semibold))
+                Text(latencyText(relativeSample: displayedSample))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            Slider(
+                value: Binding(
+                    get: { draftSample ?? Double(relativeSample) },
+                    set: { draftSample = $0 }
+                ),
+                in: range,
+                step: 1,
+                onEditingChanged: { isEditing in
+                    guard !isEditing else { return }
+                    let committed = displayedSample
+                    draftSample = nil
+                    onCommit(committed)
+                }
+            )
+            .disabled(maxIndex <= 0)
+
+            HStack {
+                Text(latencyText(relativeSample: 0))
+                Spacer()
+                Text(latencyText(relativeSample: segment.stimulusOffsetSamples))
+                Spacer()
+                Text(latencyText(relativeSample: maxIndex))
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func latencyText(relativeSample: Int) -> String {
         guard samplingRate > 0 else { return "0 ms" }
         let latencyMilliseconds = Double(relativeSample - segment.stimulusOffsetSamples) / samplingRate * 1_000
         return String(format: "%+.0f ms", latencyMilliseconds)

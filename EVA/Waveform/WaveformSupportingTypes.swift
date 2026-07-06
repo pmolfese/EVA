@@ -424,6 +424,7 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
     var acceptedEpochs = 0
     var outputSegments = 0
     var skippedArtifacts = 0
+    var skippedArtifactBreakdown: [String: Int] = [:]
     var skippedTimingMarkers = 0
     var skippedOutOfBounds = 0
     var timingAdjusted = 0
@@ -592,6 +593,7 @@ nonisolated struct PSABuildJob: Sendable {
     let timingMarkersBySegmentValue: [String: String]
     let timingEventsBySegmentValue: [String: [MFFEvent]]
     let artifactEventsForRejection: [MFFEvent]
+    let artifactEventsForRejectionByLabel: [String: [MFFEvent]]
     let preSamples: Int
     let epochLength: Int
     let psaOffset: Double
@@ -634,8 +636,12 @@ nonisolated struct PSABuildJob: Sendable {
         var jobs: [AcceptedEpochJob] = []
         var skippedOutOfBounds = 0
         var skippedArtifacts = 0
+        var skippedArtifactBreakdown: [String: Int] = [:]
         var skippedTimingMarkers = 0
         var timingAdjusted = 0
+        let artifactRejectionGroups = artifactEventsForRejectionByLabel.isEmpty
+            ? (artifactEventsForRejection.isEmpty ? [:] : [artifactRejectionLabel: artifactEventsForRejection])
+            : artifactEventsForRejectionByLabel
 
         for event in events {
             guard let categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""],
@@ -662,11 +668,21 @@ nonisolated struct PSABuildJob: Sendable {
                 skippedOutOfBounds += 1
                 continue
             }
-            if skipIfContainsArtifact, !artifactEventsForRejection.isEmpty {
+            if skipIfContainsArtifact, !artifactRejectionGroups.isEmpty {
                 let startSeconds = Double(startSample) / signal.samplingRate
                 let endSeconds = Double(endSample) / signal.samplingRate
-                if artifactEventsForRejection.contains(where: { $0.beginTimeSeconds >= startSeconds && $0.beginTimeSeconds <= endSeconds }) {
+                let matchedLabels = artifactRejectionGroups.compactMap { label, events -> String? in
+                    events.contains { artifact in
+                        artifact.beginTimeSeconds >= startSeconds && artifact.beginTimeSeconds <= endSeconds
+                    } ? label : nil
+                }
+                if !matchedLabels.isEmpty {
                     skippedArtifacts += 1
+                    let sortedLabels = matchedLabels.sorted {
+                        $0.localizedStandardCompare($1) == .orderedAscending
+                    }
+                    let breakdownLabel = sortedLabels.joined(separator: " + ")
+                    skippedArtifactBreakdown[breakdownLabel, default: 0] += 1
                     continue
                 }
             }
@@ -853,6 +869,7 @@ nonisolated struct PSABuildJob: Sendable {
                 acceptedEpochs: accepted,
                 outputSegments: segments.count,
                 skippedArtifacts: skippedArtifacts,
+                skippedArtifactBreakdown: skippedArtifactBreakdown,
                 skippedTimingMarkers: skippedTimingMarkers,
                 skippedOutOfBounds: skippedOutOfBounds,
                 timingAdjusted: timingAdjusted,

@@ -257,6 +257,7 @@ struct PSABuildJobEpochRejectionTests {
             timingMarkersBySegmentValue: [:],
             timingEventsBySegmentValue: [:],
             artifactEventsForRejection: [],
+            artifactEventsForRejectionByLabel: [:],
             preSamples: 10,
             epochLength: 50,
             psaOffset: 0,

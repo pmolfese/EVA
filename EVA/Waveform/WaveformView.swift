@@ -76,6 +76,7 @@ struct WaveformView: View {
     @Query private var markers: [UserMarker]
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
+    @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
 
     @State var recordingStore = RecordingStore()
     var amplitudeScale: Double {
@@ -594,7 +595,7 @@ struct WaveformView: View {
     }
 
     /// The signal's own events plus user markers and generated in-memory artifact events, time-sorted.
-    private func displayedEvents(
+    func displayedEvents(
         for signal: MFFSignalData,
         includeContinuousOverlays: Bool = true,
         includeArtifactOverlays: Bool = true,
@@ -751,10 +752,11 @@ struct WaveformView: View {
                 includeArtifactOverlays: includeArtifactOverlays,
                 mapContinuousOverlaysIntoEpochs: isShowingEpochs
             )
+        let displayMode = epoching.isAveraged ? epoching.averagedDisplayMode : .waveform
 
         VStack(spacing: 0) {
             // Full-width button bar — side panels below must not shrink it.
-            if epoching.isAveraged, epoching.averagedDisplayMode == .averages {
+            if displayMode == .averages {
                 averagesToolbar(for: signal)
             } else {
                 controls(for: signal, base: base, waveletInput: waveletInput, continuousSignal: continuousSignal)
@@ -763,15 +765,18 @@ struct WaveformView: View {
             Divider()
 
             Group {
-                if epoching.isAveraged, epoching.averagedDisplayMode == .averages {
+                if displayMode == .averages {
                     averagesWorkspace(for: signal)
+                        .transition(.opacity)
+                } else if displayMode == .trials {
+                    singleTrialAnalysisWorkspace()
                         .transition(.opacity)
                 } else {
                     waveformWorkspace(for: signal, events: events, isShowingEpochs: isShowingEpochs)
                         .transition(.opacity)
                 }
             }
-            .animation(.easeInOut(duration: 0.16), value: epoching.averagedDisplayMode)
+            .animation(.easeInOut(duration: 0.16), value: displayMode)
         }
         .onAppear {
             refreshDisplayedEventsCache(
@@ -868,9 +873,6 @@ struct WaveformView: View {
                     eegAnalysis.showsSheet = false
                 }
             )
-        }
-        .sheet(isPresented: $singleTrial.showsSheet) {
-            singleTrialAnalysisSheet()
         }
         .sheet(isPresented: $chanHealth.showsDetails) {
             channelHealthDetailsSheet(for: continuousSignal)
@@ -1210,21 +1212,6 @@ struct WaveformView: View {
             .help("Segment the recording into event-locked epochs")
 
             Button {
-                singleTrial.showsSheet = true
-            } label: {
-                ToolbarIcon(
-                    name: "icon.single-trial",
-                    systemName: "chart.xyaxis.line",
-                    label: toolbarButtonLabel("TRIALS"),
-                    isActive: singleTrial.result != nil
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(segmentedEpochSignal == nil || segmentedEpochSegments.isEmpty)
-            .accessibilityLabel("Single Trial Analysis")
-            .help("Extract per-trial peak/amplitude values from the segmented epochs")
-
-            Button {
                 eegAnalysis.syncArtifactSources(eegArtifactRejectionSources())
                 eegAnalysis.showsSheet = true
             } label: {
@@ -1307,8 +1294,8 @@ struct WaveformView: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .frame(width: 220)
-        .help("Switch between waveform rows and the averages workspace.")
+        .frame(width: 315)
+        .help("Switch between waveform rows, averages, and single-trial analysis.")
     }
 
     func toolbarStatusAndModeControls(for signal: MFFSignalData) -> some View {
@@ -1326,7 +1313,7 @@ struct WaveformView: View {
 
             if epoching.isAveraged {
                 averagedModePicker()
-                    .frame(width: 220)
+                    .frame(width: 315)
             }
         }
     }
