@@ -420,8 +420,10 @@ extension WaveformView {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 guard dragDistance(value) >= Self.dragSelectionThreshold else { return }
-                dragSelectionStartSample = sampleIndex(forContentX: contentX(fromGlobalX: value.startLocation.x), in: signal)
-                dragSelectionEndSample = sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
+                updateLiveDragSelection(
+                    start: sampleIndex(forContentX: contentX(fromGlobalX: value.startLocation.x), in: signal),
+                    end: sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
+                )
             }
             .onEnded { value in
                 if dragDistance(value) >= Self.dragSelectionThreshold {
@@ -431,10 +433,12 @@ extension WaveformView {
                     let lower = min(start, end)
                     let upper = max(start, end)
                     if upper > lower {
-                        selectedSampleRange = lower...upper
+                        let selectedRange = lower...upper
+                        if selectedSampleRange != selectedRange {
+                            selectedSampleRange = selectedRange
+                        }
                     }
-                    dragSelectionStartSample = nil
-                    dragSelectionEndSample = nil
+                    clearLiveDragSelection()
                     lastWaveformClick = nil
                     highlightedArtifactEvent = nil
                     return
@@ -453,6 +457,24 @@ extension WaveformView {
                     lastWaveformClick = (now, clickX)
                 }
             }
+    }
+
+    func updateLiveDragSelection(start: Int, end: Int) {
+        if dragSelectionStartSample != start {
+            dragSelectionStartSample = start
+        }
+        if dragSelectionEndSample != end {
+            dragSelectionEndSample = end
+        }
+    }
+
+    func clearLiveDragSelection() {
+        if dragSelectionStartSample != nil {
+            dragSelectionStartSample = nil
+        }
+        if dragSelectionEndSample != nil {
+            dragSelectionEndSample = nil
+        }
     }
 
     func dragDistance(_ value: DragGesture.Value) -> CGFloat {

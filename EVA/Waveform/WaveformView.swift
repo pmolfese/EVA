@@ -252,6 +252,8 @@ struct WaveformView: View {
     private let eventTrackHeight: CGFloat = 64
     private let rowSpacing: CGFloat = 12
     let labelColumnWidth: CGFloat = 120
+    private let geometryUpdateQuantum: CGFloat = 0.5
+    private let jumpSliderUpdateQuantum = 0.0005
     private let eventsPanelWidth: CGFloat = 300
     private let topomapPanelWidth: CGFloat = 320
     private let butterflyPanelWidth: CGFloat = 360
@@ -1658,7 +1660,7 @@ struct WaveformView: View {
                             GeometryReader { proxy in
                                 Color.clear
                                     .onChange(of: proxy.frame(in: .global).minX, initial: true) { _, newValue in
-                                        waveformContentMinX = newValue
+                                        updateWaveformContentMinX(newValue)
                                     }
                             }
                         )
@@ -1671,17 +1673,12 @@ struct WaveformView: View {
                         for: HorizontalViewport.self,
                         of: { geometry in
                             HorizontalViewport(
-                                offsetX: geometry.contentOffset.x,
-                                width: geometry.containerSize.width
+                                offsetX: quantizedGeometryValue(geometry.contentOffset.x),
+                                width: quantizedGeometryValue(geometry.containerSize.width)
                             )
                         },
                         action: { _, newValue in
-                            horizontalOffset = max(newValue.offsetX, 0)
-                            horizontalViewportWidth = max(newValue.width, 1)
-                            let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
-                            isSyncingSliderFromScroll = true
-                            horizontalJumpValue = maxOffset > 0 ? Double(horizontalOffset / maxOffset) : 0
-                            isSyncingSliderFromScroll = false
+                            updateHorizontalViewport(newValue, plotWidth: plotWidth)
                         }
                     )
                 }
@@ -2283,6 +2280,47 @@ struct WaveformView: View {
     func displaySampleStride(for samplingRate: Double) -> Int {
         guard samplingRate > 0 else { return referenceDisplaySampleStride }
         return max(Int((samplingRate / targetDisplaySamplesPerSecond).rounded()), 1)
+    }
+
+    private func quantizedGeometryValue(_ value: CGFloat) -> CGFloat {
+        guard value.isFinite else { return 0 }
+        return (value / geometryUpdateQuantum).rounded() * geometryUpdateQuantum
+    }
+
+    private func updateWaveformContentMinX(_ newValue: CGFloat) {
+        let nextValue = quantizedGeometryValue(newValue)
+        guard abs(waveformContentMinX - nextValue) >= geometryUpdateQuantum else { return }
+        waveformContentMinX = nextValue
+    }
+
+    private func updateHorizontalViewport(_ viewport: HorizontalViewport, plotWidth: CGFloat) {
+        let nextOffset = max(viewport.offsetX, 0)
+        let nextWidth = max(viewport.width, 1)
+        let offsetChanged = abs(horizontalOffset - nextOffset) >= geometryUpdateQuantum
+        let widthChanged = abs(horizontalViewportWidth - nextWidth) >= geometryUpdateQuantum
+        guard offsetChanged || widthChanged else { return }
+
+        if offsetChanged {
+            horizontalOffset = nextOffset
+        }
+        if widthChanged {
+            horizontalViewportWidth = nextWidth
+        }
+
+        let resolvedOffset = offsetChanged ? nextOffset : horizontalOffset
+        let resolvedWidth = widthChanged ? nextWidth : horizontalViewportWidth
+        let maxOffset = max(plotWidth - resolvedWidth, 0)
+        let nextJumpValue = maxOffset > 0 ? Double(resolvedOffset / maxOffset) : 0
+        updateHorizontalJumpValueFromScroll(nextJumpValue)
+    }
+
+    private func updateHorizontalJumpValueFromScroll(_ newValue: Double) {
+        guard newValue.isFinite else { return }
+        let clamped = min(max(newValue, 0), 1)
+        guard abs(horizontalJumpValue - clamped) >= jumpSliderUpdateQuantum else { return }
+        isSyncingSliderFromScroll = true
+        horizontalJumpValue = clamped
+        isSyncingSliderFromScroll = false
     }
 
     var visibleHorizontalRange: ClosedRange<CGFloat> {
