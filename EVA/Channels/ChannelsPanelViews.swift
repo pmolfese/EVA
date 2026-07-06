@@ -84,6 +84,16 @@ extension WaveformView {
             Button("Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio") {
                 moveEEGChannelToPhysio(index: index, in: signal)
             }
+
+            Divider()
+            Menu("Export Channel") {
+                Button("Export as JSON…") {
+                    exportChannelAsJSON(index: index, signal: signal)
+                }
+                Button("Export as 1D…") {
+                    exportChannelAs1D(index: index, signal: signal)
+                }
+            }
         }
     }
 

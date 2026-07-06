@@ -581,12 +581,10 @@ struct ArtifactLocalTemplateOptionsButton: View {
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack {
+                        HStack(spacing: 10) {
                             Text("Edge taper")
                                 .font(.caption)
-                            Spacer()
-                            TextField(
-                                "s",
+                            Slider(
                                 value: Binding(
                                     get: { artifact.localTemplateEdgeTaperSeconds },
                                     set: { newValue in
@@ -594,13 +592,13 @@ struct ArtifactLocalTemplateOptionsButton: View {
                                         onSettingsChange()
                                     }
                                 ),
-                                format: .number.precision(.fractionLength(3))
+                                in: 0...DefinedArtifact.maximumLocalTemplateEdgeTaperSeconds,
+                                step: 0.01
                             )
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 70)
-                            Text("s")
-                                .font(.caption)
+                            Text("\(Int((artifact.localTemplateEdgeTaperSeconds * 1000).rounded())) ms")
+                                .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
+                                .frame(width: 50, alignment: .trailing)
                         }
                         Text("Fades the subtraction in/out smoothly over this many seconds at each edge of the window, instead of cutting off sharply at the boundary. Bounded to half the (possibly per-event) window length.")
                             .font(.caption2)
@@ -656,6 +654,14 @@ struct ArtifactOBSOptionsSheet: View {
 
     private var hasTopography: Bool {
         artifact.topography != nil
+    }
+
+    /// Menu items in a `Picker` can't reliably show a hover tooltip on macOS,
+    /// so the reason a topography-requiring strategy is disabled has to be
+    /// visible in the label itself, not just a `.help()` that won't appear.
+    private func obsStrategyMenuLabel(for strategy: ArtifactOBSStrategy) -> String {
+        guard strategy.requiresTopography, !hasTopography else { return strategy.rawValue }
+        return "\(strategy.rawValue) (run topography scan first)"
     }
 
     private var obsStrategyBinding: Binding<ArtifactOBSStrategy> {
@@ -886,7 +892,7 @@ struct ArtifactOBSOptionsSheet: View {
 
             Picker("OBS strategy", selection: obsStrategyBinding) {
                 ForEach(ArtifactOBSStrategy.allCases) { strategy in
-                    Text(strategy.rawValue)
+                    Text(obsStrategyMenuLabel(for: strategy))
                         .tag(strategy)
                         .disabled(strategy.requiresTopography && !hasTopography)
                 }
@@ -895,6 +901,13 @@ struct ArtifactOBSOptionsSheet: View {
             .labelsHidden()
             .frame(width: 260, alignment: .leading)
             .help("Chooses how OBS builds and applies its artifact basis.")
+
+            if !hasTopography && ArtifactOBSStrategy.allCases.contains(where: \.requiresTopography) {
+                Text("Strategies marked above need a saved topography reference — run a topography scan in Define Artifact first.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(spacing: 6) {
                 Text(artifact.obsStrategy.helpText)
