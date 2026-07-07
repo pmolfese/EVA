@@ -32,6 +32,7 @@ struct EpochingViewModelTests {
         #expect(vm.skipEyeBlinks)
         #expect(vm.skipEyeMovements)
         #expect(!vm.skipIfContainsArtifact)
+        #expect(vm.escalatesBadChannelsToGlobal)
         #expect(vm.epochedSignal == nil)
         #expect(vm.epochSegments.isEmpty)
         #expect(!vm.isAveraged)
@@ -46,6 +47,43 @@ struct EpochingViewModelTests {
         #expect(vm.parameters["averageReference"] == "true")
         vm.averageReference = false
         #expect(vm.parameters["averageReference"] == "false")
+    }
+
+    @MainActor
+    @Test func parametersRoundTripPerEpochBadChannelSettings() {
+        let vm = EpochingViewModel(store: RecordingStore())
+        vm.interpolatesBadChannelsPerEpoch = true
+        vm.epochBadChannelThresholds = EpochBadChannelThresholds(
+            minMicrovolts: -125,
+            maxMicrovolts: 175,
+            maxSlopeMicrovoltsPerSample: 21,
+            maxAccelerationMicrovoltsPerSample: 11,
+            maxBadChannelFraction: 0.2,
+            maxBadChannelCount: 9,
+            usesAbsoluteBadChannelCount: true
+        )
+        vm.escalatesBadChannelsToGlobal = true
+        vm.escalationThresholdPercent = 65
+
+        let params = vm.parameters
+        #expect(params["interpolateBadChannelsPerEpoch"] == "true")
+        #expect(params["badChannel.minMicrovolts"] == "-125")
+        #expect(params["badChannel.maxMicrovolts"] == "175")
+        #expect(params["badChannel.maxSlopeMicrovoltsPerSample"] == "21")
+        #expect(params["badChannel.maxAccelerationMicrovoltsPerSample"] == "11")
+        #expect(params["badChannel.maxBadChannelFraction"] == "0.2")
+        #expect(params["badChannel.maxBadChannelCount"] == "9")
+        #expect(params["badChannel.usesAbsoluteBadChannelCount"] == "true")
+        #expect(params["badChannel.escalateToGlobal"] == "true")
+        #expect(params["badChannel.globalEscalationThresholdPercent"] == "65")
+
+        let restored = EpochingViewModel(store: RecordingStore())
+        restored.apply(parameters: params)
+
+        #expect(restored.interpolatesBadChannelsPerEpoch)
+        #expect(restored.epochBadChannelThresholds == vm.epochBadChannelThresholds)
+        #expect(restored.escalatesBadChannelsToGlobal)
+        #expect(restored.escalationThresholdPercent == 65)
     }
 
     @MainActor

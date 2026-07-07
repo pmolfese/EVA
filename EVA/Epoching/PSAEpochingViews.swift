@@ -486,6 +486,8 @@ extension WaveformView {
                         Text(maxBadChannelCaption)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .layoutPriority(1)
                     }
                 }
             }
@@ -493,7 +495,7 @@ extension WaveformView {
             Text("A channel is flagged bad for an epoch if any sample falls outside min/max, or the sample-to-sample change (slope) or change-in-slope (acceleration) exceeds these limits. Flagged channels are interpolated for just that epoch — unless too many channels are bad at once, in which case the whole epoch is rejected instead (and the expensive interpolation is skipped for it).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 294)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
 
             Divider()
@@ -524,7 +526,7 @@ extension WaveformView {
             }
         }
         .padding(16)
-        .frame(width: 336)
+        .frame(width: 520)
     }
 
     func psaEventCodeBinding(_ code: String) -> Binding<Bool> {

@@ -110,13 +110,21 @@ nonisolated struct MFFSignalData: Sendable {
 
     /// Returns a copy with the sample data replaced, preserving all metadata.
     /// Optionally annotates the signal type to record the transform applied.
-    func replacingData(_ newData: [[Float]], signalTypeSuffix: String? = nil) -> MFFSignalData {
-        MFFSignalData(
+    func replacingData(
+        _ newData: [[Float]],
+        samplingRate newSamplingRate: Double? = nil,
+        signalTypeSuffix: String? = nil
+    ) -> MFFSignalData {
+        let resolvedSamplingRate = newSamplingRate ?? samplingRate
+        let resolvedDuration = newSamplingRate == nil
+            ? duration
+            : (resolvedSamplingRate > 0 ? Double(newData.first?.count ?? 0) / resolvedSamplingRate : duration)
+        return MFFSignalData(
             signalURL: signalURL,
             signalType: signalTypeSuffix.map { "\(signalType) \($0)" } ?? signalType,
             numberOfChannels: numberOfChannels,
-            samplingRate: samplingRate,
-            duration: duration,
+            samplingRate: resolvedSamplingRate,
+            duration: resolvedDuration,
             recordingStartTime: recordingStartTime,
             events: events,
             data: newData,

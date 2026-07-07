@@ -60,10 +60,15 @@ final class BCGDetectionViewModel: ObservableObject {
     @Published var cwlLagRangeMaxMs = 150.0
     @Published var cwlLagStepMs = 10.0
     @Published var cwlWindowSeconds = 4.0
+    /// Target rate for the internal CWL regression pass. 0 means full rate.
+    @Published var cwlDownsampleTargetHz = 0.0
+    @Published var cwlDownsampleFilter = CWLCorrector.DownsampleFilter.windowedSinc
+    @Published var cwlUpsampleToOriginalHz = false
     @Published var correctedSignal: MFFSignalData?
 
     // MARK: Run / refine state
     @Published var isRunning = false
+    @Published var progress: Double?
     @Published var status: String?
     @Published var refinedTemplate: [Float]?
     @Published var refinedKeptCount: Int?
@@ -74,6 +79,7 @@ final class BCGDetectionViewModel: ObservableObject {
         detectsArtifacts = false
         showsSheet = false
         isRunning = false
+        progress = nil
         status = nil
         refinedTemplate = nil
         refinedKeptCount = nil

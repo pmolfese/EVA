@@ -167,7 +167,7 @@ nonisolated enum CategoryMatcher {
                 let norm = normalize(name)
                 if canonicalForNormalized[norm] == nil {
                     // Try to merge into an existing near cluster (edit distance).
-                    if let near = canonicalForNormalized.keys.first(where: { editDistance($0, norm) <= 1 && !$0.isEmpty }) {
+                    if let near = canonicalForNormalized.keys.first(where: { shouldFuzzyMerge($0, norm) }) {
                         canonicalForNormalized[norm] = canonicalForNormalized[near]
                     } else {
                         canonicalForNormalized[norm] = name
@@ -190,6 +190,12 @@ nonisolated enum CategoryMatcher {
 
     static func normalize(_ s: String) -> String {
         s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
+    }
+
+    private static func shouldFuzzyMerge(_ a: String, _ b: String) -> Bool {
+        let minLength = min(a.count, b.count)
+        guard minLength >= 5, !a.isEmpty, !b.isEmpty else { return false }
+        return editDistance(a, b) <= 1
     }
 
     static func editDistance(_ a: String, _ b: String) -> Int {

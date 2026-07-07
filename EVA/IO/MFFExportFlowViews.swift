@@ -63,6 +63,7 @@ extension WaveformView {
 
         // Capture the active processing pipeline for eva.xml + the process log.
         let processingScript = currentProcessingScript()
+        let auditLogLines = currentProcessingAuditLogLines()
 
         mffExportTask?.cancel()
         let sessionID = recordingSessionID
@@ -71,7 +72,8 @@ extension WaveformView {
                 snapshot: snapshot,
                 pnsForExport: pnsForExport,
                 script: processingScript,
-                to: url
+                to: url,
+                auditLogLines: auditLogLines
             )
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             isExportingMFF = false
@@ -93,9 +95,16 @@ extension WaveformView {
         snapshot: MFFExportSnapshot,
         pnsForExport: MFFSignalData?,
         script: EVAProcessingScript,
-        to url: URL
+        to url: URL,
+        auditLogLines: [String] = []
     ) async -> Result<URL, Error> {
-        await MFFExportWriter.write(snapshot: snapshot, pnsSignal: pnsForExport, script: script, to: url)
+        await MFFExportWriter.write(
+            snapshot: snapshot,
+            pnsSignal: pnsForExport,
+            script: script,
+            to: url,
+            auditLogLines: auditLogLines
+        )
     }
 
     func pnsSignalForMFFExport() -> MFFSignalData? {
@@ -154,6 +163,7 @@ extension WaveformView {
 
         let pnsForExport = pnsSignalForMFFExport()
         let processingScript = currentProcessingScript()
+        let auditLogLines = currentProcessingAuditLogLines()
         isExportingMFF = true
         mffExportStatusMessage = "Splitting MFF at \(formattedEventTime(splitTime))..."
 
@@ -199,6 +209,9 @@ extension WaveformView {
                         for step in script.steps {
                             let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
                             log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
+                        }
+                        for line in auditLogLines {
+                            log.append(line)
                         }
                         try? log.write(toPackage: output.url)
                         try Task.checkCancellation()
@@ -306,9 +319,10 @@ extension WaveformView {
     /// pipeline state, so exported packages document how EVA transformed them.
     /// Captures the current processing as a replayable script. Steps are emitted
     /// in canonical chain order (matching `body`: gradient → ica → filter →
-    /// artifact → wavelet → interpolate → markBad) so that replaying them in
-    /// order reproduces the same result and each stage's downstream invalidation
-    /// lands correctly. Keep this order in sync with `body` and `replay(_:)`.
+    /// artifact → wavelet → segment) so that replaying them in order reproduces
+    /// the portable processing state. Subject-specific outcomes such as the
+    /// exact interpolated/bad channel lists go to `currentProcessingAuditLogLines()`.
+    /// Keep this order in sync with `body` and `replay(_:)`.
     func currentProcessingScript() -> EVAProcessingScript {
         var script = EVAProcessingScript()
 
@@ -356,41 +370,30 @@ extension WaveformView {
         if epoching.epochedSignal != nil, !epoching.selectedEventCodes.isEmpty {
             script.append(EVAProcessingStep(operation: .segment, parameters: epoching.parameters))
         }
-        // Per-epoch bad-channel detection results are subject-specific (which
-        // channels were flaky varies per recording), so this is a SEPARATE
-        // provenance-only step rather than folded into the portable `.segment`
-        // params above — Copy Processing must not try to "replay" this list
-        // onto another file's channel layout.
+        return script
+    }
+
+    /// Subject-specific export audit details for `log_eva_*.txt`. These are not
+    /// part of `eva.xml` because Copy Processing should replay the portable
+    /// settings, not this file's resulting channel/epoch decisions.
+    func currentProcessingAuditLogLines() -> [String] {
+        var lines: [String] = []
         if !epoching.epochBadChannelSummary.isEmpty {
-            script.append(EVAProcessingStep(
-                operation: .segment,
-                parameters: ["epochBadChannels": epoching.epochBadChannelSummary.joined(separator: "; ")],
-                replayable: false,
-                note: "Channels flagged bad in at least one epoch during per-epoch bad-channel detection; subject-specific."
-            ))
+            lines.append("segment result: perEpochBadChannels=\(epoching.epochBadChannelSummary.joined(separator: "; "))")
         }
         if !channels.interpolated.isEmpty {
-            var interpolateParams = ["channels": channels.interpolated.keys.sorted().map { String($0 + 1) }.joined(separator: ",")]
+            var fields = [
+                "channels=\(channels.interpolated.keys.sorted().map { String($0 + 1) }.joined(separator: ","))"
+            ]
             if !epoching.escalatedChannelSummaries.isEmpty {
-                // Folded into the parameters (not just `note`) so it shows up
-                // in the exported eva.log, which prints operation + params.
-                interpolateParams["escalatedFromPerEpochDetection"] = epoching.escalatedChannelSummaries.joined(separator: "; ")
+                fields.append("escalatedFromPerEpochDetection=\(epoching.escalatedChannelSummaries.joined(separator: "; "))")
             }
-            script.append(EVAProcessingStep(
-                operation: .interpolateChannels,
-                parameters: interpolateParams,
-                replayable: false,
-                note: "Interpolated channel indices are subject-specific."
-            ))
+            lines.append("interpolateChannels result: \(fields.joined(separator: ", "))")
         }
         if !channels.bad.isEmpty {
-            script.append(EVAProcessingStep(
-                operation: .markBad,
-                parameters: ["channels": channels.bad.sorted().map { String($0 + 1) }.joined(separator: ",")],
-                replayable: false
-            ))
+            lines.append("markBad result: channels=\(channels.bad.sorted().map { String($0 + 1) }.joined(separator: ","))")
         }
-        return script
+        return lines
     }
 
     func currentMFFExportSnapshot() -> MFFExportSnapshot? {

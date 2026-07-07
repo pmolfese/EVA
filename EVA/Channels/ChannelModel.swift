@@ -341,28 +341,32 @@ struct FileExportCommands: View {
     @FocusedValue(\.importPhysioRequest) private var importPhysioRequest
 
     var body: some View {
+        Button("Import Physio...") {
+            importPhysioRequest?.wrappedValue += 1
+        }
+        .disabled(importPhysioRequest == nil)
+
+        Divider()
+
         Button("Dataset Info...") {
             datasetInfoRequest?.wrappedValue += 1
         }
         .keyboardShortcut("i", modifiers: .command)
         .disabled(datasetInfoRequest == nil)
 
+        Divider()
+
         Button("Export to MFF...") {
             mffExportRequest?.wrappedValue += 1
         }
         .disabled(mffExportRequest == nil)
 
+        Divider()
+
         Button("Copy Processing From...") {
             copyProcessingRequest?.wrappedValue += 1
         }
         .disabled(copyProcessingRequest == nil)
-
-        Divider()
-
-        Button("Import Physio...") {
-            importPhysioRequest?.wrappedValue += 1
-        }
-        .disabled(importPhysioRequest == nil)
     }
 }
 

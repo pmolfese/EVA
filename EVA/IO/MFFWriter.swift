@@ -40,6 +40,17 @@ nonisolated enum MFFExportKind: Sendable {
             return "averaged"
         }
     }
+
+    var replayOutputSuffix: String {
+        switch self {
+        case .continuous:
+            return "processed"
+        case .epoched:
+            return "segmented"
+        case .averaged:
+            return "average"
+        }
+    }
 }
 
 nonisolated enum MFFWriterError: LocalizedError {

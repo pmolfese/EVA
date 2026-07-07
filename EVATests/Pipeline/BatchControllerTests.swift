@@ -89,9 +89,9 @@ struct BatchControllerTests {
         #expect(c.summary?.failed == ["a.mff: boom"])
     }
 
-    @Test func outputNameFormatting() {
+    @Test func jobNameUsesInputFileName() {
         let c = started(["subject01"])
-        #expect(c.currentJob?.outputName == "subject01-processed.mff")
+        #expect(c.currentJob?.name == "subject01.mff")
     }
 
     @Test func completeAfterFinishIsNoOp() {

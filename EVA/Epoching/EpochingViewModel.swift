@@ -85,16 +85,16 @@ final class EpochingViewModel: ObservableObject {
     /// When a channel is flagged bad in at least this fraction of epochs, mark
     /// it bad for the whole recording and interpolate it there instead of
     /// leaving it as a per-epoch-only correction.
-    @Published var escalatesBadChannelsToGlobal = false
+    @Published var escalatesBadChannelsToGlobal = true
     @Published var escalationThresholdPercent = 50.0
     /// One line per channel escalated by the last Apply, e.g. "Ch12: bad in
-    /// 62% of epochs (31/50)" — surfaced in the status message and folded
-    /// into the exported eva.log via `currentProcessingScript()`.
+    /// 62% of epochs (31/50)" — surfaced in the status message and folded into
+    /// the exported process log via `currentProcessingAuditLogLines()`.
     @Published var escalatedChannelSummaries: [String] = []
     /// One line per channel flagged bad in at least one epoch by the last
     /// Apply, e.g. "Ch12 (14 of 120 epochs)" — including channels that never
     /// crossed the escalation threshold. Surfaced in the status message and
-    /// folded into the exported eva.log via `currentProcessingScript()`.
+    /// folded into the exported process log via `currentProcessingAuditLogLines()`.
     @Published var epochBadChannelSummary: [String] = []
 
     // MARK: Run state
@@ -185,8 +185,14 @@ final class EpochingViewModel: ObservableObject {
             "average": "\(averageOnApply)",
             "skipEyeBlinks": "\(skipEyeBlinks)",
             "skipEyeMovements": "\(skipEyeMovements)",
-            "skipArtifacts": "\(skipIfContainsArtifact)"
+            "skipArtifacts": "\(skipIfContainsArtifact)",
+            "interpolateBadChannelsPerEpoch": "\(interpolatesBadChannelsPerEpoch)"
         ]
+        if interpolatesBadChannelsPerEpoch {
+            p.merge(epochBadChannelThresholds.flatParameters(prefix: "badChannel")) { current, _ in current }
+            p["badChannel.escalateToGlobal"] = "\(escalatesBadChannelsToGlobal)"
+            p["badChannel.globalEscalationThresholdPercent"] = String(format: "%.0f", escalationThresholdPercent)
+        }
         if !selectedEventCodes.isEmpty {
             p["eventCodes"] = selectedEventCodes.sorted().joined(separator: ",")
         }
@@ -225,6 +231,16 @@ final class EpochingViewModel: ObservableObject {
         if let v = p["skipEyeBlinks"] { skipEyeBlinks = (v == "true") }
         if let v = p["skipEyeMovements"] { skipEyeMovements = (v == "true") }
         if let v = p["skipArtifacts"] { skipIfContainsArtifact = (v == "true") }
+        if let v = p["interpolateBadChannelsPerEpoch"] { interpolatesBadChannelsPerEpoch = (v == "true") }
+        epochBadChannelThresholds = EpochBadChannelThresholds.fromFlatParameters(
+            p,
+            prefix: "badChannel",
+            base: epochBadChannelThresholds
+        )
+        if let v = p["badChannel.escalateToGlobal"] { escalatesBadChannelsToGlobal = (v == "true") }
+        if let v = p["badChannel.globalEscalationThresholdPercent"].flatMap(Double.init) {
+            escalationThresholdPercent = v
+        }
         if let codes = p["eventCodes"] {
             selectedEventCodes = Set(codes.split(separator: ",").map(String.init))
         }

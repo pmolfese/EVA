@@ -90,6 +90,7 @@ nonisolated enum ReplayInteraction: Equatable {
 extension EVAProcessingStep {
     /// Pure classification of this step for the interactive replay engine.
     var replayInteraction: ReplayInteraction {
+        guard replayable else { return .skip }
         switch operation {
         case .filter, .thresholdArtifactDetection, .segment, .waveletReduce: return .auto
         case .mriGradientCorrection: return .review

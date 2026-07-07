@@ -128,6 +128,21 @@ extension WaveformView {
                             .foregroundStyle(status.hasPrefix("✓") ? Color.green : .secondary)
                     }
 
+                    if bcg.isRunning, let progress = bcg.progress {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(bcg.method == .cwlRegression ? "CWL correction" : "Processing")
+                                    .font(.caption.weight(.semibold))
+                                Spacer()
+                                Text("\(Int((min(max(progress, 0), 1) * 100).rounded()))%")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            ProgressView(value: min(max(progress, 0), 1), total: 1)
+                                .progressViewStyle(.linear)
+                        }
+                    }
+
                     // Iterative refinement panel — spatial PCA only, shown after detection
                     if bcg.method == .spatialPCA && bcg.detectsArtifacts {
                         Divider()
@@ -207,7 +222,9 @@ extension WaveformView {
                 }
                 Spacer()
                 if bcg.isRunning || bcg.isRefining {
-                    ProgressView().controlSize(.small)
+                    if bcg.progress == nil {
+                        ProgressView().controlSize(.small)
+                    }
                 }
                 Button("Cancel") {
                     bcg.showsSheet = false
@@ -504,8 +521,91 @@ extension WaveformView {
                         .foregroundStyle(.secondary)
                 }
                 .help("A shorter window adapts faster to drifting coupling but has less data to fit each regression; 3–5 s is a reasonable starting point.")
+                HStack {
+                    Text("Downsample")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    Picker("Downsample", selection: cwlDownsampleSelectionBinding(for: signal.samplingRate)) {
+                        Text("Full rate (\(cwlRateLabel(signal.samplingRate)))").tag(0.0)
+                        ForEach(cwlDownsampleTargets(for: signal.samplingRate), id: \.self) { target in
+                            Text(cwlDownsampleOptionLabel(sourceRate: signal.samplingRate, targetRate: target))
+                                .tag(target)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 170, alignment: .leading)
+                    Text("internal fit only")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .help("Runs the CWL regression on an anti-aliased downsampled copy. Leave upsampling off to keep the corrected signal at the lower rate.")
+                HStack {
+                    Text("Anti-alias")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    Picker("Anti-alias", selection: $bcg.cwlDownsampleFilter) {
+                        ForEach(CWLCorrector.DownsampleFilter.allCases) { filter in
+                            Text(filter.label).tag(filter)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 220, alignment: .leading)
+                    Text("before downsampling")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .help("Windowed-sinc low-pass is the cleaner default; block average is faster but weaker at suppressing high-frequency aliases.")
+                HStack {
+                    Text("")
+                        .frame(width: 100, alignment: .leading)
+                    Toggle("Upsample to original Hz", isOn: $bcg.cwlUpsampleToOriginalHz)
+                        .toggleStyle(.checkbox)
+                    Text("after CWL")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .disabled(cwlDownsampleSelectionBinding(for: signal.samplingRate).wrappedValue == 0)
+                .help("Maps the lower-rate artifact estimate back to the original sample rate before subtracting it, preserving the original output Hz.")
             }
         }
+    }
+
+    func cwlDownsampleTargets(for sourceRate: Double) -> [Double] {
+        let commonRates = [2500.0, 1000.0, 500.0, 250.0, 125.0]
+        return commonRates.filter { target in
+            target < sourceRate - 0.5 && Downsampler.factor(sourceRate: sourceRate, targetRate: target) > 1
+        }
+    }
+
+    func cwlDownsampleSelectionBinding(for sourceRate: Double) -> Binding<Double> {
+        Binding(
+            get: {
+                let targets = cwlDownsampleTargets(for: sourceRate)
+                return targets.contains(bcg.cwlDownsampleTargetHz) ? bcg.cwlDownsampleTargetHz : 0
+            },
+            set: { value in
+                let targets = cwlDownsampleTargets(for: sourceRate)
+                bcg.cwlDownsampleTargetHz = targets.contains(value) ? value : 0
+            }
+        )
+    }
+
+    func cwlDownsampleOptionLabel(sourceRate: Double, targetRate: Double) -> String {
+        let factor = Downsampler.factor(sourceRate: sourceRate, targetRate: targetRate)
+        let effectiveRate = Downsampler.effectiveRate(sourceRate: sourceRate, factor: factor)
+        if abs(effectiveRate - targetRate) <= 0.5 {
+            return cwlRateLabel(targetRate)
+        }
+        return "≈\(cwlRateLabel(effectiveRate))"
+    }
+
+    func cwlRateLabel(_ rate: Double) -> String {
+        if abs(rate.rounded() - rate) < 0.05 {
+            return "\(Int(rate.rounded())) Hz"
+        }
+        return "\(String(format: "%.1f", rate)) Hz"
     }
 
     func disableBCGDetection() {
@@ -537,6 +637,7 @@ extension WaveformView {
     private func runBCGDetectionCore(signal: MFFSignalData, selection: ClosedRange<Int>?) async {
         let sessionID = recordingSessionID
         bcg.isRunning = true
+        bcg.progress = nil
         bcg.status = "Detecting…"
         bcg.refinedTemplate = nil
         bcg.refinedKeptCount = nil
@@ -710,6 +811,7 @@ extension WaveformView {
             registerBCGDefinedArtifact(events: newEvents, eventCode: useCode)
         }
         bcg.isRunning = false
+        bcg.progress = nil
         if !newEvents.isEmpty {
             bcg.showsSheet = false
         }
@@ -732,6 +834,7 @@ extension WaveformView {
         let sr = signal.samplingRate
 
         bcg.isRefining = true
+        bcg.progress = nil
         bcg.status = "Refining…"
 
         let result = await BCGDetector.refineSpatialPCA(
@@ -915,7 +1018,8 @@ extension WaveformView {
         }
 
         bcg.isRunning = true
-        bcg.status = "Correcting…"
+        bcg.progress = 0
+        bcg.status = "Preparing CWL correction…"
 
         let references = referenceIndices.map { pns.data[$0] }
         let sourceData = signal.data
@@ -923,9 +1027,25 @@ extension WaveformView {
         let lagRange = bcg.cwlLagRangeMinMs...max(bcg.cwlLagRangeMaxMs, bcg.cwlLagRangeMinMs + 1)
         let lagStep = bcg.cwlLagStepMs
         let windowSeconds = bcg.cwlWindowSeconds
+        let selectedDownsampleTarget = cwlDownsampleTargets(for: sr).contains(bcg.cwlDownsampleTargetHz)
+            ? bcg.cwlDownsampleTargetHz
+            : 0
+        let downsampleFactor = selectedDownsampleTarget > 0
+            ? Downsampler.factor(sourceRate: sr, targetRate: selectedDownsampleTarget)
+            : 1
+        let downsampleEffectiveRate = Downsampler.effectiveRate(sourceRate: sr, factor: downsampleFactor)
+        let downsampleFilter = bcg.cwlDownsampleFilter
+        let upsampleToOriginalHz = downsampleFactor > 1 && bcg.cwlUpsampleToOriginalHz
 
-        let (progressContinuation, progressTask) = ProgressBridge.make { [weak bcg] (fraction: Double) in
-            bcg?.status = "Correcting… \(Int(fraction * 100))%"
+        let (progressContinuation, progressTask) = ProgressBridge.make { [weak bcg] (update: CWLCorrector.ProgressUpdate) in
+            let clamped = min(max(update.fraction, 0), 1)
+            let percent = Int((clamped * 100).rounded())
+            bcg?.progress = clamped
+            if let detail = update.detail, !detail.isEmpty {
+                bcg?.status = "\(update.message)… \(percent)% · \(detail)"
+            } else {
+                bcg?.status = "\(update.message)… \(percent)%"
+            }
         }
 
         do {
@@ -937,9 +1057,14 @@ extension WaveformView {
                     samplingRate: sr,
                     lagRangeMs: lagRange,
                     lagStepMs: lagStep,
-                    windowSeconds: windowSeconds
-                ) { fraction in
-                    progressContinuation.yield(fraction)
+                    windowSeconds: windowSeconds,
+                    downsampleFactor: downsampleFactor,
+                    downsampleFilter: downsampleFilter,
+                    upsampleToOriginalRate: upsampleToOriginalHz
+                ) { update in
+                    progressContinuation.yield(update)
+                } debugLog: { message in
+                    debugLog(message)
                 }
             }
             let correctedData = try await withTaskCancellationHandler(
@@ -951,10 +1076,30 @@ extension WaveformView {
             )
             progressContinuation.finish()
             progressTask.cancel()
-            guard !Task.isCancelled, sessionID == recordingSessionID else { bcg.isRunning = false; return }
+            guard !Task.isCancelled, sessionID == recordingSessionID else {
+                bcg.isRunning = false
+                bcg.progress = nil
+                return
+            }
 
-            bcg.correctedSignal = signal.replacingData(correctedData, signalTypeSuffix: "CWL")
-            bcg.status = "✓ CWL correction applied (\(referenceIndices.count) reference channel\(referenceIndices.count == 1 ? "" : "s"))."
+            let outputRate = downsampleFactor > 1 && !upsampleToOriginalHz && correctedData.first?.count != sourceData.first?.count
+                ? downsampleEffectiveRate
+                : sr
+            bcg.correctedSignal = signal.replacingData(
+                correctedData,
+                samplingRate: outputRate,
+                signalTypeSuffix: "CWL"
+            )
+            bcg.progress = 1
+            let downsampleSummary: String
+            if downsampleFactor > 1 {
+                downsampleSummary = upsampleToOriginalHz
+                    ? " Fit at \(cwlRateLabel(downsampleEffectiveRate)) using \(downsampleFilter.shortLabel); output upsampled to \(cwlRateLabel(sr))."
+                    : " Fit and output at \(cwlRateLabel(outputRate)) using \(downsampleFilter.shortLabel)."
+            } else {
+                downsampleSummary = ""
+            }
+            bcg.status = "✓ CWL correction applied (\(referenceIndices.count) reference channel\(referenceIndices.count == 1 ? "" : "s")).\(downsampleSummary)"
 
             // Downstream stages built on the old base are now stale — same
             // cross-domain invalidation as `applyGradientCorrection`, since
@@ -973,9 +1118,11 @@ extension WaveformView {
         } catch is CancellationError {
             progressContinuation.finish()
             progressTask.cancel()
+            bcg.progress = nil
         } catch {
             progressContinuation.finish()
             progressTask.cancel()
+            bcg.progress = nil
             bcg.status = error.localizedDescription
         }
         bcg.isRunning = false
@@ -983,6 +1130,7 @@ extension WaveformView {
 
     func disableCWLCorrection() {
         bcg.correctedSignal = nil
+        bcg.progress = nil
         bcg.status = nil
         ica.cleanedSignal = nil
         ica.decomposition = nil

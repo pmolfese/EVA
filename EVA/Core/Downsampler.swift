@@ -21,13 +21,15 @@
 //    * `strided`     — fast nearest-sample decimation (no anti-aliasing). Right
 //                      for analysis/detection where only the coarse shape matters
 //                      (ICA, template matching, health scoring).
-//    * `blockAveraged` — anti-aliased decimation by averaging each block. Right
-//                      when the decimated signal (or an estimate derived from it)
-//                      is reconstructed and reapplied, e.g. wavelet reduction.
+//    * `windowedSincDecimated` — FIR low-pass decimation for cleaner alias
+//                      suppression when reducing sample rate before correction.
+//    * `blockAveraged` — cheap decimation by averaging each block. Useful when
+//                      speed matters more than strong high-frequency rejection.
 //
 //  `linearUpsample` returns a block-decimated signal to its original length.
 //
 
+import Accelerate
 import Foundation
 
 nonisolated enum Downsampler {
@@ -55,7 +57,28 @@ nonisolated enum Downsampler {
         return Swift.stride(from: 0, to: samples.count, by: factor).map { samples[$0] }
     }
 
-    // MARK: Anti-aliased (block-average) decimation + upsample
+    // MARK: Anti-aliased decimation + upsample
+
+    /// Decimate with a windowed-sinc low-pass FIR before keeping every `factor`
+    /// sample. This is the cleaner default when high-frequency aliasing matters.
+    static func windowedSincDecimated(_ samples: [Float], by factor: Int, taps: Int? = nil) -> [Float] {
+        guard factor > 1 else { return samples }
+        let tapCount = taps ?? defaultWindowedSincTapCount(for: factor)
+        let lowPass = DSP.windowedSincLowPass(
+            numtaps: tapCount,
+            cutoff: 1.0 / Double(factor),
+            gain: 1
+        ).map(Float.init)
+        let filtered = convolveSame(lowPass, samples)
+        var out: [Float] = []
+        out.reserveCapacity(filtered.count / factor + 1)
+        var index = 0
+        while index < filtered.count {
+            out.append(filtered[index])
+            index += factor
+        }
+        return out
+    }
 
     /// Decimation by averaging each block of `factor` samples — light anti-alias
     /// that avoids the gross aliasing of plain striding.
@@ -72,6 +95,40 @@ nonisolated enum Downsampler {
             out[i] = sum / Double(max(end - start, 1))
         }
         return out
+    }
+
+    static func blockAveraged(_ samples: [Float], by factor: Int) -> [Float] {
+        guard factor > 1 else { return samples }
+        let count = samples.count
+        let outCount = (count + factor - 1) / factor
+        var out = [Float](repeating: 0, count: outCount)
+        for i in 0..<outCount {
+            let start = i * factor
+            let end = min(start + factor, count)
+            var sum = 0.0
+            for k in start..<end { sum += Double(samples[k]) }
+            out[i] = Float(sum / Double(max(end - start, 1)))
+        }
+        return out
+    }
+
+    private static func defaultWindowedSincTapCount(for factor: Int) -> Int {
+        max(31, min(255, max(factor, 1) * 8 + 1))
+    }
+
+    private static func convolveSame(_ b: [Float], _ x: [Float]) -> [Float] {
+        let nb = b.count
+        let nx = x.count
+        guard nb > 0, nx > 0 else { return x }
+        let delay = (nb - 1) / 2
+        var xPad = [Float](repeating: 0, count: nx + nb - 1)
+        xPad.replaceSubrange(delay..<(delay + nx), with: x)
+        let bFlip = b.reversed() as [Float]
+        var y = [Float](repeating: 0, count: nx)
+        bFlip.withUnsafeBufferPointer { bBuf in
+            vDSP_conv(xPad, 1, bBuf.baseAddress! + (nb - 1), -1, &y, 1, vDSP_Length(nx), vDSP_Length(nb))
+        }
+        return y
     }
 
     /// Linear interpolation back to `length`, aligning decimated samples to their

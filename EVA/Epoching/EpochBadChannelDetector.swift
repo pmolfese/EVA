@@ -52,6 +52,44 @@ nonisolated struct EpochBadChannelThresholds: Codable, Sendable, Equatable {
     /// Whether the reject-epoch threshold above is read from
     /// `maxBadChannelCount` (true) or `maxBadChannelFraction` (false, default).
     var usesAbsoluteBadChannelCount: Bool = false
+
+    // MARK: - Flat eva.xml parameters
+
+    /// Emits each threshold as its own prefixed key so Copy Processing and
+    /// exported `eva.xml` stay readable without needing a JSON payload.
+    func flatParameters(prefix: String) -> [String: String] {
+        [
+            "\(prefix).minMicrovolts": Self.num(minMicrovolts),
+            "\(prefix).maxMicrovolts": Self.num(maxMicrovolts),
+            "\(prefix).maxSlopeMicrovoltsPerSample": Self.num(maxSlopeMicrovoltsPerSample),
+            "\(prefix).maxAccelerationMicrovoltsPerSample": Self.num(maxAccelerationMicrovoltsPerSample),
+            "\(prefix).maxBadChannelFraction": Self.num(maxBadChannelFraction),
+            "\(prefix).maxBadChannelCount": "\(maxBadChannelCount)",
+            "\(prefix).usesAbsoluteBadChannelCount": "\(usesAbsoluteBadChannelCount)"
+        ]
+    }
+
+    /// Rebuilds thresholds from flat params, keeping `base` for missing keys so
+    /// older `eva.xml` files remain replayable.
+    static func fromFlatParameters(
+        _ p: [String: String],
+        prefix: String,
+        base: EpochBadChannelThresholds
+    ) -> EpochBadChannelThresholds {
+        var t = base
+        if let v = p["\(prefix).minMicrovolts"].flatMap(Double.init) { t.minMicrovolts = v }
+        if let v = p["\(prefix).maxMicrovolts"].flatMap(Double.init) { t.maxMicrovolts = v }
+        if let v = p["\(prefix).maxSlopeMicrovoltsPerSample"].flatMap(Double.init) { t.maxSlopeMicrovoltsPerSample = v }
+        if let v = p["\(prefix).maxAccelerationMicrovoltsPerSample"].flatMap(Double.init) { t.maxAccelerationMicrovoltsPerSample = v }
+        if let v = p["\(prefix).maxBadChannelFraction"].flatMap(Double.init) { t.maxBadChannelFraction = v }
+        if let v = p["\(prefix).maxBadChannelCount"].flatMap(Int.init) { t.maxBadChannelCount = v }
+        if let v = p["\(prefix).usesAbsoluteBadChannelCount"] { t.usesAbsoluteBadChannelCount = (v == "true") }
+        return t
+    }
+
+    private static func num(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(value)
+    }
 }
 
 /// Thread-safe cache of spherical-spline interpolation weights, keyed by

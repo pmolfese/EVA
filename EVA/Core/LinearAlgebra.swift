@@ -121,12 +121,20 @@ nonisolated enum LinearAlgebra {
         /// Solves A·x = b using the cached factorization. O(n²).
         func solve(_ b: [Double]) -> [Double]? {
             guard b.count == size else { return nil }
+            return solve(b, rightHandSideCount: 1)
+        }
+
+        /// Solves A·X = B for several right-hand sides using the cached
+        /// factorization. `b` is column-major with `size` rows and
+        /// `rightHandSideCount` columns, matching LAPACK's `dgetrs_`.
+        func solve(_ b: [Double], rightHandSideCount: Int) -> [Double]? {
+            guard rightHandSideCount > 0, b.count == size * rightHandSideCount else { return nil }
             var lu = columnMajorLU
             var pivots = ipiv
             var rhs = b
             var trans = Int8(UnicodeScalar("N").value)
             var n = LAPACKInt(size)
-            var nrhs = LAPACKInt(1)
+            var nrhs = LAPACKInt(rightHandSideCount)
             var lda = LAPACKInt(size)
             var ldb = LAPACKInt(size)
             var info: LAPACKInt = 0
