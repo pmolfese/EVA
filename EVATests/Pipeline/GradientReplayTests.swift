@@ -26,8 +26,14 @@ struct GradientReplayTests {
         a.windowBefore = 3
         a.windowAfter = 4
         a.fastrSlices = 5
-        a.fastrOBSAuto = false
+        a.fastrOBSAuto = true
         a.fastrANC = true
+        a.fastrSubSample = false
+        a.fastrUseFacetWindow = true
+        a.fastrOBSRandomSampling = true
+        a.fastrANCSliceHighPass = true
+        a.fastrDonorSelection = .bergenRSquare
+        a.moosmannMotionMetric = .allParameters
         a.excludeHighMotion = true
         a.motionFDThreshold = 0.35
 
@@ -40,8 +46,14 @@ struct GradientReplayTests {
         #expect(b.windowBefore == 3)
         #expect(b.windowAfter == 4)
         #expect(b.fastrSlices == 5)
-        #expect(b.fastrOBSAuto == false)
+        #expect(b.fastrOBSAuto)
         #expect(b.fastrANC == true)
+        #expect(!b.fastrSubSample)
+        #expect(b.fastrUseFacetWindow)
+        #expect(b.fastrOBSRandomSampling)
+        #expect(b.fastrANCSliceHighPass)
+        #expect(b.fastrDonorSelection == .bergenRSquare)
+        #expect(b.moosmannMotionMetric == .allParameters)
         #expect(b.excludeHighMotion == true)
     }
 

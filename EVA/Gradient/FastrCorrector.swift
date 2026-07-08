@@ -20,12 +20,12 @@
 //  per-slice epochs.
 //
 //  Pipeline per channel: upsample -> align slice epochs (integer + optional
-//  sub-sample) -> average-artifact template -> amplitude-scaled subtraction ->
-//  optional OBS residual removal (PCA) -> downsample -> optional ANC.
+//  sub-sample) -> average-artifact template -> FACET template-specific
+//  re-alignment -> amplitude-scaled subtraction -> optional OBS residual
+//  removal (PCA) -> downsample -> optional ANC.
 //
 //  TODO: validate against a MATLAB FASTR reference output (no reference dataset
-//  available yet). TODO: exact odd/even slice averaging and iterative sub-sample
-//  alignment to match FACET bit-for-bit; FARM template selection.
+//  available yet).
 //
 
 import Accelerate
@@ -47,10 +47,40 @@ struct FastrCorrector {
         case moosmann
     }
 
+    enum MotionMetric: String, CaseIterable, Identifiable, Sendable {
+        case translationOnly
+        case allParameters
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .translationOnly: return "Translation"
+            case .allParameters: return "All 6"
+            }
+        }
+
+        var help: String {
+            switch self {
+            case .translationOnly:
+                return "BERGEN-faithful RP-info: use translation speed only."
+            case .allParameters:
+                return "Use translations plus rotations converted to millimeters by the rotation radius."
+            }
+        }
+    }
+
     nonisolated enum OBSMode: Sendable, Equatable {
         case off
         case auto
         case fixed(Int)
+    }
+
+    enum ANCHighPassMode: String, CaseIterable, Identifiable, Sendable {
+        case fixed2Hz
+        case sliceTriggerDependent
+
+        var id: String { rawValue }
     }
 
     struct Config: Sendable {
@@ -61,19 +91,41 @@ struct FastrCorrector {
         var numberOfSlices = 1
         /// Number of epochs averaged into each artifact template.
         var averagingWindow = 30
+        /// Optional asymmetric template window from the UI. When nil, the legacy
+        /// symmetric `averagingWindow / 2` behavior is used.
+        var averagingWindowBefore: Int? = nil
+        var averagingWindowAfter: Int? = nil
+        /// Use FACET's AvgWindow/HalfWindow matrix semantics instead of EVA's
+        /// asymmetric pre/post window. This preserves FACET's edge saturation and
+        /// odd/even slice donor rows.
+        var useFacetAveragingWindow = false
+        /// BERGEN-style squared-correlation donor ranking, using the best r^2
+        /// candidates instead of the default neighbor/FARM donor rule. For
+        /// Moosmann, r^2 ranking is constrained to the RP-informed candidate set.
+        var usesBergenRSquareDonors = false
         /// Relative trigger position within the artifact (0 = start, 1 = end).
         var relativeTriggerPosition = 0.03
         /// FACET-style fractional-sample alignment of epochs.
         var subSampleAlignment = true
+        /// FACET's second alignment pass: align every epoch to the average
+        /// artifact template built specifically for that epoch before alpha
+        /// scaling and subtraction.
+        var alignToAverageArtifact = true
         var templateScheme: TemplateScheme = .neighbor
         /// Optimal-basis-set residual removal.
         var obs: OBSMode = .auto
         /// High-pass cutoff (Hz) for OBS residual matrix formation.
         var obsHighPassHz = 70.0
+        /// Match FACET's random 2/3 epoch subset for OBS PCA matrix formation.
+        /// False keeps EVA deterministic for reproducible replay.
+        var randomizeOBSEpochSelection = false
         /// Optional low-pass (Hz) applied to the corrected signal.
         var lowPassHz: Double? = nil
         /// Adaptive noise cancellation after template subtraction.
         var anc = false
+        /// High-pass used before LMS ANC: EVA/FMRIB fixed 2 Hz or FACET's
+        /// slice-trigger-rate-dependent cutoff for slice-triggered data.
+        var ancHighPassMode: ANCHighPassMode = .fixed2Hz
         /// Channels excluded from OBS and ANC (e.g. ECG).
         var excludedChannels: Set<Int> = []
 
@@ -86,6 +138,8 @@ struct FastrCorrector {
         var motion: [MotionSample]? = nil
         /// Movement threshold (mm) for including a volume in a Moosmann template.
         var motionThresholdMm = 0.5
+        /// Motion vector used by the Moosmann RP-info donor selector.
+        var moosmannMotionMetric: MotionMetric = .translationOnly
         /// Sphere radius (mm) converting rotation to mm for motion distance.
         var motionRadiusMm = 50.0
     }
@@ -102,6 +156,27 @@ struct FastrCorrector {
                 return "Trigger spacing could not be determined (uneven or zero)."
             }
         }
+    }
+
+    nonisolated private static let donorSelectionParallelThreshold = 16
+
+    private struct PreparedEpoch: Sendable {
+        let values: [Double]
+        let mean: Double
+        let sumSquaresCentered: Double
+    }
+
+    private struct AlignmentResult: Sendable {
+        let markers: [Int]
+        let fractionalShifts: [Double]
+    }
+
+    private struct TemplateSelection: Sendable {
+        let windowBefore: Int
+        let windowAfter: Int
+        let templateCount: Int
+        let moosmannWindow: Int
+        let facetTemporalDonors: [[Int]]?
     }
 
     /// Run FASTR on `channels` (channels × time).
@@ -144,7 +219,11 @@ struct FastrCorrector {
         let postPeak = Int((Double(minISI) * (1 - config.relativeTriggerPosition)).rounded())
         let artLength = prePeak + postPeak + 1
         let searchWindow = max(1, Int((3 * Double(L)).rounded()))
-        let halfWindow = max(1, config.averagingWindow / 2)
+        let templateSelection = makeTemplateSelection(
+            config: config,
+            numTrig: markersUp.count,
+            sliceTrigger: sliceTrigger
+        )
 
         // OBS high-pass filter weights (designed on the upsampled axis).
         let nyq = 0.5 * samplingRate
@@ -154,8 +233,10 @@ struct FastrCorrector {
         let moosmannNeighbors: [[Int]]? = config.templateScheme == .moosmann
             ? moosmannVolumeNeighbors(motion: config.motion,
                                       volumeCount: volumeTriggers.count,
-                                      window: config.averagingWindow,
-                                      thresholdMm: config.motionThresholdMm)
+                                      window: templateSelection.moosmannWindow,
+                                      thresholdMm: config.motionThresholdMm,
+                                      metric: config.moosmannMotionMetric,
+                                      radiusMm: config.motionRadiusMm)
             : nil
 
         // Alignment is computed once on channel 0 and reused for all channels.
@@ -173,7 +254,47 @@ struct FastrCorrector {
         var result = channels
         // Compute the aligned markers from channel 0 first (shared across channels).
         let channel0Up = DSP.interp(channels[0].map(Double.init), factor: L)
-        let alignedMarkers = aligner.align(dataUp: channel0Up)
+        let alignment = aligner.align(dataUp: channel0Up)
+        let alignedMarkers = alignment.markers
+        let templateAlignedMarkers: [Int]
+        if config.alignToAverageArtifact {
+            let channel0ZeroMeanUp = zeroMeanUpsampled(channels[0].map(Double.init), factor: L)
+            let channel0Prepared = applySubSampleShifts(
+                to: channel0ZeroMeanUp,
+                markers: alignedMarkers,
+                prePeak: prePeak,
+                postPeak: postPeak,
+                shifts: alignment.fractionalShifts
+            )
+            let censoredEpochs = censoredEpochIndices(
+                numTrig: alignedMarkers.count,
+                sliceTrigger: sliceTrigger,
+                slices: slices,
+                censoredVolumes: config.censoredVolumes
+            )
+            let templates = averageArtifactTemplates(
+                idata: channel0Prepared,
+                markers: alignedMarkers,
+                prePeak: prePeak,
+                postPeak: postPeak,
+                templateSelection: templateSelection,
+                sliceTrigger: sliceTrigger,
+                slices: slices,
+                moosmannNeighbors: moosmannNeighbors,
+                censoredEpochs: censoredEpochs,
+                config: config
+            ).templates
+            templateAlignedMarkers = alignToAverageArtifacts(
+                dataUp: channel0Prepared,
+                baseMarkers: alignedMarkers,
+                templates: templates,
+                prePeak: prePeak,
+                postPeak: postPeak,
+                searchWindow: searchWindow
+            )
+        } else {
+            templateAlignedMarkers = alignedMarkers
+        }
 
         // Use an explicitly managed buffer so concurrent writes to distinct slots are safe.
         nonisolated(unsafe) let resultPtr = UnsafeMutablePointer<[Float]>.allocate(capacity: channels.count)
@@ -185,9 +306,12 @@ struct FastrCorrector {
                 raw: raw,
                 channelIndex: c,
                 alignedMarkers: alignedMarkers,
+                templateAlignedMarkers: templateAlignedMarkers,
+                fractionalShifts: alignment.fractionalShifts,
                 L: L,
                 prePeak: prePeak, postPeak: postPeak, artLength: artLength,
-                halfWindow: halfWindow, sliceTrigger: sliceTrigger,
+                templateSelection: templateSelection,
+                sliceTrigger: sliceTrigger,
                 slices: slices,
                 moosmannNeighbors: moosmannNeighbors,
                 censoredVolumes: config.censoredVolumes,
@@ -217,9 +341,12 @@ struct FastrCorrector {
         raw: [Double],
         channelIndex c: Int,
         alignedMarkers: [Int],
+        templateAlignedMarkers: [Int],
+        fractionalShifts: [Double],
         L: Int,
         prePeak: Int, postPeak: Int, artLength: Int,
-        halfWindow: Int, sliceTrigger: Bool,
+        templateSelection: TemplateSelection,
+        sliceTrigger: Bool,
         slices: Int,
         moosmannNeighbors: [[Int]]?,
         censoredVolumes: Set<Int>,
@@ -228,10 +355,22 @@ struct FastrCorrector {
         config: Config, samplingRate: Double
     ) -> [Double] {
         let n = raw.count
-        let mean = raw.reduce(0, +) / Double(max(1, n))
-        let zeroMean = raw.map { $0 - mean }
-        var idata = DSP.interp(zeroMean, factor: L)
-        let iorig = DSP.interp(raw, factor: L)
+        var idata = zeroMeanUpsampled(raw, factor: L)
+        var iorig = DSP.interp(raw, factor: L)
+        idata = applySubSampleShifts(
+            to: idata,
+            markers: alignedMarkers,
+            prePeak: prePeak,
+            postPeak: postPeak,
+            shifts: fractionalShifts
+        )
+        iorig = applySubSampleShifts(
+            to: iorig,
+            markers: alignedMarkers,
+            prePeak: prePeak,
+            postPeak: postPeak,
+            shifts: fractionalShifts
+        )
         let upLength = idata.count
 
         let numTrig = alignedMarkers.count
@@ -239,49 +378,66 @@ struct FastrCorrector {
 
         // Map censored volumes to censored epoch indices (a volume spans `slices`
         // slice epochs when slice-triggered).
-        let censoredEpochs: Set<Int> = censoredVolumes.isEmpty ? [] :
-            Set((0..<numTrig).filter { censoredVolumes.contains(sliceTrigger ? $0 / slices : $0) })
+        let censoredEpochs = censoredEpochIndices(
+            numTrig: numTrig,
+            sliceTrigger: sliceTrigger,
+            slices: slices,
+            censoredVolumes: censoredVolumes
+        )
 
         // Build noise estimate (template) over the whole upsampled signal.
         var iNoise = [Double](repeating: 0, count: upLength)
 
-        // Pre-extract aligned epochs for averaging.
-        func epoch(_ s: Int) -> ArraySlice<Double>? {
-            let start = alignedMarkers[s] - prePeak
-            let end = alignedMarkers[s] + postPeak
+        let templates = averageArtifactTemplates(
+            idata: idata,
+            markers: alignedMarkers,
+            prePeak: prePeak,
+            postPeak: postPeak,
+            templateSelection: templateSelection,
+            sliceTrigger: sliceTrigger,
+            slices: slices,
+            moosmannNeighbors: moosmannNeighbors,
+            censoredEpochs: censoredEpochs,
+            config: config
+        ).templates
+
+        func alignedTarget(_ s: Int) -> ArraySlice<Double>? {
+            let start = templateAlignedMarkers[s] - prePeak
+            let end = templateAlignedMarkers[s] + postPeak
             guard start >= 0, end < upLength else { return nil }
             return idata[start...end]
         }
 
-        // FARM: select, per epoch, the most-correlated epochs (computed on this
-        // channel's data). Empty entries fall back to the neighbor window.
-        let farmNeighbors: [[Int]]? = config.templateScheme == .farm
-            ? farmEpochNeighbors(epochs: (0..<numTrig).map { epoch($0).map(Array.init) },
-                                 select: max(2, config.averagingWindow),
-                                 searchHalf: max(2 * config.averagingWindow, 25))
-            : nil
-
         for s in 0..<numTrig {
-            guard let avg = averageTemplate(
-                center: s, numTrig: numTrig, halfWindow: halfWindow,
-                sliceTrigger: sliceTrigger, slices: slices,
-                moosmannNeighbors: moosmannNeighbors, farmNeighbors: farmNeighbors,
-                censoredEpochs: censoredEpochs, epoch: epoch
-            ) else { continue }
-            guard let target = epoch(s) else { continue }
+            guard let avg = templates[s] else { continue }
+            guard let target = alignedTarget(s) else { continue }
 
             // Amplitude scale (Alpha) to minimize squared error, unless excluded.
             let alpha: Double
             if excluded {
                 alpha = 1
             } else {
-                var num = 0.0, den = 0.0
-                let t = Array(target)
-                for i in 0..<artLength { num += t[i] * avg[i]; den += avg[i] * avg[i] }
+                let vectorLength = vDSP_Length(avg.count)
+                var num = 0.0
+                var den = 0.0
+                avg.withUnsafeBufferPointer { avgBuf in
+                    target.withUnsafeBufferPointer { targetBuf in
+                        guard let avgBase = avgBuf.baseAddress, let targetBase = targetBuf.baseAddress else { return }
+                        vDSP_dotprD(targetBase, 1, avgBase, 1, &num, vectorLength)
+                        vDSP_dotprD(avgBase, 1, avgBase, 1, &den, vectorLength)
+                    }
+                }
                 alpha = den == 0 ? 0 : num / den
             }
-            let start = alignedMarkers[s] - prePeak
-            for i in 0..<artLength { iNoise[start + i] = alpha * avg[i] }
+            let start = templateAlignedMarkers[s] - prePeak
+            guard start >= 0, start + avg.count <= iNoise.count else { continue }
+            var scaledAlpha = alpha
+            avg.withUnsafeBufferPointer { avgBuf in
+                iNoise.withUnsafeMutableBufferPointer { noiseBuf in
+                    guard let avgBase = avgBuf.baseAddress, let noiseBase = noiseBuf.baseAddress else { return }
+                    vDSP_vsmulD(avgBase, 1, &scaledAlpha, noiseBase + start, 1, vDSP_Length(avg.count))
+                }
+            }
         }
 
         // OBS residual removal.
@@ -292,16 +448,21 @@ struct FastrCorrector {
                 prePeak: prePeak, postPeak: postPeak, artLength: artLength,
                 numTrig: numTrig, sliceTrigger: sliceTrigger,
                 censoredEpochs: censoredEpochs,
-                obsHPF: obsHPF, mode: config.obs
+                obsHPF: obsHPF, mode: config.obs,
+                randomizeEpochSelection: config.randomizeOBSEpochSelection
             )
         }
 
         // Corrected (upsampled) = original - template - fitted residual.
-        for i in 0..<upLength { idata[i] = iorig[i] - iNoise[i] - fittedRes[i] }
+        var totalNoise = [Double](repeating: 0, count: upLength)
+        let upVectorLength = vDSP_Length(upLength)
+        vDSP_vaddD(iNoise, 1, fittedRes, 1, &totalNoise, 1, upVectorLength)
+        // vDSP_vsubD computes C = B - A, i.e. original - noise.
+        vDSP_vsubD(totalNoise, 1, iorig, 1, &idata, 1, upVectorLength)
 
         // Downsample back.
         var cleanEEG = L > 1 ? DSP.decimate(idata, factor: L) : idata
-        var noise = L > 1 ? DSP.decimate(zip(iNoise, fittedRes).map(+), factor: L) : zip(iNoise, fittedRes).map(+)
+        var noise = L > 1 ? DSP.decimate(totalNoise, factor: L) : totalNoise
         // Guard length (decimate can be off by one).
         if cleanEEG.count > n { cleanEEG = Array(cleanEEG[0..<n]) }
         if cleanEEG.count < n { cleanEEG += Array(repeating: raw[cleanEEG.count..<n].first ?? 0, count: n - cleanEEG.count) }
@@ -319,21 +480,208 @@ struct FastrCorrector {
         if config.anc, !excluded {
             cleanEEG = adaptiveNoiseCancel(clean: cleanEEG, noise: noise,
                                            triggers: alignedMarkers, L: L,
-                                           artLength: artLength, samplingRate: samplingRate)
+                                           artLength: artLength, samplingRate: samplingRate,
+                                           sliceTrigger: sliceTrigger,
+                                           highPassMode: config.ancHighPassMode)
         }
         return cleanEEG
     }
 
     // MARK: - Template averaging
 
+    private nonisolated static func makeTemplateSelection(
+        config: Config,
+        numTrig: Int,
+        sliceTrigger: Bool
+    ) -> TemplateSelection {
+        let legacyHalfWindow = max(1, config.averagingWindow / 2)
+        let windowBefore = max(0, config.averagingWindowBefore ?? legacyHalfWindow)
+        let windowAfter = max(0, config.averagingWindowAfter ?? legacyHalfWindow)
+        if config.useFacetAveragingWindow {
+            let avgWindow = correctedFacetAvgWindow(
+                config.averagingWindow,
+                numTrig: numTrig,
+                sliceTrigger: sliceTrigger
+            )
+            let halfWindow = sliceTrigger ? avgWindow : max(1, avgWindow / 2)
+            return TemplateSelection(
+                windowBefore: windowBefore,
+                windowAfter: windowAfter,
+                templateCount: avgWindow,
+                moosmannWindow: max(1, 2 * halfWindow),
+                facetTemporalDonors: facetTemporalDonorRows(
+                    numTrig: numTrig,
+                    halfWindow: halfWindow,
+                    sliceTrigger: sliceTrigger
+                )
+            )
+        }
+
+        let templateCount = max(1, windowBefore + windowAfter)
+        return TemplateSelection(
+            windowBefore: windowBefore,
+            windowAfter: windowAfter,
+            templateCount: templateCount,
+            moosmannWindow: templateCount,
+            facetTemporalDonors: nil
+        )
+    }
+
+    private nonisolated static func correctedFacetAvgWindow(
+        _ requested: Int,
+        numTrig: Int,
+        sliceTrigger: Bool
+    ) -> Int {
+        var avgWindow = max(2, requested)
+        if avgWindow % 2 != 0 { avgWindow += 1 }
+
+        let maxWindow: Int
+        if sliceTrigger {
+            maxWindow = max(2, (numTrig - 3) / 2)
+        } else {
+            maxWindow = max(2, numTrig - 2)
+        }
+        if avgWindow > maxWindow {
+            avgWindow = maxWindow
+            if avgWindow % 2 != 0 { avgWindow -= 1 }
+        }
+        return max(2, avgWindow)
+    }
+
+    nonisolated static func facetTemporalDonorRows(
+        numTrig: Int,
+        halfWindow: Int,
+        sliceTrigger: Bool
+    ) -> [[Int]] {
+        guard numTrig > 0 else { return [] }
+        let half = max(1, halfWindow)
+        var rows = [[Int]]()
+        rows.reserveCapacity(numTrig)
+
+        var iStartOneBased = 2
+        for sZero in 0..<numTrig {
+            let s = sZero + 1
+            if sliceTrigger {
+                if s == 1 {
+                    iStartOneBased = 2
+                } else if s == 2 {
+                    iStartOneBased = 3
+                } else if s > (3 + half), s <= (numTrig - (half + 2)) {
+                    iStartOneBased = s - half
+                }
+
+                var row: [Int] = []
+                var i = iStartOneBased
+                while i <= iStartOneBased + 2 * half {
+                    let zero = i - 1
+                    if zero >= 0, zero < numTrig { row.append(zero) }
+                    i += 2
+                }
+                rows.append(row)
+            } else {
+                if s == 1 {
+                    iStartOneBased = 2
+                } else if s > (3 + half), s <= (numTrig - (half + 2)) {
+                    iStartOneBased = s - half - 1
+                }
+
+                var row: [Int] = []
+                let last = iStartOneBased + 2 * half
+                if iStartOneBased <= last {
+                    for i in iStartOneBased...last {
+                        let zero = i - 1
+                        if zero >= 0, zero < numTrig { row.append(zero) }
+                    }
+                }
+                rows.append(row)
+            }
+        }
+        return rows
+    }
+
+    private nonisolated static func averageArtifactTemplates(
+        idata: [Double],
+        markers: [Int],
+        prePeak: Int,
+        postPeak: Int,
+        templateSelection: TemplateSelection,
+        sliceTrigger: Bool,
+        slices: Int,
+        moosmannNeighbors: [[Int]]?,
+        censoredEpochs: Set<Int>,
+        config: Config
+    ) -> (templates: [[Double]?], epochs: [[Double]?]) {
+        let numTrig = markers.count
+        let upLength = idata.count
+        let epochs = (0..<numTrig).map { s -> [Double]? in
+            let start = markers[s] - prePeak
+            let end = markers[s] + postPeak
+            guard start >= 0, end < upLength else { return nil }
+            return Array(idata[start...end])
+        }
+
+        let correlationCandidatePools: [[Int]]? = config.usesBergenRSquareDonors
+            ? bergenRSquareCandidatePools(
+                numTrig: numTrig,
+                sliceTrigger: sliceTrigger,
+                slices: slices,
+                moosmannNeighbors: moosmannNeighbors
+            )
+            : nil
+
+        let bergenRSquareNeighbors: [[Int]]? = config.usesBergenRSquareDonors
+            ? bergenRSquareEpochNeighbors(
+                epochs: epochs,
+                select: templateSelection.templateCount,
+                candidatePools: correlationCandidatePools,
+                excludedEpochs: censoredEpochs
+            )
+            : nil
+
+        let farmNeighbors: [[Int]]? = !config.usesBergenRSquareDonors && config.templateScheme == .farm
+            ? farmEpochNeighbors(
+                epochs: epochs,
+                select: max(2, templateSelection.templateCount),
+                searchHalf: max(2 * templateSelection.templateCount, 25)
+            )
+            : nil
+
+        let templates = (0..<numTrig).map { s in
+            averageTemplate(
+                center: s,
+                numTrig: numTrig,
+                templateSelection: templateSelection,
+                sliceTrigger: sliceTrigger,
+                slices: slices,
+                moosmannNeighbors: moosmannNeighbors,
+                farmNeighbors: farmNeighbors,
+                bergenRSquareNeighbors: bergenRSquareNeighbors,
+                censoredEpochs: censoredEpochs
+            ) { idx in
+                guard idx >= 0, idx < epochs.count else { return nil }
+                return epochs[idx]
+            }
+        }
+
+        return (templates, epochs)
+    }
+
     private nonisolated static func averageTemplate(
-        center s: Int, numTrig: Int, halfWindow: Int, sliceTrigger: Bool,
-        slices: Int, moosmannNeighbors: [[Int]]?, farmNeighbors: [[Int]]?,
-        censoredEpochs: Set<Int>, epoch: (Int) -> ArraySlice<Double>?
+        center s: Int, numTrig: Int,
+        templateSelection: TemplateSelection,
+        sliceTrigger: Bool,
+        slices: Int,
+        moosmannNeighbors: [[Int]]?,
+        farmNeighbors: [[Int]]?,
+        bergenRSquareNeighbors: [[Int]]?,
+        censoredEpochs: Set<Int>,
+        epoch: (Int) -> [Double]?
     ) -> [Double]? {
         // Collect contributing epoch indices.
         var indices: [Int] = []
-        if let farm = farmNeighbors, s < farm.count, !farm[s].isEmpty {
+        if let rSquared = bergenRSquareNeighbors, s < rSquared.count, !rSquared[s].isEmpty {
+            indices = rSquared[s].filter { $0 >= 0 && $0 < numTrig }
+        } else if let farm = farmNeighbors, s < farm.count, !farm[s].isEmpty {
             // FARM: average the most-correlated epochs (already epoch indices).
             indices = farm[s].filter { $0 >= 0 && $0 < numTrig }
         } else if let neighbors = moosmannNeighbors {
@@ -350,19 +698,23 @@ struct FastrCorrector {
         }
         if !indices.isEmpty {
             // use FARM/Moosmann-selected indices below
+        } else if let facetRows = templateSelection.facetTemporalDonors, s < facetRows.count {
+            indices = facetRows[s]
         } else if sliceTrigger {
-            // Average every 2nd neighbor within +/- halfWindow (odd/even slice
+            // Average every 2nd neighbor within the requested pre/post window (odd/even slice
             // timing), saturating at the boundaries (FACET AvgArtWghtSliceTrigger).
-            var start = s - halfWindow
+            var start = s - templateSelection.windowBefore
             if start < 1 { start = (s % 2 == 0) ? 2 : 1 }
             var i = start
-            while i <= s + halfWindow {
+            while i <= s + templateSelection.windowAfter {
                 if i >= 0 && i < numTrig { indices.append(i) }
                 i += 2
             }
         } else {
-            for i in (s - halfWindow)...(s + halfWindow) where i >= 0 && i < numTrig {
-                indices.append(i)
+            let start = max(0, s - templateSelection.windowBefore)
+            let end = min(numTrig - 1, s + templateSelection.windowAfter)
+            if start <= end {
+                for i in start...end { indices.append(i) }
             }
         }
 
@@ -403,7 +755,8 @@ struct FastrCorrector {
         prePeak: Int, postPeak: Int, artLength: Int,
         numTrig: Int, sliceTrigger: Bool,
         censoredEpochs: Set<Int>,
-        obsHPF: [Double], mode: OBSMode
+        obsHPF: [Double], mode: OBSMode,
+        randomizeEpochSelection: Bool
     ) -> [Double] {
         let upLength = idata.count
         var fittedRes = [Double](repeating: 0, count: upLength)
@@ -412,7 +765,9 @@ struct FastrCorrector {
         let residual = zip(idata, iNoise).map(-)
         let ipca = DSP.filtfiltFIR(obsHPF, residual)
 
-        // Build the PCA matrix from a subset of epochs (every 2nd/3rd).
+        // Build the PCA matrix from FACET's epoch subset. EVA's default is
+        // deterministic for replay; the random option follows FACET's rand-driven
+        // 2/3 skip pattern.
         func epochSlice(_ s: Int, from source: [Double]) -> [Double]? {
             let start = alignedMarkers[s] - prePeak
             let end = alignedMarkers[s] + postPeak
@@ -421,9 +776,11 @@ struct FastrCorrector {
         }
 
         var pcaEpochs: [[Double]] = []
-        var skip = 2
-        var s = 1
-        while s < numTrig - 1 {
+        for s in obsPCAEpochIndices(
+            numTrig: numTrig,
+            sliceTrigger: sliceTrigger,
+            randomized: randomizeEpochSelection
+        ) {
             // Skip censored (e.g. high-motion) epochs so they don't pollute the
             // optimal basis set; the OBS fit is still applied to every epoch.
             if !censoredEpochs.contains(s), var e = epochSlice(s, from: ipca) {
@@ -431,9 +788,6 @@ struct FastrCorrector {
                 for i in 0..<e.count { e[i] -= m }  // detrend (remove mean)
                 pcaEpochs.append(e)
             }
-            // pick every 2nd or 3rd epoch
-            s += skip
-            skip = (skip == 2) ? 3 : 2
         }
         guard pcaEpochs.count > 2 else { return fittedRes }
 
@@ -513,12 +867,22 @@ struct FastrCorrector {
 
     private nonisolated static func adaptiveNoiseCancel(
         clean: [Double], noise: [Double], triggers: [Int], L: Int,
-        artLength: Int, samplingRate: Double
+        artLength: Int, samplingRate: Double,
+        sliceTrigger: Bool,
+        highPassMode: ANCHighPassMode
     ) -> [Double] {
         let n = clean.count
-        // ANC high-pass (volume-trigger ANCf = 2 Hz, per FMRIB).
+        // ANC high-pass: EVA/FMRIB fixed 2 Hz by default, or FACET's
+        // slice-trigger-rate-dependent cutoff for slice-triggered data.
         let nyq = 0.5 * samplingRate
-        let ancf = 2.0, trans = 0.15
+        let ancf = ancHighPassFrequency(
+            triggers: triggers,
+            L: L,
+            samplingRate: samplingRate,
+            sliceTrigger: sliceTrigger,
+            mode: highPassMode
+        )
+        let trans = 0.15
         var order = Int((1.2 * samplingRate / (ancf * (1 - trans))).rounded())
         if order % 2 != 0 { order += 1 }
         order = Swift.max(order, 16)
@@ -546,6 +910,183 @@ struct FastrCorrector {
 
     // MARK: - Helpers
 
+    private nonisolated static func zeroMeanUpsampled(_ raw: [Double], factor L: Int) -> [Double] {
+        let n = raw.count
+        let rawLength = vDSP_Length(n)
+        var mean = 0.0
+        if n > 0 { vDSP_meanvD(raw, 1, &mean, rawLength) }
+        var negMean = -mean
+        var zeroMean = [Double](repeating: 0, count: n)
+        if n > 0 { vDSP_vsaddD(raw, 1, &negMean, &zeroMean, 1, rawLength) }
+        return DSP.interp(zeroMean, factor: L)
+    }
+
+    private nonisolated static func censoredEpochIndices(
+        numTrig: Int,
+        sliceTrigger: Bool,
+        slices: Int,
+        censoredVolumes: Set<Int>
+    ) -> Set<Int> {
+        guard !censoredVolumes.isEmpty else { return [] }
+        let sliceCount = max(1, slices)
+        return Set((0..<numTrig).filter {
+            censoredVolumes.contains(sliceTrigger ? $0 / sliceCount : $0)
+        })
+    }
+
+    nonisolated static func obsPCAEpochIndices(
+        numTrig: Int,
+        sliceTrigger: Bool,
+        randomized: Bool = false,
+        randomStep: (() -> Int)? = nil
+    ) -> [Int] {
+        guard numTrig > 2 else { return [] }
+        if randomized {
+            var rng = SystemRandomNumberGenerator()
+            func nextStep() -> Int {
+                if let randomStep {
+                    return min(max(randomStep(), 2), 3)
+                }
+                return Bool.random(using: &rng) ? 3 : 2
+            }
+
+            var picks: [Int] = []
+            var cumulative = 0
+            while cumulative < numTrig {
+                cumulative += nextStep()
+                picks.append(cumulative)
+            }
+
+            if !sliceTrigger {
+                guard let start = picks.first, start < numTrig - 1 else { return [] }
+                return Array(start..<(numTrig - 1))
+            }
+
+            let valid = 1..<(numTrig - 1)
+            return picks.filter { valid.contains($0) }
+        }
+
+        if !sliceTrigger {
+            let start = numTrig > 4 ? 2 : 1
+            guard start < numTrig - 1 else { return [] }
+            return Array(start..<(numTrig - 1))
+        }
+
+        var indices: [Int] = []
+        var skip = 2
+        var s = 1
+        while s < numTrig - 1 {
+            indices.append(s)
+            s += skip
+            skip = (skip == 2) ? 3 : 2
+        }
+        return indices
+    }
+
+    nonisolated static func ancHighPassFrequency(
+        triggers: [Int],
+        L: Int,
+        samplingRate: Double,
+        sliceTrigger: Bool,
+        mode: ANCHighPassMode
+    ) -> Double {
+        guard mode == .sliceTriggerDependent, sliceTrigger,
+              let first = triggers.first, triggers.count > 1, L > 0,
+              samplingRate > 0
+        else {
+            return 2.0
+        }
+
+        let oneSecond = samplingRate * Double(L)
+        var triggerCount = 1
+        while triggerCount < triggers.count {
+            let elapsed = Double(triggers[triggerCount] - first)
+            if elapsed >= oneSecond { break }
+            triggerCount += 1
+        }
+        return max(0.1, 0.75 * Double(triggerCount))
+    }
+
+    private nonisolated static func applySubSampleShifts(
+        to dataUp: [Double],
+        markers: [Int],
+        prePeak: Int,
+        postPeak: Int,
+        shifts: [Double]
+    ) -> [Double] {
+        guard shifts.contains(where: { abs($0) > 1e-9 }) else { return dataUp }
+        var shifted = dataUp
+        let pad = 10
+        for s in markers.indices where s < shifts.count && abs(shifts[s]) > 1e-9 {
+            let writeStart = markers[s] - prePeak
+            let writeEnd = markers[s] + postPeak
+            guard writeStart >= 0, writeEnd < dataUp.count else { continue }
+
+            let segmentStart = max(0, writeStart - pad)
+            let segmentEnd = min(dataUp.count - 1, writeEnd + pad)
+            guard segmentStart <= segmentEnd else { continue }
+
+            let segment = Array(dataUp[segmentStart...segmentEnd])
+            let shiftedSegment = DSP.fractionalShift(segment, by: shifts[s])
+            let offset = writeStart - segmentStart
+            guard offset >= 0, offset + (writeEnd - writeStart) < shiftedSegment.count else { continue }
+            for i in 0...(writeEnd - writeStart) {
+                shifted[writeStart + i] = shiftedSegment[offset + i]
+            }
+        }
+        return shifted
+    }
+
+    private nonisolated static func alignToAverageArtifacts(
+        dataUp: [Double],
+        baseMarkers: [Int],
+        templates: [[Double]?],
+        prePeak: Int,
+        postPeak: Int,
+        searchWindow: Int
+    ) -> [Int] {
+        var aligned = baseMarkers
+        for s in baseMarkers.indices {
+            guard s < templates.count, let template = templates[s], template.count == prePeak + postPeak + 1 else {
+                continue
+            }
+            let shift = bestIntegerShift(
+                dataUp: dataUp,
+                template: template,
+                center: baseMarkers[s],
+                prePeak: prePeak,
+                postPeak: postPeak,
+                searchWindow: searchWindow
+            )
+            aligned[s] = baseMarkers[s] + shift
+        }
+        return aligned
+    }
+
+    private nonisolated static func bestIntegerShift(
+        dataUp: [Double],
+        template: [Double],
+        center: Int,
+        prePeak: Int,
+        postPeak: Int,
+        searchWindow: Int
+    ) -> Int {
+        var bestCorr = -Double.infinity
+        var bestShift = 0
+        for shift in -searchWindow...searchWindow {
+            let c = center + shift
+            let start = c - prePeak
+            let end = c + postPeak
+            guard start >= 0, end < dataUp.count else { continue }
+            let corr = DSP.pearson(dataUp[start...end], template[...])
+            if corr > bestCorr {
+                bestCorr = corr
+                bestShift = shift
+            }
+        }
+        return bestShift
+    }
+
     /// Generate slice triggers by evenly subdividing each volume interval.
     private nonisolated static func sliceTriggers(volumeTriggers: [Int], slices: Int, sampleCount: Int) -> [Int] {
         guard slices > 1 else { return volumeTriggers }
@@ -570,8 +1111,9 @@ struct FastrCorrector {
     /// (k) volumes that is *warped by motion* so it does not average across a
     /// head-movement event, and excludes volumes whose own motion exceeds the
     /// threshold. Specifically:
-    ///   - motion magnitude = translation speed = ‖Δ(dS,dL,dP)‖ per volume
-    ///     (rotation is ignored, matching the reference's `p_trans_rot_scale=0`);
+    ///   - motion magnitude defaults to translation speed = ‖Δ(dS,dL,dP)‖ per
+    ///     volume (rotation ignored, matching the reference's
+    ///     `p_trans_rot_scale=0`), with an option to include all 6 parameters;
     ///   - speeds at or below `thresholdMm` are zeroed; if none exceed it the
     ///     result is nil and the caller falls back to a plain moving average;
     ///   - distance = triangular temporal distance + (k / min positive speed) ·
@@ -582,17 +1124,18 @@ struct FastrCorrector {
     /// dummy scans excluded before SPM realignment).
     nonisolated static func moosmannVolumeNeighbors(
         motion: [MotionSample]?, volumeCount n: Int, window k: Int,
-        thresholdMm: Double
+        thresholdMm: Double,
+        metric: MotionMetric = .translationOnly,
+        radiusMm: Double = 50
     ) -> [[Int]]? {
         guard let motion, motion.count >= 2, n >= 2, k >= 1 else { return nil }
 
-        // Translation speed (mm) per motion row; first row has no predecessor.
+        // Motion speed (mm) per motion row; first row has no predecessor.
         var speedRows = [Double](repeating: 0, count: motion.count)
-        for i in 1..<motion.count {
-            let dx = motion[i].dS - motion[i - 1].dS
-            let dy = motion[i].dL - motion[i - 1].dL
-            let dz = motion[i].dP - motion[i - 1].dP
-            speedRows[i] = (dx * dx + dy * dy + dz * dz).squareRoot()
+        fillResults(&speedRows, iterations: motion.count) { i in
+            guard i > 0 else { return 0 }
+            return motionSpeed(from: motion[i - 1], to: motion[i],
+                               metric: metric, radiusMm: radiusMm)
         }
         // Threshold: keep only supra-threshold speeds (others -> 0).
         for i in speedRows.indices where speedRows[i] <= thresholdMm { speedRows[i] = 0 }
@@ -638,6 +1181,28 @@ struct FastrCorrector {
         neighborsPtr.deinitialize(count: n)
         neighborsPtr.deallocate()
         return neighbors
+    }
+
+    private nonisolated static func motionSpeed(
+        from previous: MotionSample,
+        to current: MotionSample,
+        metric: MotionMetric,
+        radiusMm: Double
+    ) -> Double {
+        let dx = current.dS - previous.dS
+        let dy = current.dL - previous.dL
+        let dz = current.dP - previous.dP
+        var squared = dx * dx + dy * dy + dz * dz
+
+        if metric == .allParameters {
+            let degToMM = Double.pi / 180.0 * max(radiusMm, 0)
+            let dr = (current.roll - previous.roll) * degToMM
+            let dp = (current.pitch - previous.pitch) * degToMM
+            let dw = (current.yaw - previous.yaw) * degToMM
+            squared += dr * dr + dp * dp + dw * dw
+        }
+
+        return squared.squareRoot()
     }
 
     /// Returns indices of the k elements with the smallest values in `dist`,
@@ -698,6 +1263,75 @@ struct FastrCorrector {
         }
     }
 
+    private nonisolated static func bergenRSquareCandidatePools(
+        numTrig: Int,
+        sliceTrigger: Bool,
+        slices: Int,
+        moosmannNeighbors: [[Int]]?
+    ) -> [[Int]]? {
+        if let moosmannNeighbors {
+            var pools = [[Int]](repeating: [], count: numTrig)
+            let sliceCount = max(slices, 1)
+            fillResults(&pools, iterations: numTrig) { s in
+                let volume = sliceTrigger ? s / sliceCount : s
+                let sliceIndex = sliceTrigger ? s % sliceCount : 0
+                guard volume < moosmannNeighbors.count else { return [] }
+                return moosmannNeighbors[volume].compactMap { vol in
+                    let idx = sliceTrigger ? vol * sliceCount + sliceIndex : vol
+                    return idx >= 0 && idx < numTrig ? idx : nil
+                }
+            }
+            return pools
+        }
+
+        guard sliceTrigger else { return nil }
+        let sliceCount = max(slices, 1)
+        let groups = (0..<sliceCount).map { sliceIndex in
+            stride(from: sliceIndex, to: numTrig, by: sliceCount).map { $0 }
+        }
+        return (0..<numTrig).map { s in
+            groups[s % sliceCount]
+        }
+    }
+
+    /// BERGEN-style best-r^2 artifact selection. Unlike FACET/FARM, this mirrors
+    /// `m_best_rsquare_artifact.m`: squared correlation is the score and the
+    /// current artifact is eligible, so a target can contribute to its own
+    /// template unless the caller excludes it through `candidatePools` or
+    /// `excludedEpochs`.
+    nonisolated static func bergenRSquareEpochNeighbors(
+        epochs: [[Double]?],
+        select: Int,
+        candidatePools: [[Int]]? = nil,
+        excludedEpochs: Set<Int> = []
+    ) -> [[Int]] {
+        let n = epochs.count
+        let selectionCount = max(1, select)
+        let prepared = prepareEpochs(epochs)
+        var result = [[Int]](repeating: [], count: n)
+
+        fillResults(&result, iterations: n) { s in
+            guard let es = prepared[s] else { return [] }
+            let pool = candidatePools.flatMap { s < $0.count ? $0[s] : nil } ?? Array(0..<n)
+            var candidates: [(index: Int, score: Double)] = []
+            candidates.reserveCapacity(pool.count)
+
+            for j in pool where j >= 0 && j < n && !excludedEpochs.contains(j) {
+                guard let ej = prepared[j], ej.values.count == es.values.count else { continue }
+                let r = preparedPearson(es, ej)
+                candidates.append((j, r * r))
+            }
+
+            candidates.sort {
+                if $0.score == $1.score { return $0.index < $1.index }
+                return $0.score > $1.score
+            }
+            return candidates.prefix(selectionCount).map(\.index)
+        }
+
+        return result
+    }
+
     /// FARM (van der Meer 2010 / FACET `AvgArtWghtFARM`) epoch selection: for each
     /// epoch, the indices of the `select` most-correlated epochs within a
     /// ±`searchHalf` neighborhood whose absolute correlation is ≥ 0.9 (excluding
@@ -709,21 +1343,71 @@ struct FastrCorrector {
         epochs: [[Double]?], select: Int, searchHalf: Int, threshold: Double = 0.9
     ) -> [[Int]] {
         let n = epochs.count
+        let prepared = prepareEpochs(epochs)
         var result = [[Int]](repeating: [], count: n)
-        for s in 0..<n {
-            guard let es = epochs[s] else { continue }
+
+        fillResults(&result, iterations: n) { s in
+            guard let es = prepared[s] else { return [] }
             let a = max(0, s - searchHalf)
             let b = min(n - 1, s + searchHalf)
             var candidates: [(index: Int, corr: Double)] = []
             for j in a...b where j != s {
-                guard let ej = epochs[j], ej.count == es.count else { continue }
-                let c = abs(DSP.pearson(es[...], ej[...]))
+                guard let ej = prepared[j], ej.values.count == es.values.count else { continue }
+                let c = abs(preparedPearson(es, ej))
                 if c >= threshold { candidates.append((j, c)) }
             }
-            candidates.sort { $0.corr > $1.corr }
-            result[s] = candidates.prefix(max(1, select)).map { $0.index }
+            candidates.sort {
+                if $0.corr == $1.corr { return $0.index < $1.index }
+                return $0.corr > $1.corr
+            }
+            return candidates.prefix(max(1, select)).map { $0.index }
         }
         return result
+    }
+
+    private nonisolated static func prepareEpochs(_ epochs: [[Double]?]) -> [PreparedEpoch?] {
+        epochs.map { values in
+            guard let values, values.count > 1 else { return nil }
+            let length = vDSP_Length(values.count)
+            var mean = 0.0
+            var rawSquares = 0.0
+            vDSP_meanvD(values, 1, &mean, length)
+            vDSP_dotprD(values, 1, values, 1, &rawSquares, length)
+            let centeredSquares = max(0, rawSquares - Double(values.count) * mean * mean)
+            return PreparedEpoch(values: values, mean: mean, sumSquaresCentered: centeredSquares)
+        }
+    }
+
+    private nonisolated static func preparedPearson(_ a: PreparedEpoch, _ b: PreparedEpoch) -> Double {
+        precondition(a.values.count == b.values.count)
+        guard a.values.count > 1 else { return 0 }
+        let denominator = (a.sumSquaresCentered * b.sumSquaresCentered).squareRoot()
+        guard denominator > 0 else { return 0 }
+        var rawDot = 0.0
+        vDSP_dotprD(a.values, 1, b.values, 1, &rawDot, vDSP_Length(a.values.count))
+        let covariance = rawDot - Double(a.values.count) * a.mean * b.mean
+        return covariance / denominator
+    }
+
+    private nonisolated static func fillResults<T: Sendable>(
+        _ result: inout [T],
+        iterations count: Int,
+        body: @Sendable (Int) -> T
+    ) {
+        guard count > 0 else { return }
+        guard count >= donorSelectionParallelThreshold, evaMaxWorkers > 1 else {
+            for i in 0..<count { result[i] = body(i) }
+            return
+        }
+
+        nonisolated(unsafe) let resultPtr = UnsafeMutablePointer<T>.allocate(capacity: count)
+        resultPtr.initialize(from: &result, count: count)
+        evaConcurrentPerform(iterations: count) { i in
+            resultPtr[i] = body(i)
+        }
+        result = Array(UnsafeBufferPointer(start: resultPtr, count: count))
+        resultPtr.deinitialize(count: count)
+        resultPtr.deallocate()
     }
 
     /// Extend a (censored-filtered) donor list back toward its original size by
@@ -787,8 +1471,8 @@ struct FastrCorrector {
     // MARK: - Aligner
 
     /// Encapsulates epoch alignment (integer cross-correlation + optional
-    /// sub-sample fractional shift). Alignment is computed on one channel and the
-    /// resulting integer markers are shared across channels.
+    /// sub-sample fractional shift). Alignment is computed on one channel and both
+    /// integer markers and fractional offsets are shared across channels.
     private nonisolated struct Aligner {
         let markersUp: [Int]
         let prePeak: Int
@@ -797,28 +1481,85 @@ struct FastrCorrector {
         let searchWindow: Int
         let subSample: Bool
 
-        func align(dataUp: [Double]) -> [Int] {
+        func align(dataUp: [Double]) -> AlignmentResult {
             let upLength = dataUp.count
             var aligned = markersUp
             // Reference template = first valid epoch.
             guard let refStart = markersUp.first, refStart - prePeak >= 0,
-                  refStart + postPeak < upLength else { return aligned }
+                  refStart + postPeak < upLength else {
+                return AlignmentResult(markers: aligned, fractionalShifts: [Double](repeating: 0, count: markersUp.count))
+            }
             let reference = Array(dataUp[(refStart - prePeak)...(refStart + postPeak)])
 
             for s in markersUp.indices {
-                let center = markersUp[s]
-                var bestCorr = -Double.infinity
-                var bestShift = 0
-                for shift in -searchWindow...searchWindow {
-                    let c = center + shift
-                    let start = c - prePeak, end = c + postPeak
-                    guard start >= 0, end < upLength else { continue }
-                    let corr = DSP.pearson(dataUp[start...end], reference[...])
-                    if corr > bestCorr { bestCorr = corr; bestShift = shift }
-                }
-                aligned[s] = center + bestShift
+                let shift = bestIntegerShift(
+                    dataUp: dataUp,
+                    template: reference,
+                    center: markersUp[s],
+                    prePeak: prePeak,
+                    postPeak: postPeak,
+                    searchWindow: searchWindow
+                )
+                aligned[s] = markersUp[s] + shift
             }
-            return aligned
+
+            let fractionalShifts = subSample
+                ? fractionalAlignments(dataUp: dataUp, markers: aligned)
+                : [Double](repeating: 0, count: markersUp.count)
+            return AlignmentResult(markers: aligned, fractionalShifts: fractionalShifts)
+        }
+
+        private func fractionalAlignments(dataUp: [Double], markers: [Int]) -> [Double] {
+            var shifts = [Double](repeating: 0, count: markers.count)
+            guard let refMarker = markers.first else { return shifts }
+
+            let pad = 10
+            let refStart = refMarker - prePeak - pad
+            let refEnd = refMarker + postPeak + pad
+            guard refStart >= 0, refEnd < dataUp.count else { return shifts }
+            let reference = Array(dataUp[refStart...refEnd])
+
+            for s in markers.indices.dropFirst() {
+                let start = markers[s] - prePeak - pad
+                let end = markers[s] + postPeak + pad
+                guard start >= 0, end < dataUp.count else { continue }
+                let segment = Array(dataUp[start...end])
+                guard segment.count == reference.count else { continue }
+                shifts[s] = bestFractionalShift(segment: segment, reference: reference)
+            }
+            return shifts
+        }
+
+        private func bestFractionalShift(segment: [Double], reference: [Double]) -> Double {
+            var shiftL = -1.0
+            var shiftM = 0.0
+            var shiftR = 1.0
+            var corrL = compare(reference, DSP.fractionalShift(segment, by: shiftL))
+            var corrM = compare(reference, segment)
+            var corrR = compare(reference, DSP.fractionalShift(segment, by: shiftR))
+
+            for _ in 0..<15 {
+                if corrL > corrR {
+                    shiftR = shiftM
+                    corrR = corrM
+                } else {
+                    shiftL = shiftM
+                    corrL = corrM
+                }
+                shiftM = (shiftL + shiftR) / 2
+                corrM = compare(reference, DSP.fractionalShift(segment, by: shiftM))
+            }
+            return shiftM
+        }
+
+        private func compare(_ reference: [Double], _ shifted: [Double]) -> Double {
+            guard reference.count == shifted.count else { return -.infinity }
+            var sse = 0.0
+            for i in reference.indices {
+                let d = reference[i] - shifted[i]
+                sse += d * d
+            }
+            return -sse
         }
     }
 }

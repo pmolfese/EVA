@@ -226,6 +226,15 @@ struct DefinedArtifact: Identifiable, Sendable {
     var obsClusterCount = Self.defaultOBSClusterCount
     var localTemplateWindowSize = Self.defaultLocalTemplateWindowSize
     var waasDecayFactor = Self.defaultWAASDecayFactor
+    /// wAAS/wAAR: match AMRI's weighted template donor pool by weighting all
+    /// valid epochs, including the current event. When off, EVA uses the
+    /// centered local window also used by MAS/MAR.
+    var waasUsesAMRIGlobalWeights = true
+    /// BCG MAS/MAR/wAAS/wAAR: optional AMRI-style epoch preprocessing. EVA's
+    /// default assumes events are already centered; when enabled for BCG
+    /// artifacts, each channel estimates a median-power offset, shifts windows
+    /// by that offset, and mean-centers epochs before template construction.
+    var localTemplateUsesAMRIPreprocessing = false
     /// MAS/MAR/wAAS/wAAR: when true, the correction is de-trended so it
     /// matches the local signal's baseline at both edges of the window
     /// instead of potentially introducing a DC/linear-drift step — same
@@ -263,9 +272,99 @@ struct DefinedArtifact: Identifiable, Sendable {
         obsClusterCount = previous.obsClusterCount
         localTemplateWindowSize = previous.localTemplateWindowSize
         waasDecayFactor = previous.waasDecayFactor
+        waasUsesAMRIGlobalWeights = previous.waasUsesAMRIGlobalWeights
+        localTemplateUsesAMRIPreprocessing = previous.localTemplateUsesAMRIPreprocessing
         localTemplatePreservesLocalBaseline = previous.localTemplatePreservesLocalBaseline
         localTemplateEdgeTaperSeconds = previous.localTemplateEdgeTaperSeconds
         usesVariableEventDuration = previous.usesVariableEventDuration
+    }
+}
+
+extension DefinedArtifact {
+    /// Flat, stable provenance fields for `eva.xml` / `log_eva`.
+    ///
+    /// Artifact-template cleaning remains a subject-specific decision step
+    /// because replay needs the drawn template/event context, but these fields
+    /// make exported files auditable and manually reproducible from the source
+    /// recording.
+    nonisolated func processingParameters(prefix: String) -> [String: String] {
+        func key(_ suffix: String) -> String {
+            prefix.isEmpty ? suffix : "\(prefix).\(suffix)"
+        }
+        func integerList(_ values: [Int], oneBased: Bool = false) -> String {
+            values.map { String(oneBased ? $0 + 1 : $0) }.joined(separator: ",")
+        }
+        func fixed(_ value: Double) -> String {
+            String(format: "%.6f", value)
+        }
+
+        let sortedEvents = events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+        var params: [String: String] = [
+            key("id"): id.uuidString,
+            key("type"): type.rawValue,
+            key("name"): name,
+            key("eventCode"): eventCode,
+            key("eventCount"): "\(events.count)",
+            key("eventOnsetsSeconds"): sortedEvents.map { fixed($0.beginTimeSeconds) }.joined(separator: ","),
+            key("selectedChannels"): integerList(selectedChannelIndices.sorted(), oneBased: true),
+            key("windowSizeSeconds"): fixed(windowSizeSeconds),
+            key("cleaningMethod"): cleaningMethod.rawValue,
+            key("appliedMethod"): appliedMethod?.rawValue ?? "",
+            key("obsStrategy"): obsStrategy.rawValue,
+            key("obsPCAComponentCount"): "\(obsPCAComponentCount)",
+            key("obsEdgeTaperSeconds"): fixed(obsEdgeTaperSeconds),
+            key("obsPreservesLocalBaseline"): "\(obsPreservesLocalBaseline)",
+            key("obsUsesOverlapAdd"): "\(obsUsesOverlapAdd)",
+            key("obsAlignmentSearchSeconds"): fixed(obsAlignmentSearchSeconds),
+            key("obsTopographyWeightStrength"): fixed(obsTopographyWeightStrength),
+            key("obsClusterCount"): "\(obsClusterCount)",
+            key("localTemplateWindowSize"): "\(localTemplateWindowSize)",
+            key("waasDecayFactor"): fixed(waasDecayFactor),
+            key("waasUsesAMRIGlobalWeights"): "\(waasUsesAMRIGlobalWeights)",
+            key("localTemplateUsesAMRIPreprocessing"): "\(localTemplateUsesAMRIPreprocessing)",
+            key("localTemplateAMRIPreprocessingEffective"): "\(type == .bcg && localTemplateUsesAMRIPreprocessing)",
+            key("localTemplatePreservesLocalBaseline"): "\(localTemplatePreservesLocalBaseline)",
+            key("localTemplateEdgeTaperSeconds"): fixed(localTemplateEdgeTaperSeconds),
+            key("usesVariableEventDuration"): "\(usesVariableEventDuration)"
+        ]
+
+        let eventDurations = sortedEvents.map { event in
+            event.durationSeconds.map(fixed) ?? ""
+        }
+        if eventDurations.contains(where: { !$0.isEmpty }) {
+            params[key("eventDurationsSeconds")] = eventDurations.joined(separator: ",")
+        }
+        if let cleanedAt {
+            params[key("cleanedAt")] = ISO8601DateFormatter().string(from: cleanedAt)
+        }
+
+        if let average {
+            params[key("averagePresent")] = "true"
+            params[key("averageSamplingRate")] = fixed(average.samplingRate)
+            params[key("averageWindowSizeSeconds")] = fixed(average.windowSizeSeconds)
+            params[key("averageEventCount")] = "\(average.eventCount)"
+            params[key("averageSelectedChannels")] = integerList(average.selectedChannelIndices.sorted(), oneBased: true)
+            params[key("averageChannelCount")] = "\(average.allChannelSamples.count)"
+            params[key("averageSampleCount")] = "\(average.allChannelSamples.first?.count ?? 0)"
+        } else {
+            params[key("averagePresent")] = "false"
+        }
+
+        if let topography {
+            params[key("topographyPresent")] = "true"
+            params[key("topographyMode")] = topography.mode.rawValue
+            params[key("topographyReferenceSample")] = "\(topography.referenceSample)"
+            params[key("topographyReferenceTimeSeconds")] = fixed(topography.referenceTimeSeconds)
+            params[key("topographyChannelCount")] = "\(topography.channelValues.count)"
+            params[key("topographyChannels")] = integerList(topography.channelIndices.sorted(), oneBased: true)
+            params[key("topographyMatchThreshold")] = fixed(topography.matchThreshold)
+            params[key("topographyMatchCount")] = "\(topography.matchCount)"
+            params[key("topographyTrajectoryFrameCount")] = "\(topography.trajectoryFrameCount ?? 0)"
+        } else {
+            params[key("topographyPresent")] = "false"
+        }
+
+        return params
     }
 }
 
@@ -692,20 +791,17 @@ nonisolated enum ArtifactCleaner {
         return max(Int((duration * samplingRate).rounded()), 3)
     }
 
-    /// MAS/MAR/wAAS/wAAR: builds a *local* template per event from a moving
-    /// window of neighboring events (median for MAS/MAR, Goldman-2000
-    /// exponentially-weighted mean for wAAS/wAAR), then either subtracts it
-    /// directly (MAS/wAAS) or scales it by a least-squares fit first
-    /// (MAR/wAAR) — matching `amri_eeg_cbc.m`'s local-pulse-artifact-template
-    /// logic (see file header for citation).
+    /// MAS/MAR/wAAS/wAAR: builds a template per event from donor epochs
+    /// (median for MAS/MAR, Goldman-2000 exponentially-weighted mean for
+    /// wAAS/wAAR), then either subtracts it directly (MAS/wAAS) or scales it by
+    /// a least-squares fit first (MAR/wAAR) — matching `amri_eeg_cbc.m`'s
+    /// local-pulse-artifact-template logic (see file header for citation).
     ///
     /// Each channel is corrected independently (its template only ever draws
     /// on that same channel's own neighboring epochs), so channels are
     /// processed across all CPU cores, mirroring `GradientRemover.correct`.
-    /// The donor-event window and wAAS/wAAR weights are purely structural —
-    /// they depend only on which events have a valid window, never on a
-    /// channel's data — so they're computed once up front instead of being
-    /// rebuilt identically for every channel in the montage.
+    /// The donor-event plan is built per channel because optional AMRI
+    /// preprocessing can shift/drop windows differently for each channel.
     private static func applyLocalTemplate(
         artifact: DefinedArtifact,
         signal: MFFSignalData,
@@ -728,25 +824,10 @@ nonisolated enum ArtifactCleaner {
         let isWeighted = artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar
         let regresses = artifact.cleaningMethod == .mar || artifact.cleaningMethod == .waar
         let decay = artifact.waasDecayFactor
+        let waasUsesAMRIGlobalWeights = artifact.waasUsesAMRIGlobalWeights
+        let usesAMRIPreprocessing = artifact.type == .bcg && artifact.localTemplateUsesAMRIPreprocessing
         let preservesLocalBaseline = artifact.localTemplatePreservesLocalBaseline
         let edgeTaperSamplesRaw = max(Int((artifact.localTemplateEdgeTaperSeconds * signal.samplingRate).rounded()), 0)
-
-        // Built as plain `let`s (via map, not a mutating loop) so they're
-        // ordinary Sendable values the concurrent closure below can capture
-        // without needing an `unsafe` annotation — a `var` capture, even one
-        // never written to again, can't be proven race-free by the compiler.
-        let validEvents = Set(ranges.indices.filter { ranges[$0] != nil })
-        let donorsByEvent: [[Int]] = ranges.indices.map { eventIndex in
-            guard ranges[eventIndex] != nil else { return [] }
-            let lo = max(0, eventIndex - half)
-            let hi = min(ranges.count - 1, eventIndex + half)
-            return (lo...hi).filter { $0 != eventIndex && validEvents.contains($0) }
-        }
-        let weightsByEvent: [[Double]] = isWeighted
-            ? ranges.indices.map { eventIndex in
-                donorsByEvent[eventIndex].map { pow(decay, abs(Double($0 - eventIndex))) }
-            }
-            : Array(repeating: [], count: ranges.count)
 
         let progressLock = NSLock()
         nonisolated(unsafe) var completedChannels = 0
@@ -763,10 +844,12 @@ nonisolated enum ArtifactCleaner {
                 let (corrected, cleaned) = correctChannelLocalTemplate(
                     out[channel],
                     ranges: ranges,
-                    donorsByEvent: donorsByEvent,
-                    weightsByEvent: weightsByEvent,
+                    localHalfWindow: half,
                     isWeighted: isWeighted,
+                    waasUsesAMRIGlobalWeights: waasUsesAMRIGlobalWeights,
+                    decay: decay,
                     regresses: regresses,
+                    usesAMRIPreprocessing: usesAMRIPreprocessing,
                     preservesLocalBaseline: preservesLocalBaseline,
                     edgeTaperSamplesRaw: edgeTaperSamplesRaw
                 )
@@ -793,38 +876,55 @@ nonisolated enum ArtifactCleaner {
     private static func correctChannelLocalTemplate(
         _ channel: [Float],
         ranges: [Range<Int>?],
-        donorsByEvent: [[Int]],
-        weightsByEvent: [[Double]],
+        localHalfWindow: Int,
         isWeighted: Bool,
+        waasUsesAMRIGlobalWeights: Bool,
+        decay: Double,
         regresses: Bool,
+        usesAMRIPreprocessing: Bool,
         preservesLocalBaseline: Bool,
         edgeTaperSamplesRaw: Int
     ) -> (channel: [Float], cleaned: Bool) {
         let original = channel
         var corrected = channel
-        let epochs: [[Float]?] = ranges.map { range in range.map { Array(original[$0]) } }
+        let effectiveRanges = usesAMRIPreprocessing
+            ? amriAlignedRanges(from: ranges, channel: original)
+            : ranges
+        let rawEpochs: [[Float]?] = effectiveRanges.map { range in range.map { Array(original[$0]) } }
+        let templateEpochs: [[Float]?] = usesAMRIPreprocessing
+            ? rawEpochs.map { $0.map(meanCentered) }
+            : rawEpochs
+        let donorPlan = localTemplateDonorPlan(
+            ranges: effectiveRanges,
+            localHalfWindow: localHalfWindow,
+            isWeighted: isWeighted,
+            waasUsesAMRIGlobalWeights: waasUsesAMRIGlobalWeights,
+            decay: decay
+        )
         var cleaned = false
 
-        for (eventIndex, range) in ranges.enumerated() {
-            guard let range, let epoch = epochs[eventIndex] else { continue }
-            let donors = donorsByEvent[eventIndex]
+        for (eventIndex, range) in effectiveRanges.enumerated() {
+            guard let range,
+                  let rawEpoch = rawEpochs[eventIndex],
+                  let templateEpoch = templateEpochs[eventIndex] else { continue }
+            let donors = donorPlan.donors[eventIndex]
             guard !donors.isEmpty else { continue }
 
             let template: [Float]
             if isWeighted {
                 template = elementwiseWeightedMean(
                     indices: donors,
-                    epochs: epochs,
-                    weights: weightsByEvent[eventIndex],
+                    epochs: templateEpochs,
+                    weights: donorPlan.weights[eventIndex],
                     length: range.count
                 )
             } else {
-                template = elementwiseMedian(indices: donors, epochs: epochs, length: range.count)
+                template = elementwiseMedian(indices: donors, epochs: templateEpochs, length: range.count)
             }
 
             let rawCorrection: [Double]
             if regresses {
-                let k = Double(localRegressionCoefficient(y: epoch, template: template))
+                let k = Double(localRegressionCoefficient(y: templateEpoch, template: template))
                 rawCorrection = template.map { k * Double($0) }
             } else {
                 rawCorrection = template.map(Double.init)
@@ -845,12 +945,85 @@ nonisolated enum ArtifactCleaner {
                 edgeTaperSamples: edgeTaperSamples
             ) else { continue }
 
-            for i in 0..<range.count {
+            let count = min(range.count, rawEpoch.count, smoothed.weightedValues.count)
+            for i in 0..<count {
                 corrected[range.lowerBound + i] -= Float(smoothed.weightedValues[i])
             }
             cleaned = true
         }
         return (corrected, cleaned)
+    }
+
+    private static func localTemplateDonorPlan(
+        ranges: [Range<Int>?],
+        localHalfWindow: Int,
+        isWeighted: Bool,
+        waasUsesAMRIGlobalWeights: Bool,
+        decay: Double
+    ) -> (donors: [[Int]], weights: [[Double]]) {
+        let validEvents = Set(ranges.indices.filter { ranges[$0] != nil })
+        let donorsByEvent: [[Int]] = ranges.indices.map { eventIndex in
+            guard ranges[eventIndex] != nil else { return [] }
+            if isWeighted, waasUsesAMRIGlobalWeights {
+                // AMRI wAAS/wAAR weights every valid epoch by distance from the
+                // current one; the current event has weight 1.
+                return ranges.indices.filter { validEvents.contains($0) }
+            }
+            let lo = max(0, eventIndex - localHalfWindow)
+            let hi = min(ranges.count - 1, eventIndex + localHalfWindow)
+            return (lo...hi).filter { $0 != eventIndex && validEvents.contains($0) }
+        }
+        let weightsByEvent: [[Double]] = isWeighted
+            ? ranges.indices.map { eventIndex in
+                donorsByEvent[eventIndex].map { pow(decay, abs(Double($0 - eventIndex))) }
+            }
+            : Array(repeating: [], count: ranges.count)
+        return (donorsByEvent, weightsByEvent)
+    }
+
+    private static func amriAlignedRanges(from ranges: [Range<Int>?], channel: [Float]) -> [Range<Int>?] {
+        let validRanges = ranges.compactMap { $0 }
+        guard validRanges.count >= 3,
+              let windowLength = validRanges.first?.count,
+              windowLength > 2,
+              validRanges.allSatisfy({ $0.count == windowLength }) else {
+            return ranges
+        }
+
+        let powerEpochs = validRanges.dropFirst().dropLast().map { range -> [Double] in
+            let epoch = meanCentered(Array(channel[range]))
+            return epoch.map { Double($0 * $0) }
+        }
+        guard !powerEpochs.isEmpty else { return ranges }
+
+        var medianPower = [Double](repeating: 0, count: windowLength)
+        var column = [Double](repeating: 0, count: powerEpochs.count)
+        for sample in 0..<windowLength {
+            for (row, epoch) in powerEpochs.enumerated() { column[row] = epoch[sample] }
+            column.sort()
+            let mid = column.count / 2
+            medianPower[sample] = column.count % 2 == 0
+                ? (column[mid - 1] + column[mid]) / 2
+                : column[mid]
+        }
+        guard let peak = medianPower.indices.max(by: { medianPower[$0] < medianPower[$1] }) else {
+            return ranges
+        }
+        let shift = peak - windowLength / 2
+        guard shift != 0 else { return ranges }
+
+        return ranges.map { range in
+            guard let range else { return nil }
+            let shifted = (range.lowerBound + shift)..<(range.upperBound + shift)
+            guard shifted.lowerBound >= 0, shifted.upperBound <= channel.count else { return nil }
+            return shifted
+        }
+    }
+
+    private static func meanCentered(_ values: [Float]) -> [Float] {
+        guard !values.isEmpty else { return values }
+        let mean = values.reduce(Float(0), +) / Float(values.count)
+        return values.map { $0 - mean }
     }
 
     /// Elementwise median across `epochs[indices]` (each resampled to `length`

@@ -1718,9 +1718,9 @@ extension WaveformView {
         OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; Options includes topography-aware OBS strategies.
         SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
         MAS/MAR: local (moving-window) median template — robust to an occasional distorted event; MAR additionally scales the template by a least-squares fit.
-        wAAS/wAAR: local template exponentially weighted toward nearby events (Goldman 2000); wAAR additionally scales the template by a least-squares fit.
+        wAAS/wAAR: exponentially weighted template (Goldman 2000); Options defaults to AMRI global weighting, where every valid event contributes by decay^distance, and wAAR additionally scales the template by a least-squares fit.
 
-        Regress and MAS/MAR/wAAS/wAAR can size each event's correction window from that event's own measured duration instead of one shared window — see Options — needed for artifacts whose events genuinely vary in length (auto-enabled for Continuous topography scanning). OBS and SSP/PCA can't: they pool every event into one shared basis, which requires uniform-length epochs.
+        Regress and MAS/MAR/wAAS/wAAR can size each event's correction window from that event's own measured duration instead of one shared window — see Options — needed for artifacts whose events genuinely vary in length (auto-enabled for Continuous topography scanning). For BCG artifacts, Local-template Options also includes AMRI BCG epoch preprocessing for R-marker-style inputs; EVA's default assumes events are already centered. OBS and SSP/PCA can't: they pool every event into one shared basis, which requires uniform-length epochs.
         """
     }
 

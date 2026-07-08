@@ -26,7 +26,7 @@ struct MotionParametersTests {
         0 0 0 0 0 0
         0.1 -0.2 0.3 0.4 -0.5 0.6
         """
-        let mp = try MotionParameters.parse(text: text, sourceName: "x.1D")
+        let mp = try MotionParameters.parse(text: text, sourceName: "x.1D", format: .afni3dvolreg)
         #expect(mp.count == 2)
         let s = mp.samples[1]
         #expect(abs(s.roll - 0.1) < 1e-9)
@@ -43,7 +43,7 @@ struct MotionParametersTests {
         0   0 0 0 0 0 0   0 0
         1   0.1 0.2 0.3 0.4 0.5 0.6   88.46 87.39
         """
-        let mp = try MotionParameters.parse(text: text, sourceName: "d.1D")
+        let mp = try MotionParameters.parse(text: text, sourceName: "d.1D", format: .afni3dvolreg)
         #expect(mp.count == 2)
         let s = mp.samples[1]
         // Columns 1..6 are the motion params; index and the two RMS columns drop.
@@ -58,8 +58,36 @@ struct MotionParametersTests {
 
         0.1 0 0 0 0 0
         """
-        let mp = try MotionParameters.parse(text: text, sourceName: "x.1D")
+        let mp = try MotionParameters.parse(text: text, sourceName: "x.1D", format: .afni3dvolreg)
         #expect(mp.count == 2)
+    }
+
+    @Test func parsesBergenSPMTranslationFirstFile() throws {
+        let text = """
+        0 0 0 0 0 0
+        1.0 -2.0 3.0 0.010 -0.020 0.030
+        """
+        let mp = try MotionParameters.parse(text: text, sourceName: "rp_example.txt", format: .spmBergen)
+        #expect(mp.count == 2)
+        #expect(mp.format == .spmBergen)
+        let s = mp.samples[1]
+        #expect(abs(s.dS - 1.0) < 1e-9)
+        #expect(abs(s.dL + 2.0) < 1e-9)
+        #expect(abs(s.dP - 3.0) < 1e-9)
+        #expect(abs(s.roll - (0.010 * 180.0 / Double.pi)) < 1e-9)
+        #expect(abs(s.pitch - (-0.020 * 180.0 / Double.pi)) < 1e-9)
+        #expect(abs(s.yaw - (0.030 * 180.0 / Double.pi)) < 1e-9)
+    }
+
+    @Test func autoDetectsBergenSPMScale() throws {
+        let text = """
+        0 0 0 0 0 0
+        0.12 0.10 -0.08 0.0001 -0.0001 0.0002
+        0.25 0.21 -0.16 0.0002 -0.0001 0.0003
+        """
+        let mp = try MotionParameters.parse(text: text, sourceName: "motion.txt")
+        #expect(mp.format == .spmBergen)
+        #expect(abs(mp.samples[1].dS - 0.12) < 1e-9)
     }
 
     @Test func throwsOnUnexpectedColumnCount() {
@@ -78,7 +106,7 @@ struct MotionParametersTests {
     // MARK: - Framewise displacement
 
     @Test func framewiseDisplacementFirstSampleIsZero() throws {
-        let mp = try MotionParameters.parse(text: "0 0 0 0 0 0\n1 0 0 0 0 0", sourceName: "x")
+        let mp = try MotionParameters.parse(text: "0 0 0 0 0 0\n1 0 0 0 0 0", sourceName: "x", format: .afni3dvolreg)
         let fd = mp.framewiseDisplacement()
         #expect(fd.count == 2)
         #expect(fd[0] == 0)
@@ -91,7 +119,7 @@ struct MotionParametersTests {
         1 0 0 0 0 0
         1 0 0 2 0 0
         """
-        let mp = try MotionParameters.parse(text: text, sourceName: "x")
+        let mp = try MotionParameters.parse(text: text, sourceName: "x", format: .afni3dvolreg)
         let fd = mp.framewiseDisplacement(radiusMm: 50)
         let k = Double.pi / 180 * 50            // deg -> mm on 50 mm sphere
         #expect(abs(fd[1] - k) < 1e-9)          // 1 deg of roll
@@ -104,7 +132,7 @@ struct MotionParametersTests {
         1 0 0 0 0 0
         1 0 0 2 0 0
         """
-        let mp = try MotionParameters.parse(text: text, sourceName: "x")
+        let mp = try MotionParameters.parse(text: text, sourceName: "x", format: .afni3dvolreg)
         // FD ~ [0, 0.87, 2.0]
         #expect(mp.volumesExceeding(threshold: 1.0) == [2])
         #expect(mp.volumesExceeding(threshold: 0.5) == [1, 2])

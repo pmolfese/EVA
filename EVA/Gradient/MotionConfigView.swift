@@ -13,8 +13,8 @@
 //  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Configuration panel for the MR gradient-artifact tool. Lets the user load
-//  AFNI 3dvolreg motion parameters (-1Dfile / -dfile), inspect them as a motion
-//  plot, and set a framewise-displacement threshold for downstream algorithms.
+//  AFNI 3dvolreg or BERGEN/SPM motion parameters, inspect them as a motion plot,
+//  and set a movement threshold for downstream algorithms.
 //
 
 import Charts
@@ -23,8 +23,10 @@ import UniformTypeIdentifiers
 
 struct MotionConfigView: View {
     @Binding var parameters: MotionParameters?
+    @Binding var fileFormat: MotionFileFormat
     @Binding var fdThreshold: Double
     @Binding var radiusMm: Double
+    @Binding var moosmannMotionMetric: FastrCorrector.MotionMetric
     @Binding var skipStart: Int
     @Binding var skipEnd: Int
     @Binding var trSeconds: Double
@@ -82,7 +84,7 @@ struct MotionConfigView: View {
                 ContentUnavailableView(
                     "No Motion File Loaded",
                     systemImage: "arrow.down.doc",
-                    description: Text("Drag a 3dvolreg motion file (.1D, -1Dfile or -dfile) here, or use Load Motion File…")
+                    description: Text("Drag an AFNI 3dvolreg or BERGEN/SPM motion file here, or use Load Motion File…")
                 )
                 .frame(height: 180)
                 .frame(maxWidth: .infinity)
@@ -138,7 +140,7 @@ struct MotionConfigView: View {
                 }
                 GridRow {
                     Text("Motion source").foregroundStyle(.secondary)
-                    Text(parameters?.sourceName ?? "none")
+                    Text(parameters.map { "\($0.sourceName) (\($0.format.label))" } ?? "none")
                 }
             }
             .font(.caption)
@@ -195,26 +197,45 @@ struct MotionConfigView: View {
     // MARK: - File loading
 
     private var motionFileSection: some View {
-        HStack(spacing: 12) {
-            Button {
-                loadMotionFile()
-            } label: {
-                Label("Load Motion File…", systemImage: "doc.badge.plus")
-            }
-
-            if parameters != nil {
-                Button(role: .destructive) {
-                    parameters = nil
-                    loadError = nil
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Button {
+                    loadMotionFile()
                 } label: {
-                    Label("Clear", systemImage: "trash")
+                    Label("Load Motion File…", systemImage: "doc.badge.plus")
                 }
+
+                if parameters != nil {
+                    Button(role: .destructive) {
+                        parameters = nil
+                        loadError = nil
+                    } label: {
+                        Label("Clear", systemImage: "trash")
+                    }
+                }
+
+                Spacer()
+                Text("Accepts AFNI -1Dfile/-dfile or BERGEN/SPM rp_*.txt. Drag a file in or browse.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
-            Spacer()
-            Text("Accepts 3dvolreg -1Dfile (6 col) or -dfile (9 col). Drag a file in or browse.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Text("Interpret file as")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Motion file format", selection: $fileFormat) {
+                    ForEach(MotionFileFormat.allCases) { format in
+                        Text(format.label).tag(format)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 330)
+                .disabled(parameters != nil)
+                Text(parameters == nil ? fileFormat.detail : "Clear and reload to change interpretation")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -237,7 +258,11 @@ struct MotionConfigView: View {
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
-            parameters = try MotionParameters.parse(text: text, sourceName: url.lastPathComponent)
+            parameters = try MotionParameters.parse(
+                text: text,
+                sourceName: url.lastPathComponent,
+                format: fileFormat
+            )
             loadError = nil
         } catch {
             loadError = "Could not read \(url.lastPathComponent): \(error.localizedDescription)"
@@ -379,8 +404,25 @@ struct MotionConfigView: View {
                     .foregroundStyle(.secondary)
             }
 
+            HStack(spacing: 12) {
+                Text("Moosmann RP-info")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Moosmann motion metric", selection: $moosmannMotionMetric) {
+                    ForEach(FastrCorrector.MotionMetric.allCases) { metric in
+                        Text(metric.label).tag(metric)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 180)
+                Text(moosmannMotionMetric.help)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Label {
-                Text("At \(fdThreshold, specifier: "%.2f") mm, **\(exceeding.count)** of \(parameters.count) TRs (\(percentExceeding(exceeding.count, of: parameters.count))) would be excluded as template donors when “Exclude high-motion TRs” is enabled.")
+                Text("At \(fdThreshold, specifier: "%.2f") mm, **\(exceeding.count)** of \(parameters.count) TRs (\(percentExceeding(exceeding.count, of: parameters.count))) would be excluded as template donors when “Exclude high-motion TRs” is enabled. Moosmann uses the same threshold with the RP-info metric above.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

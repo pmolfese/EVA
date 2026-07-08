@@ -25,6 +25,29 @@
 import Combine
 import SwiftUI
 
+enum FastrDonorSelection: String, CaseIterable, Identifiable, Sendable {
+    case methodDefault
+    case bergenRSquare
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .methodDefault: return "Default"
+        case .bergenRSquare: return "BERGEN r²"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .methodDefault:
+            return "Use the selected method's donor rule: temporal FASTR, FARM correlation, or Moosmann RP-info."
+        case .bergenRSquare:
+            return "Rank FASTR-family donors by BERGEN-style squared correlation."
+        }
+    }
+}
+
 @MainActor
 final class GradientViewModel: ObservableObject {
     /// Held directly so this VM can read channel state itself — see
@@ -48,6 +71,10 @@ final class GradientViewModel: ObservableObject {
     // MARK: UI state
     @Published var showsPopover = false
     @Published var showsMethodHelp = false
+    @Published var showsFastrDonorHelp = false
+    @Published var showsFastrOptionsHelp = false
+    @Published var showsOBSRandomHelp = false
+    @Published var showsANCHighPassHelp = false
     @Published var showsMotionConfig = false
 
     // MARK: Parameters (portable → eva.xml)
@@ -62,12 +89,23 @@ final class GradientViewModel: ObservableObject {
     @Published var fastrOBSAuto = true
     @Published var fastrANC = false
     @Published var fastrSubSample = true
+    @Published var fastrUseFacetWindow = false
+    @Published var fastrOBSRandomSampling = false
+    @Published var fastrANCSliceHighPass = false
+    @Published var fastrDonorSelection = FastrDonorSelection.methodDefault
+
+    var fastrUsesBergenRSquareDonors: Bool {
+        get { fastrDonorSelection == .bergenRSquare }
+        set { fastrDonorSelection = newValue ? .bergenRSquare : .methodDefault }
+    }
 
     // Motion censoring
     @Published var excludeHighMotion = false
     @Published var motionParameters: MotionParameters?
+    @Published var motionFileFormat = MotionFileFormat.auto
     @Published var motionFDThreshold = 0.5
     @Published var motionRadiusMm = 50.0
+    @Published var moosmannMotionMetric = FastrCorrector.MotionMetric.translationOnly
 
     // TR-marker alignment
     @Published var skipStart = 0
@@ -91,6 +129,10 @@ final class GradientViewModel: ObservableObject {
         statusIsError = false
         showsPopover = false
         showsMethodHelp = false
+        showsFastrDonorHelp = false
+        showsFastrOptionsHelp = false
+        showsOBSRandomHelp = false
+        showsANCHighPassHelp = false
         showsMotionConfig = false
     }
 
@@ -116,6 +158,13 @@ final class GradientViewModel: ObservableObject {
             params["slices"] = "\(fastrSlices)"
             params["obs"] = "\(fastrOBSAuto)"
             params["anc"] = "\(fastrANC)"
+            params["subSample"] = "\(fastrSubSample)"
+            params["facetWindow"] = "\(fastrUseFacetWindow)"
+            params["obsRandomSampling"] = "\(fastrOBSRandomSampling)"
+            params["ancSliceHighPass"] = "\(fastrANCSliceHighPass)"
+            params["fastrDonorSelection"] = fastrDonorSelection.rawValue
+            params["bergenRSquareDonors"] = "\(fastrUsesBergenRSquareDonors)"
+            params["moosmannMotionMetric"] = moosmannMotionMetric.rawValue
         }
         if excludeHighMotion {
             params["motionFDThreshold"] = String(format: "%.2f", motionFDThreshold)
@@ -135,6 +184,18 @@ final class GradientViewModel: ObservableObject {
         if let v = p["slices"].flatMap(Int.init) { fastrSlices = v }
         if let v = p["obs"] { fastrOBSAuto = (v == "true") }
         if let v = p["anc"] { fastrANC = (v == "true") }
+        if let v = p["subSample"] { fastrSubSample = (v == "true") }
+        if let v = p["facetWindow"] { fastrUseFacetWindow = (v == "true") }
+        if let v = p["obsRandomSampling"] { fastrOBSRandomSampling = (v == "true") }
+        if let v = p["ancSliceHighPass"] { fastrANCSliceHighPass = (v == "true") }
+        if let v = p["fastrDonorSelection"].flatMap(FastrDonorSelection.init(rawValue:)) {
+            fastrDonorSelection = v
+        } else if let v = p["bergenRSquareDonors"] {
+            fastrUsesBergenRSquareDonors = (v == "true")
+        }
+        if let v = p["moosmannMotionMetric"].flatMap(FastrCorrector.MotionMetric.init(rawValue:)) {
+            moosmannMotionMetric = v
+        }
         if let v = p["motionFDThreshold"].flatMap(Double.init) {
             motionFDThreshold = v
             excludeHighMotion = true
@@ -208,19 +269,21 @@ final class GradientViewModel: ObservableObject {
 
         let reducer: GradientRemover.TemplateReducer = method == .aas ? .weightedMean : .median
         let fit: GradientRemover.TemplateFit = method == .mar ? .regress : .subtract
+        let donorSelection: GradientRemover.DonorSelection = method == .aas ? .sideWindow : .amriMovingWindow
 
         do {
             let hasPNS = pnsInput != nil
             let sourceData = signal.data
+            let samplingRate = signal.samplingRate
             let worker = Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
-                let correctedData = try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit) { fraction in
+                let correctedData = try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit, donorSelection: donorSelection, samplingRate: samplingRate) { fraction in
                     progressContinuation.yield(hasPNS ? 0.70 * fraction : fraction)
                 }
                 try Task.checkCancellation()
                 let correctedPNSData: [[Float]]?
                 if let pnsInput {
-                    correctedPNSData = try GradientRemover.correct(channels: pnsInput.data, trSamples: pnsTRSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit) { fraction in
+                    correctedPNSData = try GradientRemover.correct(channels: pnsInput.data, trSamples: pnsTRSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit, donorSelection: donorSelection, samplingRate: pnsInput.samplingRate) { fraction in
                         progressContinuation.yield(0.70 + 0.30 * fraction)
                     }
                 } else {
@@ -269,13 +332,21 @@ final class GradientViewModel: ObservableObject {
         let trSamples = trimmedTRMarkers(in: signal)
         var config = FastrCorrector.Config()
         config.numberOfSlices = max(1, fastrSlices)
+        config.averagingWindowBefore = max(0, windowBefore)
+        config.averagingWindowAfter = max(0, windowAfter)
+        config.averagingWindow = fastrUseFacetWindow ? 30 : max(1, windowBefore + windowAfter)
+        config.useFacetAveragingWindow = fastrUseFacetWindow
         config.subSampleAlignment = fastrSubSample
         config.obs = fastrOBSAuto ? .auto : .off
+        config.randomizeOBSEpochSelection = fastrOBSRandomSampling
         config.anc = fastrANC
+        config.ancHighPassMode = fastrANCSliceHighPass ? .sliceTriggerDependent : .fixed2Hz
+        config.usesBergenRSquareDonors = fastrUsesBergenRSquareDonors
         if method == .moosmann {
             config.templateScheme = .moosmann
             config.motion = motionParameters?.samples
             config.motionThresholdMm = motionFDThreshold
+            config.moosmannMotionMetric = moosmannMotionMetric
             config.motionRadiusMm = motionRadiusMm
         } else if method == .farm {
             config.templateScheme = .farm
@@ -351,7 +422,10 @@ final class GradientViewModel: ObservableObject {
             } else {
                 correctedPNSSignal = nil
             }
-            statusMessage = "Applied \(methodName) correction (\(trMarkerCode) markers, \(slices) slice\(slices == 1 ? "" : "s")/volume\(fastrOBSAuto ? ", OBS" : "")\(fastrANC ? ", ANC" : "")\(censoredCount > 0 ? ", \(censoredCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
+            let windowDescription = fastrUseFacetWindow ? "FACET AvgWindow 30" : "\(windowBefore) pre / \(windowAfter) post"
+            let obsDescription = fastrOBSAuto ? ", OBS\(fastrOBSRandomSampling ? " random" : "")" : ""
+            let ancDescription = fastrANC ? ", ANC\(fastrANCSliceHighPass ? " slice-rate HPF" : "")" : ""
+            statusMessage = "Applied \(methodName) correction (\(trMarkerCode) markers, \(slices) slice\(slices == 1 ? "" : "s")/volume, template window \(windowDescription)\(fastrUsesBergenRSquareDonors ? ", BERGEN r² donors" : "")\(obsDescription)\(ancDescription)\(censoredCount > 0 ? ", \(censoredCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
             statusIsError = false
             onApplied()
         } catch is CancellationError {

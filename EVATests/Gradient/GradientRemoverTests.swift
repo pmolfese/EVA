@@ -143,6 +143,39 @@ struct GradientRemoverTests {
         #expect(plain == empty)
     }
 
+    @Test func amriMovingWindowCorrectsEdgeTRsForMAS() throws {
+        let spacing = 100
+        let nTR = 18
+        let sampleCount = spacing * nTR
+        func gradient(_ k: Int) -> Float { 80 * Float(sin(Double(k) * 0.25)) + 25 * Float(k % 11) }
+        var channel = [Float](repeating: 0, count: sampleCount)
+        for t in 0..<sampleCount {
+            channel[t] = gradient(t % spacing)
+        }
+        let triggers = Array(stride(from: 0, to: sampleCount, by: spacing))
+
+        let sideWindow = try GradientRemover.correct(
+            channels: [channel],
+            trSamples: triggers,
+            window: .default,
+            reducer: .median,
+            donorSelection: .sideWindow
+        )
+        let amriWindow = try GradientRemover.correct(
+            channels: [channel],
+            trSamples: triggers,
+            window: .default,
+            reducer: .median,
+            donorSelection: .amriMovingWindow,
+            samplingRate: 1000
+        )
+
+        func energy(_ values: [Float], tr: Int) -> Double {
+            (0..<spacing).reduce(0.0) { $0 + Double(values[tr * spacing + $1] * values[tr * spacing + $1]) }
+        }
+        #expect(energy(amriWindow[0], tr: 0) < energy(sideWindow[0], tr: 0) * 0.2)
+    }
+
     @Test func throwsWithTooFewTriggers() {
         #expect(throws: GradientRemoverError.self) {
             _ = try GradientRemover.correct(channels: [[0, 1, 2, 3]], trSamples: [0])

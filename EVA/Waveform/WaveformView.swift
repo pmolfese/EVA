@@ -889,8 +889,10 @@ struct WaveformView: View {
         .sheet(isPresented: $gradient.showsMotionConfig) {
             MotionConfigView(
                 parameters: $gradient.motionParameters,
+                fileFormat: $gradient.motionFileFormat,
                 fdThreshold: $gradient.motionFDThreshold,
                 radiusMm: $gradient.motionRadiusMm,
+                moosmannMotionMetric: $gradient.moosmannMotionMetric,
                 skipStart: $gradient.skipStart,
                 skipEnd: $gradient.skipEnd,
                 trSeconds: $gradient.trSeconds,

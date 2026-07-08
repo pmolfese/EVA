@@ -157,7 +157,7 @@ extension WaveformView {
             let motionLoaded = (gradient.motionParameters?.count ?? 0) >= 2
 
             if gradient.method == .moosmann, motionLoaded {
-                Text("Using motion: \(gradient.motionParameters?.sourceName ?? "") (\(gradient.motionParameters?.count ?? 0) vols), threshold \(String(format: "%.2f", gradient.motionFDThreshold)) mm")
+                Text("Using motion: \(gradient.motionParameters?.sourceName ?? "") (\(gradient.motionParameters?.count ?? 0) vols), \(gradient.moosmannMotionMetric.label.lowercased()) metric, threshold \(String(format: "%.2f", gradient.motionFDThreshold)) mm")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -180,8 +180,20 @@ extension WaveformView {
 
             if gradient.method.isFASTR {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("FASTR Options")
-                        .font(.caption.weight(.semibold))
+                    HStack(spacing: 6) {
+                        Text("FASTR Options")
+                            .font(.caption.weight(.semibold))
+                        Button {
+                            gradient.showsFastrOptionsHelp = true
+                        } label: {
+                            Image(systemName: "questionmark.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .help("About FASTR options")
+                        .popover(isPresented: $gradient.showsFastrOptionsHelp, arrowEdge: .trailing) {
+                            mriFastrOptionsHelp()
+                        }
+                    }
                     HStack {
                         Text("Slices / volume")
                             .font(.caption)
@@ -196,12 +208,73 @@ extension WaveformView {
                     Toggle("Sub-sample alignment", isOn: $gradient.fastrSubSample)
                         .font(.caption)
                         .help("FACET-style fractional-sample epoch alignment.")
+                    Toggle("FACET 30-artifact window", isOn: $gradient.fastrUseFacetWindow)
+                        .font(.caption)
+                        .help("Use FACET's AvgWindow=30 donor rows with border saturation instead of EVA's Pre/Post template window.")
                     Toggle("OBS residual removal (auto PCs)", isOn: $gradient.fastrOBSAuto)
                         .font(.caption)
                         .help("Remove residual artifact via an optimal basis set of residual PCs.")
+                    if gradient.fastrOBSAuto {
+                        HStack(spacing: 6) {
+                            Toggle("Random OBS epoch sampling", isOn: $gradient.fastrOBSRandomSampling)
+                                .font(.caption)
+                                .help("Use FACET's random 2/3 epoch subset when building the OBS PCA matrix. Leave off for reproducible EVA runs.")
+                            Button {
+                                gradient.showsOBSRandomHelp = true
+                            } label: {
+                                Image(systemName: "questionmark.circle")
+                            }
+                            .buttonStyle(.plain)
+                            .help("About random OBS epoch sampling")
+                            .popover(isPresented: $gradient.showsOBSRandomHelp, arrowEdge: .trailing) {
+                                mriOBSRandomHelp()
+                            }
+                        }
+                    }
                     Toggle("Adaptive noise cancellation (ANC)", isOn: $gradient.fastrANC)
                         .font(.caption)
                         .help("Apply LMS adaptive noise cancellation after template subtraction.")
+                    if gradient.fastrANC {
+                        HStack(spacing: 6) {
+                            Toggle("Slice-rate ANC high-pass", isOn: $gradient.fastrANCSliceHighPass)
+                                .font(.caption)
+                                .help("Use FACET's 0.75×slice-trigger-rate high-pass for slice-triggered FASTR. Off keeps EVA/FMRIB's fixed 2 Hz cutoff.")
+                            Button {
+                                gradient.showsANCHighPassHelp = true
+                            } label: {
+                                Image(systemName: "questionmark.circle")
+                            }
+                            .buttonStyle(.plain)
+                            .help("About ANC high-pass mode")
+                            .popover(isPresented: $gradient.showsANCHighPassHelp, arrowEdge: .trailing) {
+                                mriANCHighPassHelp()
+                            }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Text("Donor selection")
+                                .font(.caption.weight(.semibold))
+                            Button {
+                                gradient.showsFastrDonorHelp = true
+                            } label: {
+                                Image(systemName: "questionmark.circle")
+                            }
+                            .buttonStyle(.plain)
+                            .help("About FASTR-family donor selection")
+                            .popover(isPresented: $gradient.showsFastrDonorHelp, arrowEdge: .trailing) {
+                                mriFastrDonorHelp()
+                            }
+                        }
+                        Picker("Donor selection", selection: $gradient.fastrDonorSelection) {
+                            ForEach(FastrDonorSelection.allCases) { selection in
+                                Text(selection.label).tag(selection)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .help(gradient.fastrDonorSelection.help)
+                    }
                 }
             }
 
@@ -216,7 +289,7 @@ extension WaveformView {
                       : "Motion: \(gradient.motionParameters?.sourceName ?? "") (\(gradient.motionParameters?.count ?? 0) TRs)…",
                       systemImage: "slider.horizontal.3")
             }
-            .help("Load 3dvolreg motion parameters, plot head motion, and set a motion threshold.")
+            .help("Load AFNI or BERGEN/SPM motion parameters, plot head motion, and set a motion threshold.")
 
             if let motion = gradient.motionParameters {
                 mriMotionAlignmentStatus(motion: motion, selectedCount: selectedCount)
@@ -333,7 +406,7 @@ extension WaveformView {
                     .foregroundStyle(matches ? Color.secondary : Color.orange)
 
                 Text(matches
-                     ? "\(motion.sourceName), FD threshold \(String(format: "%.2f", gradient.motionFDThreshold)) mm."
+                     ? "\(motion.sourceName), \(motion.format.label), FD threshold \(String(format: "%.2f", gradient.motionFDThreshold)) mm."
                      : "Adjust Skip First/Last, choose the matching TR marker event, or clear the motion file before applying.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -454,7 +527,7 @@ extension WaveformView {
             VStack(alignment: .leading, spacing: 4) {
                 Text("MAS — Median Artifact Subtraction")
                     .font(.subheadline.weight(.semibold))
-                Text("Same per-TR template as AAS, but the template is the elementwise median of neighboring volumes instead of a weighted mean — robust to an occasional corrupted donor volume without needing separate outlier detection. Inspired by the AMRI (Advanced MRI, NINDS/NIH) MATLAB toolbox's `amri_eeg_gac.m`.")
+                Text("Same per-TR template family as AAS, but the template is the elementwise median of an AMRI-style centered moving window, excluding ignored, outlier, and too-near donor volumes. Inspired by the AMRI (Advanced MRI, NINDS/NIH) MATLAB toolbox's `amri_eeg_gac.m`.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -463,7 +536,7 @@ extension WaveformView {
             VStack(alignment: .leading, spacing: 4) {
                 Text("MAR — Median Artifact Regression")
                     .font(.subheadline.weight(.semibold))
-                Text("The MAS template, scaled by a least-squares fit before subtracting, so its amplitude can track slow gradient-artifact drift a fixed 1:1 subtraction can't. Inspired by `amri_eeg_gac.m`.")
+                Text("The AMRI-style MAS template, scaled by a least-squares fit before subtracting, so its amplitude can track slow gradient-artifact drift a fixed 1:1 subtraction can't. Inspired by `amri_eeg_gac.m`.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -481,7 +554,7 @@ extension WaveformView {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Moosmann — RP-informed averaging")
                     .font(.subheadline.weight(.semibold))
-                Text("A FASTR variant (Bergen toolbox) that builds each volume's template from a motion-warped temporal window of low-motion volumes — excluding high-motion volumes and avoiding averaging across head-movement events (translation only). Falls back to a plain moving average when no motion exceeds the threshold. Requires loaded motion parameters (Moosmann et al. 2009).")
+                Text("A FASTR variant (Bergen toolbox) that builds each volume's template from a motion-warped temporal window of low-motion volumes — excluding high-motion volumes and avoiding averaging across head-movement events. The default RP-info metric is BERGEN's translation-only motion; Motion Configuration can include all six parameters. Falls back to a plain moving average when no motion exceeds the threshold.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -490,7 +563,7 @@ extension WaveformView {
             VStack(alignment: .leading, spacing: 4) {
                 Text("FARM — most-correlated-epoch averaging")
                     .font(.subheadline.weight(.semibold))
-                Text("A FASTR variant whose template, for each artifact, averages the most similar artifacts (highest waveform correlation, ≥ 0.9) rather than temporal neighbors. Robust to motion without needing external motion parameters; selection is derived from the EEG itself (van der Meer et al. 2010, as in FACET).")
+                Text("A FASTR variant whose template, for each artifact, averages the most similar artifacts (highest waveform correlation, ≥ 0.9) rather than temporal neighbors. The BERGEN r² option switches FASTR-family donor ranking to squared correlation with self eligible, matching BERGEN's best-rsquare helper more closely.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -518,6 +591,115 @@ extension WaveformView {
         }
         .padding(16)
         .frame(width: 360)
+    }
+
+    @ViewBuilder
+    func mriFastrOptionsHelp() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("FASTR Options")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("AutoPreTrig")
+                    .font(.subheadline.weight(.semibold))
+                Text("FACET can re-estimate the artifact window's pre-trigger length by comparing the first two aligned artifacts near the first trigger and choosing the onset that minimizes their mismatch. It helps when scanner triggers are slightly inside the artifact rather than at a fixed relative position. EVA currently uses the relative trigger position plus alignment, not this onset-search step.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("OBS Sampling")
+                    .font(.subheadline.weight(.semibold))
+                Text("OBS builds PCA components from a subset of residual artifact epochs. EVA's default subset is deterministic for reproducible replay. Random sampling follows FACET's rand-driven 2/3-step selection, which can slightly change the fitted residual basis between runs.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("ANC High-Pass")
+                    .font(.subheadline.weight(.semibold))
+                Text("ANC high-passes the signal before LMS adaptive filtering. The fixed 2 Hz cutoff matches EVA's current behavior and FACET's volume-trigger path. Slice-rate mode uses FACET's slice-trigger rule: 0.75 times the estimated trigger count per second, only when volumes are subdivided into slices.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("FACET Window")
+                    .font(.subheadline.weight(.semibold))
+                Text("The FACET 30-artifact window uses FACET's AvgWindow/HalfWindow donor rows, including edge saturation and odd/even slice rows. Leave it off to use EVA's explicit Pre/Post template window.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(width: 380)
+    }
+
+    @ViewBuilder
+    func mriOBSRandomHelp() -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Random OBS Sampling")
+                .font(.headline)
+            Text("FACET chooses OBS PCA epochs using random 2/3-step jumps through the artifact list. EVA leaves this off by default so repeated runs are exactly reproducible; turning it on is closer to FACET and may slightly change the residual basis each run.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 320)
+    }
+
+    @ViewBuilder
+    func mriANCHighPassHelp() -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("ANC High-Pass")
+                .font(.headline)
+            Text("Off keeps the current EVA/FMRIB behavior: a fixed 2 Hz high-pass before LMS ANC. On uses FACET's slice-trigger path: estimate the trigger count in the first second and use 0.75 times that rate. It only differs when FASTR is running with slice subdivision.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 320)
+    }
+
+    @ViewBuilder
+    func mriFastrDonorHelp() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("FASTR Donor Selection")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Default")
+                    .font(.subheadline.weight(.semibold))
+                Text("Uses the selected method's donor rule: FASTR averages temporal pre/post neighbors, FARM chooses high-correlation epochs, and Moosmann uses BERGEN-style RP-informed low-motion donors.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("BERGEN r²")
+                    .font(.subheadline.weight(.semibold))
+                Text("Uses BERGEN's best-rsquare donor ranking inside EVA's FASTR-family pipeline: candidates are scored by squared waveform correlation, with the target artifact eligible as a donor. FASTR/FARM rank same-slice candidates; Moosmann ranks within its RP-informed candidate pool.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            Text("This is the light BERGEN port. EVA does not yet support the full BERGEN generic matrix assignment workflow, where an arbitrary row-normalized weighting matrix directly controls every artifact's template donors.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 340)
     }
 
     func clearGradientCorrection() {

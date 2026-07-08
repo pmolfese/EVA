@@ -164,6 +164,119 @@ struct FastrCorrectorTests {
         #expect(a == b)
     }
 
+    @Test func facetWindowModeRunsEndToEnd() throws {
+        let spacing = 120
+        let volumes = 40
+        let (channel, triggers) = makeSyntheticChannel(spacing: spacing, volumes: volumes)
+
+        var config = FastrCorrector.Config()
+        config.upsampleFactor = 2
+        config.useFacetAveragingWindow = true
+        config.subSampleAlignment = false
+        config.obs = .off
+
+        let result = try FastrCorrector.correct(
+            channels: [channel],
+            volumeTriggers: triggers,
+            config: config,
+            samplingRate: 250
+        )
+        #expect(result[0].count == channel.count)
+        #expect(result[0].allSatisfy { $0.isFinite })
+
+        func variance(_ x: ArraySlice<Float>) -> Double {
+            let arr = Array(x).map(Double.init)
+            let m = arr.reduce(0, +) / Double(arr.count)
+            return arr.reduce(0) { $0 + ($1 - m) * ($1 - m) } / Double(arr.count)
+        }
+        let lo = spacing * 4
+        let hi = channel.count - spacing * 4
+        #expect(variance(result[0][lo..<hi]) < variance(channel[lo..<hi]) * 0.5)
+    }
+
+    @Test func facetVolumeDonorRowsSaturateAtEdges() {
+        let rows = FastrCorrector.facetTemporalDonorRows(
+            numTrig: 20,
+            halfWindow: 3,
+            sliceTrigger: false
+        )
+        #expect(rows.count == 20)
+        #expect(rows[0] == [1, 2, 3, 4, 5, 6, 7])
+        #expect(rows[1] == rows[0])
+        #expect(rows[7] == [3, 4, 5, 6, 7, 8, 9])
+        #expect(rows[19] == rows[17])
+        #expect(!rows[0].contains(0))
+        #expect(rows[7].contains(7))
+    }
+
+    @Test func facetSliceDonorRowsUseAlternatingParity() {
+        let rows = FastrCorrector.facetTemporalDonorRows(
+            numTrig: 24,
+            halfWindow: 3,
+            sliceTrigger: true
+        )
+        #expect(rows[0] == [1, 3, 5, 7])
+        #expect(rows[1] == [2, 4, 6, 8])
+        #expect(rows[2] == rows[1])
+        #expect(rows[9] == [6, 8, 10, 12])
+        #expect(!rows[9].contains(9))
+    }
+
+    @Test func obsVolumeEpochIndicesAreContiguousLikeFacet() {
+        #expect(FastrCorrector.obsPCAEpochIndices(numTrig: 8, sliceTrigger: false) == [2, 3, 4, 5, 6])
+        #expect(FastrCorrector.obsPCAEpochIndices(numTrig: 10, sliceTrigger: true) == [1, 3, 6, 8])
+    }
+
+    @Test func obsRandomEpochIndicesFollowFacetPickSequence() {
+        var sliceSteps = [3, 2, 3, 2, 3]
+        let slice = FastrCorrector.obsPCAEpochIndices(
+            numTrig: 12,
+            sliceTrigger: true,
+            randomized: true,
+            randomStep: { sliceSteps.removeFirst() }
+        )
+        #expect(slice == [3, 5, 8, 10])
+
+        var volumeSteps = [3, 2, 2, 3, 2]
+        let volume = FastrCorrector.obsPCAEpochIndices(
+            numTrig: 12,
+            sliceTrigger: false,
+            randomized: true,
+            randomStep: { volumeSteps.removeFirst() }
+        )
+        #expect(volume == Array(3..<11))
+    }
+
+    @Test func ancHighPassCanFollowSliceTriggerRate() {
+        let sliceTriggers = (0..<40).map { $0 * 10 } // 10 triggers in first second at fs=100 Hz.
+        let fixed = FastrCorrector.ancHighPassFrequency(
+            triggers: sliceTriggers,
+            L: 1,
+            samplingRate: 100,
+            sliceTrigger: true,
+            mode: .fixed2Hz
+        )
+        #expect(fixed == 2.0)
+
+        let sliceDependent = FastrCorrector.ancHighPassFrequency(
+            triggers: sliceTriggers,
+            L: 1,
+            samplingRate: 100,
+            sliceTrigger: true,
+            mode: .sliceTriggerDependent
+        )
+        #expect(abs(sliceDependent - 7.5) < 1e-9)
+
+        let volumeFallback = FastrCorrector.ancHighPassFrequency(
+            triggers: sliceTriggers,
+            L: 1,
+            samplingRate: 100,
+            sliceTrigger: false,
+            mode: .sliceTriggerDependent
+        )
+        #expect(volumeFallback == 2.0)
+    }
+
     @Test func singleChannelMatchesMultiChannel() throws {
         // A channel's result must not depend on what other channels accompany it
         // (the shared aligner is computed from channel 0 only).
@@ -352,7 +465,39 @@ struct FastrCorrectorTests {
         #expect(n.allSatisfy { !$0.contains(4) })
     }
 
+    @Test func moosmannCanUseAllSixMotionParameters() {
+        let motion = [
+            sample(0, (0, 0, 0, 0, 0, 0)),
+            sample(1, (3, 0, 0, 0, 0, 0)),
+            sample(2, (3, 0, 0, 0, 0, 0)),
+            sample(3, (3, 0, 0, 0, 0, 0)),
+        ]
+        let translationOnly = FastrCorrector.moosmannVolumeNeighbors(
+            motion: motion, volumeCount: 4, window: 2, thresholdMm: 1.0,
+            metric: .translationOnly, radiusMm: 50
+        )
+        #expect(translationOnly == nil)
+
+        let allParameters = FastrCorrector.moosmannVolumeNeighbors(
+            motion: motion, volumeCount: 4, window: 2, thresholdMm: 1.0,
+            metric: .allParameters, radiusMm: 50
+        )
+        #expect(allParameters != nil)
+    }
+
     // MARK: - FARM epoch selection
+
+    @Test func bergenRSquareNeighborsIncludeSelfAndUseSquaredCorrelation() {
+        let wave = [0.0, 1.0, 0.0, -1.0]
+        let inverted = wave.map { -$0 }
+        let unrelated = [1.0, 0.0, 1.0, 0.0]
+        let neighbors = FastrCorrector.bergenRSquareEpochNeighbors(
+            epochs: [wave, inverted, unrelated],
+            select: 2
+        )
+        #expect(neighbors[0] == [0, 1])
+        #expect(neighbors[1] == [0, 1])
+    }
 
     @Test func farmSelectsMostCorrelatedEpochs() {
         // Epochs 0,2,4 share waveform A; epochs 1,3,5 share waveform B.

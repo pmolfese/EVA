@@ -318,7 +318,7 @@ extension WaveformView {
     /// Builds a declarative processing record (eva.xml) from the active
     /// pipeline state, so exported packages document how EVA transformed them.
     /// Captures the current processing as a replayable script. Steps are emitted
-    /// in canonical chain order (matching `body`: gradient → ica → filter →
+    /// in canonical chain order (matching `body`: gradient → BCG → ica → filter →
     /// artifact → wavelet → segment) so that replaying them in order reproduces
     /// the portable processing state. Subject-specific outcomes such as the
     /// exact interpolated/bad channel lists go to `currentProcessingAuditLogLines()`.
@@ -328,6 +328,14 @@ extension WaveformView {
 
         if gradient.correctedSignal != nil {
             script.append(EVAProcessingStep(operation: .mriGradientCorrection, parameters: gradient.parameters))
+        }
+        if bcg.correctedSignal != nil {
+            script.append(EVAProcessingStep(
+                operation: .bcgDetection,
+                parameters: bcg.parameters,
+                replayable: false,
+                note: "BCG/CWL correction is subject-specific; parameters are recorded for provenance."
+            ))
         }
         if ica.cleanedSignal != nil {
             script.append(EVAProcessingStep(
@@ -340,12 +348,12 @@ extension WaveformView {
         if filter.output != nil {
             script.append(EVAProcessingStep(operation: .filter, parameters: filter.parameters))
         }
-        if artifactVM.isCleaningActive {
+        if artifactVM.isCleaningActive, artifactVM.cleaningIsEnabled {
             // Artifact cleaning is defined per-subject (drawn templates / events),
             // so it is provenance-only, not replayable.
             script.append(EVAProcessingStep(
                 operation: .artifactClean,
-                parameters: ["artifacts": "\(template.definedArtifacts.count)"],
+                parameters: artifactCleaningParameters(),
                 replayable: false,
                 note: "Artifact definitions (templates/events) are subject-specific."
             ))
@@ -371,6 +379,17 @@ extension WaveformView {
             script.append(EVAProcessingStep(operation: .segment, parameters: epoching.parameters))
         }
         return script
+    }
+
+    func artifactCleaningParameters() -> [String: String] {
+        var params: [String: String] = [
+            "artifactCount": "\(template.definedArtifacts.count)",
+            "cleaningEnabled": "\(artifactVM.cleaningIsEnabled)"
+        ]
+        for (offset, artifact) in template.definedArtifacts.enumerated() {
+            params.merge(artifact.processingParameters(prefix: "artifact\(offset + 1)")) { current, _ in current }
+        }
+        return params
     }
 
     /// Subject-specific export audit details for `log_eva_*.txt`. These are not
