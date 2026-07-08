@@ -31,6 +31,7 @@ final class CWLCorrectorTests: XCTestCase {
             lagRangeMs: lagRange,
             lagStepMs: lagStep,
             windowSeconds: windowSeconds,
+            algorithm: .evaFast,
             progress: { progressRecorder.append($0.fraction) }
         )
         let legacy = try legacyCorrect(
@@ -77,6 +78,7 @@ final class CWLCorrectorTests: XCTestCase {
             lagRangeMs: -20...40,
             lagStepMs: 20,
             windowSeconds: 0.4,
+            algorithm: .evaFast,
             downsampleFactor: 2,
             progress: { progressRecorder.append($0.fraction) }
         )
@@ -100,6 +102,7 @@ final class CWLCorrectorTests: XCTestCase {
             lagRangeMs: -20...40,
             lagStepMs: 20,
             windowSeconds: 0.4,
+            algorithm: .evaFast,
             downsampleFactor: 2,
             upsampleToOriginalRate: true,
             progress: { progressRecorder.append($0.fraction) }
@@ -108,6 +111,28 @@ final class CWLCorrectorTests: XCTestCase {
         XCTAssertEqual(corrected.count, eeg.count)
         XCTAssertEqual(corrected.map(\.count), eeg.map(\.count))
         XCTAssertEqual(progressRecorder.values.last ?? -1, 1, accuracy: 1e-12)
+    }
+
+    func testCWRegrToolCompatibleRegressionRunsByDefault() throws {
+        let samplingRate = 250.0
+        let sampleCount = 2200
+        let references = makeReferences(sampleCount: sampleCount, samplingRate: samplingRate)
+        let eeg = makeEEG(references: references, samplingRate: samplingRate)
+        let progressRecorder = ProgressRecorder()
+
+        let corrected = try CWLCorrector.correct(
+            eeg: eeg,
+            references: references,
+            samplingRate: samplingRate,
+            cwlToolDelayMs: 20,
+            windowSeconds: 1.0,
+            progress: { progressRecorder.append($0.fraction) }
+        )
+
+        XCTAssertEqual(corrected.count, eeg.count)
+        XCTAssertEqual(corrected.map(\.count), eeg.map(\.count))
+        XCTAssertEqual(progressRecorder.values.last ?? -1, 1, accuracy: 1e-12)
+        XCTAssertNotEqual(corrected[0], eeg[0])
     }
 }
 

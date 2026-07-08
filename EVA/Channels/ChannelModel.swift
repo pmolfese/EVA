@@ -166,6 +166,8 @@ struct ArtifactMenuControls {
     var artifacts: [DefinedArtifact]
     var deleteRequest: Binding<DefinedArtifact.ID?>
     var deleteAllRequest: Binding<Int>
+    var showsAppliedCorrection: Binding<Bool>
+    var appliedCorrectionAvailable: Bool
 }
 
 extension FocusedValues {
@@ -283,6 +285,12 @@ struct ArtifactsCommands: View {
 
     var body: some View {
         if let controls {
+            Toggle("Show Applied Correction", isOn: controls.showsAppliedCorrection)
+                .keyboardShortcut("a", modifiers: [.command, .option])
+                .disabled(!controls.appliedCorrectionAvailable)
+
+            Divider()
+
             Button("Delete All Defined Artifacts") {
                 controls.deleteAllRequest.wrappedValue += 1
             }

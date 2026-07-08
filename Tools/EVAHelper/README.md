@@ -33,6 +33,9 @@ Useful flags:
 --downsample 500            Downsample after AAS and before CWL.
 --overwrite                 Replace an existing output package.
 --verbose                   Print CPU/GPU preparation and submission details.
+--orig                      Use MATLAB CWRegrTool-style tapered Hann CWL.
+--orig-delay 0.021          Original CWL delay half-width in seconds.
+--orig-taper-factor 1       Original CWL taper factor.
 --cwl-backend compare       Run Metal and CPU/LAPACK, report timing/diff.
 --cwl-gpu-kernel serial     Use the older serial Metal kernel.
 --gpu-batch-windows 8       Submit several CWL windows per command buffer.
@@ -58,3 +61,13 @@ passes. Use `--compare-no-assert` for timing-only experiments.
 Downsampling happens after AAS and before the CWL lagged-regressor setup, so it
 reduces both CPU prep and GPU work. For example, use `--downsample 500` to run
 CWL at 500 Hz and write a 500 Hz output MFF.
+
+`--orig` switches the CWL step to a CPU implementation modeled after
+CWRegrTool's default `taperedhann` path: Hann-tapered windows, dense
+sample-delay embedding over `[-delay,+delay]`, reflected delay edges, SVD
+least-squares, and weighted overlap-add. It uses `--cwl-window` for the original
+window duration and ignores Metal backend flags unless `--cwl-backend compare`
+is also supplied. With `--orig --cwl-backend compare`, the helper writes the
+original-style corrected data and reports the selected Metal path against it as
+a diagnostic difference only; the normal compare tolerances are not asserted
+because these are different CWL algorithms.

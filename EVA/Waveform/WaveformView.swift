@@ -281,7 +281,12 @@ struct WaveformView: View {
         ArtifactMenuControls(
             artifacts: template.definedArtifacts,
             deleteRequest: $template.deletionRequest,
-            deleteAllRequest: $template.deleteAllRequest
+            deleteAllRequest: $template.deleteAllRequest,
+            showsAppliedCorrection: Binding(
+                get: { artifactVM.cleaningIsEnabled },
+                set: { setArtifactCleaningEnabled($0) }
+            ),
+            appliedCorrectionAvailable: artifactVM.cleanedSignal != nil
         )
     }
 

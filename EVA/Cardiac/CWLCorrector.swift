@@ -92,6 +92,20 @@ nonisolated enum CWLCorrector {
         }
     }
 
+    enum Algorithm: String, Sendable {
+        case cwRegrTool
+        case evaFast
+
+        var label: String {
+            switch self {
+            case .cwRegrTool:
+                return "CWRegrTool-compatible"
+            case .evaFast:
+                return "EVA Fast CWR"
+            }
+        }
+    }
+
     /// Runs CWL regression on `eeg` (shape: channels × time), using
     /// `references` (the selected CWL PNS channels, same sample rate/length
     /// as `eeg`) as the regressors.
@@ -115,7 +129,9 @@ nonisolated enum CWLCorrector {
         samplingRate: Double,
         lagRangeMs: ClosedRange<Double> = -50...150,
         lagStepMs: Double = 10,
+        cwlToolDelayMs: Double = 21,
         windowSeconds: Double = 4.0,
+        algorithm: Algorithm = .cwRegrTool,
         downsampleFactor: Int = 1,
         downsampleFilter: DownsampleFilter = .windowedSinc,
         upsampleToOriginalRate: Bool = false,
@@ -136,10 +152,24 @@ nonisolated enum CWLCorrector {
                 samplingRate: samplingRate,
                 lagRangeMs: lagRangeMs,
                 lagStepMs: lagStepMs,
+                cwlToolDelayMs: cwlToolDelayMs,
                 windowSeconds: windowSeconds,
+                algorithm: algorithm,
                 downsampleFactor: requestedDownsampleFactor,
                 downsampleFilter: downsampleFilter,
                 upsampleToOriginalRate: upsampleToOriginalRate,
+                progress: progress,
+                debugLog: debugLog
+            )
+        }
+
+        if algorithm == .cwRegrTool {
+            return try correctCWRegrToolCompatible(
+                eeg: eeg,
+                references: references,
+                samplingRate: samplingRate,
+                delayMs: cwlToolDelayMs,
+                windowSeconds: windowSeconds,
                 progress: progress,
                 debugLog: debugLog
             )
@@ -323,13 +353,345 @@ nonisolated enum CWLCorrector {
         return result
     }
 
+    // MARK: - CWRegrTool-compatible tapered Hann regression
+
+    private static func correctCWRegrToolCompatible(
+        eeg: [[Float]],
+        references: [[Float]],
+        samplingRate: Double,
+        delayMs: Double,
+        windowSeconds: Double,
+        progress: (@Sendable (ProgressUpdate) -> Void)?,
+        debugLog: (@Sendable (String) -> Void)?
+    ) throws -> [[Float]] {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        try Task.checkCancellation()
+        guard let sampleCount = references.first?.count, sampleCount > 0 else {
+            throw CWLCorrectorError.noReferenceChannels
+        }
+
+        let channelCount = eeg.count
+        guard channelCount > 0 else {
+            progress?(
+                ProgressUpdate(
+                    fraction: 1,
+                    phase: .finished,
+                    message: "CWL correction complete",
+                    detail: "No EEG channels"
+                )
+            )
+            return eeg
+        }
+
+        let delaySamples = max(Int(floor(samplingRate * max(delayMs, 0) / 1000.0)), 0)
+        let windowSamples = cwRegrToolWindowSamples(samplingRate: samplingRate, windowSeconds: windowSeconds)
+        guard sampleCount >= windowSamples else {
+            throw CWLCorrectorError.tooShortForWindow(windowSamples: windowSamples, sampleCount: sampleCount)
+        }
+
+        let stepSamples = max((windowSamples - 1) / 2, 1)
+        let lags = Array(stride(from: delaySamples, through: -delaySamples, by: -1))
+        let columnCount = references.count * lags.count
+        let hann = hannWindow(windowSamples)
+        let starts = cwRegrToolWindowStarts(sampleCount: sampleCount, windowSamples: windowSamples, stepSamples: stepSamples)
+        debugLog?(
+            "CWL: starting CWRegrTool-compatible correction; EEG channels=\(channelCount), " +
+            "references=\(references.count), samples=\(sampleCount), samplingRate=\(format(samplingRate)) Hz, " +
+            "delay=\(delaySamples) samples (\(format(delayMs)) ms), window=\(windowSamples) samples, " +
+            "columns=\(columnCount), windows=\(starts.count)"
+        )
+        progress?(
+            ProgressUpdate(
+                fraction: 0,
+                phase: .preparing,
+                message: "Preparing CWRegrTool CWR",
+                detail: "\(references.count) reference channel\(references.count == 1 ? "" : "s"), ±\(delaySamples) samples"
+            )
+        )
+
+        var artifactSum = Array(
+            repeating: [Double](repeating: 0, count: sampleCount),
+            count: channelCount
+        )
+        var weightSum = [Double](repeating: 0, count: sampleCount)
+        let reportEvery = max(1, starts.count / 250)
+
+        for (windowIndex, start) in starts.enumerated() {
+            try Task.checkCancellation()
+            let design = cwRegrToolDesignColumnMajor(
+                references: references,
+                start: start,
+                windowSamples: windowSamples,
+                lags: lags,
+                window: hann
+            )
+            let rhs = cwRegrToolRHSColumnMajor(
+                eeg: eeg,
+                start: start,
+                windowSamples: windowSamples,
+                window: hann
+            )
+            guard let fitted = fitCWRegrToolWindow(
+                designColumnMajor: design,
+                rhsColumnMajor: rhs,
+                rows: windowSamples,
+                columns: columnCount,
+                rightHandSideCount: channelCount
+            ) else {
+                debugLog?("CWL: CWRegrTool-compatible window \(windowIndex + 1)/\(starts.count) failed to solve; skipping")
+                continue
+            }
+
+            for offset in 0..<windowSamples {
+                let sample = start + offset
+                guard sample < sampleCount else { continue }
+                let weight = hann[offset]
+                guard weight > 0 else { continue }
+                weightSum[sample] += weight
+                for channel in 0..<channelCount {
+                    artifactSum[channel][sample] += fitted[channel * windowSamples + offset]
+                }
+            }
+
+            if let progress, (windowIndex + 1) % reportEvery == 0 || windowIndex + 1 == starts.count {
+                progress(
+                    ProgressUpdate(
+                        fraction: Double(windowIndex + 1) / Double(max(starts.count, 1)),
+                        phase: .correcting,
+                        message: "Correcting CWRegrTool CWR",
+                        detail: "window \(windowIndex + 1)/\(starts.count)"
+                    )
+                )
+            }
+        }
+
+        var corrected = eeg
+        for channel in 0..<channelCount {
+            for sample in 0..<sampleCount where weightSum[sample] > 0 {
+                corrected[channel][sample] -= Float(artifactSum[channel][sample] / weightSum[sample])
+            }
+        }
+
+        debugLog?("CWL: CWRegrTool-compatible correction complete; elapsed=\(elapsedString(since: startedAt))")
+        progress?(
+            ProgressUpdate(
+                fraction: 1,
+                phase: .finished,
+                message: "CWL correction complete",
+                detail: "CWRegrTool-compatible, elapsed \(elapsedString(since: startedAt))"
+            )
+        )
+        return corrected
+    }
+
+    private static func cwRegrToolWindowSamples(samplingRate: Double, windowSeconds: Double) -> Int {
+        var windowSamples = max(Int(floor(samplingRate * windowSeconds + 1)), 8)
+        while (windowSamples - 1) % 2 != 0 {
+            windowSamples += 1
+        }
+        return windowSamples
+    }
+
+    private static func cwRegrToolWindowStarts(
+        sampleCount: Int,
+        windowSamples: Int,
+        stepSamples: Int
+    ) -> [Int] {
+        guard sampleCount >= windowSamples else { return [] }
+        var starts: [Int] = []
+        var start = 0
+        while start + windowSamples <= sampleCount {
+            starts.append(start)
+            start += stepSamples
+        }
+        let finalStart = sampleCount - windowSamples
+        if starts.last != finalStart {
+            starts.append(finalStart)
+        }
+        return starts
+    }
+
+    private static func cwRegrToolDesignColumnMajor(
+        references: [[Float]],
+        start: Int,
+        windowSamples: Int,
+        lags: [Int],
+        window: [Double]
+    ) -> [Double] {
+        let columnCount = references.count * lags.count
+        var design = [Double](repeating: 0, count: windowSamples * columnCount)
+        var column = 0
+        for reference in references {
+            for lag in lags {
+                let base = column * windowSamples
+                for row in 0..<windowSamples {
+                    let sourceOffset = reflectedIndex(row - lag, count: windowSamples)
+                    design[base + row] = Double(reference[start + sourceOffset]) * window[row]
+                }
+                column += 1
+            }
+        }
+        return design
+    }
+
+    private static func cwRegrToolRHSColumnMajor(
+        eeg: [[Float]],
+        start: Int,
+        windowSamples: Int,
+        window: [Double]
+    ) -> [Double] {
+        var rhs = [Double](repeating: 0, count: windowSamples * eeg.count)
+        for channel in eeg.indices {
+            let base = channel * windowSamples
+            for row in 0..<windowSamples {
+                rhs[base + row] = Double(eeg[channel][start + row]) * window[row]
+            }
+        }
+        return rhs
+    }
+
+    private static func fitCWRegrToolWindow(
+        designColumnMajor: [Double],
+        rhsColumnMajor: [Double],
+        rows: Int,
+        columns: Int,
+        rightHandSideCount: Int
+    ) -> [Double]? {
+        guard rows > 0, columns > 0, rightHandSideCount > 0 else { return nil }
+        guard designColumnMajor.count == rows * columns,
+              rhsColumnMajor.count == rows * rightHandSideCount else {
+            return nil
+        }
+        guard let beta = solveLeastSquaresSVD(
+            designColumnMajor: designColumnMajor,
+            rhsColumnMajor: rhsColumnMajor,
+            rows: rows,
+            columns: columns,
+            rightHandSideCount: rightHandSideCount
+        ) else {
+            return nil
+        }
+
+        var fitted = [Double](repeating: 0, count: rows * rightHandSideCount)
+        cblas_dgemm(
+            CblasColMajor,
+            CblasNoTrans,
+            CblasNoTrans,
+            Int32(rows),
+            Int32(rightHandSideCount),
+            Int32(columns),
+            1.0,
+            designColumnMajor,
+            Int32(rows),
+            beta,
+            Int32(columns),
+            0.0,
+            &fitted,
+            Int32(rows)
+        )
+        return fitted
+    }
+
+    private static func solveLeastSquaresSVD(
+        designColumnMajor: [Double],
+        rhsColumnMajor: [Double],
+        rows: Int,
+        columns: Int,
+        rightHandSideCount: Int
+    ) -> [Double]? {
+        let leadingB = max(rows, columns)
+        var paddedRHS = [Double](repeating: 0, count: leadingB * rightHandSideCount)
+        for rhs in 0..<rightHandSideCount {
+            for row in 0..<rows {
+                paddedRHS[rhs * leadingB + row] = rhsColumnMajor[rhs * rows + row]
+            }
+        }
+
+        var m = LAPACKInt(rows)
+        var n = LAPACKInt(columns)
+        var nrhs = LAPACKInt(rightHandSideCount)
+        var lda = LAPACKInt(rows)
+        var ldb = LAPACKInt(leadingB)
+        var singularValues = [Double](repeating: 0, count: min(rows, columns))
+        var rcond = -1.0
+        var rank = LAPACKInt(0)
+        var lwork = LAPACKInt(-1)
+        var workQuery = [Double](repeating: 0, count: 1)
+        var iwork = [LAPACKInt](repeating: 0, count: gelsdIWorkLength(rows: rows, columns: columns))
+        var info = LAPACKInt(0)
+        var queryA = designColumnMajor
+        var queryB = paddedRHS
+
+        dgelsd_(
+            &m,
+            &n,
+            &nrhs,
+            &queryA,
+            &lda,
+            &queryB,
+            &ldb,
+            &singularValues,
+            &rcond,
+            &rank,
+            &workQuery,
+            &lwork,
+            &iwork,
+            &info
+        )
+        guard info == 0, workQuery[0].isFinite else { return nil }
+
+        lwork = LAPACKInt(max(1, Int(workQuery[0].rounded(.up))))
+        var work = [Double](repeating: 0, count: Int(lwork))
+        var a = designColumnMajor
+        var b = paddedRHS
+        singularValues = [Double](repeating: 0, count: min(rows, columns))
+        iwork = [LAPACKInt](repeating: 0, count: gelsdIWorkLength(rows: rows, columns: columns))
+        info = 0
+
+        dgelsd_(
+            &m,
+            &n,
+            &nrhs,
+            &a,
+            &lda,
+            &b,
+            &ldb,
+            &singularValues,
+            &rcond,
+            &rank,
+            &work,
+            &lwork,
+            &iwork,
+            &info
+        )
+        guard info == 0 else { return nil }
+
+        var beta = [Double](repeating: 0, count: columns * rightHandSideCount)
+        for rhs in 0..<rightHandSideCount {
+            for row in 0..<columns {
+                beta[rhs * columns + row] = b[rhs * leadingB + row]
+            }
+        }
+        return beta
+    }
+
+    private static func gelsdIWorkLength(rows: Int, columns: Int) -> Int {
+        let minDimension = max(min(rows, columns), 1)
+        let smallSize = 25
+        let ratio = Double(minDimension) / Double(smallSize + 1)
+        let levels = max(0, Int(floor(log2(max(ratio, 1))))) + 1
+        return max(1, 3 * minDimension * levels + 11 * minDimension)
+    }
+
     private static func correctDownsampled(
         eeg: [[Float]],
         references: [[Float]],
         samplingRate: Double,
         lagRangeMs: ClosedRange<Double>,
         lagStepMs: Double,
+        cwlToolDelayMs: Double,
         windowSeconds: Double,
+        algorithm: Algorithm,
         downsampleFactor: Int,
         downsampleFilter: DownsampleFilter,
         upsampleToOriginalRate: Bool,
@@ -345,7 +707,9 @@ nonisolated enum CWLCorrector {
                 samplingRate: samplingRate,
                 lagRangeMs: lagRangeMs,
                 lagStepMs: lagStepMs,
+                cwlToolDelayMs: cwlToolDelayMs,
                 windowSeconds: windowSeconds,
+                algorithm: algorithm,
                 downsampleFactor: 1,
                 downsampleFilter: downsampleFilter,
                 upsampleToOriginalRate: false,
@@ -380,7 +744,9 @@ nonisolated enum CWLCorrector {
             samplingRate: effectiveRate,
             lagRangeMs: lagRangeMs,
             lagStepMs: lagStepMs,
+            cwlToolDelayMs: cwlToolDelayMs,
             windowSeconds: windowSeconds,
+            algorithm: algorithm,
             downsampleFactor: 1,
             downsampleFilter: downsampleFilter,
             upsampleToOriginalRate: false,
@@ -884,6 +1250,24 @@ nonisolated enum CWLCorrector {
             out[t] = signal[src]
         }
         return out
+    }
+
+    private static func reflectedIndex(_ index: Int, count: Int) -> Int {
+        guard count > 1 else { return 0 }
+        if index < 0 {
+            return min(-index - 1, count - 1)
+        }
+        if index >= count {
+            return max(2 * count - index - 1, 0)
+        }
+        return index
+    }
+
+    private static func hannWindow(_ length: Int) -> [Double] {
+        guard length > 1 else { return [Double](repeating: 1, count: max(length, 0)) }
+        return (0..<length).map { sample in
+            0.5 - 0.5 * cos(2.0 * Double.pi * Double(sample) / Double(length - 1))
+        }
     }
 
     private static func triangularWindow(_ length: Int) -> [Double] {

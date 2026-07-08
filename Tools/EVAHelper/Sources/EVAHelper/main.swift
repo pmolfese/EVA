@@ -94,6 +94,9 @@ struct Options {
     var verbose = false
     var windowBefore = GradientRemover.Window.default.before
     var windowAfter = GradientRemover.Window.default.after
+    var useOriginalCWL = false
+    var originalCWLDelaySeconds = 0.021
+    var originalCWLTaperFactor = 1
     var cwlBackend = CWLCorrectorEngine.Backend.metal
     var cwlGPUKernel = CWLCorrectorEngine.GPUKernel.sampleParallel
     var cwlGPUBatchWindows = 1
@@ -117,6 +120,9 @@ struct Options {
         var verbose = false
         var windowBefore = GradientRemover.Window.default.before
         var windowAfter = GradientRemover.Window.default.after
+        var useOriginalCWL = false
+        var originalCWLDelaySeconds = 0.021
+        var originalCWLTaperFactor = 1
         var cwlBackend = CWLCorrectorEngine.Backend.metal
         var cwlGPUKernel = CWLCorrectorEngine.GPUKernel.sampleParallel
         var cwlGPUBatchWindows = 1
@@ -158,6 +164,16 @@ struct Options {
             case "--window-after":
                 index += 1
                 windowAfter = try intValue(at: index, in: arguments, flag: argument)
+            case "--orig":
+                useOriginalCWL = true
+            case "--orig-delay":
+                index += 1
+                originalCWLDelaySeconds = try doubleValue(at: index, in: arguments, flag: argument)
+                useOriginalCWL = true
+            case "--orig-taper-factor":
+                index += 1
+                originalCWLTaperFactor = try intValue(at: index, in: arguments, flag: argument)
+                useOriginalCWL = true
             case "--cwl-backend":
                 index += 1
                 let raw = try value(at: index, in: arguments, flag: argument)
@@ -231,6 +247,9 @@ struct Options {
         guard windowBefore > 0, windowAfter > 0 else {
             throw HelperError.usage("--window-before and --window-after must be positive.")
         }
+        guard originalCWLDelaySeconds >= 0, originalCWLTaperFactor >= 1 else {
+            throw HelperError.usage("--orig-delay must be non-negative and --orig-taper-factor must be at least 1.")
+        }
         guard cwlGPUBatchWindows > 0 else {
             throw HelperError.usage("--gpu-batch-windows must be positive.")
         }
@@ -259,6 +278,9 @@ struct Options {
             verbose: verbose,
             windowBefore: windowBefore,
             windowAfter: windowAfter,
+            useOriginalCWL: useOriginalCWL,
+            originalCWLDelaySeconds: originalCWLDelaySeconds,
+            originalCWLTaperFactor: originalCWLTaperFactor,
             cwlBackend: cwlBackend,
             cwlGPUKernel: cwlGPUKernel,
             cwlGPUBatchWindows: cwlGPUBatchWindows,
@@ -366,6 +388,9 @@ func usage() -> String {
       --verbose                  Print CPU/GPU preparation and submission details.
       --window-before <n>        AAS template TRs before current TR (default 4).
       --window-after <n>         AAS template TRs after current TR (default 4).
+      --orig                     Use MATLAB CWRegrTool-style tapered Hann CWL.
+      --orig-delay <seconds>     Original CWL delay half-width (default 0.021).
+      --orig-taper-factor <n>    Original CWL taper factor (default 1).
       --cwl-backend <name>       CWL backend: metal, cpu, compare (default metal).
       --cwl-gpu-kernel <name>    Metal kernel: serial, sample-parallel (default sample-parallel).
       --gpu-batch-windows <n>    Submit this many CWL windows per command buffer (default 1).
@@ -381,7 +406,25 @@ func usage() -> String {
       --compare-relative-rms-diff <value>
                                   Relative RMS diff tolerance vs correction magnitude (default 1e-2).
       --compare-no-assert        Report compare metrics without failing on mismatch.
+
+    Notes:
+      --orig --cwl-backend compare reports Metal-vs-original differences without asserting equivalence.
     """
+}
+
+func remapCWLProgress(
+    _ progress: @escaping (CWLCorrectorEngine.ProgressUpdate) -> Void,
+    start: Double,
+    end: Double
+) -> (CWLCorrectorEngine.ProgressUpdate) -> Void {
+    { update in
+        progress(CWLCorrectorEngine.ProgressUpdate(
+            fraction: start + (end - start) * min(max(update.fraction, 0), 1),
+            phase: update.phase,
+            message: update.message,
+            detail: update.detail
+        ))
+    }
 }
 
 func run() throws {
@@ -402,7 +445,7 @@ func run() throws {
     writeStdoutLine("EVA helper POC")
     writeStdoutLine("Input:  \(options.inputURL.path)")
     writeStdoutLine("Output: \(outputURL.path)")
-    verboseLog?("Options: backend=\(options.cwlBackend.rawValue), gpuKernel=\(options.cwlGPUKernel.rawValue), gpuBatchWindows=\(options.cwlGPUBatchWindows)")
+    verboseLog?("Options: backend=\(options.cwlBackend.rawValue), gpuKernel=\(options.cwlGPUKernel.rawValue), gpuBatchWindows=\(options.cwlGPUBatchWindows), orig=\(options.useOriginalCWL)")
 
     let loaded = try loadRecording(from: options.inputURL, progress: progress, verbose: verboseLog)
     let signal = loaded.signal
@@ -512,31 +555,121 @@ func run() throws {
     }
 
     let references = cwlIndices.map { currentPNS.data[$0] }
-    let cwlConfig = CWLCorrectorEngine.Config(
-        backend: options.cwlBackend,
-        gpuKernel: options.cwlGPUKernel,
-        gpuBatchWindows: options.cwlGPUBatchWindows,
-        lagRangeMs: options.cwlLagMinMs...options.cwlLagMaxMs,
-        lagStepMs: options.cwlLagStepMs,
-        windowSeconds: options.cwlWindowSeconds,
-        hopSeconds: options.cwlHopSeconds
-    )
     let cwlProgressEnd = 0.86
     progress.update(cwlProgressStart, "Running CWL regression")
-    let cwlResult = try CWLCorrectorEngine.correct(
-        eeg: currentSignal.data,
-        references: references,
-        samplingRate: currentSignal.samplingRate,
-        config: cwlConfig,
-        progress: { update in
-            progress.update(
-                cwlProgressStart + (cwlProgressEnd - cwlProgressStart) * update.fraction,
-                update.message,
-                detail: update.detail
+    let cwlProgress: (CWLCorrectorEngine.ProgressUpdate) -> Void = { update in
+        progress.update(
+            cwlProgressStart + (cwlProgressEnd - cwlProgressStart) * update.fraction,
+            update.message,
+            detail: update.detail
+        )
+    }
+    let cwlResult: CWLCorrectorEngine.RunInfo
+    if options.useOriginalCWL && options.cwlBackend == .compare {
+        verboseLog?("Original CWL compare mode: comparing Metal path against MATLAB-style tapered Hann CPU path")
+        let fastConfig = CWLCorrectorEngine.Config(
+            backend: .metal,
+            gpuKernel: options.cwlGPUKernel,
+            gpuBatchWindows: options.cwlGPUBatchWindows,
+            lagRangeMs: options.cwlLagMinMs...options.cwlLagMaxMs,
+            lagStepMs: options.cwlLagStepMs,
+            windowSeconds: options.cwlWindowSeconds,
+            hopSeconds: options.cwlHopSeconds
+        )
+        let fast = try CWLCorrectorEngine.correct(
+            eeg: currentSignal.data,
+            references: references,
+            samplingRate: currentSignal.samplingRate,
+            config: fastConfig,
+            progress: remapCWLProgress(cwlProgress, start: 0.0, end: 0.50),
+            verbose: verboseLog
+        )
+        let original = try OriginalCWLCorrectorEngine.correct(
+            eeg: currentSignal.data,
+            references: references,
+            samplingRate: currentSignal.samplingRate,
+            config: OriginalCWLCorrectorEngine.Config(
+                windowSeconds: options.cwlWindowSeconds,
+                delaySeconds: options.originalCWLDelaySeconds,
+                taperFactor: options.originalCWLTaperFactor
+            ),
+            progress: remapCWLProgress(cwlProgress, start: 0.50, end: 0.98),
+            verbose: verboseLog
+        )
+        var comparison = CWLCorrectorEngine.compare(fast.corrected, original.corrected)
+        let fastDelta = CWLCorrectorEngine.compare(fast.corrected, currentSignal.data)
+        let originalDelta = CWLCorrectorEngine.compare(original.corrected, currentSignal.data)
+        comparison.relativeMaxDifference = comparison.maxAbsoluteDifference
+            / max(fastDelta.maxAbsoluteDifference, originalDelta.maxAbsoluteDifference, 1e-12)
+        comparison.relativeRMSDifference = comparison.rmsDifference
+            / max(fastDelta.rmsDifference, originalDelta.rmsDifference, 1e-12)
+        cwlProgress(CWLCorrectorEngine.ProgressUpdate(
+            fraction: 1,
+            phase: .comparing,
+            message: "Compared CWL to original",
+            detail: String(format: "max %.6g, rms %.6g", comparison.maxAbsoluteDifference, comparison.rmsDifference)
+        ))
+        verboseLog?(
+            String(
+                format: "CWL original compare: fast windows=%d regressors=%d, original windows=%d regressors=%d",
+                fast.windowCount,
+                fast.regressorCount,
+                original.windowCount,
+                original.regressorCount
             )
-        },
-        verbose: verboseLog
-    )
+        )
+        verboseLog?(
+            String(
+                format: "CWL original compare detail: max at channel %d sample %d, metal %.6g, original %.6g",
+                comparison.maxChannel + 1,
+                comparison.maxSample,
+                comparison.leftValue,
+                comparison.rightValue
+            )
+        )
+        cwlResult = CWLCorrectorEngine.RunInfo(
+            corrected: original.corrected,
+            backendDescription: "\(original.backendDescription) + Metal \(options.cwlGPUKernel.rawValue) diagnostic compare",
+            deviceName: fast.deviceName,
+            windowCount: original.windowCount,
+            regressorCount: original.regressorCount,
+            cpuSeconds: original.cpuSeconds,
+            gpuSeconds: fast.gpuSeconds,
+            comparison: comparison
+        )
+    } else if options.useOriginalCWL {
+        verboseLog?("Original CWL mode: using MATLAB-style tapered Hann CPU path; Metal/backend flags are ignored")
+        cwlResult = try OriginalCWLCorrectorEngine.correct(
+            eeg: currentSignal.data,
+            references: references,
+            samplingRate: currentSignal.samplingRate,
+            config: OriginalCWLCorrectorEngine.Config(
+                windowSeconds: options.cwlWindowSeconds,
+                delaySeconds: options.originalCWLDelaySeconds,
+                taperFactor: options.originalCWLTaperFactor
+            ),
+            progress: cwlProgress,
+            verbose: verboseLog
+        )
+    } else {
+        let cwlConfig = CWLCorrectorEngine.Config(
+            backend: options.cwlBackend,
+            gpuKernel: options.cwlGPUKernel,
+            gpuBatchWindows: options.cwlGPUBatchWindows,
+            lagRangeMs: options.cwlLagMinMs...options.cwlLagMaxMs,
+            lagStepMs: options.cwlLagStepMs,
+            windowSeconds: options.cwlWindowSeconds,
+            hopSeconds: options.cwlHopSeconds
+        )
+        cwlResult = try CWLCorrectorEngine.correct(
+            eeg: currentSignal.data,
+            references: references,
+            samplingRate: currentSignal.samplingRate,
+            config: cwlConfig,
+            progress: cwlProgress,
+            verbose: verboseLog
+        )
+    }
     currentSignal = currentSignal.copying(
         data: cwlResult.corrected,
         samplingRate: currentSignal.samplingRate,
@@ -554,13 +687,16 @@ func run() throws {
     if let cpuSeconds = cwlResult.cpuSeconds {
         writeStdoutLine(String(format: "CWL CPU time: %.3fs", cpuSeconds))
     }
+    let comparisonIsDiagnostic = options.useOriginalCWL && options.cwlBackend == .compare
     if let comparison = cwlResult.comparison {
         writeStdoutLine(String(format: "CWL compare: max diff %.6g, RMS diff %.6g", comparison.maxAbsoluteDifference, comparison.rmsDifference))
         if let relativeMax = comparison.relativeMaxDifference,
            let relativeRMS = comparison.relativeRMSDifference {
             writeStdoutLine(String(format: "CWL compare relative: max %.6g, RMS %.6g", relativeMax, relativeRMS))
         }
-        if options.compareAssert {
+        if comparisonIsDiagnostic {
+            writeStdoutLine("CWL compare assertion: skipped (original MATLAB-style CWL and Metal helper CWL are different algorithms).")
+        } else if options.compareAssert {
             let absolutePassed = comparison.maxAbsoluteDifference <= options.compareMaxDiff
                 && comparison.rmsDifference <= options.compareRMSDiff
             let relativePassed: Bool
@@ -660,7 +796,16 @@ func promptForTRCode(events: [MFFEvent]) throws -> String {
 
     while true {
         writeStdout("Select TR event number or code: ")
-        guard let raw = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+        guard let line = readLine() else {
+            let examples = candidates.prefix(3)
+                .map { "--tr-code \"\(displayCode($0.code))\"" }
+                .joined(separator: " or ")
+            throw HelperError.usage(
+                "No TR event selection was provided on stdin. Re-run with \(examples)."
+            )
+        }
+        let raw = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
             continue
         }
         if let selectedIndex = Int(raw), candidates.indices.contains(selectedIndex - 1) {

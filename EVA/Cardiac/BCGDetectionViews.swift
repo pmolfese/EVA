@@ -480,47 +480,85 @@ extension WaveformView {
 
         case .cwlRegression:
             VStack(alignment: .leading, spacing: 10) {
-                Text("Lag range")
-                    .font(.caption.weight(.semibold))
-                Text("Each CWL channel is regressed at every lag in this range; the fit is subtracted using a sliding window so the coupling can drift across the recording.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 HStack {
-                    Text("Min lag")
-                        .font(.caption)
+                    Text("")
                         .frame(width: 100, alignment: .leading)
-                    TextField("ms", value: $bcg.cwlLagRangeMinMs, format: .number.precision(.fractionLength(0)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                    Text("Max lag")
-                        .font(.caption)
-                        .padding(.leading, 8)
-                    TextField("ms", value: $bcg.cwlLagRangeMaxMs, format: .number.precision(.fractionLength(0)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                    Text("ms")
+                    Toggle("EVA Fast CWR", isOn: $bcg.cwlUseEVAFastCWR)
+                        .toggleStyle(.checkbox)
+                    Text(bcg.cwlUseEVAFastCWR ? "regularized sliding solver" : "CWRegrTool-compatible")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                HStack {
-                    Text("Lag step")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
-                    TextField("ms", value: $bcg.cwlLagStepMs, format: .number.precision(.fractionLength(0)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                    Text("Window")
-                        .font(.caption)
-                        .padding(.leading, 8)
-                    TextField("s", value: $bcg.cwlWindowSeconds, format: .number.precision(.fractionLength(1)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                    Text("s")
-                        .font(.caption)
+                .help("Unchecked uses the CWRegrTool-style dense delay embedding with Hann-tapered overlap. Checked uses EVA's faster regularized lag-range solver.")
+
+                if bcg.cwlUseEVAFastCWR {
+                    Text("Lag range")
+                        .font(.caption.weight(.semibold))
+                    Text("Each CWL channel is regressed at every lag in this range; the fit is subtracted using a sliding window so the coupling can drift across the recording.")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Text("Min lag")
+                            .font(.caption)
+                            .frame(width: 100, alignment: .leading)
+                        TextField("ms", value: $bcg.cwlLagRangeMinMs, format: .number.precision(.fractionLength(0)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("Max lag")
+                            .font(.caption)
+                            .padding(.leading, 8)
+                        TextField("ms", value: $bcg.cwlLagRangeMaxMs, format: .number.precision(.fractionLength(0)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("ms")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Lag step")
+                            .font(.caption)
+                            .frame(width: 100, alignment: .leading)
+                        TextField("ms", value: $bcg.cwlLagStepMs, format: .number.precision(.fractionLength(0)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("Window")
+                            .font(.caption)
+                            .padding(.leading, 8)
+                        TextField("s", value: $bcg.cwlWindowSeconds, format: .number.precision(.fractionLength(1)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("s")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .help("A shorter window adapts faster to drifting coupling but has less data to fit each regression; 3–5 s is a reasonable starting point.")
+                } else {
+                    Text("CWRegrTool")
+                        .font(.caption.weight(.semibold))
+                    Text("Uses dense ±delay sample embedding with a Hann-tapered overlap, matching the original CWRegrTool default as closely as practical inside EVA.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Text("Delay")
+                            .font(.caption)
+                            .frame(width: 100, alignment: .leading)
+                        TextField("ms", value: $bcg.cwlDelayMs, format: .number.precision(.fractionLength(0)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("Window")
+                            .font(.caption)
+                            .padding(.leading, 8)
+                        TextField("s", value: $bcg.cwlWindowSeconds, format: .number.precision(.fractionLength(1)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("s")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .help("CWRegrTool's default delay is 21 ms and its default window is 4 s.")
                 }
-                .help("A shorter window adapts faster to drifting coupling but has less data to fit each regression; 3–5 s is a reasonable starting point.")
                 HStack {
                     Text("Downsample")
                         .font(.caption)
@@ -1026,7 +1064,9 @@ extension WaveformView {
         let sr = signal.samplingRate
         let lagRange = bcg.cwlLagRangeMinMs...max(bcg.cwlLagRangeMaxMs, bcg.cwlLagRangeMinMs + 1)
         let lagStep = bcg.cwlLagStepMs
+        let cwlDelayMs = bcg.cwlDelayMs
         let windowSeconds = bcg.cwlWindowSeconds
+        let cwlAlgorithm = bcg.cwlUseEVAFastCWR ? CWLCorrector.Algorithm.evaFast : .cwRegrTool
         let selectedDownsampleTarget = cwlDownsampleTargets(for: sr).contains(bcg.cwlDownsampleTargetHz)
             ? bcg.cwlDownsampleTargetHz
             : 0
@@ -1057,7 +1097,9 @@ extension WaveformView {
                     samplingRate: sr,
                     lagRangeMs: lagRange,
                     lagStepMs: lagStep,
+                    cwlToolDelayMs: cwlDelayMs,
                     windowSeconds: windowSeconds,
+                    algorithm: cwlAlgorithm,
                     downsampleFactor: downsampleFactor,
                     downsampleFilter: downsampleFilter,
                     upsampleToOriginalRate: upsampleToOriginalHz
@@ -1091,6 +1133,7 @@ extension WaveformView {
                 signalTypeSuffix: "CWL"
             )
             bcg.progress = 1
+            let algorithmSummary = " \(cwlAlgorithm.label)."
             let downsampleSummary: String
             if downsampleFactor > 1 {
                 downsampleSummary = upsampleToOriginalHz
@@ -1099,7 +1142,7 @@ extension WaveformView {
             } else {
                 downsampleSummary = ""
             }
-            bcg.status = "✓ CWL correction applied (\(referenceIndices.count) reference channel\(referenceIndices.count == 1 ? "" : "s")).\(downsampleSummary)"
+            bcg.status = "✓ CWL correction applied (\(referenceIndices.count) reference channel\(referenceIndices.count == 1 ? "" : "s")).\(algorithmSummary)\(downsampleSummary)"
 
             // Downstream stages built on the old base are now stale — same
             // cross-domain invalidation as `applyGradientCorrection`, since

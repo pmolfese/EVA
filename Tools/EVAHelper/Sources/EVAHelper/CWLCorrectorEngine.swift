@@ -1047,7 +1047,7 @@ nonisolated enum CWLCorrectorEngine {
         return buffer
     }
 
-    private static func compare(_ lhs: [[Float]], _ rhs: [[Float]]) -> Comparison {
+    static func compare(_ lhs: [[Float]], _ rhs: [[Float]]) -> Comparison {
         var maxAbsoluteDifference = 0.0
         var squaredDifferenceSum = 0.0
         var count = 0

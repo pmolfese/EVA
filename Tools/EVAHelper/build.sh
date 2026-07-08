@@ -16,6 +16,7 @@ swiftc -O \
   "$ROOT/Tools/EVAHelper/Sources/EVAHelper/main.swift" \
   "$ROOT/Tools/EVAHelper/Sources/EVAHelper/BrainVisionHelperReader.swift" \
   "$ROOT/Tools/EVAHelper/Sources/EVAHelper/CWLCorrectorEngine.swift" \
+  "$ROOT/Tools/EVAHelper/Sources/EVAHelper/OriginalCWLCorrectorEngine.swift" \
   "$ROOT/EVA/Core/AccelerateCompat.swift" \
   "$ROOT/EVA/Core/DSP.swift" \
   "$ROOT/EVA/Core/LinearAlgebra.swift" \

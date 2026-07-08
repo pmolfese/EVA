@@ -80,6 +80,8 @@ struct BCGDetectionViewModelTests {
         vm.windowSeconds = 0.55
         vm.thresholdSD = 3.25
         vm.selectedCWLChannels = [0, 2]
+        vm.cwlUseEVAFastCWR = true
+        vm.cwlDelayMs = 25
         vm.cwlLagRangeMinMs = -40
         vm.cwlLagRangeMaxMs = 160
         vm.cwlLagStepMs = 5
@@ -95,6 +97,8 @@ struct BCGDetectionViewModelTests {
         #expect(p["windowSeconds"] == "0.550000")
         #expect(p["thresholdSD"] == "3.250000")
         #expect(p["cwlSelectedChannels"] == "1,3")
+        #expect(p["cwlUseEVAFastCWR"] == "true")
+        #expect(p["cwlDelayMs"] == "25.000000")
         #expect(p["cwlLagRangeMinMs"] == "-40.000000")
         #expect(p["cwlLagRangeMaxMs"] == "160.000000")
         #expect(p["cwlLagStepMs"] == "5.000000")

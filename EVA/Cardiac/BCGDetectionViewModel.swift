@@ -56,6 +56,8 @@ final class BCGDetectionViewModel: ObservableObject {
 
     // MARK: CWL regression (direct-correction method — see BCGDetectionMethod.cwlRegression)
     @Published var selectedCWLChannels = Set<Int>()
+    @Published var cwlUseEVAFastCWR = false
+    @Published var cwlDelayMs = 21.0
     @Published var cwlLagRangeMinMs = -50.0
     @Published var cwlLagRangeMaxMs = 150.0
     @Published var cwlLagStepMs = 10.0
@@ -106,6 +108,8 @@ final class BCGDetectionViewModel: ObservableObject {
             "respAdaptive": "\(respAdaptive)",
             "rejectFraction": String(format: "%.6f", rejectFraction),
             "cwlSelectedChannels": selectedCWLChannels.sorted().map { String($0 + 1) }.joined(separator: ","),
+            "cwlUseEVAFastCWR": "\(cwlUseEVAFastCWR)",
+            "cwlDelayMs": String(format: "%.6f", cwlDelayMs),
             "cwlLagRangeMinMs": String(format: "%.6f", cwlLagRangeMinMs),
             "cwlLagRangeMaxMs": String(format: "%.6f", cwlLagRangeMaxMs),
             "cwlLagStepMs": String(format: "%.6f", cwlLagStepMs),
