@@ -193,6 +193,14 @@ nonisolated struct SegmentHealthMetricSettings: Codable, Sendable {
 nonisolated enum SegmentHealthAnalyzer {
     static let continuousWindowSeconds = 2.0
 
+    /// Deterministic ID for an epoch-derived segment, shared by the health
+    /// scan and the PSA averager's "skip if labeled Bad" filter — both must
+    /// derive the same ID from the same `(index, segment)` pair for a label
+    /// recorded against one to be found by the other.
+    static func segmentID(index: Int, segment: EpochSegment) -> String {
+        "epoch-\(index)-\(segment.startSample)-\(segment.endSample)-\(segment.category)"
+    }
+
     static func analysisSegments(
         for signal: MFFSignalData,
         epochSegments: [EpochSegment]
@@ -206,7 +214,7 @@ nonisolated enum SegmentHealthAnalyzer {
         if !epochSegments.isEmpty {
             return epochSegments.enumerated().map { index, segment in
                 SegmentHealthInputSegment(
-                    segmentID: "epoch-\(index)-\(segment.startSample)-\(segment.endSample)-\(segment.category)",
+                    segmentID: segmentID(index: index, segment: segment),
                     segmentIndex: index,
                     category: segment.category,
                     startSample: min(max(segment.startSample, 0), sampleCount - 1),

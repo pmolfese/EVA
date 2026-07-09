@@ -53,8 +53,8 @@ final class EpochingViewModel: ObservableObject {
     @Published var preStimulus = 0.2
     @Published var postStimulus = 0.8
     @Published var offset = 0.0
-    @Published var baselineCorrected = false
-    @Published var averageReference = false
+    @Published var baselineCorrected = true
+    @Published var averageReference = true
     @Published var averageOnApply = false
 
     // MARK: Category naming / timing markers
@@ -74,12 +74,16 @@ final class EpochingViewModel: ObservableObject {
     @Published var skipEyeMovements = true
     @Published var skippedDefinedArtifactIDs = Set<DefinedArtifact.ID>()
     @Published var knownArtifactIDsForRejection = Set<DefinedArtifact.ID>()
+    /// Excludes segments the user manually marked "Bad" (Segment Health
+    /// right-click / popover) from category averages. Independent of
+    /// `skipIfContainsArtifact` — this is a manual call, not detector-driven.
+    @Published var skipIfLabeledBad = true
 
     // MARK: Per-epoch bad-channel interpolation
     /// Detects and interpolates channels that are only bad WITHIN a given
     /// epoch (transient per-trial artifacts a whole-recording health scan
     /// misses), instead of rejecting the whole epoch or leaving it uncorrected.
-    @Published var interpolatesBadChannelsPerEpoch = false
+    @Published var interpolatesBadChannelsPerEpoch = true
     @Published var epochBadChannelThresholds = EpochBadChannelThresholds()
     @Published var showsEpochBadChannelOptions = false
     /// When a channel is flagged bad in at least this fraction of epochs, mark
@@ -96,6 +100,13 @@ final class EpochingViewModel: ObservableObject {
     /// crossed the escalation threshold. Surfaced in the status message and
     /// folded into the exported process log via `currentProcessingAuditLogLines()`.
     @Published var epochBadChannelSummary: [String] = []
+    /// Channels flagged bad in every accepted segment from the last PSA run.
+    @Published var epochBadChannelAllSegmentsSummary: [String] = []
+    /// One line per channel showing the accepted segment numbers where it was
+    /// interpolated, e.g. "Ch1(4,5,6)".
+    @Published var interpolatedChannelsBySegmentSummary: [String] = []
+    /// Segments omitted from averaging because the user manually labeled them bad.
+    @Published var skippedLabeledBadSegmentsSummary: [String] = []
 
     // MARK: Run state
     @Published var statusMessage: String?
@@ -186,6 +197,7 @@ final class EpochingViewModel: ObservableObject {
             "skipEyeBlinks": "\(skipEyeBlinks)",
             "skipEyeMovements": "\(skipEyeMovements)",
             "skipArtifacts": "\(skipIfContainsArtifact)",
+            "skipLabeledBad": "\(skipIfLabeledBad)",
             "interpolateBadChannelsPerEpoch": "\(interpolatesBadChannelsPerEpoch)"
         ]
         if interpolatesBadChannelsPerEpoch {
@@ -231,6 +243,7 @@ final class EpochingViewModel: ObservableObject {
         if let v = p["skipEyeBlinks"] { skipEyeBlinks = (v == "true") }
         if let v = p["skipEyeMovements"] { skipEyeMovements = (v == "true") }
         if let v = p["skipArtifacts"] { skipIfContainsArtifact = (v == "true") }
+        if let v = p["skipLabeledBad"] { skipIfLabeledBad = (v == "true") }
         if let v = p["interpolateBadChannelsPerEpoch"] { interpolatesBadChannelsPerEpoch = (v == "true") }
         epochBadChannelThresholds = EpochBadChannelThresholds.fromFlatParameters(
             p,
@@ -532,6 +545,9 @@ final class EpochingViewModel: ObservableObject {
         knownArtifactIDsForRejection.removeAll()
         escalatedChannelSummaries.removeAll()
         epochBadChannelSummary.removeAll()
+        epochBadChannelAllSegmentsSummary.removeAll()
+        interpolatedChannelsBySegmentSummary.removeAll()
+        skippedLabeledBadSegmentsSummary.removeAll()
         statusMessage = nil
         isApplying = false
         phaseMessage = nil

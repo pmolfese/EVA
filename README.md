@@ -40,36 +40,46 @@ EVA is also not _intended_ as a replacement for your vendor's EEG software. We r
 
 ## A Quick Tour
 
-EVA keeps topographies next to the waveform instead of making them a separate mental mode. Double-clicking a sample can bring up a scalp map, which is especially useful when checking whether a burst looks spatially plausible or artifact-like.
+The main waveform view keeps channels, events, and the tools you'll actually reach for (MRI, filter, artifacts, process, EEG, events) in one place, with a running log of what's been applied to the recording so far.
 
 <p align="center">
-  <img src="Figures/readme_topography_artifacts.png" alt="Waveform-linked topography for artifact review" width="860">
+  <img src="Figures/readme_waveform_overview.png" alt="Main waveform view with channel list, events, and toolbar" width="900">
 </p>
 
-For event-related work, EVA can segment around events and average by category. Baseline correction and average reference can be toggled after segmentation, so you can compare choices without rebuilding the whole view.
-
-Category averages can also be inspected as butterfly plots. Confirm your evoked responses, while checking whether an effect is broadly distributed, channel-specific, or being driven by a few suspicious traces.
+Filtering, notching, and average referencing live in a single popover reachable from the toolbar, so adjusting a Butterworth cutoff or line-noise correction doesn't pull you out of the waveform.
 
 <p align="center">
-  <img src="Figures/readme_epoching_averages.png" alt="Segmentation controls and category butterfly plots" width="900">
+  <img src="Figures/readme_controls.png" alt="Filter popover with high-pass, low-pass, and line-noise controls" width="640">
 </p>
 
-Artifact handling is built around the idea that the user often knows what the artifact looks like before software does. You can highlight a waveform region, define an artifact template, choose the channels and matching behavior, and let EVA scan for similar events.
-
-Once artifacts are defined, EVA can preview and apply cleaning methods. The app currently supports regression, OBS, and SSP/PCA removal
+EVA keeps topographies next to the waveform instead of making them a separate mental mode. Double-clicking a sample can bring up a scalp map, which is especially useful when checking whether a burst looks spatially plausible or artifact-like. Channel health scoring sits right alongside it, breaking a score down into the specific metrics (signal amplitude, spectral outliers, burst peaks, line harmonics, impedance, and more) that drove it.
 
 <p align="center">
-  <img src="Figures/readme_artifact_workflow.png" alt="Artifact definition, preview, and cleaning workflow" width="900">
+  <img src="Figures/readme_topography_health.png" alt="Waveform-linked topography and explainable channel health scoring" width="900">
 </p>
 
-ICA is available for component-based cleanup. EVA includes a Core ML path for **ICLabel**, using the bundled `ICLabel.mlpackage`, providing useful labels and confidence for data cleaning.
-
-Channel health is an explainable metric, and a training-data path for a future Core ML models. EVA can score channels using finite sample rate, amplitude typicality, burst peaks, flatline/clipping, fast noise, slow drift, line-noise proxy, and neighbor agreement when sensor geometry is present.
-
-Segment health applies the same idea across time. EVA can color segments as good, watch, or poor, then show the underlying reasons in a details panel. Labeled artifact overlap is included as a major signal, and the metrics can be exported as JSON for later model training.
+For event-related work, EVA can segment around events and average by category, with per-epoch bad-channel thresholds (amplitude, slope, acceleration) controlling when a channel gets interpolated for a single epoch versus flagged globally. Category averages can also be inspected as butterfly plots, useful for checking whether an effect is broadly distributed, channel-specific, or being driven by a few suspicious traces.
 
 <p align="center">
-  <img src="Figures/readme_ica_health_workflow.png" alt="ICA component labeling with channel and segment health review" width="900">
+  <img src="Figures/readme_epoching_setup.png" alt="Segmentation dialog, category butterfly plots, and per-epoch bad-channel thresholds" width="900">
+</p>
+
+Artifact handling is built around the idea that the user often knows what the artifact looks like before software does. You can highlight a waveform region, define an artifact template from its waveform or scalp topography, choose the channels and matching behavior, and let EVA scan the recording for similar events. Once artifacts are defined, EVA can preview and apply cleaning methods — the app currently supports regression, OBS, SSP/PCA, and several averaging-based approaches.
+
+<p align="center">
+  <img src="Figures/readme_artifact_workflow.png" alt="Artifact definition by waveform and topography, then cleaning-method selection" width="760">
+</p>
+
+ICA is available for component-based cleanup, with a Core ML path for **ICLabel** (using the bundled `ICLabel.mlpackage`) providing per-component labels and confidence. Segment health applies the same explainable scoring idea used for channels across time, coloring segments good/watch/poor and showing the underlying reasons — labeled artifact overlap included — in a details panel, with metrics exportable as JSON for later model training.
+
+<p align="center">
+  <img src="Figures/readme_ica_health_workflow.png" alt="ICA component labeling and per-segment health review" width="900">
+</p>
+
+Once averages are computed, EVA lets you inspect them as waveforms, topomaps, or butterfly plots with a channel inspector and a movable latency cursor. The same segmented data feeds single-trial analysis: pick a channel and an analysis window, and EVA extracts per-trial peak and amplitude values you can export as a trial matrix for further stats.
+
+<p align="center">
+  <img src="Figures/readme_trial_analysis.png" alt="Average inspection and single-trial peak/amplitude analysis" width="820">
 </p>
 
 ## Built For macOS

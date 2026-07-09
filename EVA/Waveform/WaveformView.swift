@@ -221,6 +221,7 @@ struct WaveformView: View {
     @State var channelInspectorSelection: ChannelInspectorSelection = .channel(0)
     @State var channelInspectorOverlayEnabled = true
     @State var channelInspectorShowsStandardError = false
+    @State var averagesLogDetail: AveragesLogDetail?
     @State var showsCategoryGroupPopover = false
     @State var categoryGroupName = ""
     @State var categoryGroupSelectedCodes = Set<String>()
@@ -771,18 +772,12 @@ struct WaveformView: View {
 
             Divider()
 
-            Group {
-                if displayMode == .averages {
-                    averagesWorkspace(for: signal)
-                        .transition(.opacity)
-                } else if displayMode == .trials {
-                    singleTrialAnalysisWorkspace()
-                        .transition(.opacity)
-                } else {
-                    waveformWorkspace(for: signal, events: events, isShowingEpochs: isShowingEpochs)
-                        .transition(.opacity)
-                }
-            }
+            workspaceContent(
+                displayMode: displayMode,
+                signal: signal,
+                events: events,
+                isShowingEpochs: isShowingEpochs
+            )
             .animation(.easeInOut(duration: 0.16), value: displayMode)
         }
         .onAppear {
@@ -890,6 +885,9 @@ struct WaveformView: View {
         }
         .sheet(isPresented: $segHealth.showsDetails) {
             segmentHealthDetailsSheet()
+        }
+        .sheet(item: $averagesLogDetail) { detail in
+            averagesLogDetailSheet(detail)
         }
         .sheet(isPresented: $gradient.showsMotionConfig) {
             MotionConfigView(
@@ -1755,6 +1753,25 @@ struct WaveformView: View {
         eventTrackSourceSummary = EventTrackSourceSummary(events: events, signature: signature)
     }
 
+    @ViewBuilder
+    private func workspaceContent(
+        displayMode: EpochingViewModel.AveragedDisplayMode,
+        signal: MFFSignalData,
+        events: [MFFEvent],
+        isShowingEpochs: Bool
+    ) -> some View {
+        if displayMode == .averages {
+            averagesWorkspace(for: signal)
+                .transition(.opacity)
+        } else if displayMode == .trials {
+            singleTrialAnalysisWorkspace()
+                .transition(.opacity)
+        } else {
+            waveformWorkspace(for: signal, events: events, isShowingEpochs: isShowingEpochs)
+                .transition(.opacity)
+        }
+    }
+
     // MARK: - Topomap panel
 
     @ViewBuilder
@@ -1939,13 +1956,19 @@ struct WaveformView: View {
 
     /// Replaces channel `index` with a spherical-spline interpolation from the
     /// good channels of the currently displayed signal.
-    func interpolate(_ index: Int, in signal: MFFSignalData) {
-        channelStatusMessage = nil
-        channelStatusIsError = false
+    @discardableResult
+    func interpolate(_ index: Int, in signal: MFFSignalData, updatesStatus: Bool = true) -> (message: String, isError: Bool) {
+        if updatesStatus {
+            channelStatusMessage = nil
+            channelStatusIsError = false
+        }
         guard let geometry = electrodeGeometry, geometry.positions[index] != nil else {
-            channelStatusMessage = "No 3D coordinates for Ch \(index + 1); can't interpolate."
-            channelStatusIsError = true
-            return
+            let message = "No 3D coordinates for Ch \(index + 1); can't interpolate."
+            if updatesStatus {
+                channelStatusMessage = message
+                channelStatusIsError = true
+            }
+            return (message, true)
         }
 
         let good = signal.data.indices.filter {
@@ -1957,9 +1980,12 @@ struct WaveformView: View {
             good: good,
             positions: geometry.positions
         ) else {
-            channelStatusMessage = "Couldn't compute interpolation weights for Ch \(index + 1)."
-            channelStatusIsError = true
-            return
+            let message = "Couldn't compute interpolation weights for Ch \(index + 1)."
+            if updatesStatus {
+                channelStatusMessage = message
+                channelStatusIsError = true
+            }
+            return (message, true)
         }
 
         let length = signal.data[index].count
@@ -1974,8 +2000,11 @@ struct WaveformView: View {
         channels.interpolated[index] = series
         channels.interpolationSources[index] = (indices, weights.map(Float.init))
         channels.bad.remove(index)
-        channelStatusMessage = "Interpolated Ch \(index + 1) from \(indices.count) neighbors."
-        channelStatusIsError = false
+        let message = "Interpolated Ch \(index + 1) from \(indices.count) neighbors."
+        if updatesStatus {
+            channelStatusMessage = message
+            channelStatusIsError = false
+        }
         artifactVM.detectionRefreshToken += 1
 
         // Averaging is linear, so applying the SAME interpolation weights to the
@@ -1994,6 +2023,7 @@ struct WaveformView: View {
         } else {
             invalidateEpochsForSignalChange()
         }
+        return (message, false)
     }
 
     /// Re-derives channel `index` in the already-averaged `epoching.epochedSignal`
@@ -2207,12 +2237,6 @@ struct WaveformView: View {
         invalidateInterpolations()
         channels.clearHealthResults()
         chanHealth.signature = nil
-        segHealth.task?.cancel()
-        segHealth.task = nil
-        segHealth.analysis = nil
-        segHealth.signature = nil
-        segHealth.isAnalyzing = false
-        segHealth.progress = 0
         invalidateEpochsForSignalChange()
 
         // Force artifact overlays and downstream views to rebuild from the base.
@@ -2234,12 +2258,11 @@ struct WaveformView: View {
         epoching.averagedDisplayMode = .waveform
         epoching.showsButterflyPlot = false
         epoching.showsOverlaidCategories = false
-        segHealth.task?.cancel()
-        segHealth.task = nil
-        segHealth.analysis = nil
-        segHealth.signature = nil
-        segHealth.isAnalyzing = false
-        segHealth.progress = 0
+        epoching.epochBadChannelSummary.removeAll()
+        epoching.epochBadChannelAllSegmentsSummary.removeAll()
+        epoching.interpolatedChannelsBySegmentSummary.removeAll()
+        epoching.skippedLabeledBadSegmentsSummary.removeAll()
+        segHealth.clearAnalysis(hide: true, clearLabels: true)
     }
 
     // MARK: - SwiftData markers

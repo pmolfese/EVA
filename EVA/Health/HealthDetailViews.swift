@@ -11,38 +11,83 @@
 //  extracted from WaveformView (REFACTOR.md L5). Pure presentation.
 //
 
+import AppKit
 import SwiftUI
 
 struct SegmentHealthBand: View {
     let result: SegmentHealthResult
     let showsMouseOverHealth: Bool
+    let qualityLabel: SegmentQualityLabel?
+    let onLabel: (SegmentQualityLabel?) -> Void
     @State private var showsDetails = false
+    /// Set when the popover was opened via right-click/tap rather than hover,
+    /// so it stays open while the user reads it or picks a label instead of
+    /// closing the instant the pointer drifts off the band.
+    @State private var pinsDetails = false
 
     var body: some View {
         Rectangle()
-            .fill(result.grade.color.opacity(result.grade.segmentOverlayOpacity))
+            .fill(segmentBackgroundColor)
             .overlay(alignment: .leading) {
                 Rectangle()
                     .fill(result.grade.color.opacity(0.28))
                     .frame(width: result.grade == .good ? 0 : 1)
             }
+            .overlay(alignment: .bottom) {
+                if let qualityLabel {
+                    Rectangle()
+                        .fill(qualityLabel == .good ? Color.green : Color.red)
+                        .frame(height: 3)
+                }
+            }
             .contentShape(Rectangle())
+            .onTapGesture {
+                guard NSEvent.modifierFlags.contains(.command) else { return }
+                pinsDetails = true
+                showsDetails = true
+            }
             .onHover { hovering in
                 guard showsMouseOverHealth else {
-                    showsDetails = false
+                    if !pinsDetails { showsDetails = false }
                     return
                 }
-                showsDetails = hovering
+                if !pinsDetails { showsDetails = hovering }
+            }
+            .contextMenu {
+                Button("Show Segment Health") {
+                    pinsDetails = true
+                    showsDetails = true
+                }
+                Divider()
+                Button(qualityLabel == .good ? "Unmark Good" : "Mark as Good") {
+                    onLabel(qualityLabel == .good ? nil : .good)
+                }
+                Button(qualityLabel == .bad ? "Unmark Bad" : "Mark as Bad") {
+                    onLabel(qualityLabel == .bad ? nil : .bad)
+                }
             }
             .popover(isPresented: $showsDetails, arrowEdge: .top) {
-                SegmentHealthPopover(result: result)
+                SegmentHealthPopover(result: result, qualityLabel: qualityLabel, onLabel: onLabel)
             }
             .onChange(of: showsMouseOverHealth) { _, isEnabled in
                 if !isEnabled {
                     showsDetails = false
+                    pinsDetails = false
+                }
+            }
+            .onChange(of: showsDetails) { _, isShowing in
+                if !isShowing {
+                    pinsDetails = false
                 }
             }
             .accessibilityLabel("Segment health \(result.goodPercentage) percent good")
+    }
+
+    private var segmentBackgroundColor: Color {
+        if qualityLabel == .bad {
+            return Color.red.opacity(0.22)
+        }
+        return result.grade.color.opacity(result.grade.segmentOverlayOpacity)
     }
 }
 
@@ -278,6 +323,8 @@ struct SegmentHealthTableRow: View {
 
 struct SegmentHealthPopover: View {
     let result: SegmentHealthResult
+    var qualityLabel: SegmentQualityLabel? = nil
+    var onLabel: ((SegmentQualityLabel?) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -317,6 +364,34 @@ struct SegmentHealthPopover: View {
                 ForEach(result.metrics) { metric in
                     SegmentHealthMetricRow(metric: metric)
                 }
+            }
+
+            if let onLabel {
+                Divider()
+                HStack(spacing: 8) {
+                    Button {
+                        onLabel(qualityLabel == .good ? nil : .good)
+                    } label: {
+                        Label(
+                            qualityLabel == .good ? "Good" : "Mark as Good",
+                            systemImage: qualityLabel == .good ? "checkmark.circle.fill" : "checkmark.circle"
+                        )
+                    }
+                    .tint(.green)
+
+                    Button {
+                        onLabel(qualityLabel == .bad ? nil : .bad)
+                    } label: {
+                        Label(
+                            qualityLabel == .bad ? "Bad" : "Mark as Bad",
+                            systemImage: qualityLabel == .bad ? "xmark.circle.fill" : "xmark.circle"
+                        )
+                    }
+                    .tint(.red)
+
+                    Spacer()
+                }
+                .buttonStyle(.bordered)
             }
         }
         .padding(12)

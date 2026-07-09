@@ -505,9 +505,11 @@ struct ChannelInspectorPlot: View {
     let colorFor: (Int) -> Color
     var channelName: ((Int) -> String)? = nil
     var highlightRelativeSample: Int? = nil
+    var onScrubRelativeSample: ((Int) -> Void)? = nil
     var standardErrorBands: [String: ChannelInspectorStandardErrorBand] = [:]
 
     @State private var hoverInfo: ChannelInspectorHoverInfo?
+    @State private var liveScrubRelativeSample: Int?
 
     var body: some View {
         GeometryReader { proxy in
@@ -562,7 +564,7 @@ struct ChannelInspectorPlot: View {
                          in: &context, color: color, opacity: 0.95, lineWidth: 1.6)
                 }
 
-                if let first = segments.first, let highlightRelativeSample {
+                if let first = segments.first, let highlightRelativeSample = liveScrubRelativeSample ?? highlightRelativeSample {
                     let length = max(first.endSample - first.startSample + 1, 1)
                     if length > 1 {
                         let clamped = min(max(highlightRelativeSample, 0), length - 1)
@@ -586,6 +588,19 @@ struct ChannelInspectorPlot: View {
                     hoverInfo = nil
                 }
             }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 6, coordinateSpace: .local)
+                    .onChanged { value in
+                        guard onScrubRelativeSample != nil else { return }
+                        liveScrubRelativeSample = relativeSample(forX: value.location.x, width: proxy.size.width)
+                    }
+                    .onEnded { value in
+                        guard let onScrubRelativeSample else { return }
+                        let sample = relativeSample(forX: value.location.x, width: proxy.size.width)
+                        liveScrubRelativeSample = nil
+                        onScrubRelativeSample(sample)
+                    }
+            )
             .overlay(alignment: .topTrailing) {
                 if let hoverInfo {
                     ButterflyChannelBadge(
@@ -659,6 +674,14 @@ struct ChannelInspectorPlot: View {
             valueMicrovolts: best.value,
             detail: best.detail
         )
+    }
+
+    private func relativeSample(forX x: CGFloat, width: CGFloat) -> Int {
+        guard let first = segments.first else { return 0 }
+        let length = max(first.endSample - first.startSample + 1, 1)
+        guard length > 1, width > 0 else { return 0 }
+        let xScale = width / CGFloat(length - 1)
+        return min(max(Int((x / xScale).rounded()), 0), length - 1)
     }
 
     private func consider(

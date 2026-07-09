@@ -397,8 +397,14 @@ extension WaveformView {
     /// settings, not this file's resulting channel/epoch decisions.
     func currentProcessingAuditLogLines() -> [String] {
         var lines: [String] = []
+        if !epoching.skippedLabeledBadSegmentsSummary.isEmpty {
+            lines.append("segment result: skippedLabeledBadSegments=\(epoching.skippedLabeledBadSegmentsSummary.joined(separator: "; "))")
+        }
         if !epoching.epochBadChannelSummary.isEmpty {
             lines.append("segment result: perEpochBadChannels=\(epoching.epochBadChannelSummary.joined(separator: "; "))")
+        }
+        if !epoching.epochBadChannelAllSegmentsSummary.isEmpty {
+            lines.append("segment result: badChannelsInAllKeptSegments=\(epoching.epochBadChannelAllSegmentsSummary.joined(separator: ", "))")
         }
         if !channels.interpolated.isEmpty {
             var fields = [

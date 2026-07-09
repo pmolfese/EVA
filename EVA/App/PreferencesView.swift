@@ -116,6 +116,16 @@ private struct ProcessingDefaultsView: View {
             }
 
             Section {
+                Toggle("Run segment health automatically after segmentation", isOn: $defaults.autoRunSegmentHealthAfterSegmentation)
+            } header: {
+                Text("Segment Health")
+            } footer: {
+                Text("When on, PSA segmentation automatically turns on Segment Health and scores the newly created segments.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 HStack {
                     Spacer()
                     Button("Restore Defaults") { defaults.restoreDefaults() }

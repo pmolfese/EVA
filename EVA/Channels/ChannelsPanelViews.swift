@@ -392,7 +392,9 @@ extension WaveformView {
                     let endX = contentX(forSample: end, in: signal)
                     SegmentHealthBand(
                         result: result,
-                        showsMouseOverHealth: segHealth.showsMouseOver
+                        showsMouseOverHealth: segHealth.showsMouseOver,
+                        qualityLabel: segHealth.qualityLabels[result.segmentID],
+                        onLabel: { segHealth.setQualityLabel($0, for: result.segmentID) }
                     )
                         .frame(width: max(endX - startX, 2))
                         .frame(maxHeight: .infinity)

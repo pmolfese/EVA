@@ -348,7 +348,7 @@ extension WaveformView {
                                         colorRange: colorRange,
                                         zScaling: zScaling,
                                         channelName: { eegChannelDisplayName(index: $0, signal: signal) },
-                                        onTapChannel: { openChannelInspector(channel: $0) }
+                                        onTapChannel: { scrollToChannelRequest = $0 }
                                     )
                                     .frame(height: 320)
                                 }

@@ -423,6 +423,7 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
     var candidateEvents = 0
     var acceptedEpochs = 0
     var outputSegments = 0
+    var skippedLabeledBadSegments = 0
     var skippedArtifacts = 0
     var skippedArtifactBreakdown: [String: Int] = [:]
     var skippedTimingMarkers = 0
@@ -431,8 +432,12 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
     var rejectedForTooManyBadChannels = 0
     var badChannelCount = 0
 
+    var keptEpochs: Int {
+        max(acceptedEpochs - skippedLabeledBadSegments, 0)
+    }
+
     var excludedEpochs: Int {
-        skippedArtifacts + skippedTimingMarkers + skippedOutOfBounds + rejectedForTooManyBadChannels
+        skippedLabeledBadSegments + skippedArtifacts + skippedTimingMarkers + skippedOutOfBounds + rejectedForTooManyBadChannels
     }
 
     var hasExclusions: Bool {
@@ -456,16 +461,30 @@ nonisolated struct PSABuildResult {
     /// must capture it from the raw `buildEpochs()` result directly (see
     /// `applyPSA(to:)`), not from `finalResult`.
     var rejectedForTooManyBadChannels: Int = 0
+    /// Channels that were flagged bad in every accepted segment that survived
+    /// PSA's build stage, using the kept-segment numbering shown to the user.
+    var epochBadChannelsInAllAcceptedSegments: [Int] = []
+    /// Channel index -> 1-based accepted segment numbers where that channel
+    /// was flagged bad and therefore interpolated within the segment.
+    var interpolatedChannelSegments: [Int: [Int]] = [:]
     var exclusionSummary = PSAExclusionSummary()
 
     /// Averages each category's epochs. Runs off the main thread.
-    func average(colorIndices: [String: Int]) -> PSABuildResult? {
+    ///
+    /// - Parameter excludedIndices: Indices into `segments` (matching
+    ///   `SegmentHealthAnalyzer.segmentID(index:segment:)`'s indexing) to drop
+    ///   before averaging — e.g. segments the user manually labeled "Bad" in
+    ///   Segment Health, when "Skip if labeled Bad" is on.
+    func average(colorIndices: [String: Int], excludedIndices: Set<Int> = []) -> PSABuildResult? {
         guard signal.samplingRate > 0, !segments.isEmpty,
               let firstSegment = segments.first else { return nil }
         let epochLength = firstSegment.endSample - firstSegment.startSample + 1
         guard epochLength > 0 else { return nil }
 
-        let groupedSegments = Dictionary(grouping: segments, by: \.category)
+        let includedSegments = excludedIndices.isEmpty
+            ? segments
+            : segments.enumerated().filter { !excludedIndices.contains($0.offset) }.map(\.element)
+        let groupedSegments = Dictionary(grouping: includedSegments, by: \.category)
         let orderedCategories = groupedSegments.keys.sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
         }
@@ -803,14 +822,22 @@ nonisolated struct PSABuildJob: Sendable {
         var epochedData = Array(repeating: [Float](), count: signal.numberOfChannels)
         var epochedEvents: [MFFEvent] = []
         var segments: [EpochSegment] = []
+        var interpolatedChannelSegments: [Int: [Int]] = [:]
+        var outputStartSample = 0
 
         for (jobIndex, job) in jobs.enumerated() {
             guard let slice = slices[jobIndex] else { continue }
+            let acceptedSegmentNumber = segments.count + 1
+            if interpolatesBadChannelsPerEpoch, let badSet = jobBadChannels[jobIndex], !badSet.isEmpty {
+                for channel in badSet.sorted() {
+                    interpolatedChannelSegments[channel, default: []].append(acceptedSegmentNumber)
+                }
+            }
             for channelIndex in epochedData.indices {
                 epochedData[channelIndex].append(contentsOf: slice[channelIndex])
             }
 
-            let epochStart = jobIndex * epochLength
+            let epochStart = outputStartSample
             let stimulusSample = epochStart + preSamples
             let stimulusTime = Double(stimulusSample) / signal.samplingRate
             epochedEvents.append(MFFEvent(
@@ -830,6 +857,7 @@ nonisolated struct PSABuildJob: Sendable {
                 colorIndex: colorIndices[job.category] ?? 0,
                 contributingEpochCount: 1
             ))
+            outputStartSample += epochLength
         }
 
         let accepted = segments.count
@@ -857,6 +885,9 @@ nonisolated struct PSABuildJob: Sendable {
                 message += ", \(rejectedForTooManyBadChannels) epoch\(rejectedForTooManyBadChannels == 1 ? "" : "s") rejected for too many bad channels"
             }
         }
+        let epochBadChannelsInAllAcceptedSegments = accepted > 0
+            ? interpolatedChannelSegments.keys.sorted().filter { interpolatedChannelSegments[$0]?.count == accepted }
+            : []
         return PSABuildResult(
             signal: epochedSignal,
             segments: segments,
@@ -864,6 +895,8 @@ nonisolated struct PSABuildJob: Sendable {
             epochBadChannelCounts: epochBadChannelCounts,
             totalEpochsEvaluated: jobs.count,
             rejectedForTooManyBadChannels: rejectedForTooManyBadChannels,
+            epochBadChannelsInAllAcceptedSegments: epochBadChannelsInAllAcceptedSegments,
+            interpolatedChannelSegments: interpolatedChannelSegments,
             exclusionSummary: PSAExclusionSummary(
                 candidateEvents: events.count,
                 acceptedEpochs: accepted,

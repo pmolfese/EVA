@@ -37,6 +37,7 @@ final class ProcessingDefaults {
         static let bcgDefaultMethodRaw = "bcgDefaultMethodRaw"
         static let artifactDetectionDefaultMethodRaw = "artifactDetectionDefaultMethodRaw"
         static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
+        static let autoRunSegmentHealthAfterSegmentation = "autoRunSegmentHealthAfterSegmentation"
     }
 
     private enum Defaults {
@@ -50,6 +51,7 @@ final class ProcessingDefaults {
         static let bcgDefaultMethodRaw = "spatialPCA"
         static let artifactDetectionDefaultMethodRaw = ArtifactDetectionMethod.threshold.rawValue
         static let interpolatedHealthFromNeighbors = true
+        static let autoRunSegmentHealthAfterSegmentation = false
     }
 
     // MARK: Filter defaults
@@ -116,6 +118,12 @@ final class ProcessingDefaults {
         set { UserDefaults.standard.set(newValue, forKey: Keys.interpolatedHealthFromNeighbors) }
     }
 
+    // MARK: Segment-health defaults
+    var autoRunSegmentHealthAfterSegmentation: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.autoRunSegmentHealthAfterSegmentation) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.autoRunSegmentHealthAfterSegmentation) }
+    }
+
     /// Legacy single-blob key from before the per-key UserDefaults refactor.
     private static let legacyKey = "ProcessingDefaults.v1"
 
@@ -131,6 +139,7 @@ final class ProcessingDefaults {
             Keys.bcgDefaultMethodRaw: Defaults.bcgDefaultMethodRaw,
             Keys.artifactDetectionDefaultMethodRaw: Defaults.artifactDetectionDefaultMethodRaw,
             Keys.interpolatedHealthFromNeighbors: Defaults.interpolatedHealthFromNeighbors,
+            Keys.autoRunSegmentHealthAfterSegmentation: Defaults.autoRunSegmentHealthAfterSegmentation,
         ])
         migrateLegacyBlobIfNeeded()
     }
@@ -163,6 +172,7 @@ final class ProcessingDefaults {
         bcgDefaultMethodRaw = Defaults.bcgDefaultMethodRaw
         artifactDetectionDefaultMethodRaw = Defaults.artifactDetectionDefaultMethodRaw
         interpolatedHealthFromNeighbors = Defaults.interpolatedHealthFromNeighbors
+        autoRunSegmentHealthAfterSegmentation = Defaults.autoRunSegmentHealthAfterSegmentation
     }
 
     /// Shape of the pre-refactor persisted blob, kept only for migration.
