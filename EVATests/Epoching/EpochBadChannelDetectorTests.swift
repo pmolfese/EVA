@@ -296,6 +296,9 @@ struct PSABuildJobEpochRejectionTests {
         let result = await makeJob(thresholds: thresholds).buildEpochs()
         // Only the clean (t=5s) epoch survives; the spiked one is rejected.
         #expect(result?.segments.count == 1)
+        #expect(result?.segments.first?.startSample == 0)
+        #expect(result?.segments.first?.endSample == 49)
+        #expect(result?.signal.data.first?.count == 50)
         #expect(result?.message.contains("rejected") == true)
         // Still counted toward the escalation tally even though rejected.
         #expect(result?.epochBadChannelCounts[0] == 1)
@@ -325,6 +328,9 @@ struct PSABuildJobEpochRejectionTests {
         )
         let result = await makeJob(thresholds: thresholds).buildEpochs()
         #expect(result?.segments.count == 1)
+        #expect(result?.segments.first?.startSample == 0)
+        #expect(result?.segments.first?.endSample == 49)
+        #expect(result?.signal.data.first?.count == 50)
         #expect(result?.message.contains("rejected") == true)
         #expect(result?.epochBadChannelCounts[0] == 1)
         #expect(result?.totalEpochsEvaluated == 2)

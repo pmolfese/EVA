@@ -30,12 +30,13 @@ enum HeadlessBatchProcessor {
     }
 
     /// Loads `url`, applies `script`'s steps via a fresh `ProcessingCore`, and
-    /// (on full success) writes `<name>-processed.mff` into `outputFolder`.
+    /// writes an output named for the final export kind into `outputFolder`.
     @MainActor
     static func process(
         url: URL,
         script: EVAProcessingScript,
-        outputFolder: URL
+        outputFolder: URL,
+        progress: ((ProcessingCore.ProgressUpdate) -> Void)? = nil
     ) async throws -> Outcome {
         let (signal, pnsSignal) = try await Task.detached(priority: .userInitiated) {
             let reader = MFFReader()
@@ -55,7 +56,7 @@ enum HeadlessBatchProcessor {
             wavelet: WaveletReductionViewModel(store: store)
         )
 
-        let result = await core.applyAutoSteps(script, to: signal, pnsSignal: pnsSignal)
+        let result = await core.applyAutoSteps(script, to: signal, pnsSignal: pnsSignal, progress: progress)
         guard result.remainingSteps.isEmpty, let output = result.signal else {
             return .needsInput
         }
@@ -72,9 +73,11 @@ enum HeadlessBatchProcessor {
         }
 
         let baseName = url.deletingPathExtension().lastPathComponent
-        let outputURL = outputFolder.appendingPathComponent("\(baseName)-processed.mff")
+        let outputURL = outputFolder.appendingPathComponent("\(baseName)-\(snapshot.kind.replayOutputSuffix).mff")
+        progress?(ProcessingCore.ProgressUpdate(stepName: "Exporting", stepProgress: nil, fileProgress: 0.95))
         switch await MFFExportWriter.write(snapshot: snapshot, pnsSignal: pnsSignal, script: script, to: outputURL) {
         case .success:
+            progress?(ProcessingCore.ProgressUpdate(stepName: "Exporting", stepProgress: 1, fileProgress: 1))
             return .completed(outputURL)
         case .failure(let error):
             throw error

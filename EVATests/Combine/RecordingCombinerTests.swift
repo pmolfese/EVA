@@ -169,6 +169,36 @@ struct RecordingCombinerTests {
         #expect(result?.segments.first?.contributingEpochCount == 2)
     }
 
+    @Test func categoryMatcherKeepsShortEventCodesDistinct() {
+        let a = URL(fileURLWithPath: "/tmp/run1.mff")
+        let b = URL(fileURLWithPath: "/tmp/run2.mff")
+
+        let result = CategoryMatcher.autoMap(rawCategoriesByFile: [
+            a: ["LC++", "LI++", "RC++", "RI++"],
+            b: ["LC++", "LI++", "RC++", "RI++"],
+        ])
+
+        #expect(result.map[a]?["LC++"] == "LC++")
+        #expect(result.map[a]?["LI++"] == "LI++")
+        #expect(result.map[a]?["RC++"] == "RC++")
+        #expect(result.map[a]?["RI++"] == "RI++")
+        #expect(Set((result.map[a] ?? [:]).values) == ["LC++", "LI++", "RC++", "RI++"])
+        #expect(result.map[b] == result.map[a])
+    }
+
+    @Test func categoryMatcherStillMergesCaseAndSpacingVariants() {
+        let a = URL(fileURLWithPath: "/tmp/run1.mff")
+        let b = URL(fileURLWithPath: "/tmp/run2.mff")
+
+        let result = CategoryMatcher.autoMap(rawCategoriesByFile: [
+            a: ["Target"],
+            b: ["target "],
+        ])
+
+        #expect(result.map[a]?["Target"] == "Target")
+        #expect(result.map[b]?["target "] == "Target")
+    }
+
     @Test func grandAverageByTrialCountWeightsLargerFileMore() {
         // File `a` contributes 1 trial at value 0, file `b` contributes 3 trials at
         // value 10. Equal-per-file weighting would average to 5; trial-count

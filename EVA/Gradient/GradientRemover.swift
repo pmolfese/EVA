@@ -93,6 +93,16 @@ struct GradientRemover {
         case regress
     }
 
+    /// How donor TRs are selected for each template. The side-window mode is
+    /// EVA's original gradient-remover path. The AMRI mode mirrors
+    /// `amri_eeg_gac.m`'s centered moving window: expand edge windows to keep
+    /// the requested size where possible, exclude the current/ignored/outlier
+    /// epochs, and avoid epochs closer than the AMRI no-window interval.
+    enum DonorSelection: Sendable {
+        case sideWindow
+        case amriMovingWindow
+    }
+
     /// Runs gradient correction on `channels` (shape: channels × time).
     ///
     /// - Parameters:
@@ -117,6 +127,9 @@ struct GradientRemover {
         excludedTRs: Set<Int> = [],
         reducer: TemplateReducer = .weightedMean,
         fit: TemplateFit = .subtract,
+        donorSelection: DonorSelection = .sideWindow,
+        samplingRate: Double? = nil,
+        amriNoWindowSeconds: Double = 0.3,
         progress: (@Sendable (Double) -> Void)? = nil
     ) throws -> [[Float]] {
         try Task.checkCancellation()
@@ -172,7 +185,10 @@ struct GradientRemover {
                     weightAfter: weightAfter,
                     excludedTRs: excludedTRs,
                     reducer: reducer,
-                    fit: fit
+                    fit: fit,
+                    donorSelection: donorSelection,
+                    samplingRate: samplingRate,
+                    amriNoWindowSeconds: amriNoWindowSeconds
                 )
 
                 if let progress {
@@ -202,7 +218,10 @@ struct GradientRemover {
         weightAfter: Float,
         excludedTRs: Set<Int> = [],
         reducer: TemplateReducer = .weightedMean,
-        fit: TemplateFit = .subtract
+        fit: TemplateFit = .subtract,
+        donorSelection: DonorSelection = .sideWindow,
+        samplingRate: Double? = nil,
+        amriNoWindowSeconds: Double = 0.3
     ) -> [Float] {
         // Detrend every TR segment once (Python caches detrended TRs lazily).
         var detrended = [[Float]]()
@@ -216,29 +235,59 @@ struct GradientRemover {
         var row = channel
         var template = [Float](repeating: 0, count: spacing)
         var corrected = [Float](repeating: 0, count: spacing)
+        let usesAMRIDonorSelection: Bool
+        switch donorSelection {
+        case .sideWindow: usesAMRIDonorSelection = false
+        case .amriMovingWindow: usesAMRIDonorSelection = true
+        }
+        let outlierTRs = usesAMRIDonorSelection ? correlationOutliers(in: detrended) : []
+        let minimumDistanceTRs: Int
+        if usesAMRIDonorSelection,
+           let samplingRate,
+           samplingRate > 0,
+           amriNoWindowSeconds > 0 {
+            minimumDistanceTRs = max(Int((amriNoWindowSeconds * samplingRate / Double(spacing)).rounded()), 0)
+        } else {
+            minimumDistanceTRs = 0
+        }
 
         for n in 0..<nTR {
             guard !Task.isCancelled else { return channel }
             let start = offset + n * spacing
 
-            // Edge TRs get no template (Python `get_tr_template`): detrended only.
-            //
-            // Upstream guard was `n > (n_tr - window.after)`, which paired with
-            // the original (buggy) narrow "after" range. We widen the "after"
-            // range below to be symmetric with "before", so the last templated TR
-            // now reaches detrended[n + window.after]; the guard is tightened to
-            // `n > nTR - window.after - 1` to keep that access in bounds.
-            // See the correctness note on the "after" accumulation below.
-            if n < window.before || n > (nTR - window.after - 1) {
-                row.replaceSubrange(start..<(start + spacing), with: detrended[n])
-                continue
-            }
-
             // Donor TR indices on each side, dropping excluded (e.g. high-motion)
             // TRs. When `excludedTRs` is empty these are the full ranges, so the
             // template is identical to the unfiltered case.
-            let beforeIdx = ((n - window.before)..<n).filter { !excludedTRs.contains($0) }
-            let afterIdx = ((n + 1)..<(n + window.after + 1)).filter { !excludedTRs.contains($0) }
+            let beforeIdx: [Int]
+            let afterIdx: [Int]
+            switch donorSelection {
+            case .sideWindow:
+                // Edge TRs get no template (Python `get_tr_template`): detrended only.
+                //
+                // Upstream guard was `n > (n_tr - window.after)`, which paired with
+                // the original (buggy) narrow "after" range. We widen the "after"
+                // range below to be symmetric with "before", so the last templated TR
+                // now reaches detrended[n + window.after]; the guard is tightened to
+                // `n > nTR - window.after - 1` to keep that access in bounds.
+                // See the correctness note on the "after" accumulation below.
+                if n < window.before || n > (nTR - window.after - 1) {
+                    row.replaceSubrange(start..<(start + spacing), with: detrended[n])
+                    continue
+                }
+                beforeIdx = ((n - window.before)..<n).filter { !excludedTRs.contains($0) }
+                afterIdx = ((n + 1)..<(n + window.after + 1)).filter { !excludedTRs.contains($0) }
+
+            case .amriMovingWindow:
+                let indices = amriWindowIndices(center: n, before: window.before, after: window.after, count: nTR)
+                    .filter {
+                        $0 != n
+                            && !excludedTRs.contains($0)
+                            && !outlierTRs.contains($0)
+                            && abs($0 - n) > minimumDistanceTRs
+                    }
+                beforeIdx = indices.filter { $0 < n }
+                afterIdx = indices.filter { $0 > n }
+            }
 
             // If both sides are fully censored, leave the TR detrended (as at the
             // edges) — better than subtracting an empty template.
@@ -346,6 +395,53 @@ struct GradientRemover {
             result[i] = column.count % 2 == 0 ? (column[mid - 1] + column[mid]) / 2 : column[mid]
         }
         return result
+    }
+
+    nonisolated private static func amriWindowIndices(center: Int, before: Int, after: Int, count: Int) -> [Int] {
+        guard count > 0 else { return [] }
+        let targetCount = min(max(before + after + 1, 1), count)
+        var start = max(center - before, 0)
+        var end = min(center + after, count - 1)
+        let missing = targetCount - (end - start + 1)
+        if missing > 0 {
+            if start == 0 {
+                end = min(count - 1, end + missing)
+            } else if end == count - 1 {
+                start = max(0, start - missing)
+            }
+        }
+        return Array(start...end)
+    }
+
+    nonisolated private static func correlationOutliers(in segments: [[Float]]) -> Set<Int> {
+        guard segments.count >= 4, let length = segments.first?.count, length > 1 else { return [] }
+        let medianTemplate = elementwiseMedian(of: segments, indices: Array(segments.indices), length: length)
+        let correlations = segments.map { pearson($0, medianTemplate) }
+        let sorted = correlations.sorted()
+        let q1 = sorted[max(0, min(sorted.count - 1, Int((Double(sorted.count) * 0.25).rounded()) - 1))]
+        let q3 = sorted[max(0, min(sorted.count - 1, Int((Double(sorted.count) * 0.75).rounded()) - 1))]
+        let iqr = max(q3 - q1, 0)
+        let threshold = q1 - 4 * iqr
+        return Set(correlations.indices.filter { correlations[$0] < threshold })
+    }
+
+    nonisolated private static func pearson(_ a: [Float], _ b: [Float]) -> Double {
+        guard a.count == b.count, a.count > 1 else { return 0 }
+        let meanA = Double(a.reduce(0, +)) / Double(a.count)
+        let meanB = Double(b.reduce(0, +)) / Double(b.count)
+        var aa = 0.0
+        var bb = 0.0
+        var ab = 0.0
+        for i in a.indices {
+            let da = Double(a[i]) - meanA
+            let db = Double(b[i]) - meanB
+            aa += da * da
+            bb += db * db
+            ab += da * db
+        }
+        let denom = (aa * bb).squareRoot()
+        guard denom > 1e-12 else { return 0 }
+        return ab / denom
     }
 
     /// Least-squares scalar fit of `template ≈ k · y`: `k = dot(y, template) / dot(y, y)`.

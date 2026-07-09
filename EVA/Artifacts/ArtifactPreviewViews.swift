@@ -13,6 +13,9 @@
 //
 
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 struct ArtifactTemplateFieldLabel: View {
     let title: String
@@ -503,88 +506,136 @@ struct ArtifactLocalTemplateOptionsButton: View {
         }
         .font(.caption)
         .popover(isPresented: $showsOptions) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("\(artifact.cleaningMethod.rawValue) Options")
-                    .font(.headline)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("\(artifact.cleaningMethod.rawValue) Options")
+                        .font(.headline)
 
-                if artifact.cleaningMethod.isLocalTemplateMethod {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Window size")
-                                .font(.caption)
-                            Spacer()
-                            Stepper(
-                                "\(artifact.localTemplateWindowSize) events",
-                                value: Binding(
-                                    get: { artifact.localTemplateWindowSize },
-                                    set: { newValue in
-                                        artifact.localTemplateWindowSize = newValue
-                                        onSettingsChange()
-                                    }
-                                ),
-                                in: DefinedArtifact.minimumLocalTemplateWindowSize...DefinedArtifact.maximumLocalTemplateWindowSize,
-                                step: 2
-                            )
+                    if artifact.cleaningMethod.isLocalTemplateMethod {
+                        if artifact.type == .bcg {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Toggle(
+                                    "AMRI BCG epoch preprocessing",
+                                    isOn: Binding(
+                                        get: { artifact.localTemplateUsesAMRIPreprocessing },
+                                        set: { newValue in
+                                            artifact.localTemplateUsesAMRIPreprocessing = newValue
+                                            onSettingsChange()
+                                        }
+                                    )
+                                )
+                                .toggleStyle(.checkbox)
+                                Text("Matches amri_eeg_cbc.m's R-marker preprocessing: estimate each channel's median-power BCG delay, shift all windows by that delay, and mean-center epochs before template building. Leave off when events are already centered.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+
+                            Divider()
                         }
-                        Text("Number of neighboring events (centered on the current one) used to build each local template.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
 
-                    if artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar {
-                        Divider()
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Text("Decay factor")
+                                Text("Window size")
                                     .font(.caption)
                                 Spacer()
-                                Text(String(format: "%.2f", artifact.waasDecayFactor))
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
+                                Stepper(
+                                    "\(artifact.localTemplateWindowSize) events",
+                                    value: Binding(
+                                        get: { artifact.localTemplateWindowSize },
+                                        set: { newValue in
+                                            artifact.localTemplateWindowSize = newValue
+                                            onSettingsChange()
+                                        }
+                                    ),
+                                    in: DefinedArtifact.minimumLocalTemplateWindowSize...DefinedArtifact.maximumLocalTemplateWindowSize,
+                                    step: 2
+                                )
                             }
-                            Slider(
-                                value: Binding(
-                                    get: { artifact.waasDecayFactor },
-                                    set: { newValue in
-                                        artifact.waasDecayFactor = newValue
-                                        onSettingsChange()
-                                    }
-                                ),
-                                in: 0.5...0.99
-                            )
-                            Text("Weight of an event at distance d is decay^d — lower values favor nearby events more strongly (Goldman 2000).")
+                            Text(artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar
+                                 ? "Number of neighboring events used when AMRI global weighting is off. MAS/MAR always use this centered local window."
+                                 : "Number of neighboring events (centered on the current one) used to build each local template.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                    }
 
-                    Divider()
+                        if artifact.cleaningMethod == .waas || artifact.cleaningMethod == .waar {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 4) {
+                                Toggle(
+                                    "AMRI global weighting",
+                                    isOn: Binding(
+                                        get: { artifact.waasUsesAMRIGlobalWeights },
+                                        set: { newValue in
+                                            artifact.waasUsesAMRIGlobalWeights = newValue
+                                            onSettingsChange()
+                                        }
+                                    )
+                                )
+                                .toggleStyle(.checkbox)
+                                Text("Matches amri_eeg_cbc.m: every valid event contributes with weight decay^distance, including the current event. Turn off to use EVA's local moving window.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle(
-                            "Preserve local baseline",
-                            isOn: Binding(
-                                get: { artifact.localTemplatePreservesLocalBaseline },
-                                set: { newValue in
-                                    artifact.localTemplatePreservesLocalBaseline = newValue
-                                    onSettingsChange()
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("Decay factor")
+                                        .font(.caption)
+                                    Spacer()
+                                    Text(String(format: "%.2f", artifact.waasDecayFactor))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
                                 }
-                            )
-                        )
-                        .toggleStyle(.checkbox)
-                        Text("De-trends the correction so it matches the local signal's baseline at both edges of the window, instead of risking a DC/linear-drift step relative to the surrounding signal. Same mechanism as OBS's.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                                Slider(
+                                    value: Binding(
+                                        get: { artifact.waasDecayFactor },
+                                        set: { newValue in
+                                            artifact.waasDecayFactor = newValue
+                                            onSettingsChange()
+                                        }
+                                    ),
+                                    in: 0.5...0.99
+                                )
+                                Text("Weight of an event at distance d is decay^d — lower values favor nearby events more strongly (Goldman 2000).")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 10) {
-                            Text("Edge taper")
-                                .font(.caption)
-                            Slider(
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle(
+                                "Preserve local baseline",
+                                isOn: Binding(
+                                    get: { artifact.localTemplatePreservesLocalBaseline },
+                                    set: { newValue in
+                                        artifact.localTemplatePreservesLocalBaseline = newValue
+                                        onSettingsChange()
+                                    }
+                                )
+                            )
+                            .toggleStyle(.checkbox)
+                            Text("De-trends the correction so it matches the local signal's baseline at both edges of the window, instead of risking a DC/linear-drift step relative to the surrounding signal. Same mechanism as OBS's.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Edge taper")
+                                    .font(.caption)
+                                Spacer()
+                                Text("\(Int((artifact.localTemplateEdgeTaperSeconds * 1000).rounded())) ms")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            AlwaysVisibleSlider(
                                 value: Binding(
                                     get: { artifact.localTemplateEdgeTaperSeconds },
                                     set: { newValue in
@@ -592,44 +643,148 @@ struct ArtifactLocalTemplateOptionsButton: View {
                                         onSettingsChange()
                                     }
                                 ),
-                                in: 0...DefinedArtifact.maximumLocalTemplateEdgeTaperSeconds,
+                                range: 0...DefinedArtifact.maximumLocalTemplateEdgeTaperSeconds,
                                 step: 0.01
                             )
-                            Text("\(Int((artifact.localTemplateEdgeTaperSeconds * 1000).rounded())) ms")
-                                .font(.caption.monospacedDigit())
+                            Text("Fades the subtraction in/out smoothly over this many seconds at each edge of the window, instead of cutting off sharply at the boundary. Bounded to half the (possibly per-event) window length.")
+                                .font(.caption2)
                                 .foregroundStyle(.secondary)
-                                .frame(width: 50, alignment: .trailing)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        Text("Fades the subtraction in/out smoothly over this many seconds at each edge of the window, instead of cutting off sharply at the boundary. Bounded to half the (possibly per-event) window length.")
+
+                        Divider()
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(
+                            "Use each event's own duration",
+                            isOn: Binding(
+                                get: { artifact.usesVariableEventDuration },
+                                set: { newValue in
+                                    artifact.usesVariableEventDuration = newValue
+                                    onSettingsChange()
+                                }
+                            )
+                        )
+                        .toggleStyle(.checkbox)
+                        Text("Sizes each event's correction window from its own measured duration instead of one shared window — needed for artifacts whose events genuinely vary in length (e.g. Continuous topography scanning). Leave off when events cluster around one duration. Not available for OBS/SSP-PCA, which pool every event into one shared basis and require uniform-length epochs.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-
-                    Divider()
                 }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle(
-                        "Use each event's own duration",
-                        isOn: Binding(
-                            get: { artifact.usesVariableEventDuration },
-                            set: { newValue in
-                                artifact.usesVariableEventDuration = newValue
-                                onSettingsChange()
-                            }
-                        )
-                    )
-                    .toggleStyle(.checkbox)
-                    Text("Sizes each event's correction window from its own measured duration instead of one shared window — needed for artifacts whose events genuinely vary in length (e.g. Continuous topography scanning). Leave off when events cluster around one duration. Not available for OBS/SSP-PCA, which pool every event into one shared basis and require uniform-length epochs.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                .padding(16)
             }
-            .padding(16)
-            .frame(width: 320)
+            .frame(width: 400)
+            .frame(maxHeight: 560)
         }
+    }
+}
+
+private struct AlwaysVisibleSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+
+    @State private var isHovered = false
+
+    private var clampedValue: Double {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    private var fraction: Double {
+        let span = range.upperBound - range.lowerBound
+        guard span > 0 else { return 0 }
+        return (clampedValue - range.lowerBound) / span
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
+            let thumbDiameter: CGFloat = isHovered ? 24 : 22
+            let thumbRadius = thumbDiameter / 2
+            let trackStart = thumbRadius
+            let trackWidth = max(width - thumbDiameter, 1)
+            let thumbCenter = trackStart + CGFloat(fraction) * trackWidth
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.secondary.opacity(0.20))
+                    .frame(width: trackWidth, height: 8)
+                    .offset(x: trackStart)
+
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: max(0, thumbCenter - trackStart), height: 8)
+                    .offset(x: trackStart)
+
+                ForEach(0...10, id: \.self) { tick in
+                    Circle()
+                        .fill(Color.secondary.opacity(0.26))
+                        .frame(width: 3, height: 3)
+                        .offset(
+                            x: trackStart + CGFloat(tick) / 10 * trackWidth - 1.5,
+                            y: 11
+                        )
+                }
+
+                Circle()
+                    .fill(thumbFill)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.secondary.opacity(0.55), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.24), radius: 3, x: 0, y: 1)
+                    .frame(width: thumbDiameter, height: thumbDiameter)
+                    .offset(x: thumbCenter - thumbRadius)
+                    .animation(.easeOut(duration: 0.10), value: isHovered)
+            }
+            .frame(height: 28)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { gesture in
+                        updateValue(from: gesture.location.x, trackStart: trackStart, trackWidth: trackWidth)
+                    }
+            )
+            .onHover { isHovered = $0 }
+        }
+        .frame(height: 28)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Edge taper")
+        .accessibilityValue("\(Int((clampedValue * 1000).rounded())) ms")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment:
+                value = snapped(clampedValue + step)
+            case .decrement:
+                value = snapped(clampedValue - step)
+            @unknown default:
+                break
+            }
+        }
+        .help("Drag to adjust edge taper")
+    }
+
+    private var thumbFill: Color {
+        #if os(macOS)
+        Color(nsColor: .controlBackgroundColor)
+        #else
+        Color.white
+        #endif
+    }
+
+    private func updateValue(from locationX: CGFloat, trackStart: CGFloat, trackWidth: CGFloat) {
+        let rawFraction = min(max((locationX - trackStart) / trackWidth, 0), 1)
+        let rawValue = range.lowerBound + Double(rawFraction) * (range.upperBound - range.lowerBound)
+        value = snapped(rawValue)
+    }
+
+    private func snapped(_ rawValue: Double) -> Double {
+        let clamped = min(max(rawValue, range.lowerBound), range.upperBound)
+        guard step > 0 else { return clamped }
+        let steps = ((clamped - range.lowerBound) / step).rounded()
+        return min(max(range.lowerBound + steps * step, range.lowerBound), range.upperBound)
     }
 }
 

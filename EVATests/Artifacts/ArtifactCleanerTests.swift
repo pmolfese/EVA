@@ -204,6 +204,89 @@ struct ArtifactCleanerTests {
         }
     }
 
+    @Test func amriBCGPreprocessingIsIgnoredForNonBCGArtifacts() {
+        var template = [Float](repeating: 0, count: windowSamples)
+        template[windowSamples / 2 + 6] = 1
+        let centers = [100, 220, 340, 460, 580]
+        let scales: [Float] = [12, 18, 24, 30, 36]
+        let sampleCount = 720
+
+        let channel = makeSignal(template: template, centers: centers, scales: scales, sampleCount: sampleCount)
+        let events = makeEvents(centers: centers)
+        var baselineArtifact = makeArtifact(events: events, template: template, method: .mas)
+        baselineArtifact.localTemplatePreservesLocalBaseline = false
+        baselineArtifact.localTemplateEdgeTaperSeconds = 0
+
+        var staleFlagArtifact = baselineArtifact
+        staleFlagArtifact.localTemplateUsesAMRIPreprocessing = true
+
+        let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+        let (baselineCleaned, _) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [baselineArtifact], excluding: [])
+        let (staleFlagCleaned, _) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [staleFlagArtifact], excluding: [])
+
+        #expect(staleFlagArtifact.type != .bcg)
+        #expect(staleFlagCleaned.data == baselineCleaned.data)
+    }
+
+    @Test func waasDefaultsToAMRIGlobalWeights() {
+        var template = [Float](repeating: 0, count: windowSamples)
+        template[windowSamples / 2] = 1
+        let centers = [100, 220, 340, 460, 580, 700, 820]
+        let scales: [Float] = [10, 20, 30, 40, 50, 60, 70]
+        let sampleCount = 920
+        var channel = [Float](repeating: 0, count: sampleCount)
+        for (center, scale) in zip(centers, scales) {
+            let start = center - windowSamples / 2
+            for sample in 0..<windowSamples {
+                channel[start + sample] += scale * template[sample]
+            }
+        }
+
+        let events = makeEvents(centers: centers)
+        var artifact = makeArtifact(events: events, template: template, method: .waas)
+        artifact.localTemplateWindowSize = 3
+        artifact.waasDecayFactor = 0.9
+        artifact.localTemplatePreservesLocalBaseline = false
+        artifact.localTemplateEdgeTaperSeconds = 0
+        let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+
+        let (cleaned, _) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+
+        let weights = scales.indices.map { pow(artifact.waasDecayFactor, Double($0)) }
+        let expectedTemplate = zip(scales, weights).reduce(0.0) { $0 + Double($1.0) * $1.1 } / weights.reduce(0, +)
+        let centerSample = centers[0]
+        #expect(abs(Double(cleaned.data[0][centerSample]) - (Double(scales[0]) - expectedTemplate)) < 1e-4)
+    }
+
+    @Test func waasCanUseEVALocalWeightedWindow() {
+        var template = [Float](repeating: 0, count: windowSamples)
+        template[windowSamples / 2] = 1
+        let centers = [100, 220, 340, 460, 580]
+        let scales: [Float] = [10, 20, 30, 40, 50]
+        let sampleCount = 700
+        var channel = [Float](repeating: 0, count: sampleCount)
+        for (center, scale) in zip(centers, scales) {
+            let start = center - windowSamples / 2
+            channel[start + windowSamples / 2] += scale
+        }
+
+        let events = makeEvents(centers: centers)
+        var artifact = makeArtifact(events: events, template: template, method: .waas)
+        artifact.waasUsesAMRIGlobalWeights = false
+        artifact.localTemplateWindowSize = 3
+        artifact.waasDecayFactor = 0.9
+        artifact.localTemplatePreservesLocalBaseline = false
+        artifact.localTemplateEdgeTaperSeconds = 0
+        let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+
+        let (cleaned, _) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+
+        // With a half-window of 1 and EVA-local weighting, the first event's
+        // only donor is the second event. AMRI global weighting would include
+        // all valid events and the current event itself.
+        #expect(abs(Double(cleaned.data[0][centers[0]]) - Double(scales[0] - scales[1])) < 1e-4)
+    }
+
     @Test func doNothingLeavesSignalUnchanged() {
         let template = SyntheticSignal.bump(width: windowSamples)
         let centers = [100, 400]
@@ -413,5 +496,46 @@ struct ArtifactCleanerTests {
 
         let report = ArtifactCleaner.obsVarianceReport(for: artifact, in: signal)
         #expect(report == nil)
+    }
+
+    @Test func processingParametersCaptureArtifactCleaningSettings() {
+        let template = SyntheticSignal.bump(width: windowSamples)
+        let events = [
+            MFFEvent(id: "bcg-1", code: "BCG", beginTimeSeconds: 1, rawBeginTime: "1", sourceFile: "test", durationSeconds: 0.20),
+            MFFEvent(id: "bcg-2", code: "BCG", beginTimeSeconds: 2.5, rawBeginTime: "2.5", sourceFile: "test")
+        ]
+        var artifact = makeArtifact(events: events, template: template, method: .waar)
+        artifact.type = .bcg
+        artifact.obsStrategy = .clustered
+        artifact.obsPCAComponentCount = 4
+        artifact.obsEdgeTaperSeconds = 0.12
+        artifact.localTemplateWindowSize = 31
+        artifact.waasDecayFactor = 0.85
+        artifact.waasUsesAMRIGlobalWeights = false
+        artifact.localTemplateUsesAMRIPreprocessing = true
+        artifact.localTemplatePreservesLocalBaseline = false
+        artifact.localTemplateEdgeTaperSeconds = 0.07
+        artifact.usesVariableEventDuration = true
+        artifact.appliedMethod = .waar
+
+        let p = artifact.processingParameters(prefix: "artifact1")
+
+        #expect(p["artifact1.type"] == DefinedArtifactType.bcg.rawValue)
+        #expect(p["artifact1.eventOnsetsSeconds"] == "1.000000,2.500000")
+        #expect(p["artifact1.eventDurationsSeconds"] == "0.200000,")
+        #expect(p["artifact1.cleaningMethod"] == ArtifactCleaningMethod.waar.rawValue)
+        #expect(p["artifact1.appliedMethod"] == ArtifactCleaningMethod.waar.rawValue)
+        #expect(p["artifact1.obsStrategy"] == ArtifactOBSStrategy.clustered.rawValue)
+        #expect(p["artifact1.obsPCAComponentCount"] == "4")
+        #expect(p["artifact1.localTemplateWindowSize"] == "31")
+        #expect(p["artifact1.waasDecayFactor"] == "0.850000")
+        #expect(p["artifact1.waasUsesAMRIGlobalWeights"] == "false")
+        #expect(p["artifact1.localTemplateUsesAMRIPreprocessing"] == "true")
+        #expect(p["artifact1.localTemplateAMRIPreprocessingEffective"] == "true")
+        #expect(p["artifact1.localTemplatePreservesLocalBaseline"] == "false")
+        #expect(p["artifact1.localTemplateEdgeTaperSeconds"] == "0.070000")
+        #expect(p["artifact1.usesVariableEventDuration"] == "true")
+        #expect(p["artifact1.averagePresent"] == "true")
+        #expect(p["artifact1.averageSampleCount"] == "\(windowSamples)")
     }
 }

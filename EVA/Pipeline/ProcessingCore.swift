@@ -61,6 +61,12 @@ final class ProcessingCore {
         var remainingSteps: [EVAProcessingStep]
     }
 
+    struct ProgressUpdate {
+        var stepName: String
+        var stepProgress: Double?
+        var fileProgress: Double
+    }
+
     /// Applies as many leading steps of `script` as this core supports, in
     /// order, starting from `signal` (already gradient/ICA-corrected if the
     /// caller has that upstream state — otherwise pass the raw recording
@@ -77,12 +83,17 @@ final class ProcessingCore {
     func applyAutoSteps(
         _ script: EVAProcessingScript,
         to signal: MFFSignalData,
-        pnsSignal: MFFSignalData? = nil
+        pnsSignal: MFFSignalData? = nil,
+        progress: ((ProgressUpdate) -> Void)? = nil
     ) async -> Result {
         var current = ica.cleanedSignal ?? gradient.correctedSignal ?? signal
 
         let steps = script.replayableSteps
         for (index, step) in steps.enumerated() {
+            let stepName = ReplayStepDisplay.label(for: step.operation)
+            let stepBase = steps.isEmpty ? 1 : Double(index) / Double(steps.count)
+            let stepDone = steps.isEmpty ? 1 : Double(index + 1) / Double(steps.count)
+            progress?(ProgressUpdate(stepName: stepName, stepProgress: nil, fileProgress: stepBase))
             if ReplayCompatibility.check(step, against: current) != nil {
                 return Result(signal: current, remainingSteps: Array(steps[index...]))
             }
@@ -144,6 +155,7 @@ final class ProcessingCore {
             default:
                 return Result(signal: current, remainingSteps: Array(steps[index...]))
             }
+            progress?(ProgressUpdate(stepName: stepName, stepProgress: 1, fileProgress: stepDone))
         }
         return Result(signal: current, remainingSteps: [])
     }

@@ -23,6 +23,7 @@ import SwiftUI
 struct EVAApp: App {
     @State private var recording: MFFRecording?
     @State private var openRecordingRequest = 0
+    @State private var closeRecordingRequest = 0
     @State private var batchSetupRequest = 0
     @State private var goodnessSettings = ChannelGoodnessSettings()
     @State private var segmentGoodnessSettings = SegmentGoodnessSettings()
@@ -34,6 +35,7 @@ struct EVAApp: App {
             ContentView(
                 recording: $recording,
                 openRecordingRequest: $openRecordingRequest,
+                closeRecordingRequest: $closeRecordingRequest,
                 batchSetupRequest: $batchSetupRequest
             )
             .environment(goodnessSettings)
@@ -50,14 +52,24 @@ struct EVAApp: App {
                 }
                 .keyboardShortcut("o", modifiers: .command)
 
+                FileExportCommands()
+
                 Button("Batch Process...") {
                     batchSetupRequest += 1
                 }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
-            }
 
-            CommandGroup(after: .newItem) {
-                FileExportCommands()
+                Divider()
+
+                Button("Close File") {
+                    closeRecordingRequest += 1
+                }
+                .disabled(recording == nil)
+
+                Button("Quit") {
+                    NSApp.terminate(nil)
+                }
+                .keyboardShortcut("q", modifiers: .command)
             }
 
             CommandGroup(after: .toolbar) {

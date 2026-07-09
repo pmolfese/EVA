@@ -57,7 +57,7 @@ final class DebugLog: ObservableObject {
 
 /// Non-isolated convenience so call sites don't need to await. Hops to the main
 /// actor to mutate the published store.
-func debugLog(_ message: String) {
+nonisolated func debugLog(_ message: String) {
     Task { @MainActor in
         DebugLog.shared.log(message)
     }

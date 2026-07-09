@@ -26,6 +26,11 @@ struct BatchSetupSheet: View {
     @State private var sourceName = ""
     @State private var script: EVAProcessingScript?
     @StateObject private var config = ReplayController()
+    @State private var settingsPopoverStepID: Int?
+    @State private var inputDropIsTargeted = false
+    @State private var sourceDropIsTargeted = false
+    @State private var inputDropMessage: String?
+    @State private var sourceDropMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -105,7 +110,21 @@ struct BatchSetupSheet: View {
                     }
                 }
             }
+            if let inputDropMessage {
+                Text(inputDropMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
         }
+        .padding(10)
+        .background(dropTargetBackground(isTargeted: inputDropIsTargeted))
+        .contentShape(Rectangle())
+        .dropDestination(for: URL.self) { urls, _ in
+            addInputFiles(urls)
+        } isTargeted: { targeted in
+            inputDropIsTargeted = targeted
+        }
+        .help("Drop MFF files here")
     }
 
     private var sourceSection: some View {
@@ -126,22 +145,96 @@ struct BatchSetupSheet: View {
                 .pickerStyle(.segmented)
                 .frame(width: 240)
                 ForEach($config.steps) { $step in
-                    if step.kind != .skip {
-                        HStack(spacing: 8) {
-                            Toggle("", isOn: $step.included).labelsHidden()
-                            Text(stepLabel(step.step.operation)).font(.caption)
-                            Spacer()
-                            if step.kind == .review {
-                                Toggle("Review", isOn: $step.pauseToReview)
-                                    .toggleStyle(.checkbox).font(.caption)
-                            } else if step.kind == .decision {
-                                Label("Pauses", systemImage: "hand.raised").font(.caption2).foregroundStyle(.orange)
-                            }
-                        }
-                    }
+                    batchStepRow($step)
                 }
             }
+            if let sourceDropMessage {
+                Text(sourceDropMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
         }
+        .padding(10)
+        .background(dropTargetBackground(isTargeted: sourceDropIsTargeted))
+        .contentShape(Rectangle())
+        .dropDestination(for: URL.self) { urls, _ in
+            handleProcessingSourceDrop(urls)
+        } isTargeted: { targeted in
+            sourceDropIsTargeted = targeted
+        }
+        .help("Drop an eva.xml file or processed MFF here")
+    }
+
+    private func dropTargetBackground(isTargeted: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 8)
+            .fill(isTargeted ? Color.accentColor.opacity(0.07) : Color.clear)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(
+                        isTargeted ? Color.accentColor : Color.secondary.opacity(0.22),
+                        style: StrokeStyle(lineWidth: isTargeted ? 2 : 1, dash: [6, 4])
+                    )
+            )
+    }
+
+    private func batchStepRow(_ step: Binding<ReplayController.StepConfig>) -> some View {
+        let kind = step.wrappedValue.kind
+        return HStack(spacing: 8) {
+            Toggle("", isOn: step.included)
+                .labelsHidden()
+                .disabled(kind == .skip)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(ReplayStepDisplay.label(for: step.wrappedValue.step.operation))
+                    .font(.caption)
+                if kind == .skip {
+                    Text(ReplayStepDisplay.kindDescription(kind))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button {
+                settingsPopoverStepID = step.wrappedValue.id
+            } label: {
+                Image(systemName: "eye")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Show settings")
+            .accessibilityLabel("Show step settings")
+            .popover(isPresented: settingsPopoverBinding(for: step.wrappedValue.id)) {
+                ReplayStepSettingsPopover(step: step.wrappedValue.step)
+            }
+            if kind == .review {
+                Toggle("Review", isOn: step.pauseToReview)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .disabled(!step.wrappedValue.included)
+            } else if kind == .decision {
+                Label("Pauses", systemImage: "hand.raised")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            } else if kind == .skip {
+                Label("not replayable", systemImage: "nosign")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .opacity(kind == .skip ? 0.5 : 1)
+    }
+
+    private func settingsPopoverBinding(for id: Int) -> Binding<Bool> {
+        Binding(
+            get: { settingsPopoverStepID == id },
+            set: { isPresented in
+                if isPresented {
+                    settingsPopoverStepID = id
+                } else if settingsPopoverStepID == id {
+                    settingsPopoverStepID = nil
+                }
+            }
+        )
     }
 
     private var outputSection: some View {
@@ -151,7 +244,7 @@ struct BatchSetupSheet: View {
                 Spacer()
                 Button(outputFolder == nil ? "Choose…" : "Change…") { chooseOutputFolder() }
             }
-            Text(outputFolder?.path ?? "Processed files are written here as <name>-processed.mff.")
+            Text(outputFolder?.path ?? "Outputs are written here as <name>-processed, -segmented, or -average.mff.")
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
         }
     }
@@ -171,7 +264,7 @@ struct BatchSetupSheet: View {
         panel.allowsMultipleSelection = true
         panel.prompt = "Add"
         guard panel.runModal() == .OK else { return }
-        for url in panel.urls where !files.contains(url) { files.append(url) }
+        _ = addInputFiles(panel.urls)
     }
 
     private func chooseSource() {
@@ -180,12 +273,8 @@ struct BatchSetupSheet: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.prompt = "Choose"
-        guard panel.runModal() == .OK, let url = panel.url,
-              let read = EVAProcessingScriptXML.read(fromFile: url) else { return }
-        script = read
-        sourceName = url.lastPathComponent
-        config.configure(script: read, sourceName: sourceName)
-        config.showsConfigPane = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        _ = loadProcessingSource(from: url)
     }
 
     private func chooseOutputFolder() {
@@ -236,15 +325,81 @@ struct BatchSetupSheet: View {
         onStart()
     }
 
-    private func stepLabel(_ op: EVAProcessingStep.Operation) -> String {
-        switch op {
-        case .mriGradientCorrection: return "MRI Gradient Correction"
-        case .filter: return "Band-pass / Line-noise Filter"
-        case .thresholdArtifactDetection: return "Threshold Artifact Detection"
-        case .waveletReduce: return "Wavelet Reduction"
-        case .segment: return "PSA Segmentation / Averaging"
-        case .icaClean: return "ICA Component Removal"
-        default: return op.rawValue
+    @discardableResult
+    private func addInputFiles(_ urls: [URL]) -> Bool {
+        let candidates = urls.filter(isInputMFF)
+        guard !candidates.isEmpty else {
+            inputDropMessage = "Only MFF packages can be used as batch input."
+            return false
         }
+
+        var added = 0
+        for url in candidates where !containsInputFile(url) {
+            files.append(url)
+            added += 1
+        }
+
+        let ignored = urls.count - candidates.count
+        if added == 0 {
+            inputDropMessage = "Those MFF files are already in the batch."
+        } else if ignored > 0 {
+            inputDropMessage = "Ignored \(ignored) non-MFF item\(ignored == 1 ? "" : "s")."
+        } else {
+            inputDropMessage = nil
+        }
+        return true
     }
+
+    private func handleProcessingSourceDrop(_ urls: [URL]) -> Bool {
+        let candidates = urls.filter(isProcessingSource)
+        guard !candidates.isEmpty else {
+            sourceDropMessage = "Drop an eva.xml file or an MFF that contains one."
+            return false
+        }
+        for url in candidates where loadProcessingSource(from: url) {
+            return true
+        }
+        sourceDropMessage = "No eva.xml processing steps were found in the dropped source."
+        return false
+    }
+
+    @discardableResult
+    private func loadProcessingSource(from url: URL) -> Bool {
+        guard isProcessingSource(url) else {
+            sourceDropMessage = "Drop an eva.xml file or an MFF that contains one."
+            return false
+        }
+        let didStartAccessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        guard let read = EVAProcessingScriptXML.read(fromFile: url) else {
+            sourceDropMessage = "No eva.xml processing steps were found in \(url.lastPathComponent)."
+            return false
+        }
+        script = read
+        sourceName = url.lastPathComponent
+        settingsPopoverStepID = nil
+        sourceDropMessage = nil
+        config.configure(script: read, sourceName: sourceName)
+        config.showsConfigPane = false
+        return true
+    }
+
+    private func containsInputFile(_ url: URL) -> Bool {
+        let normalized = url.standardizedFileURL
+        return files.contains { $0.standardizedFileURL == normalized }
+    }
+
+    private func isInputMFF(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == "mff"
+    }
+
+    private func isProcessingSource(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ext == "mff" || ext == "xml"
+    }
+
 }

@@ -91,7 +91,8 @@ final class ReplayController: ObservableObject {
 
     // MARK: Finish-and-export (the seam Batch produces outputs through)
     @Published var exportWhenFinished = false
-    /// Destination folder for the processed MFF; output is `<name>-processed.mff`.
+    /// Destination folder for replay output; filename suffix follows the final
+    /// export kind (`processed`, `segmented`, or `average`).
     @Published var outputFolder: URL?
 
     private var continuation: CheckedContinuation<Resolution, Never>?

@@ -249,6 +249,9 @@ extension WaveformView {
                 .disabled(!epoching.skipIfContainsArtifact)
                 .padding(.leading, 18)
 
+                Toggle("Skip if labeled \"Bad\"", isOn: $epoching.skipIfLabeledBad)
+                    .help("Excludes segments manually marked Bad in Segment Health (right-click a segment while View > Show Segment Health is on) from category averages.")
+
                 HStack(spacing: 8) {
                     Toggle("Interpolate bad channels per epoch", isOn: $epoching.interpolatesBadChannelsPerEpoch)
                         .help("Detects channels that are only bad WITHIN a given epoch (min/max/slope/acceleration) and interpolates just that epoch, instead of leaving a transient per-trial artifact uncorrected.")
@@ -486,6 +489,8 @@ extension WaveformView {
                         Text(maxBadChannelCaption)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .layoutPriority(1)
                     }
                 }
             }
@@ -493,7 +498,7 @@ extension WaveformView {
             Text("A channel is flagged bad for an epoch if any sample falls outside min/max, or the sample-to-sample change (slope) or change-in-slope (acceleration) exceeds these limits. Flagged channels are interpolated for just that epoch — unless too many channels are bad at once, in which case the whole epoch is rejected instead (and the expensive interpolation is skipped for it).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 294)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
 
             Divider()
@@ -524,7 +529,7 @@ extension WaveformView {
             }
         }
         .padding(16)
-        .frame(width: 336)
+        .frame(width: 520)
     }
 
     func psaEventCodeBinding(_ code: String) -> Binding<Bool> {
@@ -803,6 +808,68 @@ extension WaveformView {
         }
     }
 
+    func enableSegmentHealthAfterSegmentationIfNeeded() {
+        guard processingDefaults.autoRunSegmentHealthAfterSegmentation else { return }
+        segHealth.clearAnalysis(clearLabels: true)
+        segHealth.shows = true
+        segHealth.showsDetails = false
+        segHealth.refreshRequest += 1
+    }
+
+    func psaSkippedLabeledBadSegmentsSummary(for segments: [EpochSegment], excludedIndices: Set<Int>) -> [String] {
+        guard !excludedIndices.isEmpty else { return [] }
+        return segments.enumerated()
+            .filter { excludedIndices.contains($0.offset) }
+            .map { index, segment in
+                "#\(index + 1) \(epoching.displayCategory(segment.category))"
+            }
+    }
+
+    func refreshPSAEpochDiagnostics(from result: PSABuildResult) {
+        epoching.epochBadChannelSummary = result.epochBadChannelCounts.keys.sorted().map {
+            "Ch\($0 + 1) (\(result.epochBadChannelCounts[$0] ?? 0) of \(result.totalEpochsEvaluated) epochs)"
+        }
+        epoching.epochBadChannelAllSegmentsSummary = result.epochBadChannelsInAllAcceptedSegments.map {
+            "Ch\($0 + 1)"
+        }
+        epoching.interpolatedChannelsBySegmentSummary = result.interpolatedChannelSegments.keys.sorted().map { channel in
+            let segments = result.interpolatedChannelSegments[channel, default: []]
+                .map(String.init)
+                .joined(separator: ",")
+            return "Ch\(channel + 1)(\(segments))"
+        }
+    }
+
+    func appendPSAEpochDiagnostics(
+        to baseStatus: String,
+        sourceSegments: [EpochSegment],
+        skippedIndices: Set<Int> = [],
+        includeSkippedLabeledBadSegments: Bool = false
+    ) -> String {
+        if includeSkippedLabeledBadSegments {
+            epoching.skippedLabeledBadSegmentsSummary = psaSkippedLabeledBadSegmentsSummary(for: sourceSegments, excludedIndices: skippedIndices)
+        } else {
+            epoching.skippedLabeledBadSegmentsSummary.removeAll()
+        }
+
+        var clauses: [String] = []
+        if !epoching.skippedLabeledBadSegmentsSummary.isEmpty {
+            clauses.append("skipped labeled bad segments: \(epoching.skippedLabeledBadSegmentsSummary.joined(separator: ", "))")
+        }
+        if !epoching.epochBadChannelSummary.isEmpty {
+            let channels = epoching.epochBadChannelSummary.map { summary in
+                summary.split(separator: " ").first.map(String.init) ?? summary
+            }
+            clauses.append("\(channels.count) channel\(channels.count == 1 ? "" : "s") bad in \u{2265}1 segment (\(channels.joined(separator: ", ")))")
+        }
+        if !epoching.epochBadChannelAllSegmentsSummary.isEmpty {
+            let channels = epoching.epochBadChannelAllSegmentsSummary.joined(separator: ", ")
+            clauses.append("\(epoching.epochBadChannelAllSegmentsSummary.count) channel\(epoching.epochBadChannelAllSegmentsSummary.count == 1 ? "" : "s") bad in all kept segments (\(channels))")
+        }
+        guard !clauses.isEmpty else { return baseStatus }
+        return baseStatus + " · " + clauses.joined(separator: " · ")
+    }
+
     private func applyPSACore(to signal: MFFSignalData, job: PSABuildJob) async {
         let sessionID = recordingSessionID
         let shouldAverage = epoching.averageOnApply
@@ -858,6 +925,7 @@ extension WaveformView {
         let epochBadChannelCounts = built.epochBadChannelCounts
         let totalEpochsEvaluated = built.totalEpochsEvaluated
         let rejectedForTooManyBadChannels = built.rejectedForTooManyBadChannels
+        let skippedBadIndices = excludedBadSegmentIndices(built.segments)
         var exclusionSummary = built.exclusionSummary
 
         // Keep raw epochs as source so post-processing can be toggled later.
@@ -869,8 +937,9 @@ extension WaveformView {
         if shouldAverage {
             epoching.phaseMessage = "Averaging…"
             let colorIndices = categoryColorIndices(for: built.segments.map(\.category))
+            let excludedIndices = excludedBadSegmentIndices(built.segments)
             let averageWorker = Task.detached(priority: .userInitiated) {
-                built.average(colorIndices: colorIndices)
+                built.average(colorIndices: colorIndices, excludedIndices: excludedIndices)
             }
             let averagedOpt = await withTaskCancellationHandler(
                 operation: {
@@ -923,6 +992,8 @@ extension WaveformView {
         epoching.epochedSignal = finalResult.signal
         epoching.epochSegments = finalResult.segments
         epoching.isAveraged = wasAveraged
+        enableSegmentHealthAfterSegmentationIfNeeded()
+        exclusionSummary.skippedLabeledBadSegments = shouldAverage ? skippedBadIndices.count : 0
         exclusionSummary.outputSegments = finalResult.segments.count
         exclusionSummary.badChannelCount = epochBadChannelCounts.count
         epoching.psaExclusionSummary = exclusionSummary
@@ -932,21 +1003,20 @@ extension WaveformView {
             epoching.showsButterflyPlot = false
             epoching.averagedDisplayMode = .waveform
         }
+        refreshPSAEpochDiagnostics(from: built)
         // Bad-channel reporting is composed here (not read off finalResult.message)
         // because average()/postProcessed() replace the message wholesale —
         // relying on it would silently drop this whenever averaging is on.
         var statusText = finalResult.message + suffix
-        epoching.epochBadChannelSummary = []
-        if epoching.interpolatesBadChannelsPerEpoch, totalEpochsEvaluated > 0, !epochBadChannelCounts.isEmpty {
-            let segmentBadChannels = epochBadChannelCounts.keys.sorted().map { "Ch\($0 + 1)" }
-            epoching.epochBadChannelSummary = epochBadChannelCounts.keys.sorted().map {
-                "Ch\($0 + 1) (\(epochBadChannelCounts[$0] ?? 0) of \(totalEpochsEvaluated) epochs)"
-            }
-            statusText += " · \(epochBadChannelCounts.count) channel\(epochBadChannelCounts.count == 1 ? "" : "s") bad in \u{2265}1 epoch (\(segmentBadChannels.joined(separator: ", ")))"
-            if rejectedForTooManyBadChannels > 0 {
-                statusText += " · \(rejectedForTooManyBadChannels) epoch\(rejectedForTooManyBadChannels == 1 ? "" : "s") rejected for too many bad channels"
-            }
+        if epoching.interpolatesBadChannelsPerEpoch, rejectedForTooManyBadChannels > 0 {
+            statusText += " · \(rejectedForTooManyBadChannels) epoch\(rejectedForTooManyBadChannels == 1 ? "" : "s") rejected for too many bad channels"
         }
+        statusText = appendPSAEpochDiagnostics(
+            to: statusText,
+            sourceSegments: built.segments,
+            skippedIndices: skippedBadIndices,
+            includeSkippedLabeledBadSegments: shouldAverage
+        )
         epoching.statusMessage = statusText
         escalateBadChannelsIfNeeded(
             counts: epochBadChannelCounts,
@@ -997,15 +1067,29 @@ extension WaveformView {
         }
 
         var summaries: [String] = []
+        var interpolationMessages: [String] = []
+        var interpolationErrors: [String] = []
         summaries.reserveCapacity(toEscalate.count)
+        interpolationMessages.reserveCapacity(toEscalate.count)
         for (channelIndex, count) in toEscalate {
-            interpolate(channelIndex, in: continuousSignal)
+            let interpolationStatus = interpolate(channelIndex, in: continuousSignal, updatesStatus: false)
             let percent = Double(count) / Double(totalEpochs) * 100
             summaries.append("Ch\(channelIndex + 1): bad in \(String(format: "%.0f", percent))% of epochs (\(count)/\(totalEpochs))")
+            if interpolationStatus.isError {
+                interpolationErrors.append(interpolationStatus.message)
+            } else {
+                interpolationMessages.append(interpolationStatus.message)
+            }
         }
         epoching.escalatedChannelSummaries = summaries
+        let escalatedChannels = toEscalate.map { "Ch\($0.key + 1)" }.joined(separator: ", ")
+        if !interpolationMessages.isEmpty || !interpolationErrors.isEmpty {
+            let combined = (interpolationMessages + interpolationErrors).joined(separator: " · ")
+            channelStatusMessage = combined
+            channelStatusIsError = !interpolationErrors.isEmpty
+        }
         epoching.statusMessage = (epoching.statusMessage ?? "")
-            + " · Escalated \(toEscalate.count) channel\(toEscalate.count == 1 ? "" : "s") to globally bad."
+            + " · Escalated \(toEscalate.count) channel\(toEscalate.count == 1 ? "" : "s") to globally bad (\(escalatedChannels))."
     }
 
     /// Validates PSA inputs on the main actor and packages them into a Sendable job
@@ -1171,6 +1255,30 @@ extension WaveformView {
         return labels.isEmpty ? "artifacts" : labels.joined(separator: "/")
     }
 
+    /// Indices (into `segments`, matching `SegmentHealthAnalyzer.segmentID`'s
+    /// indexing) of segments the user labeled "Bad" in Segment Health, when
+    /// "Skip if labeled Bad" is on. Empty (average() takes the fast path) when
+    /// the toggle is off or nothing's been labeled.
+    func excludedBadSegmentIndices(_ segments: [EpochSegment], requiresOptIn: Bool = true) -> Set<Int> {
+        guard (!requiresOptIn || epoching.skipIfLabeledBad), !segHealth.qualityLabels.isEmpty else { return [] }
+        var result = Set<Int>()
+        if !epoching.isAveraged,
+           epoching.epochSegments.count == segments.count,
+           let analysisResults = segHealth.analysis?.results {
+            for visible in analysisResults where segHealth.qualityLabels[visible.segmentID] == .bad {
+                guard segments.indices.contains(visible.segmentIndex) else { continue }
+                result.insert(visible.segmentIndex)
+            }
+        }
+        for (index, segment) in segments.enumerated() {
+            let id = SegmentHealthAnalyzer.segmentID(index: index, segment: segment)
+            if segHealth.qualityLabels[id] == .bad {
+                result.insert(index)
+            }
+        }
+        return result
+    }
+
     func averageCurrentEpochs() {
         guard let segmentedEpochSignal, !segmentedEpochSegments.isEmpty else {
             epoching.statusMessage = "Create epochs before averaging."
@@ -1186,11 +1294,12 @@ extension WaveformView {
             message: "\(segmentedEpochSegments.count) epochs"
         )
         let colorIndices = categoryColorIndices(for: base.segments.map(\.category))
+        let excludedIndices = excludedBadSegmentIndices(base.segments, requiresOptIn: false)
         psaTask?.cancel()
         let sessionID = recordingSessionID
         psaTask = Task {
             let averageWorker = Task.detached(priority: .userInitiated) {
-                base.average(colorIndices: colorIndices)
+                base.average(colorIndices: colorIndices, excludedIndices: excludedIndices)
             }
             let averagedOpt = await withTaskCancellationHandler(
                 operation: {
@@ -1226,7 +1335,19 @@ extension WaveformView {
             epoching.butterflyTopomapRelativeSample = nil
             selectedEventCodes.removeAll()
             horizontalScrollPosition.scrollTo(x: 0)
-            epoching.statusMessage = averaged.message + suffix
+            var exclusionSummary = epoching.psaExclusionSummary
+            if exclusionSummary.acceptedEpochs == 0 {
+                exclusionSummary.acceptedEpochs = base.segments.count
+            }
+            exclusionSummary.skippedLabeledBadSegments = excludedIndices.count
+            exclusionSummary.outputSegments = display.segments.count
+            epoching.psaExclusionSummary = exclusionSummary
+            epoching.statusMessage = appendPSAEpochDiagnostics(
+                to: averaged.message + suffix,
+                sourceSegments: base.segments,
+                skippedIndices: excludedIndices,
+                includeSkippedLabeledBadSegments: true
+            )
             psaTask = nil
         }
     }
@@ -1237,7 +1358,7 @@ extension WaveformView {
             return nil
         }
         let colorIndices = categoryColorIndices(for: result.segments.map(\.category))
-        return result.average(colorIndices: colorIndices)
+        return result.average(colorIndices: colorIndices, excludedIndices: excludedBadSegmentIndices(result.segments, requiresOptIn: false))
     }
 
     /// Subtracts each epoch's pre-stimulus mean (per channel) from the whole
@@ -1322,13 +1443,14 @@ extension WaveformView {
         )
         let isAveraged = epoching.isAveraged
         let colorIndices = categoryColorIndices(for: base.segments.map(\.category))
+        let excludedIndices = excludedBadSegmentIndices(base.segments, requiresOptIn: !isAveraged)
         psaTask?.cancel()
         let sessionID = recordingSessionID
         psaTask = Task {
             let result: PSABuildResult
             if isAveraged {
                 let averageWorker = Task.detached(priority: .userInitiated) {
-                    base.average(colorIndices: colorIndices)
+                    base.average(colorIndices: colorIndices, excludedIndices: excludedIndices)
                 }
                 let averagedOpt2 = await withTaskCancellationHandler(
                     operation: {
@@ -1357,7 +1479,16 @@ extension WaveformView {
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             epoching.epochedSignal = display.signal
             epoching.epochSegments = display.segments
-            epoching.statusMessage = result.message + suffix
+            var exclusionSummary = epoching.psaExclusionSummary
+            exclusionSummary.skippedLabeledBadSegments = isAveraged ? excludedIndices.count : 0
+            exclusionSummary.outputSegments = display.segments.count
+            epoching.psaExclusionSummary = exclusionSummary
+            epoching.statusMessage = appendPSAEpochDiagnostics(
+                to: result.message + suffix,
+                sourceSegments: base.segments,
+                skippedIndices: excludedIndices,
+                includeSkippedLabeledBadSegments: isAveraged
+            )
             psaTask = nil
         }
     }
@@ -1378,12 +1509,11 @@ extension WaveformView {
         epoching.showsButterflyPlot = false
         selectedEventCodes.removeAll()
         epoching.statusMessage = nil
-        segHealth.task?.cancel()
-        segHealth.task = nil
-        segHealth.analysis = nil
-        segHealth.signature = nil
-        segHealth.isAnalyzing = false
-        segHealth.progress = 0
+        epoching.epochBadChannelSummary.removeAll()
+        epoching.epochBadChannelAllSegmentsSummary.removeAll()
+        epoching.interpolatedChannelsBySegmentSummary.removeAll()
+        epoching.skippedLabeledBadSegmentsSummary.removeAll()
+        segHealth.clearAnalysis(hide: true, clearLabels: true)
         horizontalScrollPosition.scrollTo(x: 0)
     }
 

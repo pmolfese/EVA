@@ -46,6 +46,21 @@ struct DownsamplerTests {
         #expect(decimated.allSatisfy { abs($0 - 5) < 1e-12 })
     }
 
+    @Test func blockAveragedFloatPreservesConstantAndLength() {
+        let constant = [Float](repeating: 5, count: 12)
+        let decimated = Downsampler.blockAveraged(constant, by: 4)
+        #expect(decimated.count == 3)
+        #expect(decimated.allSatisfy { abs($0 - 5) < 1e-6 })
+    }
+
+    @Test func windowedSincDecimatedPreservesConstantInteriorAndLength() {
+        let constant = [Float](repeating: 5, count: 512)
+        let decimated = Downsampler.windowedSincDecimated(constant, by: 4)
+        #expect(decimated.count == 128)
+        let interior = decimated.dropFirst(20).dropLast(20)
+        #expect(interior.allSatisfy { abs($0 - 5) < 1e-3 })
+    }
+
     @Test func blockAveragedHandlesRaggedFinalBlock() {
         // 10 samples by 4 -> blocks [0..3],[4..7],[8..9]; last block averages 2.
         let decimated = Downsampler.blockAveraged(Array(0..<10).map(Double.init), by: 4)

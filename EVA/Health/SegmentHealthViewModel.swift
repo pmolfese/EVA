@@ -16,6 +16,14 @@
 import Combine
 import SwiftUI
 
+/// User's manual "this segment is fine / this segment is garbage" call,
+/// independent of the automated grade — set via the segment health band's
+/// context menu or popover, consulted by PSA averaging's "Skip if labeled
+/// Bad" option.
+enum SegmentQualityLabel: String, Codable {
+    case good, bad
+}
+
 @MainActor
 final class SegmentHealthViewModel: ObservableObject {
     /// Held directly so this VM can read channel state itself — see
@@ -43,16 +51,37 @@ final class SegmentHealthViewModel: ObservableObject {
     @Published var detailsRequest = 0
     @Published var refreshRequest = 0
 
-    func resetForClose() {
+    // MARK: Manual quality labels
+    /// Keyed by `SegmentHealthAnalyzer.segmentID`. Cleared on file switch along
+    /// with `analysis` — segment IDs are derived from sample offsets, so a
+    /// stale label could silently collide with an unrelated segment in a
+    /// newly-opened recording.
+    @Published var qualityLabels: [String: SegmentQualityLabel] = [:]
+
+    func setQualityLabel(_ label: SegmentQualityLabel?, for segmentID: String) {
+        qualityLabels[segmentID] = label
+    }
+
+    func clearAnalysis(hide: Bool = false, clearLabels: Bool = false) {
         task?.cancel()
         task = nil
-        shows = false
-        showsMouseOver = false
-        showsDetails = false
+        if hide {
+            shows = false
+            showsDetails = false
+        }
         analysis = nil
         isAnalyzing = false
         progress = 0
         statusMessage = nil
         signature = nil
+        if clearLabels {
+            qualityLabels.removeAll()
+        }
+    }
+
+    func resetForClose() {
+        clearAnalysis(hide: true, clearLabels: true)
+        shows = false
+        showsMouseOver = false
     }
 }

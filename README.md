@@ -40,36 +40,52 @@ EVA is also not _intended_ as a replacement for your vendor's EEG software. We r
 
 ## A Quick Tour
 
-EVA keeps topographies next to the waveform instead of making them a separate mental mode. Double-clicking a sample can bring up a scalp map, which is especially useful when checking whether a burst looks spatially plausible or artifact-like.
+The main waveform view keeps channels, events, and the tools you'll actually reach for (MRI, filter, artifacts, process, EEG, events) in one place, with a running log of what's been applied to the recording so far.
 
 <p align="center">
-  <img src="Figures/readme_topography_artifacts.png" alt="Waveform-linked topography for artifact review" width="860">
+  <img src="Figures/readme_waveform_overview.png" alt="Main waveform view with channel list, events, and toolbar" width="900">
 </p>
 
-For event-related work, EVA can segment around events and average by category. Baseline correction and average reference can be toggled after segmentation, so you can compare choices without rebuilding the whole view.
-
-Category averages can also be inspected as butterfly plots. Confirm your evoked responses, while checking whether an effect is broadly distributed, channel-specific, or being driven by a few suspicious traces.
+Filtering, notching, and average referencing live in a single popover reachable from the toolbar, so adjusting a Butterworth cutoff or line-noise correction doesn't pull you out of the waveform.
 
 <p align="center">
-  <img src="Figures/readme_epoching_averages.png" alt="Segmentation controls and category butterfly plots" width="900">
+  <img src="Figures/readme_controls.png" alt="Filter popover with high-pass, low-pass, and line-noise controls" width="640">
 </p>
 
-Artifact handling is built around the idea that the user often knows what the artifact looks like before software does. You can highlight a waveform region, define an artifact template, choose the channels and matching behavior, and let EVA scan for similar events.
-
-Once artifacts are defined, EVA can preview and apply cleaning methods. The app currently supports regression, OBS, and SSP/PCA removal
+Channel health and segment health share the same explainable scoring idea — a good/watch/poor score broken down into the specific metrics (signal amplitude, spectral outliers, burst peaks, line harmonics, impedance, slow drift, labeled-artifact overlap, and more) that drove it, so a score is never a black box.
 
 <p align="center">
-  <img src="Figures/readme_artifact_workflow.png" alt="Artifact definition, preview, and cleaning workflow" width="900">
+  <img src="Figures/readme_channel_segment_health.png" alt="Explainable channel health and per-segment health scoring" width="900">
 </p>
 
-ICA is available for component-based cleanup. EVA includes a Core ML path for **ICLabel**, using the bundled `ICLabel.mlpackage`, providing useful labels and confidence for data cleaning.
-
-Channel health is an explainable metric, and a training-data path for a future Core ML models. EVA can score channels using finite sample rate, amplitude typicality, burst peaks, flatline/clipping, fast noise, slow drift, line-noise proxy, and neighbor agreement when sensor geometry is present.
-
-Segment health applies the same idea across time. EVA can color segments as good, watch, or poor, then show the underlying reasons in a details panel. Labeled artifact overlap is included as a major signal, and the metrics can be exported as JSON for later model training.
+ICA is available for component-based cleanup, with a Core ML path for **ICLabel** (using the bundled `ICLabel.mlpackage`) providing per-component labels and confidence. Selecting a component drops its full time course into view right below the grid, so you can verify a labeled component against its own waveform before removing it or exporting it as a synthetic PNS channel.
 
 <p align="center">
-  <img src="Figures/readme_ica_health_workflow.png" alt="ICA component labeling with channel and segment health review" width="900">
+  <img src="Figures/readme_ica_workflow.png" alt="ICA component grid with time-course verification for a selected component" width="820">
+</p>
+
+EVA keeps topographies next to the waveform instead of making them a separate mental mode — double-clicking a sample can bring up a scalp map, useful for checking whether a burst looks spatially plausible or artifact-like. Category averages give you the same data from a different angle, as butterfly plots that make it easy to see whether an effect is broadly distributed, channel-specific, or being driven by a few suspicious traces.
+
+<p align="center">
+  <img src="Figures/readme_data_views.png" alt="Waveform-linked topography and category butterfly plots as two ways to view the same data" width="900">
+</p>
+
+Artifact handling is built around the idea that the user often knows what the artifact looks like before software does. You can highlight a waveform region, define an artifact template from its waveform or scalp topography, choose the channels and matching behavior, and let EVA scan the recording for similar events. Once artifacts are defined, EVA can preview and apply cleaning methods — the app currently supports regression, OBS, SSP/PCA, and several averaging-based approaches.
+
+<p align="center">
+  <img src="Figures/readme_artifact_workflow.png" alt="Artifact definition by waveform and topography, then cleaning-method selection" width="760">
+</p>
+
+For event-related work, EVA can segment around events and average by category, with baseline correction and average reference toggled after the fact so you can compare choices without rebuilding the whole view.
+
+<p align="center">
+  <img src="Figures/readme_epoching.png" alt="Segmentation dialog for event-based epoching" width="640">
+</p>
+
+Once averages are computed, EVA lets you inspect them as waveforms, topomaps, or butterfly plots with a channel inspector and a movable latency cursor. The same segmented data feeds single-trial analysis: pick a channel and an analysis window, and EVA extracts per-trial peak and amplitude values you can export as a trial matrix for further stats.
+
+<p align="center">
+  <img src="Figures/readme_trial_analysis.png" alt="Average inspection and single-trial peak/amplitude analysis" width="820">
 </p>
 
 ## Built For macOS

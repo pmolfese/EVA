@@ -71,4 +71,40 @@ struct BCGDetectionViewModelTests {
         #expect(vm.windowSeconds == 0.5)
         #expect(vm.thresholdSD == 3.0)
     }
+
+    @MainActor
+    @Test func parametersCaptureBCGAndCWLSettings() {
+        let vm = BCGDetectionViewModel(store: RecordingStore())
+        vm.method = .cwlRegression
+        vm.eventCode = "R"
+        vm.windowSeconds = 0.55
+        vm.thresholdSD = 3.25
+        vm.selectedCWLChannels = [0, 2]
+        vm.cwlUseEVAFastCWR = true
+        vm.cwlDelayMs = 25
+        vm.cwlLagRangeMinMs = -40
+        vm.cwlLagRangeMaxMs = 160
+        vm.cwlLagStepMs = 5
+        vm.cwlWindowSeconds = 5
+        vm.cwlDownsampleTargetHz = 250
+        vm.cwlDownsampleFilter = .blockAverage
+        vm.cwlUpsampleToOriginalHz = true
+
+        let p = vm.parameters
+
+        #expect(p["method"] == BCGDetectionMethod.cwlRegression.rawValue)
+        #expect(p["eventCode"] == "R")
+        #expect(p["windowSeconds"] == "0.550000")
+        #expect(p["thresholdSD"] == "3.250000")
+        #expect(p["cwlSelectedChannels"] == "1,3")
+        #expect(p["cwlUseEVAFastCWR"] == "true")
+        #expect(p["cwlDelayMs"] == "25.000000")
+        #expect(p["cwlLagRangeMinMs"] == "-40.000000")
+        #expect(p["cwlLagRangeMaxMs"] == "160.000000")
+        #expect(p["cwlLagStepMs"] == "5.000000")
+        #expect(p["cwlWindowSeconds"] == "5.000000")
+        #expect(p["cwlDownsampleTargetHz"] == "250.000000")
+        #expect(p["cwlDownsampleFilter"] == CWLCorrector.DownsampleFilter.blockAverage.rawValue)
+        #expect(p["cwlUpsampleToOriginalHz"] == "true")
+    }
 }

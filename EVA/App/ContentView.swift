@@ -28,6 +28,7 @@ struct CombineRequest: Identifiable {
 struct ContentView: View {
     @Binding var recording: MFFRecording?
     @Binding var openRecordingRequest: Int
+    @Binding var closeRecordingRequest: Int
     @Binding var batchSetupRequest: Int
 
     @Environment(BatchController.self) private var batch
@@ -78,6 +79,11 @@ struct ContentView: View {
         }
         .onChange(of: openRecordingRequest) { _, _ in
             showsFileImporter = true
+        }
+        .onChange(of: closeRecordingRequest) { _, _ in
+            if recording != nil {
+                closeRecording()
+            }
         }
         .sheet(item: $combineRequest) { request in
             CombineRecordingsSheet(
@@ -141,19 +147,37 @@ struct ContentView: View {
     /// Progress banner for a headless (windowless) batch run — there's no
     /// per-file WaveformView/`replayBanner()` to show progress through.
     private var headlessBatchBanner: some View {
-        HStack(spacing: 12) {
-            ProgressView().controlSize(.small)
-            VStack(alignment: .leading, spacing: 1) {
-                if batch.jobs.indices.contains(batch.headlessIndex) {
-                    Text("File \(batch.headlessIndex + 1) of \(batch.jobs.count) · \(batch.jobs[batch.headlessIndex].name)")
-                        .font(.callout.weight(.semibold))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                CircularStepProgressIndicator(progress: batch.currentStepProgress)
+                VStack(alignment: .leading, spacing: 1) {
+                    if batch.jobs.indices.contains(batch.headlessIndex) {
+                        Text("File \(batch.headlessIndex + 1) of \(batch.jobs.count) · \(batch.jobs[batch.headlessIndex].name)")
+                            .font(.callout.weight(.semibold))
+                    }
+                    Text(batch.currentStepName.isEmpty ? "Processing" : batch.currentStepName)
+                        .font(.caption.weight(.semibold))
+                    Text("Processing in the background — no windows will open.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                Text("Processing in the background — no windows will open.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Spacer(minLength: 12)
+                Button("Stop Batch", role: .cancel) { batch.stop() }
             }
-            Spacer(minLength: 12)
-            Button("Stop Batch", role: .cancel) { batch.stop() }
+
+            VStack(alignment: .leading, spacing: 3) {
+                ProgressView(value: batch.overallProgress)
+                    .progressViewStyle(.linear)
+                HStack {
+                    Text("Overall \(Int((batch.overallProgress * 100).rounded()))%")
+                    Spacer()
+                    if let progress = batch.currentStepProgress {
+                        Text("Current step \(Int((progress * 100).rounded()))%")
+                    }
+                }
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
         }
         .padding(12)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -480,6 +504,11 @@ private struct WindowAccessor: NSViewRepresentable {
 }
 
 #Preview {
-    ContentView(recording: .constant(nil), openRecordingRequest: .constant(0), batchSetupRequest: .constant(0))
+    ContentView(
+        recording: .constant(nil),
+        openRecordingRequest: .constant(0),
+        closeRecordingRequest: .constant(0),
+        batchSetupRequest: .constant(0)
+    )
         .environment(BatchController())
 }

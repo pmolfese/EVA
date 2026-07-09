@@ -166,6 +166,8 @@ struct ArtifactMenuControls {
     var artifacts: [DefinedArtifact]
     var deleteRequest: Binding<DefinedArtifact.ID?>
     var deleteAllRequest: Binding<Int>
+    var showsAppliedCorrection: Binding<Bool>
+    var appliedCorrectionAvailable: Bool
 }
 
 extension FocusedValues {
@@ -283,6 +285,12 @@ struct ArtifactsCommands: View {
 
     var body: some View {
         if let controls {
+            Toggle("Show Applied Correction", isOn: controls.showsAppliedCorrection)
+                .keyboardShortcut("a", modifiers: [.command, .option])
+                .disabled(!controls.appliedCorrectionAvailable)
+
+            Divider()
+
             Button("Delete All Defined Artifacts") {
                 controls.deleteAllRequest.wrappedValue += 1
             }
@@ -341,28 +349,32 @@ struct FileExportCommands: View {
     @FocusedValue(\.importPhysioRequest) private var importPhysioRequest
 
     var body: some View {
+        Button("Import Physio...") {
+            importPhysioRequest?.wrappedValue += 1
+        }
+        .disabled(importPhysioRequest == nil)
+
+        Divider()
+
         Button("Dataset Info...") {
             datasetInfoRequest?.wrappedValue += 1
         }
         .keyboardShortcut("i", modifiers: .command)
         .disabled(datasetInfoRequest == nil)
 
+        Divider()
+
         Button("Export to MFF...") {
             mffExportRequest?.wrappedValue += 1
         }
         .disabled(mffExportRequest == nil)
 
+        Divider()
+
         Button("Copy Processing From...") {
             copyProcessingRequest?.wrappedValue += 1
         }
         .disabled(copyProcessingRequest == nil)
-
-        Divider()
-
-        Button("Import Physio...") {
-            importPhysioRequest?.wrappedValue += 1
-        }
-        .disabled(importPhysioRequest == nil)
     }
 }
 

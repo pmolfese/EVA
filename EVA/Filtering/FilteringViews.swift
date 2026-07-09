@@ -244,9 +244,26 @@ extension WaveformView {
         guard let rawSignal = recording.signal else { replay.state = .finished; return }
         let actions = replay.plannedActions()
 
-        loop: for action in actions {
+        loop: for (actionOrdinal, action) in actions.enumerated() {
             let params = replay.parameters(forStep: action.stepIndex)
             replay.state = .running(index: action.stepIndex)
+            let stepName = ReplayStepDisplay.label(for: action.operation)
+            if batch.isActive, batch.matches(recording: recording) {
+                let fileProgress = actions.isEmpty ? 1 : Double(actionOrdinal) / Double(actions.count)
+                batch.updateProgress(stepName: stepName, stepProgress: nil, fileProgress: fileProgress)
+            }
+            replay.banner = .init(
+                title: "Applying \(stepName)",
+                detail: ReplayStepDisplay.runningDetail(for: action.operation),
+                showsSkip: false,
+                progress: nil
+            )
+            defer {
+                if batch.isActive, batch.matches(recording: recording) {
+                    let fileProgress = actions.isEmpty ? 1 : Double(actionOrdinal + 1) / Double(actions.count)
+                    batch.updateProgress(stepName: stepName, stepProgress: 1, fileProgress: fileProgress)
+                }
+            }
 
             switch action.operation {
             case .mriGradientCorrection:
@@ -384,22 +401,29 @@ extension WaveformView {
         }
     }
 
-    /// Writes the processed recording to `<folder>/<name>-processed.mff` (with its
-    /// eva.xml) after an interactive replay finishes. Panel-free so Batch can call
-    /// it per file. Uses renamed PNS without the synthetic-channel prompt.
+    /// Writes the processed recording after an interactive replay finishes (with
+    /// a suffix based on the final output kind). Panel-free so Batch can call it
+    /// per file. Uses renamed PNS without the synthetic-channel prompt.
     @MainActor
     func exportReplayResult(to folder: URL) async {
         guard let snapshot = currentMFFExportSnapshot() else { return }
         let base = (recording.packageName as NSString).deletingPathExtension
-        let url = folder.appendingPathComponent("\(base)-processed.mff")
+        let url = folder.appendingPathComponent("\(base)-\(snapshot.kind.replayOutputSuffix).mff")
         replay.banner = .init(title: "Exporting…", detail: url.lastPathComponent,
                               showsSkip: false, progress: nil)
+        if batch.isActive, batch.matches(recording: recording) {
+            batch.updateProgress(stepName: "Exporting", stepProgress: nil, fileProgress: 0.98)
+        }
         let result = await performMFFExport(
             snapshot: snapshot,
             pnsForExport: pnsSignalWithRenames(),
             script: currentProcessingScript(),
-            to: url
+            to: url,
+            auditLogLines: currentProcessingAuditLogLines()
         )
+        if batch.isActive, batch.matches(recording: recording) {
+            batch.updateProgress(stepName: "Exporting", stepProgress: 1, fileProgress: 1)
+        }
         switch result {
         case .success(let out):
             filter.statusMessage = "Processed + exported \(out.lastPathComponent)."
@@ -414,43 +438,60 @@ extension WaveformView {
     @ViewBuilder
     func replayBanner() -> some View {
         if let info = replay.banner {
-            HStack(spacing: 12) {
-                if replay.state.isAwaiting {
-                    Image(systemName: "pause.circle.fill")
-                        .foregroundStyle(.orange)
-                } else {
-                    ProgressView().controlSize(.small)
-                }
-
-                VStack(alignment: .leading, spacing: 1) {
-                    if batch.isActive, let job = batch.currentJob {
-                        Text("File \(batch.currentIndex + 1) of \(batch.jobs.count) · \(job.name)")
-                            .font(.caption2.weight(.semibold))
+            let stepProgress = replayCurrentStepProgress(info: info)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    if replay.state.isAwaiting {
+                        Image(systemName: "pause.circle.fill")
+                            .font(.title3)
                             .foregroundStyle(.orange)
+                            .frame(width: 32, height: 32)
+                    } else {
+                        CircularStepProgressIndicator(progress: stepProgress)
                     }
-                    Text(info.title).font(.callout.weight(.semibold))
-                    Text(info.detail).font(.caption).foregroundStyle(.secondary)
-                }
 
-                if ica.isRunning {
-                    ProgressView(value: ica.progress).frame(width: 120)
-                }
+                    VStack(alignment: .leading, spacing: 1) {
+                        if batch.isActive, let job = batch.currentJob {
+                            Text("File \(batch.currentIndex + 1) of \(batch.jobs.count) · \(job.name)")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.orange)
+                        }
+                        Text(info.title).font(.callout.weight(.semibold))
+                        Text(info.detail).font(.caption).foregroundStyle(.secondary)
+                    }
 
-                Spacer(minLength: 12)
+                    Spacer(minLength: 12)
 
-                if replay.state.isAwaiting {
-                    Button("Continue") { replay.resume(.proceed) }
-                        .keyboardShortcut(.defaultAction)
-                    if info.showsSkip {
-                        Button("Skip") { replay.resume(.skip) }
+                    if replay.state.isAwaiting {
+                        Button("Continue") { replay.resume(.proceed) }
+                            .keyboardShortcut(.defaultAction)
+                        if info.showsSkip {
+                            Button("Skip") { replay.resume(.skip) }
+                        }
+                    }
+                    // In batch, Cancel skips just this file; Stop Batch ends the run.
+                    Button(batch.isActive ? "Skip File" : "Cancel", role: .cancel) { replay.cancel() }
+                    if batch.isActive {
+                        Button("Stop Batch") {
+                            batch.stop()
+                            replay.cancel()
+                        }
                     }
                 }
-                // In batch, Cancel skips just this file; Stop Batch ends the run.
-                Button(batch.isActive ? "Skip File" : "Cancel", role: .cancel) { replay.cancel() }
-                if batch.isActive {
-                    Button("Stop Batch") {
-                        batch.stop()
-                        replay.cancel()
+
+                if batch.isActive, let overall = replayBatchOverallProgress(stepProgress: stepProgress) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ProgressView(value: overall)
+                            .progressViewStyle(.linear)
+                        HStack {
+                            Text("Overall \(Int((overall * 100).rounded()))%")
+                            Spacer()
+                            if let stepProgress {
+                                Text("Current step \(Int((stepProgress * 100).rounded()))%")
+                            }
+                        }
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -461,6 +502,62 @@ extension WaveformView {
             .padding(12)
             .frame(maxWidth: 640)
         }
+    }
+
+    private func replayCurrentStepProgress(info: ReplayController.BannerInfo) -> Double? {
+        if batch.isActive, batch.currentStepName == "Exporting" { return nil }
+        if let progress = info.progress { return progress }
+        guard let op = replayCurrentOperation() else { return nil }
+        switch op {
+        case .mriGradientCorrection:
+            return gradient.progress
+        case .filter:
+            return filter.progress
+        case .icaClean:
+            return ica.isRunning ? ica.progress : nil
+        case .waveletReduce:
+            return wavelet.progress
+        case .segment:
+            return epoching.segmentingProgress
+        case .thresholdArtifactDetection:
+            return 1
+        default:
+            return nil
+        }
+    }
+
+    private func replayCurrentOperation() -> EVAProcessingStep.Operation? {
+        guard let index = replayCurrentStepIndex() else { return nil }
+        return replay.steps.first { $0.id == index }?.step.operation
+    }
+
+    private func replayCurrentStepIndex() -> Int? {
+        switch replay.state {
+        case .running(let index), .awaitingReview(let index), .awaitingDecision(let index):
+            return index
+        default:
+            return nil
+        }
+    }
+
+    private func replayBatchOverallProgress(stepProgress: Double?) -> Double? {
+        guard batch.isActive, batch.currentIndex >= 0, !batch.jobs.isEmpty else { return nil }
+        let fileProgress = replayBatchCurrentFileProgress(stepProgress: stepProgress)
+        return min(max((Double(batch.currentIndex) + fileProgress) / Double(batch.jobs.count), 0), 1)
+    }
+
+    private func replayBatchCurrentFileProgress(stepProgress: Double?) -> Double {
+        if batch.currentStepName == "Exporting" {
+            return batch.currentFileProgress
+        }
+        let actions = replay.plannedActions()
+        guard !actions.isEmpty,
+              let currentStep = replayCurrentStepIndex(),
+              let position = actions.firstIndex(where: { $0.stepIndex == currentStep }) else {
+            return batch.currentFileProgress
+        }
+        let progress = min(max(stepProgress ?? (replay.state.isAwaiting ? 1 : 0), 0), 1)
+        return min(max((Double(position) + progress) / Double(actions.count), 0), 1)
     }
 
     func clearBandpassFilter() {

@@ -9,6 +9,12 @@
 
 import SwiftUI
 
+struct AveragesLogDetail: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let text: String
+}
+
 extension WaveformView {
     @ViewBuilder
     func averagesWorkspace(for signal: MFFSignalData) -> some View {
@@ -361,6 +367,9 @@ extension WaveformView {
                         colorFor: { epochColor(for: $0) },
                         channelName: { eegChannelDisplayName(index: $0, signal: signal) },
                         highlightRelativeSample: relativeSample,
+                        onScrubRelativeSample: { sample in
+                            setAveragesWorkspaceLatency(sample, segment: segments[0])
+                        },
                         standardErrorBands: standardErrorBands
                     )
                     .contextMenu {
@@ -415,14 +424,18 @@ extension WaveformView {
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
                     GridRow {
                         averagesLogMetric("Candidate events", value: summary.candidateEvents)
-                        averagesLogMetric("Accepted epochs", value: summary.acceptedEpochs)
+                        averagesLogMetric("Built epochs", value: summary.acceptedEpochs)
+                        averagesLogMetric("Kept epochs", value: summary.keptEpochs)
                         averagesLogMetric("Excluded", value: summary.excludedEpochs)
-                        averagesLogMetric("Timing adjusted", value: summary.timingAdjusted)
                     }
                     GridRow {
+                        averagesLogMetric("Labeled bad skips", value: summary.skippedLabeledBadSegments)
                         averagesLogMetric("Artifact skips", value: summary.skippedArtifacts)
                         averagesLogMetric("Missing timing", value: summary.skippedTimingMarkers)
                         averagesLogMetric("Out of bounds", value: summary.skippedOutOfBounds)
+                    }
+                    GridRow {
+                        averagesLogMetric("Timing adjusted", value: summary.timingAdjusted)
                         averagesLogMetric("Too many bad channels", value: summary.rejectedForTooManyBadChannels)
                     }
                 }
@@ -446,10 +459,10 @@ extension WaveformView {
                         Text("Summary")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        Text(epoching.statusMessage ?? "No PSA log message recorded.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
+                        averagesLogDetailButton(
+                            title: "PSA Summary",
+                            text: epoching.statusMessage ?? "No PSA log message recorded."
+                        )
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -458,10 +471,10 @@ extension WaveformView {
                             Text("Per-epoch bad channels")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
-                            Text(epoching.epochBadChannelSummary.prefix(5).joined(separator: ", "))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(3)
+                            averagesLogDetailButton(
+                                title: "Per-epoch Bad Channels",
+                                text: epoching.epochBadChannelSummary.joined(separator: "\n")
+                            )
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -482,6 +495,20 @@ extension WaveformView {
             .joined(separator: ", ")
     }
 
+    private func averagesLogDetailButton(title: String, text: String) -> some View {
+        Button {
+            averagesLogDetail = AveragesLogDetail(title: title, text: text)
+        } label: {
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .help("Show full text")
+    }
+
     private func averagesLogMetric(_ title: String, value: Int) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
@@ -490,6 +517,30 @@ extension WaveformView {
             Text("\(value)")
                 .font(.caption.monospacedDigit().weight(.semibold))
         }
+    }
+
+    func averagesLogDetailSheet(_ detail: AveragesLogDetail) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(detail.title)
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button("Close") {
+                    averagesLogDetail = nil
+                }
+            }
+
+            ScrollView {
+                Text(detail.text)
+                    .font(.body.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(20)
+        .frame(minWidth: 560, minHeight: 280)
     }
 
     @ViewBuilder
@@ -535,6 +586,9 @@ extension WaveformView {
                     colorFor: { epochColor(for: $0) },
                     channelName: { eegChannelDisplayName(index: $0, signal: signal) },
                     highlightRelativeSample: relativeSample,
+                    onScrubRelativeSample: { sample in
+                        setAveragesWorkspaceLatency(sample, segment: segments[0])
+                    },
                     standardErrorBands: standardErrorBands
                 )
                 .frame(height: 260)

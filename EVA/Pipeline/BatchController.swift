@@ -31,7 +31,6 @@ final class BatchController {
         let url: URL
         var status: JobStatus = .pending
         var name: String { url.lastPathComponent }
-        var outputName: String { url.deletingPathExtension().lastPathComponent + "-processed.mff" }
     }
 
     struct BatchSummary: Equatable {
@@ -62,6 +61,9 @@ final class BatchController {
     /// its own index for progress display instead.
     private(set) var isHeadlessRun = false
     private(set) var headlessIndex = -1
+    private(set) var currentStepName = ""
+    private(set) var currentStepProgress: Double?
+    private(set) var currentFileProgress = 0.0
 
     private var scopedURLs: [URL] = []
 
@@ -70,6 +72,13 @@ final class BatchController {
         return jobs[currentIndex]
     }
     var currentJobURL: URL? { currentJob?.url }
+    var overallProgress: Double {
+        guard isActive, !jobs.isEmpty else { return 0 }
+        let index = isHeadlessRun ? headlessIndex : currentIndex
+        guard index >= 0 else { return 0 }
+        let fileFraction = min(max(currentFileProgress, 0), 1)
+        return min(max((Double(index) + fileFraction) / Double(jobs.count), 0), 1)
+    }
 
     /// True when `recording` is the file currently being processed.
     func matches(recording: MFFRecording) -> Bool {
@@ -98,6 +107,7 @@ final class BatchController {
         scopedURLs.forEach { _ = $0.startAccessingSecurityScopedResource() }
         summary = nil
         isActive = true
+        updateProgress(stepName: "Waiting to open file", stepProgress: nil, fileProgress: 0)
         currentIndex = 0 // fires ContentView's swap to the first file
     }
 
@@ -116,11 +126,22 @@ final class BatchController {
     func advance() {
         guard isActive else { return }
         let next = currentIndex + 1
-        if next >= jobs.count { finish() } else { currentIndex = next }
+        if next >= jobs.count {
+            finish()
+        } else {
+            updateProgress(stepName: "Waiting to open file", stepProgress: nil, fileProgress: 0)
+            currentIndex = next
+        }
     }
 
     /// User pressed "Stop Batch": end the run, leaving unprocessed jobs pending.
     func stop() { finish() }
+
+    func updateProgress(stepName: String, stepProgress: Double?, fileProgress: Double) {
+        currentStepName = stepName
+        currentStepProgress = stepProgress.map { min(max($0, 0), 1) }
+        currentFileProgress = min(max(fileProgress, 0), 1)
+    }
 
     private func finish() {
         let done = jobs.filter { $0.status == .done }.count
@@ -135,6 +156,9 @@ final class BatchController {
         currentIndex = -1
         isHeadlessRun = false
         headlessIndex = -1
+        currentStepName = ""
+        currentStepProgress = nil
+        currentFileProgress = 0
         scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         scopedURLs = []
     }
@@ -171,9 +195,19 @@ final class BatchController {
             guard isActive else { break } // Stop Batch was pressed mid-run
             headlessIndex = index
             jobs[index].status = .processing
+            updateProgress(stepName: "Loading recording", stepProgress: nil, fileProgress: 0)
             do {
                 switch try await HeadlessBatchProcessor.process(
-                    url: jobs[index].url, script: script, outputFolder: outputFolder
+                    url: jobs[index].url,
+                    script: script,
+                    outputFolder: outputFolder,
+                    progress: { [self] update in
+                        updateProgress(
+                            stepName: update.stepName,
+                            stepProgress: update.stepProgress,
+                            fileProgress: update.fileProgress
+                        )
+                    }
                 ) {
                 case .completed:
                     jobs[index].status = .done

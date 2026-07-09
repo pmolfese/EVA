@@ -19,7 +19,8 @@ enum MFFExportWriter {
         snapshot: MFFExportSnapshot,
         pnsSignal: MFFSignalData?,
         script: EVAProcessingScript,
-        to url: URL
+        to url: URL,
+        auditLogLines: [String] = []
     ) async -> Result<URL, Error> {
         let worker = Task.detached(priority: .userInitiated) {
             do {
@@ -36,6 +37,9 @@ enum MFFExportWriter {
                 for step in script.steps {
                     let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
                     log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
+                }
+                for line in auditLogLines {
+                    log.append(line)
                 }
                 try? log.write(toPackage: url)
                 try Task.checkCancellation()

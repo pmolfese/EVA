@@ -36,6 +36,11 @@ struct ReplayControllerTests {
         #expect(EVAProcessingStep(operation: .waveletReduce).replayInteraction == .auto)
     }
 
+    @Test func nonReplayableStepsAreSkippedRegardlessOfOperation() {
+        #expect(EVAProcessingStep(operation: .segment, replayable: false).replayInteraction == .skip)
+        #expect(EVAProcessingStep(operation: .filter, replayable: false).replayInteraction == .skip)
+    }
+
     @Test func fullAutoGatesGradientReviewAndICADecisionOnly() {
         let c = ReplayController()
         c.configure(script: script([.mriGradientCorrection, .filter, .icaClean, .markBad]), sourceName: "A")
