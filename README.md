@@ -52,16 +52,22 @@ Filtering, notching, and average referencing live in a single popover reachable 
   <img src="Figures/readme_controls.png" alt="Filter popover with high-pass, low-pass, and line-noise controls" width="640">
 </p>
 
-EVA keeps topographies next to the waveform instead of making them a separate mental mode. Double-clicking a sample can bring up a scalp map, which is especially useful when checking whether a burst looks spatially plausible or artifact-like. Channel health scoring sits right alongside it, breaking a score down into the specific metrics (signal amplitude, spectral outliers, burst peaks, line harmonics, impedance, and more) that drove it.
+Channel health and segment health share the same explainable scoring idea — a good/watch/poor score broken down into the specific metrics (signal amplitude, spectral outliers, burst peaks, line harmonics, impedance, slow drift, labeled-artifact overlap, and more) that drove it, so a score is never a black box.
 
 <p align="center">
-  <img src="Figures/readme_topography_health.png" alt="Waveform-linked topography and explainable channel health scoring" width="900">
+  <img src="Figures/readme_channel_segment_health.png" alt="Explainable channel health and per-segment health scoring" width="900">
 </p>
 
-For event-related work, EVA can segment around events and average by category, with per-epoch bad-channel thresholds (amplitude, slope, acceleration) controlling when a channel gets interpolated for a single epoch versus flagged globally. Category averages can also be inspected as butterfly plots, useful for checking whether an effect is broadly distributed, channel-specific, or being driven by a few suspicious traces.
+ICA is available for component-based cleanup, with a Core ML path for **ICLabel** (using the bundled `ICLabel.mlpackage`) providing per-component labels and confidence. Selecting a component drops its full time course into view right below the grid, so you can verify a labeled component against its own waveform before removing it or exporting it as a synthetic PNS channel.
 
 <p align="center">
-  <img src="Figures/readme_epoching_setup.png" alt="Segmentation dialog, category butterfly plots, and per-epoch bad-channel thresholds" width="900">
+  <img src="Figures/readme_ica_workflow.png" alt="ICA component grid with time-course verification for a selected component" width="820">
+</p>
+
+EVA keeps topographies next to the waveform instead of making them a separate mental mode — double-clicking a sample can bring up a scalp map, useful for checking whether a burst looks spatially plausible or artifact-like. Category averages give you the same data from a different angle, as butterfly plots that make it easy to see whether an effect is broadly distributed, channel-specific, or being driven by a few suspicious traces.
+
+<p align="center">
+  <img src="Figures/readme_data_views.png" alt="Waveform-linked topography and category butterfly plots as two ways to view the same data" width="900">
 </p>
 
 Artifact handling is built around the idea that the user often knows what the artifact looks like before software does. You can highlight a waveform region, define an artifact template from its waveform or scalp topography, choose the channels and matching behavior, and let EVA scan the recording for similar events. Once artifacts are defined, EVA can preview and apply cleaning methods — the app currently supports regression, OBS, SSP/PCA, and several averaging-based approaches.
@@ -70,10 +76,10 @@ Artifact handling is built around the idea that the user often knows what the ar
   <img src="Figures/readme_artifact_workflow.png" alt="Artifact definition by waveform and topography, then cleaning-method selection" width="760">
 </p>
 
-ICA is available for component-based cleanup, with a Core ML path for **ICLabel** (using the bundled `ICLabel.mlpackage`) providing per-component labels and confidence. Segment health applies the same explainable scoring idea used for channels across time, coloring segments good/watch/poor and showing the underlying reasons — labeled artifact overlap included — in a details panel, with metrics exportable as JSON for later model training.
+For event-related work, EVA can segment around events and average by category, with baseline correction and average reference toggled after the fact so you can compare choices without rebuilding the whole view.
 
 <p align="center">
-  <img src="Figures/readme_ica_health_workflow.png" alt="ICA component labeling and per-segment health review" width="900">
+  <img src="Figures/readme_epoching.png" alt="Segmentation dialog for event-based epoching" width="640">
 </p>
 
 Once averages are computed, EVA lets you inspect them as waveforms, topomaps, or butterfly plots with a channel inspector and a movable latency cursor. The same segmented data feeds single-trial analysis: pick a channel and an analysis window, and EVA extracts per-trial peak and amplitude values you can export as a trial matrix for further stats.
