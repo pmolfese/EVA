@@ -66,4 +66,12 @@ struct UpdateCheckerTests {
         #expect(latest.tagName == "v0.1.1")
         #expect(latest.isPrerelease)
     }
+
+    @Test func releaseRequestBypassesStaleCachedResponses() {
+        let request = UpdateChecker.releasesRequest(currentVersion: "0.1.2b")
+
+        #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
+        #expect(request.value(forHTTPHeaderField: "Cache-Control") == "no-cache")
+        #expect(request.value(forHTTPHeaderField: "User-Agent") == "EVA/0.1.2b")
+    }
 }

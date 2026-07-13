@@ -134,10 +134,7 @@ struct UpdateChecker {
             throw UpdateCheckError.invalidCurrentVersion(currentVersion)
         }
 
-        var request = URLRequest(url: Self.releasesURL)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-        request.setValue("EVA/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        let request = Self.releasesRequest(currentVersion: currentVersion)
 
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -174,6 +171,19 @@ struct UpdateChecker {
         releases
             .filter { !$0.isDraft && $0.publishedAt != nil }
             .max { ($0.publishedAt ?? "") < ($1.publishedAt ?? "") }
+    }
+
+    static func releasesRequest(currentVersion: String) -> URLRequest {
+        var request = URLRequest(
+            url: Self.releasesURL,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: 20
+        )
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("EVA/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        return request
     }
 }
 
