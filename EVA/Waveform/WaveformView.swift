@@ -701,41 +701,32 @@ struct WaveformView: View {
 
         return continuousOverlayEventsForDisplay(includeArtifactOverlays: includeArtifactOverlays)
             .flatMap { event in
-                epoching.epochSegments.compactMap { segment in
-                    epochedOverlayEvent(event, in: segment, samplingRate: signal.samplingRate)
+                let overlapWindowSeconds = overlayWindowSeconds(for: event)
+                return epoching.epochSegments.compactMap { segment in
+                    EpochedOverlayEventMapper.map(
+                        event,
+                        into: segment,
+                        samplingRate: signal.samplingRate,
+                        overlapWindowSeconds: overlapWindowSeconds
+                    )
                 }
             }
             .sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
     }
 
-    private func epochedOverlayEvent(
-        _ event: MFFEvent,
-        in segment: EpochSegment,
-        samplingRate: Double
-    ) -> MFFEvent? {
-        let epochSampleCount = segment.endSample - segment.startSample + 1
-        guard epochSampleCount > 0 else { return nil }
-
-        let epochStartSeconds = segment.sourceTimeSeconds - Double(segment.stimulusOffsetSamples) / samplingRate
-        let epochEndSeconds = epochStartSeconds + Double(epochSampleCount) / samplingRate
-        guard event.beginTimeSeconds >= epochStartSeconds,
-              event.beginTimeSeconds < epochEndSeconds else {
-            return nil
+    /// Matches Segment Health's artifact windows so every epoch reported as
+    /// containing a defined/detected artifact also receives a visible flag.
+    private func overlayWindowSeconds(for event: MFFEvent) -> Double? {
+        let defaultWindowSeconds = 0.25
+        if let artifact = template.definedArtifacts.first(where: { artifact in
+            artifact.events.contains { $0.id == event.id }
+        }) {
+            return max(artifact.windowSizeSeconds, defaultWindowSeconds)
         }
-
-        let offsetSamples = Int(((event.beginTimeSeconds - epochStartSeconds) * samplingRate).rounded())
-        let displaySample = min(max(segment.startSample + offsetSamples, segment.startSample), segment.endSample)
-        let displayTime = Double(displaySample) / samplingRate
-        return MFFEvent(
-            id: "epoched-overlay-\(segment.id)-\(event.id)",
-            code: event.code,
-            label: event.label,
-            eventDescription: event.eventDescription,
-            cell: event.cell,
-            beginTimeSeconds: displayTime,
-            rawBeginTime: event.rawBeginTime,
-            sourceFile: event.sourceFile
-        )
+        if artifactVM.events.contains(where: { $0.id == event.id }) {
+            return defaultWindowSeconds
+        }
+        return nil
     }
 
     @ViewBuilder
