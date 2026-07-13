@@ -14,15 +14,6 @@ extension WaveformView {
 
     func filterPopover(for signal: MFFSignalData) -> some View {
         let lineNoiseMode = filter.activeLineNoiseMode
-        let lineNoiseBinding = Binding<FilterLineNoiseMode> {
-            filter.activeLineNoiseMode
-        } set: { mode in
-            filter.lineNoiseMode = mode
-            filter.notch60HzEnabled = mode == .notch
-            if mode != .off {
-                filter.showsLineNoiseOptions = true
-            }
-        }
 
         return VStack(alignment: .leading, spacing: 14) {
             Text("Filter")
@@ -81,15 +72,20 @@ extension WaveformView {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Line Noise")
                     .font(.caption.weight(.semibold))
-                Picker("Line Noise", selection: lineNoiseBinding) {
+                Picker("Line Noise", selection: $filter.lineNoiseMode) {
                     ForEach(FilterLineNoiseMode.allCases) { mode in
                         Text(mode.rawValue).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .onChange(of: filter.lineNoiseMode) { _, mode in
+                    if mode != .off, !showsFilterLineNoiseOptions {
+                        showsFilterLineNoiseOptions = true
+                    }
+                }
 
-                DisclosureGroup("Line Noise Options", isExpanded: $filter.showsLineNoiseOptions) {
+                DisclosureGroup("Line Noise Options", isExpanded: $showsFilterLineNoiseOptions) {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
                             Text("Frequency")
@@ -175,7 +171,7 @@ extension WaveformView {
                 if filter.isActive {
                     Button("Remove Filter", role: .destructive) {
                         clearBandpassFilter()
-                        filter.showsPopover = false
+                        showsFilterPopover = false
                     }
                 }
 
@@ -183,7 +179,7 @@ extension WaveformView {
 
                 Button("Apply Filter") {
                     applyBandpassFilter(to: signal)
-                    filter.showsPopover = false
+                    showsFilterPopover = false
                 }
                 .keyboardShortcut(.defaultAction)
             }

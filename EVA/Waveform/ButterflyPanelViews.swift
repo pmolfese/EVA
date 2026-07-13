@@ -374,14 +374,18 @@ extension WaveformView {
                             maxValue: topomapMaxBinding,
                             autoScale: autoScale,
                             onAutoMicrovolts: {
-                                epoching.topomapScaleManual = false
+                                if epoching.topomapScaleManual {
+                                    epoching.topomapScaleManual = false
+                                }
                                 seedTopomapScale(autoScale: autoScale, autoZ: autoZ)
                             },
                             sigma: $epoching.topomapZSigma,
                             zMean: topomapZMeanBinding,
                             zSD: topomapZSDBinding,
                             onAutoZ: {
-                                epoching.topomapZManual = false
+                                if epoching.topomapZManual {
+                                    epoching.topomapZManual = false
+                                }
                                 seedTopomapScale(autoScale: autoScale, autoZ: autoZ)
                             }
                         )
@@ -391,7 +395,10 @@ extension WaveformView {
                 }
                 .onAppear { seedTopomapScale(autoScale: autoScale, autoZ: autoZ) }
                 .onChange(of: epoching.topomapSymmetric) { _, sym in
-                    if sym { epoching.topomapScaleMin = -epoching.topomapScaleMax }
+                    let mirroredMinimum = -epoching.topomapScaleMax
+                    if sym, epoching.topomapScaleMin != mirroredMinimum {
+                        epoching.topomapScaleMin = mirroredMinimum
+                    }
                 }
             } else {
                 ContentUnavailableView(
@@ -424,38 +431,74 @@ extension WaveformView {
 
     var topomapMinBinding: Binding<Double> {
         Binding(get: { epoching.topomapScaleMin }, set: { value in
-            epoching.topomapScaleMin = value
-            if epoching.topomapSymmetric { epoching.topomapScaleMax = -value }
-            epoching.topomapScaleManual = true
+            if epoching.topomapScaleMin != value {
+                epoching.topomapScaleMin = value
+            }
+            let mirroredMaximum = -value
+            if epoching.topomapSymmetric, epoching.topomapScaleMax != mirroredMaximum {
+                epoching.topomapScaleMax = mirroredMaximum
+            }
+            if !epoching.topomapScaleManual {
+                epoching.topomapScaleManual = true
+            }
         })
     }
 
     var topomapMaxBinding: Binding<Double> {
         Binding(get: { epoching.topomapScaleMax }, set: { value in
-            epoching.topomapScaleMax = value
-            if epoching.topomapSymmetric { epoching.topomapScaleMin = -value }
-            epoching.topomapScaleManual = true
+            if epoching.topomapScaleMax != value {
+                epoching.topomapScaleMax = value
+            }
+            let mirroredMinimum = -value
+            if epoching.topomapSymmetric, epoching.topomapScaleMin != mirroredMinimum {
+                epoching.topomapScaleMin = mirroredMinimum
+            }
+            if !epoching.topomapScaleManual {
+                epoching.topomapScaleManual = true
+            }
         })
     }
 
     var topomapZMeanBinding: Binding<Double> {
-        Binding(get: { epoching.topomapZMean }, set: { epoching.topomapZMean = $0; epoching.topomapZManual = true })
+        Binding(get: { epoching.topomapZMean }, set: { value in
+            if epoching.topomapZMean != value {
+                epoching.topomapZMean = value
+            }
+            if !epoching.topomapZManual {
+                epoching.topomapZManual = true
+            }
+        })
     }
 
     var topomapZSDBinding: Binding<Double> {
-        Binding(get: { epoching.topomapZSD }, set: { epoching.topomapZSD = $0; epoching.topomapZManual = true })
+        Binding(get: { epoching.topomapZSD }, set: { value in
+            if epoching.topomapZSD != value {
+                epoching.topomapZSD = value
+            }
+            if !epoching.topomapZManual {
+                epoching.topomapZManual = true
+            }
+        })
     }
 
     /// Seeds µV min/max and z mean/SD from the data so the ⌘ control opens at the
     /// current auto values (only while the respective mode is still auto).
     func seedTopomapScale(autoScale: Double, autoZ: (mean: Double, sd: Double)) {
         if !epoching.topomapScaleManual {
-            epoching.topomapScaleMax = autoScale
-            epoching.topomapScaleMin = -autoScale
+            if epoching.topomapScaleMax != autoScale {
+                epoching.topomapScaleMax = autoScale
+            }
+            if epoching.topomapScaleMin != -autoScale {
+                epoching.topomapScaleMin = -autoScale
+            }
         }
         if !epoching.topomapZManual {
-            epoching.topomapZMean = autoZ.mean
-            epoching.topomapZSD = autoZ.sd
+            if epoching.topomapZMean != autoZ.mean {
+                epoching.topomapZMean = autoZ.mean
+            }
+            if epoching.topomapZSD != autoZ.sd {
+                epoching.topomapZSD = autoZ.sd
+            }
         }
     }
 

@@ -72,7 +72,6 @@ final class FilterViewModel: ObservableObject {
     @Published var lowPassCutoffText = "30"
     @Published var highPassSlope = FilterSlope.dB24
     @Published var lowPassSlope = FilterSlope.dB24
-    @Published var notch60HzEnabled = false
     @Published var lineNoiseMode = FilterLineNoiseMode.off
     @Published var lineNoiseFrequency = 60.0
     @Published var lineNoiseHarmonics = 2
@@ -81,10 +80,6 @@ final class FilterViewModel: ObservableObject {
     @Published var averageReference = false
     @Published var filterPNS = true
     @Published var precision = FilterPrecision.auto
-
-    // MARK: UI state
-    @Published var showsPopover = false
-    @Published var showsLineNoiseOptions = false
 
     // MARK: Run state
     @Published var isFiltering = false
@@ -129,9 +124,19 @@ final class FilterViewModel: ObservableObject {
 
     // MARK: Derived
 
-    var activeLineNoiseMode: FilterLineNoiseMode {
-        if lineNoiseMode == .adaptiveCleanLine { return .adaptiveCleanLine }
-        return notch60HzEnabled ? .notch : lineNoiseMode
+    var activeLineNoiseMode: FilterLineNoiseMode { lineNoiseMode }
+
+    /// Compatibility bridge for older call sites and serialized parameters that
+    /// represented notch filtering with a separate Boolean.
+    var notch60HzEnabled: Bool {
+        get { lineNoiseMode == .notch }
+        set {
+            if newValue {
+                if lineNoiseMode != .notch { lineNoiseMode = .notch }
+            } else if lineNoiseMode == .notch {
+                lineNoiseMode = .off
+            }
+        }
     }
 
     var frequencySummary: String? {
@@ -181,7 +186,6 @@ final class FilterViewModel: ObservableObject {
     func resetToDefaults() {
         highPassCutoffText = "0.1"
         lowPassCutoffText = "30"
-        notch60HzEnabled = false
         lineNoiseMode = .off
         lineNoiseFrequency = 60
         lineNoiseHarmonics = 2
@@ -224,15 +228,14 @@ final class FilterViewModel: ObservableObject {
         lowPassCutoffText = p["lowPassHz"] ?? ""
         if let v = p["highPassSlope"].flatMap(Int.init), let s = FilterSlope(rawValue: v) { highPassSlope = s }
         if let v = p["lowPassSlope"].flatMap(Int.init), let s = FilterSlope(rawValue: v) { lowPassSlope = s }
-        notch60HzEnabled = p["notchHz"] != nil
-        switch p["lineNoiseMode"].flatMap(FilterLineNoiseMode.init(rawValue:)) {
-        case .adaptiveCleanLine:
+        let serializedMode = p["lineNoiseMode"].flatMap(FilterLineNoiseMode.init(rawValue:))
+        if let serializedMode {
+            lineNoiseMode = serializedMode
+        } else if p["lineNoiseHz"] != nil {
+            // Legacy eva.xml without an explicit mode used lineNoiseHz for CleanLine.
             lineNoiseMode = .adaptiveCleanLine
-        case .notch, .off:
-            lineNoiseMode = .off // active mode becomes .notch via notch60HzEnabled
-        case nil:
-            // Legacy eva.xml without the explicit mode key: infer from frequency.
-            lineNoiseMode = p["lineNoiseHz"] != nil ? .adaptiveCleanLine : .off
+        } else {
+            lineNoiseMode = p["notchHz"] != nil ? .notch : .off
         }
         if let hz = p["lineNoiseHz"].flatMap(Double.init) { lineNoiseFrequency = hz }
         if let h = p["lineNoiseHarmonics"].flatMap(Int.init) { lineNoiseHarmonics = h }
@@ -431,8 +434,6 @@ final class FilterViewModel: ObservableObject {
 
     func resetForClose() {
         cancelInFlightWork()
-        showsPopover = false
-        showsLineNoiseOptions = false
         statusMessage = nil
         statusIsError = false
         output = nil

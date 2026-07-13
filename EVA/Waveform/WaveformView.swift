@@ -161,6 +161,8 @@ struct WaveformView: View {
     /// Filtering domain (band-pass / line-noise / average-reference), extracted
     /// into an L4 store. See REFACTOR.md.
     @StateObject var filter: FilterViewModel
+    @State var showsFilterPopover = false
+    @State var showsFilterLineNoiseOptions = false
     // Wavelet artifact reduction (HAPPE-style) pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
     @StateObject var wavelet: WaveletReductionViewModel
@@ -1039,7 +1041,7 @@ struct WaveformView: View {
             }
 
             Button {
-                filter.showsPopover.toggle()
+                showsFilterPopover.toggle()
             } label: {
                 ToolbarIcon(
                     name: "icon.filter",
@@ -1053,7 +1055,7 @@ struct WaveformView: View {
             .help(filter.output != nil
                 ? "Active: \(filter.activeFilterSummary)"
                 : "Apply a cutoff / notch / average-reference filter")
-            .popover(isPresented: $filter.showsPopover, arrowEdge: .bottom) {
+            .popover(isPresented: $showsFilterPopover, arrowEdge: .bottom) {
                 filterPopover(for: base)
             }
 

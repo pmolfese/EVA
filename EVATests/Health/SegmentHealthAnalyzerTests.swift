@@ -77,4 +77,33 @@ struct SegmentHealthAnalyzerTests {
         let analysis = SegmentHealthAnalyzer.analyze(signal: signal, segments: [], excludedChannelIndices: [])
         #expect(analysis.results.isEmpty)
     }
+
+    @Test func labeledArtifactMetricIsBinaryForAnyOverlap() {
+        let signal = SyntheticSignal.make([cleanChannel(seed: 1)], samplingRate: samplingRate)
+        let segment = try! #require(SegmentHealthAnalyzer.analysisSegments(for: signal, epochSegments: []).first)
+
+        let cleanAnalysis = SegmentHealthAnalyzer.analyze(
+            signal: signal,
+            segments: [segment],
+            excludedChannelIndices: []
+        )
+        let cleanMetric = try! #require(cleanAnalysis.results.first?.metrics.first { $0.name == "Labeled Artifacts" })
+        #expect(cleanMetric.score == 1)
+
+        let pointArtifact = SegmentHealthArtifactInterval(
+            artifactID: "manual-artifact",
+            code: "Artifact",
+            startSample: segment.startSample,
+            endSample: segment.startSample,
+            sourceFile: "Manual"
+        )
+        let artifactAnalysis = SegmentHealthAnalyzer.analyze(
+            signal: signal,
+            segments: [segment],
+            excludedChannelIndices: [],
+            artifactIntervals: [pointArtifact]
+        )
+        let artifactMetric = try! #require(artifactAnalysis.results.first?.metrics.first { $0.name == "Labeled Artifacts" })
+        #expect(artifactMetric.score == 0)
+    }
 }

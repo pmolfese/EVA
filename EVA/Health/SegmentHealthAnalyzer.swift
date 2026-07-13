@@ -128,9 +128,9 @@ nonisolated struct SegmentHealthBaselines: Codable, Sendable {
     var derivativeRatio: Double
 }
 
-/// Green/red thresholds for the segment-health metrics. "Green" is the value
-/// scoring 1.0 (fully good); "red" scores 0.0 (fully poor); values in between
-/// interpolate. Mirrors `ChannelBaseMetricSettings`.
+/// Configuration for the segment-health metrics. Continuous metrics use green/red
+/// thresholds, while labeled-artifact presence is scored as a binary condition.
+/// Mirrors `ChannelBaseMetricSettings`.
 nonisolated struct SegmentHealthMetricSettings: Codable, Sendable {
     /// Finite-sample fraction (lower bound: higher is better).
     var finiteEnabled: Bool = true
@@ -181,10 +181,8 @@ nonisolated struct SegmentHealthMetricSettings: Codable, Sendable {
     var slowDriftGreen: Double = 0.8
     var slowDriftRed: Double = 2.5
     var slowDriftWeight: Double = 0.8
-    /// Labeled-artifact window-overlap fraction (upper: lower is better).
+    /// Binary penalty for any labeled-artifact overlap in the segment.
     var artifactEnabled: Bool = true
-    var artifactGreen: Double = 0.02
-    var artifactRed: Double = 0.15
     var artifactWeight: Double = 2.4
 
     static let defaults = SegmentHealthMetricSettings()
@@ -628,15 +626,13 @@ nonisolated enum SegmentHealthAnalyzer {
         }
 
         if base.artifactEnabled {
-            let artifactScore = summary.artifactCount == 0
-                ? 1
-                : min(HealthScoring.scoreUpperFraction(summary.artifactOverlapFraction, green: base.artifactGreen, red: base.artifactRed), 0.15)
+            let artifactScore = summary.artifactCount == 0 ? 1.0 : 0.0
             metrics.append(metric(
                 name: "Labeled Artifacts",
                 score: artifactScore,
                 detail: summary.artifactCount == 0
                     ? "No labeled artifacts in segment"
-                    : "\(summary.artifactCount) artifact\(summary.artifactCount == 1 ? "" : "s"), \(HealthScoring.formatPercent(summary.artifactOverlapFraction)) window coverage",
+                    : "Contains \(summary.artifactCount) labeled artifact\(summary.artifactCount == 1 ? "" : "s")",
                 weight: base.artifactWeight
             ))
         }
