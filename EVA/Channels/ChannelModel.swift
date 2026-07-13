@@ -53,6 +53,38 @@ final class ChannelModel {
         isAnalyzingHealth = false
         healthProgress = 0
     }
+
+    /// Applies each saved spherical-spline recipe to the signal currently at
+    /// the end of the processing pipeline. The donor weights are persistent;
+    /// the replacement samples are re-derived so filtering, OBS, wavelets, and
+    /// other upstream transforms cannot reveal the original target channel.
+    func applyingInterpolations(to signal: MFFSignalData) -> MFFSignalData {
+        guard !interpolated.isEmpty else { return signal }
+        var data = signal.data
+        let sampleCount = data.first?.count ?? 0
+
+        for target in interpolated.keys.sorted() where data.indices.contains(target) {
+            if let recipe = interpolationSources[target],
+               recipe.indices.count == recipe.weights.count,
+               !recipe.indices.isEmpty,
+               recipe.indices.allSatisfy({ signal.data.indices.contains($0) && signal.data[$0].count == sampleCount }) {
+                var replacement = [Float](repeating: 0, count: sampleCount)
+                for (sourceIndex, weight) in zip(recipe.indices, recipe.weights) {
+                    let source = signal.data[sourceIndex]
+                    for sample in 0..<sampleCount {
+                        replacement[sample] += weight * source[sample]
+                    }
+                }
+                data[target] = replacement
+            } else if let cached = interpolated[target], cached.count == sampleCount {
+                // Backward-compatible fallback for interpolation state created
+                // before donor recipes were retained.
+                data[target] = cached
+            }
+        }
+
+        return signal.replacingData(data)
+    }
 }
 
 extension FocusedValues {

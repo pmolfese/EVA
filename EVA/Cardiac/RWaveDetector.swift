@@ -28,6 +28,7 @@ enum ECGDetectionAlgorithm: String, CaseIterable, Identifiable, Sendable {
     case wfdb = "WFDB"
     case wavelet = "Wavelet"
     case christov = "Christov"
+    case pulse = "Pulse-Ox"
 
     nonisolated var id: String { rawValue }
 
@@ -47,6 +48,8 @@ enum ECGDetectionAlgorithm: String, CaseIterable, Identifiable, Sendable {
             return "Wavelet"
         case .christov:
             return "Christov"
+        case .pulse:
+            return "Pulse"
         }
     }
 
@@ -64,6 +67,8 @@ enum ECGDetectionAlgorithm: String, CaseIterable, Identifiable, Sendable {
             return "Multiscale detail-energy QRS detection for sharp cardiac transients in noisy signals."
         case .christov:
             return "Christov-style adaptive slope-envelope detection with time-varying signal/noise thresholds."
+        case .pulse:
+            return "Pulse-oximeter (PPG) systolic peak picking on the smoothed, baseline-corrected pulse waveform."
         }
     }
 }
@@ -129,6 +134,7 @@ nonisolated enum RWaveDetector {
     private static let waveletDetailEnvelopeWindowSeconds = 0.080
     private static let christovEnvelopeWindowSeconds = 0.040
     private static let christovLongSlopeWindowSeconds = 0.280
+    private static let pulseSmoothingWindowSeconds = 0.090
     private static let adaptivePeakSpacingSeconds = 0.080
     private static let rPeakRefinementWindowSeconds = 0.080
 
@@ -193,7 +199,7 @@ nonisolated enum RWaveDetector {
         let aggregate = aggregateScores(processedChannels, sampleCount: sampleCount)
 
         switch algorithm {
-        case .simple:
+        case .simple, .pulse:
             return staticPeakCandidates(
                 aggregate: aggregate,
                 processedChannels: processedChannels,
@@ -300,6 +306,13 @@ nonisolated enum RWaveDetector {
                 sampleCount: sampleCount,
                 samplingRate: samplingRate
             )
+        case .pulse:
+            return pulseProcessedChannel(
+                samples: samples,
+                sampleCount: sampleCount,
+                samplingRate: samplingRate,
+                polarity: polarity
+            )
         }
     }
 
@@ -325,6 +338,49 @@ nonisolated enum RWaveDetector {
         }
 
         return ECGProcessedChannel(scores: scores, waveform: highPassed)
+    }
+
+    /// Pulse-oximeter (PPG) systolic peak detection. Unlike the QRS algorithms, a
+    /// PPG pulse is a smooth, single-lobed wave with no sharp high-frequency
+    /// transient, so the derivative/energy pipelines used for the R-wave do not
+    /// apply here. Instead we remove slow drift, smooth away sensor noise and the
+    /// dicrotic-notch ripple, and pick amplitude peaks on the resulting waveform —
+    /// the same static, non-overlapping peak picker used by `.simple`.
+    ///
+    /// Note: a PPG peak already lags the ECG R-wave by the peripheral pulse-transit
+    /// time, so events produced here are NOT interchangeable with ECG R-waves for
+    /// BCG timing — they need a smaller, separate lag when driving BCG correction.
+    private static func pulseProcessedChannel(
+        samples: [Float],
+        sampleCount: Int,
+        samplingRate: Double,
+        polarity: ECGDetectionPolarity
+    ) -> ECGProcessedChannel? {
+        guard sampleCount > 2 else { return nil }
+
+        let baselineCorrected = baselineRemoved(
+            samples: samples,
+            sampleCount: sampleCount,
+            samplingRate: samplingRate
+        )
+        let smoothed = centeredMovingAverage(
+            baselineCorrected,
+            sampleCount: sampleCount,
+            windowSamples: sampleWindow(
+                seconds: pulseSmoothingWindowSeconds,
+                samplingRate: samplingRate,
+                minimum: 3
+            )
+        )
+        guard let scores = normalizedPolarityScores(
+            values: smoothed,
+            sampleCount: sampleCount,
+            polarity: polarity
+        ) else {
+            return nil
+        }
+
+        return ECGProcessedChannel(scores: scores, waveform: smoothed)
     }
 
     private static func panTompkinsProcessedChannel(

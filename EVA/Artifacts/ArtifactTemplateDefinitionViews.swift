@@ -220,10 +220,18 @@ extension WaveformView {
         }
         .onChange(of: template.type) { _, newType in
             applyDefaultArtifactTemplateIdentity(for: newType)
-            template.mergeWindowSeconds = newType.defaultMergeWindowSeconds
-            template.mergeBehavior = newType.defaultMergeBehavior
+            let defaultMergeWindow = newType.defaultMergeWindowSeconds
+            if template.mergeWindowSeconds != defaultMergeWindow {
+                template.mergeWindowSeconds = defaultMergeWindow
+            }
+            let defaultMergeBehavior = newType.defaultMergeBehavior
+            if template.mergeBehavior != defaultMergeBehavior {
+                template.mergeBehavior = defaultMergeBehavior
+            }
             // Continuous topography scanning is gated to Ocular artifacts.
-            if newType != .ocular { template.topographyScanStyle = .windowed }
+            if newType != .ocular, template.topographyScanStyle != .windowed {
+                template.topographyScanStyle = .windowed
+            }
         }
         .onChange(of: template.name) { _, _ in
             scheduleDefinedArtifactIdentityRefresh()
@@ -234,7 +242,9 @@ extension WaveformView {
         .onChange(of: template.topographyMode) { _, newMode in
             // Continuous scanning only applies to the single-map reference
             // modes — Map sequence is already its own kind of "continuous".
-            if newMode == .trajectory { template.topographyScanStyle = .windowed }
+            if newMode == .trajectory, template.topographyScanStyle != .windowed {
+                template.topographyScanStyle = .windowed
+            }
             refreshTopographyIfNeeded(for: signal)
         }
         .onChange(of: template.topographyChannelScope) { _, _ in
@@ -896,8 +906,12 @@ extension WaveformView {
         }
 
         guard template.topographyMode.isEnabled else {
-            template.result?.topographyEvents = []
-            template.result?.topographyReference = nil
+            if template.result?.topographyEvents.isEmpty == false {
+                template.result?.topographyEvents = []
+            }
+            if template.result?.topographyReference != nil {
+                template.result?.topographyReference = nil
+            }
             return
         }
 
@@ -1753,7 +1767,6 @@ extension WaveformView {
         }
         artifactVM.cleaningIsEnabled = isEnabled
         invalidateEpochsForSignalChange()
-        invalidateInterpolations()
     }
 
 }

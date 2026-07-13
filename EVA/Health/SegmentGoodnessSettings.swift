@@ -68,7 +68,7 @@ struct SegmentGoodnessSettingsView: View {
             Text("Segment Goodness Settings")
                 .font(.title3.weight(.semibold))
 
-            Text("Green/red thresholds for the per-segment health metrics. \u{201C}Green\u{201D} scores fully good (1.0); \u{201C}Red\u{201D} scores fully poor (0.0); values between interpolate.")
+            Text("For continuous metrics, \u{201C}Good\u{201D} scores 1.0, \u{201C}Poor\u{201D} scores 0.0, and values between interpolate. Labeled Artifacts is binary: any overlap scores 0.0.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -98,7 +98,7 @@ struct SegmentGoodnessSettingsView: View {
                     row("Clipping", help: SegmentMetricHelp.clipping, enabled: $settings.base.dropoutEnabled, green: $settings.base.clippingGreen, red: $settings.base.clippingRed, weight: $settings.base.dropoutWeight, fraction: 3)
                     row("Fast Noise", help: SegmentMetricHelp.fastNoise, enabled: $settings.base.fastNoiseEnabled, green: $settings.base.fastNoiseGreen, red: $settings.base.fastNoiseRed, weight: $settings.base.fastNoiseWeight, fraction: 1)
                     row("Slow Drift", help: SegmentMetricHelp.slowDrift, enabled: $settings.base.slowDriftEnabled, green: $settings.base.slowDriftGreen, red: $settings.base.slowDriftRed, weight: $settings.base.slowDriftWeight, fraction: 1)
-                    row("Labeled Artifacts", help: SegmentMetricHelp.artifact, enabled: $settings.base.artifactEnabled, green: $settings.base.artifactGreen, red: $settings.base.artifactRed, weight: $settings.base.artifactWeight, fraction: 3)
+                    binaryRow("Labeled Artifacts", help: SegmentMetricHelp.artifact, enabled: $settings.base.artifactEnabled, weight: $settings.base.artifactWeight)
                 }
             }
             .frame(maxWidth: .infinity, minHeight: 230, alignment: .topLeading)
@@ -142,6 +142,30 @@ struct SegmentGoodnessSettingsView: View {
                 .disabled(!enabled.wrappedValue)
         }
     }
+
+    private func binaryRow(
+        _ name: String,
+        help: String,
+        enabled: Binding<Bool>,
+        weight: Binding<Double>
+    ) -> some View {
+        GridRow {
+            MetricHelpLabel(name: name, help: help)
+            Toggle("", isOn: enabled)
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .frame(width: 40)
+            Text("—")
+                .frame(width: 62)
+                .foregroundStyle(.secondary)
+            Text("—")
+                .frame(width: 62)
+                .foregroundStyle(.secondary)
+            TextField("", value: weight, format: .number.precision(.fractionLength(1)))
+                .frame(width: 62)
+                .disabled(!enabled.wrappedValue)
+        }
+    }
 }
 
 private enum SegmentMetricHelp {
@@ -165,5 +189,5 @@ private enum SegmentMetricHelp {
 
     static let slowDrift = "Baseline shift from the start to the end of the segment, relative to what's typical. High drift suggests slow movement or electrode-contact changes during the segment. Only scored for segments long enough to measure a meaningful shift."
 
-    static let artifact = "How much of the segment overlaps a labeled artifact interval (from threshold/template/ICA detection). Any overlap heavily penalizes the segment's score, since a labeled artifact is a direct, external signal that something is wrong here."
+    static let artifact = "Whether the segment contains any labeled artifact interval (from threshold/template/ICA detection). This metric is binary: no labeled artifact scores fully good; any overlap scores fully poor."
 }

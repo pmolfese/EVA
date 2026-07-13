@@ -117,7 +117,7 @@ nonisolated enum MFFWriter {
             // Segmented / averaged exports need categories.xml so EVA (and other
             // MFF readers) recognize the epoch/category structure on reopen.
             if kind != .continuous, !segments.isEmpty {
-                try writeCategoriesXML(blocks: blocks, sampleRate: sampleRate, to: packageURL)
+                try writeCategoriesXML(blocks: blocks, sampleRate: sampleRate, kind: kind, to: packageURL)
             }
             try writeEventsXML(signal: signal, blocks: blocks, sampleRate: sampleRate, kind: kind, to: packageURL)
             try writeSensorLayoutXML(signal: signal, to: packageURL)
@@ -459,7 +459,12 @@ nonisolated enum MFFWriter {
     /// category (first-appearance order), one `<seg>` per block, with the `#seg`
     /// key carrying the contributing-trial count so averaged files read back as
     /// averaged (EGI/MFF convention that EVA's own reader parses).
-    private static func writeCategoriesXML(blocks: [ExportBlock], sampleRate: Int, to packageURL: URL) throws {
+    private static func writeCategoriesXML(
+        blocks: [ExportBlock],
+        sampleRate: Int,
+        kind: MFFExportKind,
+        to packageURL: URL
+    ) throws {
         struct Seg { let begin: Int; let end: Int; let evt: Int; let count: Int }
         var order: [String] = []
         var segsByCategory: [String: [Seg]] = [:]
@@ -480,8 +485,9 @@ nonisolated enum MFFWriter {
         for category in order {
             var segsXML = ""
             for seg in segsByCategory[category] ?? [] {
+                let averageName = kind == .averaged ? "\n        <name>Average</name>" : ""
                 segsXML += """
-      <seg>
+      <seg>\(averageName)
         <beginTime>\(seg.begin)</beginTime>
         <endTime>\(seg.end)</endTime>
         <evtBegin>\(seg.evt)</evtBegin>

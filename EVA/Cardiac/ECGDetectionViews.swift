@@ -41,7 +41,7 @@ extension WaveformView {
             VStack(alignment: .leading, spacing: 4) {
                 Text("ECG / QRS Detection")
                     .font(.headline)
-                Text("Select PNS channels, EEG proxy channels, or both. Detected QRS complexes appear as artifact events.")
+                Text("Select PNS channels, EEG proxy channels, or both. Detected QRS complexes (or pulse-ox systolic peaks, via the Pulse-Ox method) appear as artifact events.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

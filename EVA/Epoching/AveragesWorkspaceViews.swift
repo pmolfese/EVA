@@ -290,14 +290,18 @@ extension WaveformView {
                                 maxValue: topomapMaxBinding,
                                 autoScale: autoScale,
                                 onAutoMicrovolts: {
-                                    epoching.topomapScaleManual = false
+                                    if epoching.topomapScaleManual {
+                                        epoching.topomapScaleManual = false
+                                    }
                                     seedTopomapScale(autoScale: autoScale, autoZ: autoZ)
                                 },
                                 sigma: $epoching.topomapZSigma,
                                 zMean: topomapZMeanBinding,
                                 zSD: topomapZSDBinding,
                                 onAutoZ: {
-                                    epoching.topomapZManual = false
+                                    if epoching.topomapZManual {
+                                        epoching.topomapZManual = false
+                                    }
                                     seedTopomapScale(autoScale: autoScale, autoZ: autoZ)
                                 }
                             )
@@ -307,7 +311,10 @@ extension WaveformView {
                     }
                     .onAppear { seedTopomapScale(autoScale: autoScale, autoZ: autoZ) }
                     .onChange(of: epoching.topomapSymmetric) { _, sym in
-                        if sym { epoching.topomapScaleMin = -epoching.topomapScaleMax }
+                        let mirroredMinimum = -epoching.topomapScaleMax
+                        if sym, epoching.topomapScaleMin != mirroredMinimum {
+                            epoching.topomapScaleMin = mirroredMinimum
+                        }
                     }
                     .contextMenu {
                         figureSaveMenu(

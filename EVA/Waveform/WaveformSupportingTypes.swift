@@ -339,6 +339,57 @@ struct WaveformUserMarkerSignature: Equatable {
     let note: String
 }
 
+/// Projects a continuous-recording marker into an epoch's display timeline.
+/// Artifact markers may represent a window rather than an instantaneous point;
+/// in that case a marker is retained whenever the window overlaps the epoch and
+/// is pinned to the nearest epoch edge when its original center is outside.
+nonisolated enum EpochedOverlayEventMapper {
+    static func map(
+        _ event: MFFEvent,
+        into segment: EpochSegment,
+        samplingRate: Double,
+        overlapWindowSeconds: Double? = nil
+    ) -> MFFEvent? {
+        guard samplingRate > 0 else { return nil }
+        let epochSampleCount = segment.endSample - segment.startSample + 1
+        guard epochSampleCount > 0 else { return nil }
+
+        let epochStartSeconds = segment.sourceTimeSeconds
+            - Double(segment.stimulusOffsetSamples) / samplingRate
+        let epochEndSeconds = epochStartSeconds + Double(epochSampleCount) / samplingRate
+
+        if let overlapWindowSeconds, overlapWindowSeconds > 0 {
+            let halfWindow = overlapWindowSeconds / 2
+            let eventStartSeconds = event.beginTimeSeconds - halfWindow
+            let eventEndSeconds = event.beginTimeSeconds + halfWindow
+            guard eventEndSeconds >= epochStartSeconds,
+                  eventStartSeconds <= epochEndSeconds else {
+                return nil
+            }
+        } else {
+            guard event.beginTimeSeconds >= epochStartSeconds,
+                  event.beginTimeSeconds < epochEndSeconds else {
+                return nil
+            }
+        }
+
+        let offsetSamples = Int(((event.beginTimeSeconds - epochStartSeconds) * samplingRate).rounded())
+        let displaySample = min(max(segment.startSample + offsetSamples, segment.startSample), segment.endSample)
+        let displayTime = Double(displaySample) / samplingRate
+        return MFFEvent(
+            id: "epoched-overlay-\(segment.id)-\(event.id)",
+            code: event.code,
+            label: event.label,
+            eventDescription: event.eventDescription,
+            cell: event.cell,
+            beginTimeSeconds: displayTime,
+            rawBeginTime: event.rawBeginTime,
+            sourceFile: event.sourceFile,
+            durationSeconds: event.durationSeconds
+        )
+    }
+}
+
 struct WaveformDefinedArtifactSignature: Equatable {
     let id: UUID
     let events: EventTrackEventSignature

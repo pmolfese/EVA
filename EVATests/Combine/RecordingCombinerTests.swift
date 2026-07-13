@@ -283,4 +283,63 @@ struct RecordingCombinerTests {
         #expect(summary.categories[0].name == "stim")
         #expect(summary.categories[0].goodTrials == 1)
     }
+
+    @Test func psaArtifactThresholdSnapshotReadsCompleteSavedSettings() throws {
+        let snapshot = try #require(PSAArtifactThresholdSnapshot(parameters: [
+            "interpolateBadChannelsPerEpoch": "true",
+            "badChannel.minMicrovolts": "-150.0",
+            "badChannel.maxMicrovolts": "150",
+            "badChannel.maxSlopeMicrovoltsPerSample": "25",
+            "badChannel.maxAccelerationMicrovoltsPerSample": "15",
+            "badChannel.maxBadChannelFraction": "0.1",
+            "badChannel.maxBadChannelCount": "13",
+            "badChannel.usesAbsoluteBadChannelCount": "false",
+            "badChannel.escalateToGlobal": "true",
+            "badChannel.globalEscalationThresholdPercent": "50"
+        ]))
+
+        #expect(snapshot.isComplete)
+        #expect(snapshot.minMicrovolts == -150)
+        #expect(snapshot.maxBadChannelFraction == 0.1)
+        #expect(snapshot.detail.contains("reject epoch > 10% bad channels"))
+        #expect(snapshot.detail.contains("global escalation at 50% of epochs"))
+    }
+
+    @Test func psaArtifactThresholdComparisonUsesSemanticNumericValues() throws {
+        let common: [String: String] = [
+            "interpolateBadChannelsPerEpoch": "true",
+            "badChannel.minMicrovolts": "-150",
+            "badChannel.maxMicrovolts": "150",
+            "badChannel.maxSlopeMicrovoltsPerSample": "25",
+            "badChannel.maxAccelerationMicrovoltsPerSample": "15",
+            "badChannel.maxBadChannelFraction": "0.10",
+            "badChannel.maxBadChannelCount": "13",
+            "badChannel.usesAbsoluteBadChannelCount": "false",
+            "badChannel.escalateToGlobal": "true",
+            "badChannel.globalEscalationThresholdPercent": "50"
+        ]
+        let reference = try #require(PSAArtifactThresholdSnapshot(parameters: common))
+        var equivalent = common
+        equivalent["badChannel.maxMicrovolts"] = "150.0"
+        equivalent["badChannel.maxBadChannelCount"] = "99" // inactive in percentage mode
+        let same = try #require(PSAArtifactThresholdSnapshot(parameters: equivalent))
+        var changed = common
+        changed["badChannel.maxAccelerationMicrovoltsPerSample"] = "20"
+        changed["badChannel.maxBadChannelFraction"] = "0.15"
+        let different = try #require(PSAArtifactThresholdSnapshot(parameters: changed))
+
+        #expect(same.differingFields(from: reference).isEmpty)
+        #expect(different.differingFields(from: reference) == [
+            "maximum acceleration", "reject-epoch percentage"
+        ])
+    }
+
+    @Test func psaArtifactThresholdSnapshotDoesNotInventMissingLegacyValues() throws {
+        #expect(PSAArtifactThresholdSnapshot(parameters: ["average": "true"]) == nil)
+        let partial = try #require(PSAArtifactThresholdSnapshot(parameters: [
+            "interpolateBadChannelsPerEpoch": "true",
+            "badChannel.minMicrovolts": "-150"
+        ]))
+        #expect(!partial.isComplete)
+    }
 }

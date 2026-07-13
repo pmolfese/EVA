@@ -54,6 +54,9 @@ nonisolated enum RecordingCombiner {
         // MFF records just the survivors.
         let script = EVAProcessingScriptXML.read(fromPackage: input.url)
         let hasProcessingRecord = script != nil
+        let psaArtifactThresholds = script?.steps
+            .last(where: { $0.operation == .segment })
+            .flatMap { PSAArtifactThresholdSnapshot(parameters: $0.parameters) }
         let rejectionByCategory: [String: CategoryRejection] = {
             guard let step = script?.steps.last(where: { $0.operation == .average && !$0.rejections.isEmpty }) else {
                 return [:]
@@ -91,6 +94,7 @@ nonisolated enum RecordingCombiner {
             isAveraged: signal.isAveraged,
             categories: categories,
             hasProcessingRecord: hasProcessingRecord,
+            psaArtifactThresholds: psaArtifactThresholds,
             snr: snr
         )
     }

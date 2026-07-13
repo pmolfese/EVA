@@ -177,6 +177,28 @@ struct ArtifactCleanerTests {
         }
     }
 
+    @Test func obsLeavesExcludedInterpolatedTargetUntouched() {
+        let template = SyntheticSignal.bump(width: windowSamples)
+        let centers = [100, 300, 500]
+        let target = makeSignal(template: template, centers: centers, scales: [2, 2, 2], sampleCount: 650)
+        let donor = makeSignal(template: template, centers: centers, scales: [1.5, 1.5, 1.5], sampleCount: 650)
+        let events = makeEvents(centers: centers)
+        var artifact = makeArtifact(events: events, template: template, method: .obs)
+        artifact.obsPCAComponentCount = 1
+        artifact.obsEdgeTaperSeconds = 0
+        let signal = SyntheticSignal.make([target, donor], samplingRate: samplingRate)
+
+        let (cleaned, summaries) = ArtifactCleaner.cleanedSignal(
+            from: signal,
+            artifacts: [artifact],
+            excluding: [0]
+        )
+
+        #expect(cleaned.data[0] == target)
+        #expect(summaries.first?.channelCount == 1)
+        #expect(windowEnergy(cleaned.data[1], center: centers[1]) < windowEnergy(donor, center: centers[1]))
+    }
+
     /// MAS now applies the same edge-taper + local-baseline mechanism as OBS
     /// (default on) before subtracting its local template — verifies that
     /// addition didn't break MAS's core job of substantially reducing a

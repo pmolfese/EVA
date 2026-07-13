@@ -88,7 +88,9 @@ extension WaveformView {
         artifactVM.isCleaning = true
         artifactVM.cleaningStatusMessage = nil
         artifactVM.cleaningProgress = nil
-        let badChannels = channels.bad
+        // Interpolated targets are reconstructed from cleaned donors after this
+        // stage, so their original samples must not participate in OBS/SSP.
+        let excludedChannels = channels.bad.union(channels.interpolated.keys)
         let (progressContinuation, progressTask) = ProgressBridge.make { progress in
             artifactVM.cleaningProgress = progress
         }
@@ -101,7 +103,7 @@ extension WaveformView {
                     ArtifactCleaner.cleanedSignal(
                         from: signal,
                         artifacts: artifacts,
-                        excluding: badChannels
+                        excluding: excludedChannels
                     ) { progress in
                         progressContinuation.yield(progress)
                     }
@@ -139,7 +141,6 @@ extension WaveformView {
                 artifactVM.statusMessage = artifactVM.cleaningStatusMessage
                 artifactVM.detectionRefreshToken += 1
                 invalidateEpochsForSignalChange()
-                invalidateInterpolations()
                 artifactVM.cleaningProgress = nil
                 artifactVM.isCleaning = false
                 artifactCleaningTask = nil
@@ -212,7 +213,6 @@ extension WaveformView {
         guard hadCleaning else { return }
         artifactVM.detectionRefreshToken += 1
         invalidateEpochsForSignalChange()
-        invalidateInterpolations()
     }
 
     var artifactScanSignature: ArtifactScanSignature {

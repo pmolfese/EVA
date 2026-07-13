@@ -38,6 +38,7 @@ struct CombineRecordingsSheet: View {
     @State private var badChannelPolicy = BadChannelPolicy.interpolatePerFile
     @State private var rebaseline = false
     @State private var showAllSNR = false
+    @State private var comparePSAArtifactThresholds = false
     /// Per-file canonical category mapping (rawName → canonicalName), editable.
     @State private var categoryMap: [URL: [String: String]] = [:]
 
@@ -72,7 +73,7 @@ struct CombineRecordingsSheet: View {
             Divider()
             footer
         }
-        .frame(width: 780, height: 620)
+        .frame(width: comparePSAArtifactThresholds ? 940 : 780, height: 620)
         .task { await load() }
     }
 
@@ -99,6 +100,7 @@ struct CombineRecordingsSheet: View {
                     Text("Ch"); Text("Hz"); Text("Categories"); Text("Trials")
                     Text("±SNR"); Text("Base SNR")
                     if showAllSNR { Text("SME"); Text("Split½"); Text("GFP") }
+                    if comparePSAArtifactThresholds { Text("PSA thresholds") }
                 }
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -139,6 +141,9 @@ struct CombineRecordingsSheet: View {
                             Text(fmt(s.snr.splitHalfReliability))
                             Text(fmt(s.snr.gfpSNR))
                         }
+                        if comparePSAArtifactThresholds {
+                            psaThresholdStatus(for: s)
+                        }
                     }
                     .font(.caption.monospacedDigit())
                 }
@@ -146,6 +151,9 @@ struct CombineRecordingsSheet: View {
             HStack(spacing: 12) {
                 Toggle("Show all SNR metrics", isOn: $showAllSNR)
                     .font(.caption)
+                Toggle("Compare PSA artifact thresholds", isOn: $comparePSAArtifactThresholds)
+                    .font(.caption)
+                    .help("Compare the saved per-epoch bad-channel interpolation and reject-epoch thresholds in each file's eva.xml.")
                 if summaries.contains(where: \.hasProcessingRecord) {
                     Label("preprocessed (has eva.xml)", systemImage: "wand.and.stars")
                         .font(.caption2)
@@ -153,6 +161,90 @@ struct CombineRecordingsSheet: View {
                 }
             }
             .padding(.top, 4)
+            if comparePSAArtifactThresholds {
+                psaThresholdComparison
+            }
+        }
+    }
+
+    private var referencePSAThresholds: PSAArtifactThresholdSnapshot? {
+        summaries.first?.psaArtifactThresholds
+    }
+
+    @ViewBuilder
+    private func psaThresholdStatus(for summary: RecordingSummary) -> some View {
+        if summary.id == summaries.first?.id {
+            if let thresholds = summary.psaArtifactThresholds, thresholds.isComplete {
+                Label("Reference", systemImage: "flag.fill")
+                    .foregroundStyle(.secondary)
+                    .help(thresholds.detail)
+            } else {
+                Label("Unavailable", systemImage: "questionmark.circle")
+                    .foregroundStyle(.orange)
+                    .help(summary.psaArtifactThresholds?.detail ?? "No PSA artifact thresholds were recorded in eva.xml.")
+            }
+        } else if let reference = referencePSAThresholds,
+                  reference.isComplete,
+                  let thresholds = summary.psaArtifactThresholds,
+                  thresholds.isComplete {
+            let differences = thresholds.differingFields(from: reference)
+            if differences.isEmpty {
+                Label("Match", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .help(thresholds.detail)
+            } else {
+                Label("Differs", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help("Different from the first file: \(differences.joined(separator: ", ")).\n\(thresholds.detail)")
+            }
+        } else {
+            Label("Unavailable", systemImage: "questionmark.circle")
+                .foregroundStyle(.orange)
+                .help(summary.psaArtifactThresholds?.detail ?? "No PSA artifact thresholds were recorded in eva.xml.")
+        }
+    }
+
+    private var psaThresholdComparison: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let reference = referencePSAThresholds, reference.isComplete {
+                Label(psaThresholdsAllMatch ? "PSA artifact thresholds match across all files" : "PSA artifact thresholds are not consistent across all files", systemImage: psaThresholdsAllMatch ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(psaThresholdsAllMatch ? .green : .orange)
+                    .font(.caption.weight(.semibold))
+                Text("Reference — \(summaries.first?.fileName ?? "first file"): \(reference.detail)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(Array(summaries.dropFirst())) { summary in
+                    if let thresholds = summary.psaArtifactThresholds, thresholds.isComplete {
+                        let differences = thresholds.differingFields(from: reference)
+                        if !differences.isEmpty {
+                            Text("\(summary.fileName): differs in \(differences.joined(separator: ", ")) — \(thresholds.detail)")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else {
+                        Text("\(summary.fileName): \(summary.psaArtifactThresholds?.detail ?? "PSA artifact thresholds not recorded")")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            } else {
+                Label("Cannot compare PSA artifact thresholds: the first file has no complete saved PSA threshold record.", systemImage: "questionmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(8)
+        .background((psaThresholdsAllMatch ? Color.green : Color.orange).opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+        .padding(.top, 4)
+    }
+
+    private var psaThresholdsAllMatch: Bool {
+        guard let reference = referencePSAThresholds, reference.isComplete else { return false }
+        return summaries.allSatisfy { summary in
+            guard let thresholds = summary.psaArtifactThresholds, thresholds.isComplete else { return false }
+            return thresholds.differingFields(from: reference).isEmpty
         }
     }
 

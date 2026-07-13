@@ -352,8 +352,14 @@ extension WaveformView {
 
     func clampMRITrims(totalMarkers: Int?) {
         let maximumCombinedSkip = max(0, (totalMarkers ?? 0) - 2)
-        gradient.skipStart = min(max(gradient.skipStart, 0), maximumCombinedSkip)
-        gradient.skipEnd = min(max(gradient.skipEnd, 0), maximumCombinedSkip - gradient.skipStart)
+        let clampedStart = min(max(gradient.skipStart, 0), maximumCombinedSkip)
+        let clampedEnd = min(max(gradient.skipEnd, 0), maximumCombinedSkip - clampedStart)
+        if gradient.skipStart != clampedStart {
+            gradient.skipStart = clampedStart
+        }
+        if gradient.skipEnd != clampedEnd {
+            gradient.skipEnd = clampedEnd
+        }
     }
 
     func mriSkipControl(
@@ -363,22 +369,27 @@ extension WaveformView {
         otherSkip: Int
     ) -> some View {
         let maximum = max(0, (totalMarkers ?? 0) - otherSkip - 2)
+        let clampedValue = Binding<Int>(
+            get: { min(max(value.wrappedValue, 0), maximum) },
+            set: { newValue in
+                let clamped = min(max(newValue, 0), maximum)
+                guard value.wrappedValue != clamped else { return }
+                value.wrappedValue = clamped
+            }
+        )
 
         return HStack(spacing: 5) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(width: 54, alignment: .leading)
-            TextField("", value: value, format: .number)
+            TextField("", value: clampedValue, format: .number)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 44)
-            Stepper("", value: value, in: 0...maximum)
+            Stepper("", value: clampedValue, in: 0...maximum)
                 .labelsHidden()
         }
         .help("Trim \(title.lowercased()) \(gradient.trMarkerCode) markers before running AAS/FASTR correction.")
-        .onChange(of: value.wrappedValue) { _, newValue in
-            value.wrappedValue = min(max(newValue, 0), maximum)
-        }
     }
 
     func trimmedMarkerCount(total: Int) -> Int {

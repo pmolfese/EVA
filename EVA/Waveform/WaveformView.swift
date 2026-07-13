@@ -161,6 +161,8 @@ struct WaveformView: View {
     /// Filtering domain (band-pass / line-noise / average-reference), extracted
     /// into an L4 store. See REFACTOR.md.
     @StateObject var filter: FilterViewModel
+    @State var showsFilterPopover = false
+    @State var showsFilterLineNoiseOptions = false
     // Wavelet artifact reduction (HAPPE-style) pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
     @StateObject var wavelet: WaveletReductionViewModel
@@ -699,41 +701,32 @@ struct WaveformView: View {
 
         return continuousOverlayEventsForDisplay(includeArtifactOverlays: includeArtifactOverlays)
             .flatMap { event in
-                epoching.epochSegments.compactMap { segment in
-                    epochedOverlayEvent(event, in: segment, samplingRate: signal.samplingRate)
+                let overlapWindowSeconds = overlayWindowSeconds(for: event)
+                return epoching.epochSegments.compactMap { segment in
+                    EpochedOverlayEventMapper.map(
+                        event,
+                        into: segment,
+                        samplingRate: signal.samplingRate,
+                        overlapWindowSeconds: overlapWindowSeconds
+                    )
                 }
             }
             .sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
     }
 
-    private func epochedOverlayEvent(
-        _ event: MFFEvent,
-        in segment: EpochSegment,
-        samplingRate: Double
-    ) -> MFFEvent? {
-        let epochSampleCount = segment.endSample - segment.startSample + 1
-        guard epochSampleCount > 0 else { return nil }
-
-        let epochStartSeconds = segment.sourceTimeSeconds - Double(segment.stimulusOffsetSamples) / samplingRate
-        let epochEndSeconds = epochStartSeconds + Double(epochSampleCount) / samplingRate
-        guard event.beginTimeSeconds >= epochStartSeconds,
-              event.beginTimeSeconds < epochEndSeconds else {
-            return nil
+    /// Matches Segment Health's artifact windows so every epoch reported as
+    /// containing a defined/detected artifact also receives a visible flag.
+    private func overlayWindowSeconds(for event: MFFEvent) -> Double? {
+        let defaultWindowSeconds = 0.25
+        if let artifact = template.definedArtifacts.first(where: { artifact in
+            artifact.events.contains { $0.id == event.id }
+        }) {
+            return max(artifact.windowSizeSeconds, defaultWindowSeconds)
         }
-
-        let offsetSamples = Int(((event.beginTimeSeconds - epochStartSeconds) * samplingRate).rounded())
-        let displaySample = min(max(segment.startSample + offsetSamples, segment.startSample), segment.endSample)
-        let displayTime = Double(displaySample) / samplingRate
-        return MFFEvent(
-            id: "epoched-overlay-\(segment.id)-\(event.id)",
-            code: event.code,
-            label: event.label,
-            eventDescription: event.eventDescription,
-            cell: event.cell,
-            beginTimeSeconds: displayTime,
-            rawBeginTime: event.rawBeginTime,
-            sourceFile: event.sourceFile
-        )
+        if artifactVM.events.contains(where: { $0.id == event.id }) {
+            return defaultWindowSeconds
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -1039,7 +1032,7 @@ struct WaveformView: View {
             }
 
             Button {
-                filter.showsPopover.toggle()
+                showsFilterPopover.toggle()
             } label: {
                 ToolbarIcon(
                     name: "icon.filter",
@@ -1053,7 +1046,7 @@ struct WaveformView: View {
             .help(filter.output != nil
                 ? "Active: \(filter.activeFilterSummary)"
                 : "Apply a cutoff / notch / average-reference filter")
-            .popover(isPresented: $filter.showsPopover, arrowEdge: .bottom) {
+            .popover(isPresented: $showsFilterPopover, arrowEdge: .bottom) {
                 filterPopover(for: base)
             }
 
@@ -1936,22 +1929,7 @@ struct WaveformView: View {
 
     /// Returns `signal` with any interpolated channels swapped in.
     func applyInterpolations(to signal: MFFSignalData) -> MFFSignalData {
-        guard !channels.interpolated.isEmpty else { return signal }
-        var data = signal.data
-        for (index, series) in channels.interpolated where index < data.count && series.count == data[index].count {
-            data[index] = series
-        }
-        return MFFSignalData(
-            signalURL: signal.signalURL,
-            signalType: signal.signalType,
-            numberOfChannels: signal.numberOfChannels,
-            samplingRate: signal.samplingRate,
-            duration: signal.duration,
-            recordingStartTime: signal.recordingStartTime,
-            events: signal.events,
-            data: data,
-            channelNames: signal.channelNames
-        )
+        channels.applyingInterpolations(to: signal)
     }
 
     /// Replaces channel `index` with a spherical-spline interpolation from the
@@ -1972,7 +1950,10 @@ struct WaveformView: View {
         }
 
         let good = signal.data.indices.filter {
-            $0 != index && !channels.bad.contains($0) && geometry.positions[$0] != nil
+            $0 != index
+                && !channels.bad.contains($0)
+                && channels.interpolated[$0] == nil
+                && geometry.positions[$0] != nil
         }
 
         guard let (indices, weights) = SphericalSpline.interpolationWeights(
