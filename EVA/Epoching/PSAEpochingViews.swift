@@ -1024,11 +1024,16 @@ extension WaveformView {
             includeSkippedLabeledBadSegments: shouldAverage
         )
         epoching.statusMessage = statusText
-        escalateBadChannelsIfNeeded(
+        await escalateBadChannelsIfNeeded(
             counts: epochBadChannelCounts,
             totalEpochs: totalEpochsEvaluated,
             continuousSignal: signal
         )
+        guard !Task.isCancelled, sessionID == recordingSessionID else {
+            epoching.isApplying = false
+            epoching.phaseMessage = nil
+            return
+        }
         if epoching.interpolatesBadChannelsPerEpoch, !channels.bad.isEmpty {
             let recordingBadChannels = channels.bad.sorted().map { "Ch\($0 + 1)" }
             epoching.statusMessage = (epoching.statusMessage ?? "")
@@ -1048,9 +1053,10 @@ extension WaveformView {
 
     /// If enabled, marks any channel flagged bad in at least
     /// `escalationThresholdPercent`% of epochs bad for the WHOLE recording
-    /// and interpolates it there — reuses `interpolate(_:in:)`, so it also
-    /// patches `epoching.epochedSignal` in place (see that function) rather
-    /// than discarding the averages just computed. NOTE: does not patch
+    /// and interpolates it there. All escalated targets share one off-main
+    /// spherical-spline factorization, and the completed batch patches
+    /// `epoching.epochedSignal` in place rather than discarding the averages
+    /// just computed. NOTE: does not patch
     /// `segmentedEpochSignal` (the pre-average raw-epoch cache) — toggling
     /// post-processing after an escalation will re-derive from the
     /// pre-escalation raw epochs. A known, narrow gap, not fixed here.
@@ -1058,7 +1064,7 @@ extension WaveformView {
         counts: [Int: Int],
         totalEpochs: Int,
         continuousSignal: MFFSignalData
-    ) {
+    ) async {
         guard epoching.escalatesBadChannelsToGlobal, totalEpochs > 0, !counts.isEmpty else {
             epoching.escalatedChannelSummaries = []
             return
@@ -1072,22 +1078,86 @@ extension WaveformView {
             return
         }
 
-        var summaries: [String] = []
-        var interpolationMessages: [String] = []
-        var interpolationErrors: [String] = []
-        summaries.reserveCapacity(toEscalate.count)
-        interpolationMessages.reserveCapacity(toEscalate.count)
-        for (channelIndex, count) in toEscalate {
-            let interpolationStatus = interpolate(channelIndex, in: continuousSignal, updatesStatus: false)
+        let summaries = toEscalate.map { channelIndex, count in
             let percent = Double(count) / Double(totalEpochs) * 100
-            summaries.append("Ch\(channelIndex + 1): bad in \(String(format: "%.0f", percent))% of epochs (\(count)/\(totalEpochs))")
-            if interpolationStatus.isError {
-                interpolationErrors.append(interpolationStatus.message)
+            return "Ch\(channelIndex + 1): bad in \(String(format: "%.0f", percent))% of epochs (\(count)/\(totalEpochs))"
+        }
+        guard let geometry = electrodeGeometry else {
+            epoching.escalatedChannelSummaries = summaries
+            channelStatusMessage = "No electrode geometry is available; can't interpolate escalated channels."
+            channelStatusIsError = true
+            return
+        }
+
+        let sessionID = recordingSessionID
+        let targets = toEscalate.map(\.key)
+        let excludedDonors = channels.bad.union(channels.interpolated.keys)
+        let epochedSignal = epoching.epochedSignal
+        let positions = geometry.positions
+        epoching.phaseMessage = "Interpolating global bad channels…"
+
+        let interpolationWorker = Task.detached(priority: .userInitiated) {
+            PSAGlobalBadChannelInterpolator.interpolate(
+                targets: targets,
+                continuousSignal: continuousSignal,
+                epochedSignal: epochedSignal,
+                excludedDonors: excludedDonors,
+                positions: positions
+            )
+        }
+        let results = await withTaskCancellationHandler(
+            operation: {
+                await interpolationWorker.value
+            },
+            onCancel: {
+                interpolationWorker.cancel()
+            }
+        )
+        guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+
+        epoching.escalatedChannelSummaries = summaries
+        let successful = results.filter(\.succeeded)
+        var interpolated = channels.interpolated
+        var interpolationSources = channels.interpolationSources
+        var globalBadChannels = channels.bad
+        var interpolationMessages: [String] = []
+        let interpolationErrors = results.compactMap(\.errorMessage)
+
+        for result in successful {
+            guard let continuousSeries = result.continuousSeries else { continue }
+            interpolated[result.target] = continuousSeries
+            interpolationSources[result.target] = (
+                result.indices,
+                result.weights.map(Float.init)
+            )
+            globalBadChannels.remove(result.target)
+            interpolationMessages.append(
+                "Interpolated Ch \(result.target + 1) from \(result.indices.count) neighbors."
+            )
+        }
+        if !successful.isEmpty {
+            channels.interpolated = interpolated
+            channels.interpolationSources = interpolationSources
+            channels.bad = globalBadChannels
+            artifactVM.detectionRefreshToken += 1
+
+            if let epochedSignal,
+               successful.allSatisfy({ $0.epochedSeries != nil }) {
+                var epochedData = epochedSignal.data
+                for result in successful {
+                    if let series = result.epochedSeries,
+                       epochedData.indices.contains(result.target) {
+                        epochedData[result.target] = series
+                    }
+                }
+                epoching.epochedSignal = epochedSignal.replacingData(epochedData)
             } else {
-                interpolationMessages.append(interpolationStatus.message)
+                // Preserve the previous safety fallback for a stale or
+                // mismatched epoched layout.
+                invalidateEpochsForSignalChange()
             }
         }
-        epoching.escalatedChannelSummaries = summaries
+
         let escalatedChannels = toEscalate.map { "Ch\($0.key + 1)" }.joined(separator: ", ")
         if !interpolationMessages.isEmpty || !interpolationErrors.isEmpty {
             let combined = (interpolationMessages + interpolationErrors).joined(separator: " · ")

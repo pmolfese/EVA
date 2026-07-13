@@ -30,4 +30,16 @@ nonisolated enum ProgressBridge {
         }
         return (continuation, task)
     }
+
+    /// Closes a progress stream and waits until every already-queued update has
+    /// been applied on the main actor. Callers can safely clear their visible
+    /// progress state after this returns without a late update restoring it.
+    @MainActor
+    static func finishAndWait<Value: Sendable>(
+        _ continuation: AsyncStream<Value>.Continuation,
+        task: Task<Void, Never>
+    ) async {
+        continuation.finish()
+        await task.value
+    }
 }

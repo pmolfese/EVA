@@ -19,7 +19,52 @@
 //  window's channels via a focused value.
 //
 
+import Accelerate
 import SwiftUI
+
+nonisolated struct ChannelInterpolationRecipe: Sendable {
+    let indices: [Int]
+    let weights: [Float]
+}
+
+/// Immutable, Sendable interpolation state. The resolver can safely apply this
+/// snapshot on a detached task without touching the observable ChannelModel.
+nonisolated struct ChannelInterpolationSnapshot: Sendable {
+    let revision: Int
+    let cachedReplacements: [Int: [Float]]
+    let recipes: [Int: ChannelInterpolationRecipe]
+
+    var isEmpty: Bool { cachedReplacements.isEmpty }
+
+    func applying(to signal: MFFSignalData) -> MFFSignalData {
+        guard !isEmpty else { return signal }
+        var data = signal.data
+        let sampleCount = data.first?.count ?? 0
+
+        for target in cachedReplacements.keys.sorted() where data.indices.contains(target) {
+            if let recipe = recipes[target],
+               recipe.indices.count == recipe.weights.count,
+               !recipe.indices.isEmpty,
+               recipe.indices.allSatisfy({ signal.data.indices.contains($0) && signal.data[$0].count == sampleCount }) {
+                var replacement = [Float](repeating: 0, count: sampleCount)
+                for (sourceIndex, weight) in zip(recipe.indices, recipe.weights) {
+                    vDSP.add(
+                        multiplication: (signal.data[sourceIndex], weight),
+                        replacement,
+                        result: &replacement
+                    )
+                }
+                data[target] = replacement
+            } else if let cached = cachedReplacements[target], cached.count == sampleCount {
+                // Backward-compatible fallback for interpolation state created
+                // before donor recipes were retained.
+                data[target] = cached
+            }
+        }
+
+        return signal.replacingData(data)
+    }
+}
 
 nonisolated enum ToolbarButtonLabels {
     static let storageKey = "toolbarButtonLabelsVisible"
@@ -32,11 +77,18 @@ final class ChannelModel {
     /// Channels marked bad (drawn gray).
     var bad = Set<Int>()
     /// channelIndex → spherical-spline-interpolated replacement series.
-    var interpolated = [Int: [Float]]()
+    var interpolated = [Int: [Float]]() {
+        didSet { interpolationRevision &+= 1 }
+    }
     /// channelIndex → the channels (and spline weights) that produced its
     /// interpolation, so health can be estimated by averaging their scores
     /// instead of a full recompute.
-    var interpolationSources = [Int: (indices: [Int], weights: [Float])]()
+    var interpolationSources = [Int: (indices: [Int], weights: [Float])]() {
+        didSet { interpolationRevision &+= 1 }
+    }
+    /// Changes only when interpolation output/recipes change. Viewport and
+    /// unrelated UI state therefore cannot invalidate the resolved-signal cache.
+    private(set) var interpolationRevision = 0
     /// Whether the waveform should lazily compute and display channel quality.
     var showsHealth = false
     /// Latest channel-health scores, keyed by channel index.
@@ -58,32 +110,18 @@ final class ChannelModel {
     /// the end of the processing pipeline. The donor weights are persistent;
     /// the replacement samples are re-derived so filtering, OBS, wavelets, and
     /// other upstream transforms cannot reveal the original target channel.
-    func applyingInterpolations(to signal: MFFSignalData) -> MFFSignalData {
-        guard !interpolated.isEmpty else { return signal }
-        var data = signal.data
-        let sampleCount = data.first?.count ?? 0
-
-        for target in interpolated.keys.sorted() where data.indices.contains(target) {
-            if let recipe = interpolationSources[target],
-               recipe.indices.count == recipe.weights.count,
-               !recipe.indices.isEmpty,
-               recipe.indices.allSatisfy({ signal.data.indices.contains($0) && signal.data[$0].count == sampleCount }) {
-                var replacement = [Float](repeating: 0, count: sampleCount)
-                for (sourceIndex, weight) in zip(recipe.indices, recipe.weights) {
-                    let source = signal.data[sourceIndex]
-                    for sample in 0..<sampleCount {
-                        replacement[sample] += weight * source[sample]
-                    }
-                }
-                data[target] = replacement
-            } else if let cached = interpolated[target], cached.count == sampleCount {
-                // Backward-compatible fallback for interpolation state created
-                // before donor recipes were retained.
-                data[target] = cached
+    var interpolationSnapshot: ChannelInterpolationSnapshot {
+        ChannelInterpolationSnapshot(
+            revision: interpolationRevision,
+            cachedReplacements: interpolated,
+            recipes: interpolationSources.mapValues {
+                ChannelInterpolationRecipe(indices: $0.indices, weights: $0.weights)
             }
-        }
+        )
+    }
 
-        return signal.replacingData(data)
+    func applyingInterpolations(to signal: MFFSignalData) -> MFFSignalData {
+        interpolationSnapshot.applying(to: signal)
     }
 }
 

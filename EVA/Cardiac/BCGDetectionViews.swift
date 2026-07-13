@@ -970,131 +970,53 @@ extension WaveformView {
         let duration    = signal.duration
         let threshold   = bcg.thresholdSD
         let method      = bcg.method
+        let configuration = BCGDetectionPreviewConfiguration(
+            thresholdSD: threshold,
+            minHR: bcg.minHR,
+            maxHR: bcg.maxHR,
+            powerMinHz: bcg.powerMinHz,
+            powerMaxHz: bcg.powerMaxHz,
+            qrsLagSeconds: bcg.qrsLagMs / 1000,
+            pcaComponents: bcg.pcaComponents,
+            spatialWhiten: bcg.spatialWhiten,
+            slidingNormalize: bcg.slidingNormalize,
+            respAdaptive: bcg.respAdaptive
+        )
+        let qrsTimes = artifactVM.events
+            .filter { $0.code == RWaveDetector.eventCode }
+            .map(\.beginTimeSeconds)
 
-        let times: [Double]
-
-        switch method {
-        case .periodicity:
-            times = await BCGDetector.periodicityEvents(
+        // With NonisolatedNonsendingByDefault, merely awaiting a nonisolated
+        // detector does not guarantee that its CPU work leaves MainActor. Run
+        // the complete algorithm path on an explicit worker instead; only the
+        // event/status publication below belongs on the UI actor.
+        let detectionWorker = Task.detached(priority: .userInitiated) {
+            await BCGDetectionPreviewEstimator.eventTimes(
+                method: method,
                 channels: channels,
                 samplingRate: sr,
-                minHR: bcg.minHR,
-                maxHR: bcg.maxHR,
-                thresholdSD: threshold
-            )
-
-        case .spatialPCA:
-            let nComp      = bcg.pcaComponents
-            let whiten     = bcg.spatialWhiten
-            let slideNorm  = bcg.slidingNormalize
-            let respNorm   = bcg.respAdaptive
-            times = await BCGDetector.spatialPCAEvents(
-                channels: channels,
-                samplingRate: sr,
+                duration: duration,
                 exemplarRange: selection,
-                numComponents: nComp,
-                spatialWhiten: whiten,
-                slidingNormalize: slideNorm,
-                respAdaptive: respNorm,
-                thresholdSD: threshold
-            )
-
-        case .cardiacPowerMap:
-            times = await BCGDetector.cardiacPowerEvents(
-                channels: channels,
-                samplingRate: sr,
-                minHz: bcg.powerMinHz,
-                maxHz: bcg.powerMaxHz,
-                thresholdSD: threshold
-            )
-
-        case .virtualECGPCA:
-            let minRR = 60.0 / max(bcg.maxHR, 1) * 0.6
-            if let pc = await BCGDetector.virtualECGComponent(
-                channels: channels,
-                samplingRate: sr,
-                minHR: bcg.minHR,
-                maxHR: bcg.maxHR
-            ) {
-                let source = ECGDetectionSource(
-                    id: "bcg-virtual-ecg",
-                    label: "Virtual ECG",
-                    channelLabels: ["PC1"],
-                    channels: [pc],
-                    samplingRate: sr,
-                    duration: duration
-                )
-                let config = ECGDetectionConfiguration(
-                    algorithm: .panTompkins,
-                    thresholdSD: threshold,
-                    minimumRRSeconds: minRR,
-                    polarity: .either
-                )
-                let worker = Task.detached(priority: .userInitiated) {
-                    RWaveDetector.detect(sources: [source], configuration: config)
-                        .map(\.beginTimeSeconds)
-                }
-                times = await withTaskCancellationHandler(
-                    operation: {
-                        await worker.value
-                    },
-                    onCancel: {
-                        worker.cancel()
-                    }
-                )
-            } else {
-                times = []
-            }
-
-        case .panTompkinsProxy:
-            let minRR = 60.0 / max(bcg.maxHR, 1) * 0.6
-            let labels = restrictedIndices?.map { "Ch \($0 + 1)" }
-                ?? channels.indices.map { "Ch \($0 + 1)" }
-            let source = ECGDetectionSource(
-                id: "bcg-pan-tompkins",
-                label: "BCG Proxy",
-                channelLabels: labels,
-                channels: channels,
-                samplingRate: sr,
-                duration: duration
-            )
-            let config = ECGDetectionConfiguration(
-                algorithm: .panTompkins,
-                thresholdSD: threshold,
-                minimumRRSeconds: minRR,
-                polarity: .either
-            )
-            let worker = Task.detached(priority: .userInitiated) {
-                RWaveDetector.detect(sources: [source], configuration: config)
-                    .map(\.beginTimeSeconds)
-            }
-            times = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                }
-            )
-
-        case .qrsLocking:
-            let qrsTimes = artifactVM.events
-                .filter { $0.code == RWaveDetector.eventCode }
-                .map { $0.beginTimeSeconds }
-            times = BCGDetector.qrsLockingEvents(
                 qrsTimes: qrsTimes,
-                lagSeconds: bcg.qrsLagMs / 1000.0,
-                recordingDuration: duration
-            )
-
-        case .cwlRegression:
-            // Direct-correction method — the action button calls
-            // `runCWLCorrection` instead of this event-detection path; this
-            // case only exists for switch exhaustiveness.
-            times = []
+                configuration: configuration
+            ) ?? []
         }
+        let times = await withTaskCancellationHandler(
+            operation: {
+                await detectionWorker.value
+            },
+            onCancel: {
+                detectionWorker.cancel()
+            }
+        )
 
-        guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+        guard !Task.isCancelled, sessionID == recordingSessionID else {
+            if sessionID == recordingSessionID {
+                bcg.isRunning = false
+                bcg.progress = nil
+            }
+            return
+        }
         let code    = bcg.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
         let useCode = code.isEmpty ? BCGDetector.eventCode : code
 

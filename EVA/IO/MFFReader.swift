@@ -41,6 +41,11 @@ nonisolated struct MFFAntiAliasTimingCorrection: Sendable, Equatable {
 }
 
 nonisolated struct MFFSignalData: Sendable {
+    /// Identity of this exact sample-data version. Copies preserve the revision;
+    /// constructing/replacing sample data creates a new one. Derived-signal
+    /// caches use this instead of the package URL because raw, filtered, and
+    /// artifact-corrected signals all originate from the same file.
+    let dataRevision: UUID
     let signalURL: URL
     let signalType: String
     let numberOfChannels: Int
@@ -75,6 +80,7 @@ nonisolated struct MFFSignalData: Sendable {
     let positiveUpFlags: [Bool]?
 
     init(
+        dataRevision: UUID = UUID(),
         signalURL: URL,
         signalType: String,
         numberOfChannels: Int,
@@ -91,6 +97,7 @@ nonisolated struct MFFSignalData: Sendable {
         impedancesKOhm: [Float]? = nil,
         positiveUpFlags: [Bool]? = nil
     ) {
+        self.dataRevision = dataRevision
         self.signalURL = signalURL
         self.signalType = signalType
         self.numberOfChannels = numberOfChannels

@@ -418,14 +418,47 @@ struct WaveformView: View {
                 // Wavelet reduction stage: computed from `processed`, applied
                 // before interpolation. Toggleable and revertible like cleaning.
                 let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? processed) : processed
-                let continuousSignal = applyInterpolations(to: waveletStage)
-                content(
-                    for: epoching.epochedSignal ?? continuousSignal,
-                    base: base,
-                    cleaningBase: preArtifact,
-                    waveletInput: processed,
-                    continuousSignal: continuousSignal
-                )
+                let interpolationSnapshot = channels.interpolationSnapshot
+                if interpolationSnapshot.isEmpty {
+                    content(
+                        for: epoching.epochedSignal ?? waveletStage,
+                        base: base,
+                        cleaningBase: preArtifact,
+                        waveletInput: processed,
+                        continuousSignal: waveletStage
+                    )
+                } else {
+                    let resolutionKey = recordingStore.interpolatedSignalResolver.key(
+                        for: waveletStage,
+                        snapshot: interpolationSnapshot
+                    )
+                    if let continuousSignal = recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey) {
+                        content(
+                            for: epoching.epochedSignal ?? continuousSignal,
+                            base: base,
+                            cleaningBase: preArtifact,
+                            waveletInput: processed,
+                            continuousSignal: continuousSignal
+                        )
+                    } else {
+                        VStack(spacing: 14) {
+                            ProgressView()
+                                .controlSize(.large)
+                            Text("Refreshing interpolated channels…")
+                                .font(.headline)
+                            Text("Applying the saved interpolation recipes to the current processed signal.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .task(id: resolutionKey) {
+                            await recordingStore.interpolatedSignalResolver.resolve(
+                                signal: waveletStage,
+                                snapshot: interpolationSnapshot
+                            )
+                        }
+                    }
+                }
             } else {
                 ContentUnavailableView(
                     "Couldn't Read Recording",
@@ -489,6 +522,14 @@ struct WaveformView: View {
         }
         .onChange(of: channelGoodnessSettingsRequest) { _, _ in
             showsChannelGoodnessSettings = true
+        }
+        .onChange(of: channels.interpolationRevision) { _, _ in
+            // Once the final interpolation is removed the resolver is bypassed;
+            // release its retained derived signal instead of keeping it for the
+            // lifetime of the recording window.
+            if channels.interpolated.isEmpty {
+                recordingStore.interpolatedSignalResolver.reset()
+            }
         }
     }
 
@@ -1940,7 +1981,12 @@ struct WaveformView: View {
 
     /// Returns `signal` with any interpolated channels swapped in.
     func applyInterpolations(to signal: MFFSignalData) -> MFFSignalData {
-        channels.applyingInterpolations(to: signal)
+        let snapshot = channels.interpolationSnapshot
+        guard !snapshot.isEmpty else { return signal }
+        return recordingStore.interpolatedSignalResolver.resolveSynchronously(
+            signal: signal,
+            snapshot: snapshot
+        )
     }
 
     /// Replaces channel `index` with a spherical-spline interpolation from the
@@ -2047,6 +2093,7 @@ struct WaveformView: View {
     func invalidateInterpolations() {
         channels.interpolated.removeAll()
         channels.interpolationSources.removeAll()
+        recordingStore.interpolatedSignalResolver.reset()
     }
 
     private func tearDownRecordingSessionForClose() {
@@ -2151,6 +2198,7 @@ struct WaveformView: View {
         channels.bad.removeAll()
         channels.interpolated.removeAll()
         channels.interpolationSources.removeAll()
+        recordingStore.interpolatedSignalResolver.reset()
         channels.clearHealthResults()
         channels.showsHealth = false
         channels.healthRefreshToken = 0

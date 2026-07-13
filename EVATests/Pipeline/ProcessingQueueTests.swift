@@ -78,4 +78,19 @@ struct ProcessingQueueTests {
 
         #expect(queue.isBusy == false)
     }
+
+    @Test func finishingProgressBridgePreventsLateProgressFromReappearing() async {
+        var displayedProgress: Int?
+        let (continuation, task) = ProgressBridge.make { value in
+            displayedProgress = value
+        }
+
+        continuation.yield(100)
+        await ProgressBridge.finishAndWait(continuation, task: task)
+        displayedProgress = nil
+
+        // Give any incorrectly detached/queued update a chance to run.
+        await Task.yield()
+        #expect(displayedProgress == nil)
+    }
 }
