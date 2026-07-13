@@ -54,4 +54,81 @@ struct MFFAveragedRoundTripTests {
         #expect(readback.epochSegments.count == 2)
         #expect(Set(readback.epochSegments.map(\.category)) == ["Target", "Standard"])
     }
+
+    @Test func singletonCategoryAveragesReadBackAsAveraged() throws {
+        let source = try MFFReader().loadSignal(from: Fixtures.url("example_2.mff"))
+        let sampleCount = source.data.first?.count ?? 0
+        try #require(sampleCount >= 200)
+        let half = sampleCount / 2
+        let segments = [
+            EpochSegment(startSample: 0, endSample: half - 1, stimulusOffsetSamples: 10,
+                         category: "Target", sourceCode: "TAR", sourceTimeSeconds: 0,
+                         colorIndex: 0, contributingEpochCount: 1),
+            EpochSegment(startSample: half, endSample: sampleCount - 1, stimulusOffsetSamples: 10,
+                         category: "Standard", sourceCode: "STD", sourceTimeSeconds: 0,
+                         colorIndex: 1, contributingEpochCount: 1)
+        ]
+
+        let out = tempURL()
+        defer { try? FileManager.default.removeItem(at: out) }
+        try MFFWriter.write(signal: source, segments: segments, kind: .averaged, to: out)
+
+        let categories = try String(contentsOf: out.appendingPathComponent("categories.xml"), encoding: .utf8)
+        #expect(categories.components(separatedBy: "<name>Average</name>").count - 1 == 2)
+        let readback = try MFFReader().loadSignal(from: out)
+        #expect(readback.isAveraged)
+        #expect(readback.epochSegments.allSatisfy { $0.contributingEpochCount == 1 })
+    }
+
+    @Test func singletonEpochsRemainUnaveraged() throws {
+        let source = try MFFReader().loadSignal(from: Fixtures.url("example_2.mff"))
+        let sampleCount = source.data.first?.count ?? 0
+        try #require(sampleCount >= 200)
+        let half = sampleCount / 2
+        let segments = [
+            EpochSegment(startSample: 0, endSample: half - 1, stimulusOffsetSamples: 10,
+                         category: "Target", sourceCode: "TAR", sourceTimeSeconds: 0,
+                         colorIndex: 0, contributingEpochCount: 1),
+            EpochSegment(startSample: half, endSample: sampleCount - 1, stimulusOffsetSamples: 10,
+                         category: "Standard", sourceCode: "STD", sourceTimeSeconds: 0,
+                         colorIndex: 1, contributingEpochCount: 1)
+        ]
+
+        let out = tempURL()
+        defer { try? FileManager.default.removeItem(at: out) }
+        try MFFWriter.write(signal: source, segments: segments, kind: .epoched, to: out)
+
+        let readback = try MFFReader().loadSignal(from: out)
+        #expect(readback.isSegmented)
+        #expect(!readback.isAveraged)
+    }
+
+    @Test func legacySingletonAverageUsesEVAProcessingRecord() throws {
+        let source = try MFFReader().loadSignal(from: Fixtures.url("example_2.mff"))
+        let sampleCount = source.data.first?.count ?? 0
+        try #require(sampleCount >= 200)
+        let half = sampleCount / 2
+        let segments = [
+            EpochSegment(startSample: 0, endSample: half - 1, stimulusOffsetSamples: 10,
+                         category: "Target", sourceCode: "TAR", sourceTimeSeconds: 0,
+                         colorIndex: 0, contributingEpochCount: 1),
+            EpochSegment(startSample: half, endSample: sampleCount - 1, stimulusOffsetSamples: 10,
+                         category: "Standard", sourceCode: "STD", sourceTimeSeconds: 0,
+                         colorIndex: 1, contributingEpochCount: 1)
+        ]
+
+        let out = tempURL()
+        defer { try? FileManager.default.removeItem(at: out) }
+        try MFFWriter.write(signal: source, segments: segments, kind: .averaged, to: out)
+        let categoriesURL = out.appendingPathComponent("categories.xml")
+        let categories = try String(contentsOf: categoriesURL, encoding: .utf8)
+            .replacingOccurrences(of: "\n        <name>Average</name>", with: "")
+        try categories.write(to: categoriesURL, atomically: true, encoding: .utf8)
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(operation: .segment, parameters: ["average": "true"]))
+        try EVAProcessingScriptXML.write(script, toPackage: out)
+
+        let readback = try MFFReader().loadSignal(from: out)
+        #expect(readback.isAveraged)
+    }
 }

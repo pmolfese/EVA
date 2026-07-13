@@ -658,6 +658,7 @@ nonisolated enum ArtifactCleaner {
                     artifact: artifact,
                     signal: signal,
                     data: &data,
+                    excluding: badChannels,
                     setupProgress: reportSetupProgress,
                     finalizingProgress: reportFinalizingProgress,
                     eventProgress: reportEventProgress
@@ -1087,6 +1088,7 @@ nonisolated enum ArtifactCleaner {
         artifact: DefinedArtifact,
         signal: MFFSignalData,
         data: inout [[Float]],
+        excluding excludedChannels: Set<Int>,
         setupProgress: (String) -> Void,
         finalizingProgress: (String) -> Void,
         eventProgress: (Int) -> Void
@@ -1122,6 +1124,7 @@ nonisolated enum ArtifactCleaner {
         guard !ranges.isEmpty else { return 0 }
 
         let channels = SignalSelection.validChannels(in: data, sampleCount: sampleCount)
+            .filter { !excludedChannels.contains($0) }
         guard !channels.isEmpty else { return 0 }
         let workerCount = workerCount(for: channels.count)
         let componentLimit = max(artifact.obsPCAComponentCount, 0)

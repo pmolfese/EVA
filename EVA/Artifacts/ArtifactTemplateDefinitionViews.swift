@@ -1767,7 +1767,6 @@ extension WaveformView {
         }
         artifactVM.cleaningIsEnabled = isEnabled
         invalidateEpochsForSignalChange()
-        invalidateInterpolations()
     }
 
 }

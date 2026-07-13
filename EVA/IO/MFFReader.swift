@@ -1112,9 +1112,16 @@ nonisolated final class MFFReader {
         }
 
         // A file is averaged when every segment is either a multi-trial average
-        // (#seg > 1) OR an EGI `<name>Average</name>` segment (grand averages use
-        // #seg == 1, so the name is the reliable marker).
-        let isAveraged = categorySegments.allSatisfy { $0.contributingEpochCount > 1 || $0.isAverage }
+        // (#seg > 1) OR an EGI `<name>Average</name>` segment (grand averages and
+        // singleton category averages use #seg == 1, so the name is the reliable
+        // marker). Older EVA exports omitted that name; recover those from the
+        // last recorded PSA segment step when its persisted `average` option was on.
+        let legacyEVAAverage = EVAProcessingScriptXML.read(fromPackage: packageURL)?
+            .steps
+            .last(where: { $0.operation == .segment })?
+            .parameters["average"] == "true"
+        let isAveraged = legacyEVAAverage
+            || categorySegments.allSatisfy { $0.contributingEpochCount > 1 || $0.isAverage }
         // Grand average = averaged AND the same category is contributed by more
         // than one segment (one per subject/group), or segments carry subject ids.
         let distinctCategories = Set(categorySegments.map(\.category)).count

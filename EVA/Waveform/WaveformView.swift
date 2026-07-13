@@ -1929,22 +1929,7 @@ struct WaveformView: View {
 
     /// Returns `signal` with any interpolated channels swapped in.
     func applyInterpolations(to signal: MFFSignalData) -> MFFSignalData {
-        guard !channels.interpolated.isEmpty else { return signal }
-        var data = signal.data
-        for (index, series) in channels.interpolated where index < data.count && series.count == data[index].count {
-            data[index] = series
-        }
-        return MFFSignalData(
-            signalURL: signal.signalURL,
-            signalType: signal.signalType,
-            numberOfChannels: signal.numberOfChannels,
-            samplingRate: signal.samplingRate,
-            duration: signal.duration,
-            recordingStartTime: signal.recordingStartTime,
-            events: signal.events,
-            data: data,
-            channelNames: signal.channelNames
-        )
+        channels.applyingInterpolations(to: signal)
     }
 
     /// Replaces channel `index` with a spherical-spline interpolation from the
@@ -1965,7 +1950,10 @@ struct WaveformView: View {
         }
 
         let good = signal.data.indices.filter {
-            $0 != index && !channels.bad.contains($0) && geometry.positions[$0] != nil
+            $0 != index
+                && !channels.bad.contains($0)
+                && channels.interpolated[$0] == nil
+                && geometry.positions[$0] != nil
         }
 
         guard let (indices, weights) = SphericalSpline.interpolationWeights(

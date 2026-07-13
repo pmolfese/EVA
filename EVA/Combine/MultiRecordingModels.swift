@@ -98,6 +98,136 @@ nonisolated struct CategorySummary: Identifiable, Sendable {
     var hasRejectionInfo: Bool { totalTrials > goodTrials || !exclusionReasons.isEmpty }
 }
 
+/// PSA settings that determine whether a channel is interpolated within an
+/// epoch and whether an epoch is rejected because too many channels are bad.
+/// All values come from the saved `segment` step in eva.xml; no defaults are
+/// filled in here because the Combine sheet is intended to verify provenance,
+/// not guess which settings an older file used.
+nonisolated struct PSAArtifactThresholdSnapshot: Sendable, Equatable {
+    let interpolatesBadChannelsPerEpoch: Bool?
+    let minMicrovolts: Double?
+    let maxMicrovolts: Double?
+    let maxSlopeMicrovoltsPerSample: Double?
+    let maxAccelerationMicrovoltsPerSample: Double?
+    let maxBadChannelFraction: Double?
+    let maxBadChannelCount: Int?
+    let usesAbsoluteBadChannelCount: Bool?
+    let escalatesBadChannelsToGlobal: Bool?
+    let globalEscalationThresholdPercent: Double?
+
+    init?(parameters: [String: String]) {
+        let relevantKeys = parameters.keys.filter {
+            $0 == "interpolateBadChannelsPerEpoch" || $0.hasPrefix("badChannel.")
+        }
+        guard !relevantKeys.isEmpty else { return nil }
+
+        interpolatesBadChannelsPerEpoch = Self.bool(parameters["interpolateBadChannelsPerEpoch"])
+        minMicrovolts = parameters["badChannel.minMicrovolts"].flatMap(Double.init)
+        maxMicrovolts = parameters["badChannel.maxMicrovolts"].flatMap(Double.init)
+        maxSlopeMicrovoltsPerSample = parameters["badChannel.maxSlopeMicrovoltsPerSample"].flatMap(Double.init)
+        maxAccelerationMicrovoltsPerSample = parameters["badChannel.maxAccelerationMicrovoltsPerSample"].flatMap(Double.init)
+        maxBadChannelFraction = parameters["badChannel.maxBadChannelFraction"].flatMap(Double.init)
+        maxBadChannelCount = parameters["badChannel.maxBadChannelCount"].flatMap(Int.init)
+        usesAbsoluteBadChannelCount = Self.bool(parameters["badChannel.usesAbsoluteBadChannelCount"])
+        escalatesBadChannelsToGlobal = Self.bool(parameters["badChannel.escalateToGlobal"])
+        globalEscalationThresholdPercent = parameters["badChannel.globalEscalationThresholdPercent"].flatMap(Double.init)
+    }
+
+    var isComplete: Bool {
+        guard let interpolatesBadChannelsPerEpoch else { return false }
+        guard interpolatesBadChannelsPerEpoch else { return true }
+        guard minMicrovolts != nil,
+              maxMicrovolts != nil,
+              maxSlopeMicrovoltsPerSample != nil,
+              maxAccelerationMicrovoltsPerSample != nil,
+              let usesAbsoluteBadChannelCount,
+              escalatesBadChannelsToGlobal != nil else { return false }
+        if usesAbsoluteBadChannelCount {
+            guard maxBadChannelCount != nil else { return false }
+        } else {
+            guard maxBadChannelFraction != nil else { return false }
+        }
+        if escalatesBadChannelsToGlobal == true {
+            guard globalEscalationThresholdPercent != nil else { return false }
+        }
+        return true
+    }
+
+    /// Human-readable settings for the expanded Combine sanity check.
+    var detail: String {
+        guard let enabled = interpolatesBadChannelsPerEpoch else {
+            return "Saved PSA interpolation toggle is missing"
+        }
+        guard enabled else { return "Per-epoch bad-channel interpolation off" }
+
+        var parts: [String] = []
+        if let minMicrovolts, let maxMicrovolts {
+            parts.append("range \(Self.number(minMicrovolts))…\(Self.number(maxMicrovolts)) µV")
+        }
+        if let maxSlopeMicrovoltsPerSample {
+            parts.append("slope ≤ \(Self.number(maxSlopeMicrovoltsPerSample)) µV/sample")
+        }
+        if let maxAccelerationMicrovoltsPerSample {
+            parts.append("acceleration ≤ \(Self.number(maxAccelerationMicrovoltsPerSample)) µV/sample")
+        }
+        if usesAbsoluteBadChannelCount == true, let maxBadChannelCount {
+            parts.append("reject epoch > \(maxBadChannelCount) bad channels")
+        } else if usesAbsoluteBadChannelCount == false, let maxBadChannelFraction {
+            parts.append("reject epoch > \(Self.number(maxBadChannelFraction * 100))% bad channels")
+        }
+        if escalatesBadChannelsToGlobal == true, let globalEscalationThresholdPercent {
+            parts.append("global escalation at \(Self.number(globalEscalationThresholdPercent))% of epochs")
+        } else if escalatesBadChannelsToGlobal == false {
+            parts.append("global escalation off")
+        }
+        if !isComplete { parts.append("saved settings incomplete") }
+        return parts.joined(separator: " · ")
+    }
+
+    func differingFields(from reference: Self) -> [String] {
+        var fields: [String] = []
+        if interpolatesBadChannelsPerEpoch != reference.interpolatesBadChannelsPerEpoch {
+            fields.append("interpolation on/off")
+            return fields
+        }
+        // Dormant values are intentionally ignored: the check compares the
+        // thresholds that actually affected PSA, not stale values hidden by an
+        // off toggle or by the other reject-epoch unit.
+        guard interpolatesBadChannelsPerEpoch == true else { return fields }
+        if minMicrovolts != reference.minMicrovolts { fields.append("minimum µV") }
+        if maxMicrovolts != reference.maxMicrovolts { fields.append("maximum µV") }
+        if maxSlopeMicrovoltsPerSample != reference.maxSlopeMicrovoltsPerSample { fields.append("maximum slope") }
+        if maxAccelerationMicrovoltsPerSample != reference.maxAccelerationMicrovoltsPerSample { fields.append("maximum acceleration") }
+        if usesAbsoluteBadChannelCount != reference.usesAbsoluteBadChannelCount {
+            fields.append("reject-epoch unit")
+        } else if usesAbsoluteBadChannelCount == true {
+            if maxBadChannelCount != reference.maxBadChannelCount { fields.append("reject-epoch count") }
+        } else if maxBadChannelFraction != reference.maxBadChannelFraction {
+            fields.append("reject-epoch percentage")
+        }
+        if escalatesBadChannelsToGlobal != reference.escalatesBadChannelsToGlobal {
+            fields.append("global escalation on/off")
+        } else if escalatesBadChannelsToGlobal == true,
+                  globalEscalationThresholdPercent != reference.globalEscalationThresholdPercent {
+            fields.append("global escalation threshold")
+        }
+        return fields
+    }
+
+    private static func bool(_ value: String?) -> Bool? {
+        guard let value else { return nil }
+        switch value.lowercased() {
+        case "true": return true
+        case "false": return false
+        default: return nil
+        }
+    }
+
+    private static func number(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(format: "%.3g", value)
+    }
+}
+
 /// A compatibility problem between a file and the reference file.
 enum CompatibilityFlag: Sendable, Hashable {
     case channelCountMismatch(Int, expected: Int)
@@ -131,6 +261,8 @@ nonisolated struct RecordingSummary: Identifiable, Sendable {
     /// True when the package carries an `eva.xml` — i.e. it was preprocessed in
     /// EVA (or an upstream tool that writes the same record).
     let hasProcessingRecord: Bool
+    /// Saved PSA bad-channel/reject-epoch settings, when eva.xml records them.
+    var psaArtifactThresholds: PSAArtifactThresholdSnapshot? = nil
     var snr: SNRMetrics
     var compatibility: [CompatibilityFlag] = []
 
