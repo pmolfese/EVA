@@ -12,6 +12,50 @@
 
 import SwiftUI
 
+private struct BCGParameterLabel: View {
+    let title: String
+    let explanation: String
+    var width: CGFloat? = 100
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .font(.caption)
+            BCGHelpButton(title: title, explanation: explanation)
+        }
+        .frame(width: width, alignment: .leading)
+    }
+}
+
+private struct BCGHelpButton: View {
+    let title: String
+    let explanation: String
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented = true
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Explain \(title)")
+        .accessibilityLabel("Explain \(title)")
+        .popover(isPresented: $isPresented, arrowEdge: .trailing) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.headline)
+                Text(explanation)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .frame(width: 320)
+        }
+    }
+}
+
 extension WaveformView {
     // MARK: - BCG Detection sheet
 
@@ -56,13 +100,23 @@ extension WaveformView {
             // Per-method options
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    bcgAlgorithmComparisonView()
+
+                    Divider()
+
                     bcgMethodOptions(for: signal, selection: selection)
 
                     // Channel restriction — applies to the GFP-based methods.
                     if bcg.method != .qrsLocking && bcg.method != .cwlRegression {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("BCG Channels")
-                                .font(.caption.weight(.semibold))
+                            HStack(spacing: 4) {
+                                Text("BCG Channels")
+                                    .font(.caption.weight(.semibold))
+                                BCGHelpButton(
+                                    title: "BCG Channels",
+                                    explanation: "Restricts detection to a saved channel set. A focused set containing channels where BCG is prominent can improve sensitivity and reduce unrelated EEG, muscle, and bad-channel activity. Leave this unset to use every EEG channel."
+                                )
+                            }
                             ChannelSetPickerView(
                                 label: "Channel Set",
                                 selectedSetID: $bcg.channelSetID,
@@ -88,14 +142,18 @@ extension WaveformView {
                                 .font(.caption.weight(.semibold))
 
                             HStack {
-                                Text("Event code")
-                                    .font(.caption)
-                                    .frame(width: 100, alignment: .leading)
+                                BCGParameterLabel(
+                                    title: "Event code",
+                                    explanation: "The label written onto every detected BCG event and shown in the event track. Changing it only changes the event label; it does not change detection."
+                                )
                                 TextField("BCG", text: $bcg.eventCode)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(width: 100)
-                                Text("Window")
-                                    .font(.caption)
+                                BCGParameterLabel(
+                                    title: "Window",
+                                    explanation: "The total artifact interval centered on each detected BCG peak. It becomes the event duration, controls the highlighted range when an event is clicked, and defines the default interval used for BCG averaging and cleaning.",
+                                    width: nil
+                                )
                                     .padding(.leading, 8)
                                 TextField("s", value: $bcg.windowSeconds, format: .number.precision(.fractionLength(3)))
                                     .textFieldStyle(.roundedBorder)
@@ -106,9 +164,10 @@ extension WaveformView {
                             }
 
                             HStack {
-                                Text("Threshold")
-                                    .font(.caption)
-                                    .frame(width: 100, alignment: .leading)
+                                BCGParameterLabel(
+                                    title: "Threshold",
+                                    explanation: "How far the detection score must rise above its robust baseline, measured in standard deviations. Lower values find more candidate beats but increase false positives; higher values are more selective and may miss weak BCG events."
+                                )
                                 TextField("SD", value: $bcg.thresholdSD, format: .number.precision(.fractionLength(1)))
                                     .textFieldStyle(.roundedBorder)
                                     .frame(width: 70)
@@ -154,9 +213,10 @@ extension WaveformView {
                                 .foregroundStyle(.secondary)
 
                             HStack {
-                                Text("Reject fraction")
-                                    .font(.caption)
-                                    .frame(width: 100, alignment: .leading)
+                                BCGParameterLabel(
+                                    title: "Reject fraction",
+                                    explanation: "During refinement, removes this fraction of the weakest or least template-like detected beats before rebuilding the spatial BCG exemplar. Larger values can clean a contaminated template but may discard genuine variable beats."
+                                )
                                 TextField("%", value: Binding(
                                     get: { bcg.rejectFraction * 100 },
                                     set: { bcg.rejectFraction = $0 / 100 }
@@ -274,6 +334,185 @@ extension WaveformView {
         }
         .frame(width: 720)
         .disabled(bcg.isRunning || bcg.isRefining)
+        .task(id: bcgDetectionPreviewRequestID(for: signal, selection: selection)) {
+            await refreshBCGDetectionEstimate(for: signal, selection: selection)
+        }
+    }
+
+    @ViewBuilder
+    func bcgAlgorithmComparisonView() -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Algorithm Comparison")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                if bcg.isEstimating {
+                    ProgressView().controlSize(.mini)
+                }
+            }
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                GridRow {
+                    Text("Algorithm")
+                    Text("Events")
+                    Text("BPM")
+                    Text("")
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+                Divider()
+                    .gridCellUnsizedAxes(.horizontal)
+                    .gridCellColumns(4)
+
+                ForEach(BCGDetectionMethod.allCases) { method in
+                    GridRow {
+                        Text(method.tabLabel).font(.caption2)
+                        if let result = bcg.algorithmResults[method] {
+                            Text("\(result.count)").font(.caption2.monospacedDigit())
+                            if let bpm = result.bpm, bpm.isFinite {
+                                Text(String(format: "%.0f", bpm)).font(.caption2.monospacedDigit())
+                            } else {
+                                Text("—").font(.caption2).foregroundStyle(.secondary)
+                            }
+                        } else if bcg.isEstimating, !method.isDirectCorrection {
+                            Text("…").font(.caption2).foregroundStyle(.secondary)
+                            Text("…").font(.caption2).foregroundStyle(.secondary)
+                        } else {
+                            Text("—").font(.caption2).foregroundStyle(.secondary)
+                            Text(bcgComparisonUnavailableLabel(for: method))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button {
+                            bcg.method = method
+                        } label: {
+                            Image(systemName: bcg.method == method ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(bcg.method == method ? Color.accentColor : Color.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Use \(method.tabLabel)")
+                    }
+                }
+            }
+
+            Text("BPM uses the median interval between detected events. Previewing does not apply or replace BCG events.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    func bcgComparisonUnavailableLabel(for method: BCGDetectionMethod) -> String {
+        switch method {
+        case .cwlRegression: return "N/A"
+        case .qrsLocking: return "ECG needed"
+        default: return "—"
+        }
+    }
+
+    func bcgDetectionPreviewRequestID(
+        for signal: MFFSignalData,
+        selection: ClosedRange<Int>?
+    ) -> String {
+        let qrsSignature = artifactVM.events
+            .filter { $0.code == RWaveDetector.eventCode }
+            .map { String(format: "%.4f", $0.beginTimeSeconds) }
+            .joined(separator: ",")
+        return [
+            signal.signalURL.path,
+            "\(signal.numberOfChannels)",
+            "\(signal.data.first?.count ?? 0)",
+            "\(signal.samplingRate)",
+            bcg.channelSetID?.uuidString ?? "all",
+            selection.map { "\($0.lowerBound)-\($0.upperBound)" } ?? "no-selection",
+            String(format: "%.4f", bcg.thresholdSD),
+            String(format: "%.4f", bcg.minHR),
+            String(format: "%.4f", bcg.maxHR),
+            String(format: "%.4f", bcg.powerMinHz),
+            String(format: "%.4f", bcg.powerMaxHz),
+            String(format: "%.4f", bcg.qrsLagMs),
+            "\(bcg.pcaComponents)",
+            "\(bcg.spatialWhiten)",
+            "\(bcg.slidingNormalize)",
+            "\(bcg.respAdaptive)",
+            qrsSignature
+        ].joined(separator: "|")
+    }
+
+    @MainActor
+    func refreshBCGDetectionEstimate(
+        for signal: MFFSignalData,
+        selection: ClosedRange<Int>?
+    ) async {
+        let requestID = bcgDetectionPreviewRequestID(for: signal, selection: selection)
+        let restrictedIndices = bcg.channelSetID.flatMap { id in
+            ChannelSetStore.shared.allSets.first(where: { $0.id == id })?
+                .channelIndices.filter { signal.data.indices.contains($0) }
+        }
+        let previewChannels: [[Float]]
+        if let restrictedIndices, !restrictedIndices.isEmpty {
+            previewChannels = restrictedIndices.map { signal.data[$0] }
+        } else {
+            previewChannels = signal.data
+        }
+        guard !previewChannels.isEmpty else {
+            bcg.isEstimating = false
+            bcg.algorithmResults = [:]
+            return
+        }
+
+        let configuration = BCGDetectionPreviewConfiguration(
+            thresholdSD: bcg.thresholdSD,
+            minHR: bcg.minHR,
+            maxHR: bcg.maxHR,
+            powerMinHz: bcg.powerMinHz,
+            powerMaxHz: bcg.powerMaxHz,
+            qrsLagSeconds: bcg.qrsLagMs / 1000,
+            pcaComponents: bcg.pcaComponents,
+            spatialWhiten: bcg.spatialWhiten,
+            slidingNormalize: bcg.slidingNormalize,
+            respAdaptive: bcg.respAdaptive
+        )
+        let qrsTimes = artifactVM.events
+            .filter { $0.code == RWaveDetector.eventCode }
+            .map(\.beginTimeSeconds)
+        let samplingRate = signal.samplingRate
+        let duration = signal.duration
+
+        bcg.isEstimating = true
+        bcg.algorithmResults = [:]
+        let results = await withTaskGroup(
+            of: (BCGDetectionMethod, BCGAlgorithmResult?).self,
+            returning: [BCGDetectionMethod: BCGAlgorithmResult].self
+        ) { group in
+            for method in BCGDetectionMethod.allCases where !method.isDirectCorrection {
+                group.addTask(priority: .utility) {
+                    guard let times = await BCGDetectionPreviewEstimator.eventTimes(
+                        method: method,
+                        channels: previewChannels,
+                        samplingRate: samplingRate,
+                        duration: duration,
+                        exemplarRange: selection,
+                        qrsTimes: qrsTimes,
+                        configuration: configuration
+                    ) else { return (method, nil) }
+                    return (method, BCGDetectionPreviewEstimator.result(from: times))
+                }
+            }
+            var output: [BCGDetectionMethod: BCGAlgorithmResult] = [:]
+            for await (method, result) in group {
+                if let result { output[method] = result }
+            }
+            return output
+        }
+
+        guard !Task.isCancelled,
+              requestID == bcgDetectionPreviewRequestID(for: signal, selection: selection) else { return }
+        bcg.isEstimating = false
+        bcg.algorithmResults = results
     }
 
     @ViewBuilder
@@ -284,9 +523,10 @@ extension WaveformView {
                 Text("Heart rate range")
                     .font(.caption.weight(.semibold))
                 HStack {
-                    Text("Min HR")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "Min HR",
+                        explanation: "The slowest plausible heart rate. It sets the lower edge of the cardiac band used by periodicity detection. Raise it when slow drift is being mistaken for BCG; lower it when genuine slow beats are missed."
+                    )
                     TextField("BPM", value: $bcg.minHR, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
@@ -296,9 +536,10 @@ extension WaveformView {
                     Slider(value: $bcg.minHR, in: 30...80, step: 1)
                 }
                 HStack {
-                    Text("Max HR")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "Max HR",
+                        explanation: "The fastest plausible heart rate. It sets the upper cardiac-band edge and helps determine minimum spacing between detections. Lower it to reject implausibly close duplicate peaks."
+                    )
                     TextField("BPM", value: $bcg.maxHR, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
@@ -332,9 +573,10 @@ extension WaveformView {
                 Divider()
 
                 HStack(spacing: 10) {
-                    Text("Components")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "Components",
+                        explanation: "The number of leading spatial principal components treated as the BCG subspace. One is simplest; two or three can capture BCG that spans multiple spatial patterns, but too many components may admit unrelated activity."
+                    )
                     Stepper("\(bcg.pcaComponents)", value: $bcg.pcaComponents, in: 1...4)
                         .labelsHidden()
                     Text("\(bcg.pcaComponents) PC\(bcg.pcaComponents == 1 ? "" : "s") combined via RSS")
@@ -343,38 +585,53 @@ extension WaveformView {
                 }
                 .help("Project onto the top N spatial components and combine scores via root-sum-of-squares. 2–3 components captures BCG sources that span more than one dipole.")
 
-                Toggle(isOn: $bcg.spatialWhiten) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Spatial whitening")
-                            .font(.caption)
-                        Text("Suppresses alpha / muscle before PCA so BCG stands out")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 6) {
+                    Toggle(isOn: $bcg.spatialWhiten) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Spatial whitening")
+                                .font(.caption)
+                            Text("Suppresses alpha / muscle before PCA so BCG stands out")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    BCGHelpButton(
+                        title: "Spatial whitening",
+                        explanation: "Equalizes spatial directions using the background covariance before computing the BCG components. This reduces domination by large non-BCG sources such as alpha or muscle, although it can make a very noisy covariance estimate less stable."
+                    )
                 }
-                .help("Equalises all spatial directions by the background covariance before computing the BCG subspace. Reduces contamination from large non-BCG sources in the exemplar PCs.")
 
-                Toggle(isOn: $bcg.respAdaptive) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Respiratory envelope normalization")
-                            .font(.caption)
-                        Text("6 s sliding RMS — tracks ~0.2 Hz BCG amplitude modulation")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 6) {
+                    Toggle(isOn: $bcg.respAdaptive) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Respiratory envelope normalization")
+                                .font(.caption)
+                            Text("6 s sliding RMS — tracks ~0.2 Hz BCG amplitude modulation")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    BCGHelpButton(
+                        title: "Respiratory envelope normalization",
+                        explanation: "Divides the detection signal by a short sliding RMS envelope. Because BCG amplitude changes across the breathing cycle, this keeps the threshold similarly sensitive at respiratory peaks and troughs."
+                    )
                 }
-                .help("BCG amplitude is modulated ~10–20% by breathing. A short sliding RMS normalisation keeps sensitivity uniform across the breath cycle, preventing missed beats at respiratory troughs.")
 
-                Toggle(isOn: $bcg.slidingNormalize) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Sliding z-score normalization")
-                            .font(.caption)
-                        Text("30 s window — adapts to slow amplitude drift across the run")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 6) {
+                    Toggle(isOn: $bcg.slidingNormalize) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Sliding z-score normalization")
+                                .font(.caption)
+                            Text("30 s window — adapts to slow amplitude drift across the run")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    BCGHelpButton(
+                        title: "Sliding z-score normalization",
+                        explanation: "Recomputes the detection baseline in a rolling 30-second window so one fixed SD threshold can follow gradual changes in BCG amplitude. Disable it when you need one global threshold across the entire recording."
+                    )
                 }
-                .help("Normalises the detection signal in a 30 s rolling window so the fixed SD threshold adapts to slow changes in BCG amplitude over the course of the recording.")
             }
 
         case .cardiacPowerMap:
@@ -382,9 +639,10 @@ extension WaveformView {
                 Text("Cardiac frequency band")
                     .font(.caption.weight(.semibold))
                 HStack {
-                    Text("Low cutoff")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "Low cutoff",
+                        explanation: "The lowest frequency included when estimating each channel's cardiac-band power. Raise it to suppress slow drift and respiration; lower it to retain unusually slow cardiac activity. Keep it below the high cutoff."
+                    )
                     TextField("Hz", value: $bcg.powerMinHz, format: .number.precision(.fractionLength(2)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
@@ -394,9 +652,10 @@ extension WaveformView {
                     Slider(value: $bcg.powerMinHz, in: 0.3...1.5, step: 0.05)
                 }
                 HStack {
-                    Text("High cutoff")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "High cutoff",
+                        explanation: "The highest frequency included in the cardiac power map. Raise it to include faster BCG structure; lower it to exclude higher-frequency muscle or scanner noise. Keep it above the low cutoff."
+                    )
                     TextField("Hz", value: $bcg.powerMaxHz, format: .number.precision(.fractionLength(2)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
@@ -426,18 +685,20 @@ extension WaveformView {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
-                    Text("Min HR")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "Min HR",
+                        explanation: "The slowest expected heart rate. For Virtual ECG, this helps define the band passed into PCA; for the proxy detector, it describes the intended physiological range. Lower it only when slow beats are expected."
+                    )
                     TextField("BPM", value: $bcg.minHR, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
                     Slider(value: $bcg.minHR, in: 30...80, step: 1)
                 }
                 HStack {
-                    Text("Max HR")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "Max HR",
+                        explanation: "The fastest expected heart rate. This sets the refractory period that prevents detections from occurring implausibly close together; for Virtual ECG it also bounds the preprocessing band."
+                    )
                     TextField("BPM", value: $bcg.maxHR, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
@@ -464,9 +725,10 @@ extension WaveformView {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
-                    Text("Lag")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "Lag",
+                        explanation: "The mechanical delay from each detected ECG R-wave to the expected BCG artifact peak. Typical values are about 200–400 ms. Adjust it until event flags align with the BCG peak in the EEG."
+                    )
                     TextField("ms", value: $bcg.qrsLagMs, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
@@ -475,7 +737,6 @@ extension WaveformView {
                         .foregroundStyle(.secondary)
                     Slider(value: $bcg.qrsLagMs, in: 100...700, step: 10)
                 }
-                .help("Typical BCG onset lags the R-wave by 200–400 ms. Start at 300 ms and adjust to align the BCG artifact peak with detected events.")
             }
 
         case .cwlRegression:
@@ -485,11 +746,14 @@ extension WaveformView {
                         .frame(width: 100, alignment: .leading)
                     Toggle("EVA Fast CWR", isOn: $bcg.cwlUseEVAFastCWR)
                         .toggleStyle(.checkbox)
+                    BCGHelpButton(
+                        title: "EVA Fast CWR",
+                        explanation: "Switches between two CWL regression implementations. Enabled uses EVA's faster regularized lag-range solver. Disabled uses a denser delay embedding with Hann-tapered overlap designed to match CWRegrTool behavior more closely."
+                    )
                     Text(bcg.cwlUseEVAFastCWR ? "regularized sliding solver" : "CWRegrTool-compatible")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .help("Unchecked uses the CWRegrTool-style dense delay embedding with Hann-tapered overlap. Checked uses EVA's faster regularized lag-range solver.")
 
                 if bcg.cwlUseEVAFastCWR {
                     Text("Lag range")
@@ -499,14 +763,18 @@ extension WaveformView {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
-                        Text("Min lag")
-                            .font(.caption)
-                            .frame(width: 100, alignment: .leading)
+                        BCGParameterLabel(
+                            title: "Min lag",
+                            explanation: "The earliest temporal offset tested between each CWL reference and EEG channel. Negative values allow the reference to lead the EEG. Widening the range increases flexibility and computation."
+                        )
                         TextField("ms", value: $bcg.cwlLagRangeMinMs, format: .number.precision(.fractionLength(0)))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 70)
-                        Text("Max lag")
-                            .font(.caption)
+                        BCGParameterLabel(
+                            title: "Max lag",
+                            explanation: "The latest temporal offset tested between the CWL reference and EEG. Positive values allow the reference-related artifact to appear later in the EEG. It must be greater than the minimum lag.",
+                            width: nil
+                        )
                             .padding(.leading, 8)
                         TextField("ms", value: $bcg.cwlLagRangeMaxMs, format: .number.precision(.fractionLength(0)))
                             .textFieldStyle(.roundedBorder)
@@ -516,14 +784,18 @@ extension WaveformView {
                             .foregroundStyle(.secondary)
                     }
                     HStack {
-                        Text("Lag step")
-                            .font(.caption)
-                            .frame(width: 100, alignment: .leading)
+                        BCGParameterLabel(
+                            title: "Lag step",
+                            explanation: "Spacing between candidate delays in the lag range. Smaller steps model timing more precisely but add regressors and computation; larger steps are faster but may miss the best alignment."
+                        )
                         TextField("ms", value: $bcg.cwlLagStepMs, format: .number.precision(.fractionLength(0)))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 70)
-                        Text("Window")
-                            .font(.caption)
+                        BCGParameterLabel(
+                            title: "Window",
+                            explanation: "Length of each sliding regression fit. Short windows track changing wire coupling more quickly but have fewer samples and can overfit; longer windows are more stable but adapt slowly.",
+                            width: nil
+                        )
                             .padding(.leading, 8)
                         TextField("s", value: $bcg.cwlWindowSeconds, format: .number.precision(.fractionLength(1)))
                             .textFieldStyle(.roundedBorder)
@@ -532,7 +804,6 @@ extension WaveformView {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    .help("A shorter window adapts faster to drifting coupling but has less data to fit each regression; 3–5 s is a reasonable starting point.")
                 } else {
                     Text("CWRegrTool")
                         .font(.caption.weight(.semibold))
@@ -541,14 +812,18 @@ extension WaveformView {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
-                        Text("Delay")
-                            .font(.caption)
-                            .frame(width: 100, alignment: .leading)
+                        BCGParameterLabel(
+                            title: "Delay",
+                            explanation: "Half-width of the dense CWRegrTool-style delay embedding around each CWL reference sample. The 21 ms default follows CWRegrTool; increasing it captures broader timing offsets but creates a larger regression."
+                        )
                         TextField("ms", value: $bcg.cwlDelayMs, format: .number.precision(.fractionLength(0)))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 70)
-                        Text("Window")
-                            .font(.caption)
+                        BCGParameterLabel(
+                            title: "Window",
+                            explanation: "Length of each Hann-tapered CWL regression segment. The 4-second default balances stable estimation with the ability to follow changes in coupling across the run.",
+                            width: nil
+                        )
                             .padding(.leading, 8)
                         TextField("s", value: $bcg.cwlWindowSeconds, format: .number.precision(.fractionLength(1)))
                             .textFieldStyle(.roundedBorder)
@@ -557,12 +832,12 @@ extension WaveformView {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    .help("CWRegrTool's default delay is 21 ms and its default window is 4 s.")
                 }
                 HStack {
-                    Text("Downsample")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "Downsample",
+                        explanation: "Runs the internal CWL regression at a lower sample rate to reduce computation. Full rate preserves all timing detail. A lower rate is usually sufficient for BCG/CWL structure if appropriate anti-alias filtering is used."
+                    )
                     Picker("Downsample", selection: cwlDownsampleSelectionBinding(for: signal.samplingRate)) {
                         Text("Full rate (\(cwlRateLabel(signal.samplingRate)))").tag(0.0)
                         ForEach(cwlDownsampleTargets(for: signal.samplingRate), id: \.self) { target in
@@ -577,11 +852,11 @@ extension WaveformView {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .help("Runs the CWL regression on an anti-aliased downsampled copy. Leave upsampling off to keep the corrected signal at the lower rate.")
                 HStack {
-                    Text("Anti-alias")
-                        .font(.caption)
-                        .frame(width: 100, alignment: .leading)
+                    BCGParameterLabel(
+                        title: "Anti-alias",
+                        explanation: "The low-pass method applied before downsampling. Windowed-sinc provides cleaner suppression of frequencies that would fold into the lower-rate signal; block averaging is faster but less selective."
+                    )
                     Picker("Anti-alias", selection: $bcg.cwlDownsampleFilter) {
                         ForEach(CWLCorrector.DownsampleFilter.allCases) { filter in
                             Text(filter.label).tag(filter)
@@ -594,18 +869,20 @@ extension WaveformView {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .help("Windowed-sinc low-pass is the cleaner default; block average is faster but weaker at suppressing high-frequency aliases.")
                 HStack {
                     Text("")
                         .frame(width: 100, alignment: .leading)
                     Toggle("Upsample to original Hz", isOn: $bcg.cwlUpsampleToOriginalHz)
                         .toggleStyle(.checkbox)
+                    BCGHelpButton(
+                        title: "Upsample to original Hz",
+                        explanation: "After fitting at a lower rate, maps the estimated artifact back to the recording's original sample rate before subtraction. Enable this to preserve the original output sampling rate; disable it to keep the corrected lower-rate signal."
+                    )
                     Text("after CWL")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 .disabled(cwlDownsampleSelectionBinding(for: signal.samplingRate).wrappedValue == 0)
-                .help("Maps the lower-rate artifact estimate back to the original sample rate before subtracting it, preserving the original output Hz.")
             }
         }
     }
@@ -821,15 +1098,12 @@ extension WaveformView {
         let code    = bcg.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
         let useCode = code.isEmpty ? BCGDetector.eventCode : code
 
-        let newEvents: [MFFEvent] = times.enumerated().map { (idx, t) in
-            MFFEvent(
-                id: "bcg-\(method.rawValue)-\(idx)-\(t)",
-                code: useCode,
-                beginTimeSeconds: t,
-                rawBeginTime: String(format: "%.4f", t),
-                sourceFile: BCGDetector.sourceFile
-            )
-        }
+        let newEvents = BCGDetector.makeEvents(
+            times: times,
+            idPrefix: "bcg-\(method.rawValue)",
+            code: useCode,
+            windowSeconds: bcg.windowSeconds
+        )
 
         let nonBCG = artifactVM.events.filter { $0.sourceFile != BCGDetector.sourceFile }
         artifactVM.events = (nonBCG + newEvents).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
@@ -896,13 +1170,12 @@ extension WaveformView {
 
         let useCode = bcg.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty ? BCGDetector.eventCode : bcg.eventCode
-        let newEvents: [MFFEvent] = newTimes.enumerated().map { (idx, t) in
-            MFFEvent(id: "bcg-refined-\(idx)-\(t)",
-                     code: useCode,
-                     beginTimeSeconds: t,
-                     rawBeginTime: String(format: "%.4f", t),
-                     sourceFile: BCGDetector.sourceFile)
-        }
+        let newEvents = BCGDetector.makeEvents(
+            times: newTimes,
+            idPrefix: "bcg-refined",
+            code: useCode,
+            windowSeconds: bcg.windowSeconds
+        )
 
         let nonBCG = artifactVM.events.filter { $0.sourceFile != BCGDetector.sourceFile }
         artifactVM.events = (nonBCG + newEvents).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
@@ -942,12 +1215,7 @@ extension WaveformView {
     }
 
     func estimatedBPM(from times: [Double]) -> Double? {
-        guard times.count >= 2 else { return nil }
-        let sorted = times.sorted()
-        let ipi = zip(sorted.dropFirst(), sorted).map { $0 - $1 }
-        let median = ipi.sorted()[ipi.count / 2]
-        guard median > 0 else { return nil }
-        return 60.0 / median
+        BCGDetectionPreviewEstimator.estimatedBPM(from: times)
     }
 
     // MARK: - CWL regression (direct correction — no events/ArtifactCleaner involved)
@@ -959,6 +1227,10 @@ extension WaveformView {
                 HStack {
                     Text("CWL Channels")
                         .font(.caption.weight(.semibold))
+                    BCGHelpButton(
+                        title: "CWL Channels",
+                        explanation: "Select the external wire-loop reference channels imported with the PNS data. These channels should measure scanner- and motion-induced interference rather than ECG or respiration. The selected references become regressors for CWL correction."
+                    )
                     Spacer()
                     Button("Likely CWL") {
                         bcg.selectedCWLChannels = Set(likelyCWLPNSChannelIndices(in: pns))

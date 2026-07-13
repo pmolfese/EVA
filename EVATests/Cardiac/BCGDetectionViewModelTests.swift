@@ -57,6 +57,49 @@ struct BCGDetectionViewModelTests {
         #expect(!vm.isRunning)
         #expect(vm.refinedTemplate == nil)
         #expect(!vm.isRefining)
+        #expect(!vm.isEstimating)
+        #expect(vm.algorithmResults.isEmpty)
+    }
+
+    @Test func previewBPMUsesMedianBeatInterval() {
+        let result = BCGDetectionPreviewEstimator.result(from: [0, 1, 2, 4])
+        #expect(result.count == 4)
+        #expect(result.bpm == 60)
+    }
+
+    @Test func previewMarksNonDetectionMethodsUnavailable() async {
+        let configuration = BCGDetectionPreviewConfiguration(
+            thresholdSD: 2.5,
+            minHR: 40,
+            maxHR: 120,
+            powerMinHz: 0.8,
+            powerMaxHz: 1.5,
+            qrsLagSeconds: 0.3,
+            pcaComponents: 1,
+            spatialWhiten: false,
+            slidingNormalize: true,
+            respAdaptive: true
+        )
+        let cwl = await BCGDetectionPreviewEstimator.eventTimes(
+            method: .cwlRegression,
+            channels: [[0, 1, 0]],
+            samplingRate: 250,
+            duration: 1,
+            exemplarRange: nil,
+            qrsTimes: [],
+            configuration: configuration
+        )
+        let qrsWithoutECG = await BCGDetectionPreviewEstimator.eventTimes(
+            method: .qrsLocking,
+            channels: [[0, 1, 0]],
+            samplingRate: 250,
+            duration: 1,
+            exemplarRange: nil,
+            qrsTimes: [],
+            configuration: configuration
+        )
+        #expect(cwl == nil)
+        #expect(qrsWithoutECG == nil)
     }
 
     @MainActor

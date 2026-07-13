@@ -43,6 +43,54 @@ struct SegmentHealthAnalyzerTests {
         #expect(segments.allSatisfy { $0.category == "Continuous" })
     }
 
+    @Test func averagedCategoriesAreNeverEligibleForSegmentHealth() {
+        let data = [cleanChannel(seed: 1)]
+        let averagedSegment = EpochSegment(
+            startSample: 0,
+            endSample: count - 1,
+            stimulusOffsetSamples: 50,
+            category: "Target",
+            sourceCode: "Target",
+            sourceTimeSeconds: 0,
+            colorIndex: 0,
+            contributingEpochCount: 24
+        )
+        let signal = MFFSignalData(
+            signalURL: URL(fileURLWithPath: "/tmp/average.mff/signal1.bin"),
+            signalType: "EEG",
+            numberOfChannels: data.count,
+            samplingRate: samplingRate,
+            duration: Double(count) / samplingRate,
+            recordingStartTime: nil,
+            events: [],
+            data: data,
+            epochSegments: [averagedSegment],
+            isSegmented: true,
+            isAveraged: true
+        )
+
+        #expect(SegmentHealthAnalyzer.analysisSegments(
+            for: signal,
+            epochSegments: [averagedSegment]
+        ).isEmpty)
+        let forcedInput = SegmentHealthInputSegment(
+            segmentID: "forced-average",
+            segmentIndex: 0,
+            category: averagedSegment.category,
+            startSample: averagedSegment.startSample,
+            endSample: averagedSegment.endSample,
+            stimulusOffsetSamples: averagedSegment.stimulusOffsetSamples,
+            sourceCode: averagedSegment.sourceCode,
+            sourceTimeSeconds: averagedSegment.sourceTimeSeconds,
+            contributingEpochCount: averagedSegment.contributingEpochCount
+        )
+        #expect(SegmentHealthAnalyzer.analyze(
+            signal: signal,
+            segments: [forcedInput],
+            excludedChannelIndices: []
+        ).results.isEmpty)
+    }
+
     @Test func segmentWithInjectedArtifactGradesWorse() {
         var channels = (1...4).map { cleanChannel(seed: UInt64($0)) }
 

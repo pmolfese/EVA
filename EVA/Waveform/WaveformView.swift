@@ -308,9 +308,16 @@ struct WaveformView: View {
             showsMouseOverHealth: $segHealth.showsMouseOver,
             detailsRequest: $segHealth.detailsRequest,
             refreshRequest: $segHealth.refreshRequest,
+            isAvailable: segmentHealthIsAvailable,
             isAnalyzing: segHealth.isAnalyzing,
             progress: segHealth.progress
         )
+    }
+
+    private var segmentHealthIsAvailable: Bool {
+        !epoching.isAveraged
+            && epoching.epochedSignal?.isAveraged != true
+            && recording.signal?.isAveraged != true
     }
 
     private var physioViewControls: PhysioViewControls {
@@ -470,6 +477,10 @@ struct WaveformView: View {
             saveChannelLabelMetricsJSON()
         }
         .onChange(of: segHealth.detailsRequest) { _, _ in
+            guard segmentHealthIsAvailable else {
+                segHealth.clearAnalysis(hide: true, clearLabels: false)
+                return
+            }
             segHealth.shows = true
             segHealth.showsDetails = true
         }
@@ -1702,12 +1713,12 @@ struct WaveformView: View {
                             .font(.caption.weight(.semibold))
                             .frame(width: labelColumnWidth, alignment: .leading)
 
-                        Slider(value: $horizontalJumpValue, in: 0...1)
-                            .onChange(of: horizontalJumpValue) { _, newValue in
-                                guard !isSyncingSliderFromScroll else { return }
-                                let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
-                                horizontalScrollPosition.scrollTo(x: CGFloat(newValue) * maxOffset)
-                            }
+                        let maxOffset = horizontalMaximumOffset(for: plotWidth)
+                        Slider(value: horizontalJumpBinding(plotWidth: plotWidth), in: 0...1)
+                            .disabled(maxOffset <= geometryUpdateQuantum)
+                            .help(maxOffset <= geometryUpdateQuantum
+                                  ? "The entire waveform is already visible."
+                                  : "Jump horizontally through the waveform.")
                     }
 
                     if let selectedSampleRange {
@@ -2320,9 +2331,41 @@ struct WaveformView: View {
 
         let resolvedOffset = offsetChanged ? nextOffset : horizontalOffset
         let resolvedWidth = widthChanged ? nextWidth : horizontalViewportWidth
-        let maxOffset = max(plotWidth - resolvedWidth, 0)
+        let maxOffset = horizontalMaximumOffset(for: plotWidth, viewportWidth: resolvedWidth)
         let nextJumpValue = maxOffset > 0 ? Double(resolvedOffset / maxOffset) : 0
         updateHorizontalJumpValueFromScroll(nextJumpValue)
+    }
+
+    private func horizontalMaximumOffset(
+        for plotWidth: CGFloat,
+        viewportWidth: CGFloat? = nil
+    ) -> CGFloat {
+        max(plotWidth - (viewportWidth ?? horizontalViewportWidth), 0)
+    }
+
+    /// Keeps the slider visually pinned at zero when the plot already fits in
+    /// the viewport. A plain `$horizontalJumpValue` binding lets the thumb move
+    /// even though the resulting scroll offset is always zero.
+    private func horizontalJumpBinding(plotWidth: CGFloat) -> Binding<Double> {
+        Binding(
+            get: {
+                horizontalMaximumOffset(for: plotWidth) > geometryUpdateQuantum
+                    ? horizontalJumpValue
+                    : 0
+            },
+            set: { newValue in
+                guard !isSyncingSliderFromScroll else { return }
+                let maxOffset = horizontalMaximumOffset(for: plotWidth)
+                guard maxOffset > geometryUpdateQuantum else {
+                    updateHorizontalJumpValueFromScroll(0)
+                    horizontalScrollPosition.scrollTo(x: 0)
+                    return
+                }
+                let clamped = min(max(newValue, 0), 1)
+                horizontalJumpValue = clamped
+                horizontalScrollPosition.scrollTo(x: CGFloat(clamped) * maxOffset)
+            }
+        )
     }
 
     private func updateHorizontalJumpValueFromScroll(_ newValue: Double) {

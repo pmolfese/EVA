@@ -809,6 +809,12 @@ extension WaveformView {
     }
 
     func enableSegmentHealthAfterSegmentationIfNeeded() {
+        guard !epoching.isAveraged, epoching.epochedSignal?.isAveraged != true else {
+            // Preserve manual labels long enough for re-averaging exclusions,
+            // but remove results/overlays that belong to the single trials.
+            segHealth.clearAnalysis(hide: true, clearLabels: false)
+            return
+        }
         guard processingDefaults.autoRunSegmentHealthAfterSegmentation else { return }
         segHealth.clearAnalysis(clearLabels: true)
         segHealth.shows = true
@@ -1328,6 +1334,7 @@ extension WaveformView {
             epoching.epochedSignal = display.signal
             epoching.epochSegments = display.segments
             epoching.isAveraged = true
+            segHealth.clearAnalysis(hide: true, clearLabels: false)
             selectedSampleRange = nil
             dragSelectionStartSample = nil
             dragSelectionEndSample = nil

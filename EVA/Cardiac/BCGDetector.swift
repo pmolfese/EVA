@@ -499,13 +499,32 @@ nonisolated enum BCGDetector {
     // MARK: - MFFEvent helpers
 
     static func makeEvents(times: [Double], windowSeconds: Double) -> [MFFEvent] {
-        times.enumerated().map { (idx, t) in
+        makeEvents(
+            times: times,
+            idPrefix: "bcg",
+            code: eventCode,
+            windowSeconds: windowSeconds
+        )
+    }
+
+    /// Creates the event records shared by initial and refined BCG detection.
+    /// BCG detector times identify the artifact peak (the center of the output
+    /// window), so each event carries the full centered window as its duration.
+    static func makeEvents(
+        times: [Double],
+        idPrefix: String,
+        code: String,
+        windowSeconds: Double
+    ) -> [MFFEvent] {
+        let duration = max(windowSeconds, 0)
+        return times.enumerated().map { index, time in
             MFFEvent(
-                id: "bcg-\(idx)-\(t)",
-                code: eventCode,
-                beginTimeSeconds: t,
-                rawBeginTime: String(format: "%.4f", t),
-                sourceFile: sourceFile
+                id: "\(idPrefix)-\(index)-\(time)",
+                code: code,
+                beginTimeSeconds: time,
+                rawBeginTime: String(format: "%.4f", time),
+                sourceFile: sourceFile,
+                durationSeconds: duration
             )
         }
     }

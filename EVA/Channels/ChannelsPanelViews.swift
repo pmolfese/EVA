@@ -380,7 +380,9 @@ extension WaveformView {
 
     @ViewBuilder
     func segmentHealthOverlay(for signal: MFFSignalData) -> some View {
-        if segHealth.shows,
+        if !epoching.isAveraged,
+           !signal.isAveraged,
+           segHealth.shows,
            let results = segHealth.analysis?.results,
            let sampleCount = signal.data.first?.count,
            sampleCount > 0 {

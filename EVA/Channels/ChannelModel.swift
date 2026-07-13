@@ -359,6 +359,7 @@ struct SegmentHealthViewControls {
     var showsMouseOverHealth: Binding<Bool>
     var detailsRequest: Binding<Int>
     var refreshRequest: Binding<Int>
+    var isAvailable: Bool
     var isAnalyzing: Bool
     var progress: Double
 }
@@ -439,16 +440,17 @@ struct ViewCommands: View {
 
         Toggle("Show Segment Health", isOn: Binding(
             get: { segmentHealthControls?.showsHealth.wrappedValue ?? false },
-            set: { segmentHealthControls?.showsHealth.wrappedValue = $0 }
+            set: { if segmentHealthControls?.isAvailable == true { segmentHealthControls?.showsHealth.wrappedValue = $0 } }
         ))
-        .disabled(segmentHealthControls == nil)
+        .disabled(segmentHealthControls?.isAvailable != true)
+        .help(segmentHealthControls?.isAvailable == false ? "Segment Health is unavailable for averaged categories." : "Show quality scores for individual segments.")
 
         Button("Segment Health Details...") {
             segmentHealthControls?.detailsRequest.wrappedValue += 1
         }
-        .disabled(segmentHealthControls == nil)
+        .disabled(segmentHealthControls?.isAvailable != true)
 
-        if let segmentHealthControls, segmentHealthControls.showsHealth.wrappedValue {
+        if let segmentHealthControls, segmentHealthControls.isAvailable, segmentHealthControls.showsHealth.wrappedValue {
             Toggle("Show Mouse Over Health", isOn: segmentHealthControls.showsMouseOverHealth)
 
             Button("Refresh Segment Health") {

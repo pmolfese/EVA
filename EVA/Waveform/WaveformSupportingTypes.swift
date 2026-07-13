@@ -1108,7 +1108,7 @@ enum PSASegmentField: String, CaseIterable, Identifiable {
 
 
 
-enum BCGDetectionMethod: String, CaseIterable, Identifiable {
+enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
     case periodicity    = "periodicity"
     case spatialPCA     = "spatialPCA"
     case cardiacPowerMap = "cardiacPowerMap"
@@ -1117,17 +1117,17 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
     case qrsLocking     = "qrsLocking"
     case cwlRegression  = "cwlRegression"
 
-    var id: String { rawValue }
+    nonisolated var id: String { rawValue }
 
     /// True for methods that directly correct the signal from an external
     /// reference (no beat/event detection step). The BCG sheet skips the
     /// shared event-code/threshold/window controls and swaps the action
     /// button to "Correct" for these.
-    var isDirectCorrection: Bool {
+    nonisolated var isDirectCorrection: Bool {
         self == .cwlRegression
     }
 
-    var tabLabel: String {
+    nonisolated var tabLabel: String {
         switch self {
         case .periodicity:      return "Periodicity"
         case .spatialPCA:       return "Spatial PCA"
@@ -1139,7 +1139,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
         }
     }
 
-    var summary: String {
+    nonisolated var summary: String {
         switch self {
         case .periodicity:
             return "Bandpass the EEG to the cardiac band, compute the Global Field Power, and find peaks. Exploits the fact that BCG repeats at a stable heart rate — no exemplar needed."
