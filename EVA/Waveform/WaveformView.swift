@@ -432,26 +432,20 @@ struct WaveformView: View {
                         for: waveletStage,
                         snapshot: interpolationSnapshot
                     )
-                    if let continuousSignal = recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey) {
-                        content(
-                            for: epoching.epochedSignal ?? continuousSignal,
-                            base: base,
-                            cleaningBase: preArtifact,
-                            waveletInput: processed,
-                            continuousSignal: continuousSignal
+                    let continuousSignal = recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey)
+                        ?? recordingStore.interpolatedSignalResolver.displaySignal(
+                            whileResolving: resolutionKey,
+                            fallback: waveletStage
                         )
-                    } else {
-                        VStack(spacing: 14) {
-                            ProgressView()
-                                .controlSize(.large)
-                            Text("Refreshing interpolated channels…")
-                                .font(.headline)
-                            Text("Applying the saved interpolation recipes to the current processed signal.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .task(id: resolutionKey) {
+                    content(
+                        for: epoching.epochedSignal ?? continuousSignal,
+                        base: base,
+                        cleaningBase: preArtifact,
+                        waveletInput: processed,
+                        continuousSignal: continuousSignal
+                    )
+                    .task(id: resolutionKey) {
+                        if recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey) == nil {
                             await recordingStore.interpolatedSignalResolver.resolve(
                                 signal: waveletStage,
                                 snapshot: interpolationSnapshot
@@ -2035,8 +2029,12 @@ struct WaveformView: View {
             vDSP.add(multiplication: (source, Float(weight)), series, result: &series)
         }
 
-        channels.interpolated[index] = series
-        channels.interpolationSources[index] = (indices, weights.map(Float.init))
+        channels.setInterpolation(
+            target: index,
+            replacement: series,
+            sourceIndices: indices,
+            sourceWeights: weights.map(Float.init)
+        )
         channels.bad.remove(index)
         let message = "Interpolated Ch \(index + 1) from \(indices.count) neighbors."
         if updatesStatus {
@@ -2091,8 +2089,7 @@ struct WaveformView: View {
     /// Interpolated channels are derived from the source data, so they go stale
     /// when the gradient/filter pipeline changes.
     func invalidateInterpolations() {
-        channels.interpolated.removeAll()
-        channels.interpolationSources.removeAll()
+        channels.removeAllInterpolations()
         recordingStore.interpolatedSignalResolver.reset()
     }
 
@@ -2196,8 +2193,7 @@ struct WaveformView: View {
 
         channels.hidden.removeAll()
         channels.bad.removeAll()
-        channels.interpolated.removeAll()
-        channels.interpolationSources.removeAll()
+        channels.removeAllInterpolations()
         recordingStore.interpolatedSignalResolver.reset()
         channels.clearHealthResults()
         channels.showsHealth = false

@@ -39,6 +39,20 @@ final class InterpolatedSignalResolver {
         cachedKey == key ? cachedSignal : nil
     }
 
+    /// Keeps the currently mounted waveform visible while a new interpolation
+    /// revision is being composed. A retained signal is safe to show only when
+    /// it came from the same upstream sample-data revision; otherwise callers
+    /// fall back to the current un-interpolated pipeline signal.
+    func displaySignal(whileResolving key: Key, fallback: MFFSignalData) -> MFFSignalData {
+        guard cachedKey?.signalRevision == key.signalRevision,
+              let cachedSignal,
+              cachedSignal.numberOfChannels == fallback.numberOfChannels,
+              cachedSignal.data.first?.count == fallback.data.first?.count else {
+            return fallback
+        }
+        return cachedSignal
+    }
+
     /// Rebuilds the resolved signal away from the main actor. Call this from a
     /// `.task(id:)`; changing the key cancels the old view task, while the final
     /// key check prevents a completed stale calculation from being published.

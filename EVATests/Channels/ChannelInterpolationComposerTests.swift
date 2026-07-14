@@ -9,6 +9,28 @@ import simd
 
 struct ChannelInterpolationComposerTests {
     @MainActor
+    @Test func interpolationAndRecipeCommitAsOneRevision() {
+        let channels = ChannelModel()
+
+        channels.setInterpolation(
+            target: 0,
+            replacement: [2.5, 3.5],
+            sourceIndices: [1, 2],
+            sourceWeights: [0.25, 0.75]
+        )
+
+        #expect(channels.interpolationRevision == 1)
+        #expect(channels.interpolated[0] == [2.5, 3.5])
+        #expect(channels.interpolationSources[0]?.indices == [1, 2])
+
+        channels.removeInterpolation(target: 0)
+
+        #expect(channels.interpolationRevision == 2)
+        #expect(channels.interpolated[0] == nil)
+        #expect(channels.interpolationSources[0] == nil)
+    }
+
+    @MainActor
     @Test func interpolationRecomposesFromCurrentProcessedDonors() {
         let channels = ChannelModel()
         channels.interpolated[0] = [99, 99]
@@ -117,6 +139,52 @@ struct ChannelInterpolationComposerTests {
         let newKey = resolver.key(for: signal, snapshot: secondSnapshot)
         #expect(resolver.cachedSignal(for: newKey)?.data[0] == [3, 4])
         #expect(resolver.computationCount == 2)
+    }
+
+    @MainActor
+    @Test func resolverRetainsMountedWaveformDuringSameSignalRefresh() async {
+        let channels = ChannelModel()
+        let signal = SyntheticSignal.make([
+            [99, 99],
+            [1, 2],
+            [3, 4]
+        ], samplingRate: 250)
+        let resolver = InterpolatedSignalResolver()
+
+        channels.setInterpolation(
+            target: 0,
+            replacement: [99, 99],
+            sourceIndices: [1],
+            sourceWeights: [1]
+        )
+        let firstSnapshot = channels.interpolationSnapshot
+        await resolver.resolve(signal: signal, snapshot: firstSnapshot)
+
+        channels.setInterpolation(
+            target: 0,
+            replacement: [99, 99],
+            sourceIndices: [2],
+            sourceWeights: [1]
+        )
+        let pendingKey = resolver.key(for: signal, snapshot: channels.interpolationSnapshot)
+        let retained = resolver.displaySignal(whileResolving: pendingKey, fallback: signal)
+
+        #expect(retained.data[0] == [1, 2])
+
+        let newPipelineSignal = signal.replacingData([
+            [88, 88],
+            [5, 6],
+            [7, 8]
+        ])
+        let newPipelineKey = resolver.key(
+            for: newPipelineSignal,
+            snapshot: channels.interpolationSnapshot
+        )
+        let fallback = resolver.displaySignal(
+            whileResolving: newPipelineKey,
+            fallback: newPipelineSignal
+        )
+        #expect(fallback.data[0] == [88, 88])
     }
 
     @Test func psaGlobalEscalationInterpolatesTargetsAsOneBatch() throws {

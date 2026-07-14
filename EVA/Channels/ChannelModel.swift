@@ -72,23 +72,43 @@ nonisolated enum ToolbarButtonLabels {
 
 @Observable
 final class ChannelModel {
+    private struct InterpolationState {
+        var replacements = [Int: [Float]]()
+        var sources = [Int: (indices: [Int], weights: [Float])]()
+        var revision = 0
+    }
+
+    private var interpolationState = InterpolationState()
+
     /// Channels whose trace is not drawn (row stays in place).
     var hidden = Set<Int>()
     /// Channels marked bad (drawn gray).
     var bad = Set<Int>()
     /// channelIndex → spherical-spline-interpolated replacement series.
-    var interpolated = [Int: [Float]]() {
-        didSet { interpolationRevision &+= 1 }
+    var interpolated: [Int: [Float]] {
+        get { interpolationState.replacements }
+        set {
+            var next = interpolationState
+            next.replacements = newValue
+            next.revision &+= 1
+            interpolationState = next
+        }
     }
     /// channelIndex → the channels (and spline weights) that produced its
     /// interpolation, so health can be estimated by averaging their scores
     /// instead of a full recompute.
-    var interpolationSources = [Int: (indices: [Int], weights: [Float])]() {
-        didSet { interpolationRevision &+= 1 }
+    var interpolationSources: [Int: (indices: [Int], weights: [Float])] {
+        get { interpolationState.sources }
+        set {
+            var next = interpolationState
+            next.sources = newValue
+            next.revision &+= 1
+            interpolationState = next
+        }
     }
     /// Changes only when interpolation output/recipes change. Viewport and
     /// unrelated UI state therefore cannot invalidate the resolved-signal cache.
-    private(set) var interpolationRevision = 0
+    var interpolationRevision: Int { interpolationState.revision }
     /// Whether the waveform should lazily compute and display channel quality.
     var showsHealth = false
     /// Latest channel-health scores, keyed by channel index.
@@ -104,6 +124,54 @@ final class ChannelModel {
         healthResults.removeAll()
         isAnalyzingHealth = false
         healthProgress = 0
+    }
+
+    /// Commits the replacement samples and their donor recipe as one observable
+    /// state change. Keeping these paired prevents an intermediate waveform
+    /// refresh with only half of the interpolation available.
+    func setInterpolation(
+        target: Int,
+        replacement: [Float],
+        sourceIndices: [Int],
+        sourceWeights: [Float]
+    ) {
+        var next = interpolationState
+        next.replacements[target] = replacement
+        next.sources[target] = (sourceIndices, sourceWeights)
+        next.revision &+= 1
+        interpolationState = next
+    }
+
+    /// Replaces a collection of interpolations in a single observable update.
+    func replaceInterpolations(
+        _ replacements: [Int: [Float]],
+        sources: [Int: (indices: [Int], weights: [Float])]
+    ) {
+        var next = interpolationState
+        next.replacements = replacements
+        next.sources = sources
+        next.revision &+= 1
+        interpolationState = next
+    }
+
+    func removeInterpolation(target: Int) {
+        guard interpolationState.replacements[target] != nil
+                || interpolationState.sources[target] != nil else { return }
+        var next = interpolationState
+        next.replacements[target] = nil
+        next.sources[target] = nil
+        next.revision &+= 1
+        interpolationState = next
+    }
+
+    func removeAllInterpolations() {
+        guard !interpolationState.replacements.isEmpty
+                || !interpolationState.sources.isEmpty else { return }
+        var next = interpolationState
+        next.replacements.removeAll()
+        next.sources.removeAll()
+        next.revision &+= 1
+        interpolationState = next
     }
 
     /// Applies each saved spherical-spline recipe to the signal currently at
@@ -198,8 +266,7 @@ struct ChannelsCommands: View {
             Button("Unmark All Bad") { model.bad.removeAll() }
                 .disabled(model.bad.isEmpty)
             Button("Remove All Interpolations") {
-                model.interpolated.removeAll()
-                model.interpolationSources.removeAll()
+                model.removeAllInterpolations()
             }
                 .disabled(model.interpolated.isEmpty)
 
@@ -221,7 +288,7 @@ struct ChannelsCommands: View {
 
             Menu("Interpolated Channels") {
                 ForEach(model.interpolated.keys.sorted(), id: \.self) { index in
-                    Button("Restore Ch \(index + 1)") { model.interpolated[index] = nil }
+                    Button("Restore Ch \(index + 1)") { model.removeInterpolation(target: index) }
                 }
             }
             .disabled(model.interpolated.isEmpty)

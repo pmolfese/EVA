@@ -1136,8 +1136,7 @@ extension WaveformView {
             )
         }
         if !successful.isEmpty {
-            channels.interpolated = interpolated
-            channels.interpolationSources = interpolationSources
+            channels.replaceInterpolations(interpolated, sources: interpolationSources)
             channels.bad = globalBadChannels
             artifactVM.detectionRefreshToken += 1
 

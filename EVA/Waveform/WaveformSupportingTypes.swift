@@ -790,9 +790,23 @@ nonisolated struct PSABuildJob: Sendable {
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
         nonisolated(unsafe) var rejectedForTooManyBadChannels = 0
-        let maxBadChannelsPerEpoch = epochBadChannelThresholds.usesAbsoluteBadChannelCount
-            ? epochBadChannelThresholds.maxBadChannelCount
-            : Int((epochBadChannelThresholds.maxBadChannelFraction * Double(signal.numberOfChannels)).rounded())
+        let maxBadChannelsPerEpoch: Int
+        if epochBadChannelThresholds.usesAbsoluteBadChannelCount {
+            // An explicit integer the user typed; 0 legitimately means "reject
+            // any epoch that has a bad channel." Use it verbatim.
+            maxBadChannelsPerEpoch = epochBadChannelThresholds.maxBadChannelCount
+        } else {
+            // Fraction path. Don't let a *positive* fraction silently round down
+            // to 0 (0.10 × 4 = 0.4 → 0) on small/low-density nets: that would
+            // turn a "tolerate 10% of channels" setting into "reject on any one
+            // flagged channel," rejecting every epoch — and with all epochs
+            // rejected `buildEpochs` returns nil, so a low-channel or headless
+            // segment step silently yields nothing. A fraction of exactly 0 is
+            // still an explicit "reject any," matching the absolute-count 0 case.
+            let fraction = epochBadChannelThresholds.maxBadChannelFraction
+            let rounded = Int((fraction * Double(signal.numberOfChannels)).rounded())
+            maxBadChannelsPerEpoch = fraction > 0 ? max(1, rounded) : 0
+        }
         // Shared across all workers: identical (target, good-set) pairs recur
         // across most epochs (a bad channel tends to stay bad trial after
         // trial), so caching turns a repeated O(n³) spline solve into an O(1)
