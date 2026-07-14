@@ -19,7 +19,52 @@
 //  window's channels via a focused value.
 //
 
+import Accelerate
 import SwiftUI
+
+nonisolated struct ChannelInterpolationRecipe: Sendable {
+    let indices: [Int]
+    let weights: [Float]
+}
+
+/// Immutable, Sendable interpolation state. The resolver can safely apply this
+/// snapshot on a detached task without touching the observable ChannelModel.
+nonisolated struct ChannelInterpolationSnapshot: Sendable {
+    let revision: Int
+    let cachedReplacements: [Int: [Float]]
+    let recipes: [Int: ChannelInterpolationRecipe]
+
+    var isEmpty: Bool { cachedReplacements.isEmpty }
+
+    func applying(to signal: MFFSignalData) -> MFFSignalData {
+        guard !isEmpty else { return signal }
+        var data = signal.data
+        let sampleCount = data.first?.count ?? 0
+
+        for target in cachedReplacements.keys.sorted() where data.indices.contains(target) {
+            if let recipe = recipes[target],
+               recipe.indices.count == recipe.weights.count,
+               !recipe.indices.isEmpty,
+               recipe.indices.allSatisfy({ signal.data.indices.contains($0) && signal.data[$0].count == sampleCount }) {
+                var replacement = [Float](repeating: 0, count: sampleCount)
+                for (sourceIndex, weight) in zip(recipe.indices, recipe.weights) {
+                    vDSP.add(
+                        multiplication: (signal.data[sourceIndex], weight),
+                        replacement,
+                        result: &replacement
+                    )
+                }
+                data[target] = replacement
+            } else if let cached = cachedReplacements[target], cached.count == sampleCount {
+                // Backward-compatible fallback for interpolation state created
+                // before donor recipes were retained.
+                data[target] = cached
+            }
+        }
+
+        return signal.replacingData(data)
+    }
+}
 
 nonisolated enum ToolbarButtonLabels {
     static let storageKey = "toolbarButtonLabelsVisible"
@@ -27,16 +72,43 @@ nonisolated enum ToolbarButtonLabels {
 
 @Observable
 final class ChannelModel {
+    private struct InterpolationState {
+        var replacements = [Int: [Float]]()
+        var sources = [Int: (indices: [Int], weights: [Float])]()
+        var revision = 0
+    }
+
+    private var interpolationState = InterpolationState()
+
     /// Channels whose trace is not drawn (row stays in place).
     var hidden = Set<Int>()
     /// Channels marked bad (drawn gray).
     var bad = Set<Int>()
     /// channelIndex → spherical-spline-interpolated replacement series.
-    var interpolated = [Int: [Float]]()
+    var interpolated: [Int: [Float]] {
+        get { interpolationState.replacements }
+        set {
+            var next = interpolationState
+            next.replacements = newValue
+            next.revision &+= 1
+            interpolationState = next
+        }
+    }
     /// channelIndex → the channels (and spline weights) that produced its
     /// interpolation, so health can be estimated by averaging their scores
     /// instead of a full recompute.
-    var interpolationSources = [Int: (indices: [Int], weights: [Float])]()
+    var interpolationSources: [Int: (indices: [Int], weights: [Float])] {
+        get { interpolationState.sources }
+        set {
+            var next = interpolationState
+            next.sources = newValue
+            next.revision &+= 1
+            interpolationState = next
+        }
+    }
+    /// Changes only when interpolation output/recipes change. Viewport and
+    /// unrelated UI state therefore cannot invalidate the resolved-signal cache.
+    var interpolationRevision: Int { interpolationState.revision }
     /// Whether the waveform should lazily compute and display channel quality.
     var showsHealth = false
     /// Latest channel-health scores, keyed by channel index.
@@ -54,36 +126,70 @@ final class ChannelModel {
         healthProgress = 0
     }
 
+    /// Commits the replacement samples and their donor recipe as one observable
+    /// state change. Keeping these paired prevents an intermediate waveform
+    /// refresh with only half of the interpolation available.
+    func setInterpolation(
+        target: Int,
+        replacement: [Float],
+        sourceIndices: [Int],
+        sourceWeights: [Float]
+    ) {
+        var next = interpolationState
+        next.replacements[target] = replacement
+        next.sources[target] = (sourceIndices, sourceWeights)
+        next.revision &+= 1
+        interpolationState = next
+    }
+
+    /// Replaces a collection of interpolations in a single observable update.
+    func replaceInterpolations(
+        _ replacements: [Int: [Float]],
+        sources: [Int: (indices: [Int], weights: [Float])]
+    ) {
+        var next = interpolationState
+        next.replacements = replacements
+        next.sources = sources
+        next.revision &+= 1
+        interpolationState = next
+    }
+
+    func removeInterpolation(target: Int) {
+        guard interpolationState.replacements[target] != nil
+                || interpolationState.sources[target] != nil else { return }
+        var next = interpolationState
+        next.replacements[target] = nil
+        next.sources[target] = nil
+        next.revision &+= 1
+        interpolationState = next
+    }
+
+    func removeAllInterpolations() {
+        guard !interpolationState.replacements.isEmpty
+                || !interpolationState.sources.isEmpty else { return }
+        var next = interpolationState
+        next.replacements.removeAll()
+        next.sources.removeAll()
+        next.revision &+= 1
+        interpolationState = next
+    }
+
     /// Applies each saved spherical-spline recipe to the signal currently at
     /// the end of the processing pipeline. The donor weights are persistent;
     /// the replacement samples are re-derived so filtering, OBS, wavelets, and
     /// other upstream transforms cannot reveal the original target channel.
-    func applyingInterpolations(to signal: MFFSignalData) -> MFFSignalData {
-        guard !interpolated.isEmpty else { return signal }
-        var data = signal.data
-        let sampleCount = data.first?.count ?? 0
-
-        for target in interpolated.keys.sorted() where data.indices.contains(target) {
-            if let recipe = interpolationSources[target],
-               recipe.indices.count == recipe.weights.count,
-               !recipe.indices.isEmpty,
-               recipe.indices.allSatisfy({ signal.data.indices.contains($0) && signal.data[$0].count == sampleCount }) {
-                var replacement = [Float](repeating: 0, count: sampleCount)
-                for (sourceIndex, weight) in zip(recipe.indices, recipe.weights) {
-                    let source = signal.data[sourceIndex]
-                    for sample in 0..<sampleCount {
-                        replacement[sample] += weight * source[sample]
-                    }
-                }
-                data[target] = replacement
-            } else if let cached = interpolated[target], cached.count == sampleCount {
-                // Backward-compatible fallback for interpolation state created
-                // before donor recipes were retained.
-                data[target] = cached
+    var interpolationSnapshot: ChannelInterpolationSnapshot {
+        ChannelInterpolationSnapshot(
+            revision: interpolationRevision,
+            cachedReplacements: interpolated,
+            recipes: interpolationSources.mapValues {
+                ChannelInterpolationRecipe(indices: $0.indices, weights: $0.weights)
             }
-        }
+        )
+    }
 
-        return signal.replacingData(data)
+    func applyingInterpolations(to signal: MFFSignalData) -> MFFSignalData {
+        interpolationSnapshot.applying(to: signal)
     }
 }
 
@@ -160,8 +266,7 @@ struct ChannelsCommands: View {
             Button("Unmark All Bad") { model.bad.removeAll() }
                 .disabled(model.bad.isEmpty)
             Button("Remove All Interpolations") {
-                model.interpolated.removeAll()
-                model.interpolationSources.removeAll()
+                model.removeAllInterpolations()
             }
                 .disabled(model.interpolated.isEmpty)
 
@@ -183,7 +288,7 @@ struct ChannelsCommands: View {
 
             Menu("Interpolated Channels") {
                 ForEach(model.interpolated.keys.sorted(), id: \.self) { index in
-                    Button("Restore Ch \(index + 1)") { model.interpolated[index] = nil }
+                    Button("Restore Ch \(index + 1)") { model.removeInterpolation(target: index) }
                 }
             }
             .disabled(model.interpolated.isEmpty)
@@ -359,6 +464,7 @@ struct SegmentHealthViewControls {
     var showsMouseOverHealth: Binding<Bool>
     var detailsRequest: Binding<Int>
     var refreshRequest: Binding<Int>
+    var isAvailable: Bool
     var isAnalyzing: Bool
     var progress: Double
 }
@@ -439,16 +545,17 @@ struct ViewCommands: View {
 
         Toggle("Show Segment Health", isOn: Binding(
             get: { segmentHealthControls?.showsHealth.wrappedValue ?? false },
-            set: { segmentHealthControls?.showsHealth.wrappedValue = $0 }
+            set: { if segmentHealthControls?.isAvailable == true { segmentHealthControls?.showsHealth.wrappedValue = $0 } }
         ))
-        .disabled(segmentHealthControls == nil)
+        .disabled(segmentHealthControls?.isAvailable != true)
+        .help(segmentHealthControls?.isAvailable == false ? "Segment Health is unavailable for averaged categories." : "Show quality scores for individual segments.")
 
         Button("Segment Health Details...") {
             segmentHealthControls?.detailsRequest.wrappedValue += 1
         }
-        .disabled(segmentHealthControls == nil)
+        .disabled(segmentHealthControls?.isAvailable != true)
 
-        if let segmentHealthControls, segmentHealthControls.showsHealth.wrappedValue {
+        if let segmentHealthControls, segmentHealthControls.isAvailable, segmentHealthControls.showsHealth.wrappedValue {
             Toggle("Show Mouse Over Health", isOn: segmentHealthControls.showsMouseOverHealth)
 
             Button("Refresh Segment Health") {

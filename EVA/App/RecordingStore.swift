@@ -22,6 +22,9 @@ import SwiftUI
 final class RecordingStore {
     /// Per-window channel state (hidden / bad / interpolated).
     var channels = ChannelModel()
+    /// Cached composition of the current processed signal with channel
+    /// interpolation recipes. Kept per recording window.
+    var interpolatedSignalResolver = InterpolatedSignalResolver()
 
     // MARK: Viewport
     var amplitudeScale: Double = 100

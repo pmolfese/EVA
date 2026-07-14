@@ -65,7 +65,8 @@ extension WaveformView {
     }
 
     func segmentHealthInputSegments(for signal: MFFSignalData) -> [SegmentHealthInputSegment] {
-        SegmentHealthAnalyzer.analysisSegments(
+        guard !epoching.isAveraged, !signal.isAveraged else { return [] }
+        return SegmentHealthAnalyzer.analysisSegments(
             for: signal,
             epochSegments: epoching.epochedSignal == nil ? [] : epoching.epochSegments
         )
@@ -198,6 +199,10 @@ extension WaveformView {
 
     @MainActor
     func refreshSegmentHealthIfNeeded(for signal: MFFSignalData) {
+        guard !epoching.isAveraged, !signal.isAveraged else {
+            segHealth.clearAnalysis(hide: true, clearLabels: false)
+            return
+        }
         let signature = segmentHealthSignature(for: signal)
 
         guard segHealth.shows else {
@@ -410,12 +415,14 @@ extension WaveformView {
     }
 
     func currentSegmentHealthSignal() -> MFFSignalData? {
+        guard !epoching.isAveraged else { return nil }
         guard let rawSignal = recording.signal else { return nil }
         let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
         let preArtifact = filter.output ?? base
         let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
         let continuousSignal = applyInterpolations(to: processed)
-        return epoching.epochedSignal ?? continuousSignal
+        let signal = epoching.epochedSignal ?? continuousSignal
+        return signal.isAveraged ? nil : signal
     }
 
     func segmentHealthProcessingSnapshot() -> SavedSegmentHealthProcessing {

@@ -78,4 +78,53 @@ struct ProcessingQueueTests {
 
         #expect(queue.isBusy == false)
     }
+
+    @Test func finishingProgressBridgePreventsLateProgressFromReappearing() async {
+        var displayedProgress: Int?
+        let (continuation, task) = ProgressBridge.make { value in
+            displayedProgress = value
+        }
+
+        continuation.yield(100)
+        await ProgressBridge.finishAndWait(continuation, task: task)
+        displayedProgress = nil
+
+        // Give any incorrectly detached/queued update a chance to run.
+        await Task.yield()
+        #expect(displayedProgress == nil)
+    }
+
+    @Test func progressBridgeCoalescesBurstsToTheNewestValue() async {
+        var applied: [Int] = []
+        let (continuation, task) = ProgressBridge.make { (value: Int) in
+            applied.append(value)
+        }
+
+        // Yield a synchronous burst before the consumer task has run: the
+        // 1-slot buffer must collapse it to the newest value, not queue 1,000
+        // main-actor applies.
+        for value in 0..<1_000 {
+            continuation.yield(value)
+        }
+        await ProgressBridge.finishAndWait(continuation, task: task)
+
+        #expect(applied == [999])
+    }
+
+    @Test func progressBridgeAlwaysAppliesTheFinalValue() async {
+        var applied: [Int] = []
+        let (continuation, task) = ProgressBridge.make { (value: Int) in
+            applied.append(value)
+        }
+
+        continuation.yield(1)
+        continuation.yield(2)
+        continuation.yield(3)
+        await ProgressBridge.finishAndWait(continuation, task: task)
+
+        // Intermediate values may be dropped, but the value representing the
+        // finished state must land before finishAndWait returns.
+        #expect(applied.last == 3)
+        #expect(applied.count <= 3)
+    }
 }

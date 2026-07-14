@@ -117,10 +117,20 @@ extension WaveformView {
                         progressContinuation.finish()
                     }
                 )
-                progressContinuation.finish()
-                progressTask.cancel()
+                // Drain queued main-actor updates before hiding progress. A
+                // cancelled listener can otherwise deliver its final 100%
+                // update after `cleaningProgress` is cleared, resurrecting the
+                // completed toolbar progress row.
+                await ProgressBridge.finishAndWait(progressContinuation, task: progressTask)
 
-                guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+                guard !Task.isCancelled, sessionID == recordingSessionID else {
+                    if sessionID == recordingSessionID {
+                        artifactVM.cleaningProgress = nil
+                        artifactVM.isCleaning = false
+                        artifactCleaningTask = nil
+                    }
+                    return
+                }
                 artifactVM.cleanedSignal = outcome.signal
                 artifactVM.cleaningIsEnabled = true
                 artifactVM.cleaningSummaries = outcome.summaries

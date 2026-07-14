@@ -71,7 +71,7 @@ extension WaveformView {
             }
 
             if channels.interpolated[index] != nil {
-                Button("Remove Interpolation") { channels.interpolated[index] = nil }
+                Button("Remove Interpolation") { channels.removeInterpolation(target: index) }
             } else {
                 Button("Interpolate") { interpolate(index, in: signal) }
                     .disabled(electrodeGeometry?.positions[index] == nil)
@@ -144,8 +144,7 @@ extension WaveformView {
         resetToOriginalData()
         channels.hidden.removeAll()
         channels.bad.removeAll()
-        channels.interpolated.removeAll()
-        channels.interpolationSources.removeAll()
+        channels.removeAllInterpolations()
         channels.clearHealthResults()
         electrodeGeometry = recording.electrodeGeometry
         ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
@@ -380,7 +379,9 @@ extension WaveformView {
 
     @ViewBuilder
     func segmentHealthOverlay(for signal: MFFSignalData) -> some View {
-        if segHealth.shows,
+        if !epoching.isAveraged,
+           !signal.isAveraged,
+           segHealth.shows,
            let results = segHealth.analysis?.results,
            let sampleCount = signal.data.first?.count,
            sampleCount > 0 {

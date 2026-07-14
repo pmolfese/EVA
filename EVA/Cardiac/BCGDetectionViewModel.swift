@@ -17,6 +17,11 @@
 import Combine
 import SwiftUI
 
+nonisolated struct BCGAlgorithmResult: Sendable, Equatable {
+    let count: Int
+    let bpm: Double?
+}
+
 @MainActor
 final class BCGDetectionViewModel: ObservableObject {
     /// Held directly so this VM can read channel state itself — see
@@ -77,6 +82,10 @@ final class BCGDetectionViewModel: ObservableObject {
     @Published var isRefining = false
     @Published var rejectFraction = 0.20
 
+    // MARK: Algorithm-comparison preview
+    @Published var isEstimating = false
+    @Published var algorithmResults: [BCGDetectionMethod: BCGAlgorithmResult] = [:]
+
     func resetForClose() {
         detectsArtifacts = false
         showsSheet = false
@@ -86,6 +95,8 @@ final class BCGDetectionViewModel: ObservableObject {
         refinedTemplate = nil
         refinedKeptCount = nil
         isRefining = false
+        isEstimating = false
+        algorithmResults = [:]
         correctedSignal = nil
     }
 

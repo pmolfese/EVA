@@ -308,9 +308,16 @@ struct WaveformView: View {
             showsMouseOverHealth: $segHealth.showsMouseOver,
             detailsRequest: $segHealth.detailsRequest,
             refreshRequest: $segHealth.refreshRequest,
+            isAvailable: segmentHealthIsAvailable,
             isAnalyzing: segHealth.isAnalyzing,
             progress: segHealth.progress
         )
+    }
+
+    private var segmentHealthIsAvailable: Bool {
+        !epoching.isAveraged
+            && epoching.epochedSignal?.isAveraged != true
+            && recording.signal?.isAveraged != true
     }
 
     private var physioViewControls: PhysioViewControls {
@@ -411,14 +418,41 @@ struct WaveformView: View {
                 // Wavelet reduction stage: computed from `processed`, applied
                 // before interpolation. Toggleable and revertible like cleaning.
                 let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? processed) : processed
-                let continuousSignal = applyInterpolations(to: waveletStage)
-                content(
-                    for: epoching.epochedSignal ?? continuousSignal,
-                    base: base,
-                    cleaningBase: preArtifact,
-                    waveletInput: processed,
-                    continuousSignal: continuousSignal
-                )
+                let interpolationSnapshot = channels.interpolationSnapshot
+                if interpolationSnapshot.isEmpty {
+                    content(
+                        for: epoching.epochedSignal ?? waveletStage,
+                        base: base,
+                        cleaningBase: preArtifact,
+                        waveletInput: processed,
+                        continuousSignal: waveletStage
+                    )
+                } else {
+                    let resolutionKey = recordingStore.interpolatedSignalResolver.key(
+                        for: waveletStage,
+                        snapshot: interpolationSnapshot
+                    )
+                    let continuousSignal = recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey)
+                        ?? recordingStore.interpolatedSignalResolver.displaySignal(
+                            whileResolving: resolutionKey,
+                            fallback: waveletStage
+                        )
+                    content(
+                        for: epoching.epochedSignal ?? continuousSignal,
+                        base: base,
+                        cleaningBase: preArtifact,
+                        waveletInput: processed,
+                        continuousSignal: continuousSignal
+                    )
+                    .task(id: resolutionKey) {
+                        if recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey) == nil {
+                            await recordingStore.interpolatedSignalResolver.resolve(
+                                signal: waveletStage,
+                                snapshot: interpolationSnapshot
+                            )
+                        }
+                    }
+                }
             } else {
                 ContentUnavailableView(
                     "Couldn't Read Recording",
@@ -470,6 +504,10 @@ struct WaveformView: View {
             saveChannelLabelMetricsJSON()
         }
         .onChange(of: segHealth.detailsRequest) { _, _ in
+            guard segmentHealthIsAvailable else {
+                segHealth.clearAnalysis(hide: true, clearLabels: false)
+                return
+            }
             segHealth.shows = true
             segHealth.showsDetails = true
         }
@@ -478,6 +516,14 @@ struct WaveformView: View {
         }
         .onChange(of: channelGoodnessSettingsRequest) { _, _ in
             showsChannelGoodnessSettings = true
+        }
+        .onChange(of: channels.interpolationRevision) { _, _ in
+            // Once the final interpolation is removed the resolver is bypassed;
+            // release its retained derived signal instead of keeping it for the
+            // lifetime of the recording window.
+            if channels.interpolated.isEmpty {
+                recordingStore.interpolatedSignalResolver.reset()
+            }
         }
     }
 
@@ -1702,12 +1748,12 @@ struct WaveformView: View {
                             .font(.caption.weight(.semibold))
                             .frame(width: labelColumnWidth, alignment: .leading)
 
-                        Slider(value: $horizontalJumpValue, in: 0...1)
-                            .onChange(of: horizontalJumpValue) { _, newValue in
-                                guard !isSyncingSliderFromScroll else { return }
-                                let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
-                                horizontalScrollPosition.scrollTo(x: CGFloat(newValue) * maxOffset)
-                            }
+                        let maxOffset = horizontalMaximumOffset(for: plotWidth)
+                        Slider(value: horizontalJumpBinding(plotWidth: plotWidth), in: 0...1)
+                            .disabled(maxOffset <= geometryUpdateQuantum)
+                            .help(maxOffset <= geometryUpdateQuantum
+                                  ? "The entire waveform is already visible."
+                                  : "Jump horizontally through the waveform.")
                     }
 
                     if let selectedSampleRange {
@@ -1929,7 +1975,12 @@ struct WaveformView: View {
 
     /// Returns `signal` with any interpolated channels swapped in.
     func applyInterpolations(to signal: MFFSignalData) -> MFFSignalData {
-        channels.applyingInterpolations(to: signal)
+        let snapshot = channels.interpolationSnapshot
+        guard !snapshot.isEmpty else { return signal }
+        return recordingStore.interpolatedSignalResolver.resolveSynchronously(
+            signal: signal,
+            snapshot: snapshot
+        )
     }
 
     /// Replaces channel `index` with a spherical-spline interpolation from the
@@ -1978,8 +2029,12 @@ struct WaveformView: View {
             vDSP.add(multiplication: (source, Float(weight)), series, result: &series)
         }
 
-        channels.interpolated[index] = series
-        channels.interpolationSources[index] = (indices, weights.map(Float.init))
+        channels.setInterpolation(
+            target: index,
+            replacement: series,
+            sourceIndices: indices,
+            sourceWeights: weights.map(Float.init)
+        )
         channels.bad.remove(index)
         let message = "Interpolated Ch \(index + 1) from \(indices.count) neighbors."
         if updatesStatus {
@@ -2034,8 +2089,8 @@ struct WaveformView: View {
     /// Interpolated channels are derived from the source data, so they go stale
     /// when the gradient/filter pipeline changes.
     func invalidateInterpolations() {
-        channels.interpolated.removeAll()
-        channels.interpolationSources.removeAll()
+        channels.removeAllInterpolations()
+        recordingStore.interpolatedSignalResolver.reset()
     }
 
     private func tearDownRecordingSessionForClose() {
@@ -2138,8 +2193,8 @@ struct WaveformView: View {
 
         channels.hidden.removeAll()
         channels.bad.removeAll()
-        channels.interpolated.removeAll()
-        channels.interpolationSources.removeAll()
+        channels.removeAllInterpolations()
+        recordingStore.interpolatedSignalResolver.reset()
         channels.clearHealthResults()
         channels.showsHealth = false
         channels.healthRefreshToken = 0
@@ -2320,9 +2375,41 @@ struct WaveformView: View {
 
         let resolvedOffset = offsetChanged ? nextOffset : horizontalOffset
         let resolvedWidth = widthChanged ? nextWidth : horizontalViewportWidth
-        let maxOffset = max(plotWidth - resolvedWidth, 0)
+        let maxOffset = horizontalMaximumOffset(for: plotWidth, viewportWidth: resolvedWidth)
         let nextJumpValue = maxOffset > 0 ? Double(resolvedOffset / maxOffset) : 0
         updateHorizontalJumpValueFromScroll(nextJumpValue)
+    }
+
+    private func horizontalMaximumOffset(
+        for plotWidth: CGFloat,
+        viewportWidth: CGFloat? = nil
+    ) -> CGFloat {
+        max(plotWidth - (viewportWidth ?? horizontalViewportWidth), 0)
+    }
+
+    /// Keeps the slider visually pinned at zero when the plot already fits in
+    /// the viewport. A plain `$horizontalJumpValue` binding lets the thumb move
+    /// even though the resulting scroll offset is always zero.
+    private func horizontalJumpBinding(plotWidth: CGFloat) -> Binding<Double> {
+        Binding(
+            get: {
+                horizontalMaximumOffset(for: plotWidth) > geometryUpdateQuantum
+                    ? horizontalJumpValue
+                    : 0
+            },
+            set: { newValue in
+                guard !isSyncingSliderFromScroll else { return }
+                let maxOffset = horizontalMaximumOffset(for: plotWidth)
+                guard maxOffset > geometryUpdateQuantum else {
+                    updateHorizontalJumpValueFromScroll(0)
+                    horizontalScrollPosition.scrollTo(x: 0)
+                    return
+                }
+                let clamped = min(max(newValue, 0), 1)
+                horizontalJumpValue = clamped
+                horizontalScrollPosition.scrollTo(x: CGFloat(clamped) * maxOffset)
+            }
+        )
     }
 
     private func updateHorizontalJumpValueFromScroll(_ newValue: Double) {

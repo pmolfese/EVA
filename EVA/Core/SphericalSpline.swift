@@ -27,7 +27,7 @@
 import Foundation
 import simd
 
-enum SphericalSpline {
+nonisolated enum SphericalSpline {
     /// Computes interpolation weights for `target` from the `good` electrodes.
     ///
     /// - Returns: parallel arrays `(indices, weights)` such that the

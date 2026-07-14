@@ -120,7 +120,7 @@ private struct ProcessingDefaultsView: View {
             } header: {
                 Text("Segment Health")
             } footer: {
-                Text("When on, PSA segmentation automatically turns on Segment Health and scores the newly created segments.")
+                Text("When on, single-trial PSA segmentation automatically turns on Segment Health and scores the newly created segments. Category averages are never scored.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

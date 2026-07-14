@@ -70,6 +70,14 @@ struct ContentView: View {
         } isTargeted: { targeted in
             isDropTargeted = targeted
         }
+        // Finder/Open With launches (and open-file Apple events delivered to an
+        // already-running app) arrive here because Info.plist declares MFF as a
+        // document type. Keep this on the same path as the Open panel and drag
+        // and drop so validation, package handling, and security-scoped access
+        // remain identical.
+        .onOpenURL { url in
+            _ = openSelectedURLs([url])
+        }
         .fileImporter(
             isPresented: $showsFileImporter,
             allowedContentTypes: [.mff, .data, .plainText],

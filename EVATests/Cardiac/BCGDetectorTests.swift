@@ -20,6 +20,21 @@ import Foundation
 @testable import EVA
 
 struct BCGDetectorTests {
+    @Test func detectedEventsCarryCenteredArtifactWindowDuration() throws {
+        let events = BCGDetector.makeEvents(
+            times: [1.25, 2.10],
+            idPrefix: "bcg-test",
+            code: "BCG",
+            windowSeconds: 0.7
+        )
+
+        #expect(events.count == 2)
+        #expect(events.map(\.durationSeconds) == [0.7, 0.7])
+        #expect(events.map(\.beginTimeSeconds) == [1.25, 2.10])
+        #expect(events.allSatisfy { $0.sourceFile == BCGDetector.sourceFile })
+        #expect(try #require(events.first).centerTimeSeconds == 1.25)
+    }
+
 
     /// Builds channels carrying a shared periodic "cardiac" pulse train (a narrow bump
     /// repeated every `periodSamples`) plus per-channel pseudo-random noise, mimicking a

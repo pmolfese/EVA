@@ -29,6 +29,7 @@ struct EVAApp: App {
     @State private var segmentGoodnessSettings = SegmentGoodnessSettings()
     @State private var processingDefaults = ProcessingDefaults.shared
     @State private var batch = BatchController()
+    @State private var isCheckingForUpdates = false
 
     var body: some Scene {
         WindowGroup {
@@ -46,6 +47,13 @@ struct EVAApp: App {
         .modelContainer(for: UserMarker.self)
         .defaultSize(Self.defaultWindowSize)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button(isCheckingForUpdates ? "Checking for Updates..." : "Check for Updates...") {
+                    checkForUpdates()
+                }
+                .disabled(isCheckingForUpdates)
+            }
+
             CommandGroup(replacing: .newItem) {
                 Button("Open Recording...") {
                     openRecordingRequest += 1
@@ -109,6 +117,26 @@ struct EVAApp: App {
 
     static let debugLogWindowID = "debug-log"
     static let channelSetsWindowID = "channel-sets"
+
+    private func checkForUpdates() {
+        guard !isCheckingForUpdates else { return }
+        isCheckingForUpdates = true
+
+        Task { @MainActor in
+            defer { isCheckingForUpdates = false }
+
+            let currentVersion = Bundle.main.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+            ) as? String ?? "Unknown"
+
+            do {
+                let result = try await UpdateChecker().check(currentVersion: currentVersion)
+                UpdateAlertPresenter.present(result)
+            } catch {
+                UpdateAlertPresenter.present(error: error)
+            }
+        }
+    }
 
     private static var defaultWindowSize: CGSize {
         let frame = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)

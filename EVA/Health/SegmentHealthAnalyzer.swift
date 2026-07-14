@@ -203,7 +203,11 @@ nonisolated enum SegmentHealthAnalyzer {
         for signal: MFFSignalData,
         epochSegments: [EpochSegment]
     ) -> [SegmentHealthInputSegment] {
-        guard let sampleCount = signal.data.first?.count,
+        // Category averages are outputs derived from multiple trials, not
+        // individual segments whose quality can be accepted/rejected. Scoring
+        // them would produce plausible-looking but semantically invalid grades.
+        guard !signal.isAveraged,
+              let sampleCount = signal.data.first?.count,
               sampleCount > 0,
               signal.samplingRate > 0 else {
             return []
@@ -256,7 +260,8 @@ nonisolated enum SegmentHealthAnalyzer {
         base: SegmentHealthMetricSettings = .defaults,
         progress: (@Sendable (Double) -> Void)? = nil
     ) -> SegmentHealthAnalysis {
-        guard signal.samplingRate > 0,
+        guard !signal.isAveraged,
+              signal.samplingRate > 0,
               let sampleCount = signal.data.first?.count,
               sampleCount > 2,
               !signal.data.isEmpty,

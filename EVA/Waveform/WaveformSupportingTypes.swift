@@ -790,9 +790,23 @@ nonisolated struct PSABuildJob: Sendable {
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
         nonisolated(unsafe) var rejectedForTooManyBadChannels = 0
-        let maxBadChannelsPerEpoch = epochBadChannelThresholds.usesAbsoluteBadChannelCount
-            ? epochBadChannelThresholds.maxBadChannelCount
-            : Int((epochBadChannelThresholds.maxBadChannelFraction * Double(signal.numberOfChannels)).rounded())
+        let maxBadChannelsPerEpoch: Int
+        if epochBadChannelThresholds.usesAbsoluteBadChannelCount {
+            // An explicit integer the user typed; 0 legitimately means "reject
+            // any epoch that has a bad channel." Use it verbatim.
+            maxBadChannelsPerEpoch = epochBadChannelThresholds.maxBadChannelCount
+        } else {
+            // Fraction path. Don't let a *positive* fraction silently round down
+            // to 0 (0.10 × 4 = 0.4 → 0) on small/low-density nets: that would
+            // turn a "tolerate 10% of channels" setting into "reject on any one
+            // flagged channel," rejecting every epoch — and with all epochs
+            // rejected `buildEpochs` returns nil, so a low-channel or headless
+            // segment step silently yields nothing. A fraction of exactly 0 is
+            // still an explicit "reject any," matching the absolute-count 0 case.
+            let fraction = epochBadChannelThresholds.maxBadChannelFraction
+            let rounded = Int((fraction * Double(signal.numberOfChannels)).rounded())
+            maxBadChannelsPerEpoch = fraction > 0 ? max(1, rounded) : 0
+        }
         // Shared across all workers: identical (target, good-set) pairs recur
         // across most epochs (a bad channel tends to stay bad trial after
         // trial), so caching turns a repeated O(n³) spline solve into an O(1)
@@ -1108,7 +1122,7 @@ enum PSASegmentField: String, CaseIterable, Identifiable {
 
 
 
-enum BCGDetectionMethod: String, CaseIterable, Identifiable {
+enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
     case periodicity    = "periodicity"
     case spatialPCA     = "spatialPCA"
     case cardiacPowerMap = "cardiacPowerMap"
@@ -1117,17 +1131,17 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
     case qrsLocking     = "qrsLocking"
     case cwlRegression  = "cwlRegression"
 
-    var id: String { rawValue }
+    nonisolated var id: String { rawValue }
 
     /// True for methods that directly correct the signal from an external
     /// reference (no beat/event detection step). The BCG sheet skips the
     /// shared event-code/threshold/window controls and swaps the action
     /// button to "Correct" for these.
-    var isDirectCorrection: Bool {
+    nonisolated var isDirectCorrection: Bool {
         self == .cwlRegression
     }
 
-    var tabLabel: String {
+    nonisolated var tabLabel: String {
         switch self {
         case .periodicity:      return "Periodicity"
         case .spatialPCA:       return "Spatial PCA"
@@ -1139,7 +1153,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable {
         }
     }
 
-    var summary: String {
+    nonisolated var summary: String {
         switch self {
         case .periodicity:
             return "Bandpass the EEG to the cardiac band, compute the Global Field Power, and find peaks. Exploits the fact that BCG repeats at a stable heart rate — no exemplar needed."

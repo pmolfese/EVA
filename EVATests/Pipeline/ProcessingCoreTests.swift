@@ -242,14 +242,42 @@ struct ProcessingCoreTests {
         )
     }
 
+    /// `stimSignal` widened to `channelCount` channels: channel 0 keeps the
+    /// bump (whose trailing >25 µV/sample edge trips the per-epoch bad-channel
+    /// detector), the rest are flat/quiet — so exactly one channel flags per
+    /// epoch.
+    private func stimSignalMultiChannel(channelCount: Int = 4, spacing: Int = 1000, nEvents: Int = 8, samplingRate: Double = 500) -> MFFSignalData {
+        let base = stimSignal(spacing: spacing, nEvents: nEvents, samplingRate: samplingRate)
+        let sampleCount = spacing * (nEvents + 1)
+        var data = base.data // [channel 0 with the bump]
+        for _ in 1..<channelCount {
+            data.append([Float](repeating: 0, count: sampleCount))
+        }
+        return MFFSignalData(
+            signalURL: base.signalURL,
+            signalType: "EEG",
+            numberOfChannels: channelCount,
+            samplingRate: samplingRate,
+            duration: Double(sampleCount) / samplingRate,
+            recordingStartTime: nil,
+            events: base.events,
+            data: data
+        )
+    }
+
     @MainActor
     @Test func segmentStepBuildsEpochsWithoutAveraging() async throws {
         let signal = stimSignal()
         let core = makeCore()
 
         var script = EVAProcessingScript()
+        // Flag off: this test verifies pure segmentation, not per-epoch
+        // bad-channel rejection (which a 1-channel synthetic signal can't
+        // meaningfully exercise). Pinned so a future default/threshold change
+        // can't silently invalidate it again.
         script.append(EVAProcessingStep(operation: .segment, parameters: [
-            "eventCodes": "stim", "preStimulusMs": "40", "postStimulusMs": "120", "average": "false"
+            "eventCodes": "stim", "preStimulusMs": "40", "postStimulusMs": "120",
+            "average": "false", "interpolateBadChannelsPerEpoch": "false"
         ]))
 
         let result = await core.applyAutoSteps(script, to: signal)
@@ -261,13 +289,39 @@ struct ProcessingCoreTests {
     }
 
     @MainActor
+    @Test func lowChannelCountSegmentSurvivesPerEpochBadChannelFloor() async throws {
+        // Regression guard for the `max(1, …)` floor in PSABuildJob.buildEpochs.
+        // With per-epoch interpolation ON (the default) and a 4-channel net,
+        // `maxBadChannelFraction * 4 = 0.4` rounds to 0. Before the floor, any
+        // epoch containing even one flagged channel — here channel 0's abrupt
+        // bump edge, one flag per epoch — was rejected, so *every* epoch was
+        // dropped and headless segmentation silently produced nothing. The floor
+        // keeps single-flag epochs. Note: the flag is left at its `true` default
+        // here on purpose (unlike the segmentation tests above, which pin it off).
+        let signal = stimSignalMultiChannel()
+        let core = makeCore()
+
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(operation: .segment, parameters: [
+            "eventCodes": "stim", "preStimulusMs": "40", "postStimulusMs": "120", "average": "false"
+        ]))
+
+        let result = await core.applyAutoSteps(script, to: signal)
+
+        #expect(result.remainingSteps.isEmpty)
+        #expect(core.epoching.epochSegments.count == 8) // all epochs survive the single flag
+        #expect(result.signal != nil)
+    }
+
+    @MainActor
     @Test func segmentStepWithAveragingProducesOneEpochPerCategory() async throws {
         let signal = stimSignal()
         let core = makeCore()
 
         var script = EVAProcessingScript()
         script.append(EVAProcessingStep(operation: .segment, parameters: [
-            "eventCodes": "stim", "preStimulusMs": "40", "postStimulusMs": "120", "average": "true"
+            "eventCodes": "stim", "preStimulusMs": "40", "postStimulusMs": "120",
+            "average": "true", "interpolateBadChannelsPerEpoch": "false"
         ]))
 
         let result = await core.applyAutoSteps(script, to: signal)
@@ -286,7 +340,8 @@ struct ProcessingCoreTests {
         var script = EVAProcessingScript()
         script.append(EVAProcessingStep(operation: .filter, parameters: ["highPassHz": "1.0"]))
         script.append(EVAProcessingStep(operation: .segment, parameters: [
-            "eventCodes": "stim", "preStimulusMs": "40", "postStimulusMs": "120", "average": "true"
+            "eventCodes": "stim", "preStimulusMs": "40", "postStimulusMs": "120",
+            "average": "true", "interpolateBadChannelsPerEpoch": "false"
         ]))
 
         let result = await core.applyAutoSteps(script, to: signal)
