@@ -13,11 +13,11 @@
 //  WaveformView still drives the reduction orchestration.
 //
 
-import Combine
 import SwiftUI
 
 @MainActor
-final class WaveletReductionViewModel: ObservableObject {
+@Observable
+final class WaveletReductionViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -27,26 +27,26 @@ final class WaveletReductionViewModel: ObservableObject {
     }
 
     // MARK: Results
-    @Published var reducedSignal: MFFSignalData?
-    @Published var artifact: MFFSignalData?
-    @Published var result: WaveletReductionResult?
-    @Published var bandVarianceRetained: Double?
+    var reducedSignal: MFFSignalData?
+    var artifact: MFFSignalData?
+    var result: WaveletReductionResult?
+    var bandVarianceRetained: Double?
 
     // MARK: Run state
-    @Published var isEnabled = true
-    @Published var isRunning = false
-    @Published var progress = 0.0
-    @Published var statusMessage: String?
+    var isEnabled = true
+    var isRunning = false
+    var progress = 0.0
+    var statusMessage: String?
 
     // MARK: UI state
-    @Published var showsSheet = false
+    var showsSheet = false
 
     // MARK: Parameters
-    @Published var mode = WaveletReductionMode.continuousEEG
-    @Published var config = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: 250)
-    @Published var coreCount = WaveletReducer.defaultCoreCount
-    @Published var candidates: [WaveletReductionCandidate] = []
-    @Published var selectedCandidateID: String?
+    var mode = WaveletReductionMode.continuousEEG
+    var config = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: 250)
+    var coreCount = WaveletReducer.defaultCoreCount
+    var candidates: [WaveletReductionCandidate] = []
+    var selectedCandidateID: String?
 
     var isActive: Bool { reducedSignal != nil }
 

@@ -14,11 +14,11 @@
 //  drives the fit/removal orchestration.
 //
 
-import Combine
 import SwiftUI
 
 @MainActor
-final class ICAViewModel: ObservableObject {
+@Observable
+final class ICAViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -31,37 +31,37 @@ final class ICAViewModel: ObservableObject {
     }
 
     // MARK: Sheet / run state
-    @Published var showsSheet = false
-    @Published var isRunning = false
-    @Published var progress = 0.0
-    @Published var progressMessage = ""
-    @Published var statusMessage: String?
-    @Published var isRemovingComponents = false
+    var showsSheet = false
+    var isRunning = false
+    var progress = 0.0
+    var progressMessage = ""
+    var statusMessage: String?
+    var isRemovingComponents = false
 
     // MARK: Parameters
-    @Published var method: ICAMethod = .picard
-    @Published var componentCount = 20
-    @Published var varianceThreshold = 0.999
-    @Published var usesAverageReference = true
-    @Published var downsampleRate = 100.0
-    @Published var maxIterations = 200
-    @Published var minimumIterations = 10
-    @Published var convergenceTolerance = 0.000000000001
+    var method: ICAMethod = .picard
+    var componentCount = 20
+    var varianceThreshold = 0.999
+    var usesAverageReference = true
+    var downsampleRate = 100.0
+    var maxIterations = 200
+    var minimumIterations = 10
+    var convergenceTolerance = 0.000000000001
 
     // MARK: Fit pre-filter
-    @Published var usesFitFilter = true
-    @Published var fitLowCutoff = 1.0
-    @Published var fitHighCutoff = 40.0
-    @Published var fitNotch60HzEnabled = false
+    var usesFitFilter = true
+    var fitLowCutoff = 1.0
+    var fitHighCutoff = 40.0
+    var fitNotch60HzEnabled = false
 
     // MARK: Results
-    @Published var decomposition: ICADecomposition?
-    @Published var cleanedSignal: MFFSignalData?
+    var decomposition: ICADecomposition?
+    var cleanedSignal: MFFSignalData?
 
     // MARK: Debug
-    @Published var debugReportRequest = 0
-    @Published var debugReportSerial = 0
-    @Published var lastReconstructionDebugReport: String?
+    var debugReportRequest = 0
+    var debugReportSerial = 0
+    var lastReconstructionDebugReport: String?
 
     var isActive: Bool { cleanedSignal != nil }
 

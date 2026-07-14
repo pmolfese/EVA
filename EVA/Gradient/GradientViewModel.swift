@@ -22,7 +22,6 @@
 //  ICA / filter / artifact stages) and reads/writes the store.
 //
 
-import Combine
 import SwiftUI
 
 enum FastrDonorSelection: String, CaseIterable, Identifiable, Sendable {
@@ -49,7 +48,8 @@ enum FastrDonorSelection: String, CaseIterable, Identifiable, Sendable {
 }
 
 @MainActor
-final class GradientViewModel: ObservableObject {
+@Observable
+final class GradientViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -59,40 +59,40 @@ final class GradientViewModel: ObservableObject {
     }
 
     // MARK: Results
-    @Published var correctedSignal: MFFSignalData?
-    @Published var correctedPNSSignal: MFFSignalData?
+    var correctedSignal: MFFSignalData?
+    var correctedPNSSignal: MFFSignalData?
 
     // MARK: Run state
-    @Published var isProcessing = false
-    @Published var progress = 0.0
-    @Published var statusMessage: String?
-    @Published var statusIsError = false
+    var isProcessing = false
+    var progress = 0.0
+    var statusMessage: String?
+    var statusIsError = false
 
     // MARK: UI state
-    @Published var showsPopover = false
-    @Published var showsMethodHelp = false
-    @Published var showsFastrDonorHelp = false
-    @Published var showsFastrOptionsHelp = false
-    @Published var showsOBSRandomHelp = false
-    @Published var showsANCHighPassHelp = false
-    @Published var showsMotionConfig = false
+    var showsPopover = false
+    var showsMethodHelp = false
+    var showsFastrDonorHelp = false
+    var showsFastrOptionsHelp = false
+    var showsOBSRandomHelp = false
+    var showsANCHighPassHelp = false
+    var showsMotionConfig = false
 
     // MARK: Parameters (portable → eva.xml)
-    @Published var appliesToPNS = true
-    @Published var windowBefore = GradientRemover.Window.default.before
-    @Published var windowAfter = GradientRemover.Window.default.after
-    @Published var trMarkerCode = "TREV"
-    @Published var method = MRIGradientMethod.aas
+    var appliesToPNS = true
+    var windowBefore = GradientRemover.Window.default.before
+    var windowAfter = GradientRemover.Window.default.after
+    var trMarkerCode = "TREV"
+    var method = MRIGradientMethod.aas
 
     // FASTR / FARM / Moosmann parameters
-    @Published var fastrSlices = 1
-    @Published var fastrOBSAuto = true
-    @Published var fastrANC = false
-    @Published var fastrSubSample = true
-    @Published var fastrUseFacetWindow = false
-    @Published var fastrOBSRandomSampling = false
-    @Published var fastrANCSliceHighPass = false
-    @Published var fastrDonorSelection = FastrDonorSelection.methodDefault
+    var fastrSlices = 1
+    var fastrOBSAuto = true
+    var fastrANC = false
+    var fastrSubSample = true
+    var fastrUseFacetWindow = false
+    var fastrOBSRandomSampling = false
+    var fastrANCSliceHighPass = false
+    var fastrDonorSelection = FastrDonorSelection.methodDefault
 
     var fastrUsesBergenRSquareDonors: Bool {
         get { fastrDonorSelection == .bergenRSquare }
@@ -100,17 +100,17 @@ final class GradientViewModel: ObservableObject {
     }
 
     // Motion censoring
-    @Published var excludeHighMotion = false
-    @Published var motionParameters: MotionParameters?
-    @Published var motionFileFormat = MotionFileFormat.auto
-    @Published var motionFDThreshold = 0.5
-    @Published var motionRadiusMm = 50.0
-    @Published var moosmannMotionMetric = FastrCorrector.MotionMetric.translationOnly
+    var excludeHighMotion = false
+    var motionParameters: MotionParameters?
+    var motionFileFormat = MotionFileFormat.auto
+    var motionFDThreshold = 0.5
+    var motionRadiusMm = 50.0
+    var moosmannMotionMetric = FastrCorrector.MotionMetric.translationOnly
 
     // TR-marker alignment
-    @Published var skipStart = 0
-    @Published var skipEnd = 0
-    @Published var trSeconds = 0.0
+    var skipStart = 0
+    var skipEnd = 0
+    var trSeconds = 0.0
 
     var isActive: Bool { correctedSignal != nil }
 

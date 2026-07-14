@@ -64,7 +64,7 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
 }
 
 struct WaveformView: View {
-    @ObservedObject var recording: MFFRecording
+    var recording: MFFRecording
 
     @Environment(\.modelContext) private var modelContext
     @Environment(ChannelGoodnessSettings.self) var goodnessSettings
@@ -129,43 +129,43 @@ struct WaveformView: View {
     @State private var blinkChannelOverrideText = ""
     @State private var movementChannelOverrideText = ""
     // ECG / QRS detection domain, extracted into an L4 store.
-    @StateObject var ecg: ECGDetectionViewModel
+    @State var ecg: ECGDetectionViewModel
     // BCG detection
     // BCG detection domain, extracted into an L4 store (REFACTOR.md).
-    @StateObject var bcg: BCGDetectionViewModel
+    @State var bcg: BCGDetectionViewModel
     /// Stable UUID so re-running detection updates the existing DefinedArtifact rather than appending a new one.
     let bcgDefinedArtifactID = UUID()
     // Artifact detection + cleaning domain, extracted into an L4 store. See
     // REFACTOR.md slice 5.
-    @StateObject var artifactVM: ArtifactViewModel
+    @State var artifactVM: ArtifactViewModel
     // "Define Artifact" template-detection domain, extracted into an L4 store
     // (REFACTOR.md — analysis-domain slice).
-    @StateObject var template: ArtifactTemplateViewModel
+    @State var template: ArtifactTemplateViewModel
     // Wavelet artifact explorer domain, extracted into an L4 store.
-    @StateObject var waveletExplorer: WaveletArtifactExplorerViewModel
+    @State var waveletExplorer: WaveletArtifactExplorerViewModel
     // ICA decomposition + component removal, extracted into an L4 store. See
     // REFACTOR.md slice 6.
-    @StateObject var ica: ICAViewModel
+    @State var ica: ICAViewModel
     // PSA epoching / averaging + averaged-data display, extracted into an L4
     // store. See REFACTOR.md slice 4.
-    @StateObject var epoching: EpochingViewModel
+    @State var epoching: EpochingViewModel
     @State var segmentedEpochSignal: MFFSignalData?
     @State var segmentedEpochSegments: [EpochSegment] = []
     // Single Trial Analysis domain, extracted into an L4 store — reads the
     // raw per-trial epochs above (segmentedEpochSignal/segmentedEpochSegments),
     // not epoching's averaged output.
-    @StateObject var singleTrial: SingleTrialAnalysisViewModel
-    @StateObject var eegAnalysis: EEGAnalysisViewModel
+    @State var singleTrial: SingleTrialAnalysisViewModel
+    @State var eegAnalysis: EEGAnalysisViewModel
 
     // Band-pass / notch filtering (applied to the active base signal).
     /// Filtering domain (band-pass / line-noise / average-reference), extracted
     /// into an L4 store. See REFACTOR.md.
-    @StateObject var filter: FilterViewModel
+    @State var filter: FilterViewModel
     @State var showsFilterPopover = false
     @State var showsFilterLineNoiseOptions = false
     // Wavelet artifact reduction (HAPPE-style) pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
-    @StateObject var wavelet: WaveletReductionViewModel
+    @State var wavelet: WaveletReductionViewModel
     @State var channelStatusIsError = false
     // Scrollable status history (newest first), shown when the status area is clicked.
     @State private var statusHistory: [StatusHistoryEntry] = []
@@ -189,8 +189,8 @@ struct WaveformView: View {
 
     // MRI gradient-artifact removal domain (AAS / FASTR / FARM / Moosmann),
     // extracted into an L4 store. See REFACTOR.md slice 2.
-    @StateObject var gradient: GradientViewModel
-    @StateObject var replay = ReplayController()
+    @State var gradient: GradientViewModel
+    @State var replay = ReplayController()
 
     // Per-channel state, shared with the menu-bar Channels commands.
     var channels: ChannelModel { recordingStore.channels }
@@ -204,11 +204,11 @@ struct WaveformView: View {
     @State var channelStatusMessage: String?
     @State private var channelLabelMetricsExportRequest = 0
     // Channel-health coordination, extracted into an L4 store (REFACTOR.md).
-    @StateObject var chanHealth: ChannelHealthViewModel
+    @State var chanHealth: ChannelHealthViewModel
     @State private var showsChannelGoodnessSettings = false
     @State private var channelGoodnessSettingsRequest = 0
     // Segment-health domain, extracted into an L4 store (REFACTOR.md).
-    @StateObject var segHealth: SegmentHealthViewModel
+    @State var segHealth: SegmentHealthViewModel
     @State private var resetToOriginalRequest = 0
     @State private var mffExportRequest = 0
     @State private var copyProcessingRequest = 0
@@ -358,20 +358,20 @@ struct WaveformView: View {
         self.recording = recording
         let store = RecordingStore()
         _recordingStore = State(initialValue: store)
-        _ecg = StateObject(wrappedValue: ECGDetectionViewModel(store: store))
-        _bcg = StateObject(wrappedValue: BCGDetectionViewModel(store: store))
-        _artifactVM = StateObject(wrappedValue: ArtifactViewModel(store: store))
-        _template = StateObject(wrappedValue: ArtifactTemplateViewModel(store: store))
-        _ica = StateObject(wrappedValue: ICAViewModel(store: store))
-        _epoching = StateObject(wrappedValue: EpochingViewModel(store: store))
-        _singleTrial = StateObject(wrappedValue: SingleTrialAnalysisViewModel(store: store))
-        _eegAnalysis = StateObject(wrappedValue: EEGAnalysisViewModel(store: store))
-        _filter = StateObject(wrappedValue: FilterViewModel(store: store))
-        _wavelet = StateObject(wrappedValue: WaveletReductionViewModel(store: store))
-        _gradient = StateObject(wrappedValue: GradientViewModel(store: store))
-        _chanHealth = StateObject(wrappedValue: ChannelHealthViewModel(store: store))
-        _segHealth = StateObject(wrappedValue: SegmentHealthViewModel(store: store))
-        _waveletExplorer = StateObject(wrappedValue: WaveletArtifactExplorerViewModel(store: store))
+        _ecg = State(wrappedValue: ECGDetectionViewModel(store: store))
+        _bcg = State(wrappedValue: BCGDetectionViewModel(store: store))
+        _artifactVM = State(wrappedValue: ArtifactViewModel(store: store))
+        _template = State(wrappedValue: ArtifactTemplateViewModel(store: store))
+        _ica = State(wrappedValue: ICAViewModel(store: store))
+        _epoching = State(wrappedValue: EpochingViewModel(store: store))
+        _singleTrial = State(wrappedValue: SingleTrialAnalysisViewModel(store: store))
+        _eegAnalysis = State(wrappedValue: EEGAnalysisViewModel(store: store))
+        _filter = State(wrappedValue: FilterViewModel(store: store))
+        _wavelet = State(wrappedValue: WaveletReductionViewModel(store: store))
+        _gradient = State(wrappedValue: GradientViewModel(store: store))
+        _chanHealth = State(wrappedValue: ChannelHealthViewModel(store: store))
+        _segHealth = State(wrappedValue: SegmentHealthViewModel(store: store))
+        _waveletExplorer = State(wrappedValue: WaveletArtifactExplorerViewModel(store: store))
     }
 
     var body: some View {

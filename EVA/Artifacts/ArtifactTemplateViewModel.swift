@@ -15,11 +15,11 @@
 //  is L3).
 //
 
-import Combine
 import SwiftUI
 
 @MainActor
-final class ArtifactTemplateViewModel: ObservableObject {
+@Observable
+final class ArtifactTemplateViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -29,74 +29,74 @@ final class ArtifactTemplateViewModel: ObservableObject {
     }
 
     // MARK: Sheet / definition
-    @Published var showsSheet = false
-    @Published var selectionRange: ClosedRange<Int>?
-    @Published var clickedChannel: Int?
-    @Published var type = DefinedArtifactType.ocular
-    @Published var definedArtifactID: DefinedArtifact.ID?
-    @Published var name = "Eye Blink"
-    @Published var eventCode = "Eye Blink"
-    @Published var definitionPanel = ArtifactDefinitionPanel.waveforms
-    @Published var confirmedSource: ArtifactDefinitionResultSource?
+    var showsSheet = false
+    var selectionRange: ClosedRange<Int>?
+    var clickedChannel: Int?
+    var type = DefinedArtifactType.ocular
+    var definedArtifactID: DefinedArtifact.ID?
+    var name = "Eye Blink"
+    var eventCode = "Eye Blink"
+    var definitionPanel = ArtifactDefinitionPanel.waveforms
+    var confirmedSource: ArtifactDefinitionResultSource?
 
     // MARK: Matching parameters
-    @Published var channelScope = ArtifactTemplateChannelScope.clickedChannel
-    @Published var customChannels = ""
-    @Published var threshold = 0.70
-    @Published var windowSeconds = 0.40
-    @Published var downsampleRate = 250.0
-    @Published var mergeWindowSeconds = 0.25
-    @Published var mergeBehavior = ArtifactTemplateMergeBehavior.discard
-    @Published var waveformStretchRange = 0.0
-    @Published var polarity = ArtifactTemplatePolarity.same
+    var channelScope = ArtifactTemplateChannelScope.clickedChannel
+    var customChannels = ""
+    var threshold = 0.70
+    var windowSeconds = 0.40
+    var downsampleRate = 250.0
+    var mergeWindowSeconds = 0.25
+    var mergeBehavior = ArtifactTemplateMergeBehavior.discard
+    var waveformStretchRange = 0.0
+    var polarity = ArtifactTemplatePolarity.same
 
     // MARK: Topography
-    @Published var topographyMode = ArtifactTopographyMode.off
-    @Published var topographyChannelScope = ArtifactTopographyChannelScope.allGood
-    @Published var topographyChannelSetID: ChannelSet.ID?
-    @Published var topographyTopN = 16
-    @Published var topographyMetric = ArtifactTopographyMetric.pearson
-    @Published var isRefreshingTopography = false
-    @Published var topographyRefreshGeneration = 0
+    var topographyMode = ArtifactTopographyMode.off
+    var topographyChannelScope = ArtifactTopographyChannelScope.allGood
+    var topographyChannelSetID: ChannelSet.ID?
+    var topographyTopN = 16
+    var topographyMetric = ArtifactTopographyMetric.pearson
+    var isRefreshingTopography = false
+    var topographyRefreshGeneration = 0
 
     // MARK: Continuous scan (single-map modes only — see ArtifactTopographyScanStyle)
-    @Published var topographyScanStyle = ArtifactTopographyScanStyle.windowed
-    @Published var continuousMinDurationSeconds = 0.05
-    @Published var continuousMaxDurationSeconds = 0.0
-    @Published var continuousSmoothingSeconds = 0.08
+    var topographyScanStyle = ArtifactTopographyScanStyle.windowed
+    var continuousMinDurationSeconds = 0.05
+    var continuousMaxDurationSeconds = 0.0
+    var continuousSmoothingSeconds = 0.08
 
     // MARK: Trajectory
-    @Published var trajectoryShiftSeconds = 0.05
-    @Published var trajectoryScaleRange = 0.0
-    @Published var trajectoryGFPWeighted = true
+    var trajectoryShiftSeconds = 0.05
+    var trajectoryScaleRange = 0.0
+    var trajectoryGFPWeighted = true
     /// `frameIndex` values (see `ArtifactTrajectoryFrame.id`) of map-sequence
     /// frames the user has removed because they don't fit the artifact —
     /// excluded from spatial-correlation scoring, not just hidden from display.
-    @Published var trajectoryExcludedFrameIndices: Set<Int> = []
+    var trajectoryExcludedFrameIndices: Set<Int> = []
     /// Whether "Save JSON…" should include map-sequence frames the user
     /// removed via the frame strip. Off by default: a removed frame no longer
     /// contributes to scoring, so leaving it out of the exported reference
     /// keeps the file consistent with what was actually matched against.
-    @Published var trajectorySaveJSONIncludesRemovedFrames = false
+    var trajectorySaveJSONIncludesRemovedFrames = false
 
     // MARK: Scan / run state
-    @Published var lastScanSignature: ArtifactScanSignature?
-    @Published var isApplying = false
-    @Published var scanCompleted = 0
-    @Published var scanTotal = 0
-    @Published var result: ArtifactTemplateDetectionResult?
-    @Published var selectedChannel: Int?
-    @Published var statusMessage: String?
+    var lastScanSignature: ArtifactScanSignature?
+    var isApplying = false
+    var scanCompleted = 0
+    var scanTotal = 0
+    var result: ArtifactTemplateDetectionResult?
+    var selectedChannel: Int?
+    var statusMessage: String?
 
     // MARK: Defined-artifact list
-    @Published var definedArtifacts: [DefinedArtifact] = []
-    @Published var deletionRequest: DefinedArtifact.ID?
-    @Published var deleteAllRequest = 0
-    @Published var obsVarianceReportCache = [String: OBSPCAVarianceReport]()
+    var definedArtifacts: [DefinedArtifact] = []
+    var deletionRequest: DefinedArtifact.ID?
+    var deleteAllRequest = 0
+    var obsVarianceReportCache = [String: OBSPCAVarianceReport]()
     /// Precomputed hover-preview data, keyed by `ArtifactCleaningPreview.cacheKey`.
     /// Populated right after Apply finishes (see `applyArtifactCleaning(to:)`)
     /// so hovering the preview button is a lookup, not a live recompute.
-    @Published var cleaningPreviewCache = [String: ArtifactCleaningPreviewData]()
+    var cleaningPreviewCache = [String: ArtifactCleaningPreviewData]()
 
     func resetForClose() {
         showsSheet = false

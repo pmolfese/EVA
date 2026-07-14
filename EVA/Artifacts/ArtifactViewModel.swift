@@ -14,11 +14,11 @@
 //  "Define Artifact" template domain is slice 10, not here.)
 //
 
-import Combine
 import SwiftUI
 
 @MainActor
-final class ArtifactViewModel: ObservableObject {
+@Observable
+final class ArtifactViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -29,27 +29,27 @@ final class ArtifactViewModel: ObservableObject {
     }
 
     // MARK: Detection
-    @Published var detectionMethod = ArtifactDetectionMethod.threshold
-    @Published var events: [MFFEvent] = []
-    @Published var isDetecting = false
-    @Published var statusMessage: String?
+    var detectionMethod = ArtifactDetectionMethod.threshold
+    var events: [MFFEvent] = []
+    var isDetecting = false
+    var statusMessage: String?
     /// Bumped by upstream pipeline stages (filter/gradient) to force a re-detect.
-    @Published var detectionRefreshToken = 0
+    var detectionRefreshToken = 0
 
     // MARK: Threshold detector settings
     /// Two-tab config panel for the threshold-based ocular detector.
-    @Published var showsThresholdSheet = false
-    @Published var blinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
-    @Published var movementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
+    var showsThresholdSheet = false
+    var blinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
+    var movementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
 
     // MARK: Cleaning
-    @Published var showsCleaningSheet = false
-    @Published var isCleaning = false
-    @Published var cleaningStatusMessage: String?
-    @Published var cleaningSummaries: [ArtifactCleaningSummary] = []
-    @Published var cleaningProgress: ArtifactCleaningProgress?
-    @Published var cleanedSignal: MFFSignalData?
-    @Published var cleaningIsEnabled = true
+    var showsCleaningSheet = false
+    var isCleaning = false
+    var cleaningStatusMessage: String?
+    var cleaningSummaries: [ArtifactCleaningSummary] = []
+    var cleaningProgress: ArtifactCleaningProgress?
+    var cleanedSignal: MFFSignalData?
+    var cleaningIsEnabled = true
 
     var isCleaningActive: Bool { cleanedSignal != nil }
 

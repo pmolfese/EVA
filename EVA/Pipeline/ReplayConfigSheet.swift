@@ -132,7 +132,7 @@ struct ReplayStepSettingsPopover: View {
 }
 
 struct ReplayConfigSheet: View {
-    @ObservedObject var controller: ReplayController
+    @Bindable var controller: ReplayController
     let onStart: () -> Void
     let onCancel: () -> Void
 

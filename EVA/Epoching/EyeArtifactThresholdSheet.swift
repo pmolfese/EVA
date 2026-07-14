@@ -14,7 +14,7 @@ struct EyeArtifactThresholdSheet: View {
     @Binding var detectsEyeMovementArtifacts: Bool
     @Binding var blinkChannelOverrideText: String
     @Binding var movementChannelOverrideText: String
-    @ObservedObject var artifactVM: ArtifactViewModel
+    @Bindable var artifactVM: ArtifactViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

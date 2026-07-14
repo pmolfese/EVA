@@ -14,11 +14,11 @@
 //  signature, in-flight task, and details-sheet toggles.
 //
 
-import Combine
 import SwiftUI
 
 @MainActor
-final class ChannelHealthViewModel: ObservableObject {
+@Observable
+final class ChannelHealthViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -27,11 +27,11 @@ final class ChannelHealthViewModel: ObservableObject {
         self.store = store
     }
 
-    @Published var statusMessage: String?
-    @Published var signature: String?
-    @Published var task: Task<Void, Never>?
-    @Published var showsDetails = false
-    @Published var detailsRequest = 0
+    var statusMessage: String?
+    var signature: String?
+    @ObservationIgnored var task: Task<Void, Never>?
+    var showsDetails = false
+    var detailsRequest = 0
 
     func resetForClose() {
         task?.cancel()

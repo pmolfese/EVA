@@ -14,7 +14,6 @@
 //  (engines `BCGDetector` / `RWaveDetector` are L3).
 //
 
-import Combine
 import SwiftUI
 
 nonisolated struct BCGAlgorithmResult: Sendable, Equatable {
@@ -23,7 +22,8 @@ nonisolated struct BCGAlgorithmResult: Sendable, Equatable {
 }
 
 @MainActor
-final class BCGDetectionViewModel: ObservableObject {
+@Observable
+final class BCGDetectionViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -34,57 +34,57 @@ final class BCGDetectionViewModel: ObservableObject {
     }
 
     // MARK: Presence / sheet
-    @Published var detectsArtifacts = false
-    @Published var showsSheet = false
+    var detectsArtifacts = false
+    var showsSheet = false
 
     // MARK: Method + shared output
-    @Published var method = BCGDetectionMethod.periodicity
-    @Published var eventCode = "BCG"
-    @Published var windowSeconds = 0.700
-    @Published var thresholdSD = 2.5
+    var method = BCGDetectionMethod.periodicity
+    var eventCode = "BCG"
+    var windowSeconds = 0.700
+    var thresholdSD = 2.5
 
     // MARK: Heart-rate / band parameters
-    @Published var minHR: Double = 40
-    @Published var maxHR: Double = 120
-    @Published var powerMinHz = 0.8
-    @Published var powerMaxHz = 1.5
-    @Published var qrsLagMs = 300.0
+    var minHR: Double = 40
+    var maxHR: Double = 120
+    var powerMinHz = 0.8
+    var powerMaxHz = 1.5
+    var qrsLagMs = 300.0
 
     // MARK: Spatial-PCA parameters
-    @Published var pcaComponents = 1
-    @Published var spatialWhiten = false
-    @Published var slidingNormalize = true
-    @Published var respAdaptive = true
+    var pcaComponents = 1
+    var spatialWhiten = false
+    var slidingNormalize = true
+    var respAdaptive = true
 
     // MARK: Channel restriction
-    @Published var channelSetID: ChannelSet.ID?
+    var channelSetID: ChannelSet.ID?
 
     // MARK: CWL regression (direct-correction method — see BCGDetectionMethod.cwlRegression)
-    @Published var selectedCWLChannels = Set<Int>()
-    @Published var cwlUseEVAFastCWR = false
-    @Published var cwlDelayMs = 21.0
-    @Published var cwlLagRangeMinMs = -50.0
-    @Published var cwlLagRangeMaxMs = 150.0
-    @Published var cwlLagStepMs = 10.0
-    @Published var cwlWindowSeconds = 4.0
+    var selectedCWLChannels = Set<Int>()
+    var cwlUseEVAFastCWR = false
+    var cwlDelayMs = 21.0
+    var cwlLagRangeMinMs = -50.0
+    var cwlLagRangeMaxMs = 150.0
+    var cwlLagStepMs = 10.0
+    var cwlWindowSeconds = 4.0
     /// Target rate for the internal CWL regression pass. 0 means full rate.
-    @Published var cwlDownsampleTargetHz = 0.0
-    @Published var cwlDownsampleFilter = CWLCorrector.DownsampleFilter.windowedSinc
-    @Published var cwlUpsampleToOriginalHz = false
-    @Published var correctedSignal: MFFSignalData?
+    var cwlDownsampleTargetHz = 0.0
+    var cwlDownsampleFilter = CWLCorrector.DownsampleFilter.windowedSinc
+    var cwlUpsampleToOriginalHz = false
+    var correctedSignal: MFFSignalData?
 
     // MARK: Run / refine state
-    @Published var isRunning = false
-    @Published var progress: Double?
-    @Published var status: String?
-    @Published var refinedTemplate: [Float]?
-    @Published var refinedKeptCount: Int?
-    @Published var isRefining = false
-    @Published var rejectFraction = 0.20
+    var isRunning = false
+    var progress: Double?
+    var status: String?
+    var refinedTemplate: [Float]?
+    var refinedKeptCount: Int?
+    var isRefining = false
+    var rejectFraction = 0.20
 
     // MARK: Algorithm-comparison preview
-    @Published var isEstimating = false
-    @Published var algorithmResults: [BCGDetectionMethod: BCGAlgorithmResult] = [:]
+    var isEstimating = false
+    var algorithmResults: [BCGDetectionMethod: BCGAlgorithmResult] = [:]
 
     func resetForClose() {
         detectsArtifacts = false

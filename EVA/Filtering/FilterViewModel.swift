@@ -23,7 +23,6 @@
 //  focused until `RecordingStore` lands.
 //
 
-import Combine
 import SwiftUI
 
 private enum FilterViewModelError: LocalizedError {
@@ -50,7 +49,8 @@ private struct FilterCutoffs: Sendable {
 }
 
 @MainActor
-final class FilterViewModel: ObservableObject {
+@Observable
+final class FilterViewModel {
     /// Held directly (not threaded through per-call parameters) so this VM can
     /// read channel exclusions itself — the first slice of the RecordingStore
     /// direct-injection pass (REFACTOR.md). Lets a future consumer (a second
@@ -68,35 +68,35 @@ final class FilterViewModel: ObservableObject {
     }
 
     // MARK: Parameters (portable → eva.xml / replay)
-    @Published var highPassCutoffText = "0.1"
-    @Published var lowPassCutoffText = "30"
-    @Published var highPassSlope = FilterSlope.dB24
-    @Published var lowPassSlope = FilterSlope.dB24
-    @Published var lineNoiseMode = FilterLineNoiseMode.off
-    @Published var lineNoiseFrequency = 60.0
-    @Published var lineNoiseHarmonics = 2
-    @Published var lineNoiseWindowSeconds = 4.0
-    @Published var lineNoiseStrength = 1.0
-    @Published var averageReference = false
-    @Published var filterPNS = true
-    @Published var precision = FilterPrecision.auto
+    var highPassCutoffText = "0.1"
+    var lowPassCutoffText = "30"
+    var highPassSlope = FilterSlope.dB24
+    var lowPassSlope = FilterSlope.dB24
+    var lineNoiseMode = FilterLineNoiseMode.off
+    var lineNoiseFrequency = 60.0
+    var lineNoiseHarmonics = 2
+    var lineNoiseWindowSeconds = 4.0
+    var lineNoiseStrength = 1.0
+    var averageReference = false
+    var filterPNS = true
+    var precision = FilterPrecision.auto
 
     // MARK: Run state
-    @Published var isFiltering = false
-    @Published var progress = 0.0
-    @Published var statusMessage: String?
-    @Published var statusIsError = false
+    var isFiltering = false
+    var progress = 0.0
+    var statusMessage: String?
+    var statusIsError = false
 
     // MARK: Results
     /// Filtered EEG (was `filteredSignal`).
-    @Published var output: MFFSignalData?
+    var output: MFFSignalData?
     /// Filtered PNS (was `filteredPNSSignal`).
-    @Published var pnsOutput: MFFSignalData?
+    var pnsOutput: MFFSignalData?
     /// Source signal type of the PNS input, for change detection.
-    @Published var pnsInputSignalType: String?
+    var pnsInputSignalType: String?
 
-    private var activeRequestID = UUID()
-    private var activeWorker: Task<([[Float]], [[Float]]?), Error>?
+    @ObservationIgnored private var activeRequestID = UUID()
+    @ObservationIgnored private var activeWorker: Task<([[Float]], [[Float]]?), Error>?
 
     var isActive: Bool { output != nil }
 

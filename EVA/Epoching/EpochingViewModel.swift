@@ -14,11 +14,11 @@
 //  toggles; WaveformView still drives the epoching orchestration.
 //
 
-import Combine
 import SwiftUI
 
 @MainActor
-final class EpochingViewModel: ObservableObject {
+@Observable
+final class EpochingViewModel {
     enum AveragedDisplayMode: String, CaseIterable, Identifiable {
         case waveform = "Waveform"
         case averages = "Averages"
@@ -44,98 +44,98 @@ final class EpochingViewModel: ObservableObject {
     }
 
     // MARK: Sheet / selection
-    @Published var showsSheet = false
-    @Published var segmentField = PSASegmentField.code
-    @Published var eventSearchText = ""
-    @Published var selectedEventCodes = Set<String>()
+    var showsSheet = false
+    var segmentField = PSASegmentField.code
+    var eventSearchText = ""
+    var selectedEventCodes = Set<String>()
 
     // MARK: Epoch window (portable → eva.xml)
-    @Published var preStimulus = 0.2
-    @Published var postStimulus = 0.8
-    @Published var offset = 0.0
-    @Published var baselineCorrected = true
-    @Published var averageReference = true
-    @Published var averageOnApply = false
+    var preStimulus = 0.2
+    var postStimulus = 0.8
+    var offset = 0.0
+    var baselineCorrected = true
+    var averageReference = true
+    var averageOnApply = false
 
     // MARK: Category naming / timing markers
-    @Published var categoryNames = [String: String]()
+    var categoryNames = [String: String]()
     /// Named groups that pool several event codes into one shared category for
     /// averaging, IN ADDITION to each code's own category (not instead of it) —
     /// e.g. "face" = {happy, sad, angry} produces segments for "face" as well as
     /// segments for "happy"/"sad"/"angry" individually. Value = member codes.
-    @Published var categoryGroups = [String: Set<String>]()
-    @Published var timingMarkerEnabledValues = Set<String>()
-    @Published var timingMarkerValuesBySegmentValue = [String: String]()
-    @Published var timingTolerance = 0.5
+    var categoryGroups = [String: Set<String>]()
+    var timingMarkerEnabledValues = Set<String>()
+    var timingMarkerValuesBySegmentValue = [String: String]()
+    var timingTolerance = 0.5
 
     // MARK: Artifact rejection
-    @Published var skipIfContainsArtifact = false
-    @Published var skipEyeBlinks = true
-    @Published var skipEyeMovements = true
-    @Published var skippedDefinedArtifactIDs = Set<DefinedArtifact.ID>()
-    @Published var knownArtifactIDsForRejection = Set<DefinedArtifact.ID>()
+    var skipIfContainsArtifact = false
+    var skipEyeBlinks = true
+    var skipEyeMovements = true
+    var skippedDefinedArtifactIDs = Set<DefinedArtifact.ID>()
+    var knownArtifactIDsForRejection = Set<DefinedArtifact.ID>()
     /// Excludes segments the user manually marked "Bad" (Segment Health
     /// right-click / popover) from category averages. Independent of
     /// `skipIfContainsArtifact` — this is a manual call, not detector-driven.
-    @Published var skipIfLabeledBad = true
+    var skipIfLabeledBad = true
 
     // MARK: Per-epoch bad-channel interpolation
     /// Detects and interpolates channels that are only bad WITHIN a given
     /// epoch (transient per-trial artifacts a whole-recording health scan
     /// misses), instead of rejecting the whole epoch or leaving it uncorrected.
-    @Published var interpolatesBadChannelsPerEpoch = true
-    @Published var epochBadChannelThresholds = EpochBadChannelThresholds()
-    @Published var showsEpochBadChannelOptions = false
+    var interpolatesBadChannelsPerEpoch = true
+    var epochBadChannelThresholds = EpochBadChannelThresholds()
+    var showsEpochBadChannelOptions = false
     /// When a channel is flagged bad in at least this fraction of epochs, mark
     /// it bad for the whole recording and interpolate it there instead of
     /// leaving it as a per-epoch-only correction.
-    @Published var escalatesBadChannelsToGlobal = true
-    @Published var escalationThresholdPercent = 50.0
+    var escalatesBadChannelsToGlobal = true
+    var escalationThresholdPercent = 50.0
     /// One line per channel escalated by the last Apply, e.g. "Ch12: bad in
     /// 62% of epochs (31/50)" — surfaced in the status message and folded into
     /// the exported process log via `currentProcessingAuditLogLines()`.
-    @Published var escalatedChannelSummaries: [String] = []
+    var escalatedChannelSummaries: [String] = []
     /// One line per channel flagged bad in at least one epoch by the last
     /// Apply, e.g. "Ch12 (14 of 120 epochs)" — including channels that never
     /// crossed the escalation threshold. Surfaced in the status message and
     /// folded into the exported process log via `currentProcessingAuditLogLines()`.
-    @Published var epochBadChannelSummary: [String] = []
+    var epochBadChannelSummary: [String] = []
     /// Channels flagged bad in every accepted segment from the last PSA run.
-    @Published var epochBadChannelAllSegmentsSummary: [String] = []
+    var epochBadChannelAllSegmentsSummary: [String] = []
     /// One line per channel showing the accepted segment numbers where it was
     /// interpolated, e.g. "Ch1(4,5,6)".
-    @Published var interpolatedChannelsBySegmentSummary: [String] = []
+    var interpolatedChannelsBySegmentSummary: [String] = []
     /// Segments omitted from averaging because the user manually labeled them bad.
-    @Published var skippedLabeledBadSegmentsSummary: [String] = []
+    var skippedLabeledBadSegmentsSummary: [String] = []
 
     // MARK: Run state
-    @Published var statusMessage: String?
-    @Published var isApplying = false
-    @Published var phaseMessage: String?
+    var statusMessage: String?
+    var isApplying = false
+    var phaseMessage: String?
     /// Fraction complete (0...1) while segmenting; nil for indeterminate
     /// phases (e.g. averaging), which fall back to a spinner.
-    @Published var segmentingProgress: Double?
+    var segmentingProgress: Double?
 
     // MARK: Results
-    @Published var epochedSignal: MFFSignalData?
-    @Published var epochSegments: [EpochSegment] = []
-    @Published var isAveraged = false
+    var epochedSignal: MFFSignalData?
+    var epochSegments: [EpochSegment] = []
+    var isAveraged = false
 
     // MARK: Averaged-data display
-    @Published var showsButterflyPlot = false
-    @Published var showsNoiseBand = true
-    @Published var showsOverlaidCategories = false
-    @Published var butterflyTopomapRelativeSample: Int?
-    @Published var averagedDisplayMode: AveragedDisplayMode = .waveform
-    @Published var showsAveragesButterfly = true
-    @Published var showsAveragesTopography = true
-    @Published var showsAveragesInspector = true
-    @Published var showsAveragesLog = true
-    @Published var psaExclusionSummary = PSAExclusionSummary()
+    var showsButterflyPlot = false
+    var showsNoiseBand = true
+    var showsOverlaidCategories = false
+    var butterflyTopomapRelativeSample: Int?
+    var averagedDisplayMode: AveragedDisplayMode = .waveform
+    var showsAveragesButterfly = true
+    var showsAveragesTopography = true
+    var showsAveragesInspector = true
+    var showsAveragesLog = true
+    var psaExclusionSummary = PSAExclusionSummary()
 
     // MARK: Figure labeling (session-only; never mutates EpochSegment.category)
     /// Category → user-facing display name, for publication figures/legends.
-    @Published var categoryRenames = [String: String]()
+    var categoryRenames = [String: String]()
 
     /// The display label for a category, honoring any session rename.
     func displayCategory(_ category: String) -> String {
@@ -145,28 +145,28 @@ final class EpochingViewModel: ObservableObject {
 
     // MARK: Topomap color scale (Cmd-hold control in the topography pane)
     enum TopomapScaleMode: String, CaseIterable, Identifiable { case microvolts = "µV", zScore = "Z"; var id: String { rawValue } }
-    @Published var topomapScaleMode: TopomapScaleMode = .microvolts
+    var topomapScaleMode: TopomapScaleMode = .microvolts
 
     /// µV mode: when true, topomaps use the manual min/max below instead of the
     /// auto symmetric ±scale. Tightening the range intensifies the colors.
-    @Published var topomapScaleManual = false
-    @Published var topomapScaleMin = -5.0
-    @Published var topomapScaleMax = 5.0
+    var topomapScaleManual = false
+    var topomapScaleMin = -5.0
+    var topomapScaleMax = 5.0
     /// Lock min = −max so the scale stays symmetric about 0.
-    @Published var topomapSymmetric = true
+    var topomapSymmetric = true
 
     /// Z-score mode: color scale spans ±`topomapZSigma` SD about the mean. Mean/SD
     /// auto-compute from the displayed maps unless the user overrides them.
-    @Published var topomapZSigma = 2.0
-    @Published var topomapZMean = 0.0
-    @Published var topomapZSD = 1.0
-    @Published var topomapZManual = false
+    var topomapZSigma = 2.0
+    var topomapZMean = 0.0
+    var topomapZSD = 1.0
+    var topomapZManual = false
 
     // MARK: Multi-condition overlay (figure building)
     /// Categories chosen for overlay. Empty == all (so no seeding is needed).
-    @Published var overlaySelectedCategories: Set<String> = []
+    var overlaySelectedCategories: Set<String> = []
     /// Butterfly panel: overlay selected conditions on shared axes vs. stacked.
-    @Published var showsOverlayButterfly = false
+    var showsOverlayButterfly = false
 
     /// Effective overlay selection over the currently-available categories
     /// (empty selection resolves to "all").

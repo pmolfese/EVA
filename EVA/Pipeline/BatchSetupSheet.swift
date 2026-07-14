@@ -25,7 +25,7 @@ struct BatchSetupSheet: View {
     @State private var outputFolder: URL?
     @State private var sourceName = ""
     @State private var script: EVAProcessingScript?
-    @StateObject private var config = ReplayController()
+    @State private var config = ReplayController()
     @State private var settingsPopoverStepID: Int?
     @State private var inputDropIsTargeted = false
     @State private var sourceDropIsTargeted = false

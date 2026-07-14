@@ -79,7 +79,7 @@ extension WaveformView {
 }
 
 struct SingleTrialAnalysisSheet: View {
-    @ObservedObject var viewModel: SingleTrialAnalysisViewModel
+    @Bindable var viewModel: SingleTrialAnalysisViewModel
     let averagedSignal: MFFSignalData?
     let averagedSegments: [EpochSegment]
     let rawSignal: MFFSignalData?
