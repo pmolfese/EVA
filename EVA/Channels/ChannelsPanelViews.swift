@@ -23,84 +23,42 @@ extension WaveformView {
         return .accentColor
     }
 
+    /// Builds a `ChannelLabelRow` for `index`, resolving the channel's derived
+    /// display state (name, hidden/bad/interpolated, color, health) here in the
+    /// parent so the row itself is a plain value + closure view with no
+    /// `WaveformView`/`ChannelModel` capture. See `ChannelLabelRow`.
     func channelLabel(index: Int, signal: MFFSignalData) -> some View {
-        let isHidden = channels.hidden.contains(index)
         let label = signal.channelNames?.indices.contains(index) == true
             ? signal.channelNames?[index].nilIfEmpty ?? "Ch \(index + 1)"
             : "Ch \(index + 1)"
-        return HStack(spacing: 6) {
-            HStack(spacing: 4) {
-                Text(label)
-                    .font(.system(.body, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if isHidden {
-                    Image(systemName: "eye.slash")
-                        .font(.caption2)
-                } else if channels.interpolated[index] != nil {
-                    Image(systemName: "wand.and.stars")
-                        .font(.caption2)
-                } else if channels.bad.contains(index) {
-                    Image(systemName: "xmark.circle")
-                        .font(.caption2)
+        return ChannelLabelRow(
+            index: index,
+            label: label,
+            isHidden: channels.hidden.contains(index),
+            isBad: channels.bad.contains(index),
+            isInterpolated: channels.interpolated[index] != nil,
+            color: channelColor(index),
+            rowHeight: channelRowHeight,
+            healthResult: channels.healthResults[index],
+            isAnalyzingHealth: channels.isAnalyzingHealth,
+            canInterpolate: electrodeGeometry?.positions[index] != nil,
+            moveToPhysioTitle: "Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio",
+            onActivateHealth: {
+                if let signal = continuousProcessedSignal {
+                    runChannelHealthOnDemand(for: signal)
                 }
-            }
-            .foregroundStyle(channelColor(index))
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            ChannelHealthBadge(
-                result: channels.healthResults[index],
-                isAnalyzing: channels.isAnalyzingHealth,
-                onActivate: {
-                    if let signal = continuousProcessedSignal {
-                        runChannelHealthOnDemand(for: signal)
-                    }
-                }
-            )
-        }
-        .opacity(isHidden ? 0.4 : 1)
-        .frame(maxWidth: .infinity, minHeight: channelRowHeight, alignment: .leading)
-        .contentShape(Rectangle())
-        .onTapGesture { toggleHidden(index) }
-        .help("Click to show/hide the trace. Right-click for Mark Bad / Interpolate.")
-        .contextMenu {
-            if channels.bad.contains(index) {
-                Button("Unmark Bad") { channels.bad.remove(index) }
-            } else {
-                Button("Mark Bad") { channels.bad.insert(index) }
-            }
-
-            if channels.interpolated[index] != nil {
-                Button("Remove Interpolation") { channels.removeInterpolation(target: index) }
-            } else {
-                Button("Interpolate") { interpolate(index, in: signal) }
-                    .disabled(electrodeGeometry?.positions[index] == nil)
-            }
-
-            Divider()
-            Button(isHidden ? "Show Trace" : "Hide Trace") { toggleHidden(index) }
-
-            Divider()
-            Button("Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio") {
-                moveEEGChannelToPhysio(index: index, in: signal)
-            }
-
-            Divider()
-            Menu("Export Channel") {
-                Button("Export as JSON…") {
-                    exportChannelAsJSON(index: index, signal: signal)
-                }
-                Button("Export as JSON with Events…") {
-                    exportChannelAsJSON(index: index, signal: signal, includeEvents: true)
-                }
-                Button("Export as 1D…") {
-                    exportChannelAs1D(index: index, signal: signal)
-                }
-                Button("Export as 1D with Events…") {
-                    exportChannelAs1D(index: index, signal: signal, includeEvents: true)
-                }
-            }
-        }
+            },
+            onToggleHidden: { toggleHidden(index) },
+            onMarkBad: { channels.bad.insert(index) },
+            onUnmarkBad: { channels.bad.remove(index) },
+            onInterpolate: { interpolate(index, in: signal) },
+            onRemoveInterpolation: { channels.removeInterpolation(target: index) },
+            onMoveToPhysio: { moveEEGChannelToPhysio(index: index, in: signal) },
+            onExportJSON: { exportChannelAsJSON(index: index, signal: signal) },
+            onExportJSONWithEvents: { exportChannelAsJSON(index: index, signal: signal, includeEvents: true) },
+            onExport1D: { exportChannelAs1D(index: index, signal: signal) },
+            onExport1DWithEvents: { exportChannelAs1D(index: index, signal: signal, includeEvents: true) }
+        )
     }
 
     func toggleHidden(_ index: Int) {
@@ -223,45 +181,33 @@ extension WaveformView {
         })
     }
 
-    @ViewBuilder
+    /// Builds a `WaveformChannelRow` for `index`, marked `.equatable()` so a row
+    /// whose data + viewport didn't change skips its Canvas redraw. Derived state
+    /// (hidden-adjusted samples, color, selection availability) is resolved here
+    /// in the parent; the row captures no `self`. See `WaveformChannelRow`.
     func waveformRow(index: Int, channel: [Float], plotWidth: CGFloat, signal: MFFSignalData) -> some View {
-        WaveformPlot(
+        let isHidden = channels.hidden.contains(index)
+        return WaveformChannelRow(
+            index: index,
             // Hidden channels keep their row but draw no trace.
-            samples: channels.hidden.contains(index) ? [] : channel,
+            samples: isHidden ? [] : channel,
+            dataRevision: signal.dataRevision,
+            isHidden: isHidden,
             amplitudeScale: amplitudeScale,
             timeScale: timeScale,
             sampleStride: displaySampleStride(for: signal),
             visibleRange: visibleHorizontalRange,
-            nominalHeight: channelRowHeight,
+            plotWidth: plotWidth,
+            rowHeight: channelRowHeight,
+            overflowHeight: channelOverflowHeight,
             color: channelColor(index),
-            usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering
+            usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering,
+            canDefineArtifact: activeSelectionRange(in: signal) != nil,
+            moveToPhysioTitle: "Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio",
+            onDefineArtifact: { openArtifactTemplateSheet(for: signal, clickedChannel: index) },
+            onMoveToPhysio: { moveEEGChannelToPhysio(index: index, in: signal) }
         )
-        .frame(width: plotWidth, height: channelRowHeight + (channelOverflowHeight * 2))
-        .background {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .frame(width: plotWidth, height: channelRowHeight)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
-                .frame(width: plotWidth, height: channelRowHeight)
-        }
-        .frame(width: plotWidth, height: channelRowHeight)
-        .contentShape(Rectangle())
-        .contextMenu {
-            Button("Define Artifact…") {
-                openArtifactTemplateSheet(for: signal, clickedChannel: index)
-            }
-            .disabled(activeSelectionRange(in: signal) == nil)
-
-            Divider()
-            Button("Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio") {
-                moveEEGChannelToPhysio(index: index, in: signal)
-            }
-        }
-        .accessibilityLabel("Channel \(index + 1)")
-        .zIndex(1)
+        .equatable()
     }
 
     @ViewBuilder
