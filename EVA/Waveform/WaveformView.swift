@@ -73,7 +73,12 @@ struct WaveformView: View {
     @Environment(BatchController.self) var batch
     /// Guards batch auto-start to once per freshly-built (per-recording) view.
     @State private var batchStarted = false
-    @Query private var markers: [UserMarker]
+    /// This recording's user markers, pre-filtered and projected to value
+    /// signatures by `WaveformMarkerContainer` (A3). Passing them in — rather than
+    /// hosting the `@Query` here — keeps a `UserMarker` table change from
+    /// re-evaluating the whole `WaveformView` body; only the tiny container
+    /// re-runs, and this view re-renders only when its own markers actually change.
+    let userMarkers: [WaveformUserMarkerSignature]
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
     @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
@@ -354,8 +359,9 @@ struct WaveformView: View {
     /// Swift only requires explicit assignment for properties whose default
     /// needs to change (here, `store` must be the SAME instance across
     /// `recordingStore` and every VM, not each's own default `RecordingStore()`).
-    init(recording: MFFRecording) {
+    init(recording: MFFRecording, userMarkers: [WaveformUserMarkerSignature]) {
         self.recording = recording
+        self.userMarkers = userMarkers
         let store = RecordingStore()
         _recordingStore = State(initialValue: store)
         _ecg = State(wrappedValue: ECGDetectionViewModel(store: store))
@@ -636,18 +642,17 @@ struct WaveformView: View {
     }
 
     /// Markers the user has created for *this* recording, surfaced as events.
+    /// `userMarkers` is already filtered to this recording by the container.
     var userMarkerEvents: [MFFEvent] {
-        markers
-            .filter { $0.packageName == recording.packageName }
-            .map { marker in
-                MFFEvent(
-                    id: "user-marker-\(marker.persistentModelID.hashValue)",
-                    code: marker.note.isEmpty ? "Marker" : marker.note,
-                    beginTimeSeconds: marker.timeSeconds,
-                    rawBeginTime: "",
-                    sourceFile: "User Markers"
-                )
-            }
+        userMarkers.map { marker in
+            MFFEvent(
+                id: "user-marker-\(marker.idHash)",
+                code: marker.note.isEmpty ? "Marker" : marker.note,
+                beginTimeSeconds: marker.timeSeconds,
+                rawBeginTime: "",
+                sourceFile: "User Markers"
+            )
+        }
     }
 
     /// The signal's own events plus user markers and generated in-memory artifact events, time-sorted.
@@ -677,15 +682,7 @@ struct WaveformView: View {
             signalURLPath: signal.signalURL.path,
             signalType: signal.signalType,
             signalEvents: EventTrackEventSignature(events: signal.events),
-            userMarkers: markers
-                .filter { $0.packageName == recording.packageName }
-                .map {
-                    WaveformUserMarkerSignature(
-                        idHash: $0.persistentModelID.hashValue,
-                        timeSeconds: $0.timeSeconds,
-                        note: $0.note
-                    )
-                },
+            userMarkers: userMarkers,
             artifactEvents: EventTrackEventSignature(events: artifactVM.events),
             definedArtifacts: template.definedArtifacts.map {
                 WaveformDefinedArtifactSignature(
