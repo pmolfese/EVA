@@ -103,7 +103,7 @@ nonisolated struct EventTrackOverlapCluster: Identifiable {
     let color: Color
 }
 
-nonisolated struct EventTrackHoverStack: Identifiable {
+private struct EventTrackHoverStack: Identifiable {
     var id: String { markers.map(\.event.id).joined(separator: "|") }
     let location: CGPoint
     let markers: [EventTrackMarker]
@@ -1358,6 +1358,7 @@ struct EventTrackView: View {
     static let maxLanes = EventTrackConstants.maxLanes
     static let laneSpacing = EventTrackConstants.laneSpacing
     static let denseMarkerThreshold = EventTrackConstants.denseMarkerThreshold
+    private static let baseTrackHeight: CGFloat = 64
 
     let events: [MFFEvent]
     let samplingRate: Double
@@ -1374,12 +1375,10 @@ struct EventTrackView: View {
     /// Called when a flag is tapped, with the event and its flag color, so the
     /// parent can highlight the artifact's window in the waveform.
     var onSelectEvent: ((MFFEvent, Color) -> Void)? = nil
-    /// Called while Command-hovering event markers. The parent owns the floating
-    /// chooser so it is not clipped by the event track's compact height.
-    var onHoverEventStack: ((EventTrackHoverStack?) -> Void)? = nil
 
     /// Event whose detail popover is currently shown (tap a flag to open).
     @State private var poppedEvent: MFFEvent?
+    @State private var hoveredEventStack: EventTrackHoverStack?
     @State private var eventIndex = EventTrackIndex.empty
 
     var body: some View {
@@ -1433,6 +1432,9 @@ struct EventTrackView: View {
                 }
             }
 
+            if isCommandKeyPressed, let hoveredEventStack {
+                inlineEventStackChooser(hoveredEventStack)
+            }
         }
         .overlay {
             RoundedRectangle(cornerRadius: 8)
@@ -1446,7 +1448,7 @@ struct EventTrackView: View {
         }
         .onChange(of: isCommandKeyPressed) { _, pressed in
             if !pressed {
-                onHoverEventStack?(nil)
+                hoveredEventStack = nil
             }
         }
         .onContinuousHover { phase in
@@ -1578,6 +1580,43 @@ struct EventTrackView: View {
             .accessibilityHidden(true)
     }
 
+    @ViewBuilder
+    private func inlineEventStackChooser(_ stack: EventTrackHoverStack) -> some View {
+        let offset = inlineChooserOffset(for: stack)
+        let width = inlineChooserWidth(for: stack.markers)
+        ScrollView(.horizontal, showsIndicators: stack.markers.count > 3) {
+            HStack(spacing: 4) {
+                ForEach(stack.markers) { marker in
+                    Button {
+                        poppedEvent = nil
+                        hoveredEventStack = nil
+                        onSelectEvent?(marker.event, marker.style.color)
+                    } label: {
+                        Text(ribbonLabel(for: marker.event))
+                            .font(.caption2.weight(.semibold))
+                            .lineLimit(1)
+                            .foregroundStyle(marker.style.color)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(marker.style.color.opacity(0.16), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help(tooltip(for: marker.event))
+                }
+            }
+            .padding(4)
+        }
+        .frame(width: width, height: 30, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
+        .offset(offset)
+        .zIndex(30)
+    }
+
     private func ribbonLabel(for event: MFFEvent) -> String {
         if isDefinedArtifactEvent(event), let label = event.label {
             return label
@@ -1687,7 +1726,12 @@ struct EventTrackView: View {
 
     private func updateHoveredEventStack(at location: CGPoint, visibleMarkers: [EventTrackMarker]) {
         guard isCommandKeyPressed else {
-            onHoverEventStack?(nil)
+            hoveredEventStack = nil
+            return
+        }
+
+        if let hoveredEventStack,
+           inlineChooserRect(for: hoveredEventStack).contains(location) {
             return
         }
 
@@ -1695,7 +1739,7 @@ struct EventTrackView: View {
             markerContains(location, marker: marker)
         }
         guard !candidates.isEmpty else {
-            onHoverEventStack?(nil)
+            hoveredEventStack = nil
             return
         }
 
@@ -1708,7 +1752,11 @@ struct EventTrackView: View {
             }
             return $0.event.beginTimeSeconds < $1.event.beginTimeSeconds
         }
-        onHoverEventStack?(EventTrackHoverStack(location: location, markers: sorted))
+        let nextID = sorted.map(\.event.id).joined(separator: "|")
+        if hoveredEventStack?.id == nextID {
+            return
+        }
+        hoveredEventStack = EventTrackHoverStack(location: chooserAnchor(for: sorted), markers: sorted)
     }
 
     private func markerContains(_ location: CGPoint, marker: EventTrackMarker) -> Bool {
@@ -1718,6 +1766,40 @@ struct EventTrackView: View {
         let labelWidth = min(max(CGFloat(ribbonLabel(for: marker.event).count) * 7 + 18, 40), 170)
         let labelRect = CGRect(x: labelX - 4, y: marker.style.laneY - 3, width: labelWidth + 8, height: 24)
         return stemHit || labelRect.contains(location)
+    }
+
+    private func inlineChooserOffset(for stack: EventTrackHoverStack) -> CGSize {
+        let width = inlineChooserWidth(for: stack.markers)
+        let trackHeight = Self.baseTrackHeight + CGFloat(max(laneCount - 1, 0)) * Self.laneSpacing
+        let x = min(max(stack.location.x + 10, 4), max(viewportWidth - width - 4, 4))
+        let y = min(max(stack.location.y + 14, 4), max(trackHeight - 34, 4))
+        return CGSize(width: x, height: y)
+    }
+
+    private func chooserAnchor(for markers: [EventTrackMarker]) -> CGPoint {
+        let markerXs = markers.map { localXPosition(for: $0) }
+        let anchorX = markerXs.isEmpty
+            ? CGFloat(0)
+            : markerXs.reduce(CGFloat(0), +) / CGFloat(markerXs.count)
+        let anchorY = markers.map(\.style.laneY).min() ?? 0
+        return CGPoint(x: anchorX, y: anchorY)
+    }
+
+    private func inlineChooserWidth(for markers: [EventTrackMarker]) -> CGFloat {
+        let naturalWidth = markers.reduce(CGFloat(8)) { partial, marker in
+            partial + inlineChooserLabelWidth(for: marker.event) + 4
+        }
+        return min(max(naturalWidth, 60), max(viewportWidth - 8, 60))
+    }
+
+    private func inlineChooserLabelWidth(for event: MFFEvent) -> CGFloat {
+        min(max(CGFloat(ribbonLabel(for: event).count) * 7 + 18, 44), 140)
+    }
+
+    private func inlineChooserRect(for stack: EventTrackHoverStack) -> CGRect {
+        let offset = inlineChooserOffset(for: stack)
+        return CGRect(x: offset.width, y: offset.height, width: inlineChooserWidth(for: stack.markers), height: 30)
+            .insetBy(dx: -6, dy: -6)
     }
 
 }
