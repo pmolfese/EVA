@@ -337,11 +337,12 @@ extension WaveformView {
             waveformHoverInfo = nil
             return
         }
+        let segment = waveformHoverSegment(containing: sample)
 
         waveformHoverInfo = WaveformHoverInfo(
             channelLabel: waveformHoverChannelLabel(index: channelIndex, signal: signal),
-            valueMicrovolts: Double(signal.data[channelIndex][sample]),
-            timeText: waveformHoverTimeText(sample: sample, in: signal),
+            valueMicrovolts: waveformHoverValue(channel: channelIndex, sample: sample, segment: segment, in: signal),
+            timeText: waveformHoverTimeText(sample: sample, segment: segment, in: signal),
             location: location
         )
     }
@@ -386,11 +387,42 @@ extension WaveformView {
         return "\(channelNumber) · \(name)"
     }
 
-    private func waveformHoverTimeText(sample: Int, in signal: MFFSignalData) -> String {
+    private func waveformHoverSegment(containing sample: Int) -> EpochSegment? {
+        guard epoching.epochedSignal != nil else { return nil }
+        return epoching.epochSegments.first { sample >= $0.startSample && sample <= $0.endSample }
+    }
+
+    private func waveformHoverValue(channel: Int, sample: Int, segment: EpochSegment?, in signal: MFFSignalData) -> Double {
+        let value = Double(signal.data[channel][sample])
+        guard let segment,
+              segment.stimulusOffsetSamples > 0 else {
+            return value
+        }
+
+        let preStart = segment.startSample
+        let preEnd = preStart + segment.stimulusOffsetSamples
+        guard preStart >= 0,
+              preEnd <= signal.data[channel].count,
+              segment.endSample < signal.data[channel].count else {
+            return value
+        }
+
+        var baselineSum = 0.0
+        var baselineCount = 0
+        for baselineSample in preStart..<preEnd {
+            let baselineValue = Double(signal.data[channel][baselineSample])
+            guard baselineValue.isFinite else { continue }
+            baselineSum += baselineValue
+            baselineCount += 1
+        }
+        guard baselineCount > 0 else { return value }
+        return value - baselineSum / Double(baselineCount)
+    }
+
+    private func waveformHoverTimeText(sample: Int, segment: EpochSegment?, in signal: MFFSignalData) -> String {
         guard signal.samplingRate > 0 else { return "Time --" }
-        if epoching.epochedSignal != nil,
-           let segment = epoching.epochSegments.first(where: { sample >= $0.startSample && sample <= $0.endSample }) {
-            let seconds = Double(sample - segment.startSample) / signal.samplingRate
+        if let segment {
+            let seconds = Double(sample - segment.startSample - segment.stimulusOffsetSamples) / signal.samplingRate
             let label = epoching.isAveraged || signal.isAveraged || segment.contributingEpochCount > 1
                 ? "Average"
                 : "Segment"
@@ -400,15 +432,18 @@ extension WaveformView {
     }
 
     private func formatWaveformHoverSeconds(_ seconds: Double) -> String {
-        if seconds < 1 {
+        let magnitude = abs(seconds)
+        if magnitude < 1 {
             return String(format: "%.1f ms", seconds * 1_000)
         }
-        if seconds < 60 {
+        if magnitude < 60 {
             return String(format: "%.3f s", seconds)
         }
-        let minutes = Int(seconds) / 60
-        let remainingSeconds = seconds.truncatingRemainder(dividingBy: 60)
-        return String(format: "%d:%06.3f", minutes, remainingSeconds)
+        let sign = seconds < 0 ? "-" : ""
+        let positiveSeconds = magnitude
+        let minutes = Int(positiveSeconds) / 60
+        let remainingSeconds = positiveSeconds.truncatingRemainder(dividingBy: 60)
+        return String(format: "%@%d:%06.3f", sign, minutes, remainingSeconds)
     }
 
     private func waveformHoverBadgeOffset(for info: WaveformHoverInfo) -> CGSize {
