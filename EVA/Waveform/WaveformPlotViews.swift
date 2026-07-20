@@ -95,6 +95,20 @@ nonisolated struct EventTrackMarker: Identifiable {
     let style: EventMarkerStyle
 }
 
+nonisolated struct EventTrackOverlapCluster: Identifiable {
+    let id: String
+    let globalX: CGFloat
+    let laneY: CGFloat
+    let count: Int
+    let color: Color
+}
+
+nonisolated struct EventTrackHoverStack: Identifiable {
+    var id: String { markers.map(\.event.id).joined(separator: "|") }
+    let location: CGPoint
+    let markers: [EventTrackMarker]
+}
+
 nonisolated struct EventTrackIndex {
     struct Key: Equatable {
         let events: EventTrackEventSignature
@@ -1354,11 +1368,15 @@ struct EventTrackView: View {
     let contentOffset: CGFloat
     let visibleRange: ClosedRange<CGFloat>
     let viewportWidth: CGFloat
+    let isCommandKeyPressed: Bool
     /// Number of distinct source lanes events are staggered into.
     var laneCount: Int = 1
     /// Called when a flag is tapped, with the event and its flag color, so the
     /// parent can highlight the artifact's window in the waveform.
     var onSelectEvent: ((MFFEvent, Color) -> Void)? = nil
+    /// Called while Command-hovering event markers. The parent owns the floating
+    /// chooser so it is not clipped by the event track's compact height.
+    var onHoverEventStack: ((EventTrackHoverStack?) -> Void)? = nil
 
     /// Event whose detail popover is currently shown (tap a flag to open).
     @State private var poppedEvent: MFFEvent?
@@ -1385,6 +1403,7 @@ struct EventTrackView: View {
             )
         let visibleMarkers = index.visibleMarkers(in: visibleRange)
         let drawsFlags = Self.drawsEventFlags(visibleMarkerCount: visibleMarkers.count)
+        let overlapClusters = drawsFlags ? overlapClusters(for: visibleMarkers) : []
 
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 8)
@@ -1409,7 +1428,11 @@ struct EventTrackView: View {
                 ForEach(visibleMarkers) { marker in
                     eventFlag(marker)
                 }
+                ForEach(overlapClusters) { cluster in
+                    overlapBadge(cluster)
+                }
             }
+
         }
         .overlay {
             RoundedRectangle(cornerRadius: 8)
@@ -1420,6 +1443,19 @@ struct EventTrackView: View {
         }
         .onChange(of: key) { _, newKey in
             updateEventIndexIfNeeded(key: newKey, signature: signature)
+        }
+        .onChange(of: isCommandKeyPressed) { _, pressed in
+            if !pressed {
+                onHoverEventStack?(nil)
+            }
+        }
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let location):
+                updateHoveredEventStack(at: location, visibleMarkers: visibleMarkers)
+            case .ended:
+                break
+            }
         }
     }
 
@@ -1443,6 +1479,10 @@ struct EventTrackView: View {
         // Position relative to the true scroll offset (not the buffered
         // culling range) so markers align with the waveform cursor.
         marker.globalX - contentOffset
+    }
+
+    private func localXPosition(forGlobalX globalX: CGFloat) -> CGFloat {
+        globalX - contentOffset
     }
 
     private func drawIndividualMarkers(
@@ -1519,6 +1559,25 @@ struct EventTrackView: View {
             .offset(x: min(max(x + 4, 0), max(viewportWidth - 70, 0)), y: style.laneY)
     }
 
+    @ViewBuilder
+    private func overlapBadge(_ cluster: EventTrackOverlapCluster) -> some View {
+        let x = localXPosition(forGlobalX: cluster.globalX)
+        Text("\(cluster.count)")
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(cluster.color, in: Capsule())
+            .overlay {
+                Capsule().stroke(.white.opacity(0.85), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+            .offset(x: min(max(x + 3, 0), max(viewportWidth - 24, 0)),
+                    y: max(cluster.laneY - 6, 0))
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
     private func ribbonLabel(for event: MFFEvent) -> String {
         if isDefinedArtifactEvent(event), let label = event.label {
             return label
@@ -1587,4 +1646,78 @@ struct EventTrackView: View {
         lines.append("Source: \(event.sourceFile)")
         return lines.joined(separator: "\n")
     }
+
+    private func overlapClusters(for markers: [EventTrackMarker]) -> [EventTrackOverlapCluster] {
+        let tolerance: CGFloat = 4
+        var clusters: [EventTrackOverlapCluster] = []
+        let markersBySource = Dictionary(grouping: markers, by: \.style.sourceIndex)
+
+        for sourceMarkers in markersBySource.values {
+            let sortedMarkers = sourceMarkers.sorted {
+                if $0.globalX == $1.globalX {
+                    return $0.event.id < $1.event.id
+                }
+                return $0.globalX < $1.globalX
+            }
+            var start = sortedMarkers.startIndex
+
+            while start < sortedMarkers.endIndex {
+                var end = sortedMarkers.index(after: start)
+                let anchorX = sortedMarkers[start].globalX
+                while end < sortedMarkers.endIndex, abs(sortedMarkers[end].globalX - anchorX) <= tolerance {
+                    end = sortedMarkers.index(after: end)
+                }
+
+                let group = sortedMarkers[start..<end]
+                if group.count > 1, let first = group.first {
+                    let ids = group.map(\.event.id).joined(separator: "|")
+                    clusters.append(EventTrackOverlapCluster(
+                        id: ids,
+                        globalX: first.globalX,
+                        laneY: first.style.laneY,
+                        count: group.count,
+                        color: first.style.color
+                    ))
+                }
+                start = end
+            }
+        }
+        return clusters.sorted { $0.globalX < $1.globalX }
+    }
+
+    private func updateHoveredEventStack(at location: CGPoint, visibleMarkers: [EventTrackMarker]) {
+        guard isCommandKeyPressed else {
+            onHoverEventStack?(nil)
+            return
+        }
+
+        let candidates = visibleMarkers.filter { marker in
+            markerContains(location, marker: marker)
+        }
+        guard !candidates.isEmpty else {
+            onHoverEventStack?(nil)
+            return
+        }
+
+        let sorted = candidates.sorted {
+            if $0.event.beginTimeSeconds == $1.event.beginTimeSeconds {
+                if $0.event.code == $1.event.code {
+                    return $0.event.id < $1.event.id
+                }
+                return $0.event.code < $1.event.code
+            }
+            return $0.event.beginTimeSeconds < $1.event.beginTimeSeconds
+        }
+        onHoverEventStack?(EventTrackHoverStack(location: location, markers: sorted))
+    }
+
+    private func markerContains(_ location: CGPoint, marker: EventTrackMarker) -> Bool {
+        let x = localXPosition(for: marker)
+        let stemHit = abs(location.x - x) <= 12
+        let labelX = min(max(x + 4, 0), max(viewportWidth - 70, 0))
+        let labelWidth = min(max(CGFloat(ribbonLabel(for: marker.event).count) * 7 + 18, 40), 170)
+        let labelRect = CGRect(x: labelX - 4, y: marker.style.laneY - 3, width: labelWidth + 8, height: 24)
+        return stemHit || labelRect.contains(location)
+    }
+
 }

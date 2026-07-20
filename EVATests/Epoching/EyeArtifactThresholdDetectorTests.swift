@@ -29,6 +29,63 @@ struct EyeArtifactThresholdDetectorTests {
         return channels
     }
 
+    @Test func hydroCel128LayoutNameUsesTableOcularChannels() {
+        let layoutName = "HydroCel GSN 128 1.0"
+
+        let blink = EyeArtifactThresholdDetector.autoOcularChannelIndices(
+            kind: .blink,
+            channelCount: 129,
+            sensorLayoutName: layoutName
+        )
+        let movement = EyeArtifactThresholdDetector.autoOcularChannelIndices(
+            kind: .movement,
+            channelCount: 129,
+            sensorLayoutName: layoutName
+        )
+
+        #expect(blink.map { $0 + 1 } == [25, 127, 21, 8, 126, 14])
+        #expect(movement.map { $0 + 1 } == [125, 128])
+    }
+
+    @Test func hydroCelLayoutNamesUseTableOcularChannelsForAllSupportedSizes() {
+        let expectedByLayout: [(String, Int, [Int], [Int])] = [
+            ("HydroCel GSN 32 1.0", 33, [2, 30, 1, 29], [31, 32]),
+            ("HydroCel GSN 64 1.0", 65, [10, 63, 5, 62], [61, 64]),
+            ("HydroCel GSN 128 1.0", 129, [25, 127, 21, 8, 126, 14], [125, 128]),
+            ("HydroCel GSN 256 1.0", 257, [37, 241, 32, 18, 238, 25], [226, 252])
+        ]
+
+        for (layoutName, channelCount, expectedBlink, expectedMovement) in expectedByLayout {
+            let blink = EyeArtifactThresholdDetector.autoOcularChannelIndices(
+                kind: .blink,
+                channelCount: channelCount,
+                sensorLayoutName: layoutName
+            )
+            let movement = EyeArtifactThresholdDetector.autoOcularChannelIndices(
+                kind: .movement,
+                channelCount: channelCount,
+                sensorLayoutName: layoutName
+            )
+
+            #expect(blink.map { $0 + 1 } == expectedBlink)
+            #expect(movement.map { $0 + 1 } == expectedMovement)
+        }
+    }
+
+    @Test func loadedNominalPlusOneChannelCountUsesHydroCelTableFallback() {
+        let blink = EyeArtifactThresholdDetector.autoOcularChannelIndices(
+            kind: .blink,
+            channelCount: 129
+        )
+        let movement = EyeArtifactThresholdDetector.autoOcularChannelIndices(
+            kind: .movement,
+            channelCount: 129
+        )
+
+        #expect(blink.map { $0 + 1 } == [25, 127, 21, 8, 126, 14])
+        #expect(movement.map { $0 + 1 } == [125, 128])
+    }
+
     @Test func detectsBlinkAboveThreshold() {
         // 128-channel layout: blink channels are 1-based [8, 25, 126, 127] -> 0-based.
         let channelCount = 129

@@ -27,8 +27,8 @@ nonisolated enum EyeArtifactPolarity: String, CaseIterable, Codable, Sendable, I
 /// How the ocular detector collapses the selected periocular channels into the
 /// single drive trace that is thresholded.
 nonisolated enum EyeArtifactTopologyMode: String, CaseIterable, Codable, Sendable, Identifiable {
-    case derivedOcular = "Derived VEOG/HEOG"
     case legacyMaxChannel = "Legacy max channel"
+    case derivedOcular = "Derived VEOG/HEOG"
 
     var id: String { rawValue }
 }
@@ -75,7 +75,7 @@ nonisolated struct EyeArtifactThresholdConfiguration: Sendable, Codable, Equatab
         maxDurationSeconds: Double,
         mergeGapSeconds: Double,
         polarity: EyeArtifactPolarity,
-        topologyMode: EyeArtifactTopologyMode = .derivedOcular,
+        topologyMode: EyeArtifactTopologyMode = .legacyMaxChannel,
         channelOverride: [Int]?
     ) {
         self.amplitudeMinMicrovolts = amplitudeMinMicrovolts
@@ -122,7 +122,7 @@ nonisolated struct EyeArtifactThresholdConfiguration: Sendable, Codable, Equatab
         maxDurationSeconds = try c.decode(Double.self, forKey: .maxDurationSeconds)
         mergeGapSeconds = try c.decode(Double.self, forKey: .mergeGapSeconds)
         polarity = try c.decode(EyeArtifactPolarity.self, forKey: .polarity)
-        topologyMode = try c.decodeIfPresent(EyeArtifactTopologyMode.self, forKey: .topologyMode) ?? .derivedOcular
+        topologyMode = try c.decodeIfPresent(EyeArtifactTopologyMode.self, forKey: .topologyMode) ?? .legacyMaxChannel
         channelOverride = try c.decodeIfPresent([Int].self, forKey: .channelOverride)
     }
 
@@ -145,7 +145,7 @@ nonisolated struct EyeArtifactThresholdConfiguration: Sendable, Codable, Equatab
                 maxDurationSeconds: 1,
                 mergeGapSeconds: 0.25,
                 polarity: .bipolar,
-                topologyMode: .derivedOcular,
+                topologyMode: .legacyMaxChannel,
                 channelOverride: nil
             )
         case .movement:
@@ -161,7 +161,7 @@ nonisolated struct EyeArtifactThresholdConfiguration: Sendable, Codable, Equatab
                 maxDurationSeconds: 1,
                 mergeGapSeconds: 0.25,
                 polarity: .bipolar,
-                topologyMode: .derivedOcular,
+                topologyMode: .legacyMaxChannel,
                 channelOverride: nil
             )
         }

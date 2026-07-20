@@ -175,16 +175,19 @@ final class ProcessingCore {
     /// per-subject decision step this core already stops at).
     private func psaArtifactRejectionEvents(for signal: MFFSignalData) -> [MFFEvent] {
         guard epoching.skipIfContainsArtifact, epoching.segmentField != .artifact else { return [] }
+        let sensorLayoutName = SensorLayout.load(fromPackageContaining: signal.signalURL)?.name
         var events: [MFFEvent] = []
         if epoching.skipEyeBlinks {
             events += EyeArtifactThresholdDetector.detect(
                 kind: .blink, channels: signal.data, samplingRate: signal.samplingRate,
-                duration: signal.duration, configuration: artifactVM.blinkThresholdConfig)
+                duration: signal.duration, sensorLayoutName: sensorLayoutName,
+                configuration: artifactVM.blinkThresholdConfig)
         }
         if epoching.skipEyeMovements {
             events += EyeArtifactThresholdDetector.detect(
                 kind: .movement, channels: signal.data, samplingRate: signal.samplingRate,
-                duration: signal.duration, configuration: artifactVM.movementThresholdConfig)
+                duration: signal.duration, sensorLayoutName: sensorLayoutName,
+                configuration: artifactVM.movementThresholdConfig)
         }
         return events
     }

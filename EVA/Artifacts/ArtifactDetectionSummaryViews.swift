@@ -187,6 +187,7 @@ extension WaveformView {
         let detectECG = ecg.isEnabled
         let blinkConfig = artifactVM.blinkThresholdConfig
         let movementConfig = artifactVM.movementThresholdConfig
+        let sensorLayoutName = recording.sensorLayout?.name
         let ecgConfiguration = ECGDetectionConfiguration(
             algorithm: ecg.algorithm,
             thresholdSD: ecg.thresholdSD,
@@ -203,6 +204,7 @@ extension WaveformView {
                         channels: sourceData,
                         samplingRate: samplingRate,
                         duration: duration,
+                        sensorLayoutName: sensorLayoutName,
                         configuration: blinkConfig
                     )
                 }
@@ -215,6 +217,7 @@ extension WaveformView {
                         channels: sourceData,
                         samplingRate: samplingRate,
                         duration: duration,
+                        sensorLayoutName: sensorLayoutName,
                         configuration: movementConfig
                     )
                 }

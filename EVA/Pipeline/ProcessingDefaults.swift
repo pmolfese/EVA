@@ -38,6 +38,7 @@ final class ProcessingDefaults {
         static let artifactDetectionDefaultMethodRaw = "artifactDetectionDefaultMethodRaw"
         static let ocularBlinkThresholdConfig = "ocularBlinkThresholdConfig"
         static let ocularMovementThresholdConfig = "ocularMovementThresholdConfig"
+        static let ocularTopologyDefaultMigrationV2 = "ocularTopologyDefaultMigrationV2"
         static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
         static let autoRunSegmentHealthAfterSegmentation = "autoRunSegmentHealthAfterSegmentation"
     }
@@ -168,6 +169,7 @@ final class ProcessingDefaults {
             Keys.autoRunSegmentHealthAfterSegmentation: Defaults.autoRunSegmentHealthAfterSegmentation,
         ])
         migrateLegacyBlobIfNeeded()
+        migrateOcularTopologyDefaultsIfNeeded()
     }
 
     /// One-time migration from the old single-JSON-blob store so existing
@@ -185,6 +187,25 @@ final class ProcessingDefaults {
         bcgDefaultMethodRaw = legacy.bcgDefaultMethodRaw
         interpolatedHealthFromNeighbors = legacy.interpolatedHealthFromNeighbors
         UserDefaults.standard.removeObject(forKey: Self.legacyKey)
+    }
+
+    private func migrateOcularTopologyDefaultsIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Keys.ocularTopologyDefaultMigrationV2) else { return }
+        migrateOcularTopologyDefaultIfNeeded(forKey: Keys.ocularBlinkThresholdConfig, kind: .blink)
+        migrateOcularTopologyDefaultIfNeeded(forKey: Keys.ocularMovementThresholdConfig, kind: .movement)
+        UserDefaults.standard.set(true, forKey: Keys.ocularTopologyDefaultMigrationV2)
+    }
+
+    private func migrateOcularTopologyDefaultIfNeeded(forKey key: String, kind: EyeArtifactKind) {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let stored = try? JSONDecoder().decode(EyeArtifactThresholdConfiguration.self, from: data) else {
+            return
+        }
+        var previousDefault = EyeArtifactThresholdConfiguration.defaults(for: kind)
+        previousDefault.topologyMode = .derivedOcular
+        if stored == previousDefault {
+            setOcularThresholdConfig(EyeArtifactThresholdConfiguration.defaults(for: kind), forKey: key)
+        }
     }
 
     func restoreDefaults() {
