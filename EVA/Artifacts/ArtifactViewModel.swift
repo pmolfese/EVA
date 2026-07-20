@@ -25,7 +25,10 @@ final class ArtifactViewModel {
 
     init(store: RecordingStore) {
         self.store = store
-        detectionMethod = ProcessingDefaults.shared.artifactDetectionDefaultMethod
+        let defaults = ProcessingDefaults.shared
+        detectionMethod = defaults.artifactDetectionDefaultMethod
+        blinkThresholdConfig = defaults.ocularBlinkThresholdConfig
+        movementThresholdConfig = defaults.ocularMovementThresholdConfig
     }
 
     // MARK: Detection

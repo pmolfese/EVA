@@ -36,6 +36,8 @@ final class ProcessingDefaults {
         static let bcgAutoSelectProxySet = "bcgAutoSelectProxySet"
         static let bcgDefaultMethodRaw = "bcgDefaultMethodRaw"
         static let artifactDetectionDefaultMethodRaw = "artifactDetectionDefaultMethodRaw"
+        static let ocularBlinkThresholdConfig = "ocularBlinkThresholdConfig"
+        static let ocularMovementThresholdConfig = "ocularMovementThresholdConfig"
         static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
         static let autoRunSegmentHealthAfterSegmentation = "autoRunSegmentHealthAfterSegmentation"
     }
@@ -50,6 +52,8 @@ final class ProcessingDefaults {
         static let bcgAutoSelectProxySet = false
         static let bcgDefaultMethodRaw = "spatialPCA"
         static let artifactDetectionDefaultMethodRaw = ArtifactDetectionMethod.threshold.rawValue
+        static let ocularBlinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
+        static let ocularMovementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
         static let interpolatedHealthFromNeighbors = true
         static let autoRunSegmentHealthAfterSegmentation = false
     }
@@ -109,6 +113,26 @@ final class ProcessingDefaults {
         set { artifactDetectionDefaultMethodRaw = newValue.rawValue }
     }
 
+    var ocularBlinkThresholdConfig: EyeArtifactThresholdConfiguration {
+        get {
+            ocularThresholdConfig(
+                forKey: Keys.ocularBlinkThresholdConfig,
+                fallback: Defaults.ocularBlinkThresholdConfig
+            )
+        }
+        set { setOcularThresholdConfig(newValue, forKey: Keys.ocularBlinkThresholdConfig) }
+    }
+
+    var ocularMovementThresholdConfig: EyeArtifactThresholdConfiguration {
+        get {
+            ocularThresholdConfig(
+                forKey: Keys.ocularMovementThresholdConfig,
+                fallback: Defaults.ocularMovementThresholdConfig
+            )
+        }
+        set { setOcularThresholdConfig(newValue, forKey: Keys.ocularMovementThresholdConfig) }
+    }
+
     // MARK: Channel-health defaults
     /// When on, an interpolated channel's health is estimated by averaging its
     /// spline-contributing channels rather than a full montage recompute — much
@@ -138,6 +162,8 @@ final class ProcessingDefaults {
             Keys.bcgAutoSelectProxySet: Defaults.bcgAutoSelectProxySet,
             Keys.bcgDefaultMethodRaw: Defaults.bcgDefaultMethodRaw,
             Keys.artifactDetectionDefaultMethodRaw: Defaults.artifactDetectionDefaultMethodRaw,
+            Keys.ocularBlinkThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularBlinkThresholdConfig),
+            Keys.ocularMovementThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularMovementThresholdConfig),
             Keys.interpolatedHealthFromNeighbors: Defaults.interpolatedHealthFromNeighbors,
             Keys.autoRunSegmentHealthAfterSegmentation: Defaults.autoRunSegmentHealthAfterSegmentation,
         ])
@@ -171,8 +197,29 @@ final class ProcessingDefaults {
         bcgAutoSelectProxySet = Defaults.bcgAutoSelectProxySet
         bcgDefaultMethodRaw = Defaults.bcgDefaultMethodRaw
         artifactDetectionDefaultMethodRaw = Defaults.artifactDetectionDefaultMethodRaw
+        ocularBlinkThresholdConfig = Defaults.ocularBlinkThresholdConfig
+        ocularMovementThresholdConfig = Defaults.ocularMovementThresholdConfig
         interpolatedHealthFromNeighbors = Defaults.interpolatedHealthFromNeighbors
         autoRunSegmentHealthAfterSegmentation = Defaults.autoRunSegmentHealthAfterSegmentation
+    }
+
+    private func ocularThresholdConfig(
+        forKey key: String,
+        fallback: EyeArtifactThresholdConfiguration
+    ) -> EyeArtifactThresholdConfiguration {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let config = try? JSONDecoder().decode(EyeArtifactThresholdConfiguration.self, from: data) else {
+            return fallback
+        }
+        return config
+    }
+
+    private func setOcularThresholdConfig(_ config: EyeArtifactThresholdConfiguration, forKey key: String) {
+        UserDefaults.standard.set(Self.encodedOcularThresholdConfig(config), forKey: key)
+    }
+
+    private static func encodedOcularThresholdConfig(_ config: EyeArtifactThresholdConfiguration) -> Data {
+        (try? JSONEncoder().encode(config)) ?? Data()
     }
 
     /// Shape of the pre-refactor persisted blob, kept only for migration.

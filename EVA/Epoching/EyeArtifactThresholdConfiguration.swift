@@ -66,7 +66,7 @@ nonisolated struct EyeArtifactThresholdConfiguration: Sendable, Codable, Equatab
                 accelerationEnabled: false,
                 accelerationThresholdMicrovoltsPerMillisecondSquared: 2,
                 minDurationSeconds: 0.05,
-                maxDurationSeconds: 0,
+                maxDurationSeconds: 1,
                 mergeGapSeconds: 0.25,
                 polarity: .bipolar,
                 channelOverride: nil
@@ -81,7 +81,7 @@ nonisolated struct EyeArtifactThresholdConfiguration: Sendable, Codable, Equatab
                 accelerationEnabled: false,
                 accelerationThresholdMicrovoltsPerMillisecondSquared: 1,
                 minDurationSeconds: 0.05,
-                maxDurationSeconds: 0,
+                maxDurationSeconds: 1,
                 mergeGapSeconds: 0.25,
                 polarity: .bipolar,
                 channelOverride: nil

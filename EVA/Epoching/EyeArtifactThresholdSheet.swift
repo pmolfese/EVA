@@ -62,9 +62,11 @@ struct EyeArtifactThresholdSheet: View {
                     artifactVM.movementThresholdConfig = .defaults(for: .movement)
                     blinkChannelOverrideText = ""
                     movementChannelOverrideText = ""
+                    saveThresholdDefaults()
                 }
                 Spacer()
                 Button("Done") {
+                    saveThresholdDefaults()
                     artifactVM.showsThresholdSheet = false
                 }
                 .keyboardShortcut(.defaultAction)
@@ -76,6 +78,9 @@ struct EyeArtifactThresholdSheet: View {
         .onAppear {
             blinkChannelOverrideText = channelOverrideText(artifactVM.blinkThresholdConfig.channelOverride)
             movementChannelOverrideText = channelOverrideText(artifactVM.movementThresholdConfig.channelOverride)
+        }
+        .onDisappear {
+            saveThresholdDefaults()
         }
     }
 
@@ -223,5 +228,10 @@ struct EyeArtifactThresholdSheet: View {
         let auto = EyeArtifactThresholdDetector.autoOcularChannelIndices(kind: kind, channelCount: signal.numberOfChannels)
         let names = auto.map { String($0 + 1) }.joined(separator: ", ")
         return "Automatic (net-based): channels \(names)."
+    }
+
+    private func saveThresholdDefaults() {
+        ProcessingDefaults.shared.ocularBlinkThresholdConfig = artifactVM.blinkThresholdConfig
+        ProcessingDefaults.shared.ocularMovementThresholdConfig = artifactVM.movementThresholdConfig
     }
 }
