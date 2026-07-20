@@ -17,7 +17,6 @@
 //  Non-document app model for opening and viewing EEG recordings.
 //
 
-import Combine
 import Foundation
 import simd
 import UniformTypeIdentifiers
@@ -56,8 +55,8 @@ enum ChannelRoleEditError: LocalizedError {
 }
 
 /// A loaded or loading EEG recording used by EVA's normal WindowGroup app flow.
-final class MFFRecording: ObservableObject, Identifiable {
-    nonisolated let objectWillChange = ObservableObjectPublisher()
+@Observable
+final class MFFRecording: Identifiable {
 
     let id = UUID()
     let packageURL: URL
@@ -79,9 +78,9 @@ final class MFFRecording: ObservableObject, Identifiable {
     private(set) var loadStatusMessage = "Preparing to read recording"
     private(set) var loadDetailMessage: String?
 
-    private var activeLoadRequestID = UUID()
-    private var loadTask: Task<LoadResult, Never>?
-    private var isClosed = false
+    @ObservationIgnored private var activeLoadRequestID = UUID()
+    @ObservationIgnored private var loadTask: Task<LoadResult, Never>?
+    @ObservationIgnored private var isClosed = false
 
     init(packageURL: URL, securityScopedURLs: [URL] = []) {
         self.packageURL = packageURL
@@ -101,14 +100,12 @@ final class MFFRecording: ObservableObject, Identifiable {
         let scopedURLs = securityScopedURLs
         let requestID = UUID()
         activeLoadRequestID = requestID
-        objectWillChange.send()
         loadProgress = 0
         loadStatusMessage = "Opening \(packageName)"
         loadDetailMessage = nil
 
         let (progressContinuation, progressTask) = ProgressBridge.make { (update: SignalImportProgress) in
             guard self.isLoading, !self.isClosed, self.activeLoadRequestID == requestID else { return }
-            self.objectWillChange.send()
             self.loadProgress = update.fraction
             self.loadStatusMessage = update.message
             self.loadDetailMessage = update.detail
@@ -146,7 +143,6 @@ final class MFFRecording: ObservableObject, Identifiable {
             return
         }
 
-        objectWillChange.send()
         loadTask = nil
         signal = result.signal
         pnsSignal = result.pnsSignal
@@ -165,7 +161,6 @@ final class MFFRecording: ObservableObject, Identifiable {
 
     @MainActor
     func tearDownForClose() {
-        objectWillChange.send()
         isClosed = true
         activeLoadRequestID = UUID()
         loadTask?.cancel()
@@ -231,7 +226,6 @@ final class MFFRecording: ObservableObject, Identifiable {
             impedancesKOhm: impedances
         )
 
-        objectWillChange.send()
         signal = updatedSignal
         pnsSignal = pnsSignalWithAppendedChannel(samples: movedSamples, name: movedName, basedOn: currentSignal)
         sensorLayout = sensorLayout?.removingChannel(index)
@@ -306,7 +300,6 @@ final class MFFRecording: ObservableObject, Identifiable {
             )
         }
 
-        objectWillChange.send()
         signal = updatedSignal
         pnsSignal = updatedPNS
         return movedName
@@ -339,7 +332,6 @@ final class MFFRecording: ObservableObject, Identifiable {
             return samples + Array(repeating: samples.last ?? 0, count: targetCount - samples.count)
         }
 
-        objectWillChange.send()
         if let currentPNS = pnsSignal {
             var data = currentPNS.data
             var names = currentPNS.channelNames ?? (0..<currentPNS.numberOfChannels).map { "PNS \($0 + 1)" }

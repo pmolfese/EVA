@@ -79,7 +79,7 @@ extension WaveformView {
 }
 
 struct SingleTrialAnalysisSheet: View {
-    @ObservedObject var viewModel: SingleTrialAnalysisViewModel
+    @Bindable var viewModel: SingleTrialAnalysisViewModel
     let averagedSignal: MFFSignalData?
     let averagedSegments: [EpochSegment]
     let rawSignal: MFFSignalData?
@@ -791,6 +791,7 @@ private struct SingleTrialWindowPicker: View {
                     colors: colors,
                     hiddenChannels: hiddenChannels,
                     amplitudeScale: amplitudeScale,
+                    samplingRate: samplingRate,
                     channelName: channelName,
                     onTapChannel: onTapChannel
                 )

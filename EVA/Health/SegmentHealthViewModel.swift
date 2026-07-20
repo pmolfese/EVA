@@ -13,7 +13,6 @@
 //  drives the analysis orchestration (the engine `SegmentHealthAnalyzer` is L3).
 //
 
-import Combine
 import SwiftUI
 
 /// User's manual "this segment is fine / this segment is garbage" call,
@@ -25,7 +24,8 @@ enum SegmentQualityLabel: String, Codable {
 }
 
 @MainActor
-final class SegmentHealthViewModel: ObservableObject {
+@Observable
+final class SegmentHealthViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -35,28 +35,28 @@ final class SegmentHealthViewModel: ObservableObject {
     }
 
     // MARK: Display
-    @Published var shows = false
-    @Published var showsMouseOver = false
-    @Published var showsDetails = false
+    var shows = false
+    var showsMouseOver = false
+    var showsDetails = false
 
     // MARK: Result / run state
-    @Published var analysis: SegmentHealthAnalysis?
-    @Published var isAnalyzing = false
-    @Published var progress = 0.0
-    @Published var statusMessage: String?
-    @Published var signature: String?
-    @Published var task: Task<Void, Never>?
+    var analysis: SegmentHealthAnalysis?
+    var isAnalyzing = false
+    var progress = 0.0
+    var statusMessage: String?
+    var signature: String?
+    @ObservationIgnored var task: Task<Void, Never>?
 
     // MARK: Menu request tokens
-    @Published var detailsRequest = 0
-    @Published var refreshRequest = 0
+    var detailsRequest = 0
+    var refreshRequest = 0
 
     // MARK: Manual quality labels
     /// Keyed by `SegmentHealthAnalyzer.segmentID`. Cleared on file switch along
     /// with `analysis` — segment IDs are derived from sample offsets, so a
     /// stale label could silently collide with an unrelated segment in a
     /// newly-opened recording.
-    @Published var qualityLabels: [String: SegmentQualityLabel] = [:]
+    var qualityLabels: [String: SegmentQualityLabel] = [:]
 
     func setQualityLabel(_ label: SegmentQualityLabel?, for segmentID: String) {
         qualityLabels[segmentID] = label

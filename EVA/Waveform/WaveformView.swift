@@ -64,7 +64,7 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
 }
 
 struct WaveformView: View {
-    @ObservedObject var recording: MFFRecording
+    var recording: MFFRecording
 
     @Environment(\.modelContext) private var modelContext
     @Environment(ChannelGoodnessSettings.self) var goodnessSettings
@@ -73,7 +73,12 @@ struct WaveformView: View {
     @Environment(BatchController.self) var batch
     /// Guards batch auto-start to once per freshly-built (per-recording) view.
     @State private var batchStarted = false
-    @Query private var markers: [UserMarker]
+    /// This recording's user markers, pre-filtered and projected to value
+    /// signatures by `WaveformMarkerContainer` (A3). Passing them in — rather than
+    /// hosting the `@Query` here — keeps a `UserMarker` table change from
+    /// re-evaluating the whole `WaveformView` body; only the tiny container
+    /// re-runs, and this view re-renders only when its own markers actually change.
+    let userMarkers: [WaveformUserMarkerSignature]
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
     @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
@@ -111,11 +116,13 @@ struct WaveformView: View {
     @State var selectedEventCodes = Set<String>()
     @State private var displayedEventsCache = WaveformDisplayedEventsCache.empty
     @State private var eventTrackSourceSummary = EventTrackSourceSummary.empty
+    @State private var hoveredEventStack: EventTrackHoverStack?
     @State var topomapSample: Int?
     @State var selectedSampleRange: ClosedRange<Int>?
     @State var dragSelectionStartSample: Int?
     @State var dragSelectionEndSample: Int?
     @State var eventTrackContextSample: Int?
+    @State var waveformHoverInfo: WaveformHoverInfo?
     /// Timestamp of the last stationary click, used to detect a double-click
     /// manually inside the single waveform interaction gesture.
     @State var lastWaveformClick: (time: Date, x: CGFloat)?
@@ -129,43 +136,43 @@ struct WaveformView: View {
     @State private var blinkChannelOverrideText = ""
     @State private var movementChannelOverrideText = ""
     // ECG / QRS detection domain, extracted into an L4 store.
-    @StateObject var ecg: ECGDetectionViewModel
+    @State var ecg: ECGDetectionViewModel
     // BCG detection
     // BCG detection domain, extracted into an L4 store (REFACTOR.md).
-    @StateObject var bcg: BCGDetectionViewModel
+    @State var bcg: BCGDetectionViewModel
     /// Stable UUID so re-running detection updates the existing DefinedArtifact rather than appending a new one.
     let bcgDefinedArtifactID = UUID()
     // Artifact detection + cleaning domain, extracted into an L4 store. See
     // REFACTOR.md slice 5.
-    @StateObject var artifactVM: ArtifactViewModel
+    @State var artifactVM: ArtifactViewModel
     // "Define Artifact" template-detection domain, extracted into an L4 store
     // (REFACTOR.md — analysis-domain slice).
-    @StateObject var template: ArtifactTemplateViewModel
+    @State var template: ArtifactTemplateViewModel
     // Wavelet artifact explorer domain, extracted into an L4 store.
-    @StateObject var waveletExplorer: WaveletArtifactExplorerViewModel
+    @State var waveletExplorer: WaveletArtifactExplorerViewModel
     // ICA decomposition + component removal, extracted into an L4 store. See
     // REFACTOR.md slice 6.
-    @StateObject var ica: ICAViewModel
+    @State var ica: ICAViewModel
     // PSA epoching / averaging + averaged-data display, extracted into an L4
     // store. See REFACTOR.md slice 4.
-    @StateObject var epoching: EpochingViewModel
+    @State var epoching: EpochingViewModel
     @State var segmentedEpochSignal: MFFSignalData?
     @State var segmentedEpochSegments: [EpochSegment] = []
     // Single Trial Analysis domain, extracted into an L4 store — reads the
     // raw per-trial epochs above (segmentedEpochSignal/segmentedEpochSegments),
     // not epoching's averaged output.
-    @StateObject var singleTrial: SingleTrialAnalysisViewModel
-    @StateObject var eegAnalysis: EEGAnalysisViewModel
+    @State var singleTrial: SingleTrialAnalysisViewModel
+    @State var eegAnalysis: EEGAnalysisViewModel
 
     // Band-pass / notch filtering (applied to the active base signal).
     /// Filtering domain (band-pass / line-noise / average-reference), extracted
     /// into an L4 store. See REFACTOR.md.
-    @StateObject var filter: FilterViewModel
+    @State var filter: FilterViewModel
     @State var showsFilterPopover = false
     @State var showsFilterLineNoiseOptions = false
     // Wavelet artifact reduction (HAPPE-style) pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
-    @StateObject var wavelet: WaveletReductionViewModel
+    @State var wavelet: WaveletReductionViewModel
     @State var channelStatusIsError = false
     // Scrollable status history (newest first), shown when the status area is clicked.
     @State private var statusHistory: [StatusHistoryEntry] = []
@@ -189,8 +196,8 @@ struct WaveformView: View {
 
     // MRI gradient-artifact removal domain (AAS / FASTR / FARM / Moosmann),
     // extracted into an L4 store. See REFACTOR.md slice 2.
-    @StateObject var gradient: GradientViewModel
-    @StateObject var replay = ReplayController()
+    @State var gradient: GradientViewModel
+    @State var replay = ReplayController()
 
     // Per-channel state, shared with the menu-bar Channels commands.
     var channels: ChannelModel { recordingStore.channels }
@@ -204,11 +211,11 @@ struct WaveformView: View {
     @State var channelStatusMessage: String?
     @State private var channelLabelMetricsExportRequest = 0
     // Channel-health coordination, extracted into an L4 store (REFACTOR.md).
-    @StateObject var chanHealth: ChannelHealthViewModel
+    @State var chanHealth: ChannelHealthViewModel
     @State private var showsChannelGoodnessSettings = false
     @State private var channelGoodnessSettingsRequest = 0
     // Segment-health domain, extracted into an L4 store (REFACTOR.md).
-    @StateObject var segHealth: SegmentHealthViewModel
+    @State var segHealth: SegmentHealthViewModel
     @State private var resetToOriginalRequest = 0
     @State private var mffExportRequest = 0
     @State private var copyProcessingRequest = 0
@@ -253,7 +260,7 @@ struct WaveformView: View {
     let channelRowHeight: CGFloat = 70
     let channelOverflowHeight: CGFloat = 28
     private let eventTrackHeight: CGFloat = 64
-    private let rowSpacing: CGFloat = 12
+    let rowSpacing: CGFloat = 12
     let labelColumnWidth: CGFloat = 120
     private let geometryUpdateQuantum: CGFloat = 0.5
     private let jumpSliderUpdateQuantum = 0.0005
@@ -354,24 +361,25 @@ struct WaveformView: View {
     /// Swift only requires explicit assignment for properties whose default
     /// needs to change (here, `store` must be the SAME instance across
     /// `recordingStore` and every VM, not each's own default `RecordingStore()`).
-    init(recording: MFFRecording) {
+    init(recording: MFFRecording, userMarkers: [WaveformUserMarkerSignature]) {
         self.recording = recording
+        self.userMarkers = userMarkers
         let store = RecordingStore()
         _recordingStore = State(initialValue: store)
-        _ecg = StateObject(wrappedValue: ECGDetectionViewModel(store: store))
-        _bcg = StateObject(wrappedValue: BCGDetectionViewModel(store: store))
-        _artifactVM = StateObject(wrappedValue: ArtifactViewModel(store: store))
-        _template = StateObject(wrappedValue: ArtifactTemplateViewModel(store: store))
-        _ica = StateObject(wrappedValue: ICAViewModel(store: store))
-        _epoching = StateObject(wrappedValue: EpochingViewModel(store: store))
-        _singleTrial = StateObject(wrappedValue: SingleTrialAnalysisViewModel(store: store))
-        _eegAnalysis = StateObject(wrappedValue: EEGAnalysisViewModel(store: store))
-        _filter = StateObject(wrappedValue: FilterViewModel(store: store))
-        _wavelet = StateObject(wrappedValue: WaveletReductionViewModel(store: store))
-        _gradient = StateObject(wrappedValue: GradientViewModel(store: store))
-        _chanHealth = StateObject(wrappedValue: ChannelHealthViewModel(store: store))
-        _segHealth = StateObject(wrappedValue: SegmentHealthViewModel(store: store))
-        _waveletExplorer = StateObject(wrappedValue: WaveletArtifactExplorerViewModel(store: store))
+        _ecg = State(wrappedValue: ECGDetectionViewModel(store: store))
+        _bcg = State(wrappedValue: BCGDetectionViewModel(store: store))
+        _artifactVM = State(wrappedValue: ArtifactViewModel(store: store))
+        _template = State(wrappedValue: ArtifactTemplateViewModel(store: store))
+        _ica = State(wrappedValue: ICAViewModel(store: store))
+        _epoching = State(wrappedValue: EpochingViewModel(store: store))
+        _singleTrial = State(wrappedValue: SingleTrialAnalysisViewModel(store: store))
+        _eegAnalysis = State(wrappedValue: EEGAnalysisViewModel(store: store))
+        _filter = State(wrappedValue: FilterViewModel(store: store))
+        _wavelet = State(wrappedValue: WaveletReductionViewModel(store: store))
+        _gradient = State(wrappedValue: GradientViewModel(store: store))
+        _chanHealth = State(wrappedValue: ChannelHealthViewModel(store: store))
+        _segHealth = State(wrappedValue: SegmentHealthViewModel(store: store))
+        _waveletExplorer = State(wrappedValue: WaveletArtifactExplorerViewModel(store: store))
     }
 
     var body: some View {
@@ -636,18 +644,17 @@ struct WaveformView: View {
     }
 
     /// Markers the user has created for *this* recording, surfaced as events.
+    /// `userMarkers` is already filtered to this recording by the container.
     var userMarkerEvents: [MFFEvent] {
-        markers
-            .filter { $0.packageName == recording.packageName }
-            .map { marker in
-                MFFEvent(
-                    id: "user-marker-\(marker.persistentModelID.hashValue)",
-                    code: marker.note.isEmpty ? "Marker" : marker.note,
-                    beginTimeSeconds: marker.timeSeconds,
-                    rawBeginTime: "",
-                    sourceFile: "User Markers"
-                )
-            }
+        userMarkers.map { marker in
+            MFFEvent(
+                id: "user-marker-\(marker.idHash)",
+                code: marker.note.isEmpty ? "Marker" : marker.note,
+                beginTimeSeconds: marker.timeSeconds,
+                rawBeginTime: "",
+                sourceFile: "User Markers"
+            )
+        }
     }
 
     /// The signal's own events plus user markers and generated in-memory artifact events, time-sorted.
@@ -677,15 +684,7 @@ struct WaveformView: View {
             signalURLPath: signal.signalURL.path,
             signalType: signal.signalType,
             signalEvents: EventTrackEventSignature(events: signal.events),
-            userMarkers: markers
-                .filter { $0.packageName == recording.packageName }
-                .map {
-                    WaveformUserMarkerSignature(
-                        idHash: $0.persistentModelID.hashValue,
-                        timeSeconds: $0.timeSeconds,
-                        note: $0.note
-                    )
-                },
+            userMarkers: userMarkers,
             artifactEvents: EventTrackEventSignature(events: artifactVM.events),
             definedArtifacts: template.definedArtifacts.map {
                 WaveformDefinedArtifactSignature(
@@ -852,6 +851,7 @@ struct WaveformView: View {
         .sheet(isPresented: $artifactVM.showsThresholdSheet) {
             EyeArtifactThresholdSheet(
                 signal: continuousSignal,
+                sensorLayoutName: recording.sensorLayout?.name,
                 detectsEyeBlinkArtifacts: $detectsEyeBlinkArtifacts,
                 detectsEyeMovementArtifacts: $detectsEyeMovementArtifacts,
                 blinkChannelOverrideText: $blinkChannelOverrideText,
@@ -1613,6 +1613,7 @@ struct WaveformView: View {
             : EventTrackSourceSummary(events: events, signature: eventSignature)
         let eventLaneCount = max(min(sourceSummary.sourceCount, EventTrackView.maxLanes), 1)
         let dynamicEventTrackHeight = eventTrackHeight + CGFloat(eventLaneCount - 1) * EventTrackView.laneSpacing
+        let eventTrackOrigin = CGPoint(x: 20 + labelColumnWidth + 12, y: 20)
 
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
@@ -1639,25 +1640,14 @@ struct WaveformView: View {
                     contentOffset: horizontalOffset,
                     visibleRange: visibleHorizontalRange,
                     viewportWidth: horizontalViewportWidth,
+                    isCommandKeyPressed: isCommandKeyPressed,
                     laneCount: eventLaneCount,
                     onSelectEvent: { event, color in
-                        // Toggle: tapping the highlighted flag again clears it.
-                        // Only artifact-detection events (defined artifacts,
-                        // eye-artifact threshold detection) get this band;
-                        // imported MFF events aren't highlighted this way. The
-                        // band itself centers on `event.centerTimeSeconds`,
-                        // which already accounts for onset-tagged sources
-                        // (Topography/Continuous) vs. center-tagged ones
-                        // (Template/Trajectory/threshold detection) — see
-                        // `MFFEvent.centerTimeSeconds`.
-                        if highlightedArtifactEvent?.id == event.id {
-                            highlightedArtifactEvent = nil
-                        } else if isCenteredArtifactDetectionEvent(event) {
-                            highlightedArtifactEvent = event
-                            highlightedArtifactColor = color
-                        } else {
-                            highlightedArtifactEvent = nil
-                        }
+                        hoveredEventStack = nil
+                        selectEventFromTrack(event, color: color, in: signal)
+                    },
+                    onHoverEventStack: { stack in
+                        hoveredEventStack = stack
                     }
                 )
                 .frame(maxWidth: .infinity, minHeight: dynamicEventTrackHeight, maxHeight: dynamicEventTrackHeight)
@@ -1699,7 +1689,16 @@ struct WaveformView: View {
                         .overlay(alignment: .topLeading) { selectionOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { artifactHighlightOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { cursorOverlay(for: signal) }
+                        .overlay(alignment: .topLeading) { waveformHoverOverlay() }
                         .contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                updateWaveformHover(at: location, in: signal)
+                            case .ended:
+                                waveformHoverInfo = nil
+                            }
+                        }
                         .background(
                             GeometryReader { proxy in
                                 Color.clear
@@ -1779,12 +1778,149 @@ struct WaveformView: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .overlay(alignment: .topLeading) {
+            eventHoverChooserOverlay(
+                in: signal,
+                trackOrigin: eventTrackOrigin,
+                trackHeight: dynamicEventTrackHeight
+            )
+        }
         .onAppear {
             refreshEventTrackSourceSummary(events: events, signature: eventSignature)
         }
         .onChange(of: eventSignature) { _, newSignature in
             refreshEventTrackSourceSummary(events: events, signature: newSignature)
         }
+    }
+
+    @ViewBuilder
+    private func eventHoverChooserOverlay(
+        in signal: MFFSignalData,
+        trackOrigin: CGPoint,
+        trackHeight: CGFloat
+    ) -> some View {
+        GeometryReader { proxy in
+            if isCommandKeyPressed, let hoveredEventStack {
+                let cardWidth: CGFloat = 178
+                let spacing: CGFloat = 8
+                let maxPopupWidth = max(proxy.size.width - 32, cardWidth)
+                let naturalWidth = CGFloat(hoveredEventStack.markers.count) * cardWidth
+                    + CGFloat(max(hoveredEventStack.markers.count - 1, 0)) * spacing
+                    + 16
+                let popupWidth = min(max(naturalWidth, cardWidth + 16), min(maxPopupWidth, 640))
+                let anchorX = trackOrigin.x + hoveredEventStack.location.x
+                let popupX = min(max(anchorX - popupWidth / 2, 8), max(proxy.size.width - popupWidth - 8, 8))
+                let popupY = trackOrigin.y + trackHeight + 8
+
+                eventHoverChooser(
+                    hoveredEventStack,
+                    signal: signal,
+                    cardWidth: cardWidth,
+                    spacing: spacing
+                )
+                .frame(width: popupWidth, alignment: .leading)
+                .offset(x: popupX, y: popupY)
+                .zIndex(100)
+            }
+        }
+        .allowsHitTesting(isCommandKeyPressed && hoveredEventStack != nil)
+    }
+
+    private func eventHoverChooser(
+        _ stack: EventTrackHoverStack,
+        signal: MFFSignalData,
+        cardWidth: CGFloat,
+        spacing: CGFloat
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(stack.markers.count == 1 ? "Event" : "\(stack.markers.count) Events")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 2)
+
+            ScrollView(.horizontal, showsIndicators: stack.markers.count > 3) {
+                HStack(alignment: .top, spacing: spacing) {
+                    ForEach(stack.markers) { marker in
+                        eventHoverCard(marker, signal: signal)
+                            .frame(width: cardWidth, alignment: .leading)
+                    }
+                }
+            }
+        }
+        .padding(8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.16), radius: 8, x: 0, y: 4)
+    }
+
+    private func eventHoverCard(_ marker: EventTrackMarker, signal: MFFSignalData) -> some View {
+        Button {
+            hoveredEventStack = nil
+            selectEventFromTrack(marker.event, color: marker.style.color, in: signal)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(marker.style.color)
+                        .frame(width: 7, height: 7)
+                    Text(eventTrackRibbonLabel(for: marker.event))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+
+                Text(formattedEventTime(marker.event.beginTimeSeconds))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                if let duration = marker.event.durationSeconds {
+                    Text(eventDurationText(duration))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Text(marker.event.sourceFile)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+            .background(marker.style.color.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(marker.style.color.opacity(0.22), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func eventTrackRibbonLabel(for event: MFFEvent) -> String {
+        if isDefinedArtifactEvent(event), let label = event.label {
+            return label
+        }
+        return event.code
+    }
+
+    private func isDefinedArtifactEvent(_ event: MFFEvent) -> Bool {
+        event.sourceFile.hasPrefix("Template ")
+            || event.sourceFile.hasPrefix("Topography ")
+            || event.sourceFile.hasPrefix("Trajectory ")
+            || event.sourceFile.hasPrefix("Continuous ")
+    }
+
+    private func eventDurationText(_ duration: Double) -> String {
+        duration >= 1
+            ? String(format: "%.3f s", duration)
+            : String(format: "%.0f ms", duration * 1000)
     }
 
     private func refreshEventTrackSourceSummary(events: [MFFEvent], signature: EventTrackEventSignature) {
@@ -2169,6 +2305,7 @@ struct WaveformView: View {
         dragSelectionStartSample = nil
         dragSelectionEndSample = nil
         eventTrackContextSample = nil
+        waveformHoverInfo = nil
         lastWaveformClick = nil
         waveformContentMinX = 0
 
@@ -2314,7 +2451,11 @@ struct WaveformView: View {
         guard commandKeyMonitor == nil else { return }
         isCommandKeyPressed = NSEvent.modifierFlags.contains(.command)
         commandKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-            isCommandKeyPressed = event.modifierFlags.contains(.command)
+            let commandIsPressed = event.modifierFlags.contains(.command)
+            isCommandKeyPressed = commandIsPressed
+            if !commandIsPressed {
+                waveformHoverInfo = nil
+            }
             return event
         }
     }
@@ -2325,6 +2466,7 @@ struct WaveformView: View {
         }
         commandKeyMonitor = nil
         isCommandKeyPressed = false
+        waveformHoverInfo = nil
     }
 
     // MARK: - Geometry helpers
@@ -2458,6 +2600,24 @@ struct WaveformView: View {
         horizontalJumpValue = maxOffset > 0 ? Double(clampedOffset / maxOffset) : 0
         isSyncingSliderFromScroll = false
         horizontalScrollPosition.scrollTo(x: clampedOffset)
+    }
+
+    private func selectEventFromTrack(_ event: MFFEvent, color: Color, in signal: MFFSignalData) {
+        jumpToEvent(event, in: signal)
+        // Toggle: selecting the highlighted flag again clears it. Only
+        // artifact-detection events (defined artifacts, eye-artifact threshold
+        // detection) get this band; imported MFF events aren't highlighted this
+        // way. The band centers on `event.centerTimeSeconds`, which accounts
+        // for onset-tagged sources (Topography/Continuous) vs. center-tagged
+        // ones (Template/Trajectory/threshold detection).
+        if highlightedArtifactEvent?.id == event.id {
+            highlightedArtifactEvent = nil
+        } else if isCenteredArtifactDetectionEvent(event) {
+            highlightedArtifactEvent = event
+            highlightedArtifactColor = color
+        } else {
+            highlightedArtifactEvent = nil
+        }
     }
 
     func jumpToSegment(_ result: SegmentHealthResult) {

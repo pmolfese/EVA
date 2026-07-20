@@ -17,11 +17,11 @@
 //  matching every other domain's async work.
 //
 
-import Combine
 import SwiftUI
 
 @MainActor
-final class WaveletArtifactExplorerViewModel: ObservableObject {
+@Observable
+final class WaveletArtifactExplorerViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -31,33 +31,33 @@ final class WaveletArtifactExplorerViewModel: ObservableObject {
     }
 
     // MARK: Sheet / run state
-    @Published var showsSheet = false
-    @Published var isRunning = false
-    @Published var progress = 0.0
-    @Published var statusTitle = ""
-    @Published var statusDetail = ""
-    @Published var statusMessage: String?
-    @Published var log: [WaveletArtifactExplorerLogLine] = []
-    @Published var result: WaveletArtifactExplorerResult?
+    var showsSheet = false
+    var isRunning = false
+    var progress = 0.0
+    var statusTitle = ""
+    var statusDetail = ""
+    var statusMessage: String?
+    var log: [WaveletArtifactExplorerLogLine] = []
+    var result: WaveletArtifactExplorerResult?
     /// Bumped on every scan start; a completing scan checks it still matches
     /// before publishing, so a stale (cancelled/superseded) run can't clobber
     /// a newer one's results.
-    @Published var runGeneration = 0
+    var runGeneration = 0
 
     // MARK: Scan configuration
-    @Published var pipeline = WaveletCleaningPipeline.eeg
-    @Published var cleaningMode = WaveletCleaningMode.conservativeLocal
-    @Published var intensity = WaveletCleaningMode.conservativeLocal.defaultIntensity
-    @Published var channelScope = WaveletExplorerChannelScope.visibleGood
-    @Published var downsampleRate = 250.0
-    @Published var levelCount = 8
-    @Published var thresholdScale = 1.0
-    @Published var waveletFamily = WaveletCleaningFamily.bior44
-    @Published var thresholdRule = WaveletCleaningThresholdRule.hard
-    @Published var thresholdModel = WaveletCleaningThresholdModel.bayesShrink
-    @Published var mergeWindowSeconds = 0.10
-    @Published var minimumDurationSeconds = 0.02
-    @Published var maximumCandidates = 80
+    var pipeline = WaveletCleaningPipeline.eeg
+    var cleaningMode = WaveletCleaningMode.conservativeLocal
+    var intensity = WaveletCleaningMode.conservativeLocal.defaultIntensity
+    var channelScope = WaveletExplorerChannelScope.visibleGood
+    var downsampleRate = 250.0
+    var levelCount = 8
+    var thresholdScale = 1.0
+    var waveletFamily = WaveletCleaningFamily.bior44
+    var thresholdRule = WaveletCleaningThresholdRule.hard
+    var thresholdModel = WaveletCleaningThresholdModel.bayesShrink
+    var mergeWindowSeconds = 0.10
+    var minimumDurationSeconds = 0.02
+    var maximumCandidates = 80
 
     func resetForClose() {
         showsSheet = false

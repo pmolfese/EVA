@@ -14,7 +14,6 @@
 //  drives the actual computation via `SingleTrialAnalyzer` (L3).
 //
 
-import Combine
 import SwiftUI
 
 /// Whether the analysis runs on one channel directly, or averages a channel
@@ -27,7 +26,8 @@ enum SingleTrialChannelScope: String, CaseIterable, Identifiable {
 }
 
 @MainActor
-final class SingleTrialAnalysisViewModel: ObservableObject {
+@Observable
+final class SingleTrialAnalysisViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -37,30 +37,30 @@ final class SingleTrialAnalysisViewModel: ObservableObject {
     }
 
     // MARK: Presence
-    @Published var showsSheet = false
+    var showsSheet = false
 
     // MARK: Selection
-    @Published var selectedCategory: String?
-    @Published var channelScope = SingleTrialChannelScope.singleChannel
-    @Published var selectedChannelIndex: Int?
-    @Published var selectedChannelSetID: ChannelSet.ID?
-    @Published var showsAllConditionsInButterfly = false
+    var selectedCategory: String?
+    var channelScope = SingleTrialChannelScope.singleChannel
+    var selectedChannelIndex: Int?
+    var selectedChannelSetID: ChannelSet.ID?
+    var showsAllConditionsInButterfly = false
 
     // MARK: Analysis window (ms, relative to stimulus onset) — nil until the
     // user drag-selects a range on the averaged-trace picker.
-    @Published var windowStartMs: Double?
-    @Published var windowEndMs: Double?
+    var windowStartMs: Double?
+    var windowEndMs: Double?
 
     // MARK: Parameters
-    @Published var adaptiveHalfWidthMs = 10.0
-    @Published var splitCount = 2
-    @Published var outlierThresholdSD = 3.0
-    @Published var distributionChunkCount = 2
+    var adaptiveHalfWidthMs = 10.0
+    var splitCount = 2
+    var outlierThresholdSD = 3.0
+    var distributionChunkCount = 2
 
     // MARK: Result / run state
-    @Published var result: SingleTrialAnalyzer.Result?
-    @Published var statusMessage: String?
-    @Published var isRunning = false
+    var result: SingleTrialAnalyzer.Result?
+    var statusMessage: String?
+    var isRunning = false
 
     var hasWindow: Bool {
         guard let start = windowStartMs, let end = windowEndMs else { return false }

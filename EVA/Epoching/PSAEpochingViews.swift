@@ -1291,6 +1291,7 @@ extension WaveformView {
             channels: signal.data,
             samplingRate: signal.samplingRate,
             duration: signal.duration,
+            sensorLayoutName: recording.sensorLayout?.name,
             configuration: configuration
         )
     }

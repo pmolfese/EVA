@@ -14,11 +14,11 @@
 //  and reads/writes this store — same shape as `BCGDetectionViewModel`.
 //
 
-import Combine
 import SwiftUI
 
 @MainActor
-final class ECGDetectionViewModel: ObservableObject {
+@Observable
+final class ECGDetectionViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -28,23 +28,23 @@ final class ECGDetectionViewModel: ObservableObject {
     }
 
     // MARK: Enablement / sheet
-    @Published var isEnabled = false
-    @Published var showsSheet = false
+    var isEnabled = false
+    var showsSheet = false
 
     // MARK: Sources
-    @Published var selectedPNSChannels = Set<Int>()
-    @Published var proxyChannels = ""
-    @Published var proxyChannelSetID: ChannelSet.ID?
+    var selectedPNSChannels = Set<Int>()
+    var proxyChannels = ""
+    var proxyChannelSetID: ChannelSet.ID?
 
     // MARK: Detection parameters
-    @Published var algorithm = ECGDetectionAlgorithm.panTompkins
-    @Published var thresholdSD = 4.0
-    @Published var minimumRRSeconds = 0.30
-    @Published var polarity = ECGDetectionPolarity.either
+    var algorithm = ECGDetectionAlgorithm.panTompkins
+    var thresholdSD = 4.0
+    var minimumRRSeconds = 0.30
+    var polarity = ECGDetectionPolarity.either
 
     // MARK: Algorithm-comparison preview
-    @Published var isEstimating = false
-    @Published var algorithmResults: [ECGDetectionAlgorithm: ECGAlgorithmResult] = [:]
+    var isEstimating = false
+    var algorithmResults: [ECGDetectionAlgorithm: ECGAlgorithmResult] = [:]
 
     func resetForClose() {
         isEnabled = false

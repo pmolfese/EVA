@@ -15,11 +15,11 @@
 //  SPDX-License-Identifier: GPL-3.0-only
 //
 
-import Combine
 import Foundation
 
 @MainActor
-final class EEGAnalysisViewModel: ObservableObject {
+@Observable
+final class EEGAnalysisViewModel {
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
@@ -28,32 +28,32 @@ final class EEGAnalysisViewModel: ObservableObject {
         self.store = store
     }
 
-    @Published var showsSheet = false
+    var showsSheet = false
 
-    @Published var segmentLengthSeconds = 4.0
-    @Published var keepsGoodSegments = true
-    @Published var keepsWatchSegments = true
-    @Published var keepsPoorSegments = false
-    @Published var artifactRejectionThreshold = 0.10
-    @Published var selectedArtifactSourceIDs = Set<String>()
+    var segmentLengthSeconds = 4.0
+    var keepsGoodSegments = true
+    var keepsWatchSegments = true
+    var keepsPoorSegments = false
+    var artifactRejectionThreshold = 0.10
+    var selectedArtifactSourceIDs = Set<String>()
 
-    @Published var frequencyBands = EEGFrequencyBand.restingDefaults
-    @Published var selectedConnectivityBandName = "Alpha"
-    @Published var selectedConnectivityMetrics = EEGConnectivityMetric.allCases
-    @Published var includesChannelConnectivity = true
-    @Published var includesRegionConnectivity = true
+    var frequencyBands = EEGFrequencyBand.restingDefaults
+    var selectedConnectivityBandName = "Alpha"
+    var selectedConnectivityMetrics = EEGConnectivityMetric.allCases
+    var includesChannelConnectivity = true
+    var includesRegionConnectivity = true
 
-    @Published var exportIncludesPerChannelDetails = true
-    @Published var exportIncludesSegmentDetails = false
-    @Published var exportIncludesConnectivityPairs = true
+    var exportIncludesPerChannelDetails = true
+    var exportIncludesSegmentDetails = false
+    var exportIncludesConnectivityPairs = true
 
-    @Published var isRunning = false
-    @Published var progress = 0.0
-    @Published var statusMessage: String?
-    @Published var result: EEGAnalysisResult?
+    var isRunning = false
+    var progress = 0.0
+    var statusMessage: String?
+    var result: EEGAnalysisResult?
 
-    private var task: Task<Void, Never>?
-    private var hasInitializedArtifactSources = false
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var hasInitializedArtifactSources = false
 
     deinit {
         task?.cancel()

@@ -16,6 +16,7 @@
 //
 
 import AppKit
+import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -46,7 +47,7 @@ struct ContentView: View {
     var body: some View {
         Group {
             if let recording {
-                WaveformView(recording: recording)
+                WaveformMarkerContainer(recording: recording)
                     .id(recording.id)
             } else {
                 launchScreen
@@ -519,4 +520,28 @@ private struct WindowAccessor: NSViewRepresentable {
         batchSetupRequest: .constant(0)
     )
         .environment(BatchController())
+}
+
+/// Hosts the `UserMarker` SwiftData query so a marker-table change re-evaluates
+/// only this tiny view — not the whole `WaveformView` body (ROADMAP A3). Projects
+/// this recording's markers to Equatable value signatures and passes them in, so
+/// `WaveformView` re-renders only when its own markers actually change.
+private struct WaveformMarkerContainer: View {
+    let recording: MFFRecording
+    @Query private var markers: [UserMarker]
+
+    var body: some View {
+        WaveformView(
+            recording: recording,
+            userMarkers: markers
+                .filter { $0.packageName == recording.packageName }
+                .map {
+                    WaveformUserMarkerSignature(
+                        idHash: $0.persistentModelID.hashValue,
+                        timeSeconds: $0.timeSeconds,
+                        note: $0.note
+                    )
+                }
+        )
+    }
 }

@@ -16,8 +16,8 @@
 import SwiftUI
 
 struct DatasetInfoSheet: View {
-    @ObservedObject var recording: MFFRecording
-    @ObservedObject var epoching: EpochingViewModel
+    var recording: MFFRecording
+    var epoching: EpochingViewModel
     let onClose: () -> Void
 
     @State private var ampType: String?

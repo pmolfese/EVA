@@ -23,84 +23,42 @@ extension WaveformView {
         return .accentColor
     }
 
+    /// Builds a `ChannelLabelRow` for `index`, resolving the channel's derived
+    /// display state (name, hidden/bad/interpolated, color, health) here in the
+    /// parent so the row itself is a plain value + closure view with no
+    /// `WaveformView`/`ChannelModel` capture. See `ChannelLabelRow`.
     func channelLabel(index: Int, signal: MFFSignalData) -> some View {
-        let isHidden = channels.hidden.contains(index)
         let label = signal.channelNames?.indices.contains(index) == true
             ? signal.channelNames?[index].nilIfEmpty ?? "Ch \(index + 1)"
             : "Ch \(index + 1)"
-        return HStack(spacing: 6) {
-            HStack(spacing: 4) {
-                Text(label)
-                    .font(.system(.body, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if isHidden {
-                    Image(systemName: "eye.slash")
-                        .font(.caption2)
-                } else if channels.interpolated[index] != nil {
-                    Image(systemName: "wand.and.stars")
-                        .font(.caption2)
-                } else if channels.bad.contains(index) {
-                    Image(systemName: "xmark.circle")
-                        .font(.caption2)
+        return ChannelLabelRow(
+            index: index,
+            label: label,
+            isHidden: channels.hidden.contains(index),
+            isBad: channels.bad.contains(index),
+            isInterpolated: channels.interpolated[index] != nil,
+            color: channelColor(index),
+            rowHeight: channelRowHeight,
+            healthResult: channels.healthResults[index],
+            isAnalyzingHealth: channels.isAnalyzingHealth,
+            canInterpolate: electrodeGeometry?.positions[index] != nil,
+            moveToPhysioTitle: "Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio",
+            onActivateHealth: {
+                if let signal = continuousProcessedSignal {
+                    runChannelHealthOnDemand(for: signal)
                 }
-            }
-            .foregroundStyle(channelColor(index))
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            ChannelHealthBadge(
-                result: channels.healthResults[index],
-                isAnalyzing: channels.isAnalyzingHealth,
-                onActivate: {
-                    if let signal = continuousProcessedSignal {
-                        runChannelHealthOnDemand(for: signal)
-                    }
-                }
-            )
-        }
-        .opacity(isHidden ? 0.4 : 1)
-        .frame(maxWidth: .infinity, minHeight: channelRowHeight, alignment: .leading)
-        .contentShape(Rectangle())
-        .onTapGesture { toggleHidden(index) }
-        .help("Click to show/hide the trace. Right-click for Mark Bad / Interpolate.")
-        .contextMenu {
-            if channels.bad.contains(index) {
-                Button("Unmark Bad") { channels.bad.remove(index) }
-            } else {
-                Button("Mark Bad") { channels.bad.insert(index) }
-            }
-
-            if channels.interpolated[index] != nil {
-                Button("Remove Interpolation") { channels.removeInterpolation(target: index) }
-            } else {
-                Button("Interpolate") { interpolate(index, in: signal) }
-                    .disabled(electrodeGeometry?.positions[index] == nil)
-            }
-
-            Divider()
-            Button(isHidden ? "Show Trace" : "Hide Trace") { toggleHidden(index) }
-
-            Divider()
-            Button("Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio") {
-                moveEEGChannelToPhysio(index: index, in: signal)
-            }
-
-            Divider()
-            Menu("Export Channel") {
-                Button("Export as JSON…") {
-                    exportChannelAsJSON(index: index, signal: signal)
-                }
-                Button("Export as JSON with Events…") {
-                    exportChannelAsJSON(index: index, signal: signal, includeEvents: true)
-                }
-                Button("Export as 1D…") {
-                    exportChannelAs1D(index: index, signal: signal)
-                }
-                Button("Export as 1D with Events…") {
-                    exportChannelAs1D(index: index, signal: signal, includeEvents: true)
-                }
-            }
-        }
+            },
+            onToggleHidden: { toggleHidden(index) },
+            onMarkBad: { channels.bad.insert(index) },
+            onUnmarkBad: { channels.bad.remove(index) },
+            onInterpolate: { interpolate(index, in: signal) },
+            onRemoveInterpolation: { channels.removeInterpolation(target: index) },
+            onMoveToPhysio: { moveEEGChannelToPhysio(index: index, in: signal) },
+            onExportJSON: { exportChannelAsJSON(index: index, signal: signal) },
+            onExportJSONWithEvents: { exportChannelAsJSON(index: index, signal: signal, includeEvents: true) },
+            onExport1D: { exportChannelAs1D(index: index, signal: signal) },
+            onExport1DWithEvents: { exportChannelAs1D(index: index, signal: signal, includeEvents: true) }
+        )
     }
 
     func toggleHidden(_ index: Int) {
@@ -223,45 +181,33 @@ extension WaveformView {
         })
     }
 
-    @ViewBuilder
+    /// Builds a `WaveformChannelRow` for `index`, marked `.equatable()` so a row
+    /// whose data + viewport didn't change skips its Canvas redraw. Derived state
+    /// (hidden-adjusted samples, color, selection availability) is resolved here
+    /// in the parent; the row captures no `self`. See `WaveformChannelRow`.
     func waveformRow(index: Int, channel: [Float], plotWidth: CGFloat, signal: MFFSignalData) -> some View {
-        WaveformPlot(
+        let isHidden = channels.hidden.contains(index)
+        return WaveformChannelRow(
+            index: index,
             // Hidden channels keep their row but draw no trace.
-            samples: channels.hidden.contains(index) ? [] : channel,
+            samples: isHidden ? [] : channel,
+            dataRevision: signal.dataRevision,
+            isHidden: isHidden,
             amplitudeScale: amplitudeScale,
             timeScale: timeScale,
             sampleStride: displaySampleStride(for: signal),
             visibleRange: visibleHorizontalRange,
-            nominalHeight: channelRowHeight,
+            plotWidth: plotWidth,
+            rowHeight: channelRowHeight,
+            overflowHeight: channelOverflowHeight,
             color: channelColor(index),
-            usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering
+            usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering,
+            canDefineArtifact: activeSelectionRange(in: signal) != nil,
+            moveToPhysioTitle: "Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio",
+            onDefineArtifact: { openArtifactTemplateSheet(for: signal, clickedChannel: index) },
+            onMoveToPhysio: { moveEEGChannelToPhysio(index: index, in: signal) }
         )
-        .frame(width: plotWidth, height: channelRowHeight + (channelOverflowHeight * 2))
-        .background {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .frame(width: plotWidth, height: channelRowHeight)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
-                .frame(width: plotWidth, height: channelRowHeight)
-        }
-        .frame(width: plotWidth, height: channelRowHeight)
-        .contentShape(Rectangle())
-        .contextMenu {
-            Button("Define Artifact…") {
-                openArtifactTemplateSheet(for: signal, clickedChannel: index)
-            }
-            .disabled(activeSelectionRange(in: signal) == nil)
-
-            Divider()
-            Button("Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio") {
-                moveEEGChannelToPhysio(index: index, in: signal)
-            }
-        }
-        .accessibilityLabel("Channel \(index + 1)")
-        .zIndex(1)
+        .equatable()
     }
 
     @ViewBuilder
@@ -375,6 +321,140 @@ extension WaveformView {
                 .offset(x: lowerX)
                 .allowsHitTesting(false)
         }
+    }
+
+    func updateWaveformHover(at location: CGPoint, in signal: MFFSignalData) {
+        guard isCommandKeyPressed,
+              let channelIndex = waveformHoverChannelIndex(atY: location.y, in: signal),
+              signal.data.indices.contains(channelIndex),
+              !channels.hidden.contains(channelIndex) else {
+            waveformHoverInfo = nil
+            return
+        }
+
+        let sample = sampleIndex(forContentX: location.x, in: signal)
+        guard signal.data[channelIndex].indices.contains(sample) else {
+            waveformHoverInfo = nil
+            return
+        }
+        let segment = waveformHoverSegment(containing: sample)
+
+        waveformHoverInfo = WaveformHoverInfo(
+            channelLabel: waveformHoverChannelLabel(index: channelIndex, signal: signal),
+            valueMicrovolts: waveformHoverValue(channel: channelIndex, sample: sample, segment: segment, in: signal),
+            timeText: waveformHoverTimeText(sample: sample, segment: segment, in: signal),
+            location: location
+        )
+    }
+
+    @ViewBuilder
+    func waveformHoverOverlay() -> some View {
+        if isCommandKeyPressed, let waveformHoverInfo {
+            ButterflyChannelBadge(
+                name: waveformHoverInfo.channelLabel,
+                valueMicrovolts: waveformHoverInfo.valueMicrovolts,
+                detail: waveformHoverInfo.timeText
+            )
+            .offset(waveformHoverBadgeOffset(for: waveformHoverInfo))
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private func waveformHoverChannelIndex(atY y: CGFloat, in signal: MFFSignalData) -> Int? {
+        guard y >= 0 else { return nil }
+        let rowPitch = channelRowHeight + rowSpacing
+        guard rowPitch > 0 else { return nil }
+
+        let rowOffset = y.truncatingRemainder(dividingBy: rowPitch)
+        guard rowOffset <= channelRowHeight else { return nil }
+
+        let rowIndex = Int(y / rowPitch)
+        let indices = channelIndices(in: signal)
+        guard indices.indices.contains(rowIndex) else { return nil }
+        return indices[rowIndex]
+    }
+
+    private func waveformHoverChannelLabel(index: Int, signal: MFFSignalData) -> String {
+        let channelNumber = "Ch \(index + 1)"
+        guard let names = signal.channelNames,
+              names.indices.contains(index) else {
+            return channelNumber
+        }
+
+        let name = names[index].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != channelNumber else { return channelNumber }
+        return "\(channelNumber) · \(name)"
+    }
+
+    private func waveformHoverSegment(containing sample: Int) -> EpochSegment? {
+        guard epoching.epochedSignal != nil else { return nil }
+        return epoching.epochSegments.first { sample >= $0.startSample && sample <= $0.endSample }
+    }
+
+    private func waveformHoverValue(channel: Int, sample: Int, segment: EpochSegment?, in signal: MFFSignalData) -> Double {
+        let value = Double(signal.data[channel][sample])
+        guard let segment,
+              segment.stimulusOffsetSamples > 0 else {
+            return value
+        }
+
+        let preStart = segment.startSample
+        let preEnd = preStart + segment.stimulusOffsetSamples
+        guard preStart >= 0,
+              preEnd <= signal.data[channel].count,
+              segment.endSample < signal.data[channel].count else {
+            return value
+        }
+
+        var baselineSum = 0.0
+        var baselineCount = 0
+        for baselineSample in preStart..<preEnd {
+            let baselineValue = Double(signal.data[channel][baselineSample])
+            guard baselineValue.isFinite else { continue }
+            baselineSum += baselineValue
+            baselineCount += 1
+        }
+        guard baselineCount > 0 else { return value }
+        return value - baselineSum / Double(baselineCount)
+    }
+
+    private func waveformHoverTimeText(sample: Int, segment: EpochSegment?, in signal: MFFSignalData) -> String {
+        guard signal.samplingRate > 0 else { return "Time --" }
+        if let segment {
+            let seconds = Double(sample - segment.startSample - segment.stimulusOffsetSamples) / signal.samplingRate
+            let label = epoching.isAveraged || signal.isAveraged || segment.contributingEpochCount > 1
+                ? "Average"
+                : "Segment"
+            return "\(label) \(formatWaveformHoverSeconds(seconds))"
+        }
+        return "Time \(formatWaveformHoverSeconds(Double(sample) / signal.samplingRate))"
+    }
+
+    private func formatWaveformHoverSeconds(_ seconds: Double) -> String {
+        let magnitude = abs(seconds)
+        if magnitude < 1 {
+            return String(format: "%.1f ms", seconds * 1_000)
+        }
+        if magnitude < 60 {
+            return String(format: "%.3f s", seconds)
+        }
+        let sign = seconds < 0 ? "-" : ""
+        let positiveSeconds = magnitude
+        let minutes = Int(positiveSeconds) / 60
+        let remainingSeconds = positiveSeconds.truncatingRemainder(dividingBy: 60)
+        return String(format: "%@%d:%06.3f", sign, minutes, remainingSeconds)
+    }
+
+    private func waveformHoverBadgeOffset(for info: WaveformHoverInfo) -> CGSize {
+        let estimatedWidth: CGFloat = 150
+        let desiredX = info.location.x + 12
+        let viewportLeading = max(horizontalOffset, 0)
+        let viewportTrailing = viewportLeading + max(horizontalViewportWidth, estimatedWidth)
+        let maxX = max(viewportTrailing - estimatedWidth, viewportLeading)
+        let x = min(max(desiredX, viewportLeading), maxX)
+        let y = max(info.location.y - 46, 0)
+        return CGSize(width: x, height: y)
     }
 
     @ViewBuilder

@@ -20,7 +20,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct EEGAnalysisSheet: View {
-    @ObservedObject var viewModel: EEGAnalysisViewModel
+    @Bindable var viewModel: EEGAnalysisViewModel
     @Environment(SegmentGoodnessSettings.self) private var segmentGoodnessSettings
 
     let packageName: String

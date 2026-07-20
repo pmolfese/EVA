@@ -339,6 +339,13 @@ struct WaveformUserMarkerSignature: Equatable {
     let note: String
 }
 
+struct WaveformHoverInfo {
+    let channelLabel: String
+    let valueMicrovolts: Double
+    let timeText: String
+    let location: CGPoint
+}
+
 /// Projects a continuous-recording marker into an epoch's display timeline.
 /// Artifact markers may represent a window rather than an instantaneous point;
 /// in that case a marker is retained whenever the window overlaps the epoch and

@@ -10,11 +10,12 @@ import SwiftUI
 
 struct EyeArtifactThresholdSheet: View {
     let signal: MFFSignalData
+    let sensorLayoutName: String?
     @Binding var detectsEyeBlinkArtifacts: Bool
     @Binding var detectsEyeMovementArtifacts: Bool
     @Binding var blinkChannelOverrideText: String
     @Binding var movementChannelOverrideText: String
-    @ObservedObject var artifactVM: ArtifactViewModel
+    @Bindable var artifactVM: ArtifactViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -38,7 +39,8 @@ struct EyeArtifactThresholdSheet: View {
                     enabled: $detectsEyeBlinkArtifacts,
                     config: $artifactVM.blinkThresholdConfig,
                     channelText: $blinkChannelOverrideText,
-                    signal: signal
+                    signal: signal,
+                    sensorLayoutName: sensorLayoutName
                 )
                 .tabItem { Text("Eye Blink") }
 
@@ -48,7 +50,8 @@ struct EyeArtifactThresholdSheet: View {
                     enabled: $detectsEyeMovementArtifacts,
                     config: $artifactVM.movementThresholdConfig,
                     channelText: $movementChannelOverrideText,
-                    signal: signal
+                    signal: signal,
+                    sensorLayoutName: sensorLayoutName
                 )
                 .tabItem { Text("Eye Movement") }
             }
@@ -62,9 +65,11 @@ struct EyeArtifactThresholdSheet: View {
                     artifactVM.movementThresholdConfig = .defaults(for: .movement)
                     blinkChannelOverrideText = ""
                     movementChannelOverrideText = ""
+                    saveThresholdDefaults()
                 }
                 Spacer()
                 Button("Done") {
+                    saveThresholdDefaults()
                     artifactVM.showsThresholdSheet = false
                 }
                 .keyboardShortcut(.defaultAction)
@@ -77,6 +82,9 @@ struct EyeArtifactThresholdSheet: View {
             blinkChannelOverrideText = channelOverrideText(artifactVM.blinkThresholdConfig.channelOverride)
             movementChannelOverrideText = channelOverrideText(artifactVM.movementThresholdConfig.channelOverride)
         }
+        .onDisappear {
+            saveThresholdDefaults()
+        }
     }
 
     @ViewBuilder
@@ -86,7 +94,8 @@ struct EyeArtifactThresholdSheet: View {
         enabled: Binding<Bool>,
         config: Binding<EyeArtifactThresholdConfiguration>,
         channelText: Binding<String>,
-        signal: MFFSignalData
+        signal: MFFSignalData,
+        sensorLayoutName: String?
     ) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -95,6 +104,19 @@ struct EyeArtifactThresholdSheet: View {
                     .font(.callout.weight(.semibold))
 
                 Group {
+                    thresholdSection("Topology") {
+                        Picker("Signal", selection: config.topologyMode) {
+                            ForEach(EyeArtifactTopologyMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(topologyCaption(kind: kind, mode: config.wrappedValue.topologyMode))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     thresholdSection("Amplitude") {
                         thresholdFloatRow("Minimum", value: config.amplitudeMinMicrovolts,
                                           unit: "µV", range: 10...500, step: 5)
@@ -133,19 +155,34 @@ struct EyeArtifactThresholdSheet: View {
                     }
 
                     thresholdSection("Channels") {
+                        Text(channelUsageHeadline(
+                            kind: kind,
+                            config: config.wrappedValue,
+                            signal: signal,
+                            sensorLayoutName: sensorLayoutName
+                        ))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+
                         HStack {
-                            TextField("auto", text: channelText)
+                            TextField("Override channels", text: channelText)
                                 .textFieldStyle(.roundedBorder)
                                 .onChange(of: channelText.wrappedValue) { _, text in
                                     let parsed = WaveformView.parseChannelList(text, channelCount: signal.numberOfChannels)
                                     config.wrappedValue.channelOverride = parsed.isEmpty ? nil : parsed
                                 }
-                            Button("Auto") {
+                            Button("Use Auto") {
                                 channelText.wrappedValue = ""
                                 config.wrappedValue.channelOverride = nil
                             }
                         }
-                        Text(channelOverrideCaption(kind: kind, config: config.wrappedValue, signal: signal))
+                        Text(channelOverrideCaption(
+                            kind: kind,
+                            config: config.wrappedValue,
+                            signal: signal,
+                            sensorLayoutName: sensorLayoutName
+                        ))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -213,15 +250,71 @@ struct EyeArtifactThresholdSheet: View {
         return indices.map { String($0 + 1) }.joined(separator: ", ")
     }
 
-    private func channelOverrideCaption(
-        kind: EyeArtifactKind, config: EyeArtifactThresholdConfiguration, signal: MFFSignalData
+    private func channelUsageHeadline(
+        kind: EyeArtifactKind,
+        config: EyeArtifactThresholdConfiguration,
+        signal: MFFSignalData,
+        sensorLayoutName: String?
     ) -> String {
+        let autoNames = autoChannelNames(kind: kind, signal: signal, sensorLayoutName: sensorLayoutName)
         if let override = config.channelOverride, !override.isEmpty {
             let valid = override.filter { $0 >= 0 && $0 < signal.numberOfChannels }
-            return "Scanning \(valid.count) channel\(valid.count == 1 ? "" : "s"). Leave blank for the automatic set."
+            let overrideNames = valid.map { String($0 + 1) }.joined(separator: ", ")
+            return "Override: \(overrideNames)"
         }
-        let auto = EyeArtifactThresholdDetector.autoOcularChannelIndices(kind: kind, channelCount: signal.numberOfChannels)
-        let names = auto.map { String($0 + 1) }.joined(separator: ", ")
-        return "Automatic (net-based): channels \(names)."
+        return "Auto: \(autoNames)"
+    }
+
+    private func channelOverrideCaption(
+        kind: EyeArtifactKind,
+        config: EyeArtifactThresholdConfiguration,
+        signal: MFFSignalData,
+        sensorLayoutName: String?
+    ) -> String {
+        let autoNames = autoChannelNames(kind: kind, signal: signal, sensorLayoutName: sensorLayoutName)
+        let autoSource: String
+        if let sensorLayoutName, !sensorLayoutName.isEmpty {
+            autoSource = sensorLayoutName
+        } else {
+            autoSource = "channel-count fallback"
+        }
+
+        if let override = config.channelOverride, !override.isEmpty {
+            let valid = override.filter { $0 >= 0 && $0 < signal.numberOfChannels }
+            let overrideNames = valid.map { String($0 + 1) }.joined(separator: ", ")
+            return "Override: channels \(overrideNames). Auto (\(autoSource)) would use: \(autoNames)."
+        }
+        return "Auto (\(autoSource)): channels \(autoNames)."
+    }
+
+    private func autoChannelNames(
+        kind: EyeArtifactKind,
+        signal: MFFSignalData,
+        sensorLayoutName: String?
+    ) -> String {
+        EyeArtifactThresholdDetector
+            .autoOcularChannelIndices(
+                kind: kind,
+                channelCount: signal.numberOfChannels,
+                sensorLayoutName: sensorLayoutName
+            )
+            .map { String($0 + 1) }
+            .joined(separator: ", ")
+    }
+
+    private func topologyCaption(kind: EyeArtifactKind, mode: EyeArtifactTopologyMode) -> String {
+        switch (kind, mode) {
+        case (.blink, .derivedOcular):
+            return "Thresholds a derived VEOG-like trace that requires same-polarity activity over both eyes, reducing eye-movement cross-labeling."
+        case (.movement, .derivedOcular):
+            return "Thresholds a derived HEOG-like left-right opponent trace, reducing blink cross-labeling."
+        case (_, .legacyMaxChannel):
+            return "Original behavior: thresholds whichever selected ocular channel has the largest absolute value at each sample."
+        }
+    }
+
+    private func saveThresholdDefaults() {
+        ProcessingDefaults.shared.ocularBlinkThresholdConfig = artifactVM.blinkThresholdConfig
+        ProcessingDefaults.shared.ocularMovementThresholdConfig = artifactVM.movementThresholdConfig
     }
 }

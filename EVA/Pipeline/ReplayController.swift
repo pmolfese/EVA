@@ -14,11 +14,11 @@
 //  replay on one code path — replay just awaits a gate between the same steps.
 //
 
-import Combine
 import SwiftUI
 
 @MainActor
-final class ReplayController: ObservableObject {
+@Observable
+final class ReplayController {
 
     enum Mode: String, CaseIterable, Identifiable {
         case fullAuto = "Full Auto"
@@ -82,18 +82,18 @@ final class ReplayController: ObservableObject {
     }
 
     // MARK: Config + state
-    @Published var sourceName = ""
-    @Published var steps: [StepConfig] = []
-    @Published var mode: Mode = .fullAuto
-    @Published var state: State = .idle
-    @Published var showsConfigPane = false
-    @Published var banner: BannerInfo?
+    var sourceName = ""
+    var steps: [StepConfig] = []
+    var mode: Mode = .fullAuto
+    var state: State = .idle
+    var showsConfigPane = false
+    var banner: BannerInfo?
 
     // MARK: Finish-and-export (the seam Batch produces outputs through)
-    @Published var exportWhenFinished = false
+    var exportWhenFinished = false
     /// Destination folder for replay output; filename suffix follows the final
     /// export kind (`processed`, `segmented`, or `average`).
-    @Published var outputFolder: URL?
+    var outputFolder: URL?
 
     private var continuation: CheckedContinuation<Resolution, Never>?
     private var pendingResolution: Resolution?
