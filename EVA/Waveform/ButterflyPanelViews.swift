@@ -65,6 +65,7 @@ extension WaveformView {
                                     colors: overlaySegments.map { epochColor(for: $0.colorIndex) },
                                     hiddenChannels: channels.hidden,
                                     amplitudeScale: amplitudeScale,
+                                    samplingRate: signal.samplingRate,
                                     highlightRelativeSample: epoching.butterflyTopomapRelativeSample,
                                     channelName: { eegChannelDisplayName(index: $0, signal: signal) },
                                     onTapChannel: { scrollToChannelRequest = $0 }
@@ -89,7 +90,8 @@ extension WaveformView {
                                             segments: overlaySegments,
                                             colors: overlaySegments.map { epochColor(for: $0.colorIndex) },
                                             hiddenChannels: channels.hidden,
-                                            amplitudeScale: amplitudeScale
+                                            amplitudeScale: amplitudeScale,
+                                            samplingRate: signal.samplingRate
                                         )
                                     }
                                 }
@@ -117,6 +119,7 @@ extension WaveformView {
                                         segment: segment,
                                         hiddenChannels: channels.hidden,
                                         amplitudeScale: amplitudeScale,
+                                        samplingRate: signal.samplingRate,
                                         color: epochColor(for: segment.colorIndex),
                                         highlightRelativeSample: epoching.butterflyTopomapRelativeSample,
                                         noiseCurve: (epoching.showsNoiseBand && !recording.noiseCurvesByCategory.isEmpty)
@@ -159,6 +162,7 @@ extension WaveformView {
                                                 segment: segment,
                                                 hiddenChannels: channels.hidden,
                                                 amplitudeScale: amplitudeScale,
+                                                samplingRate: signal.samplingRate,
                                                 color: epochColor(for: segment.colorIndex),
                                                 noiseCurve: (epoching.showsNoiseBand && !recording.noiseCurvesByCategory.isEmpty)
                                                     ? recording.noiseCurvesByCategory[segment.category] : nil

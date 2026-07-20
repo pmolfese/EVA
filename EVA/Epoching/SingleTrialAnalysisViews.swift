@@ -791,6 +791,7 @@ private struct SingleTrialWindowPicker: View {
                     colors: colors,
                     hiddenChannels: hiddenChannels,
                     amplitudeScale: amplitudeScale,
+                    samplingRate: samplingRate,
                     channelName: channelName,
                     onTapChannel: onTapChannel
                 )

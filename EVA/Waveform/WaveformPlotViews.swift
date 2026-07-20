@@ -470,6 +470,7 @@ struct ButterflyConditionPlot: View {
     let segment: EpochSegment
     let hiddenChannels: Set<Int>
     let amplitudeScale: Double
+    let samplingRate: Double
     let color: Color
     var highlightRelativeSample: Int? = nil
     /// Per-sample grand-average noise amplitude (µV) shaded as a ± band.
@@ -515,7 +516,12 @@ struct ButterflyConditionPlot: View {
                     if let hoveredTrace {
                         ButterflyChannelBadge(
                             name: channelName?(hoveredTrace.channel) ?? "Ch \(hoveredTrace.channel + 1)",
-                            valueMicrovolts: Double(hoveredTrace.valueMicrovolts)
+                            valueMicrovolts: Double(hoveredTrace.valueMicrovolts),
+                            detail: butterflyLatencyText(
+                                localSample: hoveredTrace.localSample,
+                                stimulusOffsetSamples: segment.stimulusOffsetSamples,
+                                samplingRate: samplingRate
+                            )
                         )
                             .padding(6)
                             .allowsHitTesting(false)
@@ -611,6 +617,27 @@ private struct ButterflyTraceHit {
     let channel: Int
     let localSample: Int
     let valueMicrovolts: Float
+}
+
+private func butterflyLatencyText(localSample: Int, stimulusOffsetSamples: Int, samplingRate: Double) -> String? {
+    guard samplingRate > 0 else { return nil }
+    let seconds = Double(localSample - stimulusOffsetSamples) / samplingRate
+    return "Latency \(formatButterflyLatency(seconds))"
+}
+
+private func formatButterflyLatency(_ seconds: Double) -> String {
+    let magnitude = abs(seconds)
+    if magnitude < 1 {
+        return String(format: "%.1f ms", seconds * 1_000)
+    }
+    if magnitude < 60 {
+        return String(format: "%.3f s", seconds)
+    }
+    let sign = seconds < 0 ? "-" : ""
+    let positiveSeconds = magnitude
+    let minutes = Int(positiveSeconds) / 60
+    let remainingSeconds = positiveSeconds.truncatingRemainder(dividingBy: 60)
+    return "\(sign)\(minutes):\(String(format: "%06.3f", remainingSeconds))"
 }
 
 /// Nearest-trace hit test shared by `ButterflyConditionPlot`/`OverlayButterflyPlot`:
@@ -771,6 +798,7 @@ struct OverlayButterflyPlot: View {
     let colors: [Color]
     let hiddenChannels: Set<Int>
     let amplitudeScale: Double
+    let samplingRate: Double
     var highlightRelativeSample: Int? = nil
     /// Resolves a channel index to its display name, for the hover badge.
     var channelName: ((Int) -> String)? = nil
@@ -828,9 +856,17 @@ struct OverlayButterflyPlot: View {
                 )
                 .overlay(alignment: .topTrailing) {
                     if let hoveredTrace {
+                        let firstSegment = segments.first
                         ButterflyChannelBadge(
                             name: channelName?(hoveredTrace.channel) ?? "Ch \(hoveredTrace.channel + 1)",
-                            valueMicrovolts: Double(hoveredTrace.valueMicrovolts)
+                            valueMicrovolts: Double(hoveredTrace.valueMicrovolts),
+                            detail: firstSegment.flatMap {
+                                butterflyLatencyText(
+                                    localSample: hoveredTrace.localSample,
+                                    stimulusOffsetSamples: $0.stimulusOffsetSamples,
+                                    samplingRate: samplingRate
+                                )
+                            }
                         )
                             .padding(6)
                             .allowsHitTesting(false)

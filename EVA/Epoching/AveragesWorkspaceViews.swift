@@ -194,6 +194,7 @@ extension WaveformView {
                         colors: segments.map { epochColor(for: $0.colorIndex) },
                         hiddenChannels: channels.hidden,
                         amplitudeScale: amplitudeScale,
+                        samplingRate: signal.samplingRate,
                         highlightRelativeSample: currentRelativeSample,
                         channelName: { eegChannelDisplayName(index: $0, signal: signal) },
                         onTapChannel: { channelInspectorSelection = .channel($0) },
@@ -223,6 +224,7 @@ extension WaveformView {
                                 colors: segments.map { epochColor(for: $0.colorIndex) },
                                 hiddenChannels: channels.hidden,
                                 amplitudeScale: amplitudeScale,
+                                samplingRate: signal.samplingRate,
                                 highlightRelativeSample: currentRelativeSample
                             )
                         }
@@ -565,6 +567,7 @@ extension WaveformView {
                     colors: segments.map { epochColor(for: $0.colorIndex) },
                     hiddenChannels: channels.hidden,
                     amplitudeScale: amplitudeScale,
+                    samplingRate: signal.samplingRate,
                     highlightRelativeSample: relativeSample
                 )
                 .frame(height: 260)
