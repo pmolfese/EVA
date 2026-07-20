@@ -100,6 +100,19 @@ struct EyeArtifactThresholdSheet: View {
                     .font(.callout.weight(.semibold))
 
                 Group {
+                    thresholdSection("Topology") {
+                        Picker("Signal", selection: config.topologyMode) {
+                            ForEach(EyeArtifactTopologyMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(topologyCaption(kind: kind, mode: config.wrappedValue.topologyMode))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     thresholdSection("Amplitude") {
                         thresholdFloatRow("Minimum", value: config.amplitudeMinMicrovolts,
                                           unit: "µV", range: 10...500, step: 5)
@@ -228,6 +241,17 @@ struct EyeArtifactThresholdSheet: View {
         let auto = EyeArtifactThresholdDetector.autoOcularChannelIndices(kind: kind, channelCount: signal.numberOfChannels)
         let names = auto.map { String($0 + 1) }.joined(separator: ", ")
         return "Automatic (net-based): channels \(names)."
+    }
+
+    private func topologyCaption(kind: EyeArtifactKind, mode: EyeArtifactTopologyMode) -> String {
+        switch (kind, mode) {
+        case (.blink, .derivedOcular):
+            return "Thresholds a derived VEOG-like trace that requires same-polarity activity over both eyes, reducing eye-movement cross-labeling."
+        case (.movement, .derivedOcular):
+            return "Thresholds a derived HEOG-like left-right opponent trace, reducing blink cross-labeling."
+        case (_, .legacyMaxChannel):
+            return "Original behavior: thresholds whichever selected ocular channel has the largest absolute value at each sample."
+        }
     }
 
     private func saveThresholdDefaults() {

@@ -65,18 +65,16 @@ nonisolated enum EyeArtifactThresholdDetector {
             ? max(Int((config.riseWindowSeconds * samplingRate).rounded()), 1)
             : Int.max
 
-        // Per-sample "driving" value = the candidate channel whose signed value
-        // is largest in magnitude at that sample. Velocity/acceleration and the
-        // peak all read from this single trace so the metrics stay consistent.
-        var drive = [Float](repeating: 0, count: sampleCount)
-        for sample in 0..<sampleCount {
-            var best: Float = 0
-            for channelIndex in candidateChannels {
-                let value = channels[channelIndex][sample]
-                if abs(value) > abs(best) { best = value }
-            }
-            drive[sample] = best
-        }
+        // Per-sample "driving" value. Derived mode keeps the expected ocular
+        // topology: blinks are bilateral/common-mode, movements are
+        // left-right/opponent-mode. Legacy mode preserves the old max-channel
+        // collapse exactly.
+        let drive = driveTrace(
+            kind: kind,
+            channels: channels,
+            candidateChannels: candidateChannels,
+            configuration: config
+        )
 
         func crosses(_ value: Float) -> Bool {
             switch config.polarity {
@@ -129,7 +127,12 @@ nonisolated enum EyeArtifactThresholdDetector {
             }
 
             if let last = intervals.last, run.lowerBound - last.upperBound <= mergeGapSamples {
-                intervals[intervals.count - 1] = last.lowerBound...run.upperBound
+                let merged = last.lowerBound...run.upperBound
+                if merged.count <= maximumSamples {
+                    intervals[intervals.count - 1] = merged
+                } else {
+                    intervals.append(run)
+                }
             } else {
                 intervals.append(run)
             }
@@ -189,6 +192,117 @@ nonisolated enum EyeArtifactThresholdDetector {
         return (maxVelocity, maxAcceleration)
     }
 
+    private static func driveTrace(
+        kind: EyeArtifactKind,
+        channels: [[Float]],
+        candidateChannels: [Int],
+        configuration: EyeArtifactThresholdConfiguration
+    ) -> [Float] {
+        switch configuration.topologyMode {
+        case .legacyMaxChannel:
+            return legacyMaxChannelDrive(channels: channels, candidateChannels: candidateChannels)
+        case .derivedOcular:
+            guard let groups = resolvedTopologyGroups(
+                kind: kind,
+                channels: channels,
+                configuration: configuration
+            ) else {
+                return legacyMaxChannelDrive(channels: channels, candidateChannels: candidateChannels)
+            }
+            switch kind {
+            case .blink:
+                return blinkDrive(channels: channels, groups: groups)
+            case .movement:
+                return movementDrive(channels: channels, groups: groups)
+            }
+        }
+    }
+
+    private static func legacyMaxChannelDrive(channels: [[Float]], candidateChannels: [Int]) -> [Float] {
+        let sampleCount = channels.first?.count ?? 0
+        var drive = [Float](repeating: 0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            var best: Float = 0
+            for channelIndex in candidateChannels {
+                let value = channels[channelIndex][sample]
+                if abs(value) > abs(best) { best = value }
+            }
+            drive[sample] = best
+        }
+        return drive
+    }
+
+    private static func blinkDrive(channels: [[Float]], groups: OcularTopologyGroups) -> [Float] {
+        let sampleCount = channels.first?.count ?? 0
+        var drive = [Float](repeating: 0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            let left = meanSample(sample, channels: channels, indices: groups.left)
+            let right = meanSample(sample, channels: channels, indices: groups.right)
+            guard left != 0, right != 0, (left > 0) == (right > 0) else {
+                drive[sample] = 0
+                continue
+            }
+            // Same-polarity bilateral VEOG-like activity; averaging keeps the
+            // threshold in per-side µV units instead of doubling it.
+            drive[sample] = (left + right) / 2
+        }
+        return drive
+    }
+
+    private static func movementDrive(channels: [[Float]], groups: OcularTopologyGroups) -> [Float] {
+        let sampleCount = channels.first?.count ?? 0
+        var drive = [Float](repeating: 0, count: sampleCount)
+        for sample in 0..<sampleCount {
+            let left = meanSample(sample, channels: channels, indices: groups.left)
+            let right = meanSample(sample, channels: channels, indices: groups.right)
+            let opponent = left - right
+            let common = (left + right) / 2
+            // HEOG-like activity should be dominated by left-right opposition,
+            // not common-mode blink activity.
+            drive[sample] = abs(opponent) > abs(common) ? opponent : 0
+        }
+        return drive
+    }
+
+    private static func meanSample(_ sample: Int, channels: [[Float]], indices: [Int]) -> Float {
+        guard !indices.isEmpty else { return 0 }
+        var sum: Float = 0
+        var count: Float = 0
+        for index in indices where channels.indices.contains(index) && channels[index].indices.contains(sample) {
+            sum += channels[index][sample]
+            count += 1
+        }
+        return count > 0 ? sum / count : 0
+    }
+
+    private struct OcularTopologyGroups {
+        let left: [Int]
+        let right: [Int]
+    }
+
+    private static func resolvedTopologyGroups(
+        kind: EyeArtifactKind,
+        channels: [[Float]],
+        configuration: EyeArtifactThresholdConfiguration
+    ) -> OcularTopologyGroups? {
+        let sampleCount = channels.first?.count ?? 0
+        let groups: OcularTopologyGroups
+        if let override = configuration.channelOverride, override.count >= 2 {
+            let midpoint = max(override.count / 2, 1)
+            groups = OcularTopologyGroups(
+                left: Array(override.prefix(midpoint)),
+                right: Array(override.dropFirst(midpoint))
+            )
+        } else {
+            groups = autoOcularTopologyGroups(kind: kind, channelCount: channels.count)
+        }
+
+        let left = groups.left.filter { $0 >= 0 && $0 < channels.count && channels[$0].count == sampleCount }
+        let right = groups.right.filter { $0 >= 0 && $0 < channels.count && channels[$0].count == sampleCount }
+        guard !left.isEmpty, !right.isEmpty else { return nil }
+        return OcularTopologyGroups(left: left, right: right)
+    }
+
     /// Resolves the ocular channels to scan: the user override when present and
     /// valid, otherwise the net-geometry default.
     private static func resolvedChannels(
@@ -224,5 +338,36 @@ nonisolated enum EyeArtifactThresholdDetector {
         }
 
         return oneBasedChannels.map { $0 - 1 }
+    }
+
+    /// Default left/right periocular groups for the derived VEOG/HEOG traces.
+    /// EGI channel numbers are 1-based; returned arrays are 0-based.
+    private static func autoOcularTopologyGroups(kind: EyeArtifactKind, channelCount: Int) -> OcularTopologyGroups {
+        let leftOneBased: [Int]
+        let rightOneBased: [Int]
+        switch (kind, channelCount) {
+        case (.blink, 241...):
+            leftOneBased = [18, 238]
+            rightOneBased = [37, 241]
+        case (.blink, 127...):
+            leftOneBased = [8, 126]
+            rightOneBased = [25, 127]
+        case (.movement, 252...):
+            leftOneBased = [226]
+            rightOneBased = [252]
+        case (.movement, 128...):
+            leftOneBased = [1, 125]
+            rightOneBased = [32, 128]
+        default:
+            let available = Array(1...min(channelCount, 4))
+            let midpoint = max(available.count / 2, 1)
+            leftOneBased = Array(available.prefix(midpoint))
+            rightOneBased = Array(available.dropFirst(midpoint))
+        }
+
+        return OcularTopologyGroups(
+            left: leftOneBased.map { $0 - 1 },
+            right: rightOneBased.map { $0 - 1 }
+        )
     }
 }
