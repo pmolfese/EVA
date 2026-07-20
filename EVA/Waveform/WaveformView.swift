@@ -121,6 +121,7 @@ struct WaveformView: View {
     @State var dragSelectionStartSample: Int?
     @State var dragSelectionEndSample: Int?
     @State var eventTrackContextSample: Int?
+    @State var waveformHoverInfo: WaveformHoverInfo?
     /// Timestamp of the last stationary click, used to detect a double-click
     /// manually inside the single waveform interaction gesture.
     @State var lastWaveformClick: (time: Date, x: CGFloat)?
@@ -258,7 +259,7 @@ struct WaveformView: View {
     let channelRowHeight: CGFloat = 70
     let channelOverflowHeight: CGFloat = 28
     private let eventTrackHeight: CGFloat = 64
-    private let rowSpacing: CGFloat = 12
+    let rowSpacing: CGFloat = 12
     let labelColumnWidth: CGFloat = 120
     private let geometryUpdateQuantum: CGFloat = 0.5
     private let jumpSliderUpdateQuantum = 0.0005
@@ -1696,7 +1697,16 @@ struct WaveformView: View {
                         .overlay(alignment: .topLeading) { selectionOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { artifactHighlightOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { cursorOverlay(for: signal) }
+                        .overlay(alignment: .topLeading) { waveformHoverOverlay() }
                         .contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                updateWaveformHover(at: location, in: signal)
+                            case .ended:
+                                waveformHoverInfo = nil
+                            }
+                        }
                         .background(
                             GeometryReader { proxy in
                                 Color.clear
@@ -2166,6 +2176,7 @@ struct WaveformView: View {
         dragSelectionStartSample = nil
         dragSelectionEndSample = nil
         eventTrackContextSample = nil
+        waveformHoverInfo = nil
         lastWaveformClick = nil
         waveformContentMinX = 0
 
@@ -2311,7 +2322,11 @@ struct WaveformView: View {
         guard commandKeyMonitor == nil else { return }
         isCommandKeyPressed = NSEvent.modifierFlags.contains(.command)
         commandKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-            isCommandKeyPressed = event.modifierFlags.contains(.command)
+            let commandIsPressed = event.modifierFlags.contains(.command)
+            isCommandKeyPressed = commandIsPressed
+            if !commandIsPressed {
+                waveformHoverInfo = nil
+            }
             return event
         }
     }
@@ -2322,6 +2337,7 @@ struct WaveformView: View {
         }
         commandKeyMonitor = nil
         isCommandKeyPressed = false
+        waveformHoverInfo = nil
     }
 
     // MARK: - Geometry helpers

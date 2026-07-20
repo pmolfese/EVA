@@ -323,6 +323,105 @@ extension WaveformView {
         }
     }
 
+    func updateWaveformHover(at location: CGPoint, in signal: MFFSignalData) {
+        guard isCommandKeyPressed,
+              let channelIndex = waveformHoverChannelIndex(atY: location.y, in: signal),
+              signal.data.indices.contains(channelIndex),
+              !channels.hidden.contains(channelIndex) else {
+            waveformHoverInfo = nil
+            return
+        }
+
+        let sample = sampleIndex(forContentX: location.x, in: signal)
+        guard signal.data[channelIndex].indices.contains(sample) else {
+            waveformHoverInfo = nil
+            return
+        }
+
+        waveformHoverInfo = WaveformHoverInfo(
+            channelLabel: waveformHoverChannelLabel(index: channelIndex, signal: signal),
+            valueMicrovolts: Double(signal.data[channelIndex][sample]),
+            timeText: waveformHoverTimeText(sample: sample, in: signal),
+            location: location
+        )
+    }
+
+    @ViewBuilder
+    func waveformHoverOverlay() -> some View {
+        if isCommandKeyPressed, let waveformHoverInfo {
+            ButterflyChannelBadge(
+                name: waveformHoverInfo.channelLabel,
+                valueMicrovolts: waveformHoverInfo.valueMicrovolts,
+                detail: waveformHoverInfo.timeText
+            )
+            .offset(waveformHoverBadgeOffset(for: waveformHoverInfo))
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private func waveformHoverChannelIndex(atY y: CGFloat, in signal: MFFSignalData) -> Int? {
+        guard y >= 0 else { return nil }
+        let rowPitch = channelRowHeight + rowSpacing
+        guard rowPitch > 0 else { return nil }
+
+        let rowOffset = y.truncatingRemainder(dividingBy: rowPitch)
+        guard rowOffset <= channelRowHeight else { return nil }
+
+        let rowIndex = Int(y / rowPitch)
+        let indices = channelIndices(in: signal)
+        guard indices.indices.contains(rowIndex) else { return nil }
+        return indices[rowIndex]
+    }
+
+    private func waveformHoverChannelLabel(index: Int, signal: MFFSignalData) -> String {
+        let channelNumber = "Ch \(index + 1)"
+        guard let names = signal.channelNames,
+              names.indices.contains(index) else {
+            return channelNumber
+        }
+
+        let name = names[index].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != channelNumber else { return channelNumber }
+        return "\(channelNumber) · \(name)"
+    }
+
+    private func waveformHoverTimeText(sample: Int, in signal: MFFSignalData) -> String {
+        guard signal.samplingRate > 0 else { return "Time --" }
+        if epoching.epochedSignal != nil,
+           let segment = epoching.epochSegments.first(where: { sample >= $0.startSample && sample <= $0.endSample }) {
+            let seconds = Double(sample - segment.startSample) / signal.samplingRate
+            let label = epoching.isAveraged || signal.isAveraged || segment.contributingEpochCount > 1
+                ? "Average"
+                : "Segment"
+            return "\(label) \(formatWaveformHoverSeconds(seconds))"
+        }
+        return "Time \(formatWaveformHoverSeconds(Double(sample) / signal.samplingRate))"
+    }
+
+    private func formatWaveformHoverSeconds(_ seconds: Double) -> String {
+        if seconds < 1 {
+            return String(format: "%.1f ms", seconds * 1_000)
+        }
+        if seconds < 60 {
+            return String(format: "%.3f s", seconds)
+        }
+        let minutes = Int(seconds) / 60
+        let remainingSeconds = seconds.truncatingRemainder(dividingBy: 60)
+        return String(format: "%d:%06.3f", minutes, remainingSeconds)
+    }
+
+    private func waveformHoverBadgeOffset(for info: WaveformHoverInfo) -> CGSize {
+        let estimatedWidth: CGFloat = 150
+        let desiredX = info.location.x + 12
+        let viewportLeading = max(horizontalOffset, 0)
+        let viewportTrailing = viewportLeading + max(horizontalViewportWidth, estimatedWidth)
+        let maxX = max(viewportTrailing - estimatedWidth, viewportLeading)
+        let x = min(max(desiredX, viewportLeading), maxX)
+        let y = max(info.location.y - 46, 0)
+        return CGSize(width: x, height: y)
+    }
+
     @ViewBuilder
     func segmentHealthOverlay(for signal: MFFSignalData) -> some View {
         if !epoching.isAveraged,
