@@ -116,7 +116,6 @@ struct WaveformView: View {
     @State var selectedEventCodes = Set<String>()
     @State private var displayedEventsCache = WaveformDisplayedEventsCache.empty
     @State private var eventTrackSourceSummary = EventTrackSourceSummary.empty
-    @State private var hoveredEventStack: EventTrackHoverStack?
     @State var topomapSample: Int?
     @State var selectedSampleRange: ClosedRange<Int>?
     @State var dragSelectionStartSample: Int?
@@ -1613,7 +1612,6 @@ struct WaveformView: View {
             : EventTrackSourceSummary(events: events, signature: eventSignature)
         let eventLaneCount = max(min(sourceSummary.sourceCount, EventTrackView.maxLanes), 1)
         let dynamicEventTrackHeight = eventTrackHeight + CGFloat(eventLaneCount - 1) * EventTrackView.laneSpacing
-        let eventTrackOrigin = CGPoint(x: 20 + labelColumnWidth + 12, y: 20)
 
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
@@ -1643,11 +1641,7 @@ struct WaveformView: View {
                     isCommandKeyPressed: isCommandKeyPressed,
                     laneCount: eventLaneCount,
                     onSelectEvent: { event, color in
-                        hoveredEventStack = nil
                         selectEventFromTrack(event, color: color, in: signal)
-                    },
-                    onHoverEventStack: { stack in
-                        hoveredEventStack = stack
                     }
                 )
                 .frame(maxWidth: .infinity, minHeight: dynamicEventTrackHeight, maxHeight: dynamicEventTrackHeight)
@@ -1778,149 +1772,12 @@ struct WaveformView: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
-        .overlay(alignment: .topLeading) {
-            eventHoverChooserOverlay(
-                in: signal,
-                trackOrigin: eventTrackOrigin,
-                trackHeight: dynamicEventTrackHeight
-            )
-        }
         .onAppear {
             refreshEventTrackSourceSummary(events: events, signature: eventSignature)
         }
         .onChange(of: eventSignature) { _, newSignature in
             refreshEventTrackSourceSummary(events: events, signature: newSignature)
         }
-    }
-
-    @ViewBuilder
-    private func eventHoverChooserOverlay(
-        in signal: MFFSignalData,
-        trackOrigin: CGPoint,
-        trackHeight: CGFloat
-    ) -> some View {
-        GeometryReader { proxy in
-            if isCommandKeyPressed, let hoveredEventStack {
-                let cardWidth: CGFloat = 178
-                let spacing: CGFloat = 8
-                let maxPopupWidth = max(proxy.size.width - 32, cardWidth)
-                let naturalWidth = CGFloat(hoveredEventStack.markers.count) * cardWidth
-                    + CGFloat(max(hoveredEventStack.markers.count - 1, 0)) * spacing
-                    + 16
-                let popupWidth = min(max(naturalWidth, cardWidth + 16), min(maxPopupWidth, 640))
-                let anchorX = trackOrigin.x + hoveredEventStack.location.x
-                let popupX = min(max(anchorX - popupWidth / 2, 8), max(proxy.size.width - popupWidth - 8, 8))
-                let popupY = trackOrigin.y + trackHeight + 8
-
-                eventHoverChooser(
-                    hoveredEventStack,
-                    signal: signal,
-                    cardWidth: cardWidth,
-                    spacing: spacing
-                )
-                .frame(width: popupWidth, alignment: .leading)
-                .offset(x: popupX, y: popupY)
-                .zIndex(100)
-            }
-        }
-        .allowsHitTesting(isCommandKeyPressed && hoveredEventStack != nil)
-    }
-
-    private func eventHoverChooser(
-        _ stack: EventTrackHoverStack,
-        signal: MFFSignalData,
-        cardWidth: CGFloat,
-        spacing: CGFloat
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(stack.markers.count == 1 ? "Event" : "\(stack.markers.count) Events")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 2)
-
-            ScrollView(.horizontal, showsIndicators: stack.markers.count > 3) {
-                HStack(alignment: .top, spacing: spacing) {
-                    ForEach(stack.markers) { marker in
-                        eventHoverCard(marker, signal: signal)
-                            .frame(width: cardWidth, alignment: .leading)
-                    }
-                }
-            }
-        }
-        .padding(8)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.16), radius: 8, x: 0, y: 4)
-    }
-
-    private func eventHoverCard(_ marker: EventTrackMarker, signal: MFFSignalData) -> some View {
-        Button {
-            hoveredEventStack = nil
-            selectEventFromTrack(marker.event, color: marker.style.color, in: signal)
-        } label: {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(marker.style.color)
-                        .frame(width: 7, height: 7)
-                    Text(eventTrackRibbonLabel(for: marker.event))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                }
-
-                Text(formattedEventTime(marker.event.beginTimeSeconds))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                if let duration = marker.event.durationSeconds {
-                    Text(eventDurationText(duration))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Text(marker.event.sourceFile)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 8)
-            .background(marker.style.color.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
-            .overlay {
-                RoundedRectangle(cornerRadius: 7)
-                    .stroke(marker.style.color.opacity(0.22), lineWidth: 1)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 7))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func eventTrackRibbonLabel(for event: MFFEvent) -> String {
-        if isDefinedArtifactEvent(event), let label = event.label {
-            return label
-        }
-        return event.code
-    }
-
-    private func isDefinedArtifactEvent(_ event: MFFEvent) -> Bool {
-        event.sourceFile.hasPrefix("Template ")
-            || event.sourceFile.hasPrefix("Topography ")
-            || event.sourceFile.hasPrefix("Trajectory ")
-            || event.sourceFile.hasPrefix("Continuous ")
-    }
-
-    private func eventDurationText(_ duration: Double) -> String {
-        duration >= 1
-            ? String(format: "%.3f s", duration)
-            : String(format: "%.0f ms", duration * 1000)
     }
 
     private func refreshEventTrackSourceSummary(events: [MFFEvent], signature: EventTrackEventSignature) {
