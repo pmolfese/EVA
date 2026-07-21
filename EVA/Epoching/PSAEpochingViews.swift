@@ -90,57 +90,61 @@ extension WaveformView {
                     .foregroundStyle(.secondary)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Segment On")
-                        .font(.caption.weight(.semibold))
-                        .fixedSize()
+            HStack {
+                Text("Segment On")
+                    .font(.caption.weight(.semibold))
+                    .fixedSize()
 
-                    Spacer(minLength: 10)
+                Spacer(minLength: 10)
 
-                    Picker("Segment On", selection: segmentFieldBinding) {
-                        ForEach(PSASegmentField.allCases) { field in
-                            Text(field.rawValue).tag(field)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 150)
-
-                    Spacer(minLength: 12)
-
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Filter events", text: $epoching.eventSearchText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 220)
-                    if !epoching.eventSearchText.isEmpty {
-                        Button {
-                            epoching.eventSearchText = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Clear filter")
-                    }
-
-                    Spacer(minLength: 10)
-
-                    Button {
-                        categoryGroupSelectedCodes.removeAll()
-                        categoryGroupName = ""
-                        showsCategoryGroupPopover = true
-                    } label: {
-                        Label("Group…", systemImage: "plus.circle")
-                    }
-                    .disabled(allSummaries.isEmpty)
-                    .help("Combine several event codes/labels into one pooled category for averaging.")
-                    .popover(isPresented: $showsCategoryGroupPopover) {
-                        categoryGroupPopover(allSummaries: allSummaries)
+                Picker("Segment On", selection: segmentFieldBinding) {
+                    ForEach(PSASegmentField.allCases) { field in
+                        Text(field.rawValue).tag(field)
                     }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 150)
 
+                Spacer(minLength: 12)
+
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Filter events", text: $epoching.eventSearchText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                if !epoching.eventSearchText.isEmpty {
+                    Button {
+                        epoching.eventSearchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Clear filter")
+                }
+
+                Spacer(minLength: 10)
+
+                Button {
+                    categoryGroupSelectedCodes.removeAll()
+                    categoryGroupName = ""
+                    showsCategoryGroupPopover = true
+                } label: {
+                    Label("Group…", systemImage: "plus.circle")
+                }
+                .disabled(allSummaries.isEmpty)
+                .help("Combine several event codes/labels into one pooled category for averaging.")
+                .popover(isPresented: $showsCategoryGroupPopover) {
+                    categoryGroupPopover(allSummaries: allSummaries)
+                }
+            }
+
+            // Master/detail: the event list (left) grows to fill the sheet's
+            // height, while the run parameters and options sit in a fixed-width
+            // column on the right. The whole sheet is resizable (see the frame
+            // at the end), so dragging it taller gives the list more rows.
+            HStack(alignment: .top, spacing: 16) {
                 if allSummaries.isEmpty {
                     ContentUnavailableView(
                         epoching.segmentField == .artifact ? "No Artifacts Detected" : "No Events",
@@ -149,14 +153,16 @@ extension WaveformView {
                             ? "Enable eye blink, eye movement, or ECG/QRS detection in the Artifacts panel first."
                             : "This recording has no events to segment on.")
                     )
-                    .frame(height: 120)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                 } else if summaries.isEmpty {
                     ContentUnavailableView(
                         "No Matches",
                         systemImage: "magnifyingglass",
                         description: Text("No artifact types match the filter.")
                     )
-                    .frame(height: 120)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 6) {
@@ -171,109 +177,118 @@ extension WaveformView {
                             }
                         }
                         .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(height: 160)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                 }
-            }
 
-            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
-                GridRow {
-                    Text("Pre-stimulus (s)")
-                        .font(.caption.weight(.semibold))
-                    TextField("Pre", value: $epoching.preStimulus, format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
 
-                    Text("Post-stimulus (s)")
-                        .font(.caption.weight(.semibold))
-                    TextField("Post", value: $epoching.postStimulus, format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
-                }
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                            GridRow {
+                                Text("Pre-stimulus (s)")
+                                    .font(.caption.weight(.semibold))
+                                TextField("Pre", value: $epoching.preStimulus, format: .number.precision(.fractionLength(3)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                            }
+                            GridRow {
+                                Text("Post-stimulus (s)")
+                                    .font(.caption.weight(.semibold))
+                                TextField("Post", value: $epoching.postStimulus, format: .number.precision(.fractionLength(3)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                            }
+                            GridRow {
+                                Text("Offset (s)")
+                                    .font(.caption.weight(.semibold))
+                                TextField("Offset", value: $epoching.offset, format: .number.precision(.fractionLength(3)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                                    .help("Ignored for categories that use a DIN timing marker.")
+                            }
+                            GridRow {
+                                Text("DIN Tolerance (s)")
+                                    .font(.caption.weight(.semibold))
+                                TextField("Tolerance", value: $epoching.timingTolerance, format: .number.precision(.fractionLength(3)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                                    .help("Maximum time between an event and a DIN marker for them to be paired. Events with no DIN within this window are skipped.")
+                            }
+                        }
 
-                GridRow {
-                    Text("Offset (s)")
-                        .font(.caption.weight(.semibold))
-                    TextField("Offset", value: $epoching.offset, format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
-                        .help("Ignored for categories that use a DIN timing marker.")
-
-                    Text("DIN Tolerance (s)")
-                        .font(.caption.weight(.semibold))
-                    let missedCount = psaMissedDINCount(events: events)
-                    HStack(spacing: 8) {
-                        TextField("Tolerance", value: $epoching.timingTolerance, format: .number.precision(.fractionLength(3)))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 100)
-                            .help("Maximum time between an event and a DIN marker for them to be paired. Events with no DIN within this window are skipped.")
+                        let missedCount = psaMissedDINCount(events: events)
                         if missedCount > 0 {
-                            Label("\(missedCount) unmatched", systemImage: "exclamationmark.triangle")
+                            Label("\(missedCount) selected event\(missedCount == 1 ? "" : "s") with no DIN within ±\(String(format: "%.3f", epoching.timingTolerance)) s — will be skipped", systemImage: "exclamationmark.triangle")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
-                                .help("\(missedCount) selected event\(missedCount == 1 ? "" : "s") have no DIN within ±\(String(format: "%.3f", epoching.timingTolerance)) s and will be skipped.")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Skip if contains artifact", isOn: $epoching.skipIfContainsArtifact)
+                            VStack(alignment: .leading, spacing: 7) {
+                                psaArtifactRejectionRow(
+                                    title: "Eye Blink",
+                                    detail: "Default detector",
+                                    isOn: $epoching.skipEyeBlinks,
+                                    help: "Rejects epochs containing default eye blink artifact events."
+                                )
+                                psaArtifactRejectionRow(
+                                    title: "Eye Movement",
+                                    detail: "Default detector",
+                                    isOn: $epoching.skipEyeMovements,
+                                    help: "Rejects epochs containing default eye movement artifact events."
+                                )
+                                if !template.definedArtifacts.isEmpty {
+                                    Divider()
+                                        .padding(.vertical, 2)
+                                    ForEach(template.definedArtifacts) { artifact in
+                                        psaArtifactRejectionRow(
+                                            title: artifact.name,
+                                            detail: "\(artifact.events.count) events · \(artifact.type.rawValue)",
+                                            isOn: psaDefinedArtifactBinding(artifact.id),
+                                            help: "Rejects epochs containing events from this defined artifact."
+                                        )
+                                    }
+                                }
+                            }
+                            .disabled(!epoching.skipIfContainsArtifact)
+                            .padding(.leading, 18)
+
+                            Toggle("Skip if labeled \"Bad\"", isOn: $epoching.skipIfLabeledBad)
+                                .help("Excludes segments manually marked Bad in Segment Health (right-click a segment while View > Show Segment Health is on) from category averages.")
+
+                            HStack(spacing: 8) {
+                                Toggle("Interpolate bad channels per epoch", isOn: $epoching.interpolatesBadChannelsPerEpoch)
+                                    .help("Detects channels that are only bad WITHIN a given epoch (min/max/slope/acceleration) and interpolates just that epoch, instead of leaving a transient per-trial artifact uncorrected.")
+                                Button {
+                                    epoching.showsEpochBadChannelOptions = true
+                                } label: {
+                                    Image(systemName: "slider.horizontal.3")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(!epoching.interpolatesBadChannelsPerEpoch)
+                                .help("Set the min/max/slope/acceleration thresholds that define a bad channel within one epoch.")
+                                .popover(isPresented: $epoching.showsEpochBadChannelOptions) {
+                                    epochBadChannelOptionsPopover()
+                                }
+                            }
+
+                            Toggle("Average by category", isOn: $epoching.averageOnApply)
+                            Toggle("Average reference", isOn: $epoching.averageReference)
+                                .help("Re-reference to the common average of the good channels (excludes bad channels, uses interpolated values).")
+                            Toggle("Baseline correct (pre-stimulus)", isOn: $epoching.baselineCorrected)
+                                .help("Subtract each epoch's mean over the pre-stimulus interval from the whole epoch.")
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(width: 320)
             }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("Skip if contains artifact", isOn: $epoching.skipIfContainsArtifact)
-                VStack(alignment: .leading, spacing: 7) {
-                    psaArtifactRejectionRow(
-                        title: "Eye Blink",
-                        detail: "Default detector",
-                        isOn: $epoching.skipEyeBlinks,
-                        help: "Rejects epochs containing default eye blink artifact events."
-                    )
-                    psaArtifactRejectionRow(
-                        title: "Eye Movement",
-                        detail: "Default detector",
-                        isOn: $epoching.skipEyeMovements,
-                        help: "Rejects epochs containing default eye movement artifact events."
-                    )
-                    if !template.definedArtifacts.isEmpty {
-                        Divider()
-                            .padding(.vertical, 2)
-                        ForEach(template.definedArtifacts) { artifact in
-                            psaArtifactRejectionRow(
-                                title: artifact.name,
-                                detail: "\(artifact.events.count) events · \(artifact.type.rawValue)",
-                                isOn: psaDefinedArtifactBinding(artifact.id),
-                                help: "Rejects epochs containing events from this defined artifact."
-                            )
-                        }
-                    }
-                }
-                .disabled(!epoching.skipIfContainsArtifact)
-                .padding(.leading, 18)
-
-                Toggle("Skip if labeled \"Bad\"", isOn: $epoching.skipIfLabeledBad)
-                    .help("Excludes segments manually marked Bad in Segment Health (right-click a segment while View > Show Segment Health is on) from category averages.")
-
-                HStack(spacing: 8) {
-                    Toggle("Interpolate bad channels per epoch", isOn: $epoching.interpolatesBadChannelsPerEpoch)
-                        .help("Detects channels that are only bad WITHIN a given epoch (min/max/slope/acceleration) and interpolates just that epoch, instead of leaving a transient per-trial artifact uncorrected.")
-                    Button {
-                        epoching.showsEpochBadChannelOptions = true
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(!epoching.interpolatesBadChannelsPerEpoch)
-                    .help("Set the min/max/slope/acceleration thresholds that define a bad channel within one epoch.")
-                    .popover(isPresented: $epoching.showsEpochBadChannelOptions) {
-                        epochBadChannelOptionsPopover()
-                    }
-                }
-
-                Toggle("Average by category", isOn: $epoching.averageOnApply)
-                Toggle("Average reference", isOn: $epoching.averageReference)
-                    .help("Re-reference to the common average of the good channels (excludes bad channels, uses interpolated values).")
-                Toggle("Baseline correct (pre-stimulus)", isOn: $epoching.baselineCorrected)
-                    .help("Subtract each epoch's mean over the pre-stimulus interval from the whole epoch.")
-            }
+            .frame(maxHeight: .infinity)
 
             if let psaStatus = epoching.statusMessage {
                 Text(psaStatus)
@@ -314,7 +329,10 @@ extension WaveformView {
             }
         }
         .padding(20)
-        .frame(width: 760)
+        .frame(
+            minWidth: 980, idealWidth: 1040, maxWidth: 1500,
+            minHeight: 560, idealHeight: 660, maxHeight: 1300
+        )
     }
 
     func psaSegmentEventRow(summary: EventSummary, allSummaries: [EventSummary]) -> some View {
