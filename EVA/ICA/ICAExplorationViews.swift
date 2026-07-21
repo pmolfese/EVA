@@ -41,7 +41,21 @@ extension WaveformView {
                 GridRow {
                     ArtifactTemplateFieldLabel(
                         title: "Method",
-                        help: "Picard (recommended) is a preconditioned ICA that converges in a few iterations. FastICA is a fast symmetric fixed-point solver. Infomax is the slower MNE/EEGLAB extended-infomax kept for reference."
+                        help: """
+                        Picard (recommended) is a preconditioned ICA that optimizes the same tanh maximum-likelihood objective as Infomax, but with a quasi-Newton (L-BFGS) solver — so it reaches Infomax's solution in a few iterations instead of hundreds. Picard-O solves that same likelihood under an orthogonality constraint, i.e. the same problem FastICA solves (updates stay rotations of the whitened data), but with Picard's preconditioned solver instead of FastICA's fixed-point step — giving FastICA-equivalent results with more reliable convergence. FastICA is the classic fast symmetric fixed-point solver on whitened data. Infomax is the slower MNE/EEGLAB extended-infomax, kept for reference. In short: Picard ≈ a faster Infomax; Picard-O ≈ a more robust FastICA.
+
+                        References
+
+                        Infomax: Bell, A. J., & Sejnowski, T. J. (1995). An information-maximization approach to blind separation and blind deconvolution. Neural Computation, 7(6), 1129–1159. https://doi.org/10.1162/neco.1995.7.6.1129
+
+                        Extended Infomax: Lee, T.-W., Girolami, M., & Sejnowski, T. J. (1999). Independent component analysis using an extended infomax algorithm for mixed subgaussian and supergaussian sources. Neural Computation, 11(2), 417–441. https://doi.org/10.1162/089976699300016719
+
+                        FastICA: Hyvärinen, A., & Oja, E. (1997). A fast fixed-point algorithm for independent component analysis. Neural Computation, 9(7), 1483–1492. https://doi.org/10.1162/neco.1997.9.7.1483
+
+                        Picard: Ablin, P., Cardoso, J.-F., & Gramfort, A. (2018). Faster independent component analysis by preconditioning with Hessian approximations. IEEE Transactions on Signal Processing, 66(15), 4040–4049. https://doi.org/10.1109/TSP.2018.2844203
+
+                        Picard-O: Ablin, P., Cardoso, J.-F., & Gramfort, A. (2018). Faster ICA under orthogonal constraint. In 2018 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) (pp. 4464–4468). IEEE. https://doi.org/10.1109/ICASSP.2018.8461662
+                        """
                     )
                     Picker("Method", selection: $ica.method) {
                         ForEach(ICAMethod.allCases) { method in
