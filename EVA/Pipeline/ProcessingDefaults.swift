@@ -31,6 +31,7 @@ final class ProcessingDefaults {
         static let filterLowPassHz = "filterLowPassHz"
         static let filterNotch60 = "filterNotch60"
         static let filterAverageReference = "filterAverageReference"
+        static let filterDefaultFamily = "filterDefaultFamily"
         static let icaMethod = "icaMethod"
         static let icaComponentCount = "icaComponentCount"
         static let bcgAutoSelectProxySet = "bcgAutoSelectProxySet"
@@ -48,6 +49,7 @@ final class ProcessingDefaults {
         static let filterLowPassHz = 30.0
         static let filterNotch60 = false
         static let filterAverageReference = false
+        static let filterDefaultFamily = FilterFamily.iir.rawValue
         static let icaMethod = ICAMethod.picard
         static let icaComponentCount = 20
         static let bcgAutoSelectProxySet = false
@@ -75,6 +77,12 @@ final class ProcessingDefaults {
     var filterAverageReference: Bool {
         get { UserDefaults.standard.bool(forKey: Keys.filterAverageReference) }
         set { UserDefaults.standard.set(newValue, forKey: Keys.filterAverageReference) }
+    }
+    /// Default filter family for NEW filtering. Replay of existing eva.xml always
+    /// defaults a missing `filterFamily` to IIR independent of this preference.
+    var filterDefaultFamily: String {
+        get { UserDefaults.standard.string(forKey: Keys.filterDefaultFamily) ?? Defaults.filterDefaultFamily }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.filterDefaultFamily) }
     }
 
     // MARK: ICA defaults

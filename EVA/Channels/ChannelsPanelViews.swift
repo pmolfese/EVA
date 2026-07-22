@@ -191,6 +191,7 @@ extension WaveformView {
             index: index,
             // Hidden channels keep their row but draw no trace.
             samples: isHidden ? [] : channel,
+            samplingRate: signal.samplingRate,
             dataRevision: signal.dataRevision,
             isHidden: isHidden,
             amplitudeScale: amplitudeScale,
@@ -202,6 +203,8 @@ extension WaveformView {
             overflowHeight: channelOverflowHeight,
             color: channelColor(index),
             usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering,
+            showsTimeMarkers: showsTimeMarkersAcrossTraces,
+            timeMarkerStyle: waveformTimeMarkerStyle,
             canDefineArtifact: activeSelectionRange(in: signal) != nil,
             moveToPhysioTitle: "Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio",
             onDefineArtifact: { openArtifactTemplateSheet(for: signal, clickedChannel: index) },

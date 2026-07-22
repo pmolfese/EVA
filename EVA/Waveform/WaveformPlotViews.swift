@@ -28,6 +28,70 @@ nonisolated enum EventTrackConstants {
     static let denseMarkerThreshold = 180
 }
 
+private enum WaveformTimeMarkers {
+    static func drawLocal(
+        in context: inout GraphicsContext,
+        size: CGSize,
+        pxPerSecond: Double,
+        contentOffset: CGFloat = 0,
+        style: WaveformTimeMarkerStyle
+    ) {
+        guard pxPerSecond.isFinite, pxPerSecond > 0, size.width > 0, size.height > 0 else { return }
+
+        let firstSecond = max(0, Int(ceil(Double(contentOffset) / pxPerSecond)))
+        let lastSecond = Int(floor(Double(contentOffset + size.width) / pxPerSecond))
+        guard lastSecond >= firstSecond else { return }
+
+        var path = Path()
+        for second in firstSecond...lastSecond {
+            let x = CGFloat(Double(second) * pxPerSecond) - contentOffset
+            path.move(to: CGPoint(x: x, y: 0))
+            path.addLine(to: CGPoint(x: x, y: size.height))
+        }
+        context.stroke(path, with: .color(color(for: style)), style: stroke(for: style))
+    }
+
+    static func drawContent(
+        in context: inout GraphicsContext,
+        visibleRange: ClosedRange<CGFloat>,
+        height: CGFloat,
+        pxPerSecond: Double,
+        style: WaveformTimeMarkerStyle
+    ) {
+        guard pxPerSecond.isFinite, pxPerSecond > 0, height > 0 else { return }
+
+        let firstSecond = max(0, Int(ceil(Double(visibleRange.lowerBound) / pxPerSecond)))
+        let lastSecond = Int(floor(Double(visibleRange.upperBound) / pxPerSecond))
+        guard lastSecond >= firstSecond else { return }
+
+        var path = Path()
+        for second in firstSecond...lastSecond {
+            let x = CGFloat(Double(second) * pxPerSecond)
+            path.move(to: CGPoint(x: x, y: 0))
+            path.addLine(to: CGPoint(x: x, y: height))
+        }
+        context.stroke(path, with: .color(color(for: style)), style: stroke(for: style))
+    }
+
+    private static func color(for style: WaveformTimeMarkerStyle) -> Color {
+        let normalized = style.normalized()
+        return Color(
+            red: normalized.red,
+            green: normalized.green,
+            blue: normalized.blue,
+            opacity: normalized.alpha
+        )
+    }
+
+    private static func stroke(for style: WaveformTimeMarkerStyle) -> StrokeStyle {
+        let normalized = style.normalized()
+        return StrokeStyle(
+            lineWidth: CGFloat(normalized.lineWidth),
+            dash: normalized.isSolid ? [] : [CGFloat(normalized.dashOn), CGFloat(normalized.dashOff)]
+        )
+    }
+}
+
 nonisolated struct EventTrackEventSignature: Equatable {
     let count: Int
     let firstID: MFFEvent.ID?
@@ -230,6 +294,7 @@ private struct DenseMarkerPixel: Hashable {
 
 struct WaveformPlot: View {
     let samples: [Float]
+    let samplingRate: Double
     let amplitudeScale: Double
     let timeScale: Double
     let sampleStride: Int
@@ -237,6 +302,8 @@ struct WaveformPlot: View {
     let nominalHeight: CGFloat
     var color: Color = .accentColor
     var usesPixelAdaptiveRendering = true
+    var showsTimeMarkers = false
+    var timeMarkerStyle = WaveformTimeMarkerStyle.defaultValue
 
     var body: some View {
         Canvas { context, size in
@@ -248,6 +315,15 @@ struct WaveformPlot: View {
             let pointsPerMicrovolt = (nominalHeight / 2) / max(amplitudeScale, 1)
 
             strokeBaseline(in: &context, midY: midY)
+            if showsTimeMarkers {
+                WaveformTimeMarkers.drawContent(
+                    in: &context,
+                    visibleRange: visibleRange,
+                    height: size.height,
+                    pxPerSecond: samplingRate / Double(safeSampleStride) * timeScale,
+                    style: timeMarkerStyle
+                )
+            }
 
             if usesPixelAdaptiveRendering, xScale < 1 {
                 drawPixelAdaptiveTrace(
@@ -1198,6 +1274,8 @@ struct PhysioTrackView: View {
     let timeScale: Double
     let contentOffset: CGFloat
     let viewportWidth: CGFloat
+    var showsTimeMarkers = false
+    var timeMarkerStyle = WaveformTimeMarkerStyle.defaultValue
     /// Resolved (possibly user-renamed) channel labels, for the hover tooltip.
     var names: [String] = []
 
@@ -1211,6 +1289,16 @@ struct PhysioTrackView: View {
                   size.width > 0 else { return }
             let pxPerSecond = eegSamplingRate / Double(sampleStride) * timeScale
             guard pxPerSecond > 0 else { return }
+
+            if showsTimeMarkers {
+                WaveformTimeMarkers.drawLocal(
+                    in: &context,
+                    size: size,
+                    pxPerSecond: pxPerSecond,
+                    contentOffset: contentOffset,
+                    style: timeMarkerStyle
+                )
+            }
 
             let pnsSR = signal.samplingRate
             let tStart = max(0, Double(contentOffset) / pxPerSecond)
@@ -1370,6 +1458,7 @@ struct EventTrackView: View {
     let visibleRange: ClosedRange<CGFloat>
     let viewportWidth: CGFloat
     let isCommandKeyPressed: Bool
+    var timeMarkerStyle = WaveformTimeMarkerStyle.defaultValue
     /// Number of distinct source lanes events are staggered into.
     var laneCount: Int = 1
     /// Called when a flag is tapped, with the event and its flag color, so the
@@ -1410,6 +1499,14 @@ struct EventTrackView: View {
 
             Canvas { context, size in
                 guard samplingRate > 0 else { return }
+                WaveformTimeMarkers.drawLocal(
+                    in: &context,
+                    size: size,
+                    pxPerSecond: samplingRate / Double(max(sampleStride, 1)) * timeScale,
+                    contentOffset: contentOffset,
+                    style: timeMarkerStyle
+                )
+
                 let baselineY = size.height - 16
                 var baseline = Path()
                 baseline.move(to: CGPoint(x: 0, y: baselineY))

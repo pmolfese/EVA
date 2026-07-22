@@ -42,6 +42,7 @@ struct WaveformChannelRow: View, Equatable {
     /// Trace samples for this row: `[]` when the channel is hidden (the row keeps
     /// its slot but draws nothing), otherwise the channel's series.
     let samples: [Float]
+    let samplingRate: Double
     /// Identity of the underlying sample-data version, used for equality so the
     /// row need not compare `samples` element-by-element.
     let dataRevision: UUID
@@ -55,6 +56,8 @@ struct WaveformChannelRow: View, Equatable {
     let overflowHeight: CGFloat
     let color: Color
     let usesPixelAdaptiveRendering: Bool
+    let showsTimeMarkers: Bool
+    let timeMarkerStyle: WaveformTimeMarkerStyle
     /// Whether a time selection exists, enabling "Define Artifact…".
     let canDefineArtifact: Bool
     /// Pre-resolved "Move <name> to Physio" menu title.
@@ -64,6 +67,7 @@ struct WaveformChannelRow: View, Equatable {
 
     static func == (lhs: WaveformChannelRow, rhs: WaveformChannelRow) -> Bool {
         lhs.index == rhs.index
+            && lhs.samplingRate == rhs.samplingRate
             && lhs.dataRevision == rhs.dataRevision
             && lhs.isHidden == rhs.isHidden
             && lhs.amplitudeScale == rhs.amplitudeScale
@@ -75,6 +79,8 @@ struct WaveformChannelRow: View, Equatable {
             && lhs.overflowHeight == rhs.overflowHeight
             && lhs.color == rhs.color
             && lhs.usesPixelAdaptiveRendering == rhs.usesPixelAdaptiveRendering
+            && lhs.showsTimeMarkers == rhs.showsTimeMarkers
+            && lhs.timeMarkerStyle == rhs.timeMarkerStyle
             && lhs.canDefineArtifact == rhs.canDefineArtifact
             && lhs.moveToPhysioTitle == rhs.moveToPhysioTitle
     }
@@ -82,13 +88,16 @@ struct WaveformChannelRow: View, Equatable {
     var body: some View {
         WaveformPlot(
             samples: samples,
+            samplingRate: samplingRate,
             amplitudeScale: amplitudeScale,
             timeScale: timeScale,
             sampleStride: sampleStride,
             visibleRange: visibleRange,
             nominalHeight: rowHeight,
             color: color,
-            usesPixelAdaptiveRendering: usesPixelAdaptiveRendering
+            usesPixelAdaptiveRendering: usesPixelAdaptiveRendering,
+            showsTimeMarkers: showsTimeMarkers,
+            timeMarkerStyle: timeMarkerStyle
         )
         .frame(width: plotWidth, height: rowHeight + (overflowHeight * 2))
         .background {

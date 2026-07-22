@@ -82,6 +82,8 @@ struct WaveformView: View {
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
     @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
+    @AppStorage(EVAGeneralPreferences.waveformTimeMarkersAcrossTracesKey) var showsTimeMarkersAcrossTraces = false
+    @AppStorage(EVAGeneralPreferences.waveformTimeMarkerStyleKey) var waveformTimeMarkerStyleData = WaveformTimeMarkerStyle.defaultData
 
     @State var recordingStore = RecordingStore()
     var amplitudeScale: Double {
@@ -91,6 +93,9 @@ struct WaveformView: View {
     var timeScale: Double {
         get { recordingStore.timeScale }
         nonmutating set { recordingStore.timeScale = newValue }
+    }
+    var waveformTimeMarkerStyle: WaveformTimeMarkerStyle {
+        WaveformTimeMarkerStyle.decoded(from: waveformTimeMarkerStyleData)
     }
     var horizontalOffset: CGFloat {
         get { recordingStore.horizontalOffset }
@@ -1639,6 +1644,7 @@ struct WaveformView: View {
                     visibleRange: visibleHorizontalRange,
                     viewportWidth: horizontalViewportWidth,
                     isCommandKeyPressed: isCommandKeyPressed,
+                    timeMarkerStyle: waveformTimeMarkerStyle,
                     laneCount: eventLaneCount,
                     onSelectEvent: { event, color in
                         selectEventFromTrack(event, color: color, in: signal)

@@ -421,7 +421,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.4;
+				MARKETING_VERSION = 0.1.5;
 				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -467,7 +467,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.4;
+				MARKETING_VERSION = 0.1.5;
 				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva;
 				PRODUCT_NAME = "$(TARGET_NAME)";

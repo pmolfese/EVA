@@ -207,6 +207,8 @@ extension WaveformView {
                         timeScale: timeScale,
                         contentOffset: horizontalOffset,
                         viewportWidth: horizontalViewportWidth,
+                        showsTimeMarkers: showsTimeMarkersAcrossTraces,
+                        timeMarkerStyle: waveformTimeMarkerStyle,
                         names: (0..<pns.numberOfChannels).map { physioChannelName(index: $0, names: names) }
                     )
                     .padding(.top, 16)   // align below the "Physio" header

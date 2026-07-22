@@ -15,9 +15,65 @@ extension WaveformView {
     func filterPopover(for signal: MFFSignalData) -> some View {
         let lineNoiseMode = filter.activeLineNoiseMode
 
+        // Which edges are FIR under the current family, so the IIR-only slope
+        // pickers can be disabled where they don't apply.
+        let highPassIsFIR = filter.filterFamily == .fir
+            || (filter.filterFamily == .auto && (filter.highPassCutoff ?? 0) >= filter.firCrossoverHz)
+        let lowPassIsFIR = filter.filterFamily != .iir
+
         return VStack(alignment: .leading, spacing: 14) {
             Text("Filter")
                 .font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 4) {
+                    Text("Filter Type")
+                        .font(.caption.weight(.semibold))
+                    InfoPopoverButton(title: "Filter Types", message: """
+                        IIR — zero-phase Butterworth (the classic EEG filter). Cheap, and works down to very low high-pass cutoffs.
+
+                        FIR — linear-phase finite impulse response. Constant group delay across frequency, but needs a longer kernel (more computation) for low cutoffs.
+
+                        Auto — Net Station-style hybrid: IIR high-pass below the crossover (where an FIR kernel would be impractically long) and FIR everywhere else.
+                        """)
+                    Spacer()
+                }
+                Picker("Filter Type", selection: $filter.filterFamily) {
+                    ForEach(FilterFamily.allCases) { family in
+                        Text(family.label).tag(family)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                if filter.filterFamily != .iir {
+                    HStack {
+                        if filter.filterFamily == .auto {
+                            Text("IIR HP below")
+                                .font(.caption)
+                            TextField("Hz", value: $filter.firCrossoverHz, format: .number.precision(.fractionLength(2)))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 60)
+                            Text("Hz")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text("Transition")
+                            .font(.caption)
+                        TextField("Auto", value: Binding(
+                            get: { filter.firTransitionHz ?? 0 },
+                            set: { filter.firTransitionHz = $0 > 0 ? $0 : nil }
+                        ), format: .number.precision(.fractionLength(2)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                            .help("FIR transition-band width in Hz. Leave 0 for automatic (25% of the cutoff). Narrower transitions need more taps.")
+                        Text("Hz")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("High-Pass Cutoff (Hz)")
@@ -39,8 +95,8 @@ extension WaveformView {
                     }
                     .labelsHidden()
                     .frame(width: 100)
-                    .disabled(filter.highPassCutoff == nil)
-                    .help("High-pass rolloff slope. 12 dB/oct (2-pole) is gentler and produces less ringing near the cutoff; 24 dB/oct (4-pole) is steeper. Both are applied zero-phase (forward+backward pass).")
+                    .disabled(filter.highPassCutoff == nil || highPassIsFIR)
+                    .help("High-pass rolloff slope (IIR only). 12 dB/oct (2-pole) is gentler and produces less ringing near the cutoff; 24 dB/oct (4-pole) is steeper. Both are applied zero-phase (forward+backward pass).")
                 }
             }
 
@@ -64,8 +120,8 @@ extension WaveformView {
                     }
                     .labelsHidden()
                     .frame(width: 100)
-                    .disabled(filter.lowPassCutoff == nil)
-                    .help("Low-pass rolloff slope. 24 dB/oct is a common choice for BCG preprocessing; 48 dB/oct gives a sharper brick-wall rolloff at the cost of more ringing. Both are zero-phase.")
+                    .disabled(filter.lowPassCutoff == nil || lowPassIsFIR)
+                    .help("Low-pass rolloff slope (IIR only). 24 dB/oct is a common choice for BCG preprocessing; 48 dB/oct gives a sharper brick-wall rolloff at the cost of more ringing. Both are zero-phase.")
                 }
             }
 
@@ -82,6 +138,23 @@ extension WaveformView {
                 .onChange(of: filter.lineNoiseMode) { _, mode in
                     if mode != .off, !showsFilterLineNoiseOptions {
                         showsFilterLineNoiseOptions = true
+                    }
+                }
+
+                // FIR notch is only meaningful when the FIR family is selected;
+                // it is off by default because it is far more expensive than the
+                // single IIR biquad.
+                if lineNoiseMode == .notch, filter.filterFamily == .fir {
+                    HStack(spacing: 4) {
+                        Toggle("Apply notch as FIR", isOn: $filter.notchUsesFIR)
+                            .font(.caption)
+                        InfoPopoverButton(title: "FIR Notch", message: """
+                            Applies the line-noise notch as a linear-phase FIR band-stop instead of the default IIR biquad.
+
+                            This is computationally expensive: a narrow FIR notch needs hundreds to thousands of taps and runs a full zero-phase (forward+backward) convolution per channel.
+
+                            Prefer the IIR notch unless you specifically need linear phase or an all-FIR chain.
+                            """)
                     }
                 }
 
@@ -108,7 +181,10 @@ extension WaveformView {
                                     .frame(width: 32, alignment: .leading)
                             }
                         }
-                        .disabled(lineNoiseMode != .adaptiveCleanLine)
+                        // Harmonics apply to CleanLine and to the FIR notch
+                        // (which nulls them in one kernel). The IIR notch is
+                        // single-frequency only.
+                        .disabled(lineNoiseMode != .adaptiveCleanLine && !filter.notchIsFIREffective)
 
                         VStack(alignment: .leading, spacing: 3) {
                             HStack {
@@ -566,4 +642,32 @@ extension WaveformView {
     }
 
 
+}
+
+/// A small "?" button that reveals an explanatory popover on click. Used instead
+/// of `.help` tooltips, which do not reliably appear on non-control views.
+struct InfoPopoverButton: View {
+    let title: String
+    let message: String
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.borderless)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.headline)
+                Text(message)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .frame(width: 300)
+        }
+    }
 }
