@@ -884,7 +884,7 @@ struct SingleTrialAnalysisSheet: View {
                     }
                     HStack(spacing: 16) {
                         Picker("Wavelet", selection: $viewModel.cwtWavelet) {
-                            ForEach(WaveletTransforms.CWTWavelet.allCases) { wavelet in
+                            ForEach(CWTWavelet.allCases) { wavelet in
                                 Text(wavelet.rawValue).tag(wavelet)
                             }
                         }

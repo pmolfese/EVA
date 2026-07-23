@@ -34,7 +34,7 @@ nonisolated enum CWTRidgeDetector {
     }
 
     struct Configuration: Sendable {
-        var wavelet: WaveletTransforms.CWTWavelet = .ricker
+        var wavelet: CWTWavelet = .ricker
         /// Smallest / largest wavelet scale in samples, and how many scales to
         /// sample geometrically between them.
         var minScale: Double = 2
@@ -51,7 +51,7 @@ nonisolated enum CWTRidgeDetector {
         var polarity: Polarity = .either
 
         init(
-            wavelet: WaveletTransforms.CWTWavelet = .ricker,
+            wavelet: CWTWavelet = .ricker,
             minScale: Double = 2,
             maxScale: Double = 64,
             scaleCount: Int = 24,
@@ -127,7 +127,7 @@ nonisolated enum CWTRidgeDetector {
         }
 
         let scales = geometricScales(configuration)
-        let coefficients = WaveletTransforms.cwt(signal, wavelet: configuration.wavelet, scales: scales)
+        let coefficients = ContinuousWaveletTransform.transform(signal, wavelet: configuration.wavelet, scales: scales)
         guard !coefficients.isEmpty else {
             return Result(peaks: [], scales: scales, coefficients: [], noiseLevel: 0)
         }

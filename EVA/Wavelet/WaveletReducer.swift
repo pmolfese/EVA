@@ -453,7 +453,8 @@ nonisolated enum WaveletReducer {
 
     // MARK: Thresholding
 
-    private static func applyThreshold(
+    /// Soft/hard coefficient shrinkage. Shared with `WaveletDenoiser`.
+    static func applyThreshold(
         _ value: Double,
         threshold: Double,
         rule: WaveletCleaningThresholdRule
@@ -488,7 +489,8 @@ nonisolated enum WaveletReducer {
         return min(universal, max(bayes, sigma * 0.25))
     }
 
-    private static func robustSigma(_ values: [Double]) -> Double {
+    /// Robust noise σ estimate (MAD / 0.6745). Shared with `WaveletDenoiser`.
+    static func robustSigma(_ values: [Double]) -> Double {
         let absValues = values.map(abs).sorted()
         guard !absValues.isEmpty else { return 0 }
         return percentile(absValues, fraction: 0.5) / 0.6745

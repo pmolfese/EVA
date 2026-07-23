@@ -125,7 +125,7 @@ final class SingleTrialAnalysisViewModel {
     var cwtPeakSource = CWTRidgePipeline.PeakSource.conditionAverage
     var cwtEngine = NonlinearAligner.Engine.dtw
     var cwtRidgePolarity = CWTRidgeDetector.Polarity.either
-    var cwtWavelet = WaveletTransforms.CWTWavelet.ricker
+    var cwtWavelet = CWTWavelet.ricker
     var cwtMinSNR = 3.0
     var cwtMinScale = 2.0
     var cwtMaxScale = 64.0

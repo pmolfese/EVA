@@ -24,7 +24,7 @@ nonisolated enum MatchedWaveletTemplate {
         var widthSamples: Double
         var polaritySign: Int
         var amplitude: Double
-        var wavelet: WaveletTransforms.CWTWavelet
+        var wavelet: CWTWavelet
     }
 
     /// Estimate the dominant peak inside `window` on `reference` and return a
@@ -32,7 +32,7 @@ nonisolated enum MatchedWaveletTemplate {
     static func fit(
         to reference: [Float],
         window: Range<Int>,
-        wavelet: WaveletTransforms.CWTWavelet = .ricker,
+        wavelet: CWTWavelet = .ricker,
         polarity: CWTRidgeDetector.Polarity = .either
     ) -> Fit? {
         guard !reference.isEmpty else { return nil }
@@ -73,7 +73,7 @@ nonisolated enum MatchedWaveletTemplate {
     /// scaled to match the fitted amplitude.
     static func synthesize(_ fit: Fit, length: Int) -> [Float] {
         guard length > 0 else { return [] }
-        let kernel = WaveletTransforms.waveletKernel(fit.wavelet, scale: fit.widthSamples)
+        let kernel = ContinuousWaveletTransform.kernel(fit.wavelet, scale: fit.widthSamples)
         let radius = kernel.count / 2
 
         // Normalize the kernel so its peak magnitude is 1, then scale to amplitude.
@@ -96,7 +96,7 @@ nonisolated enum MatchedWaveletTemplate {
     static func template(
         for reference: [Float],
         window: Range<Int>,
-        wavelet: WaveletTransforms.CWTWavelet = .ricker,
+        wavelet: CWTWavelet = .ricker,
         polarity: CWTRidgeDetector.Polarity = .either
     ) -> [Float]? {
         guard let fit = fit(to: reference, window: window, wavelet: wavelet, polarity: polarity) else { return nil }
@@ -109,7 +109,7 @@ nonisolated enum MatchedWaveletTemplate {
         _ reference: [Float],
         lower: Int,
         upper: Int,
-        wavelet: WaveletTransforms.CWTWavelet,
+        wavelet: CWTWavelet,
         polarity: CWTRidgeDetector.Polarity
     ) -> Fit? {
         var bestIndex = lower

@@ -52,10 +52,14 @@ struct CWTRidgePipelineTests {
     // MARK: - DWT
 
     @Test func dwtRoundTripReconstructsSignal() {
+        // Round-trips through the shared DWT core in WaveletReducer.swift that
+        // WaveletDenoiser now reuses (instead of a duplicate transform).
         let signal = (0..<128).map { Double(sin(Double($0) * 0.2) + 0.3 * cos(Double($0) * 0.05)) }
-        for wavelet in DWTWavelet.allCases {
-            let decomposition = WaveletTransforms.forward(signal, wavelet: wavelet, levels: 3)
-            let reconstructed = WaveletTransforms.inverse(decomposition)
+        for family in [WaveletReductionFamily.sym4, .db4, .coif4] {
+            let bank = WaveletFilterBank.orthonormal(family.scalingFilter)
+            let transform = WaveletTransform(bank: bank)
+            let decomposition = transform.forwardDWT(signal, levels: 3)
+            let reconstructed = transform.inverseDWT(decomposition)
             #expect(reconstructed.count == signal.count)
             let maxError = zip(signal, reconstructed).map { abs($0 - $1) }.max() ?? 0
             #expect(maxError < 1e-6)
