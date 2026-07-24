@@ -19,6 +19,10 @@
 //  provide either one channel or an ROI average, matching the existing Trials
 //  analysis path.
 //
+//  Reference: Woody, C. D. (1967). Characterization of an adaptive filter for
+//  the analysis of variable latency neuroelectric signals. Medical & Biological
+//  Engineering, 5(6), 539-554. https://doi.org/10.1007/BF02474247
+//
 
 import Foundation
 

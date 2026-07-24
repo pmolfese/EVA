@@ -76,9 +76,11 @@ final class EpochingViewModel {
     var timingTolerance = 0.5
 
     // MARK: Artifact rejection
-    var skipIfContainsArtifact = false
+    var skipIfContainsArtifact = true
     var skipEyeBlinks = true
     var skipEyeMovements = true
+    /// Drives the popover listing which artifact kinds to reject on.
+    var showsArtifactRejectionOptions = false
     var skippedDefinedArtifactIDs = Set<DefinedArtifact.ID>()
     var knownArtifactIDsForRejection = Set<DefinedArtifact.ID>()
     /// Excludes segments the user manually marked "Bad" (Segment Health
@@ -92,7 +94,6 @@ final class EpochingViewModel {
     /// misses), instead of rejecting the whole epoch or leaving it uncorrected.
     var interpolatesBadChannelsPerEpoch = true
     var epochBadChannelThresholds = EpochBadChannelThresholds()
-    var showsEpochBadChannelOptions = false
     /// When a channel is flagged bad in at least this fraction of epochs, mark
     /// it bad for the whole recording and interpolate it there instead of
     /// leaving it as a per-epoch-only correction.
@@ -127,6 +128,15 @@ final class EpochingViewModel {
     var epochedSignal: MFFSignalData?
     var epochSegments: [EpochSegment] = []
     var isAveraged = false
+    /// Per-category signal-to-noise metrics for the current average, computed
+    /// from the single trials at average time. Empty when the last apply did not
+    /// average (SNR needs the trial set, which only the averaging path builds).
+    /// Surfaced in the Averages workspace and the export audit log.
+    var averageSNRByCategory: [String: SNRMetrics] = [:]
+    /// True while SNR is being computed on a background task after the PSA sheet
+    /// has already closed, so the Averages workspace can show a spinner in the
+    /// SNR area instead of blocking the user from seeing their data.
+    var isComputingAverageSNR = false
 
     // MARK: Averaged-data display
     var showsButterflyPlot = false
@@ -481,12 +491,22 @@ final class EpochingViewModel {
                 return nil
             }
             phaseMessage = "Post-processing…"
+            // SNR is measured from the RAW single trials (`built`), before
+            // post-processing collapses them, so plus-minus/split-half/SME have
+            // the individual trials they need.
+            let snrWorker = Task.detached(priority: .userInitiated) {
+                built.categorySNR()
+            }
             let postWorker = Task.detached(priority: .userInitiated) {
                 averaged.postProcessed(averageReference: averageReference, baselineCorrect: baselineCorrect, badChannels: badChannels)
             }
             finalResult = await withTaskCancellationHandler(
                 operation: { await postWorker.value },
                 onCancel: { postWorker.cancel() }
+            )
+            averageSNRByCategory = await withTaskCancellationHandler(
+                operation: { await snrWorker.value },
+                onCancel: { snrWorker.cancel() }
             )
             wasAveraged = true
         } else {
@@ -498,6 +518,7 @@ final class EpochingViewModel {
                 operation: { await postWorker.value },
                 onCancel: { postWorker.cancel() }
             )
+            averageSNRByCategory = [:]
             wasAveraged = false
         }
 

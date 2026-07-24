@@ -19,6 +19,22 @@
 //  up in the view file). Multiple transparent detectors (Pan-Tompkins, Hamilton,
 //  WFDB-style, wavelet, Christov, simple).
 //
+//  The named detectors are original Swift implementations of published QRS
+//  detection algorithms.
+//
+//  References:
+//    * Pan-Tompkins: Pan, J., & Tompkins, W. J. (1985). A real-time QRS
+//      detection algorithm. IEEE Transactions on Biomedical Engineering,
+//      BME-32(3), 230-236. https://doi.org/10.1109/TBME.1985.325532
+//    * Hamilton: Hamilton, P. (2002). Open source ECG analysis. Computers in
+//      Cardiology, 29, 101-104. https://doi.org/10.1109/CIC.2002.1166717
+//    * Christov: Christov, I. I. (2004). Real time electrocardiogram QRS
+//      detection using combined adaptive threshold. BioMedical Engineering
+//      OnLine, 3, 28. https://doi.org/10.1186/1475-925X-3-28
+//    * WFDB-style (gqrs/wqrs): Goldberger, A. L., et al. (2000). PhysioBank,
+//      PhysioToolkit, and PhysioNet. Circulation, 101(23), e215-e220.
+//      https://doi.org/10.1161/01.CIR.101.23.e215
+//
 
 import Accelerate
 import Foundation

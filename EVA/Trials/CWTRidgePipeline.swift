@@ -93,6 +93,12 @@ nonisolated enum CWTRidgePipeline {
         var alignedAverage: [Float]
         var template: [Float]
         var functionalPCA: NonlinearAligner.FunctionalPCA?
+        /// Per-trial warping function (output sample → fractional source-sample
+        /// index), in the same order as `trials`. Lets callers apply the exact
+        /// per-sample warp to other channels — the all-channel aligned butterfly
+        /// uses this so it reflects the true non-linear alignment, not a rigid
+        /// shift. Empty when unavailable.
+        var trialWarpFunctions: [[Double]] = []
     }
 
     static func run(
@@ -196,7 +202,8 @@ nonisolated enum CWTRidgePipeline {
             unalignedAverage: unalignedAverage,
             alignedAverage: alignedAverage,
             template: alignment.template,
-            functionalPCA: fpca
+            functionalPCA: fpca,
+            trialWarpFunctions: alignment.warped.map(\.warpFunction)
         )
     }
 

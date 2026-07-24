@@ -18,6 +18,24 @@
 //  contribution to a grand average and to drive inverse-variance weighting and
 //  the butterfly noise band. See `RecordingCombiner`.
 //
+//  The metrics implemented here are original Swift implementations of published
+//  measures:
+//    * Plus-minus (odd/even sign-flipped) noise estimate: Schimmel, H. (1967).
+//      The (±) reference: accuracy of estimated mean components in average
+//      response studies. Science, 157(3784), 92-94.
+//      https://doi.org/10.1126/science.157.3784.92
+//    * Standardized Measurement Error (SME): Luck, S. J., Stewart, A. X.,
+//      Simmons, A. M., & Rhemtulla, M. (2021). Standardized measurement error:
+//      A universal metric of data quality for averaged event-related
+//      potentials. Psychophysiology, 58(6), e13793.
+//      https://doi.org/10.1111/psyp.13793
+//    * Split-half reliability / Spearman-Brown correction: Spearman, C. (1910)
+//      and Brown, W. (1910), British Journal of Psychology, 3, 271-295 / 296-322.
+//    * Global Field Power (GFP): Lehmann, D., & Skrandies, W. (1980). Reference-
+//      free identification of components of checkerboard-evoked multichannel
+//      potential fields. Electroencephalography and Clinical Neurophysiology,
+//      48(6), 609-621. https://doi.org/10.1016/0013-4694(80)90419-8
+//
 
 import Foundation
 
@@ -214,27 +232,41 @@ nonisolated enum EpochSNR {
         let iterations = 200
         let n = trials.count
         guard n >= 2, !window.isEmpty else { return 0 }
-        var rng = SystemRandomNumberGenerator()
-        var estimates = [Double]()
-        estimates.reserveCapacity(iterations)
-        for _ in 0..<iterations {
-            // Bootstrap resample trial indices with replacement.
-            var meanAmp = 0.0
+
+        // Precompute each trial's across-channel mean window amplitude to a
+        // single scalar. Whole trials are resampled together (the Luck et al.
+        // SME), so the bootstrap statistic — the grand mean over channels of the
+        // per-trial mean amplitude — is linear in these scalars. That collapses
+        // each bootstrap draw from an O(nCh · window) reduction to one lookup,
+        // turning the whole routine from O(iterations · nCh · n · window) into
+        // an O(nCh · n · window) precompute plus an O(iterations · n) bootstrap.
+        let invWindow = 1.0 / Double(window.count)
+        let invCh = nCh > 0 ? 1.0 / Double(nCh) : 0
+        var trialScalar = [Double](repeating: 0, count: n)
+        for t in 0..<n {
+            let trial = trials[t]
+            var acc = 0.0
             for c in 0..<nCh {
-                var acc = 0.0
-                for _ in 0..<n {
-                    let t = Int.random(in: 0..<n, using: &rng)
-                    let ch = trials[t][c]
-                    var w = 0.0
-                    for s in window where s < ch.count { w += Double(ch[s]) }
-                    acc += w / Double(window.count)
-                }
-                meanAmp += acc / Double(n)
+                let ch = trial[c]
+                var w = 0.0
+                for s in window where s < ch.count { w += Double(ch[s]) }
+                acc += w * invWindow
             }
-            estimates.append(meanAmp / Double(nCh))
+            trialScalar[t] = acc * invCh
         }
-        let mean = estimates.reduce(0, +) / Double(estimates.count)
-        let variance = estimates.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(estimates.count)
+
+        var rng = SystemRandomNumberGenerator()
+        let invN = 1.0 / Double(n)
+        var estimates = [Double](repeating: 0, count: iterations)
+        for i in 0..<iterations {
+            var meanAmp = 0.0
+            for _ in 0..<n {
+                meanAmp += trialScalar[Int.random(in: 0..<n, using: &rng)]
+            }
+            estimates[i] = meanAmp * invN
+        }
+        let mean = estimates.reduce(0, +) / Double(iterations)
+        let variance = estimates.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(iterations)
         return sqrt(variance)
     }
 

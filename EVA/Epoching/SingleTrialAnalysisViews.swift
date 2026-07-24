@@ -112,6 +112,8 @@ struct SingleTrialAnalysisSheet: View {
     @State private var latencyAnalysisTask: Task<Void, Never>?
     @State private var woodyAlignedPreview: SingleTrialAlignedButterflyPreview?
     @State private var rideAlignedPreview: SingleTrialAlignedButterflyPreview?
+    @State private var cwtAlignedPreview: SingleTrialAlignedButterflyPreview?
+    @State private var showsMethodHelp = false
     private let amplitudeScaleBounds: ClosedRange<Double> = 1...5_000
     private let singleTrialPlotHeight: CGFloat = 220
 
@@ -313,14 +315,97 @@ struct SingleTrialAnalysisSheet: View {
     // MARK: - Selection controls
 
     private var modeControls: some View {
-        Picker("Analysis Mode", selection: $viewModel.analysisMode) {
-            ForEach(SingleTrialAnalysisMode.allCases) { mode in
-                Text(mode.rawValue).tag(mode)
+        HStack(spacing: 8) {
+            Picker("Analysis Mode", selection: $viewModel.analysisMode) {
+                ForEach(SingleTrialAnalysisMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 360)
+
+            Button {
+                showsMethodHelp = true
+            } label: {
+                Image(systemName: "questionmark.circle")
+            }
+            .padding(.leading, 12)
+            .buttonStyle(.plain)
+            .help("About the single-trial analysis methods and references")
+            .popover(isPresented: $showsMethodHelp, arrowEdge: .trailing) {
+                singleTrialMethodHelp()
             }
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(maxWidth: 360)
+    }
+
+    @ViewBuilder
+    private func singleTrialMethodHelp() -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Single-Trial Analysis Methods")
+                    .font(.headline)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Measurements")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Reads amplitude and latency for each trial in a fixed time window, relative to the grand average's peak. Use this when trials are already well time-locked and you just want per-trial values, split-half trends, and a retained-trial-count distribution — no latency correction is applied.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Woody Alignment")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Adaptive-filter latency correction: each trial is shifted (by cross-correlation, peak, or a matched-wavelet template) onto an evolving average, which is re-estimated each pass. Use it when a single component's latency jitters from trial to trial and that jitter smears the average — realigning sharpens the peak and yields a per-trial latency. It estimates one rigid shift per trial.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("RIDE — Residue Iteration Decomposition")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Iteratively separates the ERP into a stimulus-locked (S), latency-variable (C), and optional response-locked (R) component, each with its own timing. Use it when different components move independently — e.g. a fixed early sensory response plus a decision-related component whose latency tracks reaction time — so a single Woody shift can't align them together.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("CWT Ridge")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Detects peaks with continuous-wavelet-transform ridge lines (robust to single-trial noise), then aligns trials non-linearly (dynamic time warping, curve/landmark registration, or MAP latency) so early and late components can shift by different, time-varying amounts. Use it for low-SNR data or when several components need independent, non-rigid alignment that Woody and RIDE don't provide.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("References")
+                        .font(.caption.weight(.semibold))
+                    Text("• Woody, C. D. (1967). Med. & Biol. Engineering 5(6):539–554.")
+                    Text("• Ouyang, Herzmann, Zhou & Sommer (2011). Psychophysiology 48(12):1631–1647 (RIDE).")
+                    Text("• Ouyang, Sommer & Zhou (2015). J. Neurosci. Methods 250:7–21 (RIDE toolbox).")
+                    Text("• Du, Kibbe & Lin (2006). Bioinformatics 22(17):2059–2065 (CWT peak detection).")
+                    Text("• Sakoe & Chiba (1978). IEEE TASSP 26(1):43–49 (DTW).")
+                    Text("• Ramsay & Silverman (2005). Functional Data Analysis, 2nd ed. (curve registration).")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+                Text("Woody, RIDE, and the CWT-Ridge aligners are original Swift implementations of these published methods; no upstream code was copied.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(16)
+            .frame(width: 420, alignment: .leading)
+        }
+        .frame(maxHeight: 520)
     }
 
     private var selectionControls: some View {
@@ -1234,12 +1319,17 @@ struct SingleTrialAnalysisSheet: View {
             detail: "Preparing selected trials..."
         )
         viewModel.statusMessage = nil
+        cwtAlignedPreview = nil
 
         let job = SingleTrialCWTRunJob(
             rawSignal: rawSignal,
             rawSegments: rawSegments,
+            averagedSegments: averagedSegments,
             categories: analysisCategories(runAll: viewModel.cwtRunsAllCategories),
             selectedChannelIndices: selectedChannelIndices,
+            averageReference: averageReference,
+            baselineCorrected: baselineCorrected,
+            badChannels: badChannels,
             samplingRate: rawSignal.samplingRate,
             configuration: cwtConfiguration(samplingRate: rawSignal.samplingRate)
         )
@@ -1261,6 +1351,7 @@ struct SingleTrialAnalysisSheet: View {
             viewModel.cwtResultCategory = category
             viewModel.cwtResultChannelIndices = selectedChannelIndices
             viewModel.cwtResultsByCategory = output.resultsByCategory
+            cwtAlignedPreview = output.alignedButterflyPreview
             viewModel.statusMessage = output.resultsByCategory.isEmpty
                 ? "Could not compute CWT Ridge alignment for this window and settings."
                 : nil
@@ -1605,8 +1696,17 @@ struct SingleTrialAnalysisSheet: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            labeledChart("Original vs CWT-Aligned Average") {
-                cwtAverageChart(result)
+            GeometryReader { proxy in
+                HStack(alignment: .top, spacing: 14) {
+                    labeledChart("Original vs CWT-Aligned Average") {
+                        cwtAverageChart(result)
+                    }
+                    .frame(width: proxy.size.width * 0.5 - 7)
+                    .clipped()
+                    alignedButterflyChart(preview: cwtAlignedPreview, alignedLabel: "CWT")
+                        .frame(width: proxy.size.width * 0.5 - 7)
+                        .clipped()
+                }
             }
             .frame(height: 220)
 
@@ -2619,14 +2719,19 @@ private struct SingleTrialRIDERunJob: Sendable {
 private struct SingleTrialCWTRunJob: Sendable {
     var rawSignal: MFFSignalData
     var rawSegments: [EpochSegment]
+    var averagedSegments: [EpochSegment]
     var categories: [String]
     var selectedChannelIndices: [Int]
+    var averageReference: Bool
+    var baselineCorrected: Bool
+    var badChannels: Set<Int>
     var samplingRate: Double
     var configuration: CWTRidgePipeline.Configuration
 }
 
 private struct SingleTrialCWTRunOutput: Sendable {
     var resultsByCategory: [String: CWTRidgePipeline.Result]
+    var alignedButterflyPreview: SingleTrialAlignedButterflyPreview?
 }
 
 private struct SingleTrialWoodyRunOutput: Sendable {
@@ -2776,11 +2881,40 @@ private nonisolated enum SingleTrialLatencyRunner {
             }
         }
 
+        let resultsByCategory = Dictionary(uniqueKeysWithValues: outputs.compactMap { output in
+            output.result.map { (output.category, $0) }
+        })
+
+        // All-channel aligned butterfly, so CWT shows its improved alignment the
+        // same way Woody/RIDE do. Each channel is resampled with the trial's true
+        // per-sample warping function (`trialWarpFunctions`), so the butterfly
+        // reflects the actual non-linear alignment. The net rigid shift is passed
+        // as a per-trial fallback for any trial whose warp is unavailable.
+        progress.yield(SingleTrialRunProgress(
+            fraction: 0.96,
+            title: "CWT Ridge",
+            detail: "Building all-channel aligned butterfly..."
+        ))
+        let shiftsByCategory = resultsByCategory.mapValues { result in
+            result.trials.map { Int($0.netShiftSamples.rounded()) }
+        }
+        let warpsByCategory = resultsByCategory.mapValues { $0.trialWarpFunctions }
+        let preview = await alignedButterflyPreview(
+            rawSignal: job.rawSignal,
+            rawSegments: job.rawSegments,
+            averagedSegments: job.averagedSegments,
+            orderedCategories: job.categories,
+            shiftsByCategory: shiftsByCategory,
+            warpsByCategory: warpsByCategory,
+            averageReference: job.averageReference,
+            baselineCorrected: job.baselineCorrected,
+            badChannels: job.badChannels
+        )
+
         progress.yield(SingleTrialRunProgress(fraction: 1, title: "CWT Ridge", detail: "Ready to plot."))
         return SingleTrialCWTRunOutput(
-            resultsByCategory: Dictionary(uniqueKeysWithValues: outputs.compactMap { output in
-                output.result.map { (output.category, $0) }
-            })
+            resultsByCategory: resultsByCategory,
+            alignedButterflyPreview: preview
         )
     }
 
@@ -2943,6 +3077,7 @@ private nonisolated enum SingleTrialLatencyRunner {
         averagedSegments: [EpochSegment],
         orderedCategories: [String],
         shiftsByCategory: [String: [Int]],
+        warpsByCategory: [String: [[Double]]]? = nil,
         averageReference: Bool,
         baselineCorrected: Bool,
         badChannels: Set<Int>
@@ -2970,9 +3105,11 @@ private nonisolated enum SingleTrialLatencyRunner {
             let rawLength = averageSegment.endSample - averageSegment.startSample + 1
             let length = displayLength(rawLength: rawLength, displayStride: previewStride)
             guard length > 1, trials.count == shifts.count else { continue }
+            let warps = warpsByCategory?[category]
             guard let averagedChannels = await alignedAverageAllChannels(
                 trials: trials,
                 shifts: shifts,
+                warps: warps,
                 rawSignal: rawSignal,
                 rawLength: rawLength,
                 displayStride: previewStride,
@@ -3021,6 +3158,7 @@ private nonisolated enum SingleTrialLatencyRunner {
     private static func alignedAverageAllChannels(
         trials: [EpochSegment],
         shifts: [Int],
+        warps: [[Double]]?,
         rawSignal: MFFSignalData,
         rawLength: Int,
         displayStride: Int,
@@ -3034,6 +3172,7 @@ private nonisolated enum SingleTrialLatencyRunner {
         let preparedTrials = preparePreviewTrials(
             trials: trials,
             shifts: shifts,
+            warps: warps,
             rawSignal: rawSignal,
             rawLength: rawLength,
             averageReference: averageReference,
@@ -3094,13 +3233,31 @@ private nonisolated enum SingleTrialLatencyRunner {
                 let baseline = baselineCorrected
                     ? channelBaseline(channel: channel, trial: trial, rawSignal: rawSignal)
                     : 0
+                let channelData = rawSignal.data[channel]
                 for displaySample in 0..<displayLength {
                     let rawSample = displaySample * displayStride
-                    let sourceOffset = rawSample + trial.shift
-                    guard sourceOffset >= 0, sourceOffset < rawLength else { continue }
-                    let absoluteSample = trial.segment.startSample + sourceOffset
-                    let referenceMean = trial.referenceMeans?[sourceOffset] ?? 0
-                    let value = Double(rawSignal.data[channel][absoluteSample]) - referenceMean - baseline
+                    let value: Double
+                    if let warp = trial.warp {
+                        // Non-linear warp: the output sample is drawn from a
+                        // fractional source index; linearly interpolate the
+                        // channel (and average reference) there.
+                        guard rawSample < warp.count else { continue }
+                        let source = warp[rawSample]
+                        guard source.isFinite, source >= 0, source <= Double(rawLength - 1) else { continue }
+                        let i0 = Int(source.rounded(.down))
+                        let i1 = min(i0 + 1, rawLength - 1)
+                        let frac = source - Double(i0)
+                        let base0 = trial.segment.startSample
+                        let raw = Double(channelData[base0 + i0]) * (1 - frac) + Double(channelData[base0 + i1]) * frac
+                        let referenceMean = trial.referenceMeans.map { $0[i0] * (1 - frac) + $0[i1] * frac } ?? 0
+                        value = raw - referenceMean - baseline
+                    } else {
+                        // Rigid shift (Woody / RIDE).
+                        let sourceOffset = rawSample + trial.shift
+                        guard sourceOffset >= 0, sourceOffset < rawLength else { continue }
+                        let referenceMean = trial.referenceMeans?[sourceOffset] ?? 0
+                        value = Double(channelData[trial.segment.startSample + sourceOffset]) - referenceMean - baseline
+                    }
                     guard value.isFinite else { continue }
                     sum[displaySample] += value
                     counts[displaySample] += 1
@@ -3117,23 +3274,33 @@ private nonisolated enum SingleTrialLatencyRunner {
         var segment: EpochSegment
         var shift: Int
         var referenceMeans: [Double]?
+        /// When set (CWT ridge), the per-sample warping function (output sample →
+        /// fractional source-sample index) is applied to each channel instead of
+        /// the rigid `shift`, so the butterfly reflects the true non-linear warp.
+        var warp: [Double]?
     }
 
     private static func preparePreviewTrials(
         trials: [EpochSegment],
         shifts: [Int],
+        warps: [[Double]]?,
         rawSignal: MFFSignalData,
         rawLength: Int,
         averageReference: Bool,
         badChannels: Set<Int>
     ) -> [PreparedPreviewTrial] {
-        zip(trials, shifts).compactMap { segment, shift in
+        trials.indices.compactMap { i in
+            let segment = trials[i]
             guard segment.endSample - segment.startSample + 1 == rawLength,
                   segment.startSample >= 0 else { return nil }
             let referenceMeans = averageReference
                 ? referenceMeans(segment: segment, rawLength: rawLength, rawSignal: rawSignal, badChannels: badChannels)
                 : nil
-            return PreparedPreviewTrial(segment: segment, shift: shift, referenceMeans: referenceMeans)
+            // Only use a warp whose length matches the epoch — otherwise fall
+            // back to the rigid shift for this trial.
+            let warp = warps.flatMap { $0.indices.contains(i) ? $0[i] : nil }
+                .flatMap { $0.count == rawLength ? $0 : nil }
+            return PreparedPreviewTrial(segment: segment, shift: shifts[i], referenceMeans: referenceMeans, warp: warp)
         }
     }
 

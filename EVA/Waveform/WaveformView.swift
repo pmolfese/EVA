@@ -234,7 +234,12 @@ struct WaveformView: View {
     @State var channelInspectorSelection: ChannelInspectorSelection = .channel(0)
     @State var channelInspectorOverlayEnabled = true
     @State var channelInspectorShowsStandardError = false
-    @State var averagesLogDetail: AveragesLogDetail?
+    @State var showsPSASummaryBubble = false
+    @State var showsPerEpochBadChannelsBubble = false
+    @State var showsAverageSNRHelp = false
+    @State var averageSNRSortOrder: [KeyPathComparator<AverageSNRRow>] = [
+        KeyPathComparator(\AverageSNRRow.category, order: .forward)
+    ]
     @State var showsCategoryGroupPopover = false
     @State var categoryGroupName = ""
     @State var categoryGroupSelectedCodes = Set<String>()
@@ -249,6 +254,7 @@ struct WaveformView: View {
     @State var icaTask: Task<Void, Never>?
     @State var icaRemovalTask: Task<Void, Never>?
     @State var psaTask: Task<Void, Never>?
+    @State var snrTask: Task<Void, Never>?
     @State var filterTask: Task<Void, Never>?
     @State var gradientTask: Task<Void, Never>?
     @State var replayTask: Task<Void, Never>?
@@ -928,9 +934,6 @@ struct WaveformView: View {
         }
         .sheet(isPresented: $segHealth.showsDetails) {
             segmentHealthDetailsSheet()
-        }
-        .sheet(item: $averagesLogDetail) { detail in
-            averagesLogDetailSheet(detail)
         }
         .sheet(isPresented: $gradient.showsMotionConfig) {
             MotionConfigView(

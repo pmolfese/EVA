@@ -21,10 +21,24 @@
 
 import SwiftUI
 
-struct AveragesLogDetail: Identifiable, Equatable {
-    let id = UUID()
-    let title: String
-    let text: String
+/// One row of the per-category signal-to-noise table in the Averages workspace.
+/// Optional metrics keep their `nil` for display ("n/a"); the `*Sort` keys map
+/// `nil` to the smallest value so missing metrics sink to the bottom of an
+/// ascending sort.
+struct AverageSNRRow: Identifiable {
+    let id: String
+    let category: String
+    let displayCategory: String
+    let trials: Int
+    let plusMinusSNR: Double?
+    let baselineSNR: Double?
+    let sme: Double?
+    let splitHalf: Double?
+
+    var plusMinusSort: Double { plusMinusSNR ?? -.greatestFiniteMagnitude }
+    var baselineSort: Double { baselineSNR ?? -.greatestFiniteMagnitude }
+    var smeSort: Double { sme ?? -.greatestFiniteMagnitude }
+    var splitHalfSort: Double { splitHalf ?? -.greatestFiniteMagnitude }
 }
 
 extension WaveformView {
@@ -430,78 +444,209 @@ extension WaveformView {
     }
 
     private func averagesEventsLogPanel(signal: MFFSignalData, segments: [EpochSegment]) -> some View {
-        let summary = epoching.psaExclusionSummary
+        let showsSNR = !epoching.averageSNRByCategory.isEmpty || epoching.isComputingAverageSNR
         return averagesPanel {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Events / Logs")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(segments.count) visible average\(segments.count == 1 ? "" : "s")")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
+            HStack(alignment: .top, spacing: 16) {
+                averagesEventsLogColumn(segments: segments)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
 
-                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
-                    GridRow {
-                        averagesLogMetric("Candidate events", value: summary.candidateEvents)
-                        averagesLogMetric("Built epochs", value: summary.acceptedEpochs)
-                        averagesLogMetric("Kept epochs", value: summary.keptEpochs)
-                        averagesLogMetric("Excluded", value: summary.excludedEpochs)
-                    }
-                    GridRow {
-                        averagesLogMetric("Labeled bad skips", value: summary.skippedLabeledBadSegments)
-                        averagesLogMetric("Artifact skips", value: summary.skippedArtifacts)
-                        averagesLogMetric("Missing timing", value: summary.skippedTimingMarkers)
-                        averagesLogMetric("Out of bounds", value: summary.skippedOutOfBounds)
-                    }
-                    GridRow {
-                        averagesLogMetric("Timing adjusted", value: summary.timingAdjusted)
-                        averagesLogMetric("Too many bad channels", value: summary.rejectedForTooManyBadChannels)
-                    }
-                }
-
-                if !summary.skippedArtifactBreakdown.isEmpty {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("Artifact skip causes")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text(artifactSkipBreakdownText(summary.skippedArtifactBreakdown))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                }
-
-                Divider()
-
-                HStack(alignment: .top, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Summary")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        averagesLogDetailButton(
-                            title: "PSA Summary",
-                            text: epoching.statusMessage ?? "No PSA log message recorded."
-                        )
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    if !epoching.epochBadChannelSummary.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Per-epoch bad channels")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            averagesLogDetailButton(
-                                title: "Per-epoch Bad Channels",
-                                text: epoching.epochBadChannelSummary.joined(separator: "\n")
-                            )
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                if showsSNR {
+                    Divider()
+                    averagesSNRSection()
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
             }
         }
+    }
+
+    private func averagesEventsLogColumn(segments: [EpochSegment]) -> some View {
+        let summary = epoching.psaExclusionSummary
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Events / Logs")
+                    .font(.headline)
+                Spacer()
+                Text("\(segments.count) visible average\(segments.count == 1 ? "" : "s")")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+                GridRow {
+                    averagesLogMetric("Candidate events", value: summary.candidateEvents)
+                    averagesLogMetric("Built epochs", value: summary.acceptedEpochs)
+                    averagesLogMetric("Kept epochs", value: summary.keptEpochs)
+                    averagesLogMetric("Excluded", value: summary.excludedEpochs)
+                }
+                GridRow {
+                    averagesLogMetric("Labeled bad skips", value: summary.skippedLabeledBadSegments)
+                    averagesLogMetric("Artifact skips", value: summary.skippedArtifacts)
+                    averagesLogMetric("Missing timing", value: summary.skippedTimingMarkers)
+                    averagesLogMetric("Out of bounds", value: summary.skippedOutOfBounds)
+                }
+                GridRow {
+                    averagesLogMetric("Timing adjusted", value: summary.timingAdjusted)
+                    averagesLogMetric("Too many bad channels", value: summary.rejectedForTooManyBadChannels)
+                }
+            }
+
+            if !summary.skippedArtifactBreakdown.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Artifact skip causes")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(artifactSkipBreakdownText(summary.skippedArtifactBreakdown))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            Divider()
+
+            HStack(alignment: .top, spacing: 18) {
+                averagesLogBubbleButton(
+                    label: "Summary",
+                    title: "PSA Summary",
+                    text: epoching.statusMessage ?? "No PSA log message recorded.",
+                    isPresented: $showsPSASummaryBubble
+                )
+
+                if !epoching.epochBadChannelSummary.isEmpty {
+                    averagesLogBubbleButton(
+                        label: "Per-epoch bad channels",
+                        title: "Per-epoch Bad Channels",
+                        text: epoching.epochBadChannelSummary.joined(separator: "\n"),
+                        isPresented: $showsPerEpochBadChannelsBubble
+                    )
+                }
+            }
+        }
+    }
+
+    private var averageSNRRows: [AverageSNRRow] {
+        epoching.averageSNRByCategory.map { category, m in
+            AverageSNRRow(
+                id: category,
+                category: category,
+                displayCategory: epoching.displayCategory(category),
+                trials: m.trialCount,
+                plusMinusSNR: m.plusMinusSNR,
+                baselineSNR: m.baselineSNR,
+                sme: m.standardizedMeasurementError,
+                splitHalf: m.splitHalfReliability
+            )
+        }
+        .sorted(using: averageSNRSortOrder)
+    }
+
+    /// Per-category signal-to-noise summary for the current average — a sortable,
+    /// scrollable table (handles many categories). Columns mirror the Combine
+    /// sheet's SNR table; "n/a" appears where a metric needs more trials than the
+    /// category has (±/GFP need ≥2; SME and split-half ≥4).
+    @ViewBuilder
+    private func averagesSNRSection() -> some View {
+        let rows = averageSNRRows
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Signal-to-noise")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Button {
+                    showsAverageSNRHelp = true
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .help("About these signal-to-noise metrics")
+                .popover(isPresented: $showsAverageSNRHelp, arrowEdge: .trailing) {
+                    averagesSNRHelpPopover()
+                }
+                if epoching.isComputingAverageSNR {
+                    Spacer()
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Calculating…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if rows.isEmpty, epoching.isComputingAverageSNR {
+                Text("Measuring signal-to-noise from the single trials…")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Table(rows, sortOrder: $averageSNRSortOrder) {
+                    TableColumn("Category", value: \.category) { row in
+                        Text(row.displayCategory).lineLimit(1)
+                    }
+                    TableColumn("Trials", value: \.trials) { row in
+                        Text("\(row.trials)").monospacedDigit()
+                    }
+                    .width(46)
+                    TableColumn("±SNR", value: \.plusMinusSort) { row in
+                        Text(snrText(row.plusMinusSNR)).monospacedDigit()
+                    }
+                    .width(52)
+                    TableColumn("Base", value: \.baselineSort) { row in
+                        Text(snrText(row.baselineSNR)).monospacedDigit()
+                    }
+                    .width(52)
+                    TableColumn("SME", value: \.smeSort) { row in
+                        Text(snrText(row.sme, digits: 3)).monospacedDigit()
+                    }
+                    .width(56)
+                    TableColumn("r½", value: \.splitHalfSort) { row in
+                        Text(snrText(row.splitHalf)).monospacedDigit()
+                    }
+                    .width(46)
+                }
+                .font(.caption)
+                .frame(minHeight: 120)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func averagesSNRHelpPopover() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Signal-to-noise metrics")
+                .font(.headline)
+            Group {
+                snrHelpRow("Trials", "Number of single trials that went into the category average.")
+                snrHelpRow("±SNR", "RMS(average) ÷ RMS(plus-minus noise). The plus-minus (Schimmel) residual sign-flips alternate trials so the signal cancels and only noise remains. Higher is better.")
+                snrHelpRow("Base", "Response-window peak ÷ pre-stimulus baseline RMS. A quick amplitude-over-noise ratio. Higher is better.")
+                snrHelpRow("SME", "Standardized Measurement Error — bootstrapped standard error of the mean amplitude (Luck et al. 2021). Lower is better.")
+                snrHelpRow("r½", "Split-half reliability across odd/even trials, Spearman-Brown corrected (−1…1). Higher is better.")
+            }
+            Divider()
+            Text("References: Schimmel (1967); Luck, Stewart, Simmons & Rhemtulla (2021); Lehmann & Skrandies (1980). See EpochSNR.swift.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 340, alignment: .leading)
+    }
+
+    private func snrHelpRow(_ term: String, _ description: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(term)
+                .font(.caption.monospaced().weight(.semibold))
+                .frame(width: 44, alignment: .leading)
+            Text(description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func snrText(_ value: Double?, digits: Int = 2) -> String {
+        guard let value, value.isFinite else { return "n/a" }
+        return String(format: "%.\(digits)f", value)
     }
 
     private func artifactSkipBreakdownText(_ breakdown: [String: Int]) -> String {
@@ -516,18 +661,47 @@ extension WaveformView {
             .joined(separator: ", ")
     }
 
-    private func averagesLogDetailButton(title: String, text: String) -> some View {
-        Button {
-            averagesLogDetail = AveragesLogDetail(title: title, text: text)
-        } label: {
-            Text(text)
-                .font(.caption)
+    /// A labeled control that opens the full log text in a popover bubble,
+    /// instead of showing (and clipping) the text inline.
+    private func averagesLogBubbleButton(
+        label: String,
+        title: String,
+        text: String,
+        isPresented: Binding<Bool>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                isPresented.wrappedValue = true
+            } label: {
+                Label("Show", systemImage: "text.magnifyingglass")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .popover(isPresented: isPresented, arrowEdge: .bottom) {
+                averagesLogBubble(title: title, text: text)
+            }
         }
-        .buttonStyle(.plain)
-        .help("Show full text")
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func averagesLogBubble(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            ScrollView {
+                Text(text)
+                    .font(.callout.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 320)
+        }
+        .padding(16)
+        .frame(width: 400)
     }
 
     private func averagesLogMetric(_ title: String, value: Int) -> some View {
@@ -538,30 +712,6 @@ extension WaveformView {
             Text("\(value)")
                 .font(.caption.monospacedDigit().weight(.semibold))
         }
-    }
-
-    func averagesLogDetailSheet(_ detail: AveragesLogDetail) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(detail.title)
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Button("Close") {
-                    averagesLogDetail = nil
-                }
-            }
-
-            ScrollView {
-                Text(detail.text)
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-        }
-        .padding(20)
-        .frame(minWidth: 560, minHeight: 280)
     }
 
     @ViewBuilder
@@ -700,13 +850,32 @@ private struct AveragesLatencyScrubberControl: View {
             )
             .disabled(maxIndex <= 0)
 
-            HStack {
-                Text(latencyText(relativeSample: 0))
-                Spacer()
-                Text(latencyText(relativeSample: segment.stimulusOffsetSamples))
-                Spacer()
-                Text(latencyText(relativeSample: maxIndex))
+            // Axis labels positioned to match the slider: the stimulus (0 ms)
+            // tick sits at its TRUE fractional location along the track
+            // (stimulusOffsetSamples / maxIndex), not the geometric center — the
+            // epoch window is usually asymmetric (e.g. −200…+800 ms), so 0 ms is
+            // not in the middle.
+            GeometryReader { geo in
+                let width = geo.size.width
+                let clampedStim = min(max(segment.stimulusOffsetSamples, 0), maxIndex)
+                let frac = maxIndex > 0 ? CGFloat(clampedStim) / CGFloat(maxIndex) : 0
+                ZStack(alignment: .top) {
+                    HStack {
+                        Text(latencyText(relativeSample: 0))
+                        Spacer()
+                        Text(latencyText(relativeSample: maxIndex))
+                    }
+                    VStack(spacing: 1) {
+                        Rectangle()
+                            .frame(width: 1, height: 4)
+                            .foregroundStyle(.secondary)
+                        Text(latencyText(relativeSample: clampedStim))
+                    }
+                    .fixedSize()
+                    .position(x: min(max(width * frac, 14), max(width - 14, 14)), y: 9)
+                }
             }
+            .frame(height: 24)
             .font(.caption2.monospacedDigit())
             .foregroundStyle(.secondary)
         }

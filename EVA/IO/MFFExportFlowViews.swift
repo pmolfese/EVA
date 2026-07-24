@@ -430,6 +430,16 @@ extension WaveformView {
         if !channels.bad.isEmpty {
             lines.append("markBad result: channels=\(channels.bad.sorted().map { String($0 + 1) }.joined(separator: ","))")
         }
+        for category in epoching.averageSNRByCategory.keys.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
+            let m = epoching.averageSNRByCategory[category] ?? SNRMetrics()
+            func f(_ v: Double?, _ digits: Int = 2) -> String {
+                guard let v, v.isFinite else { return "n/a" }
+                return String(format: "%.\(digits)f", v)
+            }
+            lines.append(
+                "average SNR [\(category)]: trials=\(m.trialCount), plusMinusSNR=\(f(m.plusMinusSNR)), baselineSNR=\(f(m.baselineSNR)), gfpSNR=\(f(m.gfpSNR)), sme=\(f(m.standardizedMeasurementError, 3)), splitHalfReliability=\(f(m.splitHalfReliability))"
+            )
+        }
         return lines
     }
 

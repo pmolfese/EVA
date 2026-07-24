@@ -28,6 +28,20 @@
 //   • Spatial whitening (suppresses dominant non-BCG directions before PCA)
 //   • Respiratory-envelope adaptive normalization (5-10 s window, tracks ~0.2 Hz modulation)
 //
+//  The spatial-PCA detector is an original Swift implementation in the spirit of
+//  PCA / optimal-basis-set (OBS) BCG modeling; no upstream code was copied.
+//
+//  References:
+//    * Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith,
+//      S. M. (2005). Removal of FMRI environment artifacts from EEG data using
+//      optimal basis sets. NeuroImage, 28(3), 720-737.
+//      https://doi.org/10.1016/j.neuroimage.2005.06.067
+//    * Debener, S., Strobel, A., Sorger, B., Peters, J., Kranczioch, C.,
+//      Engel, A. K., & Goebel, R. (2007). Improved quality of auditory
+//      event-related potentials recorded simultaneously with 3-T fMRI:
+//      Removal of the ballistocardiogram artefact. NeuroImage, 34(2), 587-597.
+//      https://doi.org/10.1016/j.neuroimage.2006.09.031
+//
 
 import Accelerate
 import Foundation

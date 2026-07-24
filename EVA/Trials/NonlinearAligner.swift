@@ -31,6 +31,16 @@
 //     smoothness prior on the shift, robust for low-SNR trials where plain
 //     cross-correlation diverges.
 //
+//  These are original Swift implementations of the published methods.
+//
+//  References:
+//    * DTW / Sakoe-Chiba band: Sakoe, H., & Chiba, S. (1978). Dynamic
+//      programming algorithm optimization for spoken word recognition. IEEE
+//      Transactions on Acoustics, Speech, and Signal Processing, 26(1), 43-49.
+//      https://doi.org/10.1109/TASSP.1978.1163055
+//    * Curve / landmark registration: Ramsay, J. O., & Silverman, B. W. (2005).
+//      Functional Data Analysis (2nd ed.), Chapters 7-8 (registration). Springer.
+//
 
 import Foundation
 

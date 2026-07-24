@@ -31,7 +31,7 @@ struct EpochingViewModelTests {
         #expect(vm.selectedEventCodes.isEmpty)
         #expect(vm.skipEyeBlinks)
         #expect(vm.skipEyeMovements)
-        #expect(!vm.skipIfContainsArtifact)
+        #expect(vm.skipIfContainsArtifact)
         #expect(vm.escalatesBadChannelsToGlobal)
         #expect(vm.epochedSignal == nil)
         #expect(vm.epochSegments.isEmpty)

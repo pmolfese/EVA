@@ -14,9 +14,24 @@
 //  subject to the copyleft requirements of the GPL-3.0.
 //  SPDX-License-Identifier: GPL-3.0-only
 //
-//  Pure computation for a first Swift RIDE implementation. It separates
-//  stimulus-locked S, latency-variable C, and optional response-locked R
-//  components from channel-resolved single-trial ERP traces.
+//  Pure computation for a first Swift RIDE (Residue Iteration Decomposition)
+//  implementation. It separates stimulus-locked S, latency-variable C, and
+//  optional response-locked R components from channel-resolved single-trial ERP
+//  traces.
+//
+//  RIDE is an original Swift implementation of the published method; no code was
+//  copied from the RIDE MATLAB toolbox.
+//
+//  References:
+//    * Ouyang, G., Herzmann, G., Zhou, C., & Sommer, W. (2011). Residue
+//      iteration decomposition (RIDE): A new method to separate ERP components
+//      on the basis of latency variability in single trials. Psychophysiology,
+//      48(12), 1631-1647. https://doi.org/10.1111/j.1469-8986.2011.01269.x
+//    * Ouyang, G., Sommer, W., & Zhou, C. (2015). A toolbox for residue
+//      iteration decomposition (RIDE) — A method for the decomposition,
+//      reconstruction, and single trial analysis of event related potentials.
+//      Journal of Neuroscience Methods, 250, 7-21.
+//      https://doi.org/10.1016/j.jneumeth.2014.10.009
 //
 
 import Foundation
