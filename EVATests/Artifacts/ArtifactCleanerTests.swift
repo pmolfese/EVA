@@ -374,6 +374,76 @@ struct ArtifactCleanerTests {
         }
     }
 
+    /// Per-electrode adaptive OBS (aOBS): when the artifact reaches each
+    /// channel at a different, beat-to-beat-jittering lag, a single shared
+    /// window can't learn one consistent shifted template, so standard OBS
+    /// leaves residual. Re-centering each event on each channel's own peak
+    /// before fitting should remove noticeably more of that energy.
+    @Test func perChannelAlignmentBeatsSharedWindowUnderElectrodeLatency() {
+        let template = SyntheticSignal.bump(width: windowSamples)
+        let centers = [120, 260, 400, 540, 680]
+        let sampleCount = 820
+        let channelCount = 4
+        // Distinct propagation lag per electrode, all inside the ±50 ms search.
+        let baseLag = [-6, -2, 3, 7]
+
+        var data = (0..<channelCount).map { channel -> [Float] in
+            var state = UInt64(channel + 3)
+            return (0..<sampleCount).map { _ -> Float in
+                state = state &* 6364136223846793005 &+ 1
+                return Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 0.02)
+            }
+        }
+
+        // Independent per-event, per-channel jitter so no single fixed offset
+        // captures the artifact — this is what defeats a shared window.
+        var jitterState: UInt64 = 99
+        func nextJitter() -> Int {
+            jitterState = jitterState &* 6364136223846793005 &+ 1
+            return Int(jitterState >> 40) % 5 - 2 // [-2, 2]
+        }
+
+        for center in centers {
+            for channel in 0..<channelCount {
+                let lag = baseLag[channel] + nextJitter()
+                let start = center - windowSamples / 2 + lag
+                for k in 0..<windowSamples where data[channel].indices.contains(start + k) {
+                    data[channel][start + k] += 2.0 * template[k]
+                }
+            }
+        }
+
+        let signal = SyntheticSignal.make(data, samplingRate: samplingRate)
+        let events = makeEvents(centers: centers)
+
+        func makeAOBSArtifact(perChannelAlignment: Bool) -> DefinedArtifact {
+            var artifact = makeArtifact(events: events, template: template, method: .obs)
+            artifact.selectedChannelIndices = Array(0..<channelCount)
+            artifact.obsStrategy = .standard
+            artifact.obsPCAComponentCount = 1
+            artifact.obsEdgeTaperSeconds = 0.02
+            artifact.obsPerChannelAlignment = perChannelAlignment
+            return artifact
+        }
+
+        let before = windowEnergy(signal.data, centers: centers)
+        let (shared, sharedSummaries) = ArtifactCleaner.cleanedSignal(
+            from: signal, artifacts: [makeAOBSArtifact(perChannelAlignment: false)], excluding: []
+        )
+        let (aligned, alignedSummaries) = ArtifactCleaner.cleanedSignal(
+            from: signal, artifacts: [makeAOBSArtifact(perChannelAlignment: true)], excluding: []
+        )
+
+        let afterShared = windowEnergy(shared.data, centers: centers)
+        let afterAligned = windowEnergy(aligned.data, centers: centers)
+
+        #expect(sharedSummaries.count == 1)
+        #expect(alignedSummaries.count == 1)
+        #expect(afterShared < before, "shared-window OBS should still remove some artifact energy")
+        #expect(afterAligned < afterShared * 0.85,
+                "aOBS should leave less residual than the shared window under per-electrode latency (aligned=\(afterAligned), shared=\(afterShared))")
+    }
+
     @Test func obsVarianceReportFindsDominantFirstComponent() {
         // Every event carries almost the same template (small per-event jitter),
         // so nearly all residual variance should load onto the first PC.

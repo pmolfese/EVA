@@ -222,6 +222,17 @@ struct DefinedArtifact: Identifiable, Sendable {
     var obsPreservesLocalBaseline = true
     var obsUsesOverlapAdd = true
     var obsAlignmentSearchSeconds = Self.defaultOBSAlignmentSearchSeconds
+    /// Experimental per-electrode adaptive OBS (aOBS). When true, each event's
+    /// OBS window is shifted independently *per channel* — within
+    /// ±`obsAlignmentSearchSeconds` — to the lag that best matches that
+    /// channel's own mean-artifact basis, before the least-squares basis fit
+    /// and subtraction. Standard OBS carves the identical sample window on
+    /// every electrode, which mis-phases the fit for artifacts that propagate
+    /// across the scalp with electrode-dependent latency (BCG pulse timing,
+    /// fronto→posterior ocular gradients). Composes with the channel-wise OBS
+    /// strategies (standard / topography-gated / -aligned / -weighted); the
+    /// virtual-channel, clustered, and spatiotemporal strategies ignore it.
+    var obsPerChannelAlignment = false
     var obsTopographyWeightStrength = Self.defaultOBSTopographyWeightStrength
     var obsClusterCount = Self.defaultOBSClusterCount
     var localTemplateWindowSize = Self.defaultLocalTemplateWindowSize
@@ -268,6 +279,7 @@ struct DefinedArtifact: Identifiable, Sendable {
         obsPreservesLocalBaseline = previous.obsPreservesLocalBaseline
         obsUsesOverlapAdd = previous.obsUsesOverlapAdd
         obsAlignmentSearchSeconds = previous.obsAlignmentSearchSeconds
+        obsPerChannelAlignment = previous.obsPerChannelAlignment
         obsTopographyWeightStrength = previous.obsTopographyWeightStrength
         obsClusterCount = previous.obsClusterCount
         localTemplateWindowSize = previous.localTemplateWindowSize
@@ -316,6 +328,7 @@ extension DefinedArtifact {
             key("obsPreservesLocalBaseline"): "\(obsPreservesLocalBaseline)",
             key("obsUsesOverlapAdd"): "\(obsUsesOverlapAdd)",
             key("obsAlignmentSearchSeconds"): fixed(obsAlignmentSearchSeconds),
+            key("obsPerChannelAlignment"): "\(obsPerChannelAlignment)",
             key("obsTopographyWeightStrength"): fixed(obsTopographyWeightStrength),
             key("obsClusterCount"): "\(obsClusterCount)",
             key("localTemplateWindowSize"): "\(localTemplateWindowSize)",
@@ -1132,6 +1145,15 @@ nonisolated enum ArtifactCleaner {
         let channelScales = strategy == .topographyWeighted
             ? topographyCorrectionScales(for: artifact, channels: channels)
             : [:]
+        // Experimental per-electrode aOBS: bound the per-channel lag search to
+        // ±obsAlignmentSearchSeconds. 0 disables it (also the case when the
+        // toggle is off), which keeps the shared-window behavior unchanged.
+        let perChannelLagSamples = artifact.obsPerChannelAlignment
+            ? max(Int((
+                min(max(artifact.obsAlignmentSearchSeconds, 0), DefinedArtifact.maximumOBSAlignmentSearchSeconds)
+                * signal.samplingRate
+            ).rounded()), 0)
+            : 0
 
         switch strategy {
         case .virtualChannel:
@@ -1194,6 +1216,7 @@ nonisolated enum ArtifactCleaner {
                 componentLimit: componentLimit,
                 workerCount: workerCount,
                 channelScales: channelScales,
+                perChannelLagSamples: perChannelLagSamples,
                 setupProgress: setupProgress,
                 finalizingProgress: finalizingProgress,
                 eventProgress: eventProgress
@@ -1214,6 +1237,7 @@ nonisolated enum ArtifactCleaner {
         componentLimit: Int,
         workerCount: Int,
         channelScales: [Int: Double] = [:],
+        perChannelLagSamples: Int = 0,
         setupProgress: (String) -> Void,
         finalizingProgress: (String) -> Void,
         eventProgress: (Int) -> Void
@@ -1256,17 +1280,26 @@ nonisolated enum ArtifactCleaner {
                 guard let range = maybeRange else { continue }
 
                 evaConcurrentPerform(iterations: basisCount) { basisIndex in
+                    // aOBS: shift this channel's window to its own best-matching
+                    // lag before fitting/subtracting (no-op when disabled).
+                    let fitRange = channelAlignedRange(
+                        channelData: channelSnapshot[basisIndex],
+                        meanBasis: channelBases[basisIndex].basis.first,
+                        nominalRange: range,
+                        lagSamples: perChannelLagSamples,
+                        sampleCount: sampleCount
+                    )
                     guard let correction = fittedCorrection(
                         basis: channelBases[basisIndex].basis,
                         from: channelSnapshot[basisIndex],
-                        in: range,
+                        in: fitRange,
                         taper: taper,
                         preservesLocalBaseline: preservesBaseline,
                         edgeTaperSamples: edgeTaperSamples
                     ) else { return }
                     let scale = channelCorrectionScale(for: channelBases[basisIndex].channel, scales: channelScales)
                     guard scale > 1e-6 else { return }
-                    accumulators[basisIndex].add(correction.scaled(by: scale), in: range)
+                    accumulators[basisIndex].add(correction.scaled(by: scale), in: fitRange)
                 }
             }
 
@@ -1285,26 +1318,43 @@ nonisolated enum ArtifactCleaner {
                 var corrections = [OBSCorrection?](repeating: nil, count: basisCount)
                 nonisolated(unsafe) let correctionsPtr = UnsafeMutablePointer<OBSCorrection?>.allocate(capacity: basisCount)
                 correctionsPtr.initialize(from: &corrections, count: basisCount)
+                // aOBS: each basis may fit at its own per-channel lag, so record
+                // the range used alongside the correction for the serial apply.
+                var fitRanges = [Range<Int>](repeating: range, count: basisCount)
+                nonisolated(unsafe) let fitRangesPtr = UnsafeMutablePointer<Range<Int>>.allocate(capacity: basisCount)
+                fitRangesPtr.initialize(from: &fitRanges, count: basisCount)
                 evaConcurrentPerform(iterations: basisCount) { basisIndex in
+                    let fitRange = channelAlignedRange(
+                        channelData: channelSnapshot[basisIndex],
+                        meanBasis: channelBases[basisIndex].basis.first,
+                        nominalRange: range,
+                        lagSamples: perChannelLagSamples,
+                        sampleCount: sampleCount
+                    )
+                    fitRangesPtr[basisIndex] = fitRange
                     correctionsPtr[basisIndex] = fittedCorrection(
                         basis: channelBases[basisIndex].basis,
                         from: channelSnapshot[basisIndex],
-                        in: range,
+                        in: fitRange,
                         taper: taper,
                         preservesLocalBaseline: preservesBaseline,
                         edgeTaperSamples: edgeTaperSamples
                     )
                 }
                 corrections = Array(UnsafeBufferPointer(start: correctionsPtr, count: basisCount))
+                fitRanges = Array(UnsafeBufferPointer(start: fitRangesPtr, count: basisCount))
                 correctionsPtr.deinitialize(count: basisCount)
                 correctionsPtr.deallocate()
+                fitRangesPtr.deinitialize(count: basisCount)
+                fitRangesPtr.deallocate()
                 for basisIndex in channelBases.indices {
                     guard let correction = corrections[basisIndex] else { continue }
                     let channel = channelBases[basisIndex].channel
                     let scale = channelCorrectionScale(for: channel, scales: channelScales)
                     guard scale > 1e-6 else { continue }
-                    for offset in 0..<range.count {
-                        data[channel][range.lowerBound + offset] -= Float(correction.weightedValues[offset] * scale)
+                    let fitRange = fitRanges[basisIndex]
+                    for offset in 0..<fitRange.count {
+                        data[channel][fitRange.lowerBound + offset] -= Float(correction.weightedValues[offset] * scale)
                     }
                     cleanedChannels.insert(channel)
                 }
@@ -1589,6 +1639,58 @@ nonisolated enum ArtifactCleaner {
             return .standard
         }
         return strategy
+    }
+
+    /// Minimum |correlation| between a channel's mean-artifact basis and the
+    /// best-aligned local window required before aOBS is allowed to shift that
+    /// channel off the shared window. Below it, the artifact is too weak/absent
+    /// on this electrode to trust a lag estimate, so we keep the nominal window
+    /// (a shift driven by noise would be worse than no shift).
+    nonisolated private static let channelAlignmentCorrelationFloor = 0.2
+
+    /// aOBS per-electrode alignment: returns the window (same length as
+    /// `nominalRange`, fully inside the signal) within ±`lagSamples` of the
+    /// nominal position whose centered samples best match this channel's mean
+    /// artifact `meanBasis`. Falls back to `nominalRange` when alignment is
+    /// disabled (`lagSamples == 0`), the basis is unusable, or no candidate
+    /// clears `channelAlignmentCorrelationFloor`.
+    nonisolated private static func channelAlignedRange(
+        channelData: [Float],
+        meanBasis: [Double]?,
+        nominalRange: Range<Int>,
+        lagSamples: Int,
+        sampleCount: Int
+    ) -> Range<Int> {
+        let width = nominalRange.count
+        guard lagSamples > 0,
+              let meanBasis,
+              meanBasis.count == width,
+              SignalStatistics.vectorEnergy(meanBasis) > 1e-12 else {
+            return nominalRange
+        }
+
+        // Keep the shifted window fully inside [0, sampleCount).
+        let minOffset = max(-lagSamples, -nominalRange.lowerBound)
+        let maxOffset = min(lagSamples, sampleCount - nominalRange.upperBound)
+        guard minOffset <= maxOffset else { return nominalRange }
+
+        var bestOffset = 0
+        var bestScore = -Double.infinity
+        for offset in minOffset...maxOffset {
+            let lower = nominalRange.lowerBound + offset
+            let samples = (0..<width).map { Double(channelData[lower + $0]) }
+            let centered = centeredUnitVector(samples)
+            guard centered.count == width else { continue }
+            let score = abs(LinearAlgebra.dot(meanBasis, centered))
+            if score > bestScore {
+                bestScore = score
+                bestOffset = offset
+            }
+        }
+
+        guard bestScore >= channelAlignmentCorrelationFloor else { return nominalRange }
+        let lower = nominalRange.lowerBound + bestOffset
+        return lower..<(lower + width)
     }
 
     private static func topographyAlignedEventRanges(
