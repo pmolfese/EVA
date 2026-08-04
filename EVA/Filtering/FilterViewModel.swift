@@ -65,6 +65,7 @@ final class FilterViewModel {
         lowPassCutoffText = Self.cutoffText(d.filterLowPassHz)
         notch60HzEnabled = d.filterNotch60
         averageReference = d.filterAverageReference
+        filterFamily = FilterFamily(rawValue: d.filterDefaultFamily) ?? .iir
     }
 
     // MARK: Parameters (portable → eva.xml / replay)
@@ -72,6 +73,18 @@ final class FilterViewModel {
     var lowPassCutoffText = "30"
     var highPassSlope = FilterSlope.dB24
     var lowPassSlope = FilterSlope.dB24
+    /// Filter implementation family. `.iir` reproduces the historical behavior;
+    /// `.fir` is linear-phase FIR; `.auto` is the Net Station hybrid (IIR
+    /// high-pass below the crossover, FIR elsewhere). Applied to both edges.
+    var filterFamily = FilterFamily.iir
+    /// Crossover (Hz) below which an `.auto` high-pass stays IIR.
+    var firCrossoverHz = EEGSignalFilter.defaultFIRCrossoverHz
+    /// Explicit FIR transition-band width (Hz); nil = auto (fraction of cutoff).
+    var firTransitionHz: Double?
+    /// When on (and the FIR family is selected), the line-noise notch is applied
+    /// as a linear-phase FIR band-stop instead of the default zero-phase IIR
+    /// biquad. FIR is markedly more expensive; default off.
+    var notchUsesFIR = false
     var lineNoiseMode = FilterLineNoiseMode.off
     var lineNoiseFrequency = 60.0
     var lineNoiseHarmonics = 2
@@ -126,6 +139,12 @@ final class FilterViewModel {
 
     var activeLineNoiseMode: FilterLineNoiseMode { lineNoiseMode }
 
+    /// The notch is applied as FIR only when it is active, the toggle is on, and
+    /// the FIR family is selected — otherwise it stays a zero-phase IIR biquad.
+    var notchIsFIREffective: Bool {
+        lineNoiseMode == .notch && notchUsesFIR && filterFamily == .fir
+    }
+
     /// Compatibility bridge for older call sites and serialized parameters that
     /// represented notch filtering with a separate Boolean.
     var notch60HzEnabled: Bool {
@@ -143,13 +162,27 @@ final class FilterViewModel {
         guard let cutoffs = try? currentCutoffs() else { return "Invalid cutoff" }
         switch (cutoffs.highPassHz, cutoffs.lowPassHz) {
         case let (highPass?, lowPass?):
-            return "Butterworth \(Self.formattedCutoff(highPass))-\(Self.formattedCutoff(lowPass)) Hz"
+            return "\(methodLabel(highPass: highPass, lowPass: lowPass)) \(Self.formattedCutoff(highPass))-\(Self.formattedCutoff(lowPass)) Hz"
         case let (highPass?, nil):
-            return "Butterworth high-pass \(Self.formattedCutoff(highPass)) Hz"
+            return "\(methodLabel(highPass: highPass, lowPass: nil)) high-pass \(Self.formattedCutoff(highPass)) Hz"
         case let (nil, lowPass?):
-            return "Butterworth low-pass \(Self.formattedCutoff(lowPass)) Hz"
+            return "\(methodLabel(highPass: nil, lowPass: lowPass)) low-pass \(Self.formattedCutoff(lowPass)) Hz"
         case (nil, nil):
             return nil
+        }
+    }
+
+    /// Human-readable design label for the active family and cutoffs. `.auto`
+    /// resolves per edge, so a mixed hybrid reads e.g. "FIR (IIR HP)".
+    private func methodLabel(highPass: Double?, lowPass: Double?) -> String {
+        switch filterFamily {
+        case .iir:
+            return "Butterworth"
+        case .fir:
+            return "FIR"
+        case .auto:
+            let hpIsIIR = highPass.map { $0 < firCrossoverHz } ?? false
+            return hpIsIIR ? "FIR (IIR HP)" : "FIR"
         }
     }
 
@@ -176,7 +209,11 @@ final class FilterViewModel {
         case .off:
             return nil
         case .notch:
-            return "\(String(format: "%.1f", lineNoiseFrequency)) Hz notch"
+            if notchUsesFIR, filterFamily == .fir {
+                let harmonics = lineNoiseHarmonics > 1 ? " x\(lineNoiseHarmonics)" : ""
+                return "FIR \(String(format: "%.1f", lineNoiseFrequency)) Hz notch\(harmonics)"
+            }
+            return "IIR \(String(format: "%.1f", lineNoiseFrequency)) Hz notch"
         case .adaptiveCleanLine:
             let harmonics = lineNoiseHarmonics > 1 ? " x\(lineNoiseHarmonics)" : ""
             return "CleanLine \(String(format: "%.1f", lineNoiseFrequency)) Hz\(harmonics)"
@@ -209,9 +246,23 @@ final class FilterViewModel {
         }
         params["highPassSlope"] = "\(highPassSlope.rawValue)"
         params["lowPassSlope"] = "\(lowPassSlope.rawValue)"
+        // Always record the filter family — including the explicit "iir" label —
+        // so eva.xml and the log_ file state the filter style unambiguously. This
+        // makes new files differ from pre-FIR eva.xml, which is intended.
+        params["filterFamily"] = filterFamily.rawValue
+        if filterFamily == .auto {
+            params["firCrossoverHz"] = String(format: "%.3g", firCrossoverHz)
+        }
+        if filterFamily != .iir, let firTransitionHz {
+            params["firTransitionHz"] = String(format: "%.3g", firTransitionHz)
+        }
         if notch60HzEnabled { params["notchHz"] = "60" }
         // Explicit mode disambiguates notch vs adaptive CleanLine on replay.
         params["lineNoiseMode"] = activeLineNoiseMode.rawValue
+        // Label the notch style (IIR vs FIR) explicitly whenever a notch is used.
+        if lineNoiseMode == .notch {
+            params["notchUsesFIR"] = "\(notchIsFIREffective)"
+        }
         if lineNoiseMode != .off {
             params["lineNoiseHz"] = String(format: "%.0f", lineNoiseFrequency)
             params["lineNoiseHarmonics"] = "\(lineNoiseHarmonics)"
@@ -228,6 +279,13 @@ final class FilterViewModel {
         lowPassCutoffText = p["lowPassHz"] ?? ""
         if let v = p["highPassSlope"].flatMap(Int.init), let s = FilterSlope(rawValue: v) { highPassSlope = s }
         if let v = p["lowPassSlope"].flatMap(Int.init), let s = FilterSlope(rawValue: v) { lowPassSlope = s }
+        // A missing filterFamily key means a pre-FIR eva.xml: default to IIR so
+        // historical files reproduce byte-identically regardless of the user's
+        // new-work default preference.
+        filterFamily = p["filterFamily"].flatMap(FilterFamily.init(rawValue:)) ?? .iir
+        firCrossoverHz = p["firCrossoverHz"].flatMap(Double.init) ?? EEGSignalFilter.defaultFIRCrossoverHz
+        firTransitionHz = p["firTransitionHz"].flatMap(Double.init)
+        notchUsesFIR = p["notchUsesFIR"] == "true"
         let serializedMode = p["lineNoiseMode"].flatMap(FilterLineNoiseMode.init(rawValue:))
         if let serializedMode {
             lineNoiseMode = serializedMode
@@ -283,6 +341,10 @@ final class FilterViewModel {
         let lowPassCutoff = cutoffs.lowPassHz
         let highPassSlope = self.highPassSlope
         let lowPassSlope = self.lowPassSlope
+        let filterFamily = self.filterFamily
+        let firCrossoverHz = self.firCrossoverHz
+        let firTransitionHz = self.firTransitionHz
+        let notchUsesFIR = self.notchUsesFIR
         let lineNoiseMode = activeLineNoiseMode
         let lineNoiseFrequency = self.lineNoiseFrequency
         let lineNoiseHarmonics = self.lineNoiseHarmonics
@@ -312,7 +374,11 @@ final class FilterViewModel {
                         highCutoff: lowPassCutoff,
                         highPassSlope: highPassSlope,
                         lowPassSlope: lowPassSlope,
+                        filterFamily: filterFamily,
+                        firCrossoverHz: firCrossoverHz,
+                        firTransitionHz: firTransitionHz,
                         lineNoiseMode: lineNoiseMode,
+                        notchUsesFIR: notchUsesFIR,
                         notchFrequency: lineNoiseFrequency,
                         lineNoiseHarmonics: lineNoiseHarmonics,
                         lineNoiseWindowSeconds: lineNoiseWindowSeconds,
@@ -450,7 +516,11 @@ final class FilterViewModel {
         highCutoff: Double?,
         highPassSlope: FilterSlope = .dB24,
         lowPassSlope: FilterSlope = .dB24,
+        filterFamily: FilterFamily = .iir,
+        firCrossoverHz: Double = EEGSignalFilter.defaultFIRCrossoverHz,
+        firTransitionHz: Double? = nil,
         lineNoiseMode: FilterLineNoiseMode,
+        notchUsesFIR: Bool = false,
         notchFrequency: Double,
         lineNoiseHarmonics: Int,
         lineNoiseWindowSeconds: Double,
@@ -461,6 +531,9 @@ final class FilterViewModel {
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> [[Float]] {
         let notchEnabled = lineNoiseMode == .notch
+        // The notch is applied as FIR only when the toggle is on and the FIR
+        // family is selected; otherwise it is a single zero-phase IIR biquad.
+        let notchIsFIR = notchEnabled && notchUsesFIR && filterFamily == .fir
         var bandPassed = try await EEGSignalFilter.bandPass(
             channels: sourceData,
             samplingRate: samplingRate,
@@ -468,8 +541,14 @@ final class FilterViewModel {
             highCutoff: highCutoff,
             highPassSlope: highPassSlope,
             lowPassSlope: lowPassSlope,
+            highPassFamily: filterFamily,
+            lowPassFamily: filterFamily,
+            firCrossoverHz: firCrossoverHz,
+            firTransitionHz: firTransitionHz,
             notch60HzEnabled: notchEnabled,
             notchFrequency: notchFrequency,
+            notchIsFIR: notchIsFIR,
+            notchHarmonics: lineNoiseHarmonics,
             precision: precision,
             progress: { fraction in
                 progress(lineNoiseMode == .adaptiveCleanLine ? 0.62 * fraction : fraction)

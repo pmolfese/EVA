@@ -4,7 +4,14 @@
 //
 //  Developed by P. Molfese, National Institutes of Health (NIH).
 //
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
 //  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  The U.S. Government authorizes the distribution and modification of this software
+//  subject to the copyleft requirements of the GPL-3.0.
 //  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Self-contained artifact- and wavelet-cleaning preview / hover-button / OBS
@@ -909,6 +916,28 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    private var perChannelAlignmentBinding: Binding<Bool> {
+        Binding {
+            artifact.obsPerChannelAlignment
+        } set: { newValue in
+            guard artifact.obsPerChannelAlignment != newValue else { return }
+            artifact.obsPerChannelAlignment = newValue
+            onSettingsChange()
+        }
+    }
+
+    /// aOBS per-electrode alignment only applies to the channel-wise OBS
+    /// strategies; the virtual-channel / clustered / spatiotemporal strategies
+    /// don't route through the per-channel fit, so the toggle is hidden there.
+    private var supportsPerChannelAlignment: Bool {
+        switch artifact.obsStrategy {
+        case .standard, .topographyGated, .topographyAligned, .topographyWeighted:
+            return true
+        case .virtualChannel, .clustered, .spatiotemporal:
+            return false
+        }
+    }
+
     private var reportCacheKey: String {
         [
             artifact.id.uuidString,
@@ -990,6 +1019,28 @@ struct ArtifactOBSOptionsSheet: View {
 
                 Toggle("Weighted overlap-add for nearby events", isOn: usesOverlapAddBinding)
                     .help("Combines overlapping OBS correction windows with weights so close events do not get over-subtracted where they overlap.")
+
+                if supportsPerChannelAlignment {
+                    Toggle("Per-electrode alignment (aOBS, experimental)", isOn: perChannelAlignmentBinding)
+                        .help("Shifts each event's OBS window independently per channel — within the ± lag below — to the lag that best matches that channel's own mean artifact, before fitting and subtracting. Compensates for artifacts that reach electrodes at different times (BCG pulse propagation, fronto→posterior ocular gradients). Channels where the artifact is too weak to align keep the shared window.")
+
+                    if artifact.obsPerChannelAlignment {
+                        HStack(spacing: 10) {
+                            Text("Max lag")
+                                .frame(width: 88, alignment: .leading)
+                            Slider(
+                                value: alignmentSearchBinding,
+                                in: 0...DefinedArtifact.maximumOBSAlignmentSearchSeconds,
+                                step: 0.01
+                            )
+                            Text("±\(Int((artifact.obsAlignmentSearchSeconds * 1000).rounded())) ms")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 64, alignment: .trailing)
+                        }
+                        .help("Largest per-channel time shift aOBS may apply when aligning each electrode to its own artifact peak. Shared with the topography-aligned strategy's search radius.")
+                    }
+                }
 
                 Text("Windowed corrections are forced to zero at the padded boundaries before tapering, which helps avoid step-like edges.")
                     .font(.caption)

@@ -4,13 +4,36 @@
 //
 //  Developed by P. Molfese, National Institutes of Health (NIH).
 //
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
 //  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  The U.S. Government authorizes the distribution and modification of this software
+//  subject to the copyleft requirements of the GPL-3.0.
 //  SPDX-License-Identifier: GPL-3.0-only
 //
 //  ECG / QRS (R-wave) detection engine and its supporting types, extracted from
 //  WaveformView (REFACTOR.md L5 — this is really an L3 algorithm that had ended
 //  up in the view file). Multiple transparent detectors (Pan-Tompkins, Hamilton,
 //  WFDB-style, wavelet, Christov, simple).
+//
+//  The named detectors are original Swift implementations of published QRS
+//  detection algorithms.
+//
+//  References:
+//    * Pan-Tompkins: Pan, J., & Tompkins, W. J. (1985). A real-time QRS
+//      detection algorithm. IEEE Transactions on Biomedical Engineering,
+//      BME-32(3), 230-236. https://doi.org/10.1109/TBME.1985.325532
+//    * Hamilton: Hamilton, P. (2002). Open source ECG analysis. Computers in
+//      Cardiology, 29, 101-104. https://doi.org/10.1109/CIC.2002.1166717
+//    * Christov: Christov, I. I. (2004). Real time electrocardiogram QRS
+//      detection using combined adaptive threshold. BioMedical Engineering
+//      OnLine, 3, 28. https://doi.org/10.1186/1475-925X-3-28
+//    * WFDB-style (gqrs/wqrs): Goldberger, A. L., et al. (2000). PhysioBank,
+//      PhysioToolkit, and PhysioNet. Circulation, 101(23), e215-e220.
+//      https://doi.org/10.1161/01.CIR.101.23.e215
 //
 
 import Accelerate

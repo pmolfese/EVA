@@ -18,6 +18,16 @@
 //  metrics model first: the feature/result shape can later feed a trained Core
 //  ML ranker, while today's UI already has useful reasons for every score.
 //
+//  Several channel-quality features (variance, correlation with neighbors,
+//  Hurst exponent, heavy-tailed/kurtosis pops) follow the channel statistics
+//  used by FASTER. They are original Swift implementations of the published
+//  metrics.
+//
+//  Reference: Nolan, H., Whelan, R., & Reilly, R. B. (2010). FASTER: Fully
+//  Automated Statistical Thresholding for EEG artifact Rejection. Journal of
+//  Neuroscience Methods, 192(1), 152-162.
+//  https://doi.org/10.1016/j.jneumeth.2010.07.015
+//
 
 import Accelerate
 import Foundation

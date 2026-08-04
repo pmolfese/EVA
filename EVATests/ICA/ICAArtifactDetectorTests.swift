@@ -51,9 +51,9 @@ struct ICAArtifactDetectorTests {
         }
     }
 
-    private func config() -> ICAConfiguration {
+    private func config(method: ICAMethod = .picard) -> ICAConfiguration {
         ICAConfiguration(
-            method: .picard,
+            method: method,
             componentCount: 3,
             varianceThreshold: 0.99999,
             averageReference: false,
@@ -116,6 +116,67 @@ struct ICAArtifactDetectorTests {
         let signal = SyntheticSignal.make(mixedChannels(channelCount: 4), samplingRate: samplingRate)
         let a = try ICAArtifactDetector.fit(signal: signal, configuration: config())
         let b = try ICAArtifactDetector.fit(signal: signal, configuration: config())
+        #expect(a.iterations == b.iterations)
+        #expect(a.unmixingMatrix == b.unmixingMatrix)
+    }
+
+    // MARK: - Picard-O (orthogonal constraint)
+
+    @Test func picardOReconstructsCenteredData() throws {
+        // The orthogonal solver must still recover the rank-3 subspace: the
+        // mixing/sources reconstruct the centered input to within tolerance.
+        let channels = mixedChannels(channelCount: 4)
+        let signal = SyntheticSignal.make(channels, samplingRate: samplingRate)
+        let d = try ICAArtifactDetector.fit(signal: signal, configuration: config(method: .picardO))
+
+        var maxError = 0.0
+        for c in 0..<4 {
+            for t in stride(from: 0, to: count, by: 17) {
+                var recon = d.channelMeans[c]
+                for k in 0..<d.componentCount {
+                    recon += d.mixingMatrix[c][k] * d.componentSources[k][t]
+                }
+                maxError = max(maxError, abs(recon - Double(channels[c][t])))
+            }
+        }
+        #expect(maxError < 1e-3, "reconstruction error \(maxError)")
+    }
+
+    @Test func picardOComponentsAreMutuallyDecorrelated() throws {
+        let signal = SyntheticSignal.make(mixedChannels(channelCount: 4), samplingRate: samplingRate)
+        let d = try ICAArtifactDetector.fit(signal: signal, configuration: config(method: .picardO))
+
+        for i in 0..<d.componentCount {
+            for j in (i + 1)..<d.componentCount {
+                let r = SyntheticSignal.absCorrelation(d.componentSources[i], d.componentSources[j])
+                #expect(r < 0.1, "components \(i),\(j) correlated: |r| = \(r)")
+            }
+        }
+    }
+
+    @Test func picardOUnmixingIsOrthogonalInWhitenedSpace() throws {
+        // The defining property of Picard-O: because every update is a rotation of
+        // the whitened data, the recovered sources span the same variance in every
+        // component — the source covariance is (a scalar multiple of) the identity,
+        // i.e. all component variances are equal. A non-orthogonal solver (plain
+        // Picard) is free to redistribute variance across components.
+        let signal = SyntheticSignal.make(mixedChannels(channelCount: 4), samplingRate: samplingRate)
+        let d = try ICAArtifactDetector.fit(signal: signal, configuration: config(method: .picardO))
+
+        let variances = d.componentSources.map { row -> Double in
+            let mean = row.reduce(0, +) / Double(row.count)
+            return row.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(row.count)
+        }
+        let maxVar = variances.max() ?? 0
+        let minVar = variances.min() ?? 0
+        #expect(maxVar > 0)
+        #expect((maxVar - minVar) / maxVar < 0.05, "component variances not equal: \(variances)")
+    }
+
+    @Test func picardOIsDeterministicAcrossRuns() throws {
+        let signal = SyntheticSignal.make(mixedChannels(channelCount: 4), samplingRate: samplingRate)
+        let a = try ICAArtifactDetector.fit(signal: signal, configuration: config(method: .picardO))
+        let b = try ICAArtifactDetector.fit(signal: signal, configuration: config(method: .picardO))
         #expect(a.iterations == b.iterations)
         #expect(a.unmixingMatrix == b.unmixingMatrix)
     }

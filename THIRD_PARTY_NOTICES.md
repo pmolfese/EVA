@@ -12,8 +12,8 @@ holder grants explicit redistribution terms or the EVA code is replaced.
 ## MNE-Python
 
 - EVA files:
-  - `EVA/ICAArtifactDetector.swift`
-  - `EVA/SignalImportReader.swift`
+  - `EVA/ICA/ICAArtifactDetector.swift`
+  - `EVA/IO/SignalImportReader.swift`
 - Upstream project: https://github.com/mne-tools/mne-python
 - Upstream license: BSD 3-Clause
 - Compatibility: BSD 3-Clause is compatible with GPL-3.0-only distribution.
@@ -49,7 +49,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## mffpy
 
-- EVA file: `EVA/MFFWriter.swift`
+- EVA file: `EVA/IO/MFFWriter.swift`
 - Redistributed fixtures: `EVATests/Fixtures/example_1.mff`,
   `EVATests/Fixtures/example_1.mfz`, `EVATests/Fixtures/example_2.mff`,
   `EVATests/Fixtures/example_2.json`, `EVATests/Fixtures/example_3.mff`,
@@ -84,7 +84,7 @@ specific language governing permissions and limitations under the License.
 ## ICLabel
 
 - EVA files:
-  - `EVA/ICLabelClassifier.swift`
+  - `EVA/ICA/ICLabelClassifier.swift`
   - `EVA/Models/ICLabel.mlpackage/`
   - `Tools/convert_iclabel_to_coreml.py`
 - Upstream project: https://github.com/sccn/ICLabel
@@ -105,7 +105,7 @@ NeuroImage, 198, 181-197 (2019).
 
 ## nimh-sfim/gradient_remover
 
-- EVA file: `EVA/GradientRemover.swift`
+- EVA file: `EVA/Gradient/GradientRemover.swift`
 - Upstream project: https://github.com/nimh-sfim/gradient_remover
 - Upstream source: `src/gradient_remover/GradientRemover.py`
 - Upstream author: Joshua Teves
@@ -165,10 +165,115 @@ AMRI toolbox's fit direction) before subtracting.
 
 ## Perrin et al. Spherical Spline Method
 
-- EVA file: `EVA/SphericalSpline.swift`
+- EVA file: `EVA/Core/SphericalSpline.swift`
 - Reference: Perrin et al., "Spherical splines for scalp potential and current
   density mapping", Electroencephalography and Clinical Neurophysiology, 1989
 - License: literature citation only; no software license applies unless code is
   copied from a separate implementation.
 
 EVA implements the published spherical-spline interpolation method directly.
+
+## Literature-only method implementations
+
+The following EVA features are original Swift implementations of published
+methods. No third-party source code was copied; only the published algorithms
+and, where noted, the method names are used. These are attribution / literature
+citations, not software-license notices, so there is no redistribution-license
+concern. The corresponding source-file headers carry the same references.
+
+### RIDE (Residue Iteration Decomposition)
+
+- EVA files: `EVA/Trials/RIDEAnalyzer.swift`,
+  `EVA/Epoching/SingleTrialAnalysisViews.swift`
+- References:
+  - Ouyang G, Herzmann G, Zhou C, Sommer W. Residue iteration decomposition
+    (RIDE): A new method to separate ERP components on the basis of latency
+    variability in single trials. Psychophysiology (2011), 48(12): 1631-1647.
+  - Ouyang G, Sommer W, Zhou C. A toolbox for residue iteration decomposition
+    (RIDE). Journal of Neuroscience Methods (2015), 250: 7-21.
+
+### Woody adaptive-latency filter
+
+- EVA file: `EVA/Trials/WoodyAlignmentAnalyzer.swift`
+- Reference: Woody CD. Characterization of an adaptive filter for the analysis
+  of variable latency neuroelectric signals. Medical & Biological Engineering
+  (1967), 5(6): 539-554.
+
+### Non-linear single-trial alignment (DTW, curve registration)
+
+- EVA files: `EVA/Trials/NonlinearAligner.swift`,
+  `EVA/Trials/CWTRidgePipeline.swift`
+- References:
+  - Sakoe H, Chiba S. Dynamic programming algorithm optimization for spoken
+    word recognition. IEEE Transactions on Acoustics, Speech, and Signal
+    Processing (1978), 26(1): 43-49. (DTW / Sakoe-Chiba band)
+  - Ramsay JO, Silverman BW. Functional Data Analysis, 2nd ed. Springer (2005).
+    (landmark / curve registration)
+
+### CWT ridge peak detection
+
+- EVA files: `EVA/Wavelet/CWTRidgeDetector.swift`,
+  `EVA/Wavelet/ContinuousWaveletTransform.swift`
+- Reference: Du P, Kibbe WA, Lin SM. Improved peak detection in mass spectrum
+  by incorporating continuous wavelet transform-based pattern matching.
+  Bioinformatics (2006), 22(17): 2059-2065.
+
+### ECG / QRS (R-wave) detectors
+
+- EVA file: `EVA/Cardiac/RWaveDetector.swift`
+- References:
+  - Pan J, Tompkins WJ. A real-time QRS detection algorithm. IEEE Transactions
+    on Biomedical Engineering (1985), BME-32(3): 230-236.
+  - Hamilton P. Open source ECG analysis. Computers in Cardiology (2002),
+    29: 101-104.
+  - Christov II. Real time electrocardiogram QRS detection using combined
+    adaptive threshold. BioMedical Engineering OnLine (2004), 3: 28.
+  - WFDB-style detector after the PhysioNet/WFDB `gqrs`/`wqrs` tradition:
+    Goldberger AL, et al. PhysioBank, PhysioToolkit, and PhysioNet.
+    Circulation (2000), 101(23): e215-e220.
+
+### Averaged-ERP SNR metrics
+
+- EVA file: `EVA/Epoching/EpochSNR.swift`
+- References:
+  - Schimmel H. The (±) reference: accuracy of estimated mean components in
+    average response studies. Science (1967), 157(3784): 92-94. (plus-minus
+    noise estimate)
+  - Luck SJ, Stewart AX, Simmons AM, Rhemtulla M. Standardized measurement
+    error: A universal metric of data quality for averaged event-related
+    potentials. Psychophysiology (2021), 58(6): e13793. (SME)
+  - Spearman C. / Brown W. British Journal of Psychology (1910), 3: 271-295 /
+    296-322. (split-half reliability, Spearman-Brown correction)
+  - Lehmann D, Skrandies W. Reference-free identification of components of
+    checkerboard-evoked multichannel potential fields. Electroencephalography
+    and Clinical Neurophysiology (1980), 48(6): 609-621. (Global Field Power)
+
+### FASTER-style channel-quality metrics
+
+- EVA file: `EVA/Health/ChannelHealthAnalyzer.swift`
+- Reference: Nolan H, Whelan R, Reilly RB. FASTER: Fully Automated Statistical
+  Thresholding for EEG artifact Rejection. Journal of Neuroscience Methods
+  (2010), 192(1): 152-162.
+
+### Spatial-PCA / OBS ballistocardiogram modeling
+
+- EVA file: `EVA/Cardiac/BCGDetector.swift`
+- References:
+  - Niazy RK, Beckmann CF, Iannetti GD, Brady JM, Smith SM. Removal of FMRI
+    environment artifacts from EEG data using optimal basis sets. NeuroImage
+    (2005), 28(3): 720-737.
+  - Debener S, et al. Improved quality of auditory event-related potentials
+    recorded simultaneously with 3-T fMRI: Removal of the ballistocardiogram
+    artefact. NeuroImage (2007), 34(2): 587-597.
+
+### Wavelet-thresholded artifact reduction and denoising
+
+- EVA files: `EVA/Wavelet/WaveletReducer.swift`,
+  `EVA/Wavelet/WaveletDenoiser.swift`
+- References:
+  - Gabard-Durnam LJ, Mendez Leal AS, Wilkinson CL, Levin AR. The Harvard
+    Automated Processing Pipeline for Electroencephalography (HAPPE).
+    Frontiers in Neuroscience (2018), 12: 97. (wavelet-thresholded artifact
+    rejection; the reduction engine mirrors HAPPE's `wdenoise`-based method)
+  - Donoho DL, Johnstone IM. Ideal spatial adaptation by wavelet shrinkage.
+    Biometrika (1994), 81(3): 425-455. (VisuShrink / SureShrink thresholds)

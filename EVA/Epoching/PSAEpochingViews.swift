@@ -2,6 +2,18 @@
 //  PSAEpochingViews.swift
 //  EVA
 //
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
+//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  The U.S. Government authorizes the distribution and modification of this software
+//  subject to the copyleft requirements of the GPL-3.0.
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  PSA (post-stimulus average) epoching sheet and its supporting helpers,
 //  extracted from WaveformView.swift during the L5 view-decomposition refactor.
 //  This is an extension of WaveformView (not a standalone type), following the
@@ -90,57 +102,61 @@ extension WaveformView {
                     .foregroundStyle(.secondary)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Segment On")
-                        .font(.caption.weight(.semibold))
-                        .fixedSize()
+            HStack {
+                Text("Segment On")
+                    .font(.caption.weight(.semibold))
+                    .fixedSize()
 
-                    Spacer(minLength: 10)
+                Spacer(minLength: 10)
 
-                    Picker("Segment On", selection: segmentFieldBinding) {
-                        ForEach(PSASegmentField.allCases) { field in
-                            Text(field.rawValue).tag(field)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 150)
-
-                    Spacer(minLength: 12)
-
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Filter events", text: $epoching.eventSearchText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 220)
-                    if !epoching.eventSearchText.isEmpty {
-                        Button {
-                            epoching.eventSearchText = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Clear filter")
-                    }
-
-                    Spacer(minLength: 10)
-
-                    Button {
-                        categoryGroupSelectedCodes.removeAll()
-                        categoryGroupName = ""
-                        showsCategoryGroupPopover = true
-                    } label: {
-                        Label("Group…", systemImage: "plus.circle")
-                    }
-                    .disabled(allSummaries.isEmpty)
-                    .help("Combine several event codes/labels into one pooled category for averaging.")
-                    .popover(isPresented: $showsCategoryGroupPopover) {
-                        categoryGroupPopover(allSummaries: allSummaries)
+                Picker("Segment On", selection: segmentFieldBinding) {
+                    ForEach(PSASegmentField.allCases) { field in
+                        Text(field.rawValue).tag(field)
                     }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 150)
 
+                Spacer(minLength: 12)
+
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Filter events", text: $epoching.eventSearchText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                if !epoching.eventSearchText.isEmpty {
+                    Button {
+                        epoching.eventSearchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Clear filter")
+                }
+
+                Spacer(minLength: 10)
+
+                Button {
+                    categoryGroupSelectedCodes.removeAll()
+                    categoryGroupName = ""
+                    showsCategoryGroupPopover = true
+                } label: {
+                    Label("Group…", systemImage: "plus.circle")
+                }
+                .disabled(allSummaries.isEmpty)
+                .help("Combine several event codes/labels into one pooled category for averaging.")
+                .popover(isPresented: $showsCategoryGroupPopover) {
+                    categoryGroupPopover(allSummaries: allSummaries)
+                }
+            }
+
+            // Master/detail: the event list (left) grows to fill the sheet's
+            // height, while the run parameters and options sit in a fixed-width
+            // column on the right. The whole sheet is resizable (see the frame
+            // at the end), so dragging it taller gives the list more rows.
+            HStack(alignment: .top, spacing: 16) {
                 if allSummaries.isEmpty {
                     ContentUnavailableView(
                         epoching.segmentField == .artifact ? "No Artifacts Detected" : "No Events",
@@ -149,14 +165,16 @@ extension WaveformView {
                             ? "Enable eye blink, eye movement, or ECG/QRS detection in the Artifacts panel first."
                             : "This recording has no events to segment on.")
                     )
-                    .frame(height: 120)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                 } else if summaries.isEmpty {
                     ContentUnavailableView(
                         "No Matches",
                         systemImage: "magnifyingglass",
                         description: Text("No artifact types match the filter.")
                     )
-                    .frame(height: 120)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 6) {
@@ -171,109 +189,94 @@ extension WaveformView {
                             }
                         }
                         .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(height: 160)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                 }
-            }
 
-            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
-                GridRow {
-                    Text("Pre-stimulus (s)")
-                        .font(.caption.weight(.semibold))
-                    TextField("Pre", value: $epoching.preStimulus, format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
 
-                    Text("Post-stimulus (s)")
-                        .font(.caption.weight(.semibold))
-                    TextField("Post", value: $epoching.postStimulus, format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
-                }
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                            GridRow {
+                                Text("Pre-stimulus (s)")
+                                    .font(.caption.weight(.semibold))
+                                TextField("Pre", value: $epoching.preStimulus, format: .number.precision(.fractionLength(3)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                            }
+                            GridRow {
+                                Text("Post-stimulus (s)")
+                                    .font(.caption.weight(.semibold))
+                                TextField("Post", value: $epoching.postStimulus, format: .number.precision(.fractionLength(3)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                            }
+                            GridRow {
+                                Text("Offset (s)")
+                                    .font(.caption.weight(.semibold))
+                                TextField("Offset", value: $epoching.offset, format: .number.precision(.fractionLength(3)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                                    .help("Ignored for categories that use a DIN timing marker.")
+                            }
+                            GridRow {
+                                Text("DIN Tolerance (s)")
+                                    .font(.caption.weight(.semibold))
+                                TextField("Tolerance", value: $epoching.timingTolerance, format: .number.precision(.fractionLength(3)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                                    .help("Maximum time between an event and a DIN marker for them to be paired. Events with no DIN within this window are skipped.")
+                            }
+                        }
 
-                GridRow {
-                    Text("Offset (s)")
-                        .font(.caption.weight(.semibold))
-                    TextField("Offset", value: $epoching.offset, format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 100)
-                        .help("Ignored for categories that use a DIN timing marker.")
-
-                    Text("DIN Tolerance (s)")
-                        .font(.caption.weight(.semibold))
-                    let missedCount = psaMissedDINCount(events: events)
-                    HStack(spacing: 8) {
-                        TextField("Tolerance", value: $epoching.timingTolerance, format: .number.precision(.fractionLength(3)))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 100)
-                            .help("Maximum time between an event and a DIN marker for them to be paired. Events with no DIN within this window are skipped.")
+                        let missedCount = psaMissedDINCount(events: events)
                         if missedCount > 0 {
-                            Label("\(missedCount) unmatched", systemImage: "exclamationmark.triangle")
+                            Label("\(missedCount) selected event\(missedCount == 1 ? "" : "s") with no DIN within ±\(String(format: "%.3f", epoching.timingTolerance)) s — will be skipped", systemImage: "exclamationmark.triangle")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
-                                .help("\(missedCount) selected event\(missedCount == 1 ? "" : "s") have no DIN within ±\(String(format: "%.3f", epoching.timingTolerance)) s and will be skipped.")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                Toggle("Skip if contains artifact", isOn: $epoching.skipIfContainsArtifact)
+                                Button {
+                                    epoching.showsArtifactRejectionOptions = true
+                                } label: {
+                                    Image(systemName: "slider.horizontal.3")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(!epoching.skipIfContainsArtifact)
+                                .help("Choose which artifact kinds cause an epoch to be rejected.")
+                                .popover(isPresented: $epoching.showsArtifactRejectionOptions) {
+                                    psaArtifactRejectionOptionsPopover()
+                                }
+                            }
+
+                            Toggle("Skip if labeled \"Bad\"", isOn: $epoching.skipIfLabeledBad)
+                                .help("Excludes segments manually marked Bad in Segment Health (right-click a segment while View > Show Segment Health is on) from category averages.")
+
+                            Toggle("Interpolate bad channels per epoch", isOn: $epoching.interpolatesBadChannelsPerEpoch)
+                                .help("Detects channels that are only bad WITHIN a given epoch (min/max/slope/acceleration) and interpolates just that epoch, instead of leaving a transient per-trial artifact uncorrected.")
+
+                            epochBadChannelInlineOptions()
+                                .padding(.leading, 18)
+                                .disabled(!epoching.interpolatesBadChannelsPerEpoch)
+
+                            Toggle("Average by category", isOn: $epoching.averageOnApply)
+                            Toggle("Average reference", isOn: $epoching.averageReference)
+                                .help("Re-reference to the common average of the good channels (excludes bad channels, uses interpolated values).")
+                            Toggle("Baseline correct (pre-stimulus)", isOn: $epoching.baselineCorrected)
+                                .help("Subtract each epoch's mean over the pre-stimulus interval from the whole epoch.")
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(width: 380)
             }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("Skip if contains artifact", isOn: $epoching.skipIfContainsArtifact)
-                VStack(alignment: .leading, spacing: 7) {
-                    psaArtifactRejectionRow(
-                        title: "Eye Blink",
-                        detail: "Default detector",
-                        isOn: $epoching.skipEyeBlinks,
-                        help: "Rejects epochs containing default eye blink artifact events."
-                    )
-                    psaArtifactRejectionRow(
-                        title: "Eye Movement",
-                        detail: "Default detector",
-                        isOn: $epoching.skipEyeMovements,
-                        help: "Rejects epochs containing default eye movement artifact events."
-                    )
-                    if !template.definedArtifacts.isEmpty {
-                        Divider()
-                            .padding(.vertical, 2)
-                        ForEach(template.definedArtifacts) { artifact in
-                            psaArtifactRejectionRow(
-                                title: artifact.name,
-                                detail: "\(artifact.events.count) events · \(artifact.type.rawValue)",
-                                isOn: psaDefinedArtifactBinding(artifact.id),
-                                help: "Rejects epochs containing events from this defined artifact."
-                            )
-                        }
-                    }
-                }
-                .disabled(!epoching.skipIfContainsArtifact)
-                .padding(.leading, 18)
-
-                Toggle("Skip if labeled \"Bad\"", isOn: $epoching.skipIfLabeledBad)
-                    .help("Excludes segments manually marked Bad in Segment Health (right-click a segment while View > Show Segment Health is on) from category averages.")
-
-                HStack(spacing: 8) {
-                    Toggle("Interpolate bad channels per epoch", isOn: $epoching.interpolatesBadChannelsPerEpoch)
-                        .help("Detects channels that are only bad WITHIN a given epoch (min/max/slope/acceleration) and interpolates just that epoch, instead of leaving a transient per-trial artifact uncorrected.")
-                    Button {
-                        epoching.showsEpochBadChannelOptions = true
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(!epoching.interpolatesBadChannelsPerEpoch)
-                    .help("Set the min/max/slope/acceleration thresholds that define a bad channel within one epoch.")
-                    .popover(isPresented: $epoching.showsEpochBadChannelOptions) {
-                        epochBadChannelOptionsPopover()
-                    }
-                }
-
-                Toggle("Average by category", isOn: $epoching.averageOnApply)
-                Toggle("Average reference", isOn: $epoching.averageReference)
-                    .help("Re-reference to the common average of the good channels (excludes bad channels, uses interpolated values).")
-                Toggle("Baseline correct (pre-stimulus)", isOn: $epoching.baselineCorrected)
-                    .help("Subtract each epoch's mean over the pre-stimulus interval from the whole epoch.")
-            }
+            .frame(maxHeight: .infinity)
 
             if let psaStatus = epoching.statusMessage {
                 Text(psaStatus)
@@ -281,7 +284,8 @@ extension WaveformView {
                     .foregroundStyle(.red)
             }
 
-            HStack {
+            HStack(spacing: 10) {
+                Spacer()
                 if epoching.isApplying {
                     if let segmentingProgress = epoching.segmentingProgress {
                         ProgressView(value: segmentingProgress)
@@ -295,7 +299,6 @@ extension WaveformView {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
                 Button("Cancel") {
                     epoching.showsSheet = false
                 }
@@ -314,7 +317,10 @@ extension WaveformView {
             }
         }
         .padding(20)
-        .frame(width: 760)
+        .frame(
+            minWidth: 1080, idealWidth: 1140, maxWidth: 1500,
+            minHeight: 560, idealHeight: 660, maxHeight: 1300
+        )
     }
 
     func psaSegmentEventRow(summary: EventSummary, allSummaries: [EventSummary]) -> some View {
@@ -367,6 +373,71 @@ extension WaveformView {
             .disabled(!isSelected || !usesTimingMarker || timingOptions.isEmpty)
             .help("Marker group whose nearest event supplies the true onset time.")
         }
+    }
+
+    /// Popover listing which artifact kinds reject an epoch. Moved out of the
+    /// main PSA panel so the panel stays compact; opened from the "Skip if
+    /// contains artifact" row.
+    @ViewBuilder
+    func psaArtifactRejectionOptionsPopover() -> some View {
+        // Only offer artifacts that have actually been detected as an operation:
+        // the eye-blink/eye-movement threshold detectors when they're enabled,
+        // and any user-defined artifacts. If a detector was never run there are
+        // no events to reject on, so it isn't listed (and isn't rejected — see
+        // `psaArtifactEventsForRejectionByLabel`).
+        let hasBlink = detectsEyeBlinkArtifacts
+        let hasMovement = detectsEyeMovementArtifacts
+        let definedArtifacts = template.definedArtifacts
+        let hasAny = hasBlink || hasMovement || !definedArtifacts.isEmpty
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Reject epochs containing")
+                    .font(.headline)
+
+                if hasAny {
+                    VStack(alignment: .leading, spacing: 7) {
+                        if hasBlink {
+                            psaArtifactRejectionRow(
+                                title: "Eye Blink",
+                                detail: "Threshold detector",
+                                isOn: $epoching.skipEyeBlinks,
+                                help: "Rejects epochs containing detected eye blink artifact events."
+                            )
+                        }
+                        if hasMovement {
+                            psaArtifactRejectionRow(
+                                title: "Eye Movement",
+                                detail: "Threshold detector",
+                                isOn: $epoching.skipEyeMovements,
+                                help: "Rejects epochs containing detected eye movement artifact events."
+                            )
+                        }
+                        if !definedArtifacts.isEmpty {
+                            if hasBlink || hasMovement {
+                                Divider()
+                                    .padding(.vertical, 2)
+                            }
+                            ForEach(definedArtifacts) { artifact in
+                                psaArtifactRejectionRow(
+                                    title: artifact.name,
+                                    detail: "\(artifact.events.count) events · \(artifact.type.rawValue)",
+                                    isOn: psaDefinedArtifactBinding(artifact.id),
+                                    help: "Rejects epochs containing events from this defined artifact."
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    Text("No detected artifacts. Run eye-blink / eye-movement detection or define an artifact template first, then epochs containing those events can be rejected.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(16)
+            .frame(width: 300, alignment: .leading)
+        }
+        .frame(maxHeight: 420)
     }
 
     func psaArtifactRejectionRow(
@@ -427,47 +498,47 @@ extension WaveformView {
         }
     }
 
-    /// Thresholds that define a "bad" channel WITHIN one epoch (absolute µV
-    /// bounds, not the whole-recording ratio-vs-median scoring ChannelHealth
-    /// uses — an epoch window is too short for a stable median).
+    /// Per-epoch bad-channel threshold settings, laid out inline under the
+    /// "Interpolate bad channels per epoch" toggle in the main PSA panel. Sized
+    /// to fit the options column (min/max and slope/acceleration paired two per
+    /// row) and greyed out (via the caller's `.disabled`) when interpolation is
+    /// off.
     @ViewBuilder
-    func epochBadChannelOptionsPopover() -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Per-epoch bad-channel thresholds")
-                .font(.headline)
-
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+    func epochBadChannelInlineOptions() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
                 GridRow {
                     Text("Min (µV)")
                         .font(.caption.weight(.semibold))
                     TextField("Min", value: $epoching.epochBadChannelThresholds.minMicrovolts, format: .number)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                }
-                GridRow {
+                        .frame(width: 80)
                     Text("Max (µV)")
                         .font(.caption.weight(.semibold))
                     TextField("Max", value: $epoching.epochBadChannelThresholds.maxMicrovolts, format: .number)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
+                        .frame(width: 80)
                 }
                 GridRow {
-                    Text("Max slope (µV/sample)")
+                    Text("Max slope")
                         .font(.caption.weight(.semibold))
+                        .help("Maximum allowed sample-to-sample change, in µV per sample.")
                     TextField("Slope", value: $epoching.epochBadChannelThresholds.maxSlopeMicrovoltsPerSample, format: .number)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                }
-                GridRow {
-                    Text("Max acceleration (µV/sample)")
+                        .frame(width: 80)
+                        .help("Maximum allowed sample-to-sample change, in µV per sample.")
+                    Text("Max accel.")
                         .font(.caption.weight(.semibold))
+                        .help("Maximum allowed change in slope (acceleration), in µV per sample — catches spikes distinct from a fast but smooth ramp.")
                     TextField("Acceleration", value: $epoching.epochBadChannelThresholds.maxAccelerationMicrovoltsPerSample, format: .number)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
+                        .frame(width: 80)
+                        .help("Maximum allowed change in slope (acceleration), in µV per sample — catches spikes distinct from a fast but smooth ramp.")
                 }
                 GridRow {
-                    Text("Reject epoch if bad channels >")
+                    Text("Reject if bad >")
                         .font(.caption.weight(.semibold))
+                        .help("Reject the whole epoch (and skip its interpolation) when more than this many channels are flagged bad at once.")
                     HStack(spacing: 6) {
                         if epoching.epochBadChannelThresholds.usesAbsoluteBadChannelCount {
                             TextField("Count", value: $epoching.epochBadChannelThresholds.maxBadChannelCount, format: .number)
@@ -484,24 +555,16 @@ extension WaveformView {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
-                        .frame(width: 70)
+                        .frame(width: 64)
                         .help("Define the reject-epoch threshold as a percentage of the net's channels, or as a fixed channel count.")
-                        Text(maxBadChannelCaption)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .layoutPriority(1)
                     }
                 }
             }
 
-            Text("A channel is flagged bad for an epoch if any sample falls outside min/max, or the sample-to-sample change (slope) or change-in-slope (acceleration) exceeds these limits. Flagged channels are interpolated for just that epoch — unless too many channels are bad at once, in which case the whole epoch is rejected instead (and the expensive interpolation is skipped for it).")
-                .font(.caption)
+            Text(maxBadChannelCaption)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
 
             Toggle("Escalate to globally bad if flagged in", isOn: $epoching.escalatesBadChannelsToGlobal)
                 .help("A channel that's flagged bad in enough epochs is more likely a genuinely bad channel than a per-trial artifact — mark it bad for the whole recording and interpolate it there instead of just per-epoch.")
@@ -521,15 +584,13 @@ extension WaveformView {
             .disabled(!epoching.escalatesBadChannelsToGlobal)
             .padding(.leading, 18)
 
-            HStack {
-                Spacer()
-                Button("Reset to Defaults") {
-                    epoching.epochBadChannelThresholds = EpochBadChannelThresholds()
-                }
+            Button("Reset to Defaults") {
+                epoching.epochBadChannelThresholds = EpochBadChannelThresholds()
             }
+            .controlSize(.small)
+            .help("A channel is flagged bad for an epoch if any sample falls outside min/max, or the slope or acceleration exceeds these limits. Flagged channels are interpolated for just that epoch — unless too many are bad at once, in which case the epoch is rejected instead.")
         }
-        .padding(16)
-        .frame(width: 520)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     func psaEventCodeBinding(_ code: String) -> Binding<Bool> {
@@ -808,6 +869,31 @@ extension WaveformView {
         }
     }
 
+    /// Computes per-category SNR from the RAW (pre-average) single trials off
+    /// the interactive path, so the PSA sheet can close and the user can see
+    /// their average immediately. The Averages workspace shows a spinner in the
+    /// SNR area (driven by `isComputingAverageSNR`) until this lands. Any prior
+    /// SNR task is cancelled, and the result is only applied if the session is
+    /// still current.
+    func computeAverageSNRInBackground(from base: PSABuildResult, excludedIndices: Set<Int>, sessionID: UUID) {
+        snrTask?.cancel()
+        epoching.averageSNRByCategory = [:]
+        epoching.isComputingAverageSNR = true
+        snrTask = Task {
+            let worker = Task.detached(priority: .utility) {
+                base.categorySNR(excludedIndices: excludedIndices)
+            }
+            let result = await withTaskCancellationHandler(
+                operation: { await worker.value },
+                onCancel: { worker.cancel() }
+            )
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            epoching.averageSNRByCategory = result
+            epoching.isComputingAverageSNR = false
+            snrTask = nil
+        }
+    }
+
     func enableSegmentHealthAfterSegmentationIfNeeded() {
         guard !epoching.isAveraged, epoching.epochedSignal?.isAveraged != true else {
             // Preserve manual labels long enough for re-averaging exclusions,
@@ -973,6 +1059,10 @@ extension WaveformView {
                     postWorker.cancel()
                 }
             )
+            // SNR is measured from the RAW single trials (`built`), but it does
+            // NOT block closing the sheet — the user sees their average right
+            // away and the Averages workspace shows a spinner until SNR lands.
+            computeAverageSNRInBackground(from: built, excludedIndices: excludedIndices, sessionID: sessionID)
             wasAveraged = true
         } else {
             epoching.phaseMessage = "Post-processing…"
@@ -987,6 +1077,10 @@ extension WaveformView {
                     postWorker.cancel()
                 }
             )
+            snrTask?.cancel()
+            snrTask = nil
+            epoching.isComputingAverageSNR = false
+            epoching.averageSNRByCategory = [:]
             wasAveraged = false
         }
 
@@ -1264,10 +1358,13 @@ extension WaveformView {
         guard epoching.skipIfContainsArtifact, epoching.segmentField != .artifact else { return [:] }
 
         var eventsByLabel: [String: [MFFEvent]] = [:]
-        if epoching.skipEyeBlinks {
+        // Only reject on eye artifacts whose detector was actually enabled/run —
+        // matching what the rejection popover offers. A disabled detector has no
+        // events, so it must not trigger on-the-fly detection here.
+        if epoching.skipEyeBlinks, detectsEyeBlinkArtifacts {
             eventsByLabel["Eye Blink", default: []] += artifactEventsOrDetection(for: .blink, in: signal)
         }
-        if epoching.skipEyeMovements {
+        if epoching.skipEyeMovements, detectsEyeMovementArtifacts {
             eventsByLabel["Eye Movement", default: []] += artifactEventsOrDetection(for: .movement, in: signal)
         }
         for artifact in template.definedArtifacts where epoching.skippedDefinedArtifactIDs.contains(artifact.id) {
@@ -1401,6 +1498,7 @@ extension WaveformView {
                 }
             )
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            computeAverageSNRInBackground(from: base, excludedIndices: excludedIndices, sessionID: sessionID)
             epoching.epochedSignal = display.signal
             epoching.epochSegments = display.segments
             epoching.isAveraged = true
@@ -1554,6 +1652,14 @@ extension WaveformView {
                 }
             )
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            if isAveraged {
+                computeAverageSNRInBackground(from: base, excludedIndices: excludedIndices, sessionID: sessionID)
+            } else {
+                snrTask?.cancel()
+                snrTask = nil
+                epoching.isComputingAverageSNR = false
+                epoching.averageSNRByCategory = [:]
+            }
             epoching.epochedSignal = display.signal
             epoching.epochSegments = display.segments
             var exclusionSummary = epoching.psaExclusionSummary
@@ -1576,6 +1682,10 @@ extension WaveformView {
         segmentedEpochSignal = nil
         segmentedEpochSegments = []
         epoching.isAveraged = false
+        snrTask?.cancel()
+        snrTask = nil
+        epoching.isComputingAverageSNR = false
+        epoching.averageSNRByCategory = [:]
         selectedSampleRange = nil
         dragSelectionStartSample = nil
         dragSelectionEndSample = nil

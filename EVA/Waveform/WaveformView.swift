@@ -82,6 +82,8 @@ struct WaveformView: View {
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
     @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
+    @AppStorage(EVAGeneralPreferences.waveformTimeMarkersAcrossTracesKey) var showsTimeMarkersAcrossTraces = false
+    @AppStorage(EVAGeneralPreferences.waveformTimeMarkerStyleKey) var waveformTimeMarkerStyleData = WaveformTimeMarkerStyle.defaultData
 
     @State var recordingStore = RecordingStore()
     var amplitudeScale: Double {
@@ -91,6 +93,9 @@ struct WaveformView: View {
     var timeScale: Double {
         get { recordingStore.timeScale }
         nonmutating set { recordingStore.timeScale = newValue }
+    }
+    var waveformTimeMarkerStyle: WaveformTimeMarkerStyle {
+        WaveformTimeMarkerStyle.decoded(from: waveformTimeMarkerStyleData)
     }
     var horizontalOffset: CGFloat {
         get { recordingStore.horizontalOffset }
@@ -229,7 +234,12 @@ struct WaveformView: View {
     @State var channelInspectorSelection: ChannelInspectorSelection = .channel(0)
     @State var channelInspectorOverlayEnabled = true
     @State var channelInspectorShowsStandardError = false
-    @State var averagesLogDetail: AveragesLogDetail?
+    @State var showsPSASummaryBubble = false
+    @State var showsPerEpochBadChannelsBubble = false
+    @State var showsAverageSNRHelp = false
+    @State var averageSNRSortOrder: [KeyPathComparator<AverageSNRRow>] = [
+        KeyPathComparator(\AverageSNRRow.category, order: .forward)
+    ]
     @State var showsCategoryGroupPopover = false
     @State var categoryGroupName = ""
     @State var categoryGroupSelectedCodes = Set<String>()
@@ -244,6 +254,7 @@ struct WaveformView: View {
     @State var icaTask: Task<Void, Never>?
     @State var icaRemovalTask: Task<Void, Never>?
     @State var psaTask: Task<Void, Never>?
+    @State var snrTask: Task<Void, Never>?
     @State var filterTask: Task<Void, Never>?
     @State var gradientTask: Task<Void, Never>?
     @State var replayTask: Task<Void, Never>?
@@ -923,9 +934,6 @@ struct WaveformView: View {
         }
         .sheet(isPresented: $segHealth.showsDetails) {
             segmentHealthDetailsSheet()
-        }
-        .sheet(item: $averagesLogDetail) { detail in
-            averagesLogDetailSheet(detail)
         }
         .sheet(isPresented: $gradient.showsMotionConfig) {
             MotionConfigView(
@@ -1639,6 +1647,7 @@ struct WaveformView: View {
                     visibleRange: visibleHorizontalRange,
                     viewportWidth: horizontalViewportWidth,
                     isCommandKeyPressed: isCommandKeyPressed,
+                    timeMarkerStyle: waveformTimeMarkerStyle,
                     laneCount: eventLaneCount,
                     onSelectEvent: { event, color in
                         selectEventFromTrack(event, color: color, in: signal)

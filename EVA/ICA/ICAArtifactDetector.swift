@@ -54,6 +54,7 @@ import Foundation
 
 enum ICAMethod: String, Codable, Sendable, CaseIterable, Identifiable {
     case picard
+    case picardO
     case fastICA
     case infomax
 
@@ -62,6 +63,7 @@ enum ICAMethod: String, Codable, Sendable, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .picard: return "Picard"
+        case .picardO: return "Picard-O"
         case .fastICA: return "FastICA"
         case .infomax: return "Infomax"
         }
@@ -70,11 +72,13 @@ enum ICAMethod: String, Codable, Sendable, CaseIterable, Identifiable {
     var summary: String {
         switch self {
         case .picard:
-            return "Preconditioned ICA (L-BFGS). Fastest; converges in a handful of iterations. Recommended."
+            return "Preconditioned ICA (L-BFGS) on the unconstrained likelihood. Optimizes the same maximum-likelihood objective as Infomax — a tanh (super-Gaussian) density model — but with a preconditioned quasi-Newton solver, so it reaches Infomax's solution in a handful of iterations instead of hundreds. Recommended default."
+        case .picardO:
+            return "Preconditioned ICA under an orthogonality constraint. Solves the same whitened, orthogonal problem as FastICA (updates stay rotations of the sphered data), but replaces FastICA's fixed-point step with the same preconditioned L-BFGS solver as Picard. Gives FastICA-equivalent decompositions with more reliable convergence on real EEG/MEG."
         case .fastICA:
-            return "Symmetric fixed-point ICA. Very fast, robust for clearly non-Gaussian sources."
+            return "Symmetric fixed-point ICA on whitened data (orthogonal constraint). Very fast when it converges, robust for clearly non-Gaussian sources, but the fixed-point iteration can stall on noisy real data. Picard-O targets the same solution more reliably."
         case .infomax:
-            return "Extended Infomax (MNE/EEGLAB style). Slower, included for reference and comparison."
+            return "Extended Infomax (MNE/EEGLAB style): stochastic gradient ascent on the tanh maximum-likelihood objective. This is the same objective Picard optimizes; Infomax just uses a slower first-order solver. Kept for reference and comparison."
         }
     }
 }
@@ -737,6 +741,13 @@ nonisolated private func solveICA(
         )
     case .picard:
         return picardFloat(
+            packed, features: features, samples: samples,
+            maxIterations: maxIterations,
+            convergenceTolerance: convergenceTolerance,
+            minimumIterations: minimumIterations, progress: progress
+        )
+    case .picardO:
+        return picardOFloat(
             packed, features: features, samples: samples,
             maxIterations: maxIterations,
             convergenceTolerance: convergenceTolerance,
@@ -1466,6 +1477,284 @@ nonisolated private func picardFloat(
 
     progress?(1.0)
     return (flatToNested(weights, rows: n, columns: n), iterations, finalChange)
+}
+
+// MARK: - Picard-O (preconditioned ICA under orthogonal constraint)
+//
+// Same tanh maximum-likelihood objective and the same preconditioned L-BFGS
+// machinery as `picardFloat`, but the unmixing is constrained to stay orthogonal
+// in the whitened space — i.e. it solves the same problem FastICA does. Three
+// things change versus the unconstrained Picard:
+//
+//   1. The relative gradient is projected onto the skew-symmetric matrices,
+//      Γ = G − Gᵀ (only rotations preserve orthogonality).
+//   2. The diagonal preconditioner is the orthogonal-constraint approximation
+//      h_ij = κ_i + κ_j, with κ_i = E[y_i·ψ(y_i)] − E[ψ'(y_i)].
+//   3. The step is a rotation W ← expm(α·E)·W (E skew-symmetric) instead of the
+//      affine (I + α·D)·W. Because every step is orthogonal, |det| = 1 and the
+//      log|det| term drops out of the line-search loss.
+nonisolated private func picardOFloat(
+    _ data: [Float], features: Int, samples: Int,
+    maxIterations: Int, convergenceTolerance: Double, minimumIterations: Int,
+    progress: (@Sendable (Double) -> Void)? = nil
+) -> (unmixing: [[Double]], iterations: Int, finalChange: Double) {
+    guard features > 0, samples > 1 else {
+        progress?(1.0)
+        return (LinearAlgebra.identity(features), 0, 0)
+    }
+
+    let n = features
+    let nn = n * n
+    var weights = identityFloat(n)
+    var signals = data            // Y = W · X, starts at X since W = I
+    let invSamples = 1.0 / Double(samples)
+    let tolerance = max(convergenceTolerance, 1e-7)
+    let memorySize = 7
+    let hessianFloor = 1e-3       // keep the diagonal preconditioner positive definite
+
+    var psiY = [Float](repeating: 0, count: n * samples)
+    var gradient = [Float](repeating: 0, count: nn)   // projected (skew-symmetric) Γ
+    var kappa = [Double](repeating: 0, count: n)       // per-signal Hessian diagonal term
+    var direction = [Float](repeating: 0, count: nn)
+    var rotation = [Float](repeating: 0, count: nn)     // expm(α·E)
+    var newSignals = [Float](repeating: 0, count: n * samples)
+
+    var sMemory: [[Float]] = []
+    var yMemory: [[Float]] = []
+    var rhoMemory: [Double] = []
+
+    var iterations = 0
+    var finalChange = Double.infinity
+
+    // Γ = G − Gᵀ with G = (1/T)·ψ(Y)·Yᵀ, and κ_i = E[y_i ψ(y_i)] − E[ψ'(y_i)].
+    func computeGradientAndHessian() {
+        tanhInPlace(signals, into: &psiY, count: n * samples)
+        // full[i,j] = (1/T) Σ_t ψ(y_i)·y_j
+        var full = [Float](repeating: 0, count: nn)
+        blasSGEMM(transA: false, transB: true,
+                  m: n, n: n, k: samples,
+                  alpha: Float(invSamples), psiY, lda: samples, signals, ldb: samples,
+                  beta: 0, &full, ldc: n)
+        for i in 0..<n {
+            for j in 0..<n {
+                gradient[i * n + j] = full[i * n + j] - full[j * n + i]
+            }
+        }
+
+        // κ_i = mean_t(y_i·tanh(y_i)) − mean_t(1 − tanh²(y_i))
+        for feature in 0..<n {
+            let base = feature * samples
+            var b = 0.0    // E[y·ψ(y)]
+            var a = 0.0    // E[ψ'(y)] = E[1 − tanh²]
+            for sample in 0..<samples {
+                let g = Double(psiY[base + sample])
+                let y = Double(signals[base + sample])
+                b += y * g
+                a += 1 - g * g
+            }
+            kappa[feature] = (b - a) * invSamples
+        }
+    }
+
+    // z = H^{-1} Γ with the diagonal orthogonal-constraint Hessian h_ij = κ_i + κ_j.
+    func solveHessian(_ g: [Float], into z: inout [Float]) {
+        for i in 0..<n {
+            for j in 0..<n {
+                if i == j {
+                    z[i * n + j] = 0        // skew-symmetric: diagonal is fixed at 0
+                } else {
+                    let h = max(kappa[i] + kappa[j], hessianFloor)
+                    z[i * n + j] = Float(Double(g[i * n + j]) / h)
+                }
+            }
+        }
+    }
+
+    // Data term of the likelihood loss: Σ over elements of per-sample mean log cosh.
+    // No log|det| term — orthogonal steps have |det| = 1. Matches `picardFloat`'s
+    // `dataLoss` so the two solvers report comparable objectives.
+    func dataLoss(_ buffer: [Float], elementCount: Int) -> Double {
+        var total = 0.0
+        for index in 0..<elementCount {
+            let value = Double(abs(buffer[index]))
+            total += value + log1p(exp(-2 * value))
+        }
+        return total / Double(samples)
+    }
+
+    func dot(_ a: [Float], _ b: [Float]) -> Double {
+        var total = 0.0
+        for index in 0..<a.count { total += Double(a[index]) * Double(b[index]) }
+        return total
+    }
+
+    computeGradientAndHessian()
+
+    while iterations < maxIterations {
+        guard !Task.isCancelled else { break }
+        // L-BFGS two-loop recursion (identical structure to Picard, but every
+        // vector here is skew-symmetric, so the direction stays a rotation).
+        var q = gradient
+        let m = sMemory.count
+        var alphas = [Double](repeating: 0, count: m)
+        for idx in stride(from: m - 1, through: 0, by: -1) {
+            let a = rhoMemory[idx] * dot(sMemory[idx], q)
+            alphas[idx] = a
+            let yMem = yMemory[idx]
+            for index in 0..<nn { q[index] -= Float(a) * yMem[index] }
+        }
+        var z = [Float](repeating: 0, count: nn)
+        solveHessian(q, into: &z)
+        for idx in 0..<m {
+            let beta = rhoMemory[idx] * dot(yMemory[idx], z)
+            let sMem = sMemory[idx]
+            let coefficient = Float(alphas[idx] - beta)
+            for index in 0..<nn { z[index] += coefficient * sMem[index] }
+        }
+        for index in 0..<nn { direction[index] = -z[index] }
+
+        // Guard against a non-descent L-BFGS direction; fall back to the
+        // preconditioned gradient (and drop the stale memory) if so.
+        var slope = 0.0
+        for index in 0..<nn { slope += Double(gradient[index]) * Double(direction[index]) }
+        if slope > 0 {
+            sMemory.removeAll(); yMemory.removeAll(); rhoMemory.removeAll()
+            solveHessian(gradient, into: &z)
+            slope = 0
+            for index in 0..<nn {
+                direction[index] = -z[index]
+                slope += Double(gradient[index]) * Double(direction[index])
+            }
+        }
+
+        // Backtracking line search with an Armijo sufficient-decrease condition.
+        // The step is a rotation, so the loss is just the data term.
+        let currentLoss = dataLoss(signals, elementCount: n * samples)
+        let armijoConstant = 1e-4
+        var alpha: Float = 1
+        var accepted = false
+        for _ in 0..<15 {
+            // rotation = expm(alpha · direction), direction skew-symmetric
+            skewMatrixExponential(direction, scale: alpha, features: n, into: &rotation)
+            // newSignals = rotation · signals
+            blasSGEMM(transA: false, transB: false,
+                      m: n, n: samples, k: n,
+                      alpha: 1, rotation, lda: n, signals, ldb: samples,
+                      beta: 0, &newSignals, ldc: samples)
+            let newLoss = dataLoss(newSignals, elementCount: n * samples)
+            if newLoss - currentLoss <= armijoConstant * Double(alpha) * slope {
+                accepted = true
+                break
+            }
+            alpha *= 0.5
+        }
+
+        if !accepted {
+            if !sMemory.isEmpty {
+                sMemory.removeAll(); yMemory.removeAll(); rhoMemory.removeAll()
+                continue
+            }
+            finalChange = 0
+            break
+        }
+
+        // Apply the accepted rotation: W ← rotation · W, Y ← rotation · Y.
+        var updatedWeights = [Float](repeating: 0, count: nn)
+        blasSGEMM(transA: false, transB: false,
+                  m: n, n: n, k: n,
+                  alpha: 1, rotation, lda: n, weights, ldb: n,
+                  beta: 0, &updatedWeights, ldc: n)
+        weights = updatedWeights
+        signals = newSignals
+
+        let previousGradient = gradient
+        computeGradientAndHessian()
+
+        // Store the L-BFGS pair (s = α·direction, y = ΔΓ).
+        var sVector = [Float](repeating: 0, count: nn)
+        var yVector = [Float](repeating: 0, count: nn)
+        for index in 0..<nn {
+            sVector[index] = alpha * direction[index]
+            yVector[index] = gradient[index] - previousGradient[index]
+        }
+        let curvature = dot(sVector, yVector)
+        if curvature > 1e-10 {
+            sMemory.append(sVector)
+            yMemory.append(yVector)
+            rhoMemory.append(1 / curvature)
+            if sMemory.count > memorySize {
+                sMemory.removeFirst()
+                yMemory.removeFirst()
+                rhoMemory.removeFirst()
+            }
+        }
+
+        // Gradient norm as the stopping criterion.
+        var gradNorm = 0.0
+        for index in 0..<nn { gradNorm += Double(gradient[index]) * Double(gradient[index]) }
+        gradNorm = sqrt(gradNorm / Double(nn))
+        finalChange = gradNorm
+
+        iterations += 1
+        progress?(Double(iterations) / Double(maxIterations))
+        if iterations >= max(minimumIterations, 1), gradNorm < tolerance { break }
+    }
+
+    progress?(1.0)
+    return (flatToNested(weights, rows: n, columns: n), iterations, finalChange)
+}
+
+// expm(scale · E) for a skew-symmetric E, via scaling-and-squaring with a
+// truncated Taylor series. The result is orthogonal (a rotation), which is what
+// keeps Picard-O's unmixing on the orthogonal manifold. Written into `result`
+// (row-major, features × features).
+nonisolated private func skewMatrixExponential(
+    _ skew: [Float], scale: Float, features n: Int, into result: inout [Float]
+) {
+    let nn = n * n
+    // M = scale · E
+    var m = [Float](repeating: 0, count: nn)
+    for index in 0..<nn { m[index] = scale * skew[index] }
+
+    // Scale down so ‖M‖_∞ < 1/2, then square back up `squarings` times.
+    var norm: Float = 0
+    for i in 0..<n {
+        var rowSum: Float = 0
+        for j in 0..<n { rowSum += abs(m[i * n + j]) }
+        norm = max(norm, rowSum)
+    }
+    var squarings = 0
+    if norm > 0.5 {
+        squarings = Int(ceil(log2(Double(norm) / 0.5)))
+        squarings = min(max(squarings, 0), 30)
+        let shrink = Float(pow(2.0, Double(-squarings)))
+        for index in 0..<nn { m[index] *= shrink }
+    }
+
+    // Taylor series: R = I + M + M²/2! + … + M⁷/7!
+    var term = identityFloat(n)          // M^k / k!
+    var acc = identityFloat(n)           // running sum
+    var scratch = [Float](repeating: 0, count: nn)
+    for k in 1...7 {
+        // scratch = term · M
+        blasSGEMM(transA: false, transB: false,
+                  m: n, n: n, k: n,
+                  alpha: 1, term, lda: n, m, ldb: n,
+                  beta: 0, &scratch, ldc: n)
+        let inv = Float(1.0 / Double(k))
+        for index in 0..<nn { term[index] = scratch[index] * inv }
+        for index in 0..<nn { acc[index] += term[index] }
+    }
+
+    // Square `squarings` times to undo the scaling.
+    for _ in 0..<squarings {
+        blasSGEMM(transA: false, transB: false,
+                  m: n, n: n, k: n,
+                  alpha: 1, acc, lda: n, acc, ldb: n,
+                  beta: 0, &scratch, ldc: n)
+        acc = scratch
+    }
+    result = acc
 }
 
 nonisolated private func deterministicShuffle(_ values: inout [Int], seed: Int) {

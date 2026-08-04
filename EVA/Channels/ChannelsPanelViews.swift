@@ -2,6 +2,18 @@
 //  ChannelsPanelViews.swift
 //  EVA
 //
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
+//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  The U.S. Government authorizes the distribution and modification of this software
+//  subject to the copyleft requirements of the GPL-3.0.
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  Per-channel row UI: bad/hidden toggles, context menus, channel list rendering,
 //  This is an extension of WaveformView (not a standalone type), following the
 //  same pattern as the other L5 slices -- a file split, not a state extraction.
@@ -191,6 +203,7 @@ extension WaveformView {
             index: index,
             // Hidden channels keep their row but draw no trace.
             samples: isHidden ? [] : channel,
+            samplingRate: signal.samplingRate,
             dataRevision: signal.dataRevision,
             isHidden: isHidden,
             amplitudeScale: amplitudeScale,
@@ -202,6 +215,8 @@ extension WaveformView {
             overflowHeight: channelOverflowHeight,
             color: channelColor(index),
             usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering,
+            showsTimeMarkers: showsTimeMarkersAcrossTraces,
+            timeMarkerStyle: waveformTimeMarkerStyle,
             canDefineArtifact: activeSelectionRange(in: signal) != nil,
             moveToPhysioTitle: "Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio",
             onDefineArtifact: { openArtifactTemplateSheet(for: signal, clickedChannel: index) },

@@ -2,6 +2,18 @@
 //  MFFExportFlowViews.swift
 //  EVA
 //
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
+//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  The U.S. Government authorizes the distribution and modification of this software
+//  subject to the copyleft requirements of the GPL-3.0.
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  Copy-processing (eva.xml replay import) and the MFF export flow,
 //  This is an extension of WaveformView (not a standalone type), following the
 //  same pattern as the other L5 slices -- a file split, not a state extraction.
@@ -417,6 +429,16 @@ extension WaveformView {
         }
         if !channels.bad.isEmpty {
             lines.append("markBad result: channels=\(channels.bad.sorted().map { String($0 + 1) }.joined(separator: ","))")
+        }
+        for category in epoching.averageSNRByCategory.keys.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
+            let m = epoching.averageSNRByCategory[category] ?? SNRMetrics()
+            func f(_ v: Double?, _ digits: Int = 2) -> String {
+                guard let v, v.isFinite else { return "n/a" }
+                return String(format: "%.\(digits)f", v)
+            }
+            lines.append(
+                "average SNR [\(category)]: trials=\(m.trialCount), plusMinusSNR=\(f(m.plusMinusSNR)), baselineSNR=\(f(m.baselineSNR)), gfpSNR=\(f(m.gfpSNR)), sme=\(f(m.standardizedMeasurementError, 3)), splitHalfReliability=\(f(m.splitHalfReliability))"
+            )
         }
         return lines
     }

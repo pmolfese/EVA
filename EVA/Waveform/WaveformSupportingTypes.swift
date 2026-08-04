@@ -2,6 +2,18 @@
 //  WaveformSupportingTypes.swift
 //  EVA
 //
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
+//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  The U.S. Government authorizes the distribution and modification of this software
+//  subject to the copyleft requirements of the GPL-3.0.
+//  SPDX-License-Identifier: GPL-3.0-only
+//
 //  Supporting value types, enums, and small views extracted from WaveformView.swift
 //  during the L5 view-decomposition refactor. These are internal (same-module) so
 //  WaveformView continues to see them unchanged.
@@ -613,6 +625,60 @@ nonisolated struct PSABuildResult {
         let totalEpochs = averagedSegments.reduce(0) { $0 + $1.contributingEpochCount }
         let msg = "\(categoryCount) categor\(categoryCount == 1 ? "y" : "ies"), \(totalEpochs) epochs averaged"
         return PSABuildResult(signal: averaged, segments: averagedSegments, message: msg)
+    }
+
+    /// Signal-to-noise metrics per category, computed from the RAW (pre-average)
+    /// single-trial segments — the plus-minus, split-half, and SME measures all
+    /// need the individual trials, so this must run on `self` before `average()`
+    /// collapses them. Mirrors `average()`'s trial extraction. Runs off the main
+    /// thread.
+    ///
+    /// - Parameter excludedIndices: same meaning as `average()` — segment indices
+    ///   to drop (e.g. manually labeled "Bad") so the SNR matches the average.
+    func categorySNR(excludedIndices: Set<Int> = []) -> [String: SNRMetrics] {
+        guard signal.samplingRate > 0, !segments.isEmpty,
+              let firstSegment = segments.first else { return [:] }
+        let epochLength = firstSegment.endSample - firstSegment.startSample + 1
+        guard epochLength > 0 else { return [:] }
+
+        let includedSegments = excludedIndices.isEmpty
+            ? segments
+            : segments.enumerated().filter { !excludedIndices.contains($0.offset) }.map(\.element)
+        let groupedSegments = Dictionary(grouping: includedSegments, by: \.category)
+        let minChannelLength = signal.data.map(\.count).min() ?? 0
+        let categories = Array(groupedSegments.keys)
+
+        // Categories are independent, so compute them in parallel. Each worker
+        // writes only its own slot (distinct index), so the shared buffer needs
+        // no lock.
+        var metricsByIndex = [SNRMetrics?](repeating: nil, count: categories.count)
+        metricsByIndex.withUnsafeMutableBufferPointer { buffer in
+            nonisolated(unsafe) let out = buffer.baseAddress!
+            evaConcurrentPerform(iterations: categories.count) { i in
+                guard let segs = groupedSegments[categories[i]] else { return }
+                let validSegs = segs.filter {
+                    $0.endSample - $0.startSample + 1 == epochLength
+                        && $0.startSample >= 0
+                        && $0.endSample < minChannelLength
+                }
+                guard let representative = validSegs.first else { return }
+
+                // trial × channel × sample, matching EpochSNR.metrics(trials:).
+                let trials: [[[Float]]] = validSegs.map { seg in
+                    signal.data.map { channel in
+                        Array(channel[seg.startSample..<(seg.startSample + epochLength)])
+                    }
+                }
+                let baseline = max(min(representative.stimulusOffsetSamples, epochLength), 0)
+                (out + i).pointee = EpochSNR.metrics(trials: trials, baselineSampleCount: baseline)
+            }
+        }
+
+        var result: [String: SNRMetrics] = [:]
+        for (i, category) in categories.enumerated() where metricsByIndex[i] != nil {
+            result[category] = metricsByIndex[i]
+        }
+        return result
     }
 
     /// Applies average-reference and/or baseline correction. Runs off the main thread.

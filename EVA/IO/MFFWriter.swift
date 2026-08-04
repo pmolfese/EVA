@@ -324,7 +324,7 @@ nonisolated enum MFFWriter {
         let recordTime = mffDateString(signal.recordingStartTime ?? Date())
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
-<fileInfo>
+<fileInfo xmlns="http://www.egi.com/info_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <recordTime>\(xmlEscape(recordTime))</recordTime>
   <mffVersion>3</mffVersion>
   <acquisitionVersion>EVA MFF export</acquisitionVersion>
@@ -448,7 +448,7 @@ nonisolated enum MFFWriter {
         }
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
-<epochs>
+<epochs xmlns="http://www.egi.com/epochs_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 \(body)</epochs>
 """
         try xml.write(to: packageURL.appendingPathComponent("epochs.xml"), atomically: true, encoding: .utf8)
@@ -511,7 +511,7 @@ nonisolated enum MFFWriter {
 
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
-<categories>
+<categories xmlns="http://www.egi.com/categories_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 \(body)</categories>
 """
         try xml.write(to: packageURL.appendingPathComponent("categories.xml"), atomically: true, encoding: .utf8)

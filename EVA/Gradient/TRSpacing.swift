@@ -10,6 +10,8 @@
 //  may apply.
 //
 //  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  The U.S. Government authorizes the distribution and modification of this software
+//  subject to the copyleft requirements of the GPL-3.0.
 //  SPDX-License-Identifier: GPL-3.0-only
 //
 //  Inter-trigger spacing diagnostics for the TR (TREV) markers used by the MR

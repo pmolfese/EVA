@@ -4,7 +4,14 @@
 //
 //  Developed by P. Molfese, National Institutes of Health (NIH).
 //
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
 //  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
+//  The U.S. Government authorizes the distribution and modification of this software
+//  subject to the copyleft requirements of the GPL-3.0.
 //  SPDX-License-Identifier: GPL-3.0-only
 //
 //  App-wide, persisted defaults that seed each newly-opened recording's
@@ -31,6 +38,7 @@ final class ProcessingDefaults {
         static let filterLowPassHz = "filterLowPassHz"
         static let filterNotch60 = "filterNotch60"
         static let filterAverageReference = "filterAverageReference"
+        static let filterDefaultFamily = "filterDefaultFamily"
         static let icaMethod = "icaMethod"
         static let icaComponentCount = "icaComponentCount"
         static let bcgAutoSelectProxySet = "bcgAutoSelectProxySet"
@@ -48,6 +56,7 @@ final class ProcessingDefaults {
         static let filterLowPassHz = 30.0
         static let filterNotch60 = false
         static let filterAverageReference = false
+        static let filterDefaultFamily = FilterFamily.iir.rawValue
         static let icaMethod = ICAMethod.picard
         static let icaComponentCount = 20
         static let bcgAutoSelectProxySet = false
@@ -75,6 +84,12 @@ final class ProcessingDefaults {
     var filterAverageReference: Bool {
         get { UserDefaults.standard.bool(forKey: Keys.filterAverageReference) }
         set { UserDefaults.standard.set(newValue, forKey: Keys.filterAverageReference) }
+    }
+    /// Default filter family for NEW filtering. Replay of existing eva.xml always
+    /// defaults a missing `filterFamily` to IIR independent of this preference.
+    var filterDefaultFamily: String {
+        get { UserDefaults.standard.string(forKey: Keys.filterDefaultFamily) ?? Defaults.filterDefaultFamily }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.filterDefaultFamily) }
     }
 
     // MARK: ICA defaults
