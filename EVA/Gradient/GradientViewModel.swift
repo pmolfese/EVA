@@ -65,6 +65,7 @@ final class GradientViewModel {
     // MARK: Run state
     var isProcessing = false
     var progress = 0.0
+    var operationProgress: OperationProgress?
     var statusMessage: String?
     var statusIsError = false
 
@@ -84,7 +85,7 @@ final class GradientViewModel {
     var trMarkerCode = "TREV"
     var method = MRIGradientMethod.aas
 
-    // FASTR / FARM / Moosmann parameters
+    // FASTR-family parameters and shared optional Metal execution
     var fastrSlices = 1
     var fastrOBSAuto = true
     var fastrANC = false
@@ -92,6 +93,7 @@ final class GradientViewModel {
     var fastrUseFacetWindow = false
     var fastrOBSRandomSampling = false
     var fastrANCSliceHighPass = false
+    var fastrUseMetal = false
     var fastrDonorSelection = FastrDonorSelection.methodDefault
 
     var fastrUsesBergenRSquareDonors: Bool {
@@ -125,6 +127,7 @@ final class GradientViewModel {
         correctedPNSSignal = nil
         isProcessing = false
         progress = 0
+        operationProgress = nil
         statusMessage = nil
         statusIsError = false
         showsPopover = false
@@ -166,6 +169,9 @@ final class GradientViewModel {
             params["bergenRSquareDonors"] = "\(fastrUsesBergenRSquareDonors)"
             params["moosmannMotionMetric"] = moosmannMotionMetric.rawValue
         }
+        if method.isFASTR || method == .mas || method == .mar {
+            params["metal"] = "\(fastrUseMetal)"
+        }
         if excludeHighMotion {
             params["motionFDThreshold"] = String(format: "%.2f", motionFDThreshold)
         }
@@ -188,6 +194,7 @@ final class GradientViewModel {
         if let v = p["facetWindow"] { fastrUseFacetWindow = (v == "true") }
         if let v = p["obsRandomSampling"] { fastrOBSRandomSampling = (v == "true") }
         if let v = p["ancSliceHighPass"] { fastrANCSliceHighPass = (v == "true") }
+        if let v = p["metal"] { fastrUseMetal = (v == "true") }
         if let v = p["fastrDonorSelection"].flatMap(FastrDonorSelection.init(rawValue:)) {
             fastrDonorSelection = v
         } else if let v = p["bergenRSquareDonors"] {
@@ -255,7 +262,7 @@ final class GradientViewModel {
         let excludedTRs = highMotionVolumeSet()
         let excludedCount = excludedTRs.count
         isProcessing = true
-        progress = 0
+        progress = 0.02
         statusMessage = nil
 
         let pnsInput = appliesToPNS ? pnsSignal : nil
@@ -263,27 +270,44 @@ final class GradientViewModel {
             trimmedTRMarkers(in: signal, samplingRate: $0.samplingRate)
         } ?? []
 
-        let (progressContinuation, progressTask) = ProgressBridge.make { [weak self] fraction in
-            self?.progress = fraction
-        }
-
         let reducer: GradientRemover.TemplateReducer = method == .aas ? .weightedMean : .median
         let fit: GradientRemover.TemplateFit = method == .mar ? .regress : .subtract
         let donorSelection: GradientRemover.DonorSelection = method == .aas ? .sideWindow : .amriMovingWindow
+        let usesMetal = (method == .mas || method == .mar) && fastrUseMetal
+        let computeBackend: GradientRemover.ComputeBackend = usesMetal ? .metal : .cpu
+        let hasPNS = pnsInput != nil
+        beginOperationProgress(
+            subtitle: "\(method.rawValue) · \(usesMetal && GradientRemoverMetalBackend.isAvailable ? "Metal GPU" : "CPU")",
+            hasPNS: hasPNS,
+            phase: "Preparing TR grid and motion exclusions"
+        )
+        let eegChannelCount = sourceDataChannelCount(signal)
+        let pnsChannelCount = pnsInput?.data.count ?? 0
+        let correctionPhase = method == .mar
+            ? "Building median templates and fitting MAR"
+            : "Building artifact templates"
+        let (progressContinuation, progressTask) = ProgressBridge.make { [weak self] fraction in
+            self?.updateCorrectionProgress(
+                fraction,
+                hasPNS: hasPNS,
+                eegChannels: eegChannelCount,
+                pnsChannels: pnsChannelCount,
+                phase: correctionPhase
+            )
+        }
 
         do {
-            let hasPNS = pnsInput != nil
             let sourceData = signal.data
             let samplingRate = signal.samplingRate
             let worker = Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
-                let correctedData = try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit, donorSelection: donorSelection, samplingRate: samplingRate) { fraction in
+                let correctedData = try GradientRemover.correct(channels: sourceData, trSamples: trSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit, donorSelection: donorSelection, computeBackend: computeBackend, samplingRate: samplingRate) { fraction in
                     progressContinuation.yield(hasPNS ? 0.70 * fraction : fraction)
                 }
                 try Task.checkCancellation()
                 let correctedPNSData: [[Float]]?
                 if let pnsInput {
-                    correctedPNSData = try GradientRemover.correct(channels: pnsInput.data, trSamples: pnsTRSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit, donorSelection: donorSelection, samplingRate: pnsInput.samplingRate) { fraction in
+                    correctedPNSData = try GradientRemover.correct(channels: pnsInput.data, trSamples: pnsTRSamples, window: window, excludedTRs: excludedTRs, reducer: reducer, fit: fit, donorSelection: donorSelection, computeBackend: computeBackend, samplingRate: pnsInput.samplingRate) { fraction in
                         progressContinuation.yield(0.70 + 0.30 * fraction)
                     }
                 } else {
@@ -301,7 +325,13 @@ final class GradientViewModel {
             )
             progressContinuation.finish()
             progressTask.cancel()
-            guard !Task.isCancelled else { isProcessing = false; return }
+            guard !Task.isCancelled else {
+                isProcessing = false
+                operationProgress = nil
+                return
+            }
+
+            updateFinalizingProgress()
 
             correctedSignal = signal.replacingData(result.0)
             if let pnsInput, let correctedPNSData = result.1 {
@@ -309,8 +339,10 @@ final class GradientViewModel {
             } else {
                 correctedPNSSignal = nil
             }
-            statusMessage = "Applied \(method.rawValue) gradient artifact correction (\(trMarkerCode) markers, template window \(window.before) pre / \(window.after) post TRs\(excludedCount > 0 ? ", \(excludedCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
+            let backendDescription = usesMetal && GradientRemoverMetalBackend.isAvailable ? ", Metal GPU" : ""
+            statusMessage = "Applied \(method.rawValue) gradient artifact correction (\(trMarkerCode) markers, template window \(window.before) pre / \(window.after) post TRs\(backendDescription)\(excludedCount > 0 ? ", \(excludedCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
             statusIsError = false
+            progress = 1
             onApplied()
         } catch is CancellationError {
             progressContinuation.finish()
@@ -322,6 +354,7 @@ final class GradientViewModel {
             statusIsError = true
         }
         isProcessing = false
+        operationProgress = nil
     }
 
     private func removeGradientArtifactFASTR(
@@ -341,6 +374,7 @@ final class GradientViewModel {
         config.randomizeOBSEpochSelection = fastrOBSRandomSampling
         config.anc = fastrANC
         config.ancHighPassMode = fastrANCSliceHighPass ? .sliceTriggerDependent : .fixed2Hz
+        config.computeBackend = fastrUseMetal ? .metal : .cpu
         config.usesBergenRSquareDonors = fastrUsesBergenRSquareDonors
         if method == .moosmann {
             config.templateScheme = .moosmann
@@ -362,7 +396,7 @@ final class GradientViewModel {
         let slices = config.numberOfSlices
 
         isProcessing = true
-        progress = 0
+        progress = 0.02
         statusMessage = nil
 
         let pnsInput = appliesToPNS ? pnsSignal : nil
@@ -370,12 +404,28 @@ final class GradientViewModel {
             trimmedTRMarkers(in: signal, samplingRate: $0.samplingRate)
         } ?? []
 
+        let hasPNS = pnsInput != nil
+        beginOperationProgress(
+            subtitle: "\(methodName) · \(fastrUseMetal && FastrCorrector.isMetalAvailable ? "Metal GPU" : "CPU")",
+            hasPNS: hasPNS,
+            phase: "Preparing triggers and artifact alignment"
+        )
+        let eegChannelCount = sourceDataChannelCount(signal)
+        let pnsChannelCount = pnsInput?.data.count ?? 0
+        let correctionPhase = fastrOBSAuto
+            ? "Building templates and fitting OBS"
+            : "Building and subtracting artifact templates"
         let (progressContinuation, progressTask) = ProgressBridge.make { [weak self] fraction in
-            self?.progress = fraction
+            self?.updateCorrectionProgress(
+                fraction,
+                hasPNS: hasPNS,
+                eegChannels: eegChannelCount,
+                pnsChannels: pnsChannelCount,
+                phase: correctionPhase
+            )
         }
 
         do {
-            let hasPNS = pnsInput != nil
             let sourceData = signal.data
             let samplingRate = signal.samplingRate
             let worker = Task.detached(priority: .userInitiated) {
@@ -414,7 +464,13 @@ final class GradientViewModel {
             )
             progressContinuation.finish()
             progressTask.cancel()
-            guard !Task.isCancelled else { isProcessing = false; return }
+            guard !Task.isCancelled else {
+                isProcessing = false
+                operationProgress = nil
+                return
+            }
+
+            updateFinalizingProgress()
 
             correctedSignal = signal.replacingData(result.0)
             if let pnsInput, let correctedPNSData = result.1 {
@@ -425,8 +481,10 @@ final class GradientViewModel {
             let windowDescription = fastrUseFacetWindow ? "FACET AvgWindow 30" : "\(windowBefore) pre / \(windowAfter) post"
             let obsDescription = fastrOBSAuto ? ", OBS\(fastrOBSRandomSampling ? " random" : "")" : ""
             let ancDescription = fastrANC ? ", ANC\(fastrANCSliceHighPass ? " slice-rate HPF" : "")" : ""
-            statusMessage = "Applied \(methodName) correction (\(trMarkerCode) markers, \(slices) slice\(slices == 1 ? "" : "s")/volume, template window \(windowDescription)\(fastrUsesBergenRSquareDonors ? ", BERGEN r² donors" : "")\(obsDescription)\(ancDescription)\(censoredCount > 0 ? ", \(censoredCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
+            let backendDescription = fastrUseMetal && FastrCorrector.isMetalAvailable ? ", Metal GPU" : ""
+            statusMessage = "Applied \(methodName) correction (\(trMarkerCode) markers, \(slices) slice\(slices == 1 ? "" : "s")/volume, template window \(windowDescription)\(fastrUsesBergenRSquareDonors ? ", BERGEN r² donors" : "")\(obsDescription)\(ancDescription)\(backendDescription)\(censoredCount > 0 ? ", \(censoredCount) high-motion TRs excluded" : "")\(pnsInput == nil ? "" : " + PNS"))."
             statusIsError = false
+            progress = 1
             onApplied()
         } catch is CancellationError {
             progressContinuation.finish()
@@ -438,5 +496,59 @@ final class GradientViewModel {
             statusIsError = true
         }
         isProcessing = false
+        operationProgress = nil
+    }
+
+    private func sourceDataChannelCount(_ signal: MFFSignalData) -> Int {
+        signal.data.count
+    }
+
+    private func beginOperationProgress(subtitle: String, hasPNS: Bool, phase: String) {
+        var stages = ["Preparing", "EEG correction"]
+        if hasPNS { stages.append("PNS correction") }
+        stages.append("Finalizing")
+        operationProgress = .started(
+            source: "MRI",
+            title: "MRI Gradient Removal",
+            subtitle: subtitle,
+            phase: phase,
+            stages: stages
+        ).updating(fraction: 0.02, phase: phase, activeStage: 0)
+    }
+
+    private func updateCorrectionProgress(
+        _ workerFraction: Double,
+        hasPNS: Bool,
+        eegChannels: Int,
+        pnsChannels: Int,
+        phase: String
+    ) {
+        let bounded = min(max(workerFraction, 0), 1)
+        let isPNS = hasPNS && bounded >= 0.70
+        let localFraction = isPNS
+            ? min(max((bounded - 0.70) / 0.30, 0), 1)
+            : min(max(bounded / (hasPNS ? 0.70 : 1), 0), 1)
+        let count = isPNS ? pnsChannels : eegChannels
+        let completed = min(count, max(0, Int((localFraction * Double(count)).rounded())))
+        let target = isPNS ? "PNS" : "EEG"
+        let displayFraction = 0.06 + 0.88 * bounded
+        progress = displayFraction
+        let stage = isPNS ? 2 : 1
+        operationProgress = operationProgress?.updating(
+            fraction: displayFraction,
+            phase: isPNS ? "Correcting PNS channels" : phase,
+            detail: count > 0 ? "\(target) channels \(completed) of \(count)" : nil,
+            activeStage: stage
+        )
+    }
+
+    private func updateFinalizingProgress() {
+        progress = 0.98
+        guard let current = operationProgress else { return }
+        operationProgress = current.updating(
+            fraction: 0.98,
+            phase: "Finalizing corrected signal",
+            activeStage: current.stages.count - 1
+        )
     }
 }

@@ -63,4 +63,40 @@ struct WaveletArtifactAnalyzerTests {
         #expect(result.waveformEvents.isEmpty)
         #expect(result.topographyEvents.isEmpty)
     }
+
+    /// Regression for a real bug: `downsampleAndDemean` subtracts one global
+    /// mean, and the old edge-clamped a-trous smoothing couldn't track any
+    /// remaining slow trend out to the boundaries, so a channel with nothing
+    /// but a gentle linear drift (no real artifact at all) got spuriously
+    /// flagged right at the start and end of the recording — which is what
+    /// "explorer candidates always cluster at the end" turned out to be.
+    @Test func driftingBaselineDoesNotFlagRecordingBoundaries() {
+        let sr = 250.0
+        let n = 60_000
+        var data: [[Float]] = []
+        for c in 0..<8 {
+            var state = UInt64(c + 1) &* 6364136223846793005 &+ 1
+            let channel = (0..<n).map { i -> Float in
+                state = state &* 6364136223846793005 &+ 1
+                let noise = Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 2)
+                let drift = Float(Double(i) / Double(n)) * 40 // gentle linear drift, no discrete artifact
+                return noise + drift
+            }
+            data.append(channel)
+        }
+        let signal = SyntheticSignal.make(data, samplingRate: sr)
+        let configuration = WaveletArtifactExplorerConfiguration(
+            channelIndices: Array(0..<8), downsampleRate: 250, levelCount: 8, thresholdScale: 1,
+            cleaningMode: .conservativeLocal, intensity: 1, waveletFamily: .bior44,
+            thresholdRule: .hard, thresholdModel: .bayesShrink,
+            mergeWindowSeconds: 0.1, minimumDurationSeconds: 0.02, maximumCandidates: 40
+        )
+        let result = WaveletArtifactAnalyzer.explore(in: signal, configuration: configuration)
+        let duration = Double(n) / sr
+
+        for candidate in result.candidates {
+            let fraction = candidate.peakTimeSeconds / duration
+            #expect(fraction > 0.02 && fraction < 0.98, "boundary-clustered candidate at fraction \(fraction)")
+        }
+    }
 }

@@ -79,7 +79,7 @@ nonisolated enum WaveletDenoiser {
         let levels = clampedLevels(configuration.levels, signalLength: signal.count)
         guard levels >= 1 else { return signal }
 
-        let bank = WaveletFilterBank.orthonormal(configuration.family.scalingFilter)
+        let bank = configuration.family.filterBank
         let transform = WaveletTransform(bank: bank)
         var decomposition = transform.forwardDWT(signal, levels: levels)
 

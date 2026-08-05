@@ -34,6 +34,16 @@ struct FastrCorrectorTests {
         return (channel, triggers)
     }
 
+    private func rootMeanSquareDifference(_ a: [Float], _ b: [Float]) -> Double {
+        precondition(a.count == b.count)
+        guard !a.isEmpty else { return 0 }
+        let squared = zip(a, b).reduce(0.0) { sum, pair in
+            let difference = Double(pair.0 - pair.1)
+            return sum + difference * difference
+        }
+        return (squared / Double(a.count)).squareRoot()
+    }
+
     @Test func reducesGradientArtifactPower() throws {
         let spacing = 120
         let volumes = 40
@@ -97,6 +107,330 @@ struct FastrCorrectorTests {
         )
         #expect(result.count == 3)
         for c in result { #expect(c.count == channel.count) }
+    }
+
+    // MARK: - Metal backend
+
+    @Test func metalInterpolationMatchesCPUReference() throws {
+        guard let metal = FastrMetalBackend.shared else { return }
+        let input = (0..<257).map { index in
+            Float(12 * sin(Double(index) * 0.071) + 0.2 * Double(index % 9))
+        }
+        let cpu = DSP.interp(input.map(Double.init), factor: 3)
+        let gpu = try #require(metal.interpolate(input, factor: 3, subtractMean: false))
+        #expect(gpu.count == cpu.count)
+        let maxDifference = zip(cpu, gpu).map { abs($0 - $1) }.max() ?? 0
+        #expect(maxDifference < 0.0001)
+
+        let inputMean = input.reduce(0, +) / Float(input.count)
+        let centeredCPU = DSP.interp(input.map { Double($0 - inputMean) }, factor: 3)
+        let centeredGPU = try #require(metal.interpolate(input, factor: 3, subtractMean: true))
+        let centeredMaxDifference = zip(centeredCPU, centeredGPU).map { abs($0 - $1) }.max() ?? 0
+        #expect(centeredMaxDifference < 0.0001)
+    }
+
+    @Test func metalBatchedKernelsMatchSingleChannelKernels() throws {
+        guard let metal = FastrMetalBackend.shared else { return }
+        var inputs: [[Float]] = []
+        for channel in 0..<4 {
+            var values: [Float] = []
+            for sample in 0..<193 {
+                let frequency = 0.031 + 0.004 * Double(channel)
+                let value = 9 * sin(Double(sample) * frequency)
+                    + Double(channel * 7) + 0.15 * Double(sample % 11)
+                values.append(Float(value))
+            }
+            inputs.append(values)
+        }
+
+        for subtractMean in [false, true] {
+            let batched = try #require(metal.interpolateChannels(
+                inputs,
+                factor: 3,
+                subtractMean: subtractMean
+            ))
+            #expect(batched.count == inputs.count)
+            for channel in inputs.indices {
+                let single = try #require(metal.interpolate(
+                    inputs[channel],
+                    factor: 3,
+                    subtractMean: subtractMean
+                ))
+                let maxDifference = zip(single, batched[channel]).map { abs($0 - $1) }.max() ?? 0
+                #expect(maxDifference < 0.0001)
+            }
+        }
+
+        let originals = inputs.map { $0.flatMap { [Double($0), Double($0)] } }
+        var templates: [[Double]] = []
+        var residuals: [[Double]] = []
+        for channel in originals.indices {
+            var template: [Double] = []
+            var residual: [Double] = []
+            for sample in originals[channel].indices {
+                template.append(
+                    0.08 * originals[channel][sample]
+                        + 0.01 * Double(channel + sample % 5)
+                )
+                residual.append(0.02 * sin(Double(sample + channel) * 0.17))
+            }
+            templates.append(template)
+            residuals.append(residual)
+        }
+        let targetCount = originals[0].count / 2
+        let batchedCorrection = try #require(metal.correctAndDecimateChannels(
+            original: originals,
+            templateNoise: templates,
+            residualNoise: residuals,
+            factor: 2,
+            targetCount: targetCount
+        ))
+        for channel in originals.indices {
+            let single = try #require(metal.correctAndDecimate(
+                original: originals[channel],
+                templateNoise: templates[channel],
+                residualNoise: residuals[channel],
+                factor: 2,
+                targetCount: targetCount
+            ))
+            let cleanDifference = zip(single.clean, batchedCorrection.clean[channel])
+                .map { abs($0 - $1) }.max() ?? 0
+            let noiseDifference = zip(single.noise, batchedCorrection.noise[channel])
+                .map { abs($0 - $1) }.max() ?? 0
+            #expect(cleanDifference < 0.0001)
+            #expect(noiseDifference < 0.0001)
+        }
+    }
+
+    @Test func fusedMetalTemplateNoiseMatchesReference() throws {
+        guard let metal = FastrMetalBackend.shared else { return }
+        let sampleCount = 96
+        var channels = [[Double]]()
+        for channel in 0..<2 {
+            var values = [Double]()
+            values.reserveCapacity(sampleCount)
+            let frequency = 0.07 + 0.01 * Double(channel)
+            for sample in 0..<sampleCount {
+                let oscillation = 4 * sin(Double(sample) * frequency)
+                let offset = Double(channel * 3)
+                let ripple = 0.05 * Double(sample % 7)
+                values.append(oscillation + offset + ripple)
+            }
+            channels.append(values)
+        }
+        let markers = [16, 36, 56, 76]
+        let prePeak = 4
+        let artifactLength = 9
+        let targetStarts = markers.map { $0 - prePeak }
+        let donorRows = [[1, 2], [0, 2], [], [1, 2]]
+        let fixedAlpha = [false, true]
+
+        let gpu = try #require(metal.buildTemplateNoiseChannels(
+            data: channels,
+            markers: markers,
+            targetStarts: targetStarts,
+            donorRows: donorRows,
+            prePeak: prePeak,
+            artifactLength: artifactLength,
+            fixedAlpha: fixedAlpha,
+            epochChunkSize: 2
+        ))
+
+        var expected = channels.map { _ in [Double](repeating: 0, count: sampleCount) }
+        for channel in channels.indices {
+            for epoch in markers.indices where !donorRows[epoch].isEmpty {
+                let template = (0..<artifactLength).map { sample in
+                    donorRows[epoch].reduce(0.0) { sum, donor in
+                        sum + channels[channel][markers[donor] - prePeak + sample]
+                    } / Double(donorRows[epoch].count)
+                }
+                let targetStart = targetStarts[epoch]
+                let alpha: Double
+                if fixedAlpha[channel] {
+                    alpha = 1
+                } else {
+                    let numerator = (0..<artifactLength).reduce(0.0) { sum, sample in
+                        sum + channels[channel][targetStart + sample] * template[sample]
+                    }
+                    let denominator = template.reduce(0.0) { $0 + $1 * $1 }
+                    alpha = denominator == 0 ? 0 : numerator / denominator
+                }
+                for sample in 0..<artifactLength {
+                    expected[channel][targetStart + sample] = alpha * template[sample]
+                }
+            }
+        }
+
+        #expect(gpu.count == expected.count)
+        for channel in expected.indices {
+            let maxDifference = zip(gpu[channel], expected[channel]).map { abs($0 - $1) }.max() ?? 0
+            #expect(maxDifference < 0.0001)
+        }
+    }
+
+    @Test func metalFastrCloselyMatchesCPUWithoutOBS() throws {
+        let (channel, triggers) = makeSyntheticChannel(spacing: 120, volumes: 40)
+        var cpuConfig = FastrCorrector.Config()
+        cpuConfig.upsampleFactor = 2
+        cpuConfig.numberOfSlices = 1
+        cpuConfig.averagingWindow = 20
+        cpuConfig.subSampleAlignment = false
+        cpuConfig.obs = .off
+        cpuConfig.anc = false
+
+        var metalConfig = cpuConfig
+        metalConfig.computeBackend = .metal
+        let cpu = try FastrCorrector.correct(
+            channels: [channel, channel], volumeTriggers: triggers,
+            config: cpuConfig, samplingRate: 250
+        )
+        let gpu = try FastrCorrector.correct(
+            channels: [channel, channel], volumeTriggers: triggers,
+            config: metalConfig, samplingRate: 250
+        )
+
+        #expect(gpu.count == cpu.count)
+        for channelIndex in cpu.indices {
+            #expect(gpu[channelIndex].count == cpu[channelIndex].count)
+            #expect(gpu[channelIndex].allSatisfy { $0.isFinite })
+            #expect(rootMeanSquareDifference(cpu[channelIndex], gpu[channelIndex]) < 0.01)
+        }
+    }
+
+    @Test func metalFastrProcessesMultipleChannelBatches() throws {
+        guard FastrMetalBackend.shared != nil else { return }
+        let (base, triggers) = makeSyntheticChannel(spacing: 80, volumes: 24)
+        let channels: [[Float]] = (0..<18).map { channel in
+            let scale = Float(1 + 0.01 * Double(channel))
+            return base.enumerated().map { sample, value in
+                value * scale + Float(channel) * 0.2 * Float(sin(Double(sample) * 0.019))
+            }
+        }
+        var cpuConfig = FastrCorrector.Config()
+        cpuConfig.upsampleFactor = 2
+        cpuConfig.averagingWindow = 12
+        cpuConfig.subSampleAlignment = false
+        cpuConfig.obs = .off
+
+        var metalConfig = cpuConfig
+        metalConfig.computeBackend = .metal
+        let cpu = try FastrCorrector.correct(
+            channels: channels,
+            volumeTriggers: triggers,
+            config: cpuConfig,
+            samplingRate: 250
+        )
+        let gpu = try FastrCorrector.correct(
+            channels: channels,
+            volumeTriggers: triggers,
+            config: metalConfig,
+            samplingRate: 250
+        )
+
+        #expect(gpu.count == channels.count)
+        for channel in channels.indices {
+            #expect(gpu[channel].count == channels[channel].count)
+            #expect(rootMeanSquareDifference(cpu[channel], gpu[channel]) < 0.02)
+        }
+    }
+
+    @Test func metalFastrCloselyMatchesCPUWithOBS() throws {
+        let (channel, triggers) = makeSyntheticChannel(spacing: 100, volumes: 32)
+        var cpuConfig = FastrCorrector.Config()
+        cpuConfig.upsampleFactor = 2
+        cpuConfig.averagingWindow = 16
+        cpuConfig.subSampleAlignment = false
+        cpuConfig.obs = .auto
+        cpuConfig.randomizeOBSEpochSelection = false
+        cpuConfig.anc = false
+
+        var metalConfig = cpuConfig
+        metalConfig.computeBackend = .metal
+        let cpu = try FastrCorrector.correct(
+            channels: [channel], volumeTriggers: triggers,
+            config: cpuConfig, samplingRate: 250
+        )[0]
+        let gpu = try FastrCorrector.correct(
+            channels: [channel], volumeTriggers: triggers,
+            config: metalConfig, samplingRate: 250
+        )[0]
+
+        #expect(gpu.count == cpu.count)
+        #expect(gpu.allSatisfy { $0.isFinite })
+        #expect(rootMeanSquareDifference(cpu, gpu) < 0.05)
+    }
+
+    @Test func fusedMetalTemplatesMatchCPUForFacetAndMoosmann() throws {
+        guard FastrMetalBackend.shared != nil else { return }
+        let spacing = 96
+        let volumes = 32
+        let (base, triggers) = makeSyntheticChannel(spacing: spacing, volumes: volumes)
+        let channels = [base, base.map { $0 * 1.03 + 0.2 }]
+
+        var facet = FastrCorrector.Config()
+        facet.upsampleFactor = 2
+        facet.numberOfSlices = 4
+        facet.averagingWindow = 12
+        facet.useFacetAveragingWindow = true
+        facet.subSampleAlignment = false
+        facet.obs = .off
+
+        var moosmann = FastrCorrector.Config()
+        moosmann.upsampleFactor = 2
+        moosmann.averagingWindow = 12
+        moosmann.subSampleAlignment = false
+        moosmann.obs = .off
+        moosmann.templateScheme = .moosmann
+        moosmann.motionThresholdMm = 0.5
+        moosmann.motion = (0..<volumes).map { volume in
+            sample(volume, (0, 0, 0, volume < volumes / 2 ? 0 : 4, 0, 0))
+        }
+
+        for cpuConfig in [facet, moosmann] {
+            var metalConfig = cpuConfig
+            metalConfig.computeBackend = .metal
+            let cpu = try FastrCorrector.correct(
+                channels: channels,
+                volumeTriggers: triggers,
+                config: cpuConfig,
+                samplingRate: 250
+            )
+            let gpu = try FastrCorrector.correct(
+                channels: channels,
+                volumeTriggers: triggers,
+                config: metalConfig,
+                samplingRate: 250
+            )
+            for channel in channels.indices {
+                #expect(rootMeanSquareDifference(cpu[channel], gpu[channel]) < 0.03)
+            }
+        }
+    }
+
+    @Test func metalFARMCloselyMatchesCPU() throws {
+        guard FastrMetalBackend.shared != nil else { return }
+        let (channel, triggers) = makeSyntheticChannel(spacing: 100, volumes: 32)
+        var cpuConfig = FastrCorrector.Config()
+        cpuConfig.upsampleFactor = 2
+        cpuConfig.averagingWindow = 16
+        cpuConfig.subSampleAlignment = false
+        cpuConfig.templateScheme = .farm
+        cpuConfig.obs = .off
+
+        var metalConfig = cpuConfig
+        metalConfig.computeBackend = .metal
+        let cpu = try FastrCorrector.correct(
+            channels: [channel], volumeTriggers: triggers,
+            config: cpuConfig, samplingRate: 250
+        )[0]
+        let gpu = try FastrCorrector.correct(
+            channels: [channel], volumeTriggers: triggers,
+            config: metalConfig, samplingRate: 250
+        )[0]
+
+        #expect(gpu.count == cpu.count)
+        #expect(gpu.allSatisfy { $0.isFinite })
+        #expect(rootMeanSquareDifference(cpu, gpu) < 0.02)
     }
 
     @Test func excludedChannelSkipsOBSWithoutCrashing() throws {
@@ -358,29 +692,37 @@ struct FastrCorrectorTests {
         let volumes = 40
         let (channel, triggers) = makeSyntheticChannel(spacing: spacing, volumes: volumes)
 
-        var config = FastrCorrector.Config()
-        config.upsampleFactor = 2
-        config.numberOfSlices = 1
-        config.obs = .off
-        config.censoredVolumes = [10, 11, 25]   // pretend these are high-motion
-
-        let result = try FastrCorrector.correct(
-            channels: [channel], volumeTriggers: triggers,
-            config: config, samplingRate: 250
-        )
-        #expect(result[0].count == channel.count)
-        #expect(result[0].allSatisfy { $0.isFinite })
-
-        // Censored TRs are still corrected (their artifact power drops too).
         func variance(_ x: ArraySlice<Float>) -> Double {
             let arr = Array(x).map(Double.init)
             let m = arr.reduce(0, +) / Double(arr.count)
             return arr.reduce(0) { $0 + ($1 - m) * ($1 - m) } / Double(arr.count)
         }
-        let s = triggers[25]
-        let before = variance(channel[s..<(s + spacing)])
-        let after = variance(result[0][s..<(s + spacing)])
-        #expect(after < before * 0.6)
+
+        for scheme in [FastrCorrector.TemplateScheme.neighbor, .farm] {
+            for backend in [FastrCorrector.ComputeBackend.cpu, .metal] {
+                var config = FastrCorrector.Config()
+                config.upsampleFactor = 2
+                config.numberOfSlices = 1
+                config.obs = .off
+                config.templateScheme = scheme
+                config.computeBackend = backend
+                config.censoredVolumes = [10, 11, 25]   // pretend these are high-motion
+
+                let result = try FastrCorrector.correct(
+                    channels: [channel], volumeTriggers: triggers,
+                    config: config, samplingRate: 250
+                )
+                #expect(result[0].count == channel.count)
+                #expect(result[0].allSatisfy { $0.isFinite })
+
+                // Censored TRs remain correction targets even though they cannot
+                // contribute to this or any neighboring artifact template.
+                let s = triggers[25]
+                let before = variance(channel[s..<(s + spacing)])
+                let after = variance(result[0][s..<(s + spacing)])
+                #expect(after < before * 0.6)
+            }
+        }
     }
 
     @Test func censoringEntireNeighborhoodFallsBackGracefully() throws {

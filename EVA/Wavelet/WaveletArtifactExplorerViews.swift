@@ -24,6 +24,44 @@
 
 import SwiftUI
 
+/// A metric chip that pops its `detail` content over on click instead of
+/// taking up permanent vertical space — used for the Strongest Channels /
+/// Dominant Levels tables so the candidate list (the thing actually worth
+/// scrolling to) doesn't get pushed down by tables most sessions won't need
+/// to look at every time. Self-contained `@State` (not on `WaveformView`) —
+/// matches `HoverPinnedPreviewButton`'s pattern in `ArtifactPreviewViews.swift`.
+struct WaveletExplorerSummaryChip<Detail: View>: View {
+    let title: String
+    let value: String
+    @ViewBuilder var detail: () -> Detail
+
+    @State private var showsDetail = false
+
+    var body: some View {
+        Button {
+            showsDetail.toggle()
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.caption.monospacedDigit())
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showsDetail, arrowEdge: .bottom) {
+            detail()
+                .padding(12)
+                .frame(minWidth: 260, alignment: .topLeading)
+        }
+    }
+}
+
 extension WaveformView {
     // MARK: - Wavelet artifact explorer
 
@@ -95,6 +133,10 @@ extension WaveformView {
     func waveletReductionSettingsColumn(input: MFFSignalData, reduceCount: Int) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                ArtifactTemplateFieldLabel(
+                    title: "Mode",
+                    help: "HAPPE's two wavelet-cleaning tracks. Continuous EEG is the more aggressive, hard-thresholding pass run over the whole recording. Task / ERP is gentler (soft thresholding, one extra decomposition level, quality assessed within the ERP analysis band) so it doesn't smear stimulus-locked components. Switching modes resets the settings below to that track's defaults — pick this first, then fine-tune."
+                )
                 Picker("Mode", selection: $wavelet.mode) {
                     ForEach(WaveletReductionMode.allCases) { Text($0.rawValue).tag($0) }
                 }
@@ -111,45 +153,66 @@ extension WaveformView {
 
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
                     GridRow {
-                        Text("Transform")
+                        ArtifactTemplateFieldLabel(
+                            title: "Transform",
+                            help: "DWT (decimated) is what HAPPE's wdenoise uses — fast and compact, the standard choice. SWT (undecimated/stationary) is shift-invariant, so the removed-artifact estimate doesn't shift depending on where a spike falls in the decimation grid — useful for inspecting exactly what a level removed, at the cost of more compute."
+                        )
                         Picker("", selection: $wavelet.config.kind) {
                             ForEach(WaveletTransformKind.allCases) { Text($0.rawValue).tag($0) }
                         }
                         .labelsHidden().frame(width: 140)
                     }
                     GridRow {
-                        Text("Wavelet")
+                        ArtifactTemplateFieldLabel(
+                            title: "Wavelet",
+                            help: "The mother wavelet. coif4 is HAPPE's ERP family. sym4/db4 are orthonormal and near-symmetric — solid general-purpose defaults, but no orthogonal wavelet beyond Haar can be exactly symmetric. bior4.4/bior6.8 are HAPPE's true continuous-path families (bior6.8 is HAPPE's current default, bior4.4 the earlier one) — exactly linear-phase, so thresholding and subtracting the artifact estimate doesn't introduce a small time shift, which matters most right at artifact onsets and for timing-sensitive ERP work."
+                        )
                         Picker("", selection: $wavelet.config.family) {
                             ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
                         }
                         .labelsHidden().frame(width: 140)
                     }
                     GridRow {
-                        Text("Threshold rule")
+                        ArtifactTemplateFieldLabel(
+                            title: "Threshold rule",
+                            help: "Hard keeps coefficients above the threshold unchanged and zeroes the rest — more aggressive, the Continuous EEG default. Soft also shrinks the surviving coefficients toward zero — gentler and less likely to leave a sharp edge in what's subtracted, the Task / ERP default."
+                        )
                         Picker("", selection: $wavelet.config.thresholdRule) {
                             ForEach(WaveletCleaningThresholdRule.allCases) { Text($0.rawValue).tag($0) }
                         }
                         .labelsHidden().frame(width: 140)
                     }
                     GridRow {
-                        Text("Threshold model")
+                        ArtifactTemplateFieldLabel(
+                            title: "Threshold model",
+                            help: "Universal (VisuShrink) uses one threshold per level — sigma × sqrt(2·ln N) from a robust noise estimate — simple and aggressive. BayesShrink (HAPPE's default) adapts each level's threshold to that level's estimated signal-to-noise ratio, so noisy, artifact-heavy levels get thresholded harder while cleaner levels are mostly left alone."
+                        )
                         Picker("", selection: $wavelet.config.thresholdModel) {
                             ForEach(WaveletCleaningThresholdModel.allCases) { Text($0.rawValue).tag($0) }
                         }
                         .labelsHidden().frame(width: 140)
                     }
                     GridRow {
-                        Text("Levels")
+                        ArtifactTemplateFieldLabel(
+                            title: "Levels",
+                            help: "How many times the signal is halved in frequency. More levels reach lower frequencies (drift, slow artifacts), but each extra level has less data to estimate its threshold from, so pushing this too high risks overfitting to noise. The rate-dependent default (8–10 continuous, 9–11 ERP) mirrors HAPPE's own scheme."
+                        )
                         Stepper("\(wavelet.config.levelCount)", value: $wavelet.config.levelCount, in: 1...WaveletReducer.maximumLevelCount)
                             .frame(width: 120)
                     }
                     GridRow {
-                        Text("Strength")
+                        ArtifactTemplateFieldLabel(
+                            title: "Strength",
+                            help: "Multiplies the computed threshold. 1.0 is the textbook rule for the chosen model. Lower it to keep more signal on a dataset with subtle artifacts you want to review carefully; raise it on a dataset with strong, obvious artifacts you want cut aggressively."
+                        )
                         TextField("x", value: $wavelet.config.thresholdScale, format: .number.precision(.fractionLength(2)))
                             .frame(width: 80)
                     }
                     GridRow {
-                        Text("Downsample")
+                        ArtifactTemplateFieldLabel(
+                            title: "Downsample",
+                            help: "Runs the wavelet pass on a decimated copy, then upsamples the removed-artifact estimate back to full rate before subtracting. Task / ERP defaults to ~250 Hz since ERP analysis bands are low there. Leave Continuous EEG at Full unless the recording is very high-rate and reduction is too slow."
+                        )
                         Picker("", selection: $wavelet.config.downsampleFactor) {
                             ForEach(downsampleFactorOptions(for: input.samplingRate), id: \.self) { factor in
                                 Text(downsampleFactorLabel(factor: factor, rate: input.samplingRate)).tag(factor)
@@ -158,12 +221,20 @@ extension WaveformView {
                         .labelsHidden().frame(width: 150)
                     }
                     GridRow {
-                        Text("CPU cores")
+                        ArtifactTemplateFieldLabel(
+                            title: "CPU cores",
+                            help: "How many channels are wavelet-reduced in parallel. Turn this down if the reduction is competing with other work on the Mac; raise it (up to the maximum) to finish faster on a dataset with many channels."
+                        )
                         Stepper("\(wavelet.coreCount) of \(WaveletReducer.maximumCoreCount)", value: $wavelet.coreCount, in: 1...WaveletReducer.maximumCoreCount)
                             .frame(width: 140)
                     }
                 }
                 .font(.callout)
+
+                Text(wavelet.config.family.explanation)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 if wavelet.isRunning {
                     ProgressView(value: wavelet.progress)
@@ -423,16 +494,31 @@ extension WaveformView {
             }
             .frame(maxHeight: .infinity)
 
+            if let message = waveletExplorer.applyStatusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             HStack {
                 Button("Clear Results") {
                     waveletExplorer.result = nil
+                    waveletExplorer.excludedCandidateIDs = []
                     waveletExplorer.log.removeAll()
                     waveletExplorer.progress = 0
                     waveletExplorer.statusTitle = "Wavelet artifact explorer ready"
                     waveletExplorer.statusDetail = "\(waveletExplorerChannels(in: signal).count) channels selected for exploratory multiscale scanning."
                     waveletExplorer.statusMessage = nil
+                    waveletExplorer.applyStatusMessage = nil
+                    refreshWaveletExplorerEvents()
                 }
                 .disabled(waveletExplorer.isRunning && waveletExplorer.result == nil && waveletExplorer.log.isEmpty)
+
+                if let result = waveletExplorer.result, !result.candidates.isEmpty {
+                    Text("\(waveletExplorerIncludedCandidateCount) of \(result.candidates.count) selected")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 Spacer()
 
@@ -446,6 +532,12 @@ extension WaveformView {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(waveletExplorer.isRunning || waveletExplorerChannels(in: signal).isEmpty)
+
+                Button("Apply Selected") {
+                    applyWaveletExplorerCandidates(in: signal)
+                }
+                .disabled(waveletExplorer.isRunning || waveletExplorer.isApplying || waveletExplorerIncludedCandidateCount == 0)
+                .help("Cleans the checked candidates in place using per-event wavelet decompose-threshold-subtract, the same reversible pipeline as OBS/Regress/MAS artifact cleaning.")
             }
         }
         .padding(20)
@@ -696,13 +788,27 @@ extension WaveformView {
                 waveletExplorerMetricChip(title: "Artifact energy", value: waveletExplorerPercent(result.summary.artifactEnergyFraction))
                 waveletExplorerMetricChip(title: "Effective Hz", value: String(format: "%.1f", result.effectiveSamplingRate))
                 waveletExplorerMetricChip(title: "Threshold", value: String(format: "%.3f", result.candidateThreshold))
+                WaveletExplorerSummaryChip(
+                    title: "Strongest channels",
+                    value: "\(result.summary.strongestChannels.count) ranked"
+                ) {
+                    waveletExplorerChannelSummary(result.summary)
+                }
+                WaveletExplorerSummaryChip(
+                    title: "Dominant levels",
+                    value: "\(result.summary.levelSummaries.count) levels"
+                ) {
+                    waveletExplorerLevelSummary(result.summary)
+                }
             }
 
-            HStack(alignment: .top, spacing: 16) {
-                waveletExplorerChannelSummary(result.summary)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                waveletExplorerLevelSummary(result.summary)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            if waveletExplorer.isPrecomputingPreviews {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Precomputing previews so they open instantly…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             waveletExplorerCandidateTable(result.candidates, signal: signal)
@@ -792,6 +898,7 @@ extension WaveformView {
                 ScrollView {
                     Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
                         GridRow {
+                            Text("")
                             Text("#")
                             Text("Peak")
                             Text("Duration")
@@ -801,12 +908,17 @@ extension WaveformView {
                             Text("Contrib")
                             Text("Preview")
                             Text("")
+                            Text("")
                         }
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
 
                         ForEach(candidates) { candidate in
                             GridRow {
+                                Toggle("", isOn: waveletCandidateIncludedBinding(candidate))
+                                    .toggleStyle(.checkbox)
+                                    .labelsHidden()
+                                    .help("Include this candidate when Apply Selected runs.")
                                 Text("\(candidate.rank)")
                                 Text(formattedEventTime(candidate.peakTimeSeconds))
                                 Text(String(format: "%.3fs", candidate.durationSeconds))
@@ -817,8 +929,10 @@ extension WaveformView {
                                 WaveletCleaningPreviewButton(
                                     candidate: candidate,
                                     signal: signal,
-                                    configuration: waveletCleaningConfiguration(for: signal, candidate: candidate)
+                                    configuration: waveletCleaningConfiguration(for: signal, candidate: candidate),
+                                    precomputed: waveletExplorer.previewCache
                                 )
+                                WaveletScalogramButton(candidate: candidate, signal: signal)
                                 Button("Jump") {
                                     jumpToWaveletCandidate(candidate, in: signal)
                                 }
@@ -832,6 +946,106 @@ extension WaveformView {
                 .frame(height: 190)
             }
         }
+    }
+
+    func waveletCandidateIncludedBinding(_ candidate: WaveletArtifactCandidate) -> Binding<Bool> {
+        Binding(
+            get: { !waveletExplorer.excludedCandidateIDs.contains(candidate.id) },
+            set: { included in
+                if included {
+                    waveletExplorer.excludedCandidateIDs.remove(candidate.id)
+                } else {
+                    waveletExplorer.excludedCandidateIDs.insert(candidate.id)
+                }
+            }
+        )
+    }
+
+    var waveletExplorerIncludedCandidateCount: Int {
+        guard let result = waveletExplorer.result else { return 0 }
+        return result.candidates.filter { !waveletExplorer.excludedCandidateIDs.contains($0.id) }.count
+    }
+
+    /// Builds the waveform-display event for one candidate. `beginTimeSeconds`
+    /// is the true onset (not a pre-centered peak) and `sourceFile` starts
+    /// with "Continuous" so `MFFEvent.centerTimeSeconds` and the duration
+    /// highlight band both read it as onset+duration, spanning the candidate's
+    /// full detected window rather than a point at the peak.
+    func waveletCandidateEvent(_ candidate: WaveletArtifactCandidate) -> MFFEvent {
+        let duration = max(candidate.endTimeSeconds - candidate.startTimeSeconds, 0.01)
+        return MFFEvent(
+            id: "wavelet-explorer-\(candidate.id)",
+            code: "WAVX",
+            label: "Wavelet burst",
+            eventDescription: String(
+                format: "Wavelet Explorer candidate #%d · Ch %d · score %.2f · dominant level %d",
+                candidate.rank, candidate.channelIndex + 1, candidate.score, candidate.dominantLevel
+            ),
+            beginTimeSeconds: candidate.startTimeSeconds,
+            rawBeginTime: String(format: "%.6f", candidate.startTimeSeconds),
+            sourceFile: WaveletArtifactExplorerViewModel.candidateSourceFile,
+            durationSeconds: duration
+        )
+    }
+
+    /// Keeps `artifactVM.events` (the waveform's marker overlay) in sync with
+    /// the current scan result — replaces any previously-shown wavelet
+    /// candidates wholesale, leaving every other event source (threshold
+    /// detection, defined-artifact templates) untouched.
+    func refreshWaveletExplorerEvents() {
+        let otherEvents = artifactVM.events.filter { $0.sourceFile != WaveletArtifactExplorerViewModel.candidateSourceFile }
+        let candidateEvents = (waveletExplorer.result?.candidates ?? []).map(waveletCandidateEvent)
+        artifactVM.events = (otherEvents + candidateEvents).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+    }
+
+    /// Cleans the checked candidates for real: stages them as a `DefinedArtifact`
+    /// with `cleaningMethod = .wavelet` (creating one on first Apply, updating
+    /// it in place on subsequent Applies so re-running doesn't pile up
+    /// duplicates), then runs the same `applyArtifactCleaning` pipeline every
+    /// other cleaning method uses — same revert/preview/provenance machinery,
+    /// no bespoke apply path for wavelet candidates.
+    func applyWaveletExplorerCandidates(in signal: MFFSignalData) {
+        guard let result = waveletExplorer.result else { return }
+        let included = result.candidates.filter { !waveletExplorer.excludedCandidateIDs.contains($0.id) }
+        guard !included.isEmpty else {
+            waveletExplorer.applyStatusMessage = "No candidates selected — check at least one to clean."
+            return
+        }
+
+        let events = included.map(waveletCandidateEvent)
+        let selectedChannels = Array(Set(included.map { $0.channelIndex })).sorted()
+        let averageWindowSeconds = events.compactMap(\.durationSeconds).reduce(0, +) / Double(max(events.count, 1))
+
+        let existingIndex = waveletExplorer.appliedArtifactID.flatMap { id in
+            template.definedArtifacts.firstIndex(where: { $0.id == id })
+        }
+
+        var artifact = existingIndex.map { template.definedArtifacts[$0] } ?? DefinedArtifact(
+            type: .other,
+            name: "Wavelet Explorer Candidates",
+            eventCode: "WAVX",
+            events: [],
+            selectedChannelIndices: [],
+            windowSizeSeconds: 0.1,
+            average: nil,
+            topography: nil,
+            cleaningMethod: .wavelet
+        )
+        artifact.cleaningMethod = .wavelet
+        artifact.events = events
+        artifact.selectedChannelIndices = selectedChannels
+        artifact.windowSizeSeconds = max(averageWindowSeconds, 0.05)
+        artifact.usesVariableEventDuration = true
+
+        if let existingIndex {
+            template.definedArtifacts[existingIndex] = artifact
+        } else {
+            waveletExplorer.appliedArtifactID = artifact.id
+            template.definedArtifacts.append(artifact)
+        }
+
+        waveletExplorer.applyStatusMessage = "Cleaning \(events.count) candidate\(events.count == 1 ? "" : "s")…"
+        applyArtifactCleaning(to: signal)
     }
 
     func applyWaveletExplorerPipelineDefaults(
@@ -896,6 +1110,59 @@ extension WaveformView {
         )
     }
 
+    /// Computes every candidate's hover preview up front (concurrently, off
+    /// the main actor) right after a scan, instead of on first hover. A
+    /// `TaskGroup` fans the per-candidate `cleaningPreview` calls out across
+    /// cores — each one is already independent (its own padded window, no
+    /// shared state) — then writes the whole batch into `previewCache` in one
+    /// go so this doesn't thrash observation with dozens of tiny updates.
+    /// Guarded by `runGeneration` the same way the scan itself is, so a
+    /// rescan cleanly drops a still-running precompute's results.
+    func precomputeWaveletExplorerPreviews(in signal: MFFSignalData) {
+        guard let result = waveletExplorer.result, !result.candidates.isEmpty else { return }
+        let candidates = result.candidates
+        let configurations = candidates.map { waveletCleaningConfiguration(for: signal, candidate: $0) }
+        let signalDuration = signal.duration
+        let generation = waveletExplorer.runGeneration
+
+        waveletExplorer.isPrecomputingPreviews = true
+        Task {
+            let worker = Task.detached(priority: .utility) { () -> [(String, WaveletCleaningPreviewResult)] in
+                var collected: [(String, WaveletCleaningPreviewResult)] = []
+                collected.reserveCapacity(candidates.count)
+                await withTaskGroup(of: (String, WaveletCleaningPreviewResult?).self) { group in
+                    for (candidate, configuration) in zip(candidates, configurations) {
+                        group.addTask {
+                            let key = WaveletCleaningPreview.cacheKey(
+                                candidateID: candidate.id,
+                                configuration: configuration,
+                                signalDuration: signalDuration
+                            )
+                            let preview = WaveletArtifactAnalyzer.cleaningPreview(
+                                in: signal,
+                                candidate: candidate,
+                                configuration: configuration
+                            )
+                            return (key, preview)
+                        }
+                    }
+                    for await (key, preview) in group {
+                        if let preview {
+                            collected.append((key, preview))
+                        }
+                    }
+                }
+                return collected
+            }
+            let entries = await worker.value
+            guard generation == waveletExplorer.runGeneration else { return }
+            for (key, preview) in entries {
+                waveletExplorer.previewCache[key] = preview
+            }
+            waveletExplorer.isPrecomputingPreviews = false
+        }
+    }
+
     func runWaveletArtifactExplorer(in signal: MFFSignalData) {
         guard !waveletExplorer.isRunning else { return }
         let channelIndices = waveletExplorerChannels(in: signal)
@@ -907,6 +1174,8 @@ extension WaveformView {
         waveletExplorer.runGeneration += 1
         let generation = waveletExplorer.runGeneration
         waveletExplorer.result = nil
+        waveletExplorer.previewCache = [:]
+        waveletExplorer.isPrecomputingPreviews = false
         waveletExplorer.log.removeAll()
         waveletExplorer.progress = 0
         waveletExplorer.statusTitle = "Starting wavelet artifact explorer"
@@ -952,12 +1221,15 @@ extension WaveformView {
                   sessionID == recordingSessionID,
                   generation == waveletExplorer.runGeneration else { return }
             waveletExplorer.result = result
+            waveletExplorer.excludedCandidateIDs = []
             waveletExplorer.progress = 1
             waveletExplorer.statusTitle = "Wavelet artifact explorer scan complete"
             waveletExplorer.statusDetail = "\(result.candidates.count) candidates across \(result.channelCount) channels over \(String(format: "%.1f", result.analyzedDurationSeconds)) seconds."
             waveletExplorer.statusMessage = "\(result.candidates.count) wavelet candidates found"
             waveletExplorer.isRunning = false
             waveletExplorerTask = nil
+            refreshWaveletExplorerEvents()
+            precomputeWaveletExplorerPreviews(in: signal)
         }
     }
 

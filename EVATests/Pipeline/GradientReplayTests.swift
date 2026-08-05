@@ -39,6 +39,7 @@ struct GradientReplayTests {
         a.fastrUseFacetWindow = true
         a.fastrOBSRandomSampling = true
         a.fastrANCSliceHighPass = true
+        a.fastrUseMetal = true
         a.fastrDonorSelection = .bergenRSquare
         a.moosmannMotionMetric = .allParameters
         a.excludeHighMotion = true
@@ -59,6 +60,7 @@ struct GradientReplayTests {
         #expect(b.fastrUseFacetWindow)
         #expect(b.fastrOBSRandomSampling)
         #expect(b.fastrANCSliceHighPass)
+        #expect(b.fastrUseMetal)
         #expect(b.fastrDonorSelection == .bergenRSquare)
         #expect(b.moosmannMotionMetric == .allParameters)
         #expect(b.excludeHighMotion == true)
@@ -77,6 +79,20 @@ struct GradientReplayTests {
         b.apply(parameters: a.parameters)
         #expect(b.method == .aas)
         #expect(b.parameters == a.parameters)
+    }
+
+    @MainActor
+    @Test func masMetalSelectionRoundTrips() {
+        let source = GradientViewModel(store: RecordingStore())
+        source.method = .mas
+        source.fastrUseMetal = true
+
+        let restored = GradientViewModel(store: RecordingStore())
+        restored.apply(parameters: source.parameters)
+
+        #expect(restored.method == .mas)
+        #expect(restored.fastrUseMetal)
+        #expect(restored.parameters == source.parameters)
     }
 
     /// The threshold-detection replay carries each ocular config as JSON in a

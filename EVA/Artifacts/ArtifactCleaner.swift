@@ -108,6 +108,14 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
     case waas = "wAAS"
     /// Weighted Average Artifact Regression — wAAS template, least-squares scaled before subtracting.
     case waar = "wAAR"
+    /// Wavelet decompose→threshold→reconstruct→subtract, scoped to each
+    /// event's own window (the real perfect-reconstruction engine in
+    /// `WaveletReducer`, not a template). Unlike OBS/regression/local-template,
+    /// it needs no donor events or shared basis — each event is corrected from
+    /// its own time-frequency content alone — which fits the Wavelet Artifact
+    /// Explorer's candidates well, since those are typically one-off, non-
+    /// recurring transients rather than a stereotyped, repeating morphology.
+    case wavelet = "Wavelet"
 
     var id: String { rawValue }
 
@@ -124,13 +132,13 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
 
     /// Whether this method can size each event's correction window from that
     /// event's own measured duration (`DefinedArtifact.usesVariableEventDuration`)
-    /// instead of one shared window for the whole artifact. `.regression` and
-    /// the local-template methods correct one event at a time, so nothing
-    /// stops them from using a per-event length. OBS and SSP/PCA pool every
-    /// event into one shared spatial/temporal basis, which requires
+    /// instead of one shared window for the whole artifact. `.regression`, the
+    /// local-template methods, and `.wavelet` correct one event at a time, so
+    /// nothing stops them from using a per-event length. OBS and SSP/PCA pool
+    /// every event into one shared spatial/temporal basis, which requires
     /// uniform-length epochs by construction — they can't support this.
     nonisolated var supportsVariableEventDuration: Bool {
-        self == .regression || isLocalTemplateMethod
+        self == .regression || isLocalTemplateMethod || self == .wavelet
     }
 }
 
@@ -256,6 +264,22 @@ struct DefinedArtifact: Identifiable, Sendable {
     /// than cutting off sharply at the window boundary — same mechanism as
     /// `obsEdgeTaperSeconds`.
     var localTemplateEdgeTaperSeconds = Self.defaultLocalTemplateEdgeTaperSeconds
+    /// Wavelet: transform/family/threshold settings for the per-event
+    /// decompose→threshold→reconstruct→subtract pass. Reuses
+    /// `WaveletReductionConfiguration` (and `WaveletReducer.reduceChannel`)
+    /// unchanged — the only difference from the whole-recording Wavelet
+    /// Reduction pipeline is that it runs on one short event window instead of
+    /// an entire channel.
+    var waveletConfiguration = WaveletReductionConfiguration(
+        kind: .dwt, family: .sym4, levelCount: 5,
+        thresholdRule: .hard, thresholdModel: .bayesShrink, thresholdScale: 1,
+        downsampleFactor: 1
+    )
+    /// Wavelet: same taper mechanism as `localTemplateEdgeTaperSeconds` —
+    /// seconds of raised-cosine taper at each edge of the event window.
+    var waveletEdgeTaperSeconds = Self.defaultLocalTemplateEdgeTaperSeconds
+    /// Wavelet: same de-trending mechanism as `localTemplatePreservesLocalBaseline`.
+    var waveletPreservesLocalBaseline = true
     /// When true (and `cleaningMethod.supportsVariableEventDuration`), each
     /// event's correction window is sized from that event's own measured
     /// `durationSeconds` instead of one fixed window shared by every event.
@@ -288,6 +312,9 @@ struct DefinedArtifact: Identifiable, Sendable {
         localTemplateUsesAMRIPreprocessing = previous.localTemplateUsesAMRIPreprocessing
         localTemplatePreservesLocalBaseline = previous.localTemplatePreservesLocalBaseline
         localTemplateEdgeTaperSeconds = previous.localTemplateEdgeTaperSeconds
+        waveletConfiguration = previous.waveletConfiguration
+        waveletEdgeTaperSeconds = previous.waveletEdgeTaperSeconds
+        waveletPreservesLocalBaseline = previous.waveletPreservesLocalBaseline
         usesVariableEventDuration = previous.usesVariableEventDuration
     }
 }
@@ -338,6 +365,14 @@ extension DefinedArtifact {
             key("localTemplateAMRIPreprocessingEffective"): "\(type == .bcg && localTemplateUsesAMRIPreprocessing)",
             key("localTemplatePreservesLocalBaseline"): "\(localTemplatePreservesLocalBaseline)",
             key("localTemplateEdgeTaperSeconds"): fixed(localTemplateEdgeTaperSeconds),
+            key("waveletKind"): waveletConfiguration.kind.rawValue,
+            key("waveletFamily"): waveletConfiguration.family.rawValue,
+            key("waveletLevelCount"): "\(waveletConfiguration.levelCount)",
+            key("waveletThresholdRule"): waveletConfiguration.thresholdRule.rawValue,
+            key("waveletThresholdModel"): waveletConfiguration.thresholdModel.rawValue,
+            key("waveletThresholdScale"): fixed(waveletConfiguration.thresholdScale),
+            key("waveletEdgeTaperSeconds"): fixed(waveletEdgeTaperSeconds),
+            key("waveletPreservesLocalBaseline"): "\(waveletPreservesLocalBaseline)",
             key("usesVariableEventDuration"): "\(usesVariableEventDuration)"
         ]
 
@@ -694,6 +729,14 @@ nonisolated enum ArtifactCleaner {
                     data: &data,
                     eventProgress: reportEventProgress
                 )
+            case .wavelet:
+                reportSetupProgress("Preparing per-event wavelet decomposition")
+                channelCount = applyWavelet(
+                    artifact: artifact,
+                    signal: signal,
+                    data: &data,
+                    eventProgress: reportEventProgress
+                )
             }
 
             if channelCount > 0 {
@@ -867,6 +910,84 @@ nonisolated enum ArtifactCleaner {
                     preservesLocalBaseline: preservesLocalBaseline,
                     edgeTaperSamplesRaw: edgeTaperSamplesRaw
                 )
+                out[channel] = corrected
+                cleanedFlags[index] = cleaned
+
+                progressLock.lock()
+                completedChannels += 1
+                let done = completedChannels
+                progressLock.unlock()
+                if done % reportEvery == 0 || done == channels.count {
+                    eventProgress(Int(Double(done) / Double(channels.count) * Double(ranges.count)))
+                }
+            }
+        }
+
+        return cleanedFlags.filter { $0 }.count
+    }
+
+    /// Wavelet: per-event, single-channel decompose→threshold→reconstruct→
+    /// subtract using the real perfect-reconstruction engine in
+    /// `WaveletReducer` (`reduceChannel`), scoped to just this event's own
+    /// window. Unlike OBS or the local-template methods, no cross-event
+    /// pooling is needed — each event's correction comes entirely from its
+    /// own time-frequency content — so channels are corrected independently
+    /// and concurrently, same pattern as `applyLocalTemplate`.
+    private static func applyWavelet(
+        artifact: DefinedArtifact,
+        signal: MFFSignalData,
+        data: inout [[Float]],
+        eventProgress: (Int) -> Void
+    ) -> Int {
+        guard let sampleCount = data.first?.count, sampleCount > 0 else { return 0 }
+
+        let baseWindowSamples = windowSamples(for: artifact, signal: signal)
+        let ranges = artifact.events.map { event -> Range<Int>? in
+            let eventLen = eventWindowSamples(for: event, artifact: artifact, fallback: baseWindowSamples, samplingRate: signal.samplingRate)
+            return eventWindow(event: event, windowSamples: eventLen, sampleCount: sampleCount, samplingRate: signal.samplingRate)
+        }
+        guard ranges.contains(where: { $0 != nil }) else { return 0 }
+
+        let channels = SignalSelection.validChannels(in: data, sampleCount: sampleCount)
+        guard !channels.isEmpty else { return 0 }
+
+        let configuration = artifact.waveletConfiguration
+        let preservesLocalBaseline = artifact.waveletPreservesLocalBaseline
+        let edgeTaperSamplesRaw = max(Int((artifact.waveletEdgeTaperSeconds * signal.samplingRate).rounded()), 0)
+
+        let progressLock = NSLock()
+        nonisolated(unsafe) var completedChannels = 0
+        let reportEvery = max(1, channels.count / 20)
+        nonisolated(unsafe) var cleanedFlags = [Bool](repeating: false, count: channels.count)
+
+        data.withUnsafeMutableBufferPointer { out in
+            // Each iteration writes a distinct index, so concurrent writes
+            // don't overlap; same pattern as `applyLocalTemplate`.
+            nonisolated(unsafe) let out = out
+            evaConcurrentPerform(iterations: channels.count) { index in
+                guard !Task.isCancelled else { return }
+                let channel = channels[index]
+                var corrected = out[channel]
+                var cleaned = false
+
+                for range in ranges {
+                    guard let range else { continue }
+                    let edgeTaperSamples = min(edgeTaperSamplesRaw, max(range.count / 2 - 1, 0))
+                    let taper = raisedCosineTaper(count: range.count, edgeSamples: edgeTaperSamples)
+                    let windowValues = range.map { Double(corrected[$0]) }
+                    let (_, correctionCurve, _) = WaveletReducer.reduceChannel(windowValues, configuration: configuration)
+                    guard let result = smoothedWindowCorrection(
+                        correctionCurve,
+                        taper: taper,
+                        preservesLocalBaseline: preservesLocalBaseline,
+                        edgeTaperSamples: edgeTaperSamples
+                    ) else { continue }
+                    for offset in 0..<range.count {
+                        corrected[range.lowerBound + offset] -= Float(result.weightedValues[offset])
+                    }
+                    cleaned = true
+                }
+
                 out[channel] = corrected
                 cleanedFlags[index] = cleaned
 

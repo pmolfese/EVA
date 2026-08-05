@@ -35,6 +35,7 @@ struct GradientViewModelTests {
         vm.fastrUseFacetWindow = true
         vm.fastrOBSRandomSampling = true
         vm.fastrANCSliceHighPass = true
+        vm.fastrUseMetal = true
 
         let p = vm.parameters
         #expect(p["method"] == "FASTR")
@@ -44,17 +45,20 @@ struct GradientViewModelTests {
         #expect(p["facetWindow"] == "true")
         #expect(p["obsRandomSampling"] == "true")
         #expect(p["ancSliceHighPass"] == "true")
+        #expect(p["metal"] == "true")
 
         let restored = GradientViewModel(store: RecordingStore())
         restored.apply(parameters: [
             "method": "FASTR",
             "facetWindow": "true",
             "obsRandomSampling": "true",
-            "ancSliceHighPass": "true"
+            "ancSliceHighPass": "true",
+            "metal": "true"
         ])
         #expect(restored.fastrUseFacetWindow)
         #expect(restored.fastrOBSRandomSampling)
         #expect(restored.fastrANCSliceHighPass)
+        #expect(restored.fastrUseMetal)
     }
 
     @MainActor
@@ -77,9 +81,47 @@ struct GradientViewModelTests {
     }
 
     @MainActor
+    @Test func parametersPersistMetalForMASAndMAR() {
+        for method in [MRIGradientMethod.mas, .mar] {
+            let source = GradientViewModel(store: RecordingStore())
+            source.method = method
+            source.fastrUseMetal = true
+            #expect(source.parameters["metal"] == "true")
+
+            let restored = GradientViewModel(store: RecordingStore())
+            restored.apply(parameters: source.parameters)
+            #expect(restored.method == method)
+            #expect(restored.fastrUseMetal)
+        }
+
+        let aas = GradientViewModel(store: RecordingStore())
+        aas.method = .aas
+        aas.fastrUseMetal = true
+        #expect(aas.parameters["metal"] == nil)
+    }
+
+    @MainActor
     @Test func highMotionSetEmptyWhenDisabled() {
         let vm = GradientViewModel(store: RecordingStore())
         vm.excludeHighMotion = false
         #expect(vm.highMotionVolumeSet().isEmpty)
+    }
+
+    @MainActor
+    @Test func highMotionSetUsesLoadedMotionAndFDThreshold() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.motionParameters = MotionParameters(
+            samples: [
+                MotionSample(id: 0, roll: 0, pitch: 0, yaw: 0, dS: 0.0, dL: 0, dP: 0),
+                MotionSample(id: 1, roll: 0, pitch: 0, yaw: 0, dS: 0.2, dL: 0, dP: 0),
+                MotionSample(id: 2, roll: 0, pitch: 0, yaw: 0, dS: 1.2, dL: 0, dP: 0),
+                MotionSample(id: 3, roll: 0, pitch: 0, yaw: 0, dS: 1.3, dL: 0, dP: 0)
+            ],
+            sourceName: "synthetic.1D"
+        )
+        vm.motionFDThreshold = 0.5
+        vm.excludeHighMotion = true
+
+        #expect(vm.highMotionVolumeSet() == [2])
     }
 }

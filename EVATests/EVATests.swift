@@ -38,7 +38,7 @@ struct EVATests {
     @Test func dwtPerfectReconstruction() {
         let signal = makeTestSignal(count: 600)
         for family in WaveletReductionFamily.allCases {
-            let bank = WaveletFilterBank.orthonormal(family.scalingFilter)
+            let bank = family.filterBank
             let transform = WaveletTransform(bank: bank)
             for levels in [1, 3, 5] {
                 let decomposition = transform.forwardDWT(signal, levels: levels)
@@ -52,7 +52,7 @@ struct EVATests {
     @Test func swtPerfectReconstruction() {
         let signal = makeTestSignal(count: 512)
         for family in WaveletReductionFamily.allCases {
-            let bank = WaveletFilterBank.orthonormal(family.scalingFilter)
+            let bank = family.filterBank
             let transform = WaveletTransform(bank: bank)
             for levels in [1, 3, 4] {
                 let decomposition = transform.forwardSWT(signal, levels: levels)

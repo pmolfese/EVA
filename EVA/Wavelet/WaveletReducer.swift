@@ -23,12 +23,16 @@
 //
 //  HAPPE parity notes:
 //    * HAPPE's modern continuous path calls MATLAB `wdenoise` (decimated DWT,
-//      bior4.4, level-dependent BayesShrink, hard threshold) and SUBTRACTS the
-//      denoised reconstruction as the artifact estimate. This engine mirrors that
-//      method: threshold the detail coefficients, reconstruct, subtract.
-//    * Families here are orthonormal (coif4 — HAPPE's ERP family; sym4/db4 for
-//      continuous). True biorthogonal bior4.4 (HAPPE's continuous default) is a
-//      planned addition; the method/parameters are otherwise the same.
+//      bior6.8, level-dependent BayesShrink, hard threshold — bior4.4 was the
+//      earlier default) and SUBTRACTS the denoised reconstruction as the
+//      artifact estimate. This engine mirrors that method: threshold the detail
+//      coefficients, reconstruct, subtract.
+//    * Families here include both orthonormal (coif4 — HAPPE's ERP family;
+//      sym4/db4 for continuous) and true biorthogonal (bior4.4, bior6.8) —
+//      the latter give exact linear phase, matching HAPPE's actual filters.
+//      `WaveletReductionMode.defaultConfiguration` still defaults continuous
+//      mode to `sym4` for now; pick `bior6.8` explicitly for closest HAPPE
+//      parity.
 //
 
 import Foundation
@@ -55,15 +59,37 @@ nonisolated enum WaveletReductionFamily: String, CaseIterable, Identifiable, Cod
     case coif4 = "coif4"
     case sym4 = "sym4"
     case db4 = "db4"
+    case bior44 = "bior4.4"
+    case bior68 = "bior6.8"
 
     var id: String { rawValue }
 
-    /// Orthonormal scaling (decomposition low-pass) filter coefficients.
-    var scalingFilter: [Double] {
+    /// The analysis/synthesis filter bank for this family. `coif4`/`sym4`/`db4`
+    /// are orthonormal (one filter generates the rest via QMF relations, and
+    /// reconstruction reuses the decomposition filters). `bior4.4`/`bior6.8` are
+    /// true biorthogonal spline wavelets — HAPPE's actual continuous (bior6.8,
+    /// with bior4.4 the earlier HAPPE default) and this is what gives them exact
+    /// linear phase (no time-shift distortion from thresholding), unlike the
+    /// near-symmetric-but-not-exact orthonormal families.
+    var filterBank: WaveletFilterBank {
         switch self {
-        case .coif4: return WaveletFilters.coif4
-        case .sym4: return WaveletFilters.sym4
-        case .db4: return WaveletFilters.db4
+        case .coif4: return .orthonormal(WaveletFilters.coif4)
+        case .sym4: return .orthonormal(WaveletFilters.sym4)
+        case .db4: return .orthonormal(WaveletFilters.db4)
+        case .bior44:
+            return .biorthogonal(
+                decompositionLowPass: WaveletFilters.bior44DecompositionLowPass,
+                decompositionHighPass: WaveletFilters.bior44DecompositionHighPass,
+                reconstructionLowPass: WaveletFilters.bior44ReconstructionLowPass,
+                reconstructionHighPass: WaveletFilters.bior44ReconstructionHighPass
+            )
+        case .bior68:
+            return .biorthogonal(
+                decompositionLowPass: WaveletFilters.bior68DecompositionLowPass,
+                decompositionHighPass: WaveletFilters.bior68DecompositionHighPass,
+                reconstructionLowPass: WaveletFilters.bior68ReconstructionLowPass,
+                reconstructionHighPass: WaveletFilters.bior68ReconstructionHighPass
+            )
         }
     }
 
@@ -75,6 +101,10 @@ nonisolated enum WaveletReductionFamily: String, CaseIterable, Identifiable, Cod
             return "Symlet-4 — near-symmetric Daubechies variant, a solid default for continuous EEG."
         case .db4:
             return "Daubechies-4 — compact support, classic choice for transient artifacts."
+        case .bior44:
+            return "Biorthogonal 4.4 — HAPPE's earlier continuous-path family. True linear phase (exactly symmetric), unlike the orthonormal families above."
+        case .bior68:
+            return "Biorthogonal 6.8 — HAPPE's current continuous-path default (MATLAB wdenoise). Longer support than bior4.4, also exactly linear phase."
         }
     }
 }
@@ -91,7 +121,7 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
     var explanation: String {
         switch self {
         case .continuousEEG:
-            return "HAPPE's continuous path: hard thresholding, more aggressive. Operates on the whole recording. (HAPPE uses bior4.4; EVA uses sym4 as an orthonormal stand-in.)"
+            return "HAPPE's continuous path: hard thresholding, more aggressive. Operates on the whole recording. (HAPPE uses bior6.8 by default, bior4.4 previously — both available here; this mode defaults to sym4.)"
         case .erp:
             return "HAPPE's task/ERP path: coif4 with gentler soft thresholding and an extra level, and quality assessed within the ERP analysis band."
         }
@@ -335,7 +365,7 @@ nonisolated enum WaveletReducer {
             return (samples, [Double](repeating: 0, count: count), [])
         }
 
-        let bank = WaveletFilterBank.orthonormal(configuration.family.scalingFilter)
+        let bank = configuration.family.filterBank
         let levels = boundedLevelCount(configuration.levelCount, sampleCount: count)
         guard levels >= 1 else {
             return (samples, [Double](repeating: 0, count: count), [])
@@ -551,6 +581,16 @@ nonisolated struct WaveletFilterBank: Sendable {
     let decompositionHighPass: [Double]
     let reconstructionLowPass: [Double]
     let reconstructionHighPass: [Double]
+    /// Index offset applied when placing reconstruction-filter taps back into
+    /// the upsampled signal. Zero for orthonormal banks, where all four filters
+    /// share one length and the (2i+k) convention already lines up. Biorthogonal
+    /// banks have differently-sized decomposition vs. reconstruction low-pass
+    /// filters, so reconstruction needs `(decomposition length − reconstruction
+    /// length) / 2` of alignment to keep perfect reconstruction (derived
+    /// numerically against PyWavelets' bior4.4/bior6.8 filters — see
+    /// `biorthogonal(...)` below); the high-pass branch takes the negated shift.
+    let reconstructionShift: Int
+
     var length: Int { decompositionLowPass.count }
 
     /// Builds an orthonormal analysis/synthesis bank from a scaling filter using
@@ -568,7 +608,28 @@ nonisolated struct WaveletFilterBank: Sendable {
             decompositionLowPass: scaling,
             decompositionHighPass: high,
             reconstructionLowPass: scaling,
-            reconstructionHighPass: high
+            reconstructionHighPass: high,
+            reconstructionShift: 0
+        )
+    }
+
+    /// Builds a biorthogonal analysis/synthesis bank from four independently
+    /// specified filters. Unlike the orthonormal case, decomposition and
+    /// reconstruction use genuinely different filters (only dual to each other,
+    /// not identical) — the mechanism that lets biorthogonal wavelets be exactly
+    /// linear-phase (symmetric), which no non-trivial orthogonal wavelet can be.
+    static func biorthogonal(
+        decompositionLowPass: [Double],
+        decompositionHighPass: [Double],
+        reconstructionLowPass: [Double],
+        reconstructionHighPass: [Double]
+    ) -> WaveletFilterBank {
+        WaveletFilterBank(
+            decompositionLowPass: decompositionLowPass,
+            decompositionHighPass: decompositionHighPass,
+            reconstructionLowPass: reconstructionLowPass,
+            reconstructionHighPass: reconstructionHighPass,
+            reconstructionShift: (decompositionLowPass.count - reconstructionLowPass.count) / 2
         )
     }
 }
@@ -612,17 +673,20 @@ nonisolated struct WaveletTransform: Sendable {
     private func dwtStep(_ x: [Double]) -> (approx: [Double], detail: [Double]) {
         let n = x.count
         let half = n / 2
-        let filterLength = bank.length
+        let lowLength = bank.decompositionLowPass.count
+        let highLength = bank.decompositionHighPass.count
         var approx = [Double](repeating: 0, count: half)
         var detail = [Double](repeating: 0, count: half)
         for i in 0..<half {
             var sumLow = 0.0
-            var sumHigh = 0.0
-            for k in 0..<filterLength {
+            for k in 0..<lowLength {
                 let idx = ((2 * i + k) % n + n) % n
-                let value = x[idx]
-                sumLow += bank.decompositionLowPass[k] * value
-                sumHigh += bank.decompositionHighPass[k] * value
+                sumLow += bank.decompositionLowPass[k] * x[idx]
+            }
+            var sumHigh = 0.0
+            for k in 0..<highLength {
+                let idx = ((2 * i + k) % n + n) % n
+                sumHigh += bank.decompositionHighPass[k] * x[idx]
             }
             approx[i] = sumLow
             detail[i] = sumHigh
@@ -633,14 +697,20 @@ nonisolated struct WaveletTransform: Sendable {
     private func idwtStep(_ approx: [Double], _ detail: [Double]) -> [Double] {
         let half = approx.count
         let n = half * 2
-        let filterLength = bank.length
+        let lowLength = bank.reconstructionLowPass.count
+        let highLength = bank.reconstructionHighPass.count
+        let shift = bank.reconstructionShift
         var y = [Double](repeating: 0, count: n)
         for i in 0..<half {
             let a = approx[i]
             let d = detail[i]
-            for k in 0..<filterLength {
-                let idx = ((2 * i + k) % n + n) % n
-                y[idx] += bank.reconstructionLowPass[k] * a + bank.reconstructionHighPass[k] * d
+            for k in 0..<lowLength {
+                let idx = ((2 * i + k + shift) % n + n) % n
+                y[idx] += bank.reconstructionLowPass[k] * a
+            }
+            for k in 0..<highLength {
+                let idx = ((2 * i + k - shift) % n + n) % n
+                y[idx] += bank.reconstructionHighPass[k] * d
             }
         }
         return y
@@ -673,17 +743,20 @@ nonisolated struct WaveletTransform: Sendable {
 
     private func swtStep(_ x: [Double], dilation: Int) -> (approx: [Double], detail: [Double]) {
         let n = x.count
-        let filterLength = bank.length
+        let lowLength = bank.decompositionLowPass.count
+        let highLength = bank.decompositionHighPass.count
         var approx = [Double](repeating: 0, count: n)
         var detail = [Double](repeating: 0, count: n)
         for index in 0..<n {
             var sumLow = 0.0
-            var sumHigh = 0.0
-            for k in 0..<filterLength {
+            for k in 0..<lowLength {
                 let idx = ((index + k * dilation) % n + n) % n
-                let value = x[idx]
-                sumLow += bank.decompositionLowPass[k] * value
-                sumHigh += bank.decompositionHighPass[k] * value
+                sumLow += bank.decompositionLowPass[k] * x[idx]
+            }
+            var sumHigh = 0.0
+            for k in 0..<highLength {
+                let idx = ((index + k * dilation) % n + n) % n
+                sumHigh += bank.decompositionHighPass[k] * x[idx]
             }
             approx[index] = sumLow
             detail[index] = sumHigh
@@ -693,14 +766,22 @@ nonisolated struct WaveletTransform: Sendable {
 
     private func iswtStep(_ approx: [Double], _ detail: [Double], dilation: Int) -> [Double] {
         let n = approx.count
-        let filterLength = bank.length
+        let lowLength = bank.reconstructionLowPass.count
+        let highLength = bank.reconstructionHighPass.count
+        // Shift scales with dilation here (unlike idwtStep) because à-trous taps
+        // are already spaced by `dilation` samples apart.
+        let shift = bank.reconstructionShift * dilation
         var y = [Double](repeating: 0, count: n)
         for index in 0..<n {
             let a = approx[index]
             let d = detail[index]
-            for k in 0..<filterLength {
-                let idx = ((index + k * dilation) % n + n) % n
-                y[idx] += 0.5 * (bank.reconstructionLowPass[k] * a + bank.reconstructionHighPass[k] * d)
+            for k in 0..<lowLength {
+                let idx = ((index + k * dilation + shift) % n + n) % n
+                y[idx] += 0.5 * bank.reconstructionLowPass[k] * a
+            }
+            for k in 0..<highLength {
+                let idx = ((index + k * dilation - shift) % n + n) % n
+                y[idx] += 0.5 * bank.reconstructionHighPass[k] * d
             }
         }
         return y
@@ -747,5 +828,61 @@ private nonisolated enum WaveletFilters {
         0.7822389309206135, 0.41530840703043026, -0.05607731331675481,
         -0.08126669968087875, 0.026682300156053072, 0.016068943964776348,
         -0.0073461663276420935, -0.0016294920126017326, 0.0008923136685823146
+    ]
+
+    // Biorthogonal spline wavelets (CDF construction; coefficients per
+    // PyWavelets, which agrees with MATLAB's Wavelet Toolbox — both trace back
+    // to the same published CDF filter tables). Decomposition and
+    // reconstruction filters are genuinely different (and different lengths),
+    // which is what makes these families exactly linear-phase.
+
+    static let bior44DecompositionLowPass: [Double] = [
+        0.03782845550726404, -0.023849465019556843, -0.11062440441843718,
+        0.37740285561283066, 0.8526986790088938, 0.37740285561283066,
+        -0.11062440441843718, -0.023849465019556843, 0.03782845550726404
+    ]
+    static let bior44DecompositionHighPass: [Double] = [
+        -0.06453888262869706, 0.04068941760916406, 0.41809227322161724,
+        -0.7884856164055829, 0.41809227322161724, 0.04068941760916406,
+        -0.06453888262869706
+    ]
+    static let bior44ReconstructionLowPass: [Double] = [
+        -0.06453888262869706, -0.04068941760916406, 0.41809227322161724,
+        0.7884856164055829, 0.41809227322161724, -0.04068941760916406,
+        -0.06453888262869706
+    ]
+    static let bior44ReconstructionHighPass: [Double] = [
+        -0.03782845550726404, -0.023849465019556843, 0.11062440441843718,
+        0.37740285561283066, -0.8526986790088938, 0.37740285561283066,
+        0.11062440441843718, -0.023849465019556843, -0.03782845550726404
+    ]
+
+    static let bior68DecompositionLowPass: [Double] = [
+        0.0019088317364812906, -0.0019142861290887667, -0.016990639867602342,
+        0.01193456527972926, 0.04973290349094079, -0.07726317316720414,
+        -0.09405920349573646, 0.4207962846098268, 0.8259229974584023,
+        0.4207962846098268, -0.09405920349573646, -0.07726317316720414,
+        0.04973290349094079, 0.01193456527972926, -0.016990639867602342,
+        -0.0019142861290887667, 0.0019088317364812906
+    ]
+    static let bior68DecompositionHighPass: [Double] = [
+        0.014426282505624435, -0.014467504896790148, -0.07872200106262882,
+        0.04036797903033992, 0.41784910915027457, -0.7589077294536541,
+        0.41784910915027457, 0.04036797903033992, -0.07872200106262882,
+        -0.014467504896790148, 0.014426282505624435
+    ]
+    static let bior68ReconstructionLowPass: [Double] = [
+        0.014426282505624435, 0.014467504896790148, -0.07872200106262882,
+        -0.04036797903033992, 0.41784910915027457, 0.7589077294536541,
+        0.41784910915027457, -0.04036797903033992, -0.07872200106262882,
+        0.014467504896790148, 0.014426282505624435
+    ]
+    static let bior68ReconstructionHighPass: [Double] = [
+        -0.0019088317364812906, -0.0019142861290887667, 0.016990639867602342,
+        0.01193456527972926, -0.04973290349094079, -0.07726317316720414,
+        0.09405920349573646, 0.4207962846098268, -0.8259229974584023,
+        0.4207962846098268, 0.09405920349573646, -0.07726317316720414,
+        -0.04973290349094079, 0.01193456527972926, 0.016990639867602342,
+        -0.0019142861290887667, -0.0019088317364812906
     ]
 }

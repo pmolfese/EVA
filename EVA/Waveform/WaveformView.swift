@@ -182,6 +182,7 @@ struct WaveformView: View {
     @State private var statusHistory: [StatusHistoryEntry] = []
     @State private var lastRecordedStatusBySource: [String: String] = [:]
     @State private var showsStatusHistory = false
+    @State private var showsRecentProcessingHistory = false
     // Physio (PNS) channel display. Shown by default when present; pinned below
     // the EEG channels and synced to the EEG time axis.
     @State var showsPhysioChannels = true
@@ -1355,14 +1356,15 @@ struct WaveformView: View {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 statusLog()
-                    .frame(width: 240)
 
                 Text(recordingToolbarSummary(for: signal))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .frame(width: 240, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(minWidth: 300, idealWidth: 440, maxWidth: 480, alignment: .leading)
+            .layoutPriority(1)
 
             if epoching.isAveraged {
                 averagedModePicker()
@@ -1453,6 +1455,17 @@ struct WaveformView: View {
         }
     }
 
+    private var activeOperationProgress: [OperationProgress] {
+        var operations: [OperationProgress] = []
+        if gradient.isProcessing, let progress = gradient.operationProgress {
+            operations.append(progress)
+        }
+        if filter.isFiltering, let progress = filter.operationProgress {
+            operations.append(progress)
+        }
+        return operations
+    }
+
     /// Consolidated status/progress area shown at the far right of the toolbar,
     /// so individual buttons no longer push inline messages into the layout.
     @ViewBuilder
@@ -1462,10 +1475,18 @@ struct WaveformView: View {
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 if gradient.isProcessing {
-                    logProgressRow(label: "MRI", value: gradient.progress)
+                    if let operation = gradient.operationProgress {
+                        operationProgressSummary(operation)
+                    } else {
+                        logProgressRow(label: "MRI", value: gradient.progress)
+                    }
                 }
                 if filter.isFiltering {
-                    logProgressRow(label: "Filter", value: filter.progress)
+                    if let operation = filter.operationProgress {
+                        operationProgressSummary(operation)
+                    } else {
+                        logProgressRow(label: "Filter", value: filter.progress)
+                    }
                 }
                 if let cleaningProgress = artifactVM.cleaningProgress {
                     logProgressRow(label: "Artifact", value: cleaningProgress.fraction)
@@ -1521,7 +1542,11 @@ struct WaveformView: View {
             recordStatusHistory(lines)
         }
         .popover(isPresented: $showsStatusHistory, arrowEdge: .bottom) {
-            statusHistoryPopover()
+            if activeOperationProgress.isEmpty {
+                statusHistoryPopover()
+            } else {
+                processingStatusPopover(activeOperationProgress)
+            }
         }
         .accessibilityLabel("Status log")
     }
@@ -1574,6 +1599,133 @@ struct WaveformView: View {
         }
         .padding(12)
         .frame(width: 420, height: 380, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func processingStatusPopover(_ operations: [OperationProgress]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(operations.enumerated()), id: \.offset) { index, operation in
+                if index > 0 { Divider() }
+                processingOperationView(operation)
+            }
+
+            if !statusHistory.isEmpty {
+                Divider()
+                DisclosureGroup("Recent history", isExpanded: $showsRecentProcessingHistory) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(statusHistory.suffix(3).reversed())) { entry in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(entry.source.uppercased())
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(entry.isError ? Color.red : Color.secondary)
+                                Text(entry.text)
+                                    .font(.caption)
+                                    .lineLimit(2)
+                                    .foregroundStyle(entry.isError ? Color.red : Color.secondary)
+                            }
+                        }
+                    }
+                    .padding(.top, 6)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(14)
+        .frame(width: 460, alignment: .topLeading)
+    }
+
+    private func processingOperationView(_ operation: OperationProgress) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(operation.title)
+                        .font(.headline)
+                    Text(operation.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(elapsedText(since: operation.startedAt, now: context.date))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(spacing: 8) {
+                ProgressView(value: operation.clampedFraction)
+                    .progressViewStyle(.linear)
+                Text("\(Int((operation.clampedFraction * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, alignment: .trailing)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(operation.phase)
+                    .font(.callout.weight(.medium))
+                if let detail = operation.detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(operation.stages) { stage in
+                    HStack(spacing: 7) {
+                        Image(systemName: stageIcon(stage.state))
+                            .foregroundStyle(stageColor(stage.state))
+                            .frame(width: 14)
+                        Text(stage.name)
+                            .font(.caption)
+                            .foregroundStyle(stage.state == .pending ? Color.secondary : Color.primary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func operationProgressSummary(_ operation: OperationProgress) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(operation.source)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(operation.phase)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Text("\(Int((operation.clampedFraction * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: operation.clampedFraction)
+                .progressViewStyle(.linear)
+        }
+    }
+
+    private func stageIcon(_ state: OperationProgress.StageState) -> String {
+        switch state {
+        case .complete: return "checkmark.circle.fill"
+        case .active: return "circle.inset.filled"
+        case .pending: return "circle"
+        }
+    }
+
+    private func stageColor(_ state: OperationProgress.StageState) -> Color {
+        switch state {
+        case .complete: return .green
+        case .active: return .accentColor
+        case .pending: return .secondary
+        }
+    }
+
+    private func elapsedText(since start: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(start)))
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 
     private func logProgressRow(label: String, value: Double) -> some View {
@@ -2185,6 +2337,7 @@ struct WaveformView: View {
         statusHistory = []
         lastRecordedStatusBySource = [:]
         showsStatusHistory = false
+        showsRecentProcessingHistory = false
         showsPhysioChannels = true
         physioRanges = []
         physioScaleFactors = [:]
@@ -2469,7 +2622,13 @@ struct WaveformView: View {
     }
 
     private func selectEventFromTrack(_ event: MFFEvent, color: Color, in signal: MFFSignalData) {
-        jumpToEvent(event, in: signal)
+        // Marks the row selected in the events list (line 2101) without
+        // scrolling the waveform — the flag being clicked is on-screen by
+        // definition, so recentering on it here was pure unwanted jitter.
+        // Jumping to an (possibly off-screen) event from the events *list*
+        // still goes through `jumpToEvent` directly (see the `List` row
+        // button above) and is unaffected by this.
+        selectedEventID = event.id
         // Toggle: selecting the highlighted flag again clears it. Only
         // artifact-detection events (defined artifacts, eye-artifact threshold
         // detection) get this band; imported MFF events aren't highlighted this

@@ -749,9 +749,21 @@ nonisolated enum WaveletArtifactAnalyzer {
             let step = 1 << level
             var low = [Float](repeating: 0, count: smooth.count)
             var detail = [Float](repeating: 0, count: smooth.count)
+            // Estimated locally so the coarse ("low") component can keep
+            // tracking a slow trend past each boundary instead of flattening
+            // out there — see `smoothedValue`'s doc comment for why this
+            // matters. Recomputed per level since `smooth` is that level's
+            // (already-smoothed) input. Floored well above `step` (not just
+            // a couple of samples) so the trend estimate is a block average,
+            // not two noisy raw samples — EEG-scale noise otherwise dominates
+            // a same-order-as-step window and the "fix" just replaces one
+            // spurious edge artifact with a differently-spurious one.
+            let edgeWindow = min(max(step * 4, 40), smooth.count)
+            let startTrend = edgeTrend(smooth, atStart: true, window: edgeWindow)
+            let endTrend = edgeTrend(smooth, atStart: false, window: edgeWindow)
 
             for index in smooth.indices {
-                low[index] = smoothedValue(smooth, at: index, step: step, kernel: kernel)
+                low[index] = smoothedValue(smooth, at: index, step: step, kernel: kernel, startTrend: startTrend, endTrend: endTrend)
                 detail[index] = smooth[index] - low[index]
             }
 
@@ -806,22 +818,67 @@ nonisolated enum WaveletArtifactAnalyzer {
         return coefficients.map { $0 / sum }
     }
 
+    /// A robust local linear trend (`value(x) = intercept + slope*x`) near
+    /// one edge of `samples`, fit from two block averages (first half of the
+    /// window vs. second half) rather than two raw sample values — a
+    /// two-point difference of noisy EEG samples is itself mostly noise, so
+    /// averaging each half tamps that down before taking the slope.
+    private struct EdgeTrend {
+        var slope: Float
+        var intercept: Float
+        func value(at x: Int) -> Float { intercept + slope * Float(x) }
+    }
+
+    private static func edgeTrend(_ samples: [Float], atStart: Bool, window: Int) -> EdgeTrend {
+        let n = samples.count
+        guard n >= 4 else { return EdgeTrend(slope: 0, intercept: samples.first ?? 0) }
+        let w = min(max(window, 4), n)
+        let half = max(w / 2, 2)
+        let start = atStart ? 0 : n - w
+        let firstRange = start..<(start + half)
+        let secondRange = (start + w - half)..<(start + w)
+        let firstMean = samples[firstRange].reduce(Float(0), +) / Float(firstRange.count)
+        let secondMean = samples[secondRange].reduce(Float(0), +) / Float(secondRange.count)
+        let firstCenter = Float(firstRange.lowerBound) + Float(firstRange.count - 1) / 2
+        let secondCenter = Float(secondRange.lowerBound) + Float(secondRange.count - 1) / 2
+        let denom = secondCenter - firstCenter
+        let slope = abs(denom) > 1e-6 ? (secondMean - firstMean) / denom : 0
+        return EdgeTrend(slope: slope, intercept: firstMean - slope * firstCenter)
+    }
+
+    /// A-trous smoothing at one sample. Taps that land outside `samples` are
+    /// linearly extrapolated from the nearest edge's `EdgeTrend`, rather than
+    /// clamped to repeat the edge value. Clamping made this "low" (coarse)
+    /// component flatten out artificially near both boundaries whenever the
+    /// real signal has any slow drift/trend — which is common in real EEG
+    /// (electrode/impedance drift) — so `detail = smooth - low` picked up a
+    /// spurious step right at each edge, read as a transient artifact by the
+    /// caller even though nothing actually happened there. Extrapolating
+    /// keeps the coarse component tracking the trend out to the boundary
+    /// instead.
     private static func smoothedValue(
         _ samples: [Float],
         at index: Int,
         step: Int,
-        kernel: [Float]
+        kernel: [Float],
+        startTrend: EdgeTrend,
+        endTrend: EdgeTrend
     ) -> Float {
         guard !samples.isEmpty, !kernel.isEmpty else { return 0 }
         let center = kernel.count / 2
+        let n = samples.count
         var sum: Float = 0
         for offset in kernel.indices {
-            let sampleIndex = clamped(
-                index + (offset - center) * step,
-                lower: 0,
-                upper: samples.count - 1
-            )
-            sum += kernel[offset] * samples[sampleIndex]
+            let rawIndex = index + (offset - center) * step
+            let value: Float
+            if rawIndex < 0 {
+                value = startTrend.value(at: rawIndex)
+            } else if rawIndex >= n {
+                value = endTrend.value(at: rawIndex)
+            } else {
+                value = samples[rawIndex]
+            }
+            sum += kernel[offset] * value
         }
         return sum
     }
@@ -1766,9 +1823,5 @@ nonisolated enum WaveletArtifactAnalyzer {
     private static func safeFraction(_ numerator: Double, _ denominator: Double) -> Double {
         guard denominator > 1e-12 else { return 0 }
         return max(0, min(1, numerator / denominator))
-    }
-
-    private static func clamped(_ value: Int, lower: Int, upper: Int) -> Int {
-        min(max(value, lower), upper)
     }
 }

@@ -190,6 +190,15 @@ extension WaveformView {
                     .help("Apply the selected MRI gradient artifact correction to physio/PNS channels using the same TR markers.")
             }
 
+            if gradient.method == .mas || gradient.method == .mar {
+                Toggle("Use Metal GPU", isOn: $gradient.fastrUseMetal)
+                    .font(.caption)
+                    .disabled(!GradientRemoverMetalBackend.isAvailable)
+                    .help(GradientRemoverMetalBackend.isAvailable
+                          ? "Build median artifact templates and perform subtraction or regression on the GPU. Donor and outlier selection remain on the CPU."
+                          : "No compatible Metal GPU is available; correction will use the CPU.")
+            }
+
             if gradient.method.isFASTR {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {
@@ -217,6 +226,12 @@ extension WaveformView {
                             .labelsHidden()
                     }
                     .help("Number of fMRI slices per volume. Each TR interval is split into this many slice epochs.")
+                    Toggle("Use Metal GPU", isOn: $gradient.fastrUseMetal)
+                        .font(.caption)
+                        .disabled(!FastrCorrector.isMetalAvailable)
+                        .help(FastrCorrector.isMetalAvailable
+                              ? "Run interpolation, template scaling and subtraction, OBS fitting, and decimation on the GPU. Alignment, OBS PCA, donor selection, and ANC remain on the CPU."
+                              : "No compatible Metal GPU is available; FASTR will use the CPU.")
                     Toggle("Sub-sample alignment", isOn: $gradient.fastrSubSample)
                         .font(.caption)
                         .help("FACET-style fractional-sample epoch alignment.")

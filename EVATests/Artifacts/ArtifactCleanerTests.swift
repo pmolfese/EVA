@@ -630,4 +630,97 @@ struct ArtifactCleanerTests {
         #expect(p["artifact1.averagePresent"] == "true")
         #expect(p["artifact1.averageSampleCount"] == "\(windowSamples)")
     }
+
+    // MARK: - Wavelet
+
+    @Test func waveletSubstantiallyReducesInjectedTransient() {
+        let template = SyntheticSignal.bump(width: windowSamples)
+        let centers = [200, 600, 1000]
+        let scales: [Float] = [3.0, 2.5, 3.5]
+        let sampleCount = 1400
+
+        let channel = makeSignal(template: template, centers: centers, scales: scales, sampleCount: sampleCount)
+        let events = makeEvents(centers: centers)
+        var artifact = makeArtifact(events: events, template: template, method: .wavelet)
+        artifact.waveletConfiguration = WaveletReductionConfiguration(
+            kind: .dwt, family: .sym4, levelCount: 4,
+            thresholdRule: .hard, thresholdModel: .bayesShrink, thresholdScale: 1
+        )
+        let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+
+        let (cleaned, summaries) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+
+        #expect(summaries.count == 1)
+        #expect(summaries[0].method == .wavelet)
+        #expect(summaries[0].eventCount == 3)
+        #expect(summaries[0].channelCount == 1)
+
+        for center in centers {
+            let before = windowEnergy(channel, center: center)
+            let after = windowEnergy(cleaned.data[0], center: center)
+            #expect(after < before * 0.5, "wavelet cleaning left too much artifact energy at \(center)")
+        }
+    }
+
+    /// The whole point of correcting Wavelet Explorer candidates event-by-event
+    /// (rather than running the whole-channel Wavelet Reduction engine) is that
+    /// only the flagged windows are touched — everything else in the recording
+    /// should come through byte-for-byte unchanged.
+    @Test func waveletOnlyTouchesFlaggedWindows() {
+        let template = SyntheticSignal.bump(width: windowSamples)
+        let centers = [300]
+        let sampleCount = 1200
+
+        let channel = makeSignal(template: template, centers: centers, scales: [4.0], sampleCount: sampleCount)
+        let events = makeEvents(centers: centers)
+        let artifact = makeArtifact(events: events, template: template, method: .wavelet)
+        let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+
+        let (cleaned, _) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+
+        let untouchedStart = centers[0] + windowSamples
+        for index in stride(from: untouchedStart, to: sampleCount, by: 1) {
+            #expect(cleaned.data[0][index] == channel[index], "sample \(index) outside the event window should be untouched")
+        }
+    }
+
+    @Test func waveletVariableEventDurationSizesWindowToCandidate() {
+        let baseWidth = windowSamples
+        let longWidth = baseWidth * 3
+        let sampleCount = 1600
+        let center = 800
+        let start = center - longWidth / 2
+
+        let longShape = SyntheticSignal.bump(width: longWidth)
+        var state: UInt64 = 7
+        var channel = (0..<sampleCount).map { _ -> Float in
+            state = state &* 6364136223846793005 &+ 1
+            return Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 0.5)
+        }
+        for k in 0..<longWidth where start + k >= 0 && start + k < sampleCount {
+            channel[start + k] += 5 * longShape[k]
+        }
+
+        let event = MFFEvent(
+            id: "wide-burst",
+            code: "WAVX",
+            beginTimeSeconds: Double(center) / samplingRate,
+            rawBeginTime: String(format: "%.4f", Double(center) / samplingRate),
+            sourceFile: "test",
+            durationSeconds: Double(longWidth) / samplingRate
+        )
+        var artifact = DefinedArtifact(
+            type: .other, name: "Wavelet Explorer Candidates", eventCode: "WAVX", events: [event],
+            selectedChannelIndices: [0], windowSizeSeconds: Double(baseWidth) / samplingRate,
+            average: nil, topography: nil, cleaningMethod: .wavelet
+        )
+        artifact.usesVariableEventDuration = true
+        let signal = SyntheticSignal.make([channel], samplingRate: samplingRate)
+
+        let (cleaned, _) = ArtifactCleaner.cleanedSignal(from: signal, artifacts: [artifact], excluding: [])
+
+        let before = (start..<(start + longWidth)).reduce(0.0) { $0 + Double(channel[$1] * channel[$1]) }
+        let after = (start..<(start + longWidth)).reduce(0.0) { $0 + Double(cleaned.data[0][$1] * cleaned.data[0][$1]) }
+        #expect(after < before * 0.5, "variable-duration wavelet cleaning should reduce energy across the candidate's full measured span")
+    }
 }

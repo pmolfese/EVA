@@ -1261,6 +1261,12 @@ extension WaveformView {
         if event.sourceFile == EyeArtifactThresholdDetector.sourceFile {
             return true
         }
+        // Wavelet Explorer candidates get the highlight band as soon as a
+        // scan finds them, before Apply promotes them into a DefinedArtifact —
+        // reviewing what was found shouldn't require cleaning it first.
+        if event.sourceFile == WaveletArtifactExplorerViewModel.candidateSourceFile {
+            return true
+        }
         return template.definedArtifacts.contains { artifact in
             artifact.events.contains { $0.id == event.id }
         }

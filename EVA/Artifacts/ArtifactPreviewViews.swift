@@ -150,13 +150,20 @@ struct WaveletCleaningPreviewButton: View {
     let candidate: WaveletArtifactCandidate
     let signal: MFFSignalData
     let configuration: WaveletCleaningConfiguration
+    /// Results precomputed right after a scan (see
+    /// `WaveletArtifactExplorerViewModel.previewCache` /
+    /// `precomputeWaveletExplorerPreviews`), keyed by `WaveletCleaningPreview
+    /// .cacheKey`. When a hit exists, opening this preview is a dictionary
+    /// lookup instead of a fresh decompose-threshold-reconstruct pass.
+    var precomputed: [String: WaveletCleaningPreviewResult] = [:]
 
     var body: some View {
         HoverPinnedPreviewButton(helpText: "Preview wavelet cleanup") {
             WaveletCleaningPreview(
                 candidate: candidate,
                 signal: signal,
-                configuration: configuration
+                configuration: configuration,
+                precomputed: precomputed
             )
         }
     }
@@ -166,13 +173,21 @@ struct WaveletCleaningPreview: View {
     let candidate: WaveletArtifactCandidate
     let signal: MFFSignalData
     let configuration: WaveletCleaningConfiguration
+    var precomputed: [String: WaveletCleaningPreviewResult] = [:]
 
     @State private var preview: WaveletCleaningPreviewResult?
     @State private var isLoadingPreview = false
 
-    private var previewLoadID: String {
+    /// Cache key shared with the precompute pass — must stay in exact sync
+    /// with every field the preview's result actually depends on, or a
+    /// precomputed entry could be served for the wrong settings.
+    static func cacheKey(
+        candidateID: String,
+        configuration: WaveletCleaningConfiguration,
+        signalDuration: Double
+    ) -> String {
         [
-            candidate.id,
+            candidateID,
             configuration.pipeline.rawValue,
             configuration.mode.rawValue,
             configuration.waveletFamily.rawValue,
@@ -183,8 +198,12 @@ struct WaveletCleaningPreview: View {
             String(format: "%.3f", configuration.intensity),
             configuration.channelIndices.map(String.init).joined(separator: ","),
             String(format: "%.3f", configuration.paddingSeconds),
-            String(format: "%.3f", signal.duration)
+            String(format: "%.3f", signalDuration)
         ].joined(separator: "|")
+    }
+
+    private var previewLoadID: String {
+        Self.cacheKey(candidateID: candidate.id, configuration: configuration, signalDuration: signal.duration)
     }
 
     var body: some View {
@@ -260,6 +279,12 @@ struct WaveletCleaningPreview: View {
 
     @MainActor
     private func loadPreview() async {
+        if let cached = precomputed[previewLoadID] {
+            preview = cached
+            isLoadingPreview = false
+            return
+        }
+
         isLoadingPreview = true
         preview = nil
         let signal = signal
@@ -474,6 +499,186 @@ struct WaveletCleaningPreview: View {
             return String(format: "%d:%06.3f", minutes, remainingSeconds)
         }
         return String(format: "%.3fs", seconds)
+    }
+}
+
+struct WaveletScalogramButton: View {
+    let candidate: WaveletArtifactCandidate
+    let signal: MFFSignalData
+
+    @State private var showsScalogram = false
+
+    var body: some View {
+        Button {
+            showsScalogram.toggle()
+        } label: {
+            Image(systemName: "eye")
+                .font(.caption)
+        }
+        .buttonStyle(.plain)
+        .help("Show this candidate as a time-frequency-power view (what it looks like to the wavelet)")
+        .popover(isPresented: $showsScalogram, arrowEdge: .trailing) {
+            WaveletScalogramPopoverView(candidate: candidate, signal: signal)
+        }
+    }
+}
+
+struct WaveletScalogramPopoverView: View {
+    let candidate: WaveletArtifactCandidate
+    let signal: MFFSignalData
+
+    @State private var result: WaveletScalogramResult?
+    @State private var isLoading = false
+
+    private var loadID: String {
+        "\(candidate.id)|\(candidate.channelIndex)|\(signal.duration)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Time-Frequency View")
+                        .font(.headline)
+                    Text("Candidate \(candidate.rank) · Ch \(candidate.channelIndex + 1)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let result {
+                    Text("\(Int(result.effectiveSamplingRate.rounded())) Hz analyzed")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let result {
+                WaveletScalogramCanvas(result: result)
+                    .frame(width: 520, height: 260)
+                HStack(spacing: 10) {
+                    Text("Low power").font(.caption2).foregroundStyle(.secondary)
+                    scalogramColorLegend
+                        .frame(width: 120, height: 10)
+                    Text("High power").font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(String(format: "%.2f", result.startTimeSeconds))s – \(String(format: "%.2f", result.endTimeSeconds))s")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Text("Time on x, frequency on y (log-spaced), color is wavelet power (Morlet). Includes 0.5s of context on each side of the detected window so you can see the artifact against its surroundings.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if isLoading {
+                ProgressView("Computing time-frequency view…")
+                    .frame(width: 520, height: 260)
+            } else {
+                Text("No scalogram could be computed for this candidate.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 520, height: 260)
+            }
+        }
+        .padding(14)
+        .task(id: loadID) {
+            isLoading = true
+            result = nil
+            let signal = signal
+            let candidate = candidate
+            let computed = await Task.detached(priority: .userInitiated) {
+                WaveletScalogram.compute(
+                    signal: signal,
+                    channelIndex: candidate.channelIndex,
+                    startSample: candidate.startSample,
+                    endSample: candidate.endSample
+                )
+            }.value
+            guard !Task.isCancelled else { return }
+            result = computed
+            isLoading = false
+        }
+    }
+
+    private var scalogramColorLegend: some View {
+        LinearGradient(
+            colors: (0...8).map { WaveletScalogramCanvas.color(forNormalizedPower: Double($0) / 8) },
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+    }
+}
+
+/// Renders `power[frequencyIndex][timeIndex]` as a heatmap: time on x,
+/// frequency on y (row 0 / lowest frequency at the bottom), color intensity
+/// from a fixed blue→amber→red ramp on log-compressed, per-scalogram-
+/// normalized power (log compression because wavelet power spans orders of
+/// magnitude — a linear scale would make everything but the single loudest
+/// cell look black).
+struct WaveletScalogramCanvas: View {
+    let result: WaveletScalogramResult
+
+    var body: some View {
+        GeometryReader { geo in
+            let rows = result.power.count
+            let columns = result.power.first?.count ?? 0
+            Canvas { context, size in
+                guard rows > 0, columns > 0 else { return }
+                let maxPower = result.power.flatMap { $0 }.max() ?? 0
+                guard maxPower > 1e-12 else { return }
+                let logMax = log10(maxPower + 1e-12)
+                // A cell 4 orders of magnitude below the peak reads as ~0 —
+                // matches how sparse, transient wavelet power typically is.
+                let logFloor = logMax - 4
+                let cellWidth = size.width / CGFloat(columns)
+                let cellHeight = size.height / CGFloat(rows)
+
+                for row in 0..<rows {
+                    for column in 0..<columns {
+                        let value = result.power[row][column]
+                        let logValue = log10(value + 1e-12)
+                        let normalized = max(0, min(1, (logValue - logFloor) / (logMax - logFloor)))
+                        let y = size.height - CGFloat(row + 1) * cellHeight
+                        let rect = CGRect(x: CGFloat(column) * cellWidth, y: y, width: cellWidth + 1, height: cellHeight + 1)
+                        context.fill(Path(rect), with: .color(Self.color(forNormalizedPower: normalized)))
+                    }
+                }
+            }
+            .overlay(alignment: .leading) {
+                VStack {
+                    Text(Self.frequencyLabel(result.frequenciesHz.last ?? 0))
+                    Spacer()
+                    Text(Self.frequencyLabel(result.frequenciesHz.first ?? 0))
+                }
+                .font(.system(size: 9).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(3)
+            }
+            .background(Color(nsColor: .controlBackgroundColor))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+
+    private static func frequencyLabel(_ hz: Double) -> String {
+        hz >= 10 ? String(format: "%.0f Hz", hz) : String(format: "%.1f Hz", hz)
+    }
+
+    /// Flat blue → amber → red ramp (no perceptual-uniformity library
+    /// available here) — good enough to read "where's the power," not meant
+    /// as a publication colormap.
+    static func color(forNormalizedPower value: Double) -> Color {
+        let v = max(0, min(1, value))
+        if v < 0.5 {
+            let t = v / 0.5
+            return Color(red: 0.05 + 0.1 * t, green: 0.05 + 0.35 * t, blue: 0.35 + 0.45 * t)
+        } else {
+            let t = (v - 0.5) / 0.5
+            return Color(red: 0.15 + 0.85 * t, green: 0.4 + 0.2 * t, blue: 0.8 - 0.75 * t)
+        }
     }
 }
 
