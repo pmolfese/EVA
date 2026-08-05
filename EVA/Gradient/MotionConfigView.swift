@@ -45,6 +45,8 @@ struct MotionConfigView: View {
 
     @State private var loadError: String?
     @State private var isDropTargeted = false
+    @State private var trimStart = 0
+    @State private var trimEnd = 0
 
     /// TR markers after trimming the start/end skips.
     private var trimmedMarkers: [Int] {
@@ -176,6 +178,19 @@ struct MotionConfigView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let motionCount, motionCount > usedCount {
+                let diff = motionCount - usedCount
+                HStack(spacing: 8) {
+                    Text("Fix by trimming \(diff) TR\(diff == 1 ? "" : "s") from the motion file:")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Button("From start") { trimQuick(diff, fromStart: true) }
+                        .font(.caption2)
+                    Button("From end") { trimQuick(diff, fromStart: false) }
+                        .font(.caption2)
+                }
+            }
+
             if even {
                 Text(spacing.hasEnoughTriggers
                      ? "Fixed TR detected: \(secs(spacing.modeSeconds)) (evenly spaced)."
@@ -238,6 +253,38 @@ struct MotionConfigView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+
+            if let parameters {
+                motionTrimSection(for: parameters)
+            }
+        }
+    }
+
+    /// Lets the user drop data points from the start/end of the loaded motion
+    /// file — e.g. an AFNI file with one extra volume versus the EEG's TR
+    /// markers — without needing to re-export the file.
+    private func motionTrimSection(for parameters: MotionParameters) -> some View {
+        let maxTrim = max(0, parameters.count - 1)
+        let removing = min(trimStart, maxTrim) + min(trimEnd, maxTrim)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 16) {
+                Stepper(value: $trimStart, in: 0...maxTrim) {
+                    Text("Trim from start: \(trimStart)")
+                }
+                Stepper(value: $trimEnd, in: 0...maxTrim) {
+                    Text("Trim from end: \(trimEnd)")
+                }
+                Button("Apply") { applyTrim() }
+                    .disabled(trimStart == 0 && trimEnd == 0)
+            }
+            .font(.caption)
+
+            if removing > 0 {
+                Text("Removes \(removing) TR\(removing == 1 ? "" : "s"), leaving \(max(0, parameters.count - removing)).")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -266,9 +313,25 @@ struct MotionConfigView: View {
                 format: fileFormat
             )
             loadError = nil
+            trimStart = 0
+            trimEnd = 0
         } catch {
             loadError = "Could not read \(url.lastPathComponent): \(error.localizedDescription)"
         }
+    }
+
+    /// Applies the pending start/end trim from `motionTrimSection`.
+    private func applyTrim() {
+        guard let current = parameters else { return }
+        parameters = current.trimmed(start: trimStart, end: trimEnd)
+        trimStart = 0
+        trimEnd = 0
+    }
+
+    /// One-click trim used by the TR-count mismatch hint.
+    private func trimQuick(_ count: Int, fromStart: Bool) {
+        guard let current = parameters else { return }
+        parameters = fromStart ? current.trimmed(start: count, end: 0) : current.trimmed(start: 0, end: count)
     }
 
     /// Handle a Finder drag-and-drop of a single motion file.

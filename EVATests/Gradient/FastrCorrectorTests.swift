@@ -297,6 +297,34 @@ struct FastrCorrectorTests {
         }
     }
 
+    /// FACET's PCA-epoch subsample (`obsPCAEpochIndices`) was designed for
+    /// volume-triggered data (numTrig in the hundreds). For slice-triggered
+    /// data with many slices per volume, numTrig — and so the ~40% subsample
+    /// — can reach into the thousands, and the OBS Gram-matrix
+    /// eigendecomposition is O(p³) in epoch count. Uncapped, this scenario
+    /// (30 volumes x 90 slices = 2700 epochs) would spend tens of seconds in
+    /// a single LAPACK call; the cap in `prepareOBSFromFilteredResidual`
+    /// should keep it fast regardless. This mostly guards against a
+    /// regression reintroducing the uncapped cost, not a specific speed bound.
+    @Test func obsPCAEpochCountIsCappedForHighSliceCounts() throws {
+        let (channel, triggers) = makeSyntheticChannel(spacing: 180, volumes: 30)
+        var config = FastrCorrector.Config()
+        config.upsampleFactor = 2
+        config.numberOfSlices = 90
+        config.averagingWindow = 4
+        config.subSampleAlignment = false
+        config.obs = .auto
+        config.anc = false
+
+        let result = try FastrCorrector.correct(
+            channels: [channel], volumeTriggers: triggers,
+            config: config, samplingRate: 250
+        )[0]
+
+        #expect(result.count == channel.count)
+        #expect(result.allSatisfy { $0.isFinite })
+    }
+
     @Test func metalFastrProcessesMultipleChannelBatches() throws {
         guard FastrMetalBackend.shared != nil else { return }
         let (base, triggers) = makeSyntheticChannel(spacing: 80, volumes: 24)
@@ -314,6 +342,14 @@ struct FastrCorrectorTests {
 
         var metalConfig = cpuConfig
         metalConfig.computeBackend = .metal
+
+        // These synthetic channels are far too small to hit the real
+        // memory-based batch size bound, so force a small batch size here to
+        // exercise the multi-batch (and batch-pipelining) code path
+        // deterministically instead of relying on memory pressure.
+        FastrCorrector.debugBatchSizeOverride = 5
+        defer { FastrCorrector.debugBatchSizeOverride = nil }
+
         let cpu = try FastrCorrector.correct(
             channels: channels,
             volumeTriggers: triggers,
@@ -358,6 +394,107 @@ struct FastrCorrectorTests {
         #expect(gpu.count == cpu.count)
         #expect(gpu.allSatisfy { $0.isFinite })
         #expect(rootMeanSquareDifference(cpu, gpu) < 0.05)
+    }
+
+    /// `obsChunkSeconds` defaults to 60, but this synthetic recording (32
+    /// volumes x 100 samples / 250 Hz = 12.8s) is short enough that it all
+    /// falls into a single chunk regardless — the chunk-boundary logic in
+    /// `obsChunkEpochIndices`/the per-chunk OBS fit accumulation is untested
+    /// by `metalFastrCloselyMatchesCPUWithOBS` above. Force a short chunk
+    /// duration here so the same recording splits into several real chunks,
+    /// and confirm CPU and Metal still agree once chunk results are combined.
+    @Test func metalFastrChunkedOBSMatchesCPUAcrossMultipleChunks() throws {
+        let (channel, triggers) = makeSyntheticChannel(spacing: 100, volumes: 32)
+        var cpuConfig = FastrCorrector.Config()
+        cpuConfig.upsampleFactor = 2
+        cpuConfig.averagingWindow = 16
+        cpuConfig.subSampleAlignment = false
+        cpuConfig.obs = .auto
+        cpuConfig.randomizeOBSEpochSelection = false
+        cpuConfig.anc = false
+        cpuConfig.obsChunkSeconds = 2  // ~6 chunks over the 12.8s recording
+
+        var metalConfig = cpuConfig
+        metalConfig.computeBackend = .metal
+        let cpu = try FastrCorrector.correct(
+            channels: [channel], volumeTriggers: triggers,
+            config: cpuConfig, samplingRate: 250
+        )[0]
+        let gpu = try FastrCorrector.correct(
+            channels: [channel], volumeTriggers: triggers,
+            config: metalConfig, samplingRate: 250
+        )[0]
+
+        #expect(gpu.count == cpu.count)
+        #expect(gpu.allSatisfy { $0.isFinite })
+        #expect(cpu.allSatisfy { $0.isFinite })
+        #expect(rootMeanSquareDifference(cpu, gpu) < 0.05)
+    }
+
+    @Test func metalFastrLowPassMatchesCPUAcrossChannelBatch() throws {
+        guard FastrMetalBackend.shared != nil else { return }
+        let (base, triggers) = makeSyntheticChannel(spacing: 90, volumes: 28)
+        let channels: [[Float]] = (0..<6).map { channel in
+            let scale = Float(1 + 0.02 * Double(channel))
+            return base.enumerated().map { sample, value in
+                value * scale + Float(channel) * 0.15 * Float(sin(Double(sample) * 0.023))
+            }
+        }
+        var cpuConfig = FastrCorrector.Config()
+        cpuConfig.upsampleFactor = 2
+        cpuConfig.averagingWindow = 14
+        cpuConfig.subSampleAlignment = false
+        cpuConfig.obs = .off
+        cpuConfig.anc = false
+        cpuConfig.lowPassHz = 30
+
+        var metalConfig = cpuConfig
+        metalConfig.computeBackend = .metal
+        let cpu = try FastrCorrector.correct(
+            channels: channels, volumeTriggers: triggers,
+            config: cpuConfig, samplingRate: 250
+        )
+        let gpu = try FastrCorrector.correct(
+            channels: channels, volumeTriggers: triggers,
+            config: metalConfig, samplingRate: 250
+        )
+
+        #expect(gpu.count == channels.count)
+        for channel in channels.indices {
+            #expect(gpu[channel].count == cpu[channel].count)
+            #expect(gpu[channel].allSatisfy { $0.isFinite })
+            #expect(rootMeanSquareDifference(cpu[channel], gpu[channel]) < 0.05)
+        }
+    }
+
+    @Test func metalFastrLowPassAndANCMatchesCPU() throws {
+        guard FastrMetalBackend.shared != nil else { return }
+        let (channel, triggers) = makeSyntheticChannel(spacing: 100, volumes: 32)
+        var cpuConfig = FastrCorrector.Config()
+        cpuConfig.upsampleFactor = 2
+        cpuConfig.averagingWindow = 16
+        cpuConfig.subSampleAlignment = false
+        cpuConfig.obs = .off
+        cpuConfig.anc = true
+        cpuConfig.lowPassHz = 30
+
+        var metalConfig = cpuConfig
+        metalConfig.computeBackend = .metal
+        let cpu = try FastrCorrector.correct(
+            channels: [channel, channel], volumeTriggers: triggers,
+            config: cpuConfig, samplingRate: 250
+        )
+        let gpu = try FastrCorrector.correct(
+            channels: [channel, channel], volumeTriggers: triggers,
+            config: metalConfig, samplingRate: 250
+        )
+
+        #expect(gpu.count == cpu.count)
+        for channelIndex in cpu.indices {
+            #expect(gpu[channelIndex].count == cpu[channelIndex].count)
+            #expect(gpu[channelIndex].allSatisfy { $0.isFinite })
+            #expect(rootMeanSquareDifference(cpu[channelIndex], gpu[channelIndex]) < 0.05)
+        }
     }
 
     @Test func fusedMetalTemplatesMatchCPUForFacetAndMoosmann() throws {

@@ -69,7 +69,7 @@ final class WaveletArtifactExplorerViewModel {
     var downsampleRate = 250.0
     var levelCount = 8
     var thresholdScale = 1.0
-    var waveletFamily = WaveletCleaningFamily.bior44
+    var waveletFamily = WaveletReductionFamily.bior44
     var thresholdRule = WaveletCleaningThresholdRule.hard
     var thresholdModel = WaveletCleaningThresholdModel.bayesShrink
     var mergeWindowSeconds = 0.10

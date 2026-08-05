@@ -23,7 +23,7 @@ nonisolated enum WaveletCleaningPipeline: String, CaseIterable, Identifiable, Se
 
     var id: String { rawValue }
 
-    var defaultFamily: WaveletCleaningFamily {
+    var defaultFamily: WaveletReductionFamily {
         switch self {
         case .eeg: return .bior44
         case .erp: return .coif4
@@ -86,13 +86,6 @@ nonisolated enum WaveletCleaningMode: String, CaseIterable, Identifiable, Codabl
     }
 }
 
-nonisolated enum WaveletCleaningFamily: String, CaseIterable, Identifiable, Codable, Sendable {
-    case bior44 = "bior4.4"
-    case coif4 = "coif4"
-
-    var id: String { rawValue }
-}
-
 nonisolated enum WaveletCleaningThresholdRule: String, CaseIterable, Identifiable, Codable, Sendable {
     case hard = "Hard"
     case soft = "Soft"
@@ -111,7 +104,7 @@ nonisolated struct WaveletCleaningConfiguration: Sendable {
     var pipeline: WaveletCleaningPipeline
     var mode: WaveletCleaningMode
     var channelIndices: [Int]
-    var waveletFamily: WaveletCleaningFamily
+    var waveletFamily: WaveletReductionFamily
     var thresholdRule: WaveletCleaningThresholdRule
     var thresholdModel: WaveletCleaningThresholdModel
     var levelCount: Int

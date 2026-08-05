@@ -53,6 +53,20 @@ nonisolated final class FastrMetalBackend: @unchecked Sendable {
         var basisCount: UInt32
     }
 
+    private struct OBSChannelParameters {
+        var sampleCount: UInt32
+        var epochCount: UInt32
+        var artifactLength: UInt32
+        var basisCount: UInt32
+        var channelCount: UInt32
+    }
+
+    private struct BatchFIRParameters {
+        var sampleCount: UInt32
+        var tapCount: UInt32
+        var channelCount: UInt32
+    }
+
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let interpolatePipeline: MTLComputePipelineState
@@ -64,9 +78,17 @@ nonisolated final class FastrMetalBackend: @unchecked Sendable {
     private let batchCorrectDecimatePipeline: MTLComputePipelineState
     private let obsCoefficientPipeline: MTLComputePipelineState
     private let obsFitPipeline: MTLComputePipelineState
+    private let obsCoefficientChannelsPipeline: MTLComputePipelineState
+    private let obsFitChannelsPipeline: MTLComputePipelineState
+    private let batchFIRFilterPipeline: MTLComputePipelineState
 
     static let shared: FastrMetalBackend? = FastrMetalBackend()
     static var isAvailable: Bool { shared != nil }
+
+    /// The device's single-buffer size limit, used to bound how many
+    /// channels can be batched into one GPU dispatch (the largest per-batch
+    /// buffer is one Float array sized channelCount x upsampled-sample-count).
+    var maxBufferLength: Int { device.maxBufferLength }
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else { return nil }
@@ -87,7 +109,10 @@ nonisolated final class FastrMetalBackend: @unchecked Sendable {
               let correctDecimate = library.makeFunction(name: "fastrCorrectDecimate"),
               let batchCorrectDecimate = library.makeFunction(name: "fastrCorrectDecimateChannels"),
               let obsCoefficient = library.makeFunction(name: "fastrOBSCoefficients"),
-              let obsFit = library.makeFunction(name: "fastrOBSFits")
+              let obsFit = library.makeFunction(name: "fastrOBSFits"),
+              let obsCoefficientChannels = library.makeFunction(name: "fastrOBSCoefficientsChannels"),
+              let obsFitChannels = library.makeFunction(name: "fastrOBSFitsChannels"),
+              let batchFIRFilter = library.makeFunction(name: "fastrBatchFIRFilter")
         else {
             assertionFailure("A required FASTR function is missing from EVA's compiled Metal library.")
             return nil
@@ -101,7 +126,10 @@ nonisolated final class FastrMetalBackend: @unchecked Sendable {
               let correctDecimatePipeline = try? device.makeComputePipelineState(function: correctDecimate),
               let batchCorrectDecimatePipeline = try? device.makeComputePipelineState(function: batchCorrectDecimate),
               let obsCoefficientPipeline = try? device.makeComputePipelineState(function: obsCoefficient),
-              let obsFitPipeline = try? device.makeComputePipelineState(function: obsFit)
+              let obsFitPipeline = try? device.makeComputePipelineState(function: obsFit),
+              let obsCoefficientChannelsPipeline = try? device.makeComputePipelineState(function: obsCoefficientChannels),
+              let obsFitChannelsPipeline = try? device.makeComputePipelineState(function: obsFitChannels),
+              let batchFIRFilterPipeline = try? device.makeComputePipelineState(function: batchFIRFilter)
         else {
             assertionFailure("A required FASTR Metal compute pipeline could not be created.")
             return nil
@@ -118,6 +146,9 @@ nonisolated final class FastrMetalBackend: @unchecked Sendable {
         self.batchCorrectDecimatePipeline = batchCorrectDecimatePipeline
         self.obsCoefficientPipeline = obsCoefficientPipeline
         self.obsFitPipeline = obsFitPipeline
+        self.obsCoefficientChannelsPipeline = obsCoefficientChannelsPipeline
+        self.obsFitChannelsPipeline = obsFitChannelsPipeline
+        self.batchFIRFilterPipeline = batchFIRFilterPipeline
     }
 
     func interpolate(_ input: [Float], factor: Int, subtractMean: Bool) -> [Double]? {
@@ -688,6 +719,233 @@ nonisolated final class FastrMetalBackend: @unchecked Sendable {
             }
         }
         return fitted
+    }
+
+    /// Channel-batched OBS fit. Fits every channel's PCA design onto its
+    /// high-passed residual in a single dispatch instead of one Metal round
+    /// trip per channel — the per-channel calls previously ran from inside a
+    /// concurrent CPU loop, which serialized on the shared command queue and
+    /// let per-call dispatch overhead dominate the (tiny) actual GPU work.
+    ///
+    /// `columnsPerChannel[c]` may have a different basis count than other
+    /// channels (auto PC selection is data-dependent); rows are zero-padded
+    /// up to the batch's max basis count so a single dispatch shape covers
+    /// every channel — the zero rows contribute nothing to the fit. An empty
+    /// `columnsPerChannel[c]` means OBS was skipped for that channel and its
+    /// result is all zero.
+    func fitOptimalBasisChannels(
+        data: [[Double]],
+        epochStarts: [Int],
+        columnsPerChannel: [[[Double]]]
+    ) -> [[Double]]? {
+        let channelCount = data.count
+        guard channelCount > 0,
+              channelCount == columnsPerChannel.count,
+              !epochStarts.isEmpty,
+              let sampleCount = data.first?.count,
+              sampleCount > 0,
+              data.allSatisfy({ $0.count == sampleCount })
+        else { return nil }
+
+        let artifactLength = columnsPerChannel.compactMap { $0.first?.count }.first ?? 0
+        let maxBasisCount = columnsPerChannel.map(\.count).max() ?? 0
+        guard artifactLength > 0, maxBasisCount > 0, maxBasisCount <= 32 else {
+            return data.map { _ in [Double](repeating: 0, count: sampleCount) }
+        }
+        guard columnsPerChannel.allSatisfy({ $0.allSatisfy { $0.count == artifactLength } }) else { return nil }
+
+        // Per-channel dual basis (pseudoinverse of the design columns), computed
+        // on the CPU as in the single-channel path, then packed with the
+        // channel's (possibly zero-padded) design columns.
+        var flatDual = [Float](repeating: 0, count: channelCount * maxBasisCount * artifactLength)
+        var flatColumns = [Float](repeating: 0, count: channelCount * maxBasisCount * artifactLength)
+        for channel in 0..<channelCount {
+            let columns = columnsPerChannel[channel]
+            let basisCount = columns.count
+            guard basisCount > 0 else { continue }
+
+            var gram = [[Double]](repeating: [Double](repeating: 0, count: basisCount), count: basisCount)
+            for row in 0..<basisCount {
+                for column in row..<basisCount {
+                    var value = 0.0
+                    vDSP_dotprD(columns[row], 1, columns[column], 1, &value, vDSP_Length(artifactLength))
+                    gram[row][column] = value
+                    gram[column][row] = value
+                }
+            }
+            var inverse = [Double](repeating: 0, count: basisCount * basisCount)
+            for column in 0..<basisCount {
+                var unit = [Double](repeating: 0, count: basisCount)
+                unit[column] = 1
+                guard let solution = LinearAlgebra.solveLinearSystem(gram, unit) else { return nil }
+                for row in 0..<basisCount {
+                    inverse[row * basisCount + column] = solution[row]
+                }
+            }
+
+            let channelBase = channel * maxBasisCount * artifactLength
+            for row in 0..<basisCount {
+                let dualBase = channelBase + row * artifactLength
+                let columnsBase = channelBase + row * artifactLength
+                for sample in 0..<artifactLength {
+                    var value = 0.0
+                    for column in 0..<basisCount {
+                        value += inverse[row * basisCount + column] * columns[column][sample]
+                    }
+                    flatDual[dualBase + sample] = Float(value)
+                    flatColumns[columnsBase + sample] = Float(columns[row][sample])
+                }
+            }
+        }
+
+        let validStarts = epochStarts.map { start in
+            start >= 0 && start + artifactLength <= sampleCount ? Int32(start) : -1
+        }
+        let flatData = data.flatMap { $0.map(Float.init) }
+        var parameters = OBSChannelParameters(
+            sampleCount: UInt32(sampleCount),
+            epochCount: UInt32(epochStarts.count),
+            artifactLength: UInt32(artifactLength),
+            basisCount: UInt32(maxBasisCount),
+            channelCount: UInt32(channelCount)
+        )
+        let coefficientCount = channelCount * epochStarts.count * maxBasisCount
+        let fitCount = channelCount * epochStarts.count * artifactLength
+        guard let dataBuffer = buffer(flatData),
+              let startsBuffer = buffer(validStarts),
+              let dualBuffer = buffer(flatDual),
+              let columnsBuffer = buffer(flatColumns),
+              let coefficientBuffer = device.makeBuffer(
+                length: coefficientCount * MemoryLayout<Float>.stride,
+                options: .storageModeShared
+              ),
+              let fitBuffer = device.makeBuffer(
+                length: fitCount * MemoryLayout<Float>.stride,
+                options: .storageModeShared
+              ),
+              let commandBuffer = queue.makeCommandBuffer()
+        else { return nil }
+
+        guard let coefficientEncoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        coefficientEncoder.setComputePipelineState(obsCoefficientChannelsPipeline)
+        coefficientEncoder.setBuffer(dataBuffer, offset: 0, index: 0)
+        coefficientEncoder.setBuffer(startsBuffer, offset: 0, index: 1)
+        coefficientEncoder.setBuffer(dualBuffer, offset: 0, index: 2)
+        coefficientEncoder.setBuffer(coefficientBuffer, offset: 0, index: 3)
+        coefficientEncoder.setBytes(&parameters, length: MemoryLayout<OBSChannelParameters>.stride, index: 4)
+        dispatch(coefficientEncoder, pipeline: obsCoefficientChannelsPipeline, count: coefficientCount)
+        coefficientEncoder.endEncoding()
+
+        guard let fitEncoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        fitEncoder.setComputePipelineState(obsFitChannelsPipeline)
+        fitEncoder.setBuffer(startsBuffer, offset: 0, index: 0)
+        fitEncoder.setBuffer(columnsBuffer, offset: 0, index: 1)
+        fitEncoder.setBuffer(coefficientBuffer, offset: 0, index: 2)
+        fitEncoder.setBuffer(fitBuffer, offset: 0, index: 3)
+        fitEncoder.setBytes(&parameters, length: MemoryLayout<OBSChannelParameters>.stride, index: 4)
+        dispatch(fitEncoder, pipeline: obsFitChannelsPipeline, count: fitCount)
+        fitEncoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else { return nil }
+
+        let fits = floats(from: fitBuffer, count: fitCount)
+        return (0..<channelCount).map { channel in
+            var fitted = [Double](repeating: 0, count: sampleCount)
+            guard !columnsPerChannel[channel].isEmpty else { return fitted }
+            let channelBase = channel * epochStarts.count * artifactLength
+            for epoch in epochStarts.indices {
+                let start = validStarts[epoch]
+                guard start >= 0 else { continue }
+                let fitBase = channelBase + epoch * artifactLength
+                for sample in 0..<artifactLength {
+                    fitted[Int(start) + sample] = Double(fits[fitBase + sample])
+                }
+            }
+            return fitted
+        }
+    }
+
+    /// Channel-batched zero-phase (forward-backward) FIR filtering — matches
+    /// `DSP.filtfiltFIR(taps, signal)` applied to every row of `signals`, but
+    /// does the O(N·taps) convolution for the whole batch in two GPU
+    /// dispatches total instead of one CPU `filtfiltFIR` call (two
+    /// convolution passes each) per channel.
+    ///
+    /// Reflection padding and the final forward/reverse/forward/reverse
+    /// sequence mirror `DSP.filtfiltFIR` exactly; only the convolution passes
+    /// themselves move to the GPU, with the (cheap, O(pad)) padding and
+    /// reversal done on the CPU between dispatches.
+    func filtfiltChannels(taps: [Double], signals: [[Double]]) -> [[Double]]? {
+        let nb = taps.count
+        guard nb > 1,
+              let sampleCount = signals.first?.count,
+              sampleCount > 3 * (nb - 1),
+              signals.allSatisfy({ $0.count == sampleCount })
+        else { return nil }
+
+        let pad = 3 * (nb - 1)
+        let extLength = sampleCount + 2 * pad
+        let channelCount = signals.count
+        let tapsFloat = taps.map(Float.init)
+
+        // Odd (point-symmetric) reflection padding, matching DSP.filtfiltFIR.
+        var ext = [Float](repeating: 0, count: channelCount * extLength)
+        for c in 0..<channelCount {
+            let x = signals[c]
+            let base = c * extLength
+            for i in 0..<pad { ext[base + i] = Float(2 * x[0] - x[pad - i]) }
+            for i in 0..<sampleCount { ext[base + pad + i] = Float(x[i]) }
+            let last = sampleCount - 1
+            for i in 0..<pad { ext[base + pad + sampleCount + i] = Float(2 * x[last] - x[last - 1 - i]) }
+        }
+
+        guard let firstPass = runBatchFIR(ext, taps: tapsFloat, sampleCount: extLength, channelCount: channelCount)
+        else { return nil }
+
+        var reversed = [Float](repeating: 0, count: channelCount * extLength)
+        for c in 0..<channelCount {
+            let base = c * extLength
+            for i in 0..<extLength { reversed[base + i] = firstPass[base + extLength - 1 - i] }
+        }
+
+        guard let secondPass = runBatchFIR(reversed, taps: tapsFloat, sampleCount: extLength, channelCount: channelCount)
+        else { return nil }
+
+        return (0..<channelCount).map { c in
+            let base = c * extLength
+            return (0..<sampleCount).map { i in
+                Double(secondPass[base + extLength - 1 - (pad + i)])
+            }
+        }
+    }
+
+    private func runBatchFIR(_ input: [Float], taps: [Float], sampleCount: Int, channelCount: Int) -> [Float]? {
+        var parameters = BatchFIRParameters(
+            sampleCount: UInt32(sampleCount),
+            tapCount: UInt32(taps.count),
+            channelCount: UInt32(channelCount)
+        )
+        let total = sampleCount * channelCount
+        guard let inputBuffer = buffer(input),
+              let tapsBuffer = buffer(taps),
+              let outputBuffer = device.makeBuffer(length: total * MemoryLayout<Float>.stride, options: .storageModeShared),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else { return nil }
+
+        encoder.setComputePipelineState(batchFIRFilterPipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(tapsBuffer, offset: 0, index: 1)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 2)
+        encoder.setBytes(&parameters, length: MemoryLayout<BatchFIRParameters>.stride, index: 3)
+        dispatch(encoder, pipeline: batchFIRFilterPipeline, count: total)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else { return nil }
+        return floats(from: outputBuffer, count: total)
     }
 
     private func buffer<T>(_ values: [T]) -> MTLBuffer? {

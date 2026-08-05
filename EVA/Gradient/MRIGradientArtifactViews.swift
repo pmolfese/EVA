@@ -257,6 +257,18 @@ extension WaveformView {
                                 mriOBSRandomHelp()
                             }
                         }
+                        HStack(spacing: 6) {
+                            Text("OBS chunk")
+                                .font(.caption)
+                                .frame(width: 96, alignment: .leading)
+                            TextField("Seconds", value: $gradient.fastrOBSChunkSeconds, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 70)
+                            Text("s")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .help("PCA for the optimal basis set is recomputed independently every this many seconds of the recording, matching FASTR's reference implementation (Niazy et al., 2005). Shorter chunks adapt faster to changing artifact shape but use fewer epochs per PCA fit; longer chunks average over more data but assume the artifact stays stable throughout. Default: 60s.")
                     }
                     Toggle("Adaptive noise cancellation (ANC)", isOn: $gradient.fastrANC)
                         .font(.caption)

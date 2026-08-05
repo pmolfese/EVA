@@ -313,3 +313,105 @@ kernel void fastrOBSFits(
     }
     fits[gid] = value;
 }
+
+struct FastrOBSChannelParameters {
+    uint sampleCount;
+    uint epochCount;
+    uint artifactLength;
+    uint basisCount;
+    uint channelCount;
+};
+
+// Channel-batched OBS fit: one dispatch covers every channel in a FASTR batch
+// instead of one command buffer per channel. `dual`/`columns` are zero-padded
+// per channel up to a shared `basisCount`, so channels with fewer PCs than the
+// batch max contribute zero without needing per-channel dispatch shapes.
+kernel void fastrOBSCoefficientsChannels(
+    device const float *data [[buffer(0)]],
+    device const int *starts [[buffer(1)]],
+    device const float *dual [[buffer(2)]],
+    device float *coefficients [[buffer(3)]],
+    constant FastrOBSChannelParameters &p [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]) {
+    uint perChannel = p.epochCount * p.basisCount;
+    uint count = p.channelCount * perChannel;
+    if (gid >= count) return;
+    uint channel = gid / perChannel;
+    uint rem = gid % perChannel;
+    uint epoch = rem / p.basisCount;
+    uint basis = rem % p.basisCount;
+    int start = starts[epoch];
+    if (start < 0) {
+        coefficients[gid] = 0.0f;
+        return;
+    }
+    device const float *channelData = data + channel * p.sampleCount;
+    device const float *channelDual = dual + channel * p.basisCount * p.artifactLength;
+    float value = 0.0f;
+    uint dualBase = basis * p.artifactLength;
+    for (uint sample = 0; sample < p.artifactLength; ++sample) {
+        value += channelDual[dualBase + sample] * channelData[start + int(sample)];
+    }
+    coefficients[gid] = value;
+}
+
+kernel void fastrOBSFitsChannels(
+    device const int *starts [[buffer(0)]],
+    device const float *columns [[buffer(1)]],
+    device const float *coefficients [[buffer(2)]],
+    device float *fits [[buffer(3)]],
+    constant FastrOBSChannelParameters &p [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]) {
+    uint perChannel = p.epochCount * p.artifactLength;
+    uint count = p.channelCount * perChannel;
+    if (gid >= count) return;
+    uint channel = gid / perChannel;
+    uint rem = gid % perChannel;
+    uint epoch = rem / p.artifactLength;
+    uint sample = rem % p.artifactLength;
+    if (starts[epoch] < 0) {
+        fits[gid] = 0.0f;
+        return;
+    }
+    device const float *channelColumns = columns + channel * p.basisCount * p.artifactLength;
+    device const float *channelCoefficients = coefficients + channel * p.epochCount * p.basisCount;
+    float value = 0.0f;
+    uint coefficientBase = epoch * p.basisCount;
+    for (uint basis = 0; basis < p.basisCount; ++basis) {
+        value += channelColumns[basis * p.artifactLength + sample]
+            * channelCoefficients[coefficientBase + basis];
+    }
+    fits[gid] = value;
+}
+
+struct FastrBatchFIRParameters {
+    uint sampleCount;
+    uint tapCount;
+    uint channelCount;
+};
+
+// Direct-form causal FIR convolution, batched across channels:
+// y[n] = sum_k taps[k] * x[n-k], treating x as zero for n-k < 0. Matches
+// DSP.firFilter's semantics. Used twice (with a CPU-side reversal of the
+// signal in between) by FastrMetalBackend.filtfiltChannels to reproduce
+// DSP.filtfiltFIR's zero-phase forward-backward filtering for every channel
+// in a FASTR batch with two GPU dispatches total, instead of one CPU
+// filtfiltFIR call (two convolution passes each) per channel.
+kernel void fastrBatchFIRFilter(
+    device const float *input [[buffer(0)]],
+    device const float *taps [[buffer(1)]],
+    device float *output [[buffer(2)]],
+    constant FastrBatchFIRParameters &p [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]) {
+    uint total = p.channelCount * p.sampleCount;
+    if (gid >= total) return;
+    uint channel = gid / p.sampleCount;
+    uint n = gid % p.sampleCount;
+    device const float *x = input + channel * p.sampleCount;
+    float value = 0.0f;
+    for (uint k = 0; k < p.tapCount; ++k) {
+        if (k > n) break;
+        value += taps[k] * x[n - k];
+    }
+    output[gid] = value;
+}

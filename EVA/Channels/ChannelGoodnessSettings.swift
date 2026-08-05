@@ -24,7 +24,7 @@ import SwiftUI
 
 /// Configuration for the on-demand wavelet channel-burden detector.
 struct ChannelWaveletGoodnessSettings: Codable, Sendable {
-    var family: WaveletCleaningFamily = .bior44
+    var family: WaveletReductionFamily = .bior44
     var levelCount: Int = 8
     var thresholdModel: WaveletCleaningThresholdModel = .bayesShrink
     var thresholdRule: WaveletCleaningThresholdRule = .hard
@@ -369,7 +369,7 @@ struct ChannelGoodnessSettingsView: View {
             GridRow {
                 MetricHelpLabel(name: "Wavelet", help: FieldHelp.waveletFamily)
                 Picker("", selection: $settings.wavelet.family) {
-                    ForEach(WaveletCleaningFamily.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .labelsHidden()
                 .frame(width: 150)

@@ -88,6 +88,9 @@ final class GradientViewModel {
     // FASTR-family parameters and shared optional Metal execution
     var fastrSlices = 1
     var fastrOBSAuto = true
+    /// OBS PCA is recomputed independently every `fastrOBSChunkSeconds` of
+    /// the recording (FASTR's reference design), rather than once globally.
+    var fastrOBSChunkSeconds = 60.0
     var fastrANC = false
     var fastrSubSample = true
     var fastrUseFacetWindow = false
@@ -160,6 +163,7 @@ final class GradientViewModel {
         if method.isFASTR {
             params["slices"] = "\(fastrSlices)"
             params["obs"] = "\(fastrOBSAuto)"
+            params["obsChunkSeconds"] = "\(fastrOBSChunkSeconds)"
             params["anc"] = "\(fastrANC)"
             params["subSample"] = "\(fastrSubSample)"
             params["facetWindow"] = "\(fastrUseFacetWindow)"
@@ -189,6 +193,7 @@ final class GradientViewModel {
         if let v = p["windowAfter"].flatMap(Int.init) { windowAfter = v }
         if let v = p["slices"].flatMap(Int.init) { fastrSlices = v }
         if let v = p["obs"] { fastrOBSAuto = (v == "true") }
+        if let v = p["obsChunkSeconds"].flatMap(Double.init) { fastrOBSChunkSeconds = v }
         if let v = p["anc"] { fastrANC = (v == "true") }
         if let v = p["subSample"] { fastrSubSample = (v == "true") }
         if let v = p["facetWindow"] { fastrUseFacetWindow = (v == "true") }
@@ -372,6 +377,7 @@ final class GradientViewModel {
         config.subSampleAlignment = fastrSubSample
         config.obs = fastrOBSAuto ? .auto : .off
         config.randomizeOBSEpochSelection = fastrOBSRandomSampling
+        config.obsChunkSeconds = fastrOBSChunkSeconds
         config.anc = fastrANC
         config.ancHighPassMode = fastrANCSliceHighPass ? .sliceTriggerDependent : .fixed2Hz
         config.computeBackend = fastrUseMetal ? .metal : .cpu

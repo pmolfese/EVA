@@ -575,7 +575,7 @@ extension WaveformView {
                         help: "bior4.4 is the non-ERP HAPPE-style choice; coif4 is the ERP-oriented choice."
                     )
                     Picker("Wavelet", selection: $waveletExplorer.waveletFamily) {
-                        ForEach(WaveletCleaningFamily.allCases) { family in
+                        ForEach(WaveletReductionFamily.allCases) { family in
                             Text(family.rawValue).tag(family)
                         }
                     }
@@ -906,6 +906,7 @@ extension WaveformView {
                             Text("Peak Ch")
                             Text("Level")
                             Text("Contrib")
+                            Text("Type")
                             Text("Preview")
                             Text("")
                             Text("")
@@ -926,6 +927,7 @@ extension WaveformView {
                                 Text("Ch \(candidate.channelIndex + 1)")
                                 Text("L\(candidate.dominantLevel)")
                                 Text("\(candidate.contributingChannelCount)")
+                                Text(candidate.artifactType.rawValue)
                                 WaveletCleaningPreviewButton(
                                     candidate: candidate,
                                     signal: signal,
@@ -978,8 +980,8 @@ extension WaveformView {
             code: "WAVX",
             label: "Wavelet burst",
             eventDescription: String(
-                format: "Wavelet Explorer candidate #%d · Ch %d · score %.2f · dominant level %d",
-                candidate.rank, candidate.channelIndex + 1, candidate.score, candidate.dominantLevel
+                format: "Wavelet Explorer candidate #%d · Ch %d · score %.2f · dominant level %d · %@",
+                candidate.rank, candidate.channelIndex + 1, candidate.score, candidate.dominantLevel, candidate.artifactType.rawValue
             ),
             beginTimeSeconds: candidate.startTimeSeconds,
             rawBeginTime: String(format: "%.6f", candidate.startTimeSeconds),

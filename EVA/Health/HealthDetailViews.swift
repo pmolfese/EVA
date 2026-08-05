@@ -526,7 +526,7 @@ struct ChannelHealthDetailsView: View {
     let progress: Double
     let statusMessage: String?
     let onRefresh: () -> Void
-    @Binding var waveletFamily: WaveletCleaningFamily
+    @Binding var waveletFamily: WaveletReductionFamily
     @Binding var waveletLevelCount: Int
     @Binding var waveletThresholdModel: WaveletCleaningThresholdModel
     @Binding var waveletThresholdRule: WaveletCleaningThresholdRule
@@ -708,7 +708,7 @@ struct ChannelHealthDetailsView: View {
 }
 
 struct WaveletRunPopover: View {
-    @Binding var family: WaveletCleaningFamily
+    @Binding var family: WaveletReductionFamily
     @Binding var levelCount: Int
     @Binding var thresholdModel: WaveletCleaningThresholdModel
     @Binding var thresholdRule: WaveletCleaningThresholdRule
@@ -731,7 +731,7 @@ struct WaveletRunPopover: View {
                 GridRow {
                     Text("Wavelet")
                     Picker("", selection: $family) {
-                        ForEach(WaveletCleaningFamily.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden()
                     .frame(width: 130)

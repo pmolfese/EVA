@@ -120,6 +120,24 @@ nonisolated struct MotionParameters: Sendable {
         return fd.indices.filter { fd[$0] > threshold }
     }
 
+    /// Returns a copy with `start` samples dropped from the front and `end`
+    /// dropped from the back — e.g. to line up a motion file that has an
+    /// extra volume or two versus the EEG's TR markers. IDs are renumbered
+    /// from 0 so the trimmed samples still plot as a contiguous volume axis.
+    func trimmed(start: Int, end: Int) -> MotionParameters {
+        let lower = min(max(start, 0), samples.count)
+        let upper = min(max(end, 0), samples.count - lower)
+        let kept = samples[lower..<(samples.count - upper)]
+        let reindexed = kept.enumerated().map { index, sample in
+            MotionSample(
+                id: index,
+                roll: sample.roll, pitch: sample.pitch, yaw: sample.yaw,
+                dS: sample.dS, dL: sample.dL, dP: sample.dP
+            )
+        }
+        return MotionParameters(samples: reindexed, sourceName: sourceName, format: format)
+    }
+
     /// Parses the text contents of an AFNI 3dvolreg file or BERGEN/SPM rp_*.txt.
     static func parse(
         text: String,
