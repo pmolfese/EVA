@@ -46,6 +46,7 @@ extension WaveformView {
             let stillAvailable = members.intersection(availableValues)
             return stillAvailable.count >= 2 ? stillAvailable : nil
         }
+        epoching.categoryRegexRules = epoching.categoryRegexRules.filter { availableValues.contains($0.value.sourceCode) }
         var enabledTimingValues = epoching.timingMarkerEnabledValues.intersection(availableValues)
         var timingMarkerValues = epoching.timingMarkerValuesBySegmentValue.filter { segmentValue, timingValue in
             availableValues.contains(segmentValue)
@@ -139,16 +140,19 @@ extension WaveformView {
                 Spacer(minLength: 10)
 
                 Button {
+                    categoryGroupMode = .codes
                     categoryGroupSelectedCodes.removeAll()
                     categoryGroupName = ""
+                    categoryRegexSourceCode = ""
+                    categoryRegexPattern = ""
                     showsCategoryGroupPopover = true
                 } label: {
                     Label("Group…", systemImage: "plus.circle")
                 }
                 .disabled(allSummaries.isEmpty)
-                .help("Combine several event codes/labels into one pooled category for averaging.")
+                .help("Combine several event codes/labels into one pooled category, or sub-select one code's events by a regex on their description.")
                 .popover(isPresented: $showsCategoryGroupPopover) {
-                    categoryGroupPopover(allSummaries: allSummaries)
+                    categoryGroupPopover(events: events, allSummaries: allSummaries)
                 }
             }
 
@@ -185,6 +189,12 @@ extension WaveformView {
                                 Divider().padding(.vertical, 2)
                                 ForEach(epoching.categoryGroups.keys.sorted(), id: \.self) { groupName in
                                     psaCategoryGroupRow(groupName: groupName, allSummaries: allSummaries)
+                                }
+                            }
+                            if !epoching.categoryRegexRules.isEmpty {
+                                Divider().padding(.vertical, 2)
+                                ForEach(epoching.categoryRegexRules.keys.sorted(), id: \.self) { ruleID in
+                                    psaCategoryRegexRuleRow(ruleID: ruleID, events: events)
                                 }
                             }
                         }
@@ -616,57 +626,173 @@ extension WaveformView {
     /// name pool into one averaged trace, while each code stays individually
     /// selectable/toggleable (the group isn't a distinct data structure).
     @ViewBuilder
-    func categoryGroupPopover(allSummaries: [EventSummary]) -> some View {
+    func categoryGroupPopover(events: [MFFEvent], allSummaries: [EventSummary]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Group into Category")
+            Text("New Category")
                 .font(.headline)
-            Text("Pools the selected codes/labels into one category for averaging. Each one stays individually selectable.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
 
-            TextField("Category name (e.g. \"emotional\")", text: $categoryGroupName)
-                .textFieldStyle(.roundedBorder)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(allSummaries) { summary in
-                        Toggle(isOn: Binding(
-                            get: { categoryGroupSelectedCodes.contains(summary.code) },
-                            set: { isOn in
-                                if isOn { categoryGroupSelectedCodes.insert(summary.code) }
-                                else { categoryGroupSelectedCodes.remove(summary.code) }
-                            }
-                        )) {
-                            HStack(spacing: 6) {
-                                Text(summary.code)
-                                    .font(.system(.body, design: .monospaced))
-                                Text("(\(epoching.categoryNames[summary.code] ?? summary.code))")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
+            Picker("Mode", selection: $categoryGroupMode) {
+                ForEach(CategoryGroupMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
                 }
-                .padding(4)
             }
-            .frame(maxHeight: 220)
+            .pickerStyle(.segmented)
+            .labelsHidden()
 
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    showsCategoryGroupPopover = false
-                }
-                Button("Create Group") {
-                    applyCategoryGroup()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(categoryGroupSelectedCodes.count < 2
-                    || categoryGroupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            switch categoryGroupMode {
+            case .codes:
+                categoryGroupCodesPopoverBody(allSummaries: allSummaries)
+            case .regex:
+                categoryGroupRegexPopoverBody(events: events, allSummaries: allSummaries)
             }
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(width: 340)
+    }
+
+    @ViewBuilder
+    private func categoryGroupCodesPopoverBody(allSummaries: [EventSummary]) -> some View {
+        Text("Pools the selected codes/labels into one category for averaging. Each one stays individually selectable.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        TextField("Category name (e.g. \"emotional\")", text: $categoryGroupName)
+            .textFieldStyle(.roundedBorder)
+
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(allSummaries) { summary in
+                    Toggle(isOn: Binding(
+                        get: { categoryGroupSelectedCodes.contains(summary.code) },
+                        set: { isOn in
+                            if isOn { categoryGroupSelectedCodes.insert(summary.code) }
+                            else { categoryGroupSelectedCodes.remove(summary.code) }
+                        }
+                    )) {
+                        HStack(spacing: 6) {
+                            Text(summary.code)
+                                .font(.system(.body, design: .monospaced))
+                            Text("(\(epoching.categoryNames[summary.code] ?? summary.code))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .padding(4)
+        }
+        .frame(maxHeight: 220)
+
+        HStack {
+            Spacer()
+            Button("Cancel") {
+                showsCategoryGroupPopover = false
+            }
+            Button("Create Group") {
+                applyCategoryGroup()
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(categoryGroupSelectedCodes.count < 2
+                || categoryGroupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    @ViewBuilder
+    private func categoryGroupRegexPopoverBody(events: [MFFEvent], allSummaries: [EventSummary]) -> some View {
+        let preview = regexMatchPreview(sourceCode: categoryRegexSourceCode, pattern: categoryRegexPattern, events: events)
+        let patternIsValid = !categoryRegexPattern.isEmpty && preview != nil
+
+        Text("Sub-selects the events of ONE code whose description matches a pattern into a new category, in addition to that event's own category.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        Text("Source code")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+
+        Picker("Source code", selection: $categoryRegexSourceCode) {
+            Text("Choose a code…").tag("")
+            ForEach(allSummaries) { summary in
+                Text("\(summary.code) — \(summary.count) events").tag(summary.code)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+
+        Text("Pattern (applied to description field)")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+        TextField("e.g. cond=(\\d+)_correct", text: $categoryRegexPattern)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(.body, design: .monospaced))
+
+        if categoryRegexSourceCode.isEmpty {
+            Text("Choose a source code above.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if !categoryRegexPattern.isEmpty {
+            if let preview {
+                HStack(spacing: 6) {
+                    Image(systemName: preview.matched > 0 ? "checkmark.circle.fill" : "exclamationmark.circle")
+                        .foregroundStyle(preview.matched > 0 ? .green : .orange)
+                    Text("\(preview.matched) of \(preview.total) descriptions match")
+                        .font(.caption)
+                }
+                if !preview.samples.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(preview.samples, id: \.self) { sample in
+                            Text(sample)
+                                .font(.system(.caption2, design: .monospaced))
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                }
+            } else {
+                Label("Invalid regular expression", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+
+        TextField("New category name", text: $categoryGroupName)
+            .textFieldStyle(.roundedBorder)
+
+        HStack {
+            Spacer()
+            Button("Cancel") {
+                showsCategoryGroupPopover = false
+            }
+            Button("Create Category") {
+                applyCategoryRegexRule()
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(categoryRegexSourceCode.isEmpty
+                || !patternIsValid
+                || categoryGroupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    /// `nil` means the pattern doesn't compile as a regex; otherwise the match
+    /// count against `sourceCode`'s events and up to 2 sample descriptions.
+    private func regexMatchPreview(
+        sourceCode: String,
+        pattern: String,
+        events: [MFFEvent]
+    ) -> (matched: Int, total: Int, samples: [String])? {
+        guard !sourceCode.isEmpty, !pattern.isEmpty else { return nil }
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let codeEvents = events.filter { $0.code == sourceCode }
+        let matched = codeEvents.filter { event in
+            guard let description = event.eventDescription else { return false }
+            return regex.firstMatch(in: description, range: NSRange(description.startIndex..., in: description)) != nil
+        }
+        let samples = matched.prefix(2).compactMap(\.eventDescription)
+        return (matched.count, codeEvents.count, Array(samples))
     }
 
     /// Creates a pooled group — each member code keeps its own category (set
@@ -685,6 +811,23 @@ extension WaveformView {
         }
         showsCategoryGroupPopover = false
         categoryGroupSelectedCodes.removeAll()
+        categoryGroupName = ""
+    }
+
+    /// Creates a regex sub-selection rule — see `CategoryRegexRule`. Unlike
+    /// `applyCategoryGroup`, the source code does NOT need to already be in
+    /// `selectedEventCodes`; `psaBuildJob`/`makeBuildJob` pull in its events
+    /// regardless so the regex-matched subset can be evaluated on its own.
+    func applyCategoryRegexRule() {
+        let name = categoryGroupName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pattern = categoryRegexPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !pattern.isEmpty, !categoryRegexSourceCode.isEmpty,
+              (try? NSRegularExpression(pattern: pattern)) != nil else { return }
+        let rule = CategoryRegexRule(sourceCode: categoryRegexSourceCode, pattern: pattern, categoryName: name)
+        epoching.categoryRegexRules[rule.id.uuidString] = rule
+        showsCategoryGroupPopover = false
+        categoryRegexSourceCode = ""
+        categoryRegexPattern = ""
         categoryGroupName = ""
     }
 
@@ -771,6 +914,55 @@ extension WaveformView {
         )
     }
 
+    /// A row for a regex sub-selection rule, styled like `psaCategoryGroupRow`
+    /// so it sits in the same list — including the same count column, computed
+    /// by re-running the rule's pattern against `sourceCode`'s current events
+    /// (cheap: a handful of codes, not the whole recording).
+    func psaCategoryRegexRuleRow(ruleID: String, events: [MFFEvent]) -> some View {
+        let rule = epoching.categoryRegexRules[ruleID]
+        let matchCount = rule.flatMap {
+            regexMatchPreview(sourceCode: $0.sourceCode, pattern: $0.pattern, events: events)?.matched
+        } ?? 0
+
+        return HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "text.magnifyingglass")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(rule?.categoryName ?? "")
+                        .font(.system(.body, design: .monospaced).weight(.semibold))
+                    Text(rule?.sourceCode ?? "")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 150, alignment: .leading)
+
+            Text("\(matchCount)")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
+
+            Text(rule?.pattern ?? "")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(minWidth: 170, alignment: .leading)
+                .help("Regex sub-selection — matching events are filed under this category in addition to their own.")
+
+            Spacer(minLength: 0)
+
+            Button {
+                epoching.categoryRegexRules.removeValue(forKey: ruleID)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Remove this rule.")
+        }
+    }
+
     func psaCategoryBinding(_ code: String) -> Binding<String> {
         Binding(
             get: { epoching.categoryNames[code] ?? code },
@@ -820,7 +1012,7 @@ extension WaveformView {
 
     func canApplyPSA(events: [MFFEvent]) -> Bool {
         !events.isEmpty
-            && !epoching.selectedEventCodes.isEmpty
+            && (!epoching.selectedEventCodes.isEmpty || !epoching.categoryRegexRules.isEmpty)
             && epoching.preStimulus >= 0
             && epoching.postStimulus > 0
             && selectedPSACategoriesByCode() != nil
@@ -1281,7 +1473,11 @@ extension WaveformView {
                 return nil
             }
         }
-        let events = allEvents.filter { epoching.selectedEventCodes.contains(psaSegmentValue(for: $0)) }
+        let regexSourceCodes = Set(epoching.categoryRegexRules.values.map(\.sourceCode))
+        let events = allEvents.filter {
+            let value = psaSegmentValue(for: $0)
+            return epoching.selectedEventCodes.contains(value) || regexSourceCodes.contains(value)
+        }
         guard !events.isEmpty else {
             epoching.statusMessage = epoching.segmentField == .artifact
                 ? "Select at least one artifact type."
@@ -1299,10 +1495,12 @@ extension WaveformView {
             return nil
         }
         let artifactEventsByLabel = psaArtifactEventsForRejectionByLabel(in: signal)
+        let regexRules = Array(epoching.categoryRegexRules.values)
         return PSABuildJob(
             signal: signal,
             events: events,
             categoriesBySegmentValue: categoriesBySegmentValue,
+            categoryRegexRules: regexRules,
             timingMarkersBySegmentValue: timingMarkersBySegmentValue,
             timingEventsBySegmentValue: timingEventsBySegmentValue,
             artifactEventsForRejection: artifactEventsByLabel.values.flatMap { $0 },
@@ -1311,7 +1509,7 @@ extension WaveformView {
             epochLength: epochLength,
             psaOffset: epoching.offset,
             sampleCount: sampleCount,
-            colorIndices: categoryColorIndices(for: categoriesBySegmentValue.values.flatMap { $0 }),
+            colorIndices: categoryColorIndices(for: categoriesBySegmentValue.values.flatMap { $0 } + regexRules.map(\.categoryName)),
             skipIfContainsArtifact: epoching.skipIfContainsArtifact && epoching.segmentField != .artifact,
             artifactRejectionLabel: psaArtifactRejectionLabel(),
             timingTolerance: epoching.timingTolerance,

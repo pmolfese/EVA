@@ -733,6 +733,12 @@ nonisolated struct PSABuildJob: Sendable {
     /// belongs to a pooled group carries a second entry for the group's
     /// category, producing a duplicate epoch tagged with each category.
     let categoriesBySegmentValue: [String: [String]]
+    /// Regex sub-selection rules — see `EpochingViewModel.categoryRegexRules`.
+    /// An event whose code matches a rule's `sourceCode` AND whose
+    /// `eventDescription` matches the rule's pattern gets that rule's
+    /// category IN ADDITION to whatever `categoriesBySegmentValue` gives it
+    /// (possibly nothing, if the source code itself isn't separately selected).
+    let categoryRegexRules: [CategoryRegexRule]
     let timingMarkersBySegmentValue: [String: String]
     let timingEventsBySegmentValue: [String: [MFFEvent]]
     let artifactEventsForRejection: [MFFEvent]
@@ -786,9 +792,27 @@ nonisolated struct PSABuildJob: Sendable {
             ? (artifactEventsForRejection.isEmpty ? [:] : [artifactRejectionLabel: artifactEventsForRejection])
             : artifactEventsForRejectionByLabel
 
+        // Compile each rule's pattern once, grouped by the code it applies to,
+        // rather than re-compiling per event.
+        let regexRulesByCode: [String: [(regex: NSRegularExpression, categoryName: String)]] =
+            Dictionary(grouping: categoryRegexRules, by: \.sourceCode).mapValues { rules in
+                rules.compactMap { rule in
+                    (try? NSRegularExpression(
+                        pattern: rule.pattern,
+                        options: rule.isCaseSensitive ? [] : [.caseInsensitive]
+                    )).map { ($0, rule.categoryName) }
+                }
+            }
+
         for event in events {
-            guard let categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""],
-                  !categories.isEmpty else { continue }
+            var categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""] ?? []
+            if let description = event.eventDescription, let rules = regexRulesByCode[event.code] {
+                let range = NSRange(description.startIndex..., in: description)
+                for rule in rules where rule.regex.firstMatch(in: description, range: range) != nil {
+                    categories.append(rule.categoryName)
+                }
+            }
+            guard !categories.isEmpty else { continue }
             let segmentValue: String = categoriesBySegmentValue[event.code] != nil ? event.code : (event.label ?? event.code)
             let anchorTimeSeconds: Double
             let timingMarkerValue = timingMarkersBySegmentValue[event.code] ?? timingMarkersBySegmentValue[event.label ?? ""]

@@ -23,6 +23,26 @@
 
 import SwiftUI
 
+/// One regex sub-selection rule: within `sourceCode`'s events, any whose
+/// `eventDescription` matches `pattern` get filed under `categoryName` in
+/// addition to their normal category. See `EpochingViewModel.categoryRegexRules`.
+/// Which flow the "Group…" popover is showing — pooling whole codes together,
+/// or sub-selecting one code's events by a regex on their description.
+enum CategoryGroupMode: String, CaseIterable, Identifiable {
+    case codes = "Multiple codes"
+    case regex = "Regex on description"
+
+    var id: String { rawValue }
+}
+
+struct CategoryRegexRule: Identifiable, Codable, Hashable, Sendable {
+    var id = UUID()
+    var sourceCode: String
+    var pattern: String
+    var categoryName: String
+    var isCaseSensitive: Bool = false
+}
+
 @MainActor
 @Observable
 final class EpochingViewModel {
@@ -71,6 +91,14 @@ final class EpochingViewModel {
     /// e.g. "face" = {happy, sad, angry} produces segments for "face" as well as
     /// segments for "happy"/"sad"/"angry" individually. Value = member codes.
     var categoryGroups = [String: Set<String>]()
+    /// Sub-selects a new category out of ONE event code's individual events by
+    /// matching a regex against `MFFEvent.eventDescription` (the per-event
+    /// "description" field EGI `Events_ECI` tracks populate) — finer-grained
+    /// than `categoryGroups`, which only pools whole codes together. Matching
+    /// events get the rule's category IN ADDITION to their code's own category
+    /// (and the source code doesn't need to be individually selected). Keyed by
+    /// `CategoryRegexRule.id.uuidString`.
+    var categoryRegexRules = [String: CategoryRegexRule]()
     var timingMarkerEnabledValues = Set<String>()
     var timingMarkerValuesBySegmentValue = [String: String]()
     var timingTolerance = 0.5
@@ -375,7 +403,11 @@ final class EpochingViewModel {
                 return nil
             }
         }
-        let events = sortedEvents.filter { selectedEventCodes.contains(segmentValue(for: $0)) }
+        let regexSourceCodes = Set(categoryRegexRules.values.map(\.sourceCode))
+        let events = sortedEvents.filter {
+            let value = segmentValue(for: $0)
+            return selectedEventCodes.contains(value) || regexSourceCodes.contains(value)
+        }
         guard !events.isEmpty else {
             statusMessage = segmentField == .artifact
                 ? "Select at least one artifact type."
@@ -393,10 +425,12 @@ final class EpochingViewModel {
             return nil
         }
         let skipArtifacts = skipIfContainsArtifact && segmentField != .artifact
+        let regexRules = Array(categoryRegexRules.values)
         return PSABuildJob(
             signal: signal,
             events: events,
             categoriesBySegmentValue: categoriesBySegmentValue,
+            categoryRegexRules: regexRules,
             timingMarkersBySegmentValue: timingMarkersBySegmentValue,
             timingEventsBySegmentValue: timingEventsBySegmentValue,
             artifactEventsForRejection: skipArtifacts ? artifactRejectionEvents : [],
@@ -405,7 +439,7 @@ final class EpochingViewModel {
             epochLength: epochLength,
             psaOffset: offset,
             sampleCount: sampleCount,
-            colorIndices: Self.colorIndices(for: categoriesBySegmentValue.values.flatMap { $0 }),
+            colorIndices: Self.colorIndices(for: categoriesBySegmentValue.values.flatMap { $0 } + regexRules.map(\.categoryName)),
             skipIfContainsArtifact: skipArtifacts,
             artifactRejectionLabel: "artifacts",
             timingTolerance: timingTolerance,
@@ -567,6 +601,7 @@ final class EpochingViewModel {
         selectedEventCodes.removeAll()
         categoryNames.removeAll()
         categoryGroups.removeAll()
+        categoryRegexRules.removeAll()
         timingMarkerEnabledValues.removeAll()
         timingMarkerValuesBySegmentValue.removeAll()
         skippedDefinedArtifactIDs.removeAll()

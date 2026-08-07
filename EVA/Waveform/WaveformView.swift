@@ -242,8 +242,11 @@ struct WaveformView: View {
         KeyPathComparator(\AverageSNRRow.category, order: .forward)
     ]
     @State var showsCategoryGroupPopover = false
+    @State var categoryGroupMode: CategoryGroupMode = .codes
     @State var categoryGroupName = ""
     @State var categoryGroupSelectedCodes = Set<String>()
+    @State var categoryRegexSourceCode = ""
+    @State var categoryRegexPattern = ""
     @State var isExportingMFF = false
     @State var mffExportStatusMessage: String?
     @State var recordingSessionID = UUID()
