@@ -23,9 +23,6 @@
 
 import SwiftUI
 
-/// One regex sub-selection rule: within `sourceCode`'s events, any whose
-/// `eventDescription` matches `pattern` get filed under `categoryName` in
-/// addition to their normal category. See `EpochingViewModel.categoryRegexRules`.
 /// Which flow the "Group…" popover is showing — pooling whole codes together,
 /// or sub-selecting one code's events by a regex on their description.
 enum CategoryGroupMode: String, CaseIterable, Identifiable {
@@ -35,12 +32,50 @@ enum CategoryGroupMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// One regex sub-selection rule: within `sourceCode`'s events, any whose
+/// `eventDescription` matches `pattern` get filed under `categoryName` in
+/// addition to their normal category. See `EpochingViewModel.categoryRegexRules`.
 struct CategoryRegexRule: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var sourceCode: String
     var pattern: String
+    /// May reference the pattern's capture groups as `$1`, `$2`, … — e.g.
+    /// pattern `n2_(\w+)` + this template `n2_$1` resolves per event to
+    /// `n2_nov`, `n2_rep`, etc., so one rule can fan out into several
+    /// categories instead of needing one rule per captured value.
     var categoryName: String
     var isCaseSensitive: Bool = false
+
+    /// Substitutes this rule's `$1`/`$2`/… references with `match`'s captured
+    /// substrings. A template with no `$` references (the common case) is
+    /// returned unchanged. An out-of-range or unmatched group (e.g. `$2` when
+    /// the pattern only has one capture, or an optional group that didn't
+    /// participate) is dropped rather than left as literal `$2` text.
+    func resolvedCategoryName(for match: Regex<AnyRegexOutput>.Match) -> String {
+        guard categoryName.contains("$") else { return categoryName }
+        let chars = Array(categoryName)
+        var result = ""
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "$", i + 1 < chars.count, chars[i + 1].isNumber {
+                var j = i + 1
+                var digits = ""
+                while j < chars.count, chars[j].isNumber {
+                    digits.append(chars[j])
+                    j += 1
+                }
+                if let index = Int(digits), index < match.output.count,
+                   let substring = match.output[index].substring {
+                    result += String(substring)
+                }
+                i = j
+            } else {
+                result.append(chars[i])
+                i += 1
+            }
+        }
+        return result
+    }
 }
 
 @MainActor

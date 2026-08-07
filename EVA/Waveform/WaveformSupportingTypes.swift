@@ -794,22 +794,21 @@ nonisolated struct PSABuildJob: Sendable {
 
         // Compile each rule's pattern once, grouped by the code it applies to,
         // rather than re-compiling per event.
-        let regexRulesByCode: [String: [(regex: NSRegularExpression, categoryName: String)]] =
+        let regexRulesByCode: [String: [(regex: Regex<AnyRegexOutput>, rule: CategoryRegexRule)]] =
             Dictionary(grouping: categoryRegexRules, by: \.sourceCode).mapValues { rules in
                 rules.compactMap { rule in
-                    (try? NSRegularExpression(
-                        pattern: rule.pattern,
-                        options: rule.isCaseSensitive ? [] : [.caseInsensitive]
-                    )).map { ($0, rule.categoryName) }
+                    (try? Regex(rule.pattern))
+                        .map { rule.isCaseSensitive ? $0 : $0.ignoresCase() }
+                        .map { ($0, rule) }
                 }
             }
 
         for event in events {
             var categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""] ?? []
             if let description = event.eventDescription, let rules = regexRulesByCode[event.code] {
-                let range = NSRange(description.startIndex..., in: description)
-                for rule in rules where rule.regex.firstMatch(in: description, range: range) != nil {
-                    categories.append(rule.categoryName)
+                for entry in rules {
+                    guard let match = description.firstMatch(of: entry.regex) else { continue }
+                    categories.append(entry.rule.resolvedCategoryName(for: match))
                 }
             }
             guard !categories.isEmpty else { continue }

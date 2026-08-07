@@ -700,7 +700,12 @@ extension WaveformView {
 
     @ViewBuilder
     private func categoryGroupRegexPopoverBody(events: [MFFEvent], allSummaries: [EventSummary]) -> some View {
-        let preview = regexMatchPreview(sourceCode: categoryRegexSourceCode, pattern: categoryRegexPattern, events: events)
+        let preview = regexMatchPreview(
+            sourceCode: categoryRegexSourceCode,
+            pattern: categoryRegexPattern,
+            categoryNameTemplate: categoryGroupName,
+            events: events
+        )
         let patternIsValid = !categoryRegexPattern.isEmpty && preview != nil
 
         Text("Sub-selects the events of ONE code whose description matches a pattern into a new category, in addition to that event's own category.")
@@ -740,12 +745,40 @@ extension WaveformView {
                     Text("\(preview.matched) of \(preview.total) descriptions match")
                         .font(.caption)
                 }
+                if preview.matched > 0 {
+                    let categoryNoun = preview.categories.count == 1 ? "category" : "categories"
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "square.stack.3d.up")
+                            .foregroundStyle(.secondary)
+                        Text("→ \(preview.categories.count) \(categoryNoun): \(regexCategoryListSummary(preview.categories))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if preview.categories.count == 1, categoryGroupName.contains("$") {
+                        Label("Only one category — check that the pattern has a matching capture group for $1/$2/…", systemImage: "exclamationmark.triangle")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 if !preview.samples.isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(preview.samples, id: \.self) { sample in
-                            Text(sample)
+                        ForEach(preview.samples, id: \.category) { sample in
+                            HStack(spacing: 4) {
+                                Text(sample.description)
+                                Text("→")
+                                    .foregroundStyle(.secondary)
+                                Text(sample.category)
+                                    .fontWeight(.semibold)
+                            }
+                            .font(.system(.caption2, design: .monospaced))
+                            .lineLimit(1)
+                        }
+                        if preview.categories.count > preview.samples.count {
+                            Text("+ \(preview.categories.count - preview.samples.count) more categor\(preview.categories.count - preview.samples.count == 1 ? "y" : "ies")")
                                 .font(.system(.caption2, design: .monospaced))
-                                .lineLimit(1)
+                                .foregroundStyle(.secondary)
                         }
                     }
                     .padding(6)
@@ -759,8 +792,9 @@ extension WaveformView {
             }
         }
 
-        TextField("New category name", text: $categoryGroupName)
+        TextField("New category name (e.g. \"emotional\" or \"n2_$1\")", text: $categoryGroupName)
             .textFieldStyle(.roundedBorder)
+            .help("Use $1, $2, … to reference the pattern's capture groups — one rule then fans out into a category per captured value instead of needing a separate rule for each.")
 
         HStack {
             Spacer()
@@ -777,22 +811,48 @@ extension WaveformView {
         }
     }
 
+    /// "2 categories: n2_nov, n2_rep" / "1 category: n2_" / truncates past 6
+    /// with a "+N more" tail so a high-cardinality capture group doesn't blow
+    /// out the popover or the row.
+    private func regexCategoryListSummary(_ categories: [String]) -> String {
+        let shown = categories.prefix(6).joined(separator: ", ")
+        let suffix = categories.count > 6 ? ", +\(categories.count - 6) more" : ""
+        return shown + suffix
+    }
+
     /// `nil` means the pattern doesn't compile as a regex; otherwise the match
-    /// count against `sourceCode`'s events and up to 2 sample descriptions.
+    /// count against `sourceCode`'s events, the full distinct set of
+    /// categories this rule would actually produce, and ONE example
+    /// (description → resolved category) per distinct category — not just
+    /// the first 2 raw matches, which can all collapse onto the same category
+    /// and hide the fan-out you're trying to verify. Resolves
+    /// `categoryNameTemplate`'s `$1`/`$2`/… references the same way
+    /// `buildEpochs` does, so a missing capture group (everything collapsing
+    /// into one category) is visible before you click Create.
     private func regexMatchPreview(
         sourceCode: String,
         pattern: String,
+        categoryNameTemplate: String,
         events: [MFFEvent]
-    ) -> (matched: Int, total: Int, samples: [String])? {
+    ) -> (matched: Int, total: Int, samples: [(description: String, category: String)], categories: [String])? {
         guard !sourceCode.isEmpty, !pattern.isEmpty else { return nil }
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        guard let regex = try? Regex(pattern).ignoresCase() else { return nil }
+        let rule = CategoryRegexRule(sourceCode: sourceCode, pattern: pattern, categoryName: categoryNameTemplate)
         let codeEvents = events.filter { $0.code == sourceCode }
-        let matched = codeEvents.filter { event in
-            guard let description = event.eventDescription else { return false }
-            return regex.firstMatch(in: description, range: NSRange(description.startIndex..., in: description)) != nil
+        var matchedCount = 0
+        var exampleByCategory: [String: String] = [:]
+        for event in codeEvents {
+            guard let description = event.eventDescription,
+                  let match = description.firstMatch(of: regex) else { continue }
+            matchedCount += 1
+            let category = rule.resolvedCategoryName(for: match)
+            if exampleByCategory[category] == nil {
+                exampleByCategory[category] = description
+            }
         }
-        let samples = matched.prefix(2).compactMap(\.eventDescription)
-        return (matched.count, codeEvents.count, Array(samples))
+        let categories = exampleByCategory.keys.sorted()
+        let samples = categories.prefix(8).map { (exampleByCategory[$0] ?? "", $0) }
+        return (matchedCount, codeEvents.count, Array(samples), categories)
     }
 
     /// Creates a pooled group — each member code keeps its own category (set
@@ -822,7 +882,7 @@ extension WaveformView {
         let name = categoryGroupName.trimmingCharacters(in: .whitespacesAndNewlines)
         let pattern = categoryRegexPattern.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !pattern.isEmpty, !categoryRegexSourceCode.isEmpty,
-              (try? NSRegularExpression(pattern: pattern)) != nil else { return }
+              (try? Regex(pattern)) != nil else { return }
         let rule = CategoryRegexRule(sourceCode: categoryRegexSourceCode, pattern: pattern, categoryName: name)
         epoching.categoryRegexRules[rule.id.uuidString] = rule
         showsCategoryGroupPopover = false
@@ -920,9 +980,16 @@ extension WaveformView {
     /// (cheap: a handful of codes, not the whole recording).
     func psaCategoryRegexRuleRow(ruleID: String, events: [MFFEvent]) -> some View {
         let rule = epoching.categoryRegexRules[ruleID]
-        let matchCount = rule.flatMap {
-            regexMatchPreview(sourceCode: $0.sourceCode, pattern: $0.pattern, events: events)?.matched
-        } ?? 0
+        let preview = rule.flatMap {
+            regexMatchPreview(
+                sourceCode: $0.sourceCode,
+                pattern: $0.pattern,
+                categoryNameTemplate: $0.categoryName,
+                events: events
+            )
+        }
+        let matchCount = preview?.matched ?? 0
+        let categoryCount = preview?.categories.count ?? 0
 
         return HStack(spacing: 12) {
             HStack(spacing: 6) {
@@ -943,12 +1010,20 @@ extension WaveformView {
                 .monospacedDigit()
                 .frame(width: 44, alignment: .trailing)
 
-            Text(rule?.pattern ?? "")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(minWidth: 170, alignment: .leading)
-                .help("Regex sub-selection — matching events are filed under this category in addition to their own.")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(rule?.pattern ?? "")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if let rule, rule.categoryName.contains("$"), let categories = preview?.categories, !categories.isEmpty {
+                    Text("→ \(regexCategoryListSummary(categories))")
+                        .font(.caption2)
+                        .foregroundStyle(categoryCount <= 1 ? .orange : .secondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(minWidth: 170, alignment: .leading)
+            .help("Regex sub-selection — matching events are filed under this category in addition to their own.")
 
             Spacer(minLength: 0)
 
