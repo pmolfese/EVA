@@ -254,6 +254,7 @@ struct PSABuildJobEpochRejectionTests {
             signal: signal,
             events: events,
             categoriesBySegmentValue: ["stim": ["stim"]],
+            categoryRegexRules: [],
             timingMarkersBySegmentValue: [:],
             timingEventsBySegmentValue: [:],
             artifactEventsForRejection: [],

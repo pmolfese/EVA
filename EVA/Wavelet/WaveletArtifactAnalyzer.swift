@@ -104,6 +104,11 @@ nonisolated struct WaveletArtifactExplorerConfiguration: Sendable {
     var mergeWindowSeconds: Double
     var minimumDurationSeconds: Double
     var maximumCandidates: Int
+    /// Runs an extra full-rate pass over the finest levels so muscle/EMG and
+    /// other fast transients — which sit above the downsampled pass's Nyquist
+    /// and are otherwise invisible to it — still get found. Costs roughly a
+    /// second scan.
+    var detectsFastArtifacts: Bool = false
 }
 
 nonisolated struct WaveletArtifactExplorerProgress: Sendable {
@@ -119,6 +124,11 @@ nonisolated struct WaveletArtifactExplorerResult: Sendable {
     var effectiveSamplingRate: Double
     var candidateThreshold: Double
     var analyzedDurationSeconds: Double
+    /// Seconds at each end of the recording that the scan deliberately does
+    /// not report candidates in — the transform's circular boundary makes
+    /// coefficients there unreliable. Surfaced so "nothing found at the very
+    /// start" reads as out of scope rather than as a clean result.
+    var edgeMarginSeconds: Double = 0
 }
 
 /// Cross-channel spatial pattern of a candidate, classified from which
@@ -136,6 +146,46 @@ nonisolated enum WaveletArtifactType: String, Sendable {
     case channelLocal = "Channel-local"
     case movement = "Movement"
     case unclassified = "Unclassified"
+}
+
+/// Channel groups used to classify a merged event's spatial pattern.
+/// `ocular` reuses the same curated per-net-geometry channel table as
+/// `EyeArtifactThresholdDetector` (consistent with the rest of the app,
+/// rather than a second hand-picked list). `lateral` has no existing table,
+/// so it's derived geometrically from `sensorLayout.xml`: the most
+/// laterally-displaced channels, a reasonable proxy for temporal/frontal
+/// muscle-prone sites when no montage-specific table exists.
+///
+/// Injectable into `explore(in:configuration:channelRoles:)` so tests (whose
+/// synthetic signals have no `sensorLayout.xml` on disk, and would otherwise
+/// always get an empty `lateral` set) can drive classification directly.
+nonisolated struct WaveletChannelRoles: Sendable {
+    var ocular: Set<Int>
+    var lateral: Set<Int>
+
+    init(ocular: Set<Int>, lateral: Set<Int>) {
+        self.ocular = ocular
+        self.lateral = lateral
+    }
+
+    static func resolve(for signal: MFFSignalData) -> WaveletChannelRoles {
+        let layout = SensorLayout.load(fromPackageContaining: signal.signalURL)
+        let ocularIndices = EyeArtifactThresholdDetector.autoOcularChannelIndices(
+            kind: .blink,
+            channelCount: signal.numberOfChannels,
+            sensorLayoutName: layout?.name
+        )
+
+        var lateralIndices: Set<Int> = []
+        if let positions = layout?.positions, positions.count >= 4 {
+            let lateralities = positions.map { abs($0.x) }.sorted()
+            let cutoffIndex = min(Int(Double(lateralities.count) * 0.7), lateralities.count - 1)
+            let cutoff = lateralities[cutoffIndex]
+            lateralIndices = Set(positions.filter { abs($0.x) >= cutoff }.map(\.channelIndex))
+        }
+
+        return WaveletChannelRoles(ocular: Set(ocularIndices), lateral: lateralIndices)
+    }
 }
 
 nonisolated struct WaveletArtifactCandidate: Identifiable, Sendable {
@@ -209,7 +259,8 @@ nonisolated enum WaveletArtifactAnalyzer {
             waveletFamily: .bior44,
             thresholdRule: .hard,
             thresholdModel: .robustUniversal,
-            effectiveSamplingRate: effectiveRate
+            effectiveSamplingRate: effectiveRate,
+            retention: .full
         )
         return featureSummary(from: data, effectiveSamplingRate: effectiveRate)
     }
@@ -254,7 +305,8 @@ nonisolated enum WaveletArtifactAnalyzer {
             waveletFamily: .bior44,
             thresholdRule: .hard,
             thresholdModel: .robustUniversal,
-            effectiveSamplingRate: effectiveRate
+            effectiveSamplingRate: effectiveRate,
+            retention: .full
         )
         let summary = featureSummary(from: waveletData, effectiveSamplingRate: effectiveRate)
         let exemplar = exemplarWindow(
@@ -319,6 +371,7 @@ nonisolated enum WaveletArtifactAnalyzer {
     static func explore(
         in signal: MFFSignalData,
         configuration: WaveletArtifactExplorerConfiguration,
+        channelRoles: WaveletChannelRoles? = nil,
         progress: (@Sendable (WaveletArtifactExplorerProgress) -> Void)? = nil
     ) -> WaveletArtifactExplorerResult {
         func report(_ fraction: Double, _ title: String, _ detail: String) {
@@ -361,82 +414,76 @@ nonisolated enum WaveletArtifactAnalyzer {
             "Using \(channels.count) channels, \(waveletWorkerCount(for: channels.count)) wavelet workers, \(String(format: "%.1f", effectiveRate)) Hz effective sampling, \(configuration.cleaningMode.rawValue), intensity \(String(format: "%.2f", configuration.intensity)), \(configuration.waveletFamily.rawValue), \(configuration.thresholdModel.rawValue), \(configuration.thresholdRule.rawValue.lowercased()) thresholding, \(levelCount) levels, and a \(String(format: "%.2f", configuration.thresholdScale))x effective coefficient gate."
         )
 
-        let data = prepareChannels(
+        report(0.10, "Resolving channel roles", "Loading net geometry to weight ocular/lateral channel groups for artifact-type classification.")
+        let roles = channelRoles ?? WaveletChannelRoles.resolve(for: signal)
+
+        let primary = scanPass(
             signal: signal,
-            channelIndices: channels,
+            channels: channels,
+            configuration: configuration,
             decimation: decimation,
             levelCount: levelCount,
-            thresholdScale: configuration.thresholdScale,
-            waveletFamily: configuration.waveletFamily,
-            thresholdRule: configuration.thresholdRule,
-            thresholdModel: configuration.thresholdModel,
-            effectiveSamplingRate: effectiveRate
+            roles: roles,
+            sampleCount: sampleCount
         ) { completed, channelIndex, total in
             let denominator = max(total, 1)
-            let fraction = 0.08 + 0.48 * (Double(completed) / Double(denominator))
+            let fraction = 0.12 + 0.44 * (Double(completed) / Double(denominator))
             report(
                 fraction,
                 "Finished Ch \(channelIndex + 1)",
-                "Completed \(completed) of \(total) channel decompositions using \(waveletWorkerCount(for: total)) workers: downsampling, demeaning, applying \(configuration.waveletFamily.rawValue) smoothing, computing \(levelCount) undecimated detail levels, and retaining \(configuration.thresholdModel.rawValue) outlier coefficients."
+                "Completed \(completed) of \(total) channel decompositions using \(waveletWorkerCount(for: total)) workers: downsampling, demeaning, applying \(configuration.waveletFamily.rawValue) wavelet filters, computing \(levelCount) undecimated detail levels, and retaining \(configuration.thresholdModel.rawValue) outlier coefficients."
             )
         }
-        report(0.58, "Summarizing wavelet evidence", "Aggregating artifact-energy fractions across channels and levels.")
 
-        let summary = featureSummary(from: data, effectiveSamplingRate: effectiveRate)
-        let minimumDurationSamples = max(Int((configuration.minimumDurationSeconds * effectiveRate).rounded()), 1)
-        let mergeSamples = max(Int((configuration.mergeWindowSeconds * effectiveRate).rounded()), 1)
-        let perChannelWindowSamples = max(Int((localThresholdWindowSeconds * effectiveRate).rounded()), 64)
+        let summary = primary.summary
+        let representativeThreshold = primary.representativeThreshold
+        var candidates = primary.candidates
 
-        report(
-            0.66,
-            "Scoring each channel locally",
-            "Computing a windowed burst threshold per channel — instead of one whole-recording cutoff — so quiet and noisy stretches each get their own baseline."
-        )
-        let perChannelRanges = data.map { channel in
-            (
-                channel: channel,
-                ranges: channelCandidateRanges(
-                    for: channel,
-                    minimumDurationSamples: minimumDurationSamples,
-                    windowSamples: perChannelWindowSamples
-                )
+        // Optional second pass at the recording's own rate. The primary pass
+        // downsamples, which puts fast transients (EMG/muscle, electrode
+        // pops) above its Nyquist and out of reach entirely — this pass keeps
+        // full bandwidth but only decomposes the finest levels, since it
+        // exists purely to catch what the primary pass can no longer see.
+        if configuration.detectsFastArtifacts, decimation > 1 {
+            let fastLevelCount = fastPassLevelCount(samplingRate: signal.samplingRate, sampleCount: sampleCount)
+            report(
+                0.62,
+                "Second pass for fast artifacts",
+                "Rescanning at the full \(String(format: "%.0f", signal.samplingRate)) Hz across \(fastLevelCount) fine levels to catch muscle/EMG transients above the \(String(format: "%.0f", effectiveRate / 2)) Hz limit of the primary pass."
             )
-        }
-        let representativeThreshold = medianPositive(
-            data.map { Double(localBurstThreshold($0.energySalience)) },
-            fallback: 0
-        )
-
-        report(0.76, "Resolving channel roles", "Loading net geometry to weight ocular/lateral channel groups for artifact-type classification.")
-        let roles = ChannelRoleSets.resolve(for: signal)
-
-        report(
-            0.84,
-            "Merging bursts across channels",
-            "Grouping per-channel bursts within \(mergeSamples) samples of each other and classifying the resulting spatial pattern (ocular / muscle / channel-local / movement)."
-        )
-        let events = mergeChannelCandidates(perChannelRanges, mergeSamples: mergeSamples)
-        let ranked = events.sorted {
-            if $0.peakValue == $1.peakValue {
-                return $0.peak < $1.peak
+            let fast = scanPass(
+                signal: signal,
+                channels: channels,
+                configuration: configuration,
+                decimation: 1,
+                levelCount: fastLevelCount,
+                roles: roles,
+                sampleCount: sampleCount
+            ) { completed, channelIndex, total in
+                let denominator = max(total, 1)
+                let fraction = 0.64 + 0.22 * (Double(completed) / Double(denominator))
+                report(fraction, "Fast pass Ch \(channelIndex + 1)", "Completed \(completed) of \(total) full-rate channel decompositions.")
             }
-            return $0.peakValue > $1.peakValue
+            let beforeMerge = candidates.count
+            candidates = mergeCandidateLists(
+                candidates,
+                fast.candidates,
+                samplingRate: signal.samplingRate,
+                mergeWindowSeconds: configuration.mergeWindowSeconds
+            )
+            report(
+                0.88,
+                "Combining passes",
+                "Added \(max(candidates.count - beforeMerge, 0)) fast-artifact candidates the downsampled pass could not represent."
+            )
         }
-        .prefix(max(configuration.maximumCandidates, 1))
 
-        let candidates = buildExplorerCandidates(
-            from: Array(ranked),
-            sampleCount: sampleCount,
-            samplingRate: signal.samplingRate,
-            decimation: decimation,
-            levelCount: levelCount,
-            roles: roles
-        )
+        candidates = rankedCandidates(candidates, limit: max(configuration.maximumCandidates, 1))
 
         report(
             0.94,
             "Ranking artifact candidates",
-            "Sorting \(candidates.count) candidate bursts by peak multichannel wavelet score and preserving peak channel/level/type metadata."
+            "Sorting \(candidates.count) candidate bursts by anomaly strength (sigmas above each channel's own local baseline) and preserving peak channel/level/type metadata."
         )
         report(
             1.0,
@@ -446,7 +493,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return WaveletArtifactExplorerResult(
             summary: summary,
             candidates: candidates,
-            channelCount: data.count,
+            channelCount: summary.channelCount,
             effectiveSamplingRate: effectiveRate,
             candidateThreshold: representativeThreshold,
             analyzedDurationSeconds: Double(sampleCount) / signal.samplingRate
@@ -497,7 +544,8 @@ nonisolated enum WaveletArtifactAnalyzer {
             waveletFamily: configuration.waveletFamily,
             thresholdRule: configuration.thresholdRule,
             thresholdModel: configuration.thresholdModel,
-            effectiveSamplingRate: effectiveRate
+            effectiveSamplingRate: effectiveRate,
+            retention: .goodness
         ) { completed, channelIndex, total in
             report(
                 0.06 + 0.74 * Double(completed) / Double(max(total, 1)),
@@ -636,12 +684,35 @@ nonisolated enum WaveletArtifactAnalyzer {
     private struct ChannelWaveletData {
         var channelIndex: Int
         var samples: [Float]
+        /// Empty unless `ChannelDataRetention.perLevelDetails` was requested —
+        /// see that type for why.
         var details: [[Float]]
         var artifactDetails: [[Float]]
+        /// Empty unless `ChannelDataRetention.signedSalience` was requested.
         var signedSalience: [Float]
         var energySalience: [Float]
+        /// Per-sample dominant (1-based) level, kept as a byte map so the
+        /// Explorer can report a candidate's dominant level without retaining
+        /// every level's full coefficient array.
+        var dominantLevels: [UInt8]
         var totalEnergyByLevel: [Double]
         var artifactEnergyByLevel: [Double]
+    }
+
+    /// Which per-channel intermediates to hold on to. At the Explorer's
+    /// working scale — 256 channels x 10 min x 500 Hz x ~10 levels — keeping
+    /// `details` and `artifactDetails` for every channel is about 24 MB per
+    /// channel, ~6 GB across the net, which is a hard failure well before
+    /// speed matters. The Explorer only needs aggregate salience plus each
+    /// sample's dominant level, so it asks for neither; template matching
+    /// (`detect`) genuinely needs the full arrays and asks for both.
+    private struct ChannelDataRetention {
+        var perLevelDetails: Bool
+        var signedSalience: Bool
+
+        static let full = ChannelDataRetention(perLevelDetails: true, signedSalience: true)
+        static let explorer = ChannelDataRetention(perLevelDetails: false, signedSalience: false)
+        static let goodness = ChannelDataRetention(perLevelDetails: false, signedSalience: true)
     }
 
     private struct ExemplarWindow {
@@ -667,6 +738,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         thresholdRule: WaveletCleaningThresholdRule,
         thresholdModel: WaveletCleaningThresholdModel,
         effectiveSamplingRate: Double,
+        retention: ChannelDataRetention,
         progress: ((Int, Int, Int) -> Void)? = nil
     ) -> [ChannelWaveletData] {
         guard !channelIndices.isEmpty else { return [] }
@@ -682,7 +754,8 @@ nonisolated enum WaveletArtifactAnalyzer {
                     waveletFamily: waveletFamily,
                     thresholdRule: thresholdRule,
                     thresholdModel: thresholdModel,
-                    effectiveSamplingRate: effectiveSamplingRate
+                    effectiveSamplingRate: effectiveSamplingRate,
+                    retention: retention
                 )
                 progress?(offset + 1, channelIndex, channelIndices.count)
                 return data
@@ -707,7 +780,8 @@ nonisolated enum WaveletArtifactAnalyzer {
                     waveletFamily: waveletFamily,
                     thresholdRule: thresholdRule,
                     thresholdModel: thresholdModel,
-                    effectiveSamplingRate: effectiveSamplingRate
+                    effectiveSamplingRate: effectiveSamplingRate,
+                    retention: retention
                 )
 
                 resultLock.lock()
@@ -740,7 +814,8 @@ nonisolated enum WaveletArtifactAnalyzer {
         waveletFamily: WaveletReductionFamily,
         thresholdRule: WaveletCleaningThresholdRule,
         thresholdModel: WaveletCleaningThresholdModel,
-        effectiveSamplingRate: Double
+        effectiveSamplingRate: Double,
+        retention: ChannelDataRetention
     ) -> ChannelWaveletData? {
         guard signal.data.indices.contains(channelIndex) else { return nil }
         let samples = downsampleAndDemean(signal.data[channelIndex], by: decimation)
@@ -754,8 +829,12 @@ nonisolated enum WaveletArtifactAnalyzer {
             thresholdModel: thresholdModel,
             effectiveSamplingRate: effectiveSamplingRate
         )
-        var signedSalience = [Float](repeating: 0, count: samples.count)
+        var signedSalience = retention.signedSalience
+            ? [Float](repeating: 0, count: samples.count)
+            : []
         var energySalience = [Float](repeating: 0, count: samples.count)
+        var dominantLevels = [UInt8](repeating: 0, count: samples.count)
+        var dominantMagnitude = [Float](repeating: 0, count: samples.count)
         var totalEnergyByLevel = [Double](repeating: 0, count: decomposition.details.count)
         var artifactEnergyByLevel = [Double](repeating: 0, count: decomposition.details.count)
 
@@ -767,18 +846,26 @@ nonisolated enum WaveletArtifactAnalyzer {
                 let artifactValue = Double(artifact[sample])
                 totalEnergyByLevel[level] += detailValue * detailValue
                 artifactEnergyByLevel[level] += artifactValue * artifactValue
-                signedSalience[sample] += artifact[sample]
-                energySalience[sample] += abs(artifact[sample])
+                let magnitude = abs(artifact[sample])
+                if retention.signedSalience {
+                    signedSalience[sample] += artifact[sample]
+                }
+                energySalience[sample] += magnitude
+                if magnitude > dominantMagnitude[sample] {
+                    dominantMagnitude[sample] = magnitude
+                    dominantLevels[sample] = UInt8(truncatingIfNeeded: level + 1)
+                }
             }
         }
 
         return ChannelWaveletData(
             channelIndex: channelIndex,
             samples: samples,
-            details: decomposition.details,
-            artifactDetails: decomposition.artifactDetails,
+            details: retention.perLevelDetails ? decomposition.details : [],
+            artifactDetails: retention.perLevelDetails ? decomposition.artifactDetails : [],
             signedSalience: signedSalience,
             energySalience: energySalience,
+            dominantLevels: dominantLevels,
             totalEnergyByLevel: totalEnergyByLevel,
             artifactEnergyByLevel: artifactEnergyByLevel
         )
@@ -831,21 +918,11 @@ nonisolated enum WaveletArtifactAnalyzer {
         // of any real recording, not a detection compromise anywhere else.
         let detrended = removeLinearTrend(samples)
         let bank = waveletFamily.filterBank
-        let maxDilation = 1 << max(levelCount - 1, 0)
-        let maxFilterLength = max(bank.decompositionLowPass.count, bank.decompositionHighPass.count)
-        // Also covers the group-delay shift applied below (deepest level's
-        // accumulated low-pass delay plus that level's own high-pass delay)
-        // so the shift's zero-filled head/tail never lands outside the
-        // suppressed margin.
-        let maxGroupDelay = (bank.decompositionLowPass.count - 1) / 2 * (maxDilation - 1)
-            + (bank.decompositionHighPass.count - 1) / 2 * maxDilation
-        // Capped at 5% of the channel rather than 50%: the margin is sized
-        // for suppressing a boundary-wrap artifact in a long continuous
-        // recording, where it's a sliver of the total. On a short snippet
-        // (e.g. a padded exemplar window for template matching) the
-        // uncapped margin can approach half the signal and swallow genuine
-        // interior content instead of just the true boundary.
-        let edgeMarginSamples = min((maxFilterLength - 1) * maxDilation + maxGroupDelay, detrended.count / 20)
+        let edgeMarginSamples = edgeMargin(
+            family: waveletFamily,
+            levelCount: levelCount,
+            sampleCount: detrended.count
+        )
         let transform = WaveletTransform(bank: bank)
         let decomposition = transform.forwardSWT(detrended.map(Double.init), levels: levelCount)
 
@@ -968,31 +1045,7 @@ nonisolated enum WaveletArtifactAnalyzer {
             start += stride
         }
 
-        guard centers.count > 1 else {
-            return [Float](repeating: centerValues.first ?? 0, count: n)
-        }
-
-        var result = [Float](repeating: 0, count: n)
-        var segment = 0
-        for index in 0..<n {
-            while segment < centers.count - 2, index > centers[segment + 1] {
-                segment += 1
-            }
-            let leftCenter = centers[segment]
-            let rightCenter = centers[segment + 1]
-            let leftValue = centerValues[segment]
-            let rightValue = centerValues[segment + 1]
-            if index <= leftCenter {
-                result[index] = leftValue
-            } else if index >= rightCenter {
-                result[index] = rightValue
-            } else {
-                let span = Float(rightCenter - leftCenter)
-                let weight = span > 0 ? Float(index - leftCenter) / span : 0
-                result[index] = leftValue * (1 - weight) + rightValue * weight
-            }
-        }
-        return result
+        return interpolatedCurve(centerValues, centers: centers, count: n)
     }
 
     private static func thresholdCoefficient(
@@ -1047,7 +1100,7 @@ nonisolated enum WaveletArtifactAnalyzer {
     }
 
     private static func robustSigma(_ values: [Float]) -> Float {
-        let stride = max(values.count / 4_000, 1)
+        let stride = max(values.count / robustStatisticSampleCap, 1)
         var absValues: [Float] = []
         absValues.reserveCapacity(values.count / stride + 1)
         for index in Swift.stride(from: 0, to: values.count, by: stride) {
@@ -1492,7 +1545,12 @@ nonisolated enum WaveletArtifactAnalyzer {
         var start: Int
         var end: Int
         var peak: Int
+        /// Raw salience at the peak, in the channel's own units.
         var peakValue: Float
+        /// Sigmas above that channel's local median at the peak. Unlike
+        /// `peakValue` this is comparable across channels, so ranking with it
+        /// doesn't just surface whichever channels run hottest.
+        var peakScore: Float
     }
 
     private struct MergedArtifactEvent {
@@ -1500,41 +1558,145 @@ nonisolated enum WaveletArtifactAnalyzer {
         var end: Int
         var peak: Int
         var peakValue: Float
+        var peakScore: Float
         var peakChannelIndex: Int
         var peakLevel: Int
         var contributingChannels: Set<Int>
     }
 
-    /// Channel groups used to classify a merged event's spatial pattern.
-    /// `ocular` reuses the same curated per-net-geometry channel table as
-    /// `EyeArtifactThresholdDetector` (consistent with the rest of the app,
-    /// rather than a second hand-picked list). `lateral` has no existing
-    /// table, so it's derived geometrically from `sensorLayout.xml`: the
-    /// most laterally-displaced channels, a reasonable proxy for
-    /// temporal/frontal muscle-prone sites when no montage-specific table
-    /// exists.
-    private struct ChannelRoleSets {
-        var ocular: Set<Int>
-        var lateral: Set<Int>
+    private struct ScanPassResult {
+        var candidates: [WaveletArtifactCandidate]
+        var summary: WaveletArtifactFeatureSummary
+        var representativeThreshold: Double
+    }
 
-        static func resolve(for signal: MFFSignalData) -> ChannelRoleSets {
-            let channelCount = signal.numberOfChannels
-            let layout = SensorLayout.load(fromPackageContaining: signal.signalURL)
-            let ocularIndices = EyeArtifactThresholdDetector.autoOcularChannelIndices(
-                kind: .blink,
-                channelCount: channelCount,
-                sensorLayoutName: layout?.name
+    /// One complete detection pass at a given decimation and depth:
+    /// decompose every channel, find each channel's own local bursts, merge
+    /// them across channels, and classify. Factored out so the Explorer can
+    /// run it twice — once downsampled for the bulk of the recording, once at
+    /// full rate for fast transients (see `detectsFastArtifacts`).
+    private static func scanPass(
+        signal: MFFSignalData,
+        channels: [Int],
+        configuration: WaveletArtifactExplorerConfiguration,
+        decimation: Int,
+        levelCount: Int,
+        roles: WaveletChannelRoles,
+        sampleCount: Int,
+        progress: ((Int, Int, Int) -> Void)? = nil
+    ) -> ScanPassResult {
+        let effectiveRate = signal.samplingRate / Double(decimation)
+        let data = prepareChannels(
+            signal: signal,
+            channelIndices: channels,
+            decimation: decimation,
+            levelCount: levelCount,
+            thresholdScale: configuration.thresholdScale,
+            waveletFamily: configuration.waveletFamily,
+            thresholdRule: configuration.thresholdRule,
+            thresholdModel: configuration.thresholdModel,
+            effectiveSamplingRate: effectiveRate,
+            retention: .explorer,
+            progress: progress
+        )
+
+        let summary = featureSummary(from: data, effectiveSamplingRate: effectiveRate)
+        let minimumDurationSamples = max(Int((configuration.minimumDurationSeconds * effectiveRate).rounded()), 1)
+        let mergeSamples = max(Int((configuration.mergeWindowSeconds * effectiveRate).rounded()), 1)
+        let perChannelWindowSamples = max(Int((localThresholdWindowSeconds * effectiveRate).rounded()), 64)
+
+        let perChannelRanges = data.map { channel in
+            (
+                channel: channel,
+                ranges: channelCandidateRanges(
+                    for: channel,
+                    minimumDurationSamples: minimumDurationSamples,
+                    windowSamples: perChannelWindowSamples
+                )
             )
+        }
+        let representativeThreshold = medianPositive(
+            data.map { Double(burstStatistics($0.energySalience).threshold) },
+            fallback: 0
+        )
 
-            var lateralIndices: Set<Int> = []
-            if let positions = layout?.positions, positions.count >= 4 {
-                let lateralities = positions.map { abs($0.x) }.sorted()
-                let cutoffIndex = min(Int(Double(lateralities.count) * 0.7), lateralities.count - 1)
-                let cutoff = lateralities[cutoffIndex]
-                lateralIndices = Set(positions.filter { abs($0.x) >= cutoff }.map(\.channelIndex))
+        let events = mergeChannelCandidates(perChannelRanges, mergeSamples: mergeSamples)
+        let candidates = buildExplorerCandidates(
+            from: events,
+            sampleCount: sampleCount,
+            samplingRate: signal.samplingRate,
+            decimation: decimation,
+            levelCount: levelCount,
+            roles: roles
+        )
+
+        return ScanPassResult(
+            candidates: candidates,
+            summary: summary,
+            representativeThreshold: representativeThreshold
+        )
+    }
+
+    /// Depth for the full-rate fast pass: enough levels to reach down to
+    /// roughly 20 Hz, which brackets muscle/EMG, and no further — deeper
+    /// levels only re-cover ground the primary (downsampled) pass already
+    /// handles at a fraction of the cost.
+    private static func fastPassLevelCount(samplingRate: Double, sampleCount: Int) -> Int {
+        let lowestFrequencyOfInterest = 20.0
+        let ideal = Int(ceil(log2(max(samplingRate / (2 * lowestFrequencyOfInterest), 2))))
+        return boundedLevelCount(min(max(ideal, 3), 6), sampleCount: sampleCount)
+    }
+
+    /// Folds the fast pass's candidates into the primary list. A fast-pass
+    /// find that lands on something the primary pass already reported is the
+    /// same event seen twice, so the stronger reading wins rather than the
+    /// list carrying both.
+    private static func mergeCandidateLists(
+        _ primary: [WaveletArtifactCandidate],
+        _ additional: [WaveletArtifactCandidate],
+        samplingRate: Double,
+        mergeWindowSeconds: Double
+    ) -> [WaveletArtifactCandidate] {
+        guard !additional.isEmpty else { return primary }
+        guard !primary.isEmpty else { return additional }
+
+        let tolerance = max(mergeWindowSeconds, 0.001)
+        var combined = primary
+        for candidate in additional {
+            let overlapIndex = combined.firstIndex { existing in
+                candidate.startTimeSeconds <= existing.endTimeSeconds + tolerance
+                    && existing.startTimeSeconds <= candidate.endTimeSeconds + tolerance
             }
+            if let overlapIndex {
+                if candidate.score > combined[overlapIndex].score {
+                    combined[overlapIndex] = candidate
+                }
+            } else {
+                combined.append(candidate)
+            }
+        }
+        return combined
+    }
 
-            return ChannelRoleSets(ocular: Set(ocularIndices), lateral: lateralIndices)
+    /// Sorts by anomaly strength, applies the cap, and renumbers — ranks and
+    /// ids have to be reassigned after the two passes are combined.
+    private static func rankedCandidates(
+        _ candidates: [WaveletArtifactCandidate],
+        limit: Int
+    ) -> [WaveletArtifactCandidate] {
+        let sorted = candidates.sorted {
+            if $0.score == $1.score {
+                return $0.peakSample < $1.peakSample
+            }
+            return $0.score > $1.score
+        }
+        .prefix(limit)
+
+        return sorted.enumerated().map { offset, candidate in
+            var renumbered = candidate
+            renumbered.rank = offset + 1
+            renumbered.id = "wavelet-explorer-\(offset + 1)-\(candidate.peakSample)"
+            return renumbered
         }
     }
 
@@ -1550,7 +1712,8 @@ nonisolated enum WaveletArtifactAnalyzer {
     ) -> [ChannelCandidateRange] {
         let values = channel.energySalience
         guard !values.isEmpty else { return [] }
-        let thresholds = windowedThreshold(for: values, windowSamples: windowSamples, statistic: localBurstThreshold)
+        let model = localNoiseModel(for: values, windowSamples: windowSamples)
+        let thresholds = interpolatedCurve(model.thresholds, centers: model.centers, count: values.count)
 
         var ranges: [ChannelCandidateRange] = []
         var index = 0
@@ -1573,19 +1736,35 @@ nonisolated enum WaveletArtifactAnalyzer {
             }
 
             if end - start + 1 >= minimumDurationSamples {
-                ranges.append(ChannelCandidateRange(start: start, end: end, peak: peak, peakValue: peakValue))
+                let median = interpolated(model.medians, centers: model.centers, at: peak)
+                let sigma = interpolated(model.sigmas, centers: model.centers, at: peak)
+                let peakScore = sigma > 1e-9 ? (peakValue - median) / sigma : 0
+                ranges.append(ChannelCandidateRange(
+                    start: start,
+                    end: end,
+                    peak: peak,
+                    peakValue: peakValue,
+                    peakScore: peakScore
+                ))
             }
             index = end + 1
         }
         return ranges
     }
 
-    /// Merges per-channel candidate ranges (already sorted implicitly by
-    /// channel) into cross-channel events: any ranges from any channel that
-    /// overlap or fall within `mergeSamples` of the growing group are
-    /// combined, and every contributing channel is tracked so the merged
-    /// event's spatial footprint (single-channel vs. multi-channel, and
-    /// which channels) is available for classification.
+    /// Merges per-channel candidate ranges into cross-channel events: ranges
+    /// that overlap or fall within `mergeSamples` of the growing group are
+    /// combined into one event, so an artifact that shows up slightly offset
+    /// across channels still reads as a single occurrence.
+    ///
+    /// Contributing channels are then counted separately, and more strictly:
+    /// only channels whose own range actually reaches the event's peak (again
+    /// within `mergeSamples`) count. Proximity-based merging chains — each
+    /// absorbed range pushes the group's `end` out, letting the next one in —
+    /// so on a many-channel recording a lone real burst would otherwise
+    /// accumulate unrelated noise detections from neighbouring channels and
+    /// get misread as a widespread (movement) artifact instead of the
+    /// channel-local event it is.
     private static func mergeChannelCandidates(
         _ perChannel: [(channel: ChannelWaveletData, ranges: [ChannelCandidateRange])],
         mergeSamples: Int
@@ -1610,37 +1789,72 @@ nonisolated enum WaveletArtifactAnalyzer {
         tagged.sort { $0.range.start < $1.range.start }
 
         var events: [MergedArtifactEvent] = []
+        var groups: [[Tagged]] = []
         for item in tagged {
             if var last = events.last, item.range.start - last.end <= mergeSamples {
                 last.end = max(last.end, item.range.end)
-                last.contributingChannels.insert(item.channelIndex)
-                if item.range.peakValue > last.peakValue {
+                // Representative peak is the most *anomalous* contribution
+                // (sigmas above that channel's own local median), not the
+                // largest raw one — otherwise a merged event's reported peak
+                // channel is just whichever contributing channel runs hottest.
+                if item.range.peakScore > last.peakScore {
                     last.peakValue = item.range.peakValue
+                    last.peakScore = item.range.peakScore
                     last.peak = item.range.peak
                     last.peakChannelIndex = item.channelIndex
                     last.peakLevel = item.level
                 }
                 events[events.count - 1] = last
+                groups[groups.count - 1].append(item)
             } else {
                 events.append(MergedArtifactEvent(
                     start: item.range.start,
                     end: item.range.end,
                     peak: item.range.peak,
                     peakValue: item.range.peakValue,
+                    peakScore: item.range.peakScore,
                     peakChannelIndex: item.channelIndex,
                     peakLevel: item.level,
                     contributingChannels: [item.channelIndex]
                 ))
+                groups.append([item])
             }
+        }
+
+        // Second pass: settle which channels actually took part. A channel
+        // counts only if its own range both reaches the event's (now final)
+        // peak in time AND responded with comparable strength. Time alone is
+        // too weak a test — every channel throws the occasional
+        // barely-over-threshold noise blip, and on a high-density net some of
+        // those land near any given peak by chance, which would turn a lone
+        // electrode pop into an apparently widespread (movement) artifact.
+        // Requiring a fraction of the peak channel's score keeps genuinely
+        // weaker participants in a real widespread event (posterior channels
+        // in a blink, say) while dropping noise-level coincidences.
+        for index in events.indices {
+            let peak = events[index].peak
+            let peakScore = events[index].peakScore
+            let strengthFloor = peakScore * contributingChannelScoreFraction
+            var contributing: Set<Int> = [events[index].peakChannelIndex]
+            for item in groups[index] {
+                let reachesPeak = item.range.start - mergeSamples <= peak
+                    && item.range.end + mergeSamples >= peak
+                if reachesPeak, item.range.peakScore >= strengthFloor {
+                    contributing.insert(item.channelIndex)
+                }
+            }
+            events[index].contributingChannels = contributing
         }
         return events
     }
 
+    /// A channel must reach this fraction of the event's peak score to count
+    /// as contributing — see `mergeChannelCandidates`.
+    private static let contributingChannelScoreFraction: Float = 0.35
+
     private static func dominantLevel(in channel: ChannelWaveletData, at sample: Int) -> Int {
-        let level = channel.artifactDetails.indices.max {
-            abs(channel.artifactDetails[$0][sample]) < abs(channel.artifactDetails[$1][sample])
-        } ?? 0
-        return level + 1
+        guard channel.dominantLevels.indices.contains(sample) else { return 1 }
+        return max(Int(channel.dominantLevels[sample]), 1)
     }
 
     /// Classifies a merged event's likely artifact type from which channels
@@ -1652,11 +1866,16 @@ nonisolated enum WaveletArtifactAnalyzer {
     /// (electrode pop/bad contact) rather than a real multi-channel pattern,
     /// and anything broadband/multi-channel that fits neither weighting is
     /// left as movement/cap-shift.
-    private static func classifyArtifactType(
+    ///
+    /// Internal rather than private so its decision matrix can be tested
+    /// directly: driving every branch through `explore` would mean
+    /// synthesizing signals that land on exact wavelet levels, which tests
+    /// the transform's frequency mapping more than it tests this logic.
+    static func classifyArtifactType(
         contributingChannels: Set<Int>,
         peakLevel: Int,
         levelCount: Int,
-        roles: ChannelRoleSets
+        roles: WaveletChannelRoles
     ) -> WaveletArtifactType {
         guard contributingChannels.count > 1 else { return .channelLocal }
         guard !roles.ocular.isEmpty || !roles.lateral.isEmpty else { return .unclassified }
@@ -1685,7 +1904,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         samplingRate: Double,
         decimation: Int,
         levelCount: Int,
-        roles: ChannelRoleSets
+        roles: WaveletChannelRoles
     ) -> [WaveletArtifactCandidate] {
         events.enumerated().map { offset, event in
             let startSample = min(max(event.start * decimation, 0), max(sampleCount - 1, 0))
@@ -1703,7 +1922,7 @@ nonisolated enum WaveletArtifactAnalyzer {
                 endTimeSeconds: Double(endSample) / samplingRate,
                 peakTimeSeconds: peakTime,
                 durationSeconds: durationSeconds,
-                score: Double(event.peakValue),
+                score: Double(event.peakScore),
                 peakEnergy: Double(event.peakValue),
                 channelIndex: event.peakChannelIndex,
                 dominantLevel: event.peakLevel,
@@ -1734,15 +1953,28 @@ nonisolated enum WaveletArtifactAnalyzer {
     /// That scales with window size the right way — a real outlier has to
     /// clear a noise-calibrated bar, not merely rank near the top of
     /// whatever's in the window.
-    private static func localBurstThreshold(_ values: [Float]) -> Float {
+    /// Robust local statistics for one window of a channel's salience trace.
+    /// The threshold is deliberately NOT a percentile-rank cutoff (e.g. "top
+    /// 1.5% of this window") — a fixed local percentile always flags
+    /// *something* in every window purely by construction, artifact or not,
+    /// once you're evaluating "top X%" against a small local sample instead
+    /// of the whole recording. It's a fixed-significance (sigma-scaled)
+    /// universal threshold, the same style `coefficientThreshold` uses for
+    /// detail coefficients: a real outlier has to clear a noise-calibrated
+    /// bar, not merely rank near the top of whatever's in the window.
+    ///
+    /// `median` and `sigma` come back alongside it because the candidate
+    /// score is expressed in sigmas above the local median — deriving all
+    /// three from the one sort keeps this off the hot path.
+    private static func burstStatistics(_ values: [Float]) -> (median: Float, sigma: Float, threshold: Float) {
         let sampled = sampledFiniteValues(values).sorted()
-        guard !sampled.isEmpty else { return 0 }
+        guard !sampled.isEmpty else { return (0, 0, 0) }
         let medianValue = percentile(sampled, fraction: 0.50)
         let deviations = sampled.map { abs($0 - medianValue) }.sorted()
         let mad = percentile(deviations, fraction: 0.50)
         let sigma = mad / 0.6745
         guard sigma > 1e-9 else {
-            return medianValue + 0.0001
+            return (medianValue, 0, medianValue + 0.0001)
         }
         // `energySalience` is one-sided (sum of |coefficient| across levels,
         // never negative) and right-skewed, not Gaussian — a MAD-based sigma
@@ -1754,7 +1986,97 @@ nonisolated enum WaveletArtifactAnalyzer {
         // genuine local burst, loose enough that per-window/per-channel
         // multiple-comparisons noise stops crossing it by chance.
         let universal = sigma * Float(sqrt(2 * log(Double(max(sampled.count, 2))))) * 1.8
-        return medianValue + universal
+        return (medianValue, sigma, medianValue + universal)
+    }
+
+    /// Per-window robust noise statistics for one channel's salience trace,
+    /// sampled at window centers. The detection threshold curve and the
+    /// per-candidate score both read from this, so the expensive part
+    /// (sorting each window) happens once per channel rather than once per
+    /// quantity.
+    private struct LocalNoiseModel {
+        var centers: [Int]
+        var medians: [Float]
+        var sigmas: [Float]
+        var thresholds: [Float]
+    }
+
+    private static func localNoiseModel(for values: [Float], windowSamples: Int) -> LocalNoiseModel {
+        var model = LocalNoiseModel(centers: [], medians: [], sigmas: [], thresholds: [])
+        let n = values.count
+        guard n > 0 else { return model }
+
+        func appendWindow(from start: Int, to end: Int) {
+            let stats = burstStatistics(Array(values[start..<end]))
+            model.centers.append((start + end - 1) / 2)
+            model.medians.append(stats.median)
+            model.sigmas.append(stats.sigma)
+            model.thresholds.append(stats.threshold)
+        }
+
+        guard n > windowSamples else {
+            appendWindow(from: 0, to: n)
+            return model
+        }
+
+        let stride = max(windowSamples / 2, 1)
+        var start = 0
+        while start < n {
+            let end = min(start + windowSamples, n)
+            appendWindow(from: start, to: end)
+            if end == n { break }
+            start += stride
+        }
+        return model
+    }
+
+    /// Linearly interpolates a per-window-center quantity at one sample
+    /// index, clamping to the nearest center outside the covered span.
+    private static func interpolated(_ valuesAtCenters: [Float], centers: [Int], at index: Int) -> Float {
+        guard !valuesAtCenters.isEmpty, valuesAtCenters.count == centers.count else { return 0 }
+        guard centers.count > 1 else { return valuesAtCenters[0] }
+        if index <= centers[0] { return valuesAtCenters[0] }
+        if index >= centers[centers.count - 1] { return valuesAtCenters[valuesAtCenters.count - 1] }
+
+        var segment = 0
+        while segment < centers.count - 2, index > centers[segment + 1] {
+            segment += 1
+        }
+        let leftCenter = centers[segment]
+        let rightCenter = centers[segment + 1]
+        let span = Float(rightCenter - leftCenter)
+        guard span > 0 else { return valuesAtCenters[segment] }
+        let weight = Float(index - leftCenter) / span
+        return valuesAtCenters[segment] * (1 - weight) + valuesAtCenters[segment + 1] * weight
+    }
+
+    /// Expands a per-window-center quantity into a full per-sample curve.
+    private static func interpolatedCurve(_ valuesAtCenters: [Float], centers: [Int], count: Int) -> [Float] {
+        guard count > 0 else { return [] }
+        guard !valuesAtCenters.isEmpty else { return [Float](repeating: 0, count: count) }
+        guard centers.count > 1 else { return [Float](repeating: valuesAtCenters[0], count: count) }
+
+        var result = [Float](repeating: 0, count: count)
+        var segment = 0
+        for index in 0..<count {
+            while segment < centers.count - 2, index > centers[segment + 1] {
+                segment += 1
+            }
+            let leftCenter = centers[segment]
+            let rightCenter = centers[segment + 1]
+            let leftValue = valuesAtCenters[segment]
+            let rightValue = valuesAtCenters[segment + 1]
+            if index <= leftCenter {
+                result[index] = leftValue
+            } else if index >= rightCenter {
+                result[index] = rightValue
+            } else {
+                let span = Float(rightCenter - leftCenter)
+                let weight = span > 0 ? Float(index - leftCenter) / span : 0
+                result[index] = leftValue * (1 - weight) + rightValue * weight
+            }
+        }
+        return result
     }
 
     private static func channelBurstFraction(_ channel: ChannelWaveletData) -> Double {
@@ -1777,9 +2099,19 @@ nonisolated enum WaveletArtifactAnalyzer {
         return max(finite[lower] * (1 - weight) + finite[upper] * weight, fallback)
     }
 
+    /// Robust statistics (median, MAD) are estimated from at most this many
+    /// evenly-strided samples. These estimates get recomputed for every
+    /// window of every level of every channel, and each one sorts its
+    /// sample — at 256 channels this is the single largest cost in the scan
+    /// after the transform itself. A median from ~2000 samples carries a
+    /// standard error near 3%, far finer than the threshold needs, so the
+    /// larger caps were paying an n-log-n price for precision that never
+    /// reached the result.
+    private static let robustStatisticSampleCap = 2_000
+
     private static func sampledFiniteValues(_ values: [Float]) -> [Float] {
         guard !values.isEmpty else { return [] }
-        let stride = max(values.count / 8_000, 1)
+        let stride = max(values.count / robustStatisticSampleCap, 1)
         var sampled: [Float] = []
         sampled.reserveCapacity(values.count / stride + 1)
         for index in Swift.stride(from: 0, to: values.count, by: stride) {

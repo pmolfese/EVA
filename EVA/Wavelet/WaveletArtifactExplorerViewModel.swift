@@ -66,7 +66,12 @@ final class WaveletArtifactExplorerViewModel {
     var cleaningMode = WaveletCleaningMode.conservativeLocal
     var intensity = WaveletCleaningMode.conservativeLocal.defaultIntensity
     var channelScope = WaveletExplorerChannelScope.visibleGood
-    var downsampleRate = 250.0
+    /// 500 Hz rather than 250: the primary pass can only see content below
+    /// its own Nyquist, and 250 Hz put most muscle/EMG out of reach.
+    var downsampleRate = 500.0
+    /// Extra full-rate pass for fast transients — see
+    /// `WaveletArtifactExplorerConfiguration.detectsFastArtifacts`.
+    var detectsFastArtifacts = false
     var levelCount = 8
     var thresholdScale = 1.0
     var waveletFamily = WaveletReductionFamily.bior44

@@ -741,25 +741,59 @@ nonisolated struct WaveletTransform: Sendable {
         return Array(approx.prefix(decomposition.originalLength))
     }
 
+    /// Split into a wrap-free interior and a wrapping tail. Only samples
+    /// within one tap-reach of the end can wrap (`index + k*dilation` only
+    /// ever grows), so the modulo — two integer divisions per tap per sample
+    /// in the naive form, which dominated this loop at scan scale — is needed
+    /// for just that tail. Each output element still accumulates its taps in
+    /// the same order with the same operations, so results are bit-identical
+    /// to the straightforward version; `inverseSWT`'s perfect reconstruction
+    /// depends on that.
     private func swtStep(_ x: [Double], dilation: Int) -> (approx: [Double], detail: [Double]) {
         let n = x.count
         let lowLength = bank.decompositionLowPass.count
         let highLength = bank.decompositionHighPass.count
         var approx = [Double](repeating: 0, count: n)
         var detail = [Double](repeating: 0, count: n)
-        for index in 0..<n {
-            var sumLow = 0.0
-            for k in 0..<lowLength {
-                let idx = ((index + k * dilation) % n + n) % n
-                sumLow += bank.decompositionLowPass[k] * x[idx]
+
+        let maxReach = max(lowLength - 1, highLength - 1) * dilation
+        let interiorEnd = max(n - maxReach, 0)
+
+        x.withUnsafeBufferPointer { xp in
+            bank.decompositionLowPass.withUnsafeBufferPointer { lp in
+                bank.decompositionHighPass.withUnsafeBufferPointer { hp in
+                    approx.withUnsafeMutableBufferPointer { ap in
+                        detail.withUnsafeMutableBufferPointer { dp in
+                            for index in 0..<interiorEnd {
+                                var sumLow = 0.0
+                                for k in 0..<lowLength {
+                                    sumLow += lp[k] * xp[index + k * dilation]
+                                }
+                                var sumHigh = 0.0
+                                for k in 0..<highLength {
+                                    sumHigh += hp[k] * xp[index + k * dilation]
+                                }
+                                ap[index] = sumLow
+                                dp[index] = sumHigh
+                            }
+                            // `index` and `k * dilation` are both non-negative,
+                            // so a single modulo already lands in range.
+                            for index in interiorEnd..<n {
+                                var sumLow = 0.0
+                                for k in 0..<lowLength {
+                                    sumLow += lp[k] * xp[(index + k * dilation) % n]
+                                }
+                                var sumHigh = 0.0
+                                for k in 0..<highLength {
+                                    sumHigh += hp[k] * xp[(index + k * dilation) % n]
+                                }
+                                ap[index] = sumLow
+                                dp[index] = sumHigh
+                            }
+                        }
+                    }
+                }
             }
-            var sumHigh = 0.0
-            for k in 0..<highLength {
-                let idx = ((index + k * dilation) % n + n) % n
-                sumHigh += bank.decompositionHighPass[k] * x[idx]
-            }
-            approx[index] = sumLow
-            detail[index] = sumHigh
         }
         return (approx, detail)
     }

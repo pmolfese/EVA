@@ -633,11 +633,24 @@ extension WaveformView {
 
                     ArtifactTemplateFieldLabel(
                         title: "Downsample Hz",
-                        help: "Temporary sampling rate for exploratory scanning. Lower rates are faster and usually enough for broad artifacts."
+                        help: "Temporary sampling rate for exploratory scanning. Lower rates are faster, but the scan can only see content below half this rate — muscle/EMG needs 500 Hz or more, or the fast-artifact pass below."
                     )
                     TextField("Hz", value: $waveletExplorer.downsampleRate, format: .number.precision(.fractionLength(0)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
+                }
+
+                GridRow {
+                    ArtifactTemplateFieldLabel(
+                        title: "Fast artifacts",
+                        help: "Adds a second pass at the recording's full sampling rate over the finest levels, to catch muscle/EMG and other fast transients that sit above the downsampled pass's limit. Roughly doubles scan time."
+                    )
+                    Toggle(isOn: $waveletExplorer.detectsFastArtifacts) {
+                        Text("Second full-rate pass")
+                            .font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
+                    .frame(width: 180, alignment: .leading)
                 }
 
                 GridRow {
@@ -1197,7 +1210,8 @@ extension WaveformView {
             thresholdModel: waveletExplorer.thresholdModel,
             mergeWindowSeconds: max(waveletExplorer.mergeWindowSeconds, 0.001),
             minimumDurationSeconds: max(waveletExplorer.minimumDurationSeconds, 0.001),
-            maximumCandidates: waveletExplorer.maximumCandidates
+            maximumCandidates: waveletExplorer.maximumCandidates,
+            detectsFastArtifacts: waveletExplorer.detectsFastArtifacts
         )
 
         waveletExplorerTask?.cancel()
