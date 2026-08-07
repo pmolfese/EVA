@@ -72,6 +72,9 @@ final class WaveletArtifactExplorerViewModel {
     /// Extra full-rate pass for fast transients — see
     /// `WaveletArtifactExplorerConfiguration.detectsFastArtifacts`.
     var detectsFastArtifacts = false
+    /// Run the decomposition on the GPU — see
+    /// `WaveletArtifactExplorerConfiguration.usesGPU`.
+    var usesGPU = false
     var levelCount = 8
     var thresholdScale = 1.0
     var waveletFamily = WaveletReductionFamily.bior44

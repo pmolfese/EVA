@@ -109,6 +109,12 @@ nonisolated struct WaveletArtifactExplorerConfiguration: Sendable {
     /// and are otherwise invisible to it — still get found. Costs roughly a
     /// second scan.
     var detectsFastArtifacts: Bool = false
+    /// Runs the wavelet decomposition on the GPU via `WaveletMetalBackend`.
+    /// Falls back to the CPU silently if Metal is unavailable or the dispatch
+    /// fails. Results differ slightly from the CPU path — the GPU works in
+    /// float where the CPU uses double — so detection is equivalent, not
+    /// bit-identical.
+    var usesGPU: Bool = false
 }
 
 nonisolated struct WaveletArtifactExplorerProgress: Sendable {
@@ -434,7 +440,6 @@ nonisolated enum WaveletArtifactAnalyzer {
                 "Completed \(completed) of \(total) channel decompositions using \(waveletWorkerCount(for: total)) workers: downsampling, demeaning, applying \(configuration.waveletFamily.rawValue) wavelet filters, computing \(levelCount) undecimated detail levels, and retaining \(configuration.thresholdModel.rawValue) outlier coefficients."
             )
         }
-
         let summary = primary.summary
         let representativeThreshold = primary.representativeThreshold
         var candidates = primary.candidates
@@ -477,7 +482,6 @@ nonisolated enum WaveletArtifactAnalyzer {
                 "Added \(max(candidates.count - beforeMerge, 0)) fast-artifact candidates the downsampled pass could not represent."
             )
         }
-
         candidates = rankedCandidates(candidates, limit: max(configuration.maximumCandidates, 1))
 
         report(
@@ -602,11 +606,24 @@ nonisolated enum WaveletArtifactAnalyzer {
         return results
     }
 
-    static func cleaningPreview(
+    /// The window and channel set one preview covers. Split out from
+    /// `cleaningPreview` so a batch of previews can be planned first and their
+    /// transforms dispatched together — see `cleaningPreviews`.
+    private struct PreviewPlan {
+        var candidate: WaveletArtifactCandidate
+        var configuration: WaveletCleaningConfiguration
+        var startSample: Int
+        var endSample: Int
+        var windowSamples: Int
+        var channels: [Int]
+        var levelCount: Int
+    }
+
+    private static func previewPlan(
         in signal: MFFSignalData,
         candidate: WaveletArtifactCandidate,
         configuration: WaveletCleaningConfiguration
-    ) -> WaveletCleaningPreviewResult? {
+    ) -> PreviewPlan? {
         guard signal.samplingRate > 0,
               let sampleCount = signal.data.first?.count,
               sampleCount > 2,
@@ -620,8 +637,137 @@ nonisolated enum WaveletArtifactAnalyzer {
         let windowSamples = endSample - startSample + 1
         guard windowSamples > 2 else { return nil }
 
-        let channels = SignalSelection.validChannels(configuration.channelIndices, in: signal)
-        let levelCount = boundedLevelCount(configuration.levelCount, sampleCount: windowSamples)
+        return PreviewPlan(
+            candidate: candidate,
+            configuration: configuration,
+            startSample: startSample,
+            endSample: endSample,
+            windowSamples: windowSamples,
+            channels: SignalSelection.validChannels(configuration.channelIndices, in: signal),
+            levelCount: boundedLevelCount(configuration.levelCount, sampleCount: windowSamples)
+        )
+    }
+
+    /// Exactly what the transform consumes for one preview window, whichever
+    /// backend runs it — `reconstructedArtifactSignal` demeans before
+    /// decomposing, and `undecimatedDetails` detrends on top of that.
+    private static func previewTransformInput(_ window: [Float]) -> [Float] {
+        detrendedForTransform(demean(window))
+    }
+
+    /// Previews for several candidates at once. With `usesGPU` the wavelet
+    /// transforms for every (candidate, channel) window are grouped by window
+    /// length and dispatched together — preview windows come out nearly
+    /// uniform in practice (padding saturates at its cap for all but the
+    /// longest candidates), so this collapses to a handful of wide batches
+    /// rather than one small dispatch per preview, which would be all
+    /// round-trip overhead. Falls back to the per-preview CPU path otherwise.
+    static func cleaningPreviews(
+        in signal: MFFSignalData,
+        candidates: [WaveletArtifactCandidate],
+        configurations: [WaveletCleaningConfiguration],
+        usesGPU: Bool = false
+    ) -> [WaveletCleaningPreviewResult?] {
+        guard candidates.count == configurations.count else { return [] }
+        let plans = zip(candidates, configurations).map {
+            previewPlan(in: signal, candidate: $0, configuration: $1)
+        }
+
+        var precomputed: [Int: [Int: [[Float]]]] = [:]
+        if usesGPU, let backend = WaveletMetalBackend.shared {
+            precomputed = previewDetailsOnGPU(backend: backend, signal: signal, plans: plans)
+        }
+
+        return plans.enumerated().map { index, plan in
+            guard let plan else { return nil }
+            return cleaningPreview(in: signal, plan: plan, precomputedDetails: precomputed[index])
+        }
+    }
+
+    /// Batched GPU transforms for a set of preview plans, keyed
+    /// `[planIndex: [channelIndex: details]]`. Anything that fails is simply
+    /// absent, so those windows fall back to the CPU.
+    private static func previewDetailsOnGPU(
+        backend: WaveletMetalBackend,
+        signal: MFFSignalData,
+        plans: [PreviewPlan?]
+    ) -> [Int: [Int: [[Float]]]] {
+        struct WindowKey: Hashable {
+            var windowSamples: Int
+            var levelCount: Int
+            var family: WaveletReductionFamily
+        }
+
+        var grouped: [WindowKey: [(planIndex: Int, channelIndex: Int, input: [Float])]] = [:]
+        for (planIndex, plan) in plans.enumerated() {
+            guard let plan else { continue }
+            let key = WindowKey(
+                windowSamples: plan.windowSamples,
+                levelCount: plan.levelCount,
+                family: plan.configuration.waveletFamily
+            )
+            for channelIndex in plan.channels where signal.data.indices.contains(channelIndex) {
+                let channel = signal.data[channelIndex]
+                guard channel.count > plan.endSample else { continue }
+                let window = Array(channel[plan.startSample...plan.endSample])
+                grouped[key, default: []].append((planIndex, channelIndex, previewTransformInput(window)))
+            }
+        }
+
+        var results: [Int: [Int: [[Float]]]] = [:]
+        for (key, entries) in grouped {
+            let bank = key.family.filterBank
+            let lowPass = bank.decompositionLowPass.map(Float.init)
+            let highPass = bank.decompositionHighPass.map(Float.init)
+            let batchSize = max(
+                backend.maximumBatchChannels(sampleCount: key.windowSamples, levelCount: key.levelCount),
+                1
+            )
+
+            var start = 0
+            while start < entries.count {
+                let end = min(start + batchSize, entries.count)
+                let batch = Array(entries[start..<end])
+                if let details = backend.forwardSWTDetails(
+                    channels: batch.map(\.input),
+                    levelCount: key.levelCount,
+                    lowPass: lowPass,
+                    highPass: highPass
+                ) {
+                    for (offset, entry) in batch.enumerated() {
+                        results[entry.planIndex, default: [:]][entry.channelIndex] = details[offset]
+                    }
+                }
+                start = end
+            }
+        }
+        return results
+    }
+
+    static func cleaningPreview(
+        in signal: MFFSignalData,
+        candidate: WaveletArtifactCandidate,
+        configuration: WaveletCleaningConfiguration
+    ) -> WaveletCleaningPreviewResult? {
+        guard let plan = previewPlan(in: signal, candidate: candidate, configuration: configuration) else {
+            return nil
+        }
+        return cleaningPreview(in: signal, plan: plan, precomputedDetails: nil)
+    }
+
+    private static func cleaningPreview(
+        in signal: MFFSignalData,
+        plan: PreviewPlan,
+        precomputedDetails: [Int: [[Float]]]?
+    ) -> WaveletCleaningPreviewResult? {
+        guard let sampleCount = signal.data.first?.count else { return nil }
+        let configuration = plan.configuration
+        let candidate = plan.candidate
+        let startSample = plan.startSample
+        let endSample = plan.endSample
+        let windowSamples = plan.windowSamples
+        let channels = plan.channels
+        let levelCount = plan.levelCount
         var beforeSamples = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
         var artifactSamples = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
         var afterSamples = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
@@ -641,7 +787,8 @@ nonisolated enum WaveletArtifactAnalyzer {
                 waveletFamily: configuration.waveletFamily,
                 thresholdRule: configuration.thresholdRule,
                 thresholdModel: configuration.thresholdModel,
-                samplingRate: signal.samplingRate
+                samplingRate: signal.samplingRate,
+                precomputedDetails: precomputedDetails?[channelIndex]
             )
             artifactSamples[channelIndex] = artifact
             for sample in 0..<min(windowSamples, artifact.count) {
@@ -746,9 +893,35 @@ nonisolated enum WaveletArtifactAnalyzer {
         thresholdModel: WaveletCleaningThresholdModel,
         effectiveSamplingRate: Double,
         retention: ChannelDataRetention,
+        usesGPU: Bool = false,
         progress: ((Int, Int, Int) -> Void)? = nil
     ) -> [ChannelWaveletData] {
         guard !channelIndices.isEmpty else { return [] }
+
+        // The GPU path finishes the per-level work on-device and never brings
+        // the bands back, so it can only serve callers that don't need them.
+        if usesGPU, !retention.perLevelDetails, !retention.signedSalience,
+           let backend = WaveletMetalBackend.shared {
+            if let gpuResults = prepareChannelsOnGPU(
+                backend: backend,
+                signal: signal,
+                channelIndices: channelIndices,
+                decimation: decimation,
+                levelCount: levelCount,
+                thresholdScale: thresholdScale,
+                waveletFamily: waveletFamily,
+                thresholdRule: thresholdRule,
+                thresholdModel: thresholdModel,
+                effectiveSamplingRate: effectiveSamplingRate,
+                retention: retention,
+                progress: progress
+            ) {
+                return gpuResults
+            }
+            // Falling through to the CPU is the intended behaviour for any GPU
+            // hiccup — a scan that quietly takes longer beats one that fails.
+        }
+
         let workerCount = waveletWorkerCount(for: channelIndices.count)
         if workerCount == 1 {
             return channelIndices.enumerated().compactMap { offset, channelIndex in
@@ -808,6 +981,188 @@ nonisolated enum WaveletArtifactAnalyzer {
         return results.compactMap { $0 }
     }
 
+    /// GPU decomposition path. Channels are downsampled and detrended on the
+    /// CPU, handed to Metal in batches sized to the device's buffer limit, and
+    /// the returned detail bands are folded back through the same
+    /// thresholding and accumulation the CPU path uses — so only the
+    /// transform differs. Batching keeps peak memory to one batch rather than
+    /// the whole net's per-level coefficients.
+    ///
+    /// Returns nil if the backend can't complete, letting the caller fall back.
+    private static func prepareChannelsOnGPU(
+        backend: WaveletMetalBackend,
+        signal: MFFSignalData,
+        channelIndices: [Int],
+        decimation: Int,
+        levelCount: Int,
+        thresholdScale: Double,
+        waveletFamily: WaveletReductionFamily,
+        thresholdRule: WaveletCleaningThresholdRule,
+        thresholdModel: WaveletCleaningThresholdModel,
+        effectiveSamplingRate: Double,
+        retention: ChannelDataRetention,
+        progress: ((Int, Int, Int) -> Void)?
+    ) -> [ChannelWaveletData]? {
+        let bank = waveletFamily.filterBank
+        let lowPass = bank.decompositionLowPass.map(Float.init)
+        let highPass = bank.decompositionHighPass.map(Float.init)
+
+        // Prepared up front so every channel in a batch is the same length,
+        // which the kernel's channel-major layout requires.
+        var prepared: [(channelIndex: Int, samples: [Float], detrended: [Float])] = []
+        prepared.reserveCapacity(channelIndices.count)
+        for channelIndex in channelIndices {
+            guard signal.data.indices.contains(channelIndex) else { continue }
+            let samples = downsampleAndDemean(signal.data[channelIndex], by: decimation)
+            guard samples.count > 2 else { continue }
+            prepared.append((channelIndex, samples, detrendedForTransform(samples)))
+        }
+        guard let sampleCount = prepared.first?.samples.count,
+              prepared.allSatisfy({ $0.samples.count == sampleCount })
+        else {
+            return nil
+        }
+
+        let batchSize = max(backend.maximumBatchChannels(sampleCount: sampleCount, levelCount: levelCount), 1)
+        let edgeMarginSamples = edgeMargin(family: waveletFamily, levelCount: levelCount, sampleCount: sampleCount)
+        let marginEnd = max(sampleCount - edgeMarginSamples, edgeMarginSamples)
+        let windowSamples = max(Int((localThresholdWindowSeconds * effectiveSamplingRate).rounded()), 64)
+        let windows = thresholdWindows(sampleCount: sampleCount, windowSamples: windowSamples)
+        let delays = levelGroupDelays(family: waveletFamily, levelCount: levelCount)
+        let subsampleStride = max(windowSamples / robustStatisticSampleCap, 1)
+
+        var results: [ChannelWaveletData] = []
+        results.reserveCapacity(prepared.count)
+        var completed = 0
+
+        var batchStart = 0
+        while batchStart < prepared.count {
+            let batchEnd = min(batchStart + batchSize, prepared.count)
+            let batch = Array(prepared[batchStart..<batchEnd])
+
+            // Transform, then leave the bands on-device. The CPU only reads a
+            // strided subsample out of them (shared storage, so a direct read
+            // rather than a copy) to compute each window's robust threshold —
+            // the one genuinely serial step, since it needs a median.
+            guard let resident = backend.residentDetails(
+                channels: batch.map(\.detrended),
+                levelCount: levelCount,
+                lowPass: lowPass,
+                highPass: highPass
+            ) else {
+                return nil
+            }
+
+            nonisolated(unsafe) var thresholds = [Float](
+                repeating: 0,
+                count: levelCount * batch.count * windows.count
+            )
+            let workerCount = waveletWorkerCount(for: batch.count)
+            evaConcurrentPerform(iterations: workerCount) { workerIndex in
+                var channel = workerIndex
+                while channel < batch.count {
+                    for level in 0..<levelCount {
+                        let slot = (level * batch.count + channel) * windows.count
+                        for (windowIndex, window) in windows.enumerated() {
+                            let subsample = resident.subsample(
+                                level: level,
+                                channel: channel,
+                                delay: delays[level],
+                                from: window.start,
+                                to: window.end,
+                                stride: subsampleStride
+                            )
+                            thresholds[slot + windowIndex] = coefficientThreshold(
+                                for: subsample,
+                                model: thresholdModel,
+                                populationCount: window.end - window.start
+                            )
+                        }
+                    }
+                    channel += workerCount
+                }
+            }
+
+            guard let accumulated = backend.accumulate(
+                resident,
+                request: WaveletMetalBackend.AccumulateRequest(
+                    levelDelays: delays,
+                    thresholds: thresholds,
+                    windowCenters: windows.map(\.center),
+                    edgeMarginStart: edgeMarginSamples,
+                    edgeMarginEnd: marginEnd,
+                    thresholdScale: Float(max(thresholdScale, 0.05)),
+                    usesSoftThreshold: thresholdRule == .soft
+                )
+            ) else {
+                return nil
+            }
+
+            for (offset, entry) in batch.enumerated() {
+                results.append(ChannelWaveletData(
+                    channelIndex: entry.channelIndex,
+                    samples: entry.samples,
+                    // The GPU path never materializes per-level bands on the
+                    // host, so it can only serve the Explorer's retention
+                    // (which asks for neither) — `prepareChannels` routes the
+                    // template-matching paths to the CPU.
+                    details: [],
+                    artifactDetails: [],
+                    signedSalience: [],
+                    energySalience: accumulated.energySalience[offset],
+                    dominantLevels: accumulated.dominantLevels[offset],
+                    totalEnergyByLevel: accumulated.totalEnergyByLevel[offset],
+                    artifactEnergyByLevel: accumulated.artifactEnergyByLevel[offset]
+                ))
+                completed += 1
+                progress?(completed, entry.channelIndex, prepared.count)
+            }
+            batchStart = batchEnd
+        }
+
+        return results
+    }
+
+    /// Window bounds and centres for the per-level threshold curve, matching
+    /// `windowedThreshold`'s own stepping so both backends threshold on the
+    /// same windows.
+    private static func thresholdWindows(
+        sampleCount: Int,
+        windowSamples: Int
+    ) -> [(start: Int, end: Int, center: Int)] {
+        guard sampleCount > 0 else { return [] }
+        guard sampleCount > windowSamples else {
+            return [(0, sampleCount, (sampleCount - 1) / 2)]
+        }
+        var windows: [(start: Int, end: Int, center: Int)] = []
+        let stride = max(windowSamples / 2, 1)
+        var start = 0
+        while start < sampleCount {
+            let end = min(start + windowSamples, sampleCount)
+            windows.append((start, end, (start + end - 1) / 2))
+            if end == sampleCount { break }
+            start += stride
+        }
+        return windows
+    }
+
+    /// Each level's accumulated group delay — the same cascade
+    /// `undecimatedDetails` applies, precomputed so the GPU kernels can index it.
+    private static func levelGroupDelays(family: WaveletReductionFamily, levelCount: Int) -> [Int] {
+        let bank = family.filterBank
+        let highLength = bank.decompositionHighPass.count
+        let lowLength = bank.decompositionLowPass.count
+        var delays: [Int] = []
+        delays.reserveCapacity(levelCount)
+        var cumulativeLowPassDelay = 0
+        for level in 0..<levelCount {
+            let dilation = 1 << level
+            delays.append(cumulativeLowPassDelay + (highLength - 1) / 2 * dilation)
+            cumulativeLowPassDelay += (lowLength - 1) / 2 * dilation
+        }
+        return delays
+    }
+
     private static func waveletWorkerCount(for channelCount: Int) -> Int {
         min(evaMaxWorkers, max(channelCount, 1))
     }
@@ -822,10 +1177,12 @@ nonisolated enum WaveletArtifactAnalyzer {
         thresholdRule: WaveletCleaningThresholdRule,
         thresholdModel: WaveletCleaningThresholdModel,
         effectiveSamplingRate: Double,
-        retention: ChannelDataRetention
+        retention: ChannelDataRetention,
+        precomputedSamples: [Float]? = nil,
+        precomputedDetails: [[Float]]? = nil
     ) -> ChannelWaveletData? {
         guard signal.data.indices.contains(channelIndex) else { return nil }
-        let samples = downsampleAndDemean(signal.data[channelIndex], by: decimation)
+        let samples = precomputedSamples ?? downsampleAndDemean(signal.data[channelIndex], by: decimation)
         guard samples.count > 2 else { return nil }
         let decomposition = undecimatedDetails(
             samples,
@@ -834,7 +1191,8 @@ nonisolated enum WaveletArtifactAnalyzer {
             waveletFamily: waveletFamily,
             thresholdRule: thresholdRule,
             thresholdModel: thresholdModel,
-            effectiveSamplingRate: effectiveSamplingRate
+            effectiveSamplingRate: effectiveSamplingRate,
+            precomputedDetails: precomputedDetails
         )
         var signedSalience = retention.signedSalience
             ? [Float](repeating: 0, count: samples.count)
@@ -901,7 +1259,8 @@ nonisolated enum WaveletArtifactAnalyzer {
         waveletFamily: WaveletReductionFamily,
         thresholdRule: WaveletCleaningThresholdRule,
         thresholdModel: WaveletCleaningThresholdModel,
-        effectiveSamplingRate: Double
+        effectiveSamplingRate: Double,
+        precomputedDetails: [[Float]]? = nil
     ) -> (details: [[Float]], artifactDetails: [[Float]]) {
         guard samples.count > 2, levelCount > 0 else { return ([], []) }
 
@@ -923,22 +1282,32 @@ nonisolated enum WaveletArtifactAnalyzer {
         // candidate generation in the margin that's actually reachable by
         // the wrap (`edgeMarginSamples` below) — a tiny, known-bounded slice
         // of any real recording, not a detection compromise anywhere else.
-        let detrended = removeLinearTrend(samples)
         let bank = waveletFamily.filterBank
         let edgeMarginSamples = edgeMargin(
             family: waveletFamily,
             levelCount: levelCount,
-            sampleCount: detrended.count
+            sampleCount: samples.count
         )
-        let transform = WaveletTransform(bank: bank)
-        let decomposition = transform.forwardSWT(detrended.map(Double.init), levels: levelCount)
-
+        // `precomputedDetails` is the GPU seam: when the Metal backend has
+        // already produced this channel's raw detail bands (from the same
+        // detrended samples), everything from here on — group-delay
+        // realignment, windowed thresholding, edge suppression — is identical
+        // either way.
+        let rawDetails: [[Float]]
+        if let precomputedDetails, precomputedDetails.count == levelCount {
+            rawDetails = precomputedDetails
+        } else {
+            let transform = WaveletTransform(bank: bank)
+            rawDetails = transform.forwardSWT(detrendedForTransform(samples).map(Double.init), levels: levelCount)
+                .details
+                .map { $0.map(Float.init) }
+        }
         let windowSamples = max(Int((localThresholdWindowSeconds * effectiveSamplingRate).rounded()), 64)
         var details: [[Float]] = []
         var artifactDetails: [[Float]] = []
-        details.reserveCapacity(decomposition.details.count)
-        artifactDetails.reserveCapacity(decomposition.details.count)
-        let marginEnd = max(detrended.count - edgeMarginSamples, edgeMarginSamples)
+        details.reserveCapacity(rawDetails.count)
+        artifactDetails.reserveCapacity(rawDetails.count)
+        let marginEnd = max(samples.count - edgeMarginSamples, edgeMarginSamples)
 
         // `swtStep`'s taps run forward from `index` (`index + k*dilation`,
         // never `index - k*dilation`), so `detail[index]` is really centered
@@ -958,11 +1327,11 @@ nonisolated enum WaveletArtifactAnalyzer {
         let lowLength = bank.decompositionLowPass.count
         var cumulativeLowPassDelay = 0
 
-        for level in decomposition.details.indices {
+        for level in rawDetails.indices {
             let dilation = 1 << level
             let delay = cumulativeLowPassDelay + (highLength - 1) / 2 * dilation
             cumulativeLowPassDelay += (lowLength - 1) / 2 * dilation
-            let detail = shiftForward(decomposition.details[level].map(Float.init), by: delay)
+            let detail = shiftForward(rawDetails[level], by: delay)
             let scale = Float(max(thresholdScale, 0.05))
             let thresholds = windowedCoefficientThreshold(
                 for: detail,
@@ -1011,6 +1380,13 @@ nonisolated enum WaveletArtifactAnalyzer {
             shifted[index] = values[index - delay]
         }
         return shifted
+    }
+
+    /// The exact input the transform sees, whichever backend runs it — the
+    /// GPU path detrends here too before uploading, so both produce detail
+    /// bands from identical samples.
+    static func detrendedForTransform(_ samples: [Float]) -> [Float] {
+        removeLinearTrend(samples)
     }
 
     /// Least-squares linear fit removed from the whole channel — see the
@@ -1093,15 +1469,22 @@ nonisolated enum WaveletArtifactAnalyzer {
     }
 
 
+    /// `populationCount` is the size of the window these values represent,
+    /// which is the `N` in the universal threshold's `sqrt(2 ln N)`. It's
+    /// separate from `values.count` so a caller holding only a subsample (the
+    /// GPU path, which reads a strided sample straight out of device memory)
+    /// still gets the threshold the full window would have produced, rather
+    /// than a systematically lower one.
     private static func coefficientThreshold(
         for values: [Float],
-        model: WaveletCleaningThresholdModel
+        model: WaveletCleaningThresholdModel,
+        populationCount: Int? = nil
     ) -> Float {
         guard values.count > 2 else { return 0 }
         let sigma = robustSigma(values)
         let universalThreshold: Float
         if sigma > 1e-12 {
-            universalThreshold = sigma * Float(sqrt(2 * log(Double(max(values.count, 2)))))
+            universalThreshold = sigma * Float(sqrt(2 * log(Double(max(populationCount ?? values.count, 2)))))
         } else {
             let rmsValue = rms(values)
             universalThreshold = rmsValue > 0 ? rmsValue * 2.5 : 0
@@ -1451,7 +1834,8 @@ nonisolated enum WaveletArtifactAnalyzer {
         waveletFamily: WaveletReductionFamily,
         thresholdRule: WaveletCleaningThresholdRule,
         thresholdModel: WaveletCleaningThresholdModel,
-        samplingRate: Double
+        samplingRate: Double,
+        precomputedDetails: [[Float]]? = nil
     ) -> [Float] {
         guard samples.count > 2 else { return [Float](repeating: 0, count: samples.count) }
         let centered = demean(samples)
@@ -1462,7 +1846,8 @@ nonisolated enum WaveletArtifactAnalyzer {
             waveletFamily: waveletFamily,
             thresholdRule: thresholdRule,
             thresholdModel: thresholdModel,
-            effectiveSamplingRate: samplingRate
+            effectiveSamplingRate: samplingRate,
+            precomputedDetails: precomputedDetails
         )
         var artifact = [Float](repeating: 0, count: samples.count)
         for level in decomposition.artifactDetails {
@@ -1625,9 +2010,9 @@ nonisolated enum WaveletArtifactAnalyzer {
             thresholdModel: configuration.thresholdModel,
             effectiveSamplingRate: effectiveRate,
             retention: .explorer,
+            usesGPU: configuration.usesGPU,
             progress: progress
         )
-
         let summary = featureSummary(from: data, effectiveSamplingRate: effectiveRate)
         let minimumDurationSamples = max(Int((configuration.minimumDurationSeconds * effectiveRate).rounded()), 1)
         let mergeSamples = max(Int((configuration.mergeWindowSeconds * effectiveRate).rounded()), 1)
@@ -1647,7 +2032,6 @@ nonisolated enum WaveletArtifactAnalyzer {
             data.map { Double(burstStatistics($0.energySalience).threshold) },
             fallback: 0
         )
-
         let events = mergeChannelCandidates(perChannelRanges, mergeSamples: mergeSamples)
         let candidates = buildExplorerCandidates(
             from: events,

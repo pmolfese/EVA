@@ -651,6 +651,20 @@ extension WaveformView {
                     }
                     .toggleStyle(.checkbox)
                     .frame(width: 180, alignment: .leading)
+
+                    ArtifactTemplateFieldLabel(
+                        title: "Use GPU",
+                        help: WaveletMetalBackend.isAvailable
+                            ? "Runs the wavelet decomposition as a Metal compute kernel instead of on the CPU. Biggest win on high-density nets and long recordings. The GPU works in single precision where the CPU uses double, so candidates can differ marginally — detection is equivalent, not bit-identical. Falls back to the CPU automatically if a dispatch fails."
+                            : "No Metal device is available on this machine, so the scan will run on the CPU."
+                    )
+                    Toggle(isOn: $waveletExplorer.usesGPU) {
+                        Text(WaveletMetalBackend.isAvailable ? "Metal decomposition" : "Unavailable")
+                            .font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(!WaveletMetalBackend.isAvailable)
+                    .frame(width: 180, alignment: .leading)
                 }
 
                 GridRow {
@@ -1165,37 +1179,40 @@ extension WaveformView {
     /// rescan cleanly drops a still-running precompute's results.
     func precomputeWaveletExplorerPreviews(in signal: MFFSignalData) {
         guard let result = waveletExplorer.result, !result.candidates.isEmpty else { return }
-        let candidates = result.candidates
+        // Only the top-ranked handful. A preview costs more than its share of
+        // the scan itself (each one decomposes every channel over the
+        // candidate's padded window), and most candidates are never opened —
+        // so precomputing all of them spends more time than the scan on work
+        // that's mostly thrown away. Anything not prefetched still opens via
+        // `WaveletCleaningPreview.loadPreview`'s on-demand path, with a brief
+        // spinner.
+        let candidates = Array(result.candidates.prefix(waveletExplorerPrefetchCount))
         let configurations = candidates.map { waveletCleaningConfiguration(for: signal, candidate: $0) }
         let signalDuration = signal.duration
         let generation = waveletExplorer.runGeneration
+        let usesGPU = waveletExplorer.usesGPU
 
         waveletExplorer.isPrecomputingPreviews = true
         Task {
             let worker = Task.detached(priority: .utility) { () -> [(String, WaveletCleaningPreviewResult)] in
+                // Batched so the GPU path can group every (candidate, channel)
+                // window into a few wide dispatches; on the CPU path this is
+                // equivalent to the previous per-candidate loop.
+                let previews = WaveletArtifactAnalyzer.cleaningPreviews(
+                    in: signal,
+                    candidates: candidates,
+                    configurations: configurations,
+                    usesGPU: usesGPU
+                )
                 var collected: [(String, WaveletCleaningPreviewResult)] = []
                 collected.reserveCapacity(candidates.count)
-                await withTaskGroup(of: (String, WaveletCleaningPreviewResult?).self) { group in
-                    for (candidate, configuration) in zip(candidates, configurations) {
-                        group.addTask {
-                            let key = WaveletCleaningPreview.cacheKey(
-                                candidateID: candidate.id,
-                                configuration: configuration,
-                                signalDuration: signalDuration
-                            )
-                            let preview = WaveletArtifactAnalyzer.cleaningPreview(
-                                in: signal,
-                                candidate: candidate,
-                                configuration: configuration
-                            )
-                            return (key, preview)
-                        }
-                    }
-                    for await (key, preview) in group {
-                        if let preview {
-                            collected.append((key, preview))
-                        }
-                    }
+                for (offset, preview) in previews.enumerated() where preview != nil {
+                    let key = WaveletCleaningPreview.cacheKey(
+                        candidateID: candidates[offset].id,
+                        configuration: configurations[offset],
+                        signalDuration: signalDuration
+                    )
+                    collected.append((key, preview!))
                 }
                 return collected
             }
@@ -1207,6 +1224,11 @@ extension WaveformView {
             waveletExplorer.isPrecomputingPreviews = false
         }
     }
+
+    /// How many candidates get their preview computed up front. Sized to cover
+    /// what fits on screen without scrolling, since that's what a user
+    /// realistically hovers first.
+    var waveletExplorerPrefetchCount: Int { 12 }
 
     func runWaveletArtifactExplorer(in signal: MFFSignalData) {
         guard !waveletExplorer.isRunning else { return }
@@ -1241,7 +1263,8 @@ extension WaveformView {
             mergeWindowSeconds: max(waveletExplorer.mergeWindowSeconds, 0.001),
             minimumDurationSeconds: max(waveletExplorer.minimumDurationSeconds, 0.001),
             maximumCandidates: waveletExplorer.maximumCandidates,
-            detectsFastArtifacts: waveletExplorer.detectsFastArtifacts
+            detectsFastArtifacts: waveletExplorer.detectsFastArtifacts,
+            usesGPU: waveletExplorer.usesGPU
         )
 
         waveletExplorerTask?.cancel()
