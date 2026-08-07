@@ -788,7 +788,17 @@ nonisolated enum WaveletArtifactAnalyzer {
     /// `windowedCoefficientThreshold`) rather than once for the whole
     /// recording, so a quiet stretch and a noisy stretch each get their own
     /// noise floor instead of sharing one whole-recording robust statistic.
-    private static let localThresholdWindowSeconds = 4.0
+    /// 30s rather than a few seconds: `coefficientThreshold`'s BayesShrink
+    /// path estimates both a noise sigma AND an observed-variance "signal"
+    /// estimate from the same window, and on a short window (order
+    /// hundreds-to-low-thousands of samples) the observed-variance estimate
+    /// is itself noisy enough that pure noise can look like "signal" purely
+    /// from small-sample variance, driving the threshold down and letting
+    /// noise through as false "artifact" in that window. 30s keeps enough
+    /// samples per window for that variance estimate to stabilize while
+    /// still adapting across a multi-minute recording instead of using one
+    /// whole-recording statistic.
+    private static let localThresholdWindowSeconds = 30.0
 
     private static func undecimatedDetails(
         _ samples: [Float],
@@ -802,15 +812,41 @@ nonisolated enum WaveletArtifactAnalyzer {
         guard samples.count > 2, levelCount > 0 else { return ([], []) }
 
         // The real (undecimated) transform below wraps circularly at its
-        // boundaries. A recording with genuine slow drift/impedance change
-        // has different start and end levels, so a raw circular wrap would
-        // read as one large spurious discontinuity right at the edges.
-        // Removing the whole-channel linear trend first — never added back,
-        // since only the detail bands (which a real wavelet with >=2
-        // vanishing moments already suppresses for a pure ramp) feed the
-        // rest of this pipeline — keeps that wraparound seam at noise level.
+        // boundaries. Removing the whole-channel linear trend first — never
+        // added back, since only the detail bands feed the rest of this
+        // pipeline — keeps a slow drift/impedance change from reading as one
+        // large spurious discontinuity at the seam. That still leaves a
+        // smaller but real effect: filter taps for samples near the end
+        // reach around into samples near the start (`(index + k*dilation) %
+        // n`), splicing two otherwise-unrelated stretches of noise together —
+        // which a wavelet filter reads as more structure than an ordinary
+        // interior stretch has, since real interior noise is never that
+        // locally self-similar. Padding the signal to fake a smoother seam
+        // (tried: mirror reflection) trades this for a *different* artifact —
+        // a reflection's mirror point is itself an unnaturally correlated
+        // kink that a high-pass filter also responds to. Rather than chase a
+        // padding scheme that manufactures no artifact at all, suppress
+        // candidate generation in the margin that's actually reachable by
+        // the wrap (`edgeMarginSamples` below) — a tiny, known-bounded slice
+        // of any real recording, not a detection compromise anywhere else.
         let detrended = removeLinearTrend(samples)
-        let transform = WaveletTransform(bank: waveletFamily.filterBank)
+        let bank = waveletFamily.filterBank
+        let maxDilation = 1 << max(levelCount - 1, 0)
+        let maxFilterLength = max(bank.decompositionLowPass.count, bank.decompositionHighPass.count)
+        // Also covers the group-delay shift applied below (deepest level's
+        // accumulated low-pass delay plus that level's own high-pass delay)
+        // so the shift's zero-filled head/tail never lands outside the
+        // suppressed margin.
+        let maxGroupDelay = (bank.decompositionLowPass.count - 1) / 2 * (maxDilation - 1)
+            + (bank.decompositionHighPass.count - 1) / 2 * maxDilation
+        // Capped at 5% of the channel rather than 50%: the margin is sized
+        // for suppressing a boundary-wrap artifact in a long continuous
+        // recording, where it's a sliver of the total. On a short snippet
+        // (e.g. a padded exemplar window for template matching) the
+        // uncapped margin can approach half the signal and swallow genuine
+        // interior content instead of just the true boundary.
+        let edgeMarginSamples = min((maxFilterLength - 1) * maxDilation + maxGroupDelay, detrended.count / 20)
+        let transform = WaveletTransform(bank: bank)
         let decomposition = transform.forwardSWT(detrended.map(Double.init), levels: levelCount)
 
         let windowSamples = max(Int((localThresholdWindowSeconds * effectiveSamplingRate).rounded()), 64)
@@ -818,9 +854,31 @@ nonisolated enum WaveletArtifactAnalyzer {
         var artifactDetails: [[Float]] = []
         details.reserveCapacity(decomposition.details.count)
         artifactDetails.reserveCapacity(decomposition.details.count)
+        let marginEnd = max(detrended.count - edgeMarginSamples, edgeMarginSamples)
+
+        // `swtStep`'s taps run forward from `index` (`index + k*dilation`,
+        // never `index - k*dilation`), so `detail[index]` is really centered
+        // on an input sample *ahead* of `index`, for a (near-)symmetric
+        // filter — a group delay. And since each level decomposes the
+        // *previous* level's low-pass output (not the original signal), that
+        // delay accumulates across levels via the low-pass chain, mirroring
+        // `WaveletTransform.forwardSWT`'s own cascade. Left uncorrected, a
+        // feature at true sample T shows up in a deep level's detail band
+        // well *before* T — fine for a same-level self-correlation, but
+        // breaks anything that compares a fixed input-sample window (an
+        // exemplar/template) against this array, like `detectWaveform`'s
+        // matching. Shifting each level's detail forward by its own
+        // (accumulated) delay re-aligns `detail[index]` with input sample
+        // `index`.
+        let highLength = bank.decompositionHighPass.count
+        let lowLength = bank.decompositionLowPass.count
+        var cumulativeLowPassDelay = 0
 
         for level in decomposition.details.indices {
-            let detail = decomposition.details[level].map(Float.init)
+            let dilation = 1 << level
+            let delay = cumulativeLowPassDelay + (highLength - 1) / 2 * dilation
+            cumulativeLowPassDelay += (lowLength - 1) / 2 * dilation
+            let detail = shiftForward(decomposition.details[level].map(Float.init), by: delay)
             let scale = Float(max(thresholdScale, 0.05))
             let thresholds = windowedCoefficientThreshold(
                 for: detail,
@@ -828,7 +886,7 @@ nonisolated enum WaveletArtifactAnalyzer {
                 windowSamples: windowSamples
             )
             var artifacts = [Float](repeating: 0, count: detail.count)
-            for index in detail.indices {
+            for index in detail.indices where index >= edgeMarginSamples && index < marginEnd {
                 artifacts[index] = thresholdCoefficient(detail[index], threshold: thresholds[index] * scale, rule: thresholdRule)
             }
             details.append(detail)
@@ -836,6 +894,18 @@ nonisolated enum WaveletArtifactAnalyzer {
         }
 
         return (details, artifactDetails)
+    }
+
+    /// Shifts `values` forward (later) by `delay` samples, zero-filling the
+    /// now-empty head — see the group-delay note in `undecimatedDetails`.
+    private static func shiftForward(_ values: [Float], by delay: Int) -> [Float] {
+        guard delay > 0 else { return values }
+        guard delay < values.count else { return [Float](repeating: 0, count: values.count) }
+        var shifted = [Float](repeating: 0, count: values.count)
+        for index in delay..<values.count {
+            shifted[index] = values[index - delay]
+        }
+        return shifted
     }
 
     /// Least-squares linear fit removed from the whole channel — see the
