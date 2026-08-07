@@ -496,7 +496,14 @@ nonisolated enum WaveletArtifactAnalyzer {
             channelCount: summary.channelCount,
             effectiveSamplingRate: effectiveRate,
             candidateThreshold: representativeThreshold,
-            analyzedDurationSeconds: Double(sampleCount) / signal.samplingRate
+            analyzedDurationSeconds: Double(sampleCount) / signal.samplingRate,
+            edgeMarginSeconds: Double(
+                edgeMargin(
+                    family: configuration.waveletFamily,
+                    levelCount: levelCount,
+                    sampleCount: max(sampleCount / decimation, 1)
+                )
+            ) / max(effectiveRate, 1)
         )
     }
 
@@ -971,6 +978,27 @@ nonisolated enum WaveletArtifactAnalyzer {
         }
 
         return (details, artifactDetails)
+    }
+
+    /// Samples at each end where the transform's circular boundary makes
+    /// coefficients untrustworthy, so no candidate is reported there.
+    ///
+    /// Covers the deepest level's tap reach plus the group-delay shift
+    /// applied in `undecimatedDetails` (that level's accumulated low-pass
+    /// delay plus its own high-pass delay), so the shift's zero-filled
+    /// head/tail also lands inside the margin. Capped at 5% of the signal
+    /// rather than 50%: the margin is sized for a boundary artifact in a long
+    /// continuous recording, where it's a sliver of the total, but on a short
+    /// snippet (a padded exemplar window for template matching, say) an
+    /// uncapped margin would approach half the signal and swallow genuine
+    /// interior content.
+    static func edgeMargin(family: WaveletReductionFamily, levelCount: Int, sampleCount: Int) -> Int {
+        let bank = family.filterBank
+        let maxDilation = 1 << max(levelCount - 1, 0)
+        let maxFilterLength = max(bank.decompositionLowPass.count, bank.decompositionHighPass.count)
+        let maxGroupDelay = (bank.decompositionLowPass.count - 1) / 2 * (maxDilation - 1)
+            + (bank.decompositionHighPass.count - 1) / 2 * maxDilation
+        return min((maxFilterLength - 1) * maxDilation + maxGroupDelay, sampleCount / 20)
     }
 
     /// Shifts `values` forward (later) by `delay` samples, zero-filling the
@@ -2294,8 +2322,17 @@ nonisolated enum WaveletArtifactAnalyzer {
         return min(max(requested, 1), maximumLevelCount, maximumBySamples)
     }
 
+    /// Anti-aliased decimation, not plain striding. Striding folds everything
+    /// above the new Nyquist back into the analysis band, so a fast transient
+    /// (muscle/EMG, an electrode pop) doesn't drop out of a downsampled scan —
+    /// it reappears at a bogus frequency, which then lands on the wrong
+    /// wavelet level and gets classified accordingly. Filtering first means
+    /// out-of-band content is genuinely excluded, and the full-rate second
+    /// pass (`detectsFastArtifacts`) is what recovers it, at its real
+    /// frequency.
     private static func downsampleAndDemean(_ samples: [Float], by decimation: Int) -> [Float] {
-        let values = Downsampler.strided(samples, by: max(decimation, 1)).map { $0.isFinite ? $0 : 0 }
+        let sanitized = samples.map { $0.isFinite ? $0 : 0 }
+        let values = Downsampler.windowedSincDecimated(sanitized, by: max(decimation, 1))
         return demean(values)
     }
 

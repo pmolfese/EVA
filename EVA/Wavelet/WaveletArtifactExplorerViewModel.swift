@@ -81,6 +81,57 @@ final class WaveletArtifactExplorerViewModel {
     var minimumDurationSeconds = 0.02
     var maximumCandidates = 80
 
+    // MARK: Results table sorting
+    /// Column the candidate table is sorted by, and direction. Defaults to
+    /// rank ascending, i.e. the scan's own anomaly-strength order.
+    var sortColumn = WaveletCandidateSortColumn.rank
+    var sortAscending = true
+
+    /// Applies the current sort to a scan's candidates. Ties always fall back
+    /// to rank ascending, so the order is stable and doesn't reshuffle as the
+    /// direction flips.
+    func sortedCandidates(_ candidates: [WaveletArtifactCandidate]) -> [WaveletArtifactCandidate] {
+        candidates.sorted { lhs, rhs in
+            switch compare(lhs, rhs, by: sortColumn) {
+            case .orderedAscending: return sortAscending
+            case .orderedDescending: return !sortAscending
+            case .orderedSame: return lhs.rank < rhs.rank
+            }
+        }
+    }
+
+    private func compare(
+        _ lhs: WaveletArtifactCandidate,
+        _ rhs: WaveletArtifactCandidate,
+        by column: WaveletCandidateSortColumn
+    ) -> ComparisonResult {
+        switch column {
+        case .rank: return compare(lhs.rank, rhs.rank)
+        case .peakTime: return compare(lhs.peakTimeSeconds, rhs.peakTimeSeconds)
+        case .duration: return compare(lhs.durationSeconds, rhs.durationSeconds)
+        case .score: return compare(lhs.score, rhs.score)
+        case .channel: return compare(lhs.channelIndex, rhs.channelIndex)
+        case .level: return compare(lhs.dominantLevel, rhs.dominantLevel)
+        case .contributingChannels: return compare(lhs.contributingChannelCount, rhs.contributingChannelCount)
+        case .type: return lhs.artifactType.rawValue.compare(rhs.artifactType.rawValue)
+        }
+    }
+
+    private func compare<Value: Comparable>(_ lhs: Value, _ rhs: Value) -> ComparisonResult {
+        if lhs < rhs { return .orderedAscending }
+        if lhs > rhs { return .orderedDescending }
+        return .orderedSame
+    }
+
+    func toggleSort(_ column: WaveletCandidateSortColumn) {
+        if sortColumn == column {
+            sortAscending.toggle()
+        } else {
+            sortColumn = column
+            sortAscending = column.sortsAscendingByDefault
+        }
+    }
+
     // MARK: Apply (candidates → ArtifactCleaner)
     /// Candidate IDs the user has unchecked — everything else is included
     /// when Apply runs. Opt-out rather than opt-in so a fresh scan's results

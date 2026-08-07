@@ -801,6 +801,13 @@ extension WaveformView {
                 waveletExplorerMetricChip(title: "Artifact energy", value: waveletExplorerPercent(result.summary.artifactEnergyFraction))
                 waveletExplorerMetricChip(title: "Effective Hz", value: String(format: "%.1f", result.effectiveSamplingRate))
                 waveletExplorerMetricChip(title: "Threshold", value: String(format: "%.3f", result.candidateThreshold))
+                if result.edgeMarginSeconds > 0.0005 {
+                    waveletExplorerMetricChip(
+                        title: "Edges skipped",
+                        value: String(format: "±%.2fs", result.edgeMarginSeconds)
+                    )
+                    .help("The first and last \(String(format: "%.2f", result.edgeMarginSeconds))s are not scanned — the wavelet transform's boundary makes coefficients there unreliable, so candidates in that span would be spurious.")
+                }
                 WaveletExplorerSummaryChip(
                     title: "Strongest channels",
                     value: "\(result.summary.strongestChannels.count) ranked"
@@ -912,14 +919,14 @@ extension WaveformView {
                     Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
                         GridRow {
                             Text("")
-                            Text("#")
-                            Text("Peak")
-                            Text("Duration")
-                            Text("Score")
-                            Text("Peak Ch")
-                            Text("Level")
-                            Text("Contrib")
-                            Text("Type")
+                            waveletSortHeader(.rank)
+                            waveletSortHeader(.peakTime)
+                            waveletSortHeader(.duration)
+                            waveletSortHeader(.score)
+                            waveletSortHeader(.channel)
+                            waveletSortHeader(.level)
+                            waveletSortHeader(.contributingChannels)
+                            waveletSortHeader(.type)
                             Text("Preview")
                             Text("")
                             Text("")
@@ -927,7 +934,7 @@ extension WaveformView {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
 
-                        ForEach(candidates) { candidate in
+                        ForEach(waveletExplorer.sortedCandidates(candidates)) { candidate in
                             GridRow {
                                 Toggle("", isOn: waveletCandidateIncludedBinding(candidate))
                                     .toggleStyle(.checkbox)
@@ -961,6 +968,29 @@ extension WaveformView {
                 .frame(height: 190)
             }
         }
+    }
+
+    /// A clickable column header. Clicking the active column flips direction;
+    /// clicking another selects it. The active column carries a chevron.
+    func waveletSortHeader(_ column: WaveletCandidateSortColumn) -> some View {
+        Button {
+            waveletExplorer.toggleSort(column)
+        } label: {
+            HStack(spacing: 2) {
+                Text(column.rawValue)
+                if waveletExplorer.sortColumn == column {
+                    Image(systemName: waveletExplorer.sortAscending ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(
+            column == .score
+                ? "Anomaly strength, in sigmas above that channel's own local baseline — comparable across channels of different amplitude."
+                : "Sort by \(column.rawValue)."
+        )
     }
 
     func waveletCandidateIncludedBinding(_ candidate: WaveletArtifactCandidate) -> Binding<Bool> {

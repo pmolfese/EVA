@@ -74,6 +74,29 @@ enum ArtifactDefinitionResultSource: Equatable {
     }
 }
 
+/// Sortable columns in the Wavelet Explorer's candidate table.
+enum WaveletCandidateSortColumn: String, CaseIterable, Identifiable {
+    case rank = "#"
+    case peakTime = "Peak"
+    case duration = "Duration"
+    case score = "Score"
+    case channel = "Peak Ch"
+    case level = "Level"
+    case contributingChannels = "Contrib"
+    case type = "Type"
+
+    var id: String { rawValue }
+
+    /// Rank reads naturally low-to-high; the rest are most interesting
+    /// largest-first, except the categorical ones which read alphabetically.
+    var sortsAscendingByDefault: Bool {
+        switch self {
+        case .rank, .peakTime, .channel, .type: return true
+        case .duration, .score, .level, .contributingChannels: return false
+        }
+    }
+}
+
 enum WaveletExplorerChannelScope: String, CaseIterable, Identifiable {
     case visibleGood = "Visible Good"
     case allGood = "All Good"

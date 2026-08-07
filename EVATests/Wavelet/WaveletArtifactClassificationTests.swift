@@ -192,6 +192,64 @@ struct WaveletArtifactClassificationTests {
         }
     }
 
+    /// A fast (high-frequency) burst sits above the downsampled pass's
+    /// Nyquist, so only the optional full-rate pass can see it.
+    @Test func fastPassFindsBurstAboveDownsampledNyquist() {
+        let sr = 1000.0
+        let n = 30_000
+        let burstStart = 15_000
+        let burstLength = 300
+        // 300 Hz — well above the 125 Hz Nyquist of a 250 Hz downsampled
+        // pass, and above the 250 Hz Nyquist of a 500 Hz one.
+        let burstFrequency = 300.0
+
+        var data: [[Float]] = []
+        for c in 0..<8 {
+            var state = UInt64(c + 1) &* 6364136223846793005 &+ 1
+            var channel = (0..<n).map { _ -> Float in
+                state = state &* 6364136223846793005 &+ 1
+                return Float((Double(state >> 40) / Double(UInt32.max) - 0.5) * 2)
+            }
+            if c == 3 {
+                for k in 0..<burstLength {
+                    let t = Double(k) / sr
+                    let envelope = sin(Double(k) / Double(burstLength) * .pi)
+                    channel[burstStart + k] += Float(sin(2 * .pi * burstFrequency * t) * envelope) * 60
+                }
+            }
+            data.append(channel)
+        }
+
+        let signal = SyntheticSignal.make(data, samplingRate: sr)
+        func configuration(fastPass: Bool) -> WaveletArtifactExplorerConfiguration {
+            WaveletArtifactExplorerConfiguration(
+                channelIndices: Array(0..<8), downsampleRate: 250, levelCount: 8, thresholdScale: 1,
+                cleaningMode: .conservativeLocal, intensity: 1, waveletFamily: .bior44,
+                thresholdRule: .hard, thresholdModel: .bayesShrink,
+                mergeWindowSeconds: 0.1, minimumDurationSeconds: 0.02, maximumCandidates: 40,
+                detectsFastArtifacts: fastPass
+            )
+        }
+
+        let burstTime = Double(burstStart) / sr
+        func foundBurst(_ result: WaveletArtifactExplorerResult) -> Bool {
+            result.candidates.contains { abs($0.peakTimeSeconds - burstTime) < 0.5 }
+        }
+
+        let withoutFastPass = WaveletArtifactAnalyzer.explore(
+            in: signal, configuration: configuration(fastPass: false), channelRoles: roles
+        )
+        let withFastPass = WaveletArtifactAnalyzer.explore(
+            in: signal, configuration: configuration(fastPass: true), channelRoles: roles
+        )
+
+        #expect(foundBurst(withFastPass), "fast pass missed the \(Int(burstFrequency)) Hz burst")
+        #expect(
+            !foundBurst(withoutFastPass),
+            "the downsampled pass reported a burst above its own Nyquist, so this test isn't measuring what it claims"
+        )
+    }
+
     /// Scores are sigmas above each channel's own local median, so a burst on
     /// a quiet channel must not be outranked by ordinary activity on a
     /// channel that simply runs hotter.
