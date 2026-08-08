@@ -1260,6 +1260,13 @@ extension WaveformView {
         if event.sourceFile == WaveletArtifactExplorerViewModel.candidateSourceFile {
             return true
         }
+        // ECG detection stamps the marker on the R peak and records the measured
+        // width of the deflection *around* it, so the band centers the same way
+        // the other detectors' do. `hasPrefix` because the algorithm name is
+        // appended to the source file ("ECG Detection: Pan-Tompkins").
+        if event.sourceFile.hasPrefix(RWaveDetector.sourceFile) {
+            return true
+        }
         return template.definedArtifacts.contains { artifact in
             artifact.events.contains { $0.id == event.id }
         }

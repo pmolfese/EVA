@@ -144,7 +144,10 @@ struct RWaveCandidate: Sendable {
 
 nonisolated enum RWaveDetector {
     static let eventCode = "R Wave"
-    private static let sourceFile = "ECG Detection"
+    /// Prefix of every emitted event's `sourceFile` (the algorithm name is
+    /// appended). Callers match on the prefix to recognise detector output —
+    /// see `isCenteredArtifactDetectionEvent`.
+    static let sourceFile = "ECG Detection"
     private static let baselineWindowSeconds = 0.60
     private static let qrsHighPassWindowSeconds = 0.20
     private static let qrsSmoothingWindowSeconds = 0.035
