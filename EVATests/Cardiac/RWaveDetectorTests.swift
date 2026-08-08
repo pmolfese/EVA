@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 
 import Testing
 import Foundation
@@ -103,6 +98,96 @@ struct RWaveDetectorTests {
         for i in 1..<max(times.count, 1) where i < times.count {
             #expect(times[i] - times[i - 1] >= 0.4 - 1e-6, "minimum RR spacing violated")
         }
+    }
+
+    // MARK: - Measured duration (R deflection width)
+
+    /// Exact arithmetic on a hand-built deflection: peak 1.0 at sample 50,
+    /// decaying by 1/8 per sample either side (all values binary-exact, so the
+    /// comparison against the 20%-of-peak cutoff is unambiguous). 0.25 clears the
+    /// cutoff and 0.125 does not, so onset = 44, offset = 56 → 12 samples.
+    @Test func complexWidthMeasuresTheDeflectionAtTheCutoff() {
+        var waveform = [Double](repeating: 0, count: 101)
+        for offset in -8...8 {
+            waveform[50 + offset] = max(1.0 - Double(abs(offset)) / 8.0, 0)
+        }
+        let channel = ECGProcessedChannel(scores: waveform, waveform: waveform)
+
+        let width = RWaveDetector.complexWidthSeconds(
+            at: 50, processedChannels: [channel], samplingRate: 1000, polarity: .positive)
+
+        #expect(width != nil)
+        #expect(abs((width ?? 0) - 0.012) < 1e-12)
+    }
+
+    /// A flat neighbourhood has no deflection to measure, and must report "no
+    /// measurement" rather than a 0 ms duration that would display as fact.
+    @Test func complexWidthIsNilWhenThereIsNothingToMeasure() {
+        let flat = ECGProcessedChannel(
+            scores: [Double](repeating: 0, count: 101),
+            waveform: [Double](repeating: 0, count: 101))
+        #expect(RWaveDetector.complexWidthSeconds(
+            at: 50, processedChannels: [flat], samplingRate: 1000, polarity: .positive) == nil)
+        #expect(RWaveDetector.complexWidthSeconds(
+            at: 50, processedChannels: [], samplingRate: 1000, polarity: .positive) == nil)
+    }
+
+    /// The search is bounded, so even a deflection that never returns toward
+    /// baseline cannot report an implausible duration.
+    @Test func complexWidthIsBoundedOnAMonotoneRamp() {
+        let ramp = (0..<2001).map { Double($0) / 2000 }
+        let channel = ECGProcessedChannel(scores: ramp, waveform: ramp)
+        let width = RWaveDetector.complexWidthSeconds(
+            at: 2000, processedChannels: [channel], samplingRate: 1000, polarity: .positive)
+        #expect((width ?? 0) <= 0.100 + 1e-9)
+    }
+
+    /// Every detected beat gets a duration, and it lands in a physiologically
+    /// plausible range for an R deflection rather than 0 or the search bound.
+    @Test(arguments: [
+        ECGDetectionAlgorithm.simple,
+        .panTompkins,
+        .hamilton,
+        .wfdb,
+        .wavelet,
+        .christov,
+    ])
+    func detectedBeatsCarryAPlausibleDuration(algorithm: ECGDetectionAlgorithm) {
+        let samplingRate = 250.0
+        let (source, _) = syntheticECGSource(
+            sampleCount: 5000, samplingRate: samplingRate, periodSamples: 250
+        )
+        let events = RWaveDetector.detect(sources: [source], configuration: config(algorithm))
+
+        #expect(!events.isEmpty)
+        for event in events {
+            let duration = event.durationSeconds
+            #expect(duration != nil, "\(algorithm.rawValue): beat at \(event.beginTimeSeconds) has no duration")
+            if let duration {
+                #expect(duration > 0.004 && duration < 0.200,
+                        "\(algorithm.rawValue): implausible duration \(duration * 1000) ms")
+            }
+        }
+    }
+
+    /// The duration is measured, not stamped: widening the planted complexes has
+    /// to widen the reported durations.
+    @Test func durationTracksTheWidthOfThePlantedComplex() {
+        let samplingRate = 250.0
+        func medianDuration(bumpWidth: Int) -> Double {
+            let (source, _) = syntheticECGSource(
+                sampleCount: 5000, samplingRate: samplingRate,
+                periodSamples: 250, bumpWidth: bumpWidth
+            )
+            let events = RWaveDetector.detect(sources: [source], configuration: config(.simple))
+            let durations = events.compactMap(\.durationSeconds).sorted()
+            precondition(!durations.isEmpty, "no durations for bumpWidth \(bumpWidth)")
+            return durations[durations.count / 2]
+        }
+
+        let narrow = medianDuration(bumpWidth: 10)
+        let wide = medianDuration(bumpWidth: 30)
+        #expect(wide > narrow * 1.5, "narrow \(narrow * 1000) ms vs wide \(wide * 1000) ms")
     }
 
     @Test func emptySourcesProduceNoEvents() {

@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Artifact template definition sheet (waveform/topography matching, defined
 //  artifacts CRUD, and the artifact cleaning sheet), extracted from
 //  WaveformView.swift during the L5 view-decomposition refactor. This is an
@@ -1231,7 +1226,6 @@ extension WaveformView {
         upsertDefinedArtifact(from: result, configuration: configuration, source: .waveform)
         artifactVM.events = definedArtifactEventList()
         selectedEventCodes = [configuration.eventCode]
-        showsEventsPanel = true
         template.confirmedSource = .waveform
         artifactVM.statusMessage = "\(result.selectedEvents.count) waveform matches"
     }
@@ -1251,7 +1245,6 @@ extension WaveformView {
         }
         artifactVM.events = template.definedArtifacts.isEmpty ? result.topographyEvents : definedArtifactEventList()
         selectedEventCodes = [template.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)]
-        showsEventsPanel = true
         template.confirmedSource = .topography
         artifactVM.statusMessage = "\(result.topographyEvents.count) topography matches"
     }
@@ -1259,6 +1252,19 @@ extension WaveformView {
     func isCenteredArtifactDetectionEvent(_ event: MFFEvent) -> Bool {
         guard event.durationSeconds != nil else { return false }
         if event.sourceFile == EyeArtifactThresholdDetector.sourceFile {
+            return true
+        }
+        // Wavelet Explorer candidates get the highlight band as soon as a
+        // scan finds them, before Apply promotes them into a DefinedArtifact —
+        // reviewing what was found shouldn't require cleaning it first.
+        if event.sourceFile == WaveletArtifactExplorerViewModel.candidateSourceFile {
+            return true
+        }
+        // ECG detection stamps the marker on the R peak and records the measured
+        // width of the deflection *around* it, so the band centers the same way
+        // the other detectors' do. `hasPrefix` because the algorithm name is
+        // appended to the source file ("ECG Detection: Pan-Tompkins").
+        if event.sourceFile.hasPrefix(RWaveDetector.sourceFile) {
             return true
         }
         return template.definedArtifacts.contains { artifact in
@@ -1350,7 +1356,6 @@ extension WaveformView {
             upsertDefinedArtifact(from: result, configuration: configuration, source: source)
             artifactVM.events = definedArtifactEventList()
             selectedEventCodes = [configuration.eventCode]
-            showsEventsPanel = true
             template.confirmedSource = source
             artifactVM.statusMessage = source == .topography
                 ? "\(result.topographyEvents.count) topography matches"

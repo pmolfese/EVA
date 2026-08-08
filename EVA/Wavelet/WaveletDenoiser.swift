@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Wavelet shrinkage denoising of single-trial (or averaged) ERP traces, used to
 //  raise SNR before latency estimation (Woody / RIDE / CWT-Ridge). It reuses the
 //  shared discrete-wavelet machinery in `WaveletReducer.swift`
@@ -79,7 +74,7 @@ nonisolated enum WaveletDenoiser {
         let levels = clampedLevels(configuration.levels, signalLength: signal.count)
         guard levels >= 1 else { return signal }
 
-        let bank = WaveletFilterBank.orthonormal(configuration.family.scalingFilter)
+        let bank = configuration.family.filterBank
         let transform = WaveletTransform(bank: bank)
         var decomposition = transform.forwardDWT(signal, levels: levels)
 

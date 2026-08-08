@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Supporting value types, enums, and small views extracted from WaveformView.swift
 //  during the L5 view-decomposition refactor. These are internal (same-module) so
 //  WaveformView continues to see them unchanged.
@@ -70,6 +65,29 @@ enum ArtifactDefinitionResultSource: Equatable {
         switch self {
         case .waveform: return "waveform.path"
         case .topography: return "circle.grid.3x3.fill"
+        }
+    }
+}
+
+/// Sortable columns in the Wavelet Explorer's candidate table.
+enum WaveletCandidateSortColumn: String, CaseIterable, Identifiable {
+    case rank = "#"
+    case peakTime = "Peak"
+    case duration = "Duration"
+    case score = "Score"
+    case channel = "Peak Ch"
+    case level = "Level"
+    case contributingChannels = "Contrib"
+    case type = "Type"
+
+    var id: String { rawValue }
+
+    /// Rank reads naturally low-to-high; the rest are most interesting
+    /// largest-first, except the categorical ones which read alphabetically.
+    var sortsAscendingByDefault: Bool {
+        switch self {
+        case .rank, .peakTime, .channel, .type: return true
+        case .duration, .score, .level, .contributingChannels: return false
         }
     }
 }
@@ -733,6 +751,12 @@ nonisolated struct PSABuildJob: Sendable {
     /// belongs to a pooled group carries a second entry for the group's
     /// category, producing a duplicate epoch tagged with each category.
     let categoriesBySegmentValue: [String: [String]]
+    /// Regex sub-selection rules — see `EpochingViewModel.categoryRegexRules`.
+    /// An event whose code matches a rule's `sourceCode` AND whose
+    /// `eventDescription` matches the rule's pattern gets that rule's
+    /// category IN ADDITION to whatever `categoriesBySegmentValue` gives it
+    /// (possibly nothing, if the source code itself isn't separately selected).
+    let categoryRegexRules: [CategoryRegexRule]
     let timingMarkersBySegmentValue: [String: String]
     let timingEventsBySegmentValue: [String: [MFFEvent]]
     let artifactEventsForRejection: [MFFEvent]
@@ -752,6 +776,14 @@ nonisolated struct PSABuildJob: Sendable {
     let epochBadChannelThresholds: EpochBadChannelThresholds
     let electrodePositions: [Int: SIMD3<Double>]
     let globallyBadChannels: Set<Int>
+    /// Sub-window of the epoch, in seconds relative to the anchor (negative =
+    /// before it), within which an artifact must fall to reject the epoch.
+    /// `nil` — the default — means the whole epoch counts.
+    ///
+    /// Intersected with the epoch, so a window wider than the epoch behaves the
+    /// same as `nil`. See `EpochingViewModel.effectiveArtifactRejectionWindow`,
+    /// which clamps it before it gets here.
+    let artifactRejectionWindow: ClosedRange<Double>?
 
     /// One accepted (event, category) pairing, cheap to compute — everything
     /// EXCEPT the per-channel sample extraction and (optional) per-epoch
@@ -786,9 +818,26 @@ nonisolated struct PSABuildJob: Sendable {
             ? (artifactEventsForRejection.isEmpty ? [:] : [artifactRejectionLabel: artifactEventsForRejection])
             : artifactEventsForRejectionByLabel
 
+        // Compile each rule's pattern once, grouped by the code it applies to,
+        // rather than re-compiling per event.
+        let regexRulesByCode: [String: [(regex: Regex<AnyRegexOutput>, rule: CategoryRegexRule)]] =
+            Dictionary(grouping: categoryRegexRules, by: \.sourceCode).mapValues { rules in
+                rules.compactMap { rule in
+                    (try? Regex(rule.pattern))
+                        .map { rule.isCaseSensitive ? $0 : $0.ignoresCase() }
+                        .map { ($0, rule) }
+                }
+            }
+
         for event in events {
-            guard let categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""],
-                  !categories.isEmpty else { continue }
+            var categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""] ?? []
+            if let description = event.eventDescription, let rules = regexRulesByCode[event.code] {
+                for entry in rules {
+                    guard let match = description.firstMatch(of: entry.regex) else { continue }
+                    categories.append(entry.rule.resolvedCategoryName(for: match))
+                }
+            }
+            guard !categories.isEmpty else { continue }
             let segmentValue: String = categoriesBySegmentValue[event.code] != nil ? event.code : (event.label ?? event.code)
             let anchorTimeSeconds: Double
             let timingMarkerValue = timingMarkersBySegmentValue[event.code] ?? timingMarkersBySegmentValue[event.label ?? ""]
@@ -812,9 +861,17 @@ nonisolated struct PSABuildJob: Sendable {
                 continue
             }
             if skipIfContainsArtifact, !artifactRejectionGroups.isEmpty {
-                let startSeconds = Double(startSample) / signal.samplingRate
-                let endSeconds = Double(endSample) / signal.samplingRate
-                let matchedLabels = artifactRejectionGroups.compactMap { label, events -> String? in
+                // Default window is the whole epoch; `artifactRejectionWindow`
+                // narrows it, relative to the anchor (t = 0), and can only ever
+                // shrink it — an artifact outside the epoch was never a
+                // rejection candidate.
+                var startSeconds = Double(startSample) / signal.samplingRate
+                var endSeconds = Double(endSample) / signal.samplingRate
+                if let window = artifactRejectionWindow {
+                    startSeconds = max(startSeconds, anchorTimeSeconds + window.lowerBound)
+                    endSeconds = min(endSeconds, anchorTimeSeconds + window.upperBound)
+                }
+                let matchedLabels = startSeconds > endSeconds ? [] : artifactRejectionGroups.compactMap { label, events -> String? in
                     events.contains { artifact in
                         artifact.beginTimeSeconds >= startSeconds && artifact.beginTimeSeconds <= endSeconds
                     } ? label : nil

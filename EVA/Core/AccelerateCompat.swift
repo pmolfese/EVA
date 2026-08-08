@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Thin compatibility shim for the modern Accelerate LAPACK headers, enabled by
 //  the `-Xcc -DACCELERATE_NEW_LAPACK` build flag (REFACTOR.md L4.5). The new
 //  headers replace the legacy `__CLPK_integer` scalar type with `__LAPACK_int`;

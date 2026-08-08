@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  L4 store for the PSA epoching / averaging domain and the averaged-data
 //  display state (butterfly, overlaid categories, noise band), extracted from
 //  WaveformView (REFACTOR.md slice 4). State-ownership extraction: the store
@@ -22,6 +17,61 @@
 //
 
 import SwiftUI
+
+/// Which flow the "Group…" popover is showing — pooling whole codes together,
+/// or sub-selecting one code's events by a regex on their description.
+enum CategoryGroupMode: String, CaseIterable, Identifiable {
+    case codes = "Multiple codes"
+    case regex = "Regex on description"
+
+    var id: String { rawValue }
+}
+
+/// One regex sub-selection rule: within `sourceCode`'s events, any whose
+/// `eventDescription` matches `pattern` get filed under `categoryName` in
+/// addition to their normal category. See `EpochingViewModel.categoryRegexRules`.
+struct CategoryRegexRule: Identifiable, Codable, Hashable, Sendable {
+    var id = UUID()
+    var sourceCode: String
+    var pattern: String
+    /// May reference the pattern's capture groups as `$1`, `$2`, … — e.g.
+    /// pattern `n2_(\w+)` + this template `n2_$1` resolves per event to
+    /// `n2_nov`, `n2_rep`, etc., so one rule can fan out into several
+    /// categories instead of needing one rule per captured value.
+    var categoryName: String
+    var isCaseSensitive: Bool = false
+
+    /// Substitutes this rule's `$1`/`$2`/… references with `match`'s captured
+    /// substrings. A template with no `$` references (the common case) is
+    /// returned unchanged. An out-of-range or unmatched group (e.g. `$2` when
+    /// the pattern only has one capture, or an optional group that didn't
+    /// participate) is dropped rather than left as literal `$2` text.
+    func resolvedCategoryName(for match: Regex<AnyRegexOutput>.Match) -> String {
+        guard categoryName.contains("$") else { return categoryName }
+        let chars = Array(categoryName)
+        var result = ""
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "$", i + 1 < chars.count, chars[i + 1].isNumber {
+                var j = i + 1
+                var digits = ""
+                while j < chars.count, chars[j].isNumber {
+                    digits.append(chars[j])
+                    j += 1
+                }
+                if let index = Int(digits), index < match.output.count,
+                   let substring = match.output[index].substring {
+                    result += String(substring)
+                }
+                i = j
+            } else {
+                result.append(chars[i])
+                i += 1
+            }
+        }
+        return result
+    }
+}
 
 @MainActor
 @Observable
@@ -71,6 +121,14 @@ final class EpochingViewModel {
     /// e.g. "face" = {happy, sad, angry} produces segments for "face" as well as
     /// segments for "happy"/"sad"/"angry" individually. Value = member codes.
     var categoryGroups = [String: Set<String>]()
+    /// Sub-selects a new category out of ONE event code's individual events by
+    /// matching a regex against `MFFEvent.eventDescription` (the per-event
+    /// "description" field EGI `Events_ECI` tracks populate) — finer-grained
+    /// than `categoryGroups`, which only pools whole codes together. Matching
+    /// events get the rule's category IN ADDITION to their code's own category
+    /// (and the source code doesn't need to be individually selected). Keyed by
+    /// `CategoryRegexRule.id.uuidString`.
+    var categoryRegexRules = [String: CategoryRegexRule]()
     var timingMarkerEnabledValues = Set<String>()
     var timingMarkerValuesBySegmentValue = [String: String]()
     var timingTolerance = 0.5
@@ -81,6 +139,16 @@ final class EpochingViewModel {
     var skipEyeMovements = true
     /// Drives the popover listing which artifact kinds to reject on.
     var showsArtifactRejectionOptions = false
+    /// Restricts rejection to a sub-window of the epoch instead of the whole
+    /// thing, so an artifact late in a long post-stimulus interval (a blink at
+    /// 750 ms in a −100…800 ms epoch) doesn't have to cost the trial. Off by
+    /// default: the whole epoch counts, which is the historical behaviour.
+    var limitsArtifactRejectionWindow = false
+    /// Bounds of that window in **seconds relative to the anchor** (negative =
+    /// before it), matching how `preStimulus`/`postStimulus` are expressed.
+    /// Clamped to the epoch by `effectiveArtifactRejectionWindow`.
+    var artifactRejectionWindowStart = -0.2
+    var artifactRejectionWindowEnd = 0.8
     var skippedDefinedArtifactIDs = Set<DefinedArtifact.ID>()
     var knownArtifactIDsForRejection = Set<DefinedArtifact.ID>()
     /// Excludes segments the user manually marked "Bad" (Segment Health
@@ -203,6 +271,34 @@ final class EpochingViewModel {
         overlaySelectedCategories = current
     }
 
+    /// The artifact-rejection window actually applied, in seconds relative to
+    /// the anchor, or `nil` for "the whole epoch".
+    ///
+    /// Clamped to the epoch, since an artifact outside the epoch was never a
+    /// rejection candidate. An inverted window (end before start) collapses to a
+    /// zero-width instant rather than falling back to the whole epoch — a
+    /// mistyped bound should reject *less*, never silently reject everything.
+    var effectiveArtifactRejectionWindow: ClosedRange<Double>? {
+        guard limitsArtifactRejectionWindow else { return nil }
+        let lower = max(artifactRejectionWindowStart, -preStimulus)
+        let upper = min(artifactRejectionWindowEnd, postStimulus)
+        return lower...max(lower, upper)
+    }
+
+    /// True when the configured bounds are inverted, so the UI can say so
+    /// instead of silently rejecting nothing.
+    var artifactRejectionWindowIsInverted: Bool {
+        limitsArtifactRejectionWindow && artifactRejectionWindowEnd <= artifactRejectionWindowStart
+    }
+
+    /// Seeds the window from the current epoch bounds, so switching the limit on
+    /// starts from "the whole epoch" and is narrowed from there rather than
+    /// starting at stale numbers from a different epoch length.
+    func seedArtifactRejectionWindowFromEpoch() {
+        artifactRejectionWindowStart = -preStimulus
+        artifactRejectionWindowEnd = postStimulus
+    }
+
     var parameters: [String: String] {
         var p: [String: String] = [
             "preStimulusMs": String(format: "%.0f", preStimulus * 1000),
@@ -217,6 +313,11 @@ final class EpochingViewModel {
             "skipLabeledBad": "\(skipIfLabeledBad)",
             "interpolateBadChannelsPerEpoch": "\(interpolatesBadChannelsPerEpoch)"
         ]
+        if skipIfContainsArtifact, limitsArtifactRejectionWindow {
+            p["artifactWindowLimited"] = "true"
+            p["artifactWindowStartMs"] = String(format: "%.0f", artifactRejectionWindowStart * 1000)
+            p["artifactWindowEndMs"] = String(format: "%.0f", artifactRejectionWindowEnd * 1000)
+        }
         if interpolatesBadChannelsPerEpoch {
             p.merge(epochBadChannelThresholds.flatParameters(prefix: "badChannel")) { current, _ in current }
             p["badChannel.escalateToGlobal"] = "\(escalatesBadChannelsToGlobal)"
@@ -260,6 +361,11 @@ final class EpochingViewModel {
         if let v = p["skipEyeBlinks"] { skipEyeBlinks = (v == "true") }
         if let v = p["skipEyeMovements"] { skipEyeMovements = (v == "true") }
         if let v = p["skipArtifacts"] { skipIfContainsArtifact = (v == "true") }
+        // Absent keys mean "not limited", matching how `parameters` only writes
+        // them when the limit is on.
+        limitsArtifactRejectionWindow = p["artifactWindowLimited"] == "true"
+        if let v = p["artifactWindowStartMs"].flatMap(Double.init) { artifactRejectionWindowStart = v / 1000 }
+        if let v = p["artifactWindowEndMs"].flatMap(Double.init) { artifactRejectionWindowEnd = v / 1000 }
         if let v = p["skipLabeledBad"] { skipIfLabeledBad = (v == "true") }
         if let v = p["interpolateBadChannelsPerEpoch"] { interpolatesBadChannelsPerEpoch = (v == "true") }
         epochBadChannelThresholds = EpochBadChannelThresholds.fromFlatParameters(
@@ -375,7 +481,11 @@ final class EpochingViewModel {
                 return nil
             }
         }
-        let events = sortedEvents.filter { selectedEventCodes.contains(segmentValue(for: $0)) }
+        let regexSourceCodes = Set(categoryRegexRules.values.map(\.sourceCode))
+        let events = sortedEvents.filter {
+            let value = segmentValue(for: $0)
+            return selectedEventCodes.contains(value) || regexSourceCodes.contains(value)
+        }
         guard !events.isEmpty else {
             statusMessage = segmentField == .artifact
                 ? "Select at least one artifact type."
@@ -393,10 +503,12 @@ final class EpochingViewModel {
             return nil
         }
         let skipArtifacts = skipIfContainsArtifact && segmentField != .artifact
+        let regexRules = Array(categoryRegexRules.values)
         return PSABuildJob(
             signal: signal,
             events: events,
             categoriesBySegmentValue: categoriesBySegmentValue,
+            categoryRegexRules: regexRules,
             timingMarkersBySegmentValue: timingMarkersBySegmentValue,
             timingEventsBySegmentValue: timingEventsBySegmentValue,
             artifactEventsForRejection: skipArtifacts ? artifactRejectionEvents : [],
@@ -405,14 +517,15 @@ final class EpochingViewModel {
             epochLength: epochLength,
             psaOffset: offset,
             sampleCount: sampleCount,
-            colorIndices: Self.colorIndices(for: categoriesBySegmentValue.values.flatMap { $0 }),
+            colorIndices: Self.colorIndices(for: categoriesBySegmentValue.values.flatMap { $0 } + regexRules.map(\.categoryName)),
             skipIfContainsArtifact: skipArtifacts,
             artifactRejectionLabel: "artifacts",
             timingTolerance: timingTolerance,
             interpolatesBadChannelsPerEpoch: interpolatesBadChannelsPerEpoch,
             epochBadChannelThresholds: epochBadChannelThresholds,
             electrodePositions: electrodePositions,
-            globallyBadChannels: globallyBadChannels
+            globallyBadChannels: globallyBadChannels,
+            artifactRejectionWindow: skipArtifacts ? effectiveArtifactRejectionWindow : nil
         )
     }
 
@@ -567,6 +680,7 @@ final class EpochingViewModel {
         selectedEventCodes.removeAll()
         categoryNames.removeAll()
         categoryGroups.removeAll()
+        categoryRegexRules.removeAll()
         timingMarkerEnabledValues.removeAll()
         timingMarkerValuesBySegmentValue.removeAll()
         skippedDefinedArtifactIDs.removeAll()

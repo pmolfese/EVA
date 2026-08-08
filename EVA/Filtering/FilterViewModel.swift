@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  L4 store for the band-pass / line-noise / average-reference filtering domain,
 //  extracted from WaveformView (first slice of the ProcessingPipeline refactor —
 //  see REFACTOR.md). Owns the filter parameters, run state, and the filtered
@@ -97,6 +92,7 @@ final class FilterViewModel {
     // MARK: Run state
     var isFiltering = false
     var progress = 0.0
+    var operationProgress: OperationProgress?
     var statusMessage: String?
     var statusIsError = false
 
@@ -327,7 +323,7 @@ final class FilterViewModel {
         }
 
         isFiltering = true
-        progress = 0
+        progress = 0.02
         statusMessage = nil
         statusIsError = false
 
@@ -353,6 +349,13 @@ final class FilterViewModel {
         let averageReference = self.averageReference
         let precision = self.precision
         let filterSummary = activeFilterSummary
+        let pnsEnabled = pnsInput != nil
+
+        beginOperationProgress(
+            subtitle: filterSummary,
+            hasCleanLine: lineNoiseMode == .adaptiveCleanLine,
+            hasPNS: pnsEnabled
+        )
 
         if lineNoiseMode == .adaptiveCleanLine {
             statusMessage = "Filtering, then applying adaptive CleanLine..."
@@ -360,12 +363,16 @@ final class FilterViewModel {
         }
 
         let (progressContinuation, progressTask) = ProgressBridge.make { [weak self] fraction in
-            self?.progress = fraction
+            self?.updateFilterProgress(
+                fraction,
+                hasCleanLine: lineNoiseMode == .adaptiveCleanLine,
+                hasPNS: pnsEnabled,
+                eegChannels: sourceData.count,
+                pnsChannels: pnsInput?.data.count ?? 0
+            )
         }
 
         do {
-            let pnsEnabled = pnsInput != nil
-
             let worker = Task.detached(priority: .userInitiated) {
                     let filteredData = try await Self.filteredChannels(
                         sourceData,
@@ -430,8 +437,13 @@ final class FilterViewModel {
                 progressContinuation.finish()
                 progressTask.cancel()
 
-                guard activeRequestID == requestID, !Task.isCancelled else { return }
+                guard activeRequestID == requestID, !Task.isCancelled else {
+                    operationProgress = nil
+                    return
+                }
                 activeWorker = nil
+
+                updateFinalizingProgress(averageReference: averageReference)
 
                 output = signal.replacingData(result.0)
                 if let pnsInput, let filteredPNSData = result.1 {
@@ -454,6 +466,7 @@ final class FilterViewModel {
                 onApplied()
                 statusMessage = "Applied \(filterSummary)\(pnsInput == nil ? "" : " + PNS")."
                 statusIsError = false
+                progress = 1
             } catch {
                 progressContinuation.finish()
                 progressTask.cancel()
@@ -465,6 +478,7 @@ final class FilterViewModel {
             if activeRequestID == requestID {
                 activeWorker = nil
                 isFiltering = false
+                operationProgress = nil
             }
     }
 
@@ -474,6 +488,7 @@ final class FilterViewModel {
         activeWorker?.cancel()
         activeWorker = nil
         isFiltering = false
+        operationProgress = nil
         output = nil
         pnsOutput = nil
         pnsInputSignalType = nil
@@ -496,6 +511,7 @@ final class FilterViewModel {
         activeWorker = nil
         isFiltering = false
         progress = 0
+        operationProgress = nil
     }
 
     func resetForClose() {
@@ -505,6 +521,76 @@ final class FilterViewModel {
         output = nil
         pnsOutput = nil
         pnsInputSignalType = nil
+    }
+
+    private func beginOperationProgress(subtitle: String, hasCleanLine: Bool, hasPNS: Bool) {
+        var stages = ["Preparing", "EEG filtering"]
+        if hasCleanLine { stages.append("Adaptive CleanLine") }
+        if hasPNS { stages.append("PNS filtering") }
+        stages.append("Finalizing")
+        operationProgress = .started(
+            source: "Filter",
+            title: "Signal Filtering",
+            subtitle: subtitle,
+            phase: "Designing filter coefficients",
+            stages: stages
+        ).updating(
+            fraction: 0.02,
+            phase: "Designing filter coefficients",
+            activeStage: 0
+        )
+    }
+
+    private func updateFilterProgress(
+        _ workerFraction: Double,
+        hasCleanLine: Bool,
+        hasPNS: Bool,
+        eegChannels: Int,
+        pnsChannels: Int
+    ) {
+        let bounded = min(max(workerFraction, 0), 1)
+        let isPNS = hasPNS && bounded >= 0.70
+        let local = isPNS
+            ? min(max((bounded - 0.70) / 0.30, 0), 1)
+            : min(max(bounded / (hasPNS ? 0.70 : 1), 0), 1)
+        let inCleanLine = hasCleanLine && local >= 0.62
+        let phaseFraction: Double
+        if hasCleanLine {
+            phaseFraction = inCleanLine ? (local - 0.62) / 0.38 : local / 0.62
+        } else {
+            phaseFraction = local
+        }
+        let count = isPNS ? pnsChannels : eegChannels
+        let completed = min(count, max(0, Int((phaseFraction * Double(count)).rounded())))
+        let displayFraction = 0.06 + 0.88 * bounded
+        progress = displayFraction
+
+        let cleanLineStage = 2
+        let pnsStage = 2 + (hasCleanLine ? 1 : 0)
+        let activeStage = isPNS ? pnsStage : (inCleanLine ? cleanLineStage : 1)
+        let target = isPNS ? "PNS" : "EEG"
+        let phase: String
+        if isPNS {
+            phase = inCleanLine ? "Applying adaptive CleanLine to PNS" : "Filtering PNS channels"
+        } else {
+            phase = inCleanLine ? "Applying adaptive CleanLine" : "Filtering EEG channels"
+        }
+        operationProgress = operationProgress?.updating(
+            fraction: displayFraction,
+            phase: phase,
+            detail: count > 0 ? "\(target) channels \(completed) of \(count)" : nil,
+            activeStage: activeStage
+        )
+    }
+
+    private func updateFinalizingProgress(averageReference: Bool) {
+        progress = 0.98
+        guard let current = operationProgress else { return }
+        operationProgress = current.updating(
+            fraction: 0.98,
+            phase: averageReference ? "Applying average reference and finalizing" : "Finalizing filtered signal",
+            activeStage: current.stages.count - 1
+        )
     }
 
     // MARK: - Transform (L3 orchestration)

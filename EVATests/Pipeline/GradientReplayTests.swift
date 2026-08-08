@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Round-trip coverage for the reproducible eva.xml pipeline: gradient-correction
 //  parameters and the portable eye-artifact threshold-detection config must both
 //  survive serialize → deserialize so Copy Processing replays them exactly.
@@ -39,6 +34,7 @@ struct GradientReplayTests {
         a.fastrUseFacetWindow = true
         a.fastrOBSRandomSampling = true
         a.fastrANCSliceHighPass = true
+        a.fastrUseMetal = true
         a.fastrDonorSelection = .bergenRSquare
         a.moosmannMotionMetric = .allParameters
         a.excludeHighMotion = true
@@ -59,6 +55,7 @@ struct GradientReplayTests {
         #expect(b.fastrUseFacetWindow)
         #expect(b.fastrOBSRandomSampling)
         #expect(b.fastrANCSliceHighPass)
+        #expect(b.fastrUseMetal)
         #expect(b.fastrDonorSelection == .bergenRSquare)
         #expect(b.moosmannMotionMetric == .allParameters)
         #expect(b.excludeHighMotion == true)
@@ -77,6 +74,20 @@ struct GradientReplayTests {
         b.apply(parameters: a.parameters)
         #expect(b.method == .aas)
         #expect(b.parameters == a.parameters)
+    }
+
+    @MainActor
+    @Test func masMetalSelectionRoundTrips() {
+        let source = GradientViewModel(store: RecordingStore())
+        source.method = .mas
+        source.fastrUseMetal = true
+
+        let restored = GradientViewModel(store: RecordingStore())
+        restored.apply(parameters: source.parameters)
+
+        #expect(restored.method == .mas)
+        #expect(restored.fastrUseMetal)
+        #expect(restored.parameters == source.parameters)
     }
 
     /// The threshold-detection replay carries each ocular config as JSON in a

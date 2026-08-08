@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  MRI gradient artifact removal popover (AAS/FASTR/FARM/Moosmann) and its
 //  supporting helpers, extracted from WaveformView.swift during the L5
 //  view-decomposition refactor. This is an extension of WaveformView (not a
@@ -190,6 +185,15 @@ extension WaveformView {
                     .help("Apply the selected MRI gradient artifact correction to physio/PNS channels using the same TR markers.")
             }
 
+            if gradient.method == .mas || gradient.method == .mar {
+                Toggle("Use Metal GPU", isOn: $gradient.fastrUseMetal)
+                    .font(.caption)
+                    .disabled(!GradientRemoverMetalBackend.isAvailable)
+                    .help(GradientRemoverMetalBackend.isAvailable
+                          ? "Build median artifact templates and perform subtraction or regression on the GPU. Donor and outlier selection remain on the CPU."
+                          : "No compatible Metal GPU is available; correction will use the CPU.")
+            }
+
             if gradient.method.isFASTR {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {
@@ -217,6 +221,12 @@ extension WaveformView {
                             .labelsHidden()
                     }
                     .help("Number of fMRI slices per volume. Each TR interval is split into this many slice epochs.")
+                    Toggle("Use Metal GPU", isOn: $gradient.fastrUseMetal)
+                        .font(.caption)
+                        .disabled(!FastrCorrector.isMetalAvailable)
+                        .help(FastrCorrector.isMetalAvailable
+                              ? "Run interpolation, template scaling and subtraction, OBS fitting, and decimation on the GPU. Alignment, OBS PCA, donor selection, and ANC remain on the CPU."
+                              : "No compatible Metal GPU is available; FASTR will use the CPU.")
                     Toggle("Sub-sample alignment", isOn: $gradient.fastrSubSample)
                         .font(.caption)
                         .help("FACET-style fractional-sample epoch alignment.")
@@ -242,6 +252,18 @@ extension WaveformView {
                                 mriOBSRandomHelp()
                             }
                         }
+                        HStack(spacing: 6) {
+                            Text("OBS chunk")
+                                .font(.caption)
+                                .frame(width: 96, alignment: .leading)
+                            TextField("Seconds", value: $gradient.fastrOBSChunkSeconds, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 70)
+                            Text("s")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .help("PCA for the optimal basis set is recomputed independently every this many seconds of the recording, matching FASTR's reference implementation (Niazy et al., 2005). Shorter chunks adapt faster to changing artifact shape but use fewer epochs per PCA fit; longer chunks average over more data but assume the artifact stays stable throughout. Default: 60s.")
                     }
                     Toggle("Adaptive noise cancellation (ANC)", isOn: $gradient.fastrANC)
                         .font(.caption)

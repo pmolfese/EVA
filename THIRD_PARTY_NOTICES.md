@@ -1,13 +1,42 @@
 # Third-Party Notices
 
-EVA is licensed under the GNU General Public License version 3.0 only. Some
-source files include or were implemented with reference to third-party software,
-models, or publications. Those files keep local source-header attribution, and
-the related notices are collected here.
+EVA was developed by P. Molfese, National Institutes of Health (NIH), as a
+public work of the United States Government under 17 U.S.C. § 105. Some source
+files include or were implemented with reference to third-party software,
+models, or publications. Those files keep local attribution, and the related
+notices are collected here.
 
 This file is not a substitute for legal review. Entries marked "no known
 license" should be treated as attribution-only until the upstream copyright
 holder grants explicit redistribution terms or the EVA code is replaced.
+
+## Copyleft components
+
+**EVA currently incorporates no copyleft-licensed code.** Every entry below is
+permissively licensed (BSD, Apache, MIT), attribution-only pending upstream
+terms, or a literature citation with no code copied.
+
+If that changes, section 3 of `LICENSE` governs, and this convention applies:
+
+- A file that carries copyleft-licensed material gets an
+  `SPDX-License-Identifier` in its header naming the applicable license, and an
+  entry in this file. A file with no such marker is Government-authored and
+  carries no license conditions.
+- Copyleft terms can govern the distribution of EVA as a whole, not just the
+  covered files. Adding such a component is a decision about how the whole
+  application is distributed, so make it deliberately.
+- Marking a Government-authored file with a copyleft identifier does not make it
+  copyleft — a public work has no copyright for a license to attach to. Mark
+  only files that actually carry third-party material.
+
+Reimplementing a published method from a paper does not create a license
+obligation, even when the reference implementation is copyleft. Copying or
+translating that implementation's code does. EVA replicates methods from several
+GPL-licensed toolboxes (HAPPE, EEGLAB) on the literature-only basis recorded at
+the end of this file.
+
+Never take a reference implementation from a proprietary source. See
+`docs/empirical-bayes-port.md` for the constraints that apply to one such case.
 
 ## MNE-Python
 
@@ -16,7 +45,8 @@ holder grants explicit redistribution terms or the EVA code is replaced.
   - `EVA/IO/SignalImportReader.swift`
 - Upstream project: https://github.com/mne-tools/mne-python
 - Upstream license: BSD 3-Clause
-- Compatibility: BSD 3-Clause is compatible with GPL-3.0-only distribution.
+- Notice: retain the BSD 3-Clause attribution and disclaimer when redistributing
+  material derived from or adapted with reference to MNE-Python.
 
 EVA's ICA implementation and native readers for BrainVision, EDF/EDF+, EEGLAB,
 Persyst, BESA, and montage helpers were implemented with reference to the
@@ -56,7 +86,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   `EVATests/Fixtures/example_4.mff`, `EVATests/Fixtures/example_5.mff`
 - Upstream project: https://github.com/BEL-Public/mffpy
 - Upstream license: Apache License 2.0
-- Compatibility: Apache-2.0 is compatible with GPL-3.0-only distribution.
+- Notice: retain the Apache License 2.0 notice for the redistributed fixtures
+  and any material derived from or adapted with reference to mffpy.
 
 EVA's MFF signal block and epoch XML writer structure follows the public mffpy
 writer implementation, especially `mffpy/bin_writer.py`,
@@ -91,8 +122,9 @@ specific language governing permissions and limitations under the License.
 - Upstream authorship: SCCN; Luca Pion-Tonachini, Ken Kreutz-Delgado, and Scott
   Makeig
 - Upstream license: no repository-level license was found
-- Compatibility: not confirmed. Treat as attribution-only until explicit
-  GPL-compatible redistribution terms are obtained.
+- Notice: EVA currently bundles a Core ML conversion of the ICLabel network with
+  attribution. Redistribution terms for the upstream model were not identified
+  at review time; explicit permission is being sought.
 
 EVA bundles a Core ML conversion of the official ICLabel default MatConvNet
 network and implements the corresponding feature preparation path.
@@ -110,8 +142,8 @@ NeuroImage, 198, 181-197 (2019).
 - Upstream source: `src/gradient_remover/GradientRemover.py`
 - Upstream author: Joshua Teves
 - Upstream license: no repository-level license or source-file license was found
-- Compatibility: not confirmed. Treat as attribution-only until explicit
-  GPL-compatible redistribution terms are obtained or this code is replaced.
+- Notice: treat as attribution/provenance until explicit redistribution terms
+  are obtained or this code is replaced.
 
 EVA's MR gradient artifact removal implementation is a Swift translation of the
 upstream template-based gradient remover, with a documented correction to the
@@ -127,7 +159,8 @@ neighboring-TR "after" window.
   ballistocardiogram artefacts from simultaneous EEG and fMRI recordings.
   NeuroImage, 37(1), 202-211.
 - Upstream license (`CWRegrTool/LICENSE.txt`): MIT
-- Compatibility: MIT is compatible with GPL-3.0-only distribution.
+- Notice: retain the MIT attribution if redistributing copied CWRegrTool
+  material. EVA does not copy CWRegrTool code.
 
 No code was copied from CWRegrTool (a MATLAB/EEGLAB plugin); EVA's CWL
 correction is an original Swift implementation of the adaptive regression
@@ -152,9 +185,9 @@ license and is not redistributed with EVA.
 - wAAS/wAAR weighting additionally cites: Goldman RI, Stern JM, Engel J Jr,
   Cohen MS. Acquiring simultaneous EEG and functional MRI. Clinical
   Neurophysiology (2000), 111(11): 1974-1980.
-- Upstream license (`amri_eeg_gac.m`, `amri_eeg_cbc.m` file headers): GNU
-  General Public License v3.
-- Compatibility: same license as EVA (GPL-3.0-only).
+- Upstream source-file license: the referenced AMRI MATLAB files carry their
+  own license headers.
+- Notice: EVA does not redistribute or copy AMRI toolbox code in the app.
 
 No code was copied from the AMRI toolbox (MATLAB/EEGLAB functions); EVA's
 MAS/MAR (gradient and BCG) and wAAS/wAAR (BCG) are original Swift
@@ -269,7 +302,8 @@ concern. The corresponding source-file headers carry the same references.
 ### Wavelet-thresholded artifact reduction and denoising
 
 - EVA files: `EVA/Wavelet/WaveletReducer.swift`,
-  `EVA/Wavelet/WaveletDenoiser.swift`
+  `EVA/Wavelet/WaveletDenoiser.swift`,
+  `EVA/Wavelet/EmpiricalBayesThreshold.swift`
 - References:
   - Gabard-Durnam LJ, Mendez Leal AS, Wilkinson CL, Levin AR. The Harvard
     Automated Processing Pipeline for Electroencephalography (HAPPE).
@@ -277,3 +311,21 @@ concern. The corresponding source-file headers carry the same references.
     rejection; the reduction engine mirrors HAPPE's `wdenoise`-based method)
   - Donoho DL, Johnstone IM. Ideal spatial adaptation by wavelet shrinkage.
     Biometrika (1994), 81(3): 425-455. (VisuShrink / SureShrink thresholds)
+  - Johnstone IM, Silverman BW. Empirical Bayes selection of wavelet
+    thresholds. The Annals of Statistics (2005), 33(4): 1700-1752.
+    (`EmpiricalBayesThreshold` — the estimator behind `wdenoise`'s
+    `'DenoisingMethod','Bayes'`, and therefore behind HAPPE's threshold choice.
+    Written from the paper's §2.2-2.3: the quasi-Cauchy marginal, the
+    marginal-maximum-likelihood score, and the posterior-median threshold. The
+    two algebraic reductions the file actually evaluates are derived in its
+    header.)
+
+  The authors also publish an R package, **EbayesThresh** (CRAN, GPL >= 2). It
+  is **not** incorporated, linked, or ported — no copyleft obligation attaches
+  to EVA. It is used only as an external oracle at development time:
+  `Tools/generate_ebayes_reference.R` runs it and records its printed numbers
+  into `EVATests/Fixtures/ebayes-thresh-reference.json`, which
+  `EVATests/Wavelet/EmpiricalBayesThresholdTests.swift` compares the Swift
+  against. Running a program and comparing outputs creates no derivative work,
+  and nothing of the package ships. If a comparison ever fails, fix the Swift
+  against the paper — do not port from the package.

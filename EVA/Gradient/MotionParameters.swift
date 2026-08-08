@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Rigid-body head-motion parameters used to drive fMRI-gradient artifact
 //  correction (e.g. FASTR) on simultaneous EEG/fMRI data.
 //
@@ -118,6 +113,24 @@ nonisolated struct MotionParameters: Sendable {
     func volumesExceeding(threshold: Double, radiusMm: Double = 50) -> [Int] {
         let fd = framewiseDisplacement(radiusMm: radiusMm)
         return fd.indices.filter { fd[$0] > threshold }
+    }
+
+    /// Returns a copy with `start` samples dropped from the front and `end`
+    /// dropped from the back — e.g. to line up a motion file that has an
+    /// extra volume or two versus the EEG's TR markers. IDs are renumbered
+    /// from 0 so the trimmed samples still plot as a contiguous volume axis.
+    func trimmed(start: Int, end: Int) -> MotionParameters {
+        let lower = min(max(start, 0), samples.count)
+        let upper = min(max(end, 0), samples.count - lower)
+        let kept = samples[lower..<(samples.count - upper)]
+        let reindexed = kept.enumerated().map { index, sample in
+            MotionSample(
+                id: index,
+                roll: sample.roll, pitch: sample.pitch, yaw: sample.yaw,
+                dS: sample.dS, dL: sample.dL, dP: sample.dP
+            )
+        }
+        return MotionParameters(samples: reindexed, sourceName: sourceName, format: format)
     }
 
     /// Parses the text contents of an AFNI 3dvolreg file or BERGEN/SPM rp_*.txt.

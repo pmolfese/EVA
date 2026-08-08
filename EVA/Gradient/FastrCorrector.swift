@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  FASTR (fMRI Artifact Slice Template Removal) gradient-artifact correction for
 //  simultaneous EEG/fMRI, after Niazy et al. (2005). This is a Swift port of the
 //  algorithm shared by the FMRIB EEGLAB plugin (fmrib_fastr) and the FACET
@@ -34,6 +29,11 @@ import Accelerate
 import Foundation
 
 struct FastrCorrector {
+
+    enum ComputeBackend: String, Sendable {
+        case cpu
+        case metal
+    }
 
     enum TemplateScheme: String, CaseIterable, Sendable {
         /// Average temporally-neighboring epochs (Niazy / FACET default).
@@ -86,6 +86,9 @@ struct FastrCorrector {
     }
 
     struct Config: Sendable {
+        /// Dense FASTR kernels run on the CPU by default. Metal is optional and
+        /// falls back to CPU if no compatible device or shader pipeline exists.
+        var computeBackend: ComputeBackend = .cpu
         /// Interpolation factor L (upsampling before template formation).
         var upsampleFactor = 10
         /// Number of fMRI slices per volume; the volume interval is split into
@@ -121,6 +124,14 @@ struct FastrCorrector {
         /// Match FACET's random 2/3 epoch subset for OBS PCA matrix formation.
         /// False keeps EVA deterministic for reproducible replay.
         var randomizeOBSEpochSelection = false
+        /// OBS PCA is recomputed independently every `obsChunkSeconds` of the
+        /// recording rather than once globally, matching Niazy et al. (2005)'s
+        /// reference FASTR implementation: a single global basis assumes the
+        /// artifact shape is stationary for the whole recording, which both
+        /// loses accuracy over a long scan (motion, drift) and makes the PCA
+        /// Gram-matrix eigendecomposition (O(epoch count³)) the dominant cost
+        /// of the whole correction for slice-triggered data with many epochs.
+        var obsChunkSeconds = 60.0
         /// Optional low-pass (Hz) applied to the corrected signal.
         var lowPassHz: Double? = nil
         /// Adaptive noise cancellation after template subtraction.
@@ -162,6 +173,24 @@ struct FastrCorrector {
 
     nonisolated private static let donorSelectionParallelThreshold = 16
 
+    /// Safety ceiling on how many epochs feed one chunk's OBS PCA Gram matrix.
+    /// `Config.obsChunkSeconds` chunking (matching FASTR's reference
+    /// implementation) already keeps this bounded in practice — a 1-minute
+    /// chunk of even densely slice-triggered data is normally in the
+    /// hundreds, not thousands — but this remains as a hard backstop against
+    /// a pathologically large `obsChunkSeconds` value turning the O(p³)
+    /// eigendecomposition back into the dominant cost of the correction.
+    nonisolated private static let maxPCAEpochCount = 1500
+
+    /// Test-only override for the Metal batch size. `metalBatchSize` is
+    /// otherwise bound by real memory (RAM headroom and the GPU's buffer size
+    /// limit), which small synthetic test signals never approach — this lets
+    /// tests force multiple/small batches to exercise that code path
+    /// deterministically. `nil` (the default) uses the real calculation.
+    nonisolated(unsafe) static var debugBatchSizeOverride: Int?
+
+    nonisolated static var isMetalAvailable: Bool { FastrMetalBackend.isAvailable }
+
     private struct PreparedEpoch: Sendable {
         let values: [Double]
         let mean: Double
@@ -179,6 +208,30 @@ struct FastrCorrector {
         let templateCount: Int
         let moosmannWindow: Int
         let facetTemporalDonors: [[Int]]?
+    }
+
+    /// CPU-computed inputs to the OBS fit: the high-passed residual and the
+    /// (already scaled) PCA design columns for every chunk of the recording
+    /// (see `Config.obsChunkSeconds`) — `nil` for a chunk with too few usable
+    /// epochs. Split out from `optimalBasisSet` so the FASTR Metal batch path
+    /// can gather these for every channel in a batch and fit them with one
+    /// GPU dispatch per chunk instead of one Metal round trip per channel.
+    private struct OBSPreparation: Sendable {
+        let ipca: [Double]
+        let chunkColumns: [[[Double]]?]
+    }
+
+    private struct PreparedChannel: Sendable {
+        let raw: [Double]
+        let original: [Double]
+        let templateNoise: [Double]
+        var residualNoise: [Double]
+        let excluded: Bool
+        var obsPreparation: OBSPreparation?
+        /// `idata - iNoise`, staged for the Metal batch path so the OBS
+        /// high-pass filter can be run once for the whole channel batch
+        /// instead of once per channel. Set only when OBS is deferred.
+        var obsResidual: [Double]?
     }
 
     /// Run FASTR on `channels` (channels × time).
@@ -211,6 +264,7 @@ struct FastrCorrector {
 
         let L = max(1, config.upsampleFactor)
         let sliceTrigger = slices > 1
+        let metal = config.computeBackend == .metal ? FastrMetalBackend.shared : nil
 
         // Upsampled trigger positions and artifact geometry.
         let markersUp = triggers.map { $0 * L }
@@ -255,12 +309,14 @@ struct FastrCorrector {
 
         var result = channels
         // Compute the aligned markers from channel 0 first (shared across channels).
-        let channel0Up = DSP.interp(channels[0].map(Double.init), factor: L)
+        let channel0Up = metal?.interpolate(channels[0], factor: L, subtractMean: false)
+            ?? DSP.interp(channels[0].map(Double.init), factor: L)
         let alignment = aligner.align(dataUp: channel0Up)
         let alignedMarkers = alignment.markers
         let templateAlignedMarkers: [Int]
         if config.alignToAverageArtifact {
-            let channel0ZeroMeanUp = zeroMeanUpsampled(channels[0].map(Double.init), factor: L)
+            let channel0ZeroMeanUp = metal?.interpolate(channels[0], factor: L, subtractMean: true)
+                ?? zeroMeanUpsampled(channels[0].map(Double.init), factor: L)
             let channel0Prepared = applySubSampleShifts(
                 to: channel0ZeroMeanUp,
                 markers: alignedMarkers,
@@ -298,6 +354,37 @@ struct FastrCorrector {
             templateAlignedMarkers = alignedMarkers
         }
 
+        let epochChunks = obsChunkEpochIndices(
+            alignedMarkers: alignedMarkers,
+            chunkSeconds: config.obsChunkSeconds,
+            samplingRate: samplingRate,
+            L: L
+        )
+
+        if let metal {
+            return correctMetalBatches(
+                channels: channels,
+                alignedMarkers: alignedMarkers,
+                templateAlignedMarkers: templateAlignedMarkers,
+                fractionalShifts: alignment.fractionalShifts,
+                L: L,
+                prePeak: prePeak,
+                postPeak: postPeak,
+                artLength: artLength,
+                templateSelection: templateSelection,
+                sliceTrigger: sliceTrigger,
+                slices: slices,
+                moosmannNeighbors: moosmannNeighbors,
+                censoredVolumes: config.censoredVolumes,
+                obsHPF: obsHPF,
+                epochChunks: epochChunks,
+                config: config,
+                samplingRate: samplingRate,
+                metal: metal,
+                progress: progress
+            )
+        }
+
         // Use an explicitly managed buffer so concurrent writes to distinct slots are safe.
         nonisolated(unsafe) let resultPtr = UnsafeMutablePointer<[Float]>.allocate(capacity: channels.count)
         resultPtr.initialize(from: &result, count: channels.count)
@@ -306,6 +393,7 @@ struct FastrCorrector {
             let raw = channels[c].map(Double.init)
             let corrected = correctChannel(
                 raw: raw,
+                rawFloat: channels[c],
                 channelIndex: c,
                 alignedMarkers: alignedMarkers,
                 templateAlignedMarkers: templateAlignedMarkers,
@@ -317,9 +405,10 @@ struct FastrCorrector {
                 slices: slices,
                 moosmannNeighbors: moosmannNeighbors,
                 censoredVolumes: config.censoredVolumes,
-                searchWindow: searchWindow,
                 obsHPF: obsHPF,
-                config: config, samplingRate: samplingRate
+                epochChunks: epochChunks,
+                config: config, samplingRate: samplingRate,
+                metal: nil
             )
             resultPtr[c] = corrected.map { Float($0) }
 
@@ -337,10 +426,395 @@ struct FastrCorrector {
         return result
     }
 
+    private nonisolated static func correctMetalBatches(
+        channels: [[Float]],
+        alignedMarkers: [Int],
+        templateAlignedMarkers: [Int],
+        fractionalShifts: [Double],
+        L: Int,
+        prePeak: Int,
+        postPeak: Int,
+        artLength: Int,
+        templateSelection: TemplateSelection,
+        sliceTrigger: Bool,
+        slices: Int,
+        moosmannNeighbors: [[Int]]?,
+        censoredVolumes: Set<Int>,
+        obsHPF: [Double],
+        epochChunks: [[Int]],
+        config: Config,
+        samplingRate: Double,
+        metal: FastrMetalBackend,
+        progress: (@Sendable (Double) -> Void)?
+    ) -> [[Float]] {
+        let sampleCount = channels.first?.count ?? 0
+        let batchSize = metalBatchSize(
+            channelCount: channels.count,
+            sampleCount: sampleCount,
+            factor: L,
+            maxBufferLength: metal.maxBufferLength
+        )
+        let sharedDonorRows = sharedTemplateDonorRows(
+            markers: alignedMarkers,
+            prePeak: prePeak,
+            postPeak: postPeak,
+            templateSelection: templateSelection,
+            sliceTrigger: sliceTrigger,
+            slices: slices,
+            moosmannNeighbors: moosmannNeighbors,
+            censoredEpochs: censoredEpochIndices(
+                numTrig: alignedMarkers.count,
+                sliceTrigger: sliceTrigger,
+                slices: slices,
+                censoredVolumes: censoredVolumes
+            ),
+            config: config,
+            upsampledCount: sampleCount * L
+        )
+        var result = channels
+        nonisolated(unsafe) let resultPtr = UnsafeMutablePointer<[Float]>.allocate(capacity: channels.count)
+        resultPtr.initialize(from: &result, count: channels.count)
+        let progressLock = NSLock()
+        nonisolated(unsafe) var completed = 0
+
+        // One batch's Metal calls block the thread that issued them
+        // (`waitUntilCompleted`), and the CPU-only stages between them
+        // (PCA/design-column setup, ANC) only use the cores needed for that
+        // one batch's channel count. Run up to `pipelineDepth` batches on
+        // separate threads at once so one batch's GPU wait overlaps with
+        // another batch's CPU-side work — otherwise the whole pipeline
+        // serializes on a single thread alternating between blocked-on-GPU
+        // and CPU-bound, and neither the GPU nor the CPU ever reads busy.
+        let batchStarts = Array(stride(from: 0, to: channels.count, by: batchSize))
+        let pipelineDepth = min(2, max(batchStarts.count, 1))
+
+        func processBatch(_ batchStart: Int) {
+            guard !Task.isCancelled else { return }
+            let batchEnd = min(batchStart + batchSize, channels.count)
+            let batchChannels = Array(channels[batchStart..<batchEnd])
+            let centeredUpsampled = metal.interpolateChannels(
+                batchChannels,
+                factor: L,
+                subtractMean: true
+            )
+
+            var originalUpsampled: [[Double]]?
+            var shiftedCentered: [[Double]]?
+            var shiftedOriginal: [[Double]]?
+            var batchTemplateNoise: [[Double]]?
+            if let centeredUpsampled,
+               let sharedDonorRows {
+                var centered = centeredUpsampled
+                fillResults(&centered, iterations: centered.count) { offset in
+                    applySubSampleShifts(
+                        to: centeredUpsampled[offset],
+                        markers: alignedMarkers,
+                        prePeak: prePeak,
+                        postPeak: postPeak,
+                        shifts: fractionalShifts
+                    )
+                }
+                batchTemplateNoise = metal.buildTemplateNoiseChannels(
+                    data: centered,
+                    markers: alignedMarkers,
+                    targetStarts: templateAlignedMarkers.map { $0 - prePeak },
+                    donorRows: sharedDonorRows,
+                    prePeak: prePeak,
+                    artifactLength: artLength,
+                    fixedAlpha: (batchStart..<batchEnd).map { config.excludedChannels.contains($0) }
+                )
+                if batchTemplateNoise != nil {
+                    shiftedCentered = centered
+                    originalUpsampled = metal.interpolateChannels(
+                        batchChannels,
+                        factor: L,
+                        subtractMean: false
+                    )
+                    if let originalUpsampled {
+                        var original = originalUpsampled
+                        fillResults(&original, iterations: original.count) { offset in
+                            applySubSampleShifts(
+                                to: originalUpsampled[offset],
+                                markers: alignedMarkers,
+                                prePeak: prePeak,
+                                postPeak: postPeak,
+                                shifts: fractionalShifts
+                            )
+                        }
+                        shiftedOriginal = original
+                    } else {
+                        batchTemplateNoise = nil
+                        shiftedCentered = nil
+                    }
+                }
+            }
+            if originalUpsampled == nil {
+                originalUpsampled = metal.interpolateChannels(
+                    batchChannels,
+                    factor: L,
+                    subtractMean: false
+                )
+            }
+            let preparedCentered = shiftedCentered ?? centeredUpsampled
+            let preparedOriginal = shiftedOriginal ?? originalUpsampled
+            let precomputedNoise = batchTemplateNoise
+            let hasPrecomputedNoise = precomputedNoise != nil
+
+            let count = batchChannels.count
+            nonisolated(unsafe) let preparedPtr = UnsafeMutablePointer<PreparedChannel?>.allocate(capacity: count)
+            preparedPtr.initialize(repeating: nil, count: count)
+            evaConcurrentPerform(iterations: count) { offset in
+                guard !Task.isCancelled else { return }
+                let channelIndex = batchStart + offset
+                let rawFloat = batchChannels[offset]
+                preparedPtr[offset] = prepareChannel(
+                    raw: rawFloat.map(Double.init),
+                    rawFloat: rawFloat,
+                    centeredUpsampled: preparedCentered?[offset],
+                    originalUpsampled: preparedOriginal?[offset],
+                    precomputedTemplateNoise: precomputedNoise?[offset],
+                    inputsAreShifted: hasPrecomputedNoise,
+                    channelIndex: channelIndex,
+                    alignedMarkers: alignedMarkers,
+                    templateAlignedMarkers: templateAlignedMarkers,
+                    fractionalShifts: fractionalShifts,
+                    L: L,
+                    prePeak: prePeak,
+                    postPeak: postPeak,
+                    artLength: artLength,
+                    templateSelection: templateSelection,
+                    sliceTrigger: sliceTrigger,
+                    slices: slices,
+                    moosmannNeighbors: moosmannNeighbors,
+                    censoredVolumes: censoredVolumes,
+                    obsHPF: obsHPF,
+                    epochChunks: epochChunks,
+                    config: config,
+                    metal: metal,
+                    deferOBSToMetalBatch: true
+                )
+            }
+            let prepared = (0..<count).map { preparedPtr[$0] }
+            preparedPtr.deinitialize(count: count)
+            preparedPtr.deallocate()
+            guard prepared.allSatisfy({ $0 != nil }) else { return }
+            var ready = prepared.compactMap { $0 }
+
+            // High-pass every channel's OBS residual with one GPU dispatch
+            // for the whole batch (matches DSP.filtfiltFIR per channel)
+            // instead of one CPU convolution pass per channel; the cheap
+            // PCA/design-column setup that follows still runs concurrently
+            // per channel on the CPU.
+            let hpfIndices = ready.indices.filter { ready[$0].obsResidual != nil }
+            if !hpfIndices.isEmpty {
+                let batchFiltered = metal.filtfiltChannels(
+                    taps: obsHPF,
+                    signals: hpfIndices.map { ready[$0].obsResidual! }
+                )
+                let numTrig = alignedMarkers.count
+                nonisolated(unsafe) let hpfReadyPtr = UnsafeMutablePointer<PreparedChannel>.allocate(capacity: ready.count)
+                hpfReadyPtr.initialize(from: &ready, count: ready.count)
+                evaConcurrentPerform(iterations: hpfIndices.count) { i in
+                    let idx = hpfIndices[i]
+                    let ipca = batchFiltered?[i] ?? DSP.filtfiltFIR(obsHPF, hpfReadyPtr[idx].obsResidual!)
+                    hpfReadyPtr[idx].obsPreparation = prepareOBSFromFilteredResidual(
+                        ipca: ipca, alignedMarkers: alignedMarkers,
+                        prePeak: prePeak, postPeak: postPeak, artLength: artLength,
+                        sliceTrigger: sliceTrigger, epochChunks: epochChunks,
+                        censoredEpochs: censoredEpochIndices(
+                            numTrig: numTrig, sliceTrigger: sliceTrigger,
+                            slices: slices, censoredVolumes: censoredVolumes
+                        ),
+                        mode: config.obs, randomizeEpochSelection: config.randomizeOBSEpochSelection
+                    )
+                }
+                ready = Array(UnsafeBufferPointer(start: hpfReadyPtr, count: ready.count))
+                hpfReadyPtr.deinitialize(count: ready.count)
+                hpfReadyPtr.deallocate()
+            }
+
+            // Fit the OBS design for every channel in this batch, per chunk,
+            // with one GPU dispatch per chunk instead of one Metal round trip
+            // per channel issued from concurrent CPU threads (which
+            // serialized on the command queue and let per-call overhead
+            // dominate the tiny actual work).
+            let obsIndices = ready.indices.filter { ready[$0].obsPreparation != nil }
+            if !obsIndices.isEmpty {
+                nonisolated(unsafe) let readyPtr = UnsafeMutablePointer<PreparedChannel>.allocate(capacity: ready.count)
+                readyPtr.initialize(from: &ready, count: ready.count)
+                for (chunkIndex, chunkEpochs) in epochChunks.enumerated() {
+                    let chunkIndices = obsIndices.filter {
+                        (readyPtr[$0].obsPreparation?.chunkColumns[safe: chunkIndex] ?? nil) != nil
+                    }
+                    guard !chunkIndices.isEmpty else { continue }
+                    let epochStarts = chunkEpochs.map { alignedMarkers[$0] - prePeak }
+                    let batchFit = metal.fitOptimalBasisChannels(
+                        data: chunkIndices.map { readyPtr[$0].obsPreparation!.ipca },
+                        epochStarts: epochStarts,
+                        columnsPerChannel: chunkIndices.map { readyPtr[$0].obsPreparation!.chunkColumns[chunkIndex]! }
+                    )
+                    if let batchFit {
+                        for (i, idx) in chunkIndices.enumerated() {
+                            var accumulated = readyPtr[idx].residualNoise
+                            vDSP_vaddD(accumulated, 1, batchFit[i], 1, &accumulated, 1, vDSP_Length(accumulated.count))
+                            readyPtr[idx].residualNoise = accumulated
+                        }
+                    } else {
+                        evaConcurrentPerform(iterations: chunkIndices.count) { i in
+                            let idx = chunkIndices[i]
+                            let prep = readyPtr[idx].obsPreparation!
+                            let columns = prep.chunkColumns[chunkIndex]!
+                            let upLength = readyPtr[idx].original.count
+                            for s in chunkEpochs {
+                                let start = alignedMarkers[s] - prePeak
+                                let end = alignedMarkers[s] + postPeak
+                                guard start >= 0, end < upLength else { continue }
+                                let target = Array(prep.ipca[start...end])
+                                let fit = DSP.leastSquaresFit(target: target, design: columns)
+                                for k in 0..<artLength { readyPtr[idx].residualNoise[start + k] = fit[k] }
+                            }
+                        }
+                    }
+                }
+                ready = Array(UnsafeBufferPointer(start: readyPtr, count: ready.count))
+                readyPtr.deinitialize(count: ready.count)
+                readyPtr.deallocate()
+            }
+            let finalReady = ready
+
+            let gpu = metal.correctAndDecimateChannels(
+                original: finalReady.map(\.original),
+                templateNoise: finalReady.map(\.templateNoise),
+                residualNoise: finalReady.map(\.residualNoise),
+                factor: L,
+                targetCount: sampleCount
+            )
+
+            nonisolated(unsafe) let decimatedPtr = UnsafeMutablePointer<(clean: [Double], noise: [Double])>.allocate(capacity: count)
+            decimatedPtr.initialize(repeating: (clean: [], noise: []), count: count)
+            evaConcurrentPerform(iterations: count) { offset in
+                let gpuResult: (clean: [Double], noise: [Double])? = {
+                    guard let gpu else { return nil }
+                    return (gpu.clean[offset], gpu.noise[offset])
+                }()
+                decimatedPtr[offset] = decimateChannel(finalReady[offset], gpuResult: gpuResult, L: L, metal: metal)
+            }
+            var decimated = (0..<count).map { decimatedPtr[$0] }
+            decimatedPtr.deinitialize(count: count)
+            decimatedPtr.deallocate()
+
+            // Batch the optional post low-pass across the whole channel batch
+            // with one GPU dispatch (matches DSP.filtfiltFIR per channel)
+            // instead of one CPU convolution pass per channel, per signal.
+            if let lpf = config.lowPassHz, lpf > 0 {
+                let taps = lowPassWeights(lpf: lpf, fs: samplingRate)
+                let combined = decimated.map(\.clean) + decimated.map(\.noise)
+                let batchFiltered = metal.filtfiltChannels(taps: taps, signals: combined)
+                nonisolated(unsafe) let decimatedPtr2 = UnsafeMutablePointer<(clean: [Double], noise: [Double])>.allocate(capacity: count)
+                decimatedPtr2.initialize(from: &decimated, count: count)
+                evaConcurrentPerform(iterations: count) { offset in
+                    if let batchFiltered {
+                        decimatedPtr2[offset] = (clean: batchFiltered[offset], noise: batchFiltered[count + offset])
+                    } else {
+                        decimatedPtr2[offset] = (
+                            clean: DSP.filtfiltFIR(taps, decimatedPtr2[offset].clean),
+                            noise: DSP.filtfiltFIR(taps, decimatedPtr2[offset].noise)
+                        )
+                    }
+                }
+                decimated = Array(UnsafeBufferPointer(start: decimatedPtr2, count: count))
+                decimatedPtr2.deinitialize(count: count)
+                decimatedPtr2.deallocate()
+            }
+            let finalDecimated = decimated
+
+            nonisolated(unsafe) let outputPtr = UnsafeMutablePointer<[Float]>.allocate(capacity: count)
+            outputPtr.initialize(repeating: [], count: count)
+            evaConcurrentPerform(iterations: count) { offset in
+                outputPtr[offset] = finishChannel(
+                    finalReady[offset],
+                    clean: finalDecimated[offset].clean,
+                    noise: finalDecimated[offset].noise,
+                    alignedMarkers: alignedMarkers,
+                    L: L,
+                    artLength: artLength,
+                    sliceTrigger: sliceTrigger,
+                    config: config,
+                    samplingRate: samplingRate,
+                    applyLowPass: false
+                ).map(Float.init)
+            }
+            for offset in 0..<count {
+                resultPtr[batchStart + offset] = outputPtr[offset]
+            }
+            outputPtr.deinitialize(count: count)
+            outputPtr.deallocate()
+
+            progressLock.lock()
+            completed += count
+            let fraction = Double(completed) / Double(channels.count)
+            progressLock.unlock()
+            progress?(fraction)
+        }
+
+        if pipelineDepth > 1 {
+            DispatchQueue.concurrentPerform(iterations: pipelineDepth) { worker in
+                var index = worker
+                while index < batchStarts.count {
+                    processBatch(batchStarts[index])
+                    index += pipelineDepth
+                }
+            }
+        } else {
+            for start in batchStarts { processBatch(start) }
+        }
+
+        let finalResult = Array(UnsafeBufferPointer(start: resultPtr, count: channels.count))
+        resultPtr.deinitialize(count: channels.count)
+        resultPtr.deallocate()
+        return finalResult
+    }
+
+    private nonisolated static func metalBatchSize(
+        channelCount: Int,
+        sampleCount: Int,
+        factor: Int,
+        maxBufferLength: Int
+    ) -> Int {
+        if let override = debugBatchSizeOverride {
+            return max(1, min(channelCount, override))
+        }
+        let upsampledCount = max(sampleCount * max(factor, 1), 1)
+        // Per-channel staging budget: upsampled Double/Float working buffers
+        // that exist simultaneously for every channel in a batch
+        // (interpolation, HPF/low-pass filtfilt scratch, templates, OBS work).
+        let bytesPerSample = 96
+        let bytesPerChannel = max(upsampledCount * bytesPerSample, 1)
+
+        // Batch size used to be capped at CPU core count (plus a flat
+        // 16-channel ceiling) — a leftover from treating GPU batching like
+        // CPU parallelism, even though the GPU dispatch doesn't care how many
+        // CPU workers exist. That cap forced tiny batches for anything but
+        // short recordings, which starves the GPU: most wall-clock time ends
+        // up in the per-channel CPU stages between many small, frequent GPU
+        // round trips, so Activity Monitor shows the GPU sitting near-idle.
+        // Bound purely by real memory: a fraction of physical RAM, and the
+        // GPU's own single-buffer size limit (the largest per-batch buffer is
+        // one Float array of channelCount x upsampledCount).
+        let physicalMemory = Int(clamping: ProcessInfo.processInfo.physicalMemory)
+        let ramBudget = min(4 * 1_024 * 1_024 * 1_024, physicalMemory / 4)
+        let ramBound = max(1, ramBudget / bytesPerChannel)
+        let bufferBound = max(1, maxBufferLength / (upsampledCount * 4))
+        let memoryBound = min(ramBound, bufferBound)
+
+        return max(1, min(channelCount, memoryBound))
+    }
+
     // MARK: - Per-channel correction
 
     private nonisolated static func correctChannel(
         raw: [Double],
+        rawFloat: [Float],
         channelIndex c: Int,
         alignedMarkers: [Int],
         templateAlignedMarkers: [Int],
@@ -352,27 +826,97 @@ struct FastrCorrector {
         slices: Int,
         moosmannNeighbors: [[Int]]?,
         censoredVolumes: Set<Int>,
-        searchWindow: Int,
         obsHPF: [Double],
-        config: Config, samplingRate: Double
+        epochChunks: [[Int]],
+        config: Config, samplingRate: Double,
+        metal: FastrMetalBackend?
     ) -> [Double] {
-        let n = raw.count
-        var idata = zeroMeanUpsampled(raw, factor: L)
-        var iorig = DSP.interp(raw, factor: L)
-        idata = applySubSampleShifts(
-            to: idata,
-            markers: alignedMarkers,
+        let prepared = prepareChannel(
+            raw: raw,
+            rawFloat: rawFloat,
+            centeredUpsampled: nil,
+            originalUpsampled: nil,
+            precomputedTemplateNoise: nil,
+            inputsAreShifted: false,
+            channelIndex: c,
+            alignedMarkers: alignedMarkers,
+            templateAlignedMarkers: templateAlignedMarkers,
+            fractionalShifts: fractionalShifts,
+            L: L,
             prePeak: prePeak,
             postPeak: postPeak,
-            shifts: fractionalShifts
+            artLength: artLength,
+            templateSelection: templateSelection,
+            sliceTrigger: sliceTrigger,
+            slices: slices,
+            moosmannNeighbors: moosmannNeighbors,
+            censoredVolumes: censoredVolumes,
+            obsHPF: obsHPF,
+            epochChunks: epochChunks,
+            config: config,
+            metal: metal
         )
-        iorig = applySubSampleShifts(
-            to: iorig,
-            markers: alignedMarkers,
-            prePeak: prePeak,
-            postPeak: postPeak,
-            shifts: fractionalShifts
+        let decimated = decimateChannel(prepared, gpuResult: nil, L: L, metal: metal)
+        return finishChannel(
+            prepared,
+            clean: decimated.clean,
+            noise: decimated.noise,
+            alignedMarkers: alignedMarkers,
+            L: L,
+            artLength: artLength,
+            sliceTrigger: sliceTrigger,
+            config: config,
+            samplingRate: samplingRate,
+            applyLowPass: true
         )
+    }
+
+    private nonisolated static func prepareChannel(
+        raw: [Double],
+        rawFloat: [Float],
+        centeredUpsampled: [Double]?,
+        originalUpsampled: [Double]?,
+        precomputedTemplateNoise: [Double]?,
+        inputsAreShifted: Bool,
+        channelIndex c: Int,
+        alignedMarkers: [Int],
+        templateAlignedMarkers: [Int],
+        fractionalShifts: [Double],
+        L: Int,
+        prePeak: Int, postPeak: Int, artLength: Int,
+        templateSelection: TemplateSelection,
+        sliceTrigger: Bool,
+        slices: Int,
+        moosmannNeighbors: [[Int]]?,
+        censoredVolumes: Set<Int>,
+        obsHPF: [Double],
+        epochChunks: [[Int]],
+        config: Config,
+        metal: FastrMetalBackend?,
+        deferOBSToMetalBatch: Bool = false
+    ) -> PreparedChannel {
+        var idata = centeredUpsampled
+            ?? metal?.interpolate(rawFloat, factor: L, subtractMean: true)
+            ?? zeroMeanUpsampled(raw, factor: L)
+        var iorig = originalUpsampled
+            ?? metal?.interpolate(rawFloat, factor: L, subtractMean: false)
+            ?? DSP.interp(raw, factor: L)
+        if !inputsAreShifted {
+            idata = applySubSampleShifts(
+                to: idata,
+                markers: alignedMarkers,
+                prePeak: prePeak,
+                postPeak: postPeak,
+                shifts: fractionalShifts
+            )
+            iorig = applySubSampleShifts(
+                to: iorig,
+                markers: alignedMarkers,
+                prePeak: prePeak,
+                postPeak: postPeak,
+                shifts: fractionalShifts
+            )
+        }
         let upLength = idata.count
 
         let numTrig = alignedMarkers.count
@@ -387,99 +931,176 @@ struct FastrCorrector {
             censoredVolumes: censoredVolumes
         )
 
-        // Build noise estimate (template) over the whole upsampled signal.
-        var iNoise = [Double](repeating: 0, count: upLength)
+        var iNoise: [Double]
+        if let precomputedTemplateNoise, precomputedTemplateNoise.count == upLength {
+            iNoise = precomputedTemplateNoise
+        } else {
+            let templates = averageArtifactTemplates(
+                idata: idata,
+                markers: alignedMarkers,
+                prePeak: prePeak,
+                postPeak: postPeak,
+                templateSelection: templateSelection,
+                sliceTrigger: sliceTrigger,
+                slices: slices,
+                moosmannNeighbors: moosmannNeighbors,
+                censoredEpochs: censoredEpochs,
+                config: config
+            ).templates
+            let targetStarts = templateAlignedMarkers.map { $0 - prePeak }
+            let metalNoise = metal?.buildTemplateNoise(
+                data: idata,
+                templates: templates,
+                targetStarts: targetStarts,
+                fixedAlpha: excluded
+            )
+            iNoise = metalNoise ?? [Double](repeating: 0, count: upLength)
 
-        let templates = averageArtifactTemplates(
-            idata: idata,
-            markers: alignedMarkers,
-            prePeak: prePeak,
-            postPeak: postPeak,
-            templateSelection: templateSelection,
-            sliceTrigger: sliceTrigger,
-            slices: slices,
-            moosmannNeighbors: moosmannNeighbors,
-            censoredEpochs: censoredEpochs,
-            config: config
-        ).templates
-
-        func alignedTarget(_ s: Int) -> ArraySlice<Double>? {
-            let start = templateAlignedMarkers[s] - prePeak
-            let end = templateAlignedMarkers[s] + postPeak
-            guard start >= 0, end < upLength else { return nil }
-            return idata[start...end]
-        }
-
-        for s in 0..<numTrig {
-            guard let avg = templates[s] else { continue }
-            guard let target = alignedTarget(s) else { continue }
-
-            // Amplitude scale (Alpha) to minimize squared error, unless excluded.
-            let alpha: Double
-            if excluded {
-                alpha = 1
-            } else {
-                let vectorLength = vDSP_Length(avg.count)
-                var num = 0.0
-                var den = 0.0
-                avg.withUnsafeBufferPointer { avgBuf in
-                    target.withUnsafeBufferPointer { targetBuf in
-                        guard let avgBase = avgBuf.baseAddress, let targetBase = targetBuf.baseAddress else { return }
-                        vDSP_dotprD(targetBase, 1, avgBase, 1, &num, vectorLength)
-                        vDSP_dotprD(avgBase, 1, avgBase, 1, &den, vectorLength)
-                    }
-                }
-                alpha = den == 0 ? 0 : num / den
+            func alignedTarget(_ s: Int) -> ArraySlice<Double>? {
+                let start = templateAlignedMarkers[s] - prePeak
+                let end = templateAlignedMarkers[s] + postPeak
+                guard start >= 0, end < upLength else { return nil }
+                return idata[start...end]
             }
-            let start = templateAlignedMarkers[s] - prePeak
-            guard start >= 0, start + avg.count <= iNoise.count else { continue }
-            var scaledAlpha = alpha
-            avg.withUnsafeBufferPointer { avgBuf in
-                iNoise.withUnsafeMutableBufferPointer { noiseBuf in
-                    guard let avgBase = avgBuf.baseAddress, let noiseBase = noiseBuf.baseAddress else { return }
-                    vDSP_vsmulD(avgBase, 1, &scaledAlpha, noiseBase + start, 1, vDSP_Length(avg.count))
+
+            if metalNoise == nil || iNoise.count != upLength {
+                iNoise = [Double](repeating: 0, count: upLength)
+                for s in 0..<numTrig {
+                    guard let avg = templates[s] else { continue }
+                    guard let target = alignedTarget(s) else { continue }
+
+                    // Amplitude scale (Alpha) to minimize squared error, unless excluded.
+                    let alpha: Double
+                    if excluded {
+                        alpha = 1
+                    } else {
+                        let vectorLength = vDSP_Length(avg.count)
+                        var num = 0.0
+                        var den = 0.0
+                        avg.withUnsafeBufferPointer { avgBuf in
+                            target.withUnsafeBufferPointer { targetBuf in
+                                guard let avgBase = avgBuf.baseAddress, let targetBase = targetBuf.baseAddress else { return }
+                                vDSP_dotprD(targetBase, 1, avgBase, 1, &num, vectorLength)
+                                vDSP_dotprD(avgBase, 1, avgBase, 1, &den, vectorLength)
+                            }
+                        }
+                        alpha = den == 0 ? 0 : num / den
+                    }
+                    let start = targetStarts[s]
+                    guard start >= 0, start + avg.count <= iNoise.count else { continue }
+                    var scaledAlpha = alpha
+                    avg.withUnsafeBufferPointer { avgBuf in
+                        iNoise.withUnsafeMutableBufferPointer { noiseBuf in
+                            guard let avgBase = avgBuf.baseAddress, let noiseBase = noiseBuf.baseAddress else { return }
+                            vDSP_vsmulD(avgBase, 1, &scaledAlpha, noiseBase + start, 1, vDSP_Length(avg.count))
+                        }
+                    }
                 }
             }
         }
 
         // OBS residual removal.
         var fittedRes = [Double](repeating: 0, count: upLength)
+        var obsResidual: [Double]?
         if !excluded, config.obs != .off {
-            fittedRes = optimalBasisSet(
-                idata: idata, iNoise: iNoise, alignedMarkers: alignedMarkers,
-                prePeak: prePeak, postPeak: postPeak, artLength: artLength,
-                numTrig: numTrig, sliceTrigger: sliceTrigger,
-                censoredEpochs: censoredEpochs,
-                obsHPF: obsHPF, mode: config.obs,
-                randomizeEpochSelection: config.randomizeOBSEpochSelection
-            )
+            if deferOBSToMetalBatch {
+                // Only stage the (idata - iNoise) residual here (this runs
+                // inside a concurrent per-channel loop, which is fine); the
+                // high-pass filter and OBS fit are batched once for the whole
+                // channel batch by the caller.
+                obsResidual = zip(idata, iNoise).map(-)
+            } else {
+                fittedRes = optimalBasisSet(
+                    idata: idata, iNoise: iNoise, alignedMarkers: alignedMarkers,
+                    prePeak: prePeak, postPeak: postPeak, artLength: artLength,
+                    sliceTrigger: sliceTrigger, epochChunks: epochChunks,
+                    censoredEpochs: censoredEpochs,
+                    obsHPF: obsHPF, mode: config.obs,
+                    randomizeEpochSelection: config.randomizeOBSEpochSelection,
+                    metal: metal
+                )
+            }
         }
 
-        // Corrected (upsampled) = original - template - fitted residual.
-        var totalNoise = [Double](repeating: 0, count: upLength)
-        let upVectorLength = vDSP_Length(upLength)
-        vDSP_vaddD(iNoise, 1, fittedRes, 1, &totalNoise, 1, upVectorLength)
-        // vDSP_vsubD computes C = B - A, i.e. original - noise.
-        vDSP_vsubD(totalNoise, 1, iorig, 1, &idata, 1, upVectorLength)
+        return PreparedChannel(
+            raw: raw,
+            original: iorig,
+            templateNoise: iNoise,
+            residualNoise: fittedRes,
+            excluded: excluded,
+            obsPreparation: nil,
+            obsResidual: obsResidual
+        )
+    }
 
-        // Downsample back.
-        var cleanEEG = L > 1 ? DSP.decimate(idata, factor: L) : idata
-        var noise = L > 1 ? DSP.decimate(totalNoise, factor: L) : totalNoise
+    /// Correct-and-decimate plus the trailing length guard, split out of
+    /// `finishChannel` so the Metal batch path can apply the optional
+    /// low-pass filter across a whole channel batch in one GPU dispatch
+    /// before doing the (necessarily per-channel, sequential) ANC step.
+    private nonisolated static func decimateChannel(
+        _ prepared: PreparedChannel,
+        gpuResult: (clean: [Double], noise: [Double])?,
+        L: Int,
+        metal: FastrMetalBackend?
+    ) -> (clean: [Double], noise: [Double]) {
+        let n = prepared.raw.count
+        let upLength = prepared.original.count
+        var cleanEEG: [Double]
+        var noise: [Double]
+        if let gpuResult = gpuResult ?? metal?.correctAndDecimate(
+            original: prepared.original,
+            templateNoise: prepared.templateNoise,
+            residualNoise: prepared.residualNoise,
+            factor: L,
+            targetCount: n
+        ) {
+            cleanEEG = gpuResult.clean
+            noise = gpuResult.noise
+        } else {
+            var totalNoise = [Double](repeating: 0, count: upLength)
+            let upVectorLength = vDSP_Length(upLength)
+            vDSP_vaddD(prepared.templateNoise, 1, prepared.residualNoise, 1,
+                       &totalNoise, 1, upVectorLength)
+            var corrected = [Double](repeating: 0, count: upLength)
+            // vDSP_vsubD computes C = B - A, i.e. original - noise.
+            vDSP_vsubD(totalNoise, 1, prepared.original, 1, &corrected, 1, upVectorLength)
+            cleanEEG = L > 1 ? DSP.decimate(corrected, factor: L) : corrected
+            noise = L > 1 ? DSP.decimate(totalNoise, factor: L) : totalNoise
+        }
         // Guard length (decimate can be off by one).
         if cleanEEG.count > n { cleanEEG = Array(cleanEEG[0..<n]) }
-        if cleanEEG.count < n { cleanEEG += Array(repeating: raw[cleanEEG.count..<n].first ?? 0, count: n - cleanEEG.count) }
+        if cleanEEG.count < n { cleanEEG += Array(repeating: prepared.raw[cleanEEG.count..<n].first ?? 0, count: n - cleanEEG.count) }
         if noise.count > n { noise = Array(noise[0..<n]) }
         if noise.count < n { noise += Array(repeating: 0, count: n - noise.count) }
+        return (cleanEEG, noise)
+    }
+
+    /// Optional low-pass (unless already applied by the caller in batch) and
+    /// ANC, given the decimated clean/noise pair from `decimateChannel`.
+    private nonisolated static func finishChannel(
+        _ prepared: PreparedChannel,
+        clean: [Double],
+        noise: [Double],
+        alignedMarkers: [Int],
+        L: Int,
+        artLength: Int,
+        sliceTrigger: Bool,
+        config: Config,
+        samplingRate: Double,
+        applyLowPass: Bool
+    ) -> [Double] {
+        var cleanEEG = clean
+        var noise = noise
 
         // Optional low-pass.
-        if let lpf = config.lowPassHz, lpf > 0 {
+        if applyLowPass, let lpf = config.lowPassHz, lpf > 0 {
             let taps = lowPassWeights(lpf: lpf, fs: samplingRate)
             cleanEEG = DSP.filtfiltFIR(taps, cleanEEG)
             noise = DSP.filtfiltFIR(taps, noise)
         }
 
         // Optional adaptive noise cancellation.
-        if config.anc, !excluded {
+        if config.anc, !prepared.excluded {
             cleanEEG = adaptiveNoiseCancel(clean: cleanEEG, noise: noise,
                                            triggers: alignedMarkers, L: L,
                                            artLength: artLength, samplingRate: samplingRate,
@@ -527,6 +1148,75 @@ struct FastrCorrector {
             moosmannWindow: templateCount,
             facetTemporalDonors: nil
         )
+    }
+
+    /// Returns channel-independent donor rows for the fused Metal template path.
+    /// Correlation-ranked FARM and Bergen donors remain channel-specific.
+    private nonisolated static func sharedTemplateDonorRows(
+        markers: [Int],
+        prePeak: Int,
+        postPeak: Int,
+        templateSelection: TemplateSelection,
+        sliceTrigger: Bool,
+        slices: Int,
+        moosmannNeighbors: [[Int]]?,
+        censoredEpochs: Set<Int>,
+        config: Config,
+        upsampledCount: Int
+    ) -> [[Int]]? {
+        guard config.templateScheme != .farm, !config.usesBergenRSquareDonors else { return nil }
+        let numTrig = markers.count
+        return (0..<numTrig).map { s in
+            var indices: [Int] = []
+            if let neighbors = moosmannNeighbors {
+                let volume = sliceTrigger ? s / max(slices, 1) : s
+                let sliceIndex = sliceTrigger ? s % max(slices, 1) : 0
+                if volume < neighbors.count, !neighbors[volume].isEmpty {
+                    indices = neighbors[volume].compactMap { volume in
+                        let index = sliceTrigger ? volume * max(slices, 1) + sliceIndex : volume
+                        return index >= 0 && index < numTrig ? index : nil
+                    }
+                }
+            }
+            if indices.isEmpty,
+               let facetRows = templateSelection.facetTemporalDonors,
+               s < facetRows.count {
+                indices = facetRows[s]
+            } else if indices.isEmpty, sliceTrigger {
+                var start = s - templateSelection.windowBefore
+                if start < 1 { start = (s % 2 == 0) ? 2 : 1 }
+                var index = start
+                while index <= s + templateSelection.windowAfter {
+                    if index >= 0 && index < numTrig { indices.append(index) }
+                    index += 2
+                }
+            } else if indices.isEmpty {
+                let start = max(0, s - templateSelection.windowBefore)
+                let end = min(numTrig - 1, s + templateSelection.windowAfter)
+                if start <= end { indices = Array(start...end) }
+            }
+
+            if !censoredEpochs.isEmpty {
+                let targetCount = indices.count
+                let kept = indices.filter { !censoredEpochs.contains($0) }
+                indices = topUpDonors(
+                    kept,
+                    center: s,
+                    stride: sliceTrigger ? 2 : 1,
+                    target: targetCount,
+                    numTrig: numTrig,
+                    censored: censoredEpochs
+                )
+            }
+
+            guard let first = indices.first else { return [] }
+            let firstStart = markers[first] - prePeak
+            guard firstStart >= 0, firstStart + prePeak + postPeak < upsampledCount else { return [] }
+            return indices.filter { index in
+                let start = markers[index] - prePeak
+                return start >= 0 && start + prePeak + postPeak < upsampledCount
+            }
+        }
     }
 
     private nonisolated static func correctedFacetAvgWindow(
@@ -648,7 +1338,8 @@ struct FastrCorrector {
             )
             : nil
 
-        let templates = (0..<numTrig).map { s in
+        var templates = [[Double]?](repeating: nil, count: numTrig)
+        fillResults(&templates, iterations: numTrig) { s in
             averageTemplate(
                 center: s,
                 numTrig: numTrig,
@@ -720,16 +1411,15 @@ struct FastrCorrector {
             }
         }
 
-        // Drop censored (e.g. high-motion) donors. If that empties the set, keep
-        // the original (better an imperfect template than none); otherwise top up
-        // to the original count by walking outward so the window doesn't shrink.
+        // Drop censored (e.g. high-motion) donors and top up from clean epochs.
+        // A censored epoch must never re-enter a template, even when every donor
+        // in the original neighborhood was censored.
         if !censoredEpochs.isEmpty {
             let kept = indices.filter { !censoredEpochs.contains($0) }
-            if !kept.isEmpty {
-                indices = topUpDonors(kept, center: s, stride: sliceTrigger ? 2 : 1,
-                                      target: indices.count, numTrig: numTrig,
-                                      censored: censoredEpochs)
-            }
+            indices = topUpDonors(kept, center: s, stride: sliceTrigger ? 2 : 1,
+                                  target: indices.count, numTrig: numTrig,
+                                  censored: censoredEpochs)
+            guard !indices.isEmpty else { return nil }
         }
 
         guard let first = epoch(indices.first ?? s) else { return nil }
@@ -752,79 +1442,185 @@ struct FastrCorrector {
 
     // MARK: - Optimal basis set (OBS)
 
-    private nonisolated static func optimalBasisSet(
+    /// CPU-only OBS setup: high-pass the residual, build the PCA epoch subset,
+    /// and derive the (scaled) design columns. Returns `nil` when OBS should
+    /// contribute nothing (too few usable epochs, empty basis, zero PCs, or
+    /// `mode == .off`), matching `optimalBasisSet`'s all-zero early-outs.
+    private nonisolated static func prepareOBS(
         idata: [Double], iNoise: [Double], alignedMarkers: [Int],
         prePeak: Int, postPeak: Int, artLength: Int,
-        numTrig: Int, sliceTrigger: Bool,
+        sliceTrigger: Bool,
+        epochChunks: [[Int]],
         censoredEpochs: Set<Int>,
         obsHPF: [Double], mode: OBSMode,
         randomizeEpochSelection: Bool
-    ) -> [Double] {
-        let upLength = idata.count
-        var fittedRes = [Double](repeating: 0, count: upLength)
-
+    ) -> OBSPreparation? {
         // High-pass the residual (data - template).
         let residual = zip(idata, iNoise).map(-)
         let ipca = DSP.filtfiltFIR(obsHPF, residual)
+        return prepareOBSFromFilteredResidual(
+            ipca: ipca, alignedMarkers: alignedMarkers,
+            prePeak: prePeak, postPeak: postPeak, artLength: artLength,
+            sliceTrigger: sliceTrigger, epochChunks: epochChunks,
+            censoredEpochs: censoredEpochs,
+            mode: mode, randomizeEpochSelection: randomizeEpochSelection
+        )
+    }
 
-        // Build the PCA matrix from FACET's epoch subset. EVA's default is
-        // deterministic for replay; the random option follows FACET's rand-driven
-        // 2/3 skip pattern.
-        func epochSlice(_ s: Int, from source: [Double]) -> [Double]? {
+    /// The non-filtering half of `prepareOBS`: builds a PCA design (basis
+    /// columns) independently for each chunk of the recording from an
+    /// already high-passed residual (`ipca`). Split out so the Metal batch
+    /// path can high-pass every channel's residual with one GPU dispatch and
+    /// then run this (cheap, CPU) part concurrently per channel.
+    ///
+    /// Chunking matches Niazy et al. (2005)'s reference FASTR implementation
+    /// ("each 1-min portion of the data is processed at a time... to provide
+    /// a degree of adaptivity") rather than fitting one global OBS: a single
+    /// basis assumes the artifact shape is stationary for the whole
+    /// recording, which loses accuracy over a long scan and — for
+    /// slice-triggered data with many epochs — makes the Gram-matrix
+    /// eigendecomposition (O(epoch count³)) the dominant cost of the entire
+    /// correction if left unbounded.
+    private nonisolated static func prepareOBSFromFilteredResidual(
+        ipca: [Double], alignedMarkers: [Int],
+        prePeak: Int, postPeak: Int, artLength: Int,
+        sliceTrigger: Bool,
+        epochChunks: [[Int]],
+        censoredEpochs: Set<Int>,
+        mode: OBSMode,
+        randomizeEpochSelection: Bool
+    ) -> OBSPreparation? {
+        let upLength = ipca.count
+
+        func epochSlice(_ s: Int) -> [Double]? {
             let start = alignedMarkers[s] - prePeak
             let end = alignedMarkers[s] + postPeak
             guard start >= 0, end < upLength else { return nil }
-            return Array(source[start...end])
+            return Array(ipca[start...end])
         }
 
-        var pcaEpochs: [[Double]] = []
-        for s in obsPCAEpochIndices(
-            numTrig: numTrig,
-            sliceTrigger: sliceTrigger,
-            randomized: randomizeEpochSelection
-        ) {
-            // Skip censored (e.g. high-motion) epochs so they don't pollute the
-            // optimal basis set; the OBS fit is still applied to every epoch.
-            if !censoredEpochs.contains(s), var e = epochSlice(s, from: ipca) {
-                let m = e.reduce(0, +) / Double(e.count)
-                for i in 0..<e.count { e[i] -= m }  // detrend (remove mean)
-                pcaEpochs.append(e)
-            }
-        }
-        guard pcaEpochs.count > 2 else { return fittedRes }
+        var anyChunkValid = false
+        let chunkColumns: [[[Double]]?] = epochChunks.map { chunkEpochs -> [[Double]]? in
+            // FACET's subsample pattern (EVA's default is deterministic for
+            // replay; the random option follows FACET's rand-driven 2/3 skip
+            // pattern), applied within this chunk rather than globally.
+            let localIndices = obsPCAEpochIndices(
+                numTrig: chunkEpochs.count,
+                sliceTrigger: sliceTrigger,
+                randomized: randomizeEpochSelection
+            )
+            let epochIndices = capPCAEpochCount(localIndices.compactMap { chunkEpochs[safe: $0] })
 
-        let (basis, oev) = DSP.pca(epochs: pcaEpochs)
-        guard !basis.isEmpty else { return fittedRes }
-
-        let pcs: Int
-        switch mode {
-        case .fixed(let k): pcs = min(max(1, k), basis.count)
-        case .auto: pcs = autoSelectPCs(oev: oev, max: basis.count)
-        case .off: return fittedRes
-        }
-        guard pcs > 0 else { return fittedRes }
-
-        // Build design columns: first `pcs` PCs (+ DC for volume triggers).
-        var columns = Array(basis[0..<pcs])
-        if !sliceTrigger {
-            columns.append([Double](repeating: 1, count: artLength))
-        }
-        // Scale PCs 2..n to the range of PC1 (matches FMRIB/FACET).
-        if let range0 = columnRange(columns[0]), range0 > 0 {
-            for k in 1..<pcs {
-                if let rk = columnRange(columns[k]), rk > 0 {
-                    let scale = range0 / rk
-                    for i in 0..<columns[k].count { columns[k][i] *= scale }
+            var pcaEpochs: [[Double]] = []
+            for s in epochIndices {
+                // Skip censored (e.g. high-motion) epochs so they don't
+                // pollute the optimal basis set; the OBS fit is still
+                // applied to every epoch.
+                if !censoredEpochs.contains(s), var e = epochSlice(s) {
+                    let m = e.reduce(0, +) / Double(e.count)
+                    for i in 0..<e.count { e[i] -= m }  // detrend (remove mean)
+                    pcaEpochs.append(e)
                 }
             }
+            guard pcaEpochs.count > 2 else { return nil }
+
+            let (basis, oev) = DSP.pca(epochs: pcaEpochs)
+            guard !basis.isEmpty else { return nil }
+
+            let pcs: Int
+            switch mode {
+            case .fixed(let k): pcs = min(max(1, k), basis.count)
+            case .auto: pcs = autoSelectPCs(oev: oev, max: basis.count)
+            case .off: return nil
+            }
+            guard pcs > 0 else { return nil }
+
+            // Build design columns: first `pcs` PCs (+ DC for volume triggers).
+            var columns = Array(basis[0..<pcs])
+            if !sliceTrigger {
+                columns.append([Double](repeating: 1, count: artLength))
+            }
+            // Scale PCs 2..n to the range of PC1 (matches FMRIB/FACET).
+            if let range0 = columnRange(columns[0]), range0 > 0 {
+                for k in 1..<pcs {
+                    if let rk = columnRange(columns[k]), rk > 0 {
+                        let scale = range0 / rk
+                        for i in 0..<columns[k].count { columns[k][i] *= scale }
+                    }
+                }
+            }
+            anyChunkValid = true
+            return columns
         }
 
-        // Fit each epoch's high-passed residual onto the OBS and subtract.
-        for s in 0..<numTrig {
-            guard let target = epochSlice(s, from: ipca) else { continue }
-            let fit = DSP.leastSquaresFit(target: target, design: columns)
-            let start = alignedMarkers[s] - prePeak
-            for i in 0..<artLength { fittedRes[start + i] = fit[i] }
+        guard anyChunkValid else { return nil }
+        return OBSPreparation(ipca: ipca, chunkColumns: chunkColumns)
+    }
+
+    /// CPU fallback fit: least-squares each chunk's epochs onto that chunk's
+    /// own OBS design and scatter the fit back into a full-length array.
+    private nonisolated static func applyOBSFitCPU(
+        _ prep: OBSPreparation,
+        epochChunks: [[Int]],
+        alignedMarkers: [Int],
+        prePeak: Int, postPeak: Int, artLength: Int,
+        upLength: Int
+    ) -> [Double] {
+        var fittedRes = [Double](repeating: 0, count: upLength)
+        for (chunkIndex, chunkEpochs) in epochChunks.enumerated() {
+            guard let columns = prep.chunkColumns[safe: chunkIndex] ?? nil else { continue }
+            for s in chunkEpochs {
+                let start = alignedMarkers[s] - prePeak
+                let end = alignedMarkers[s] + postPeak
+                guard start >= 0, end < upLength else { continue }
+                let target = Array(prep.ipca[start...end])
+                let fit = DSP.leastSquaresFit(target: target, design: columns)
+                for i in 0..<artLength { fittedRes[start + i] = fit[i] }
+            }
+        }
+        return fittedRes
+    }
+
+    private nonisolated static func optimalBasisSet(
+        idata: [Double], iNoise: [Double], alignedMarkers: [Int],
+        prePeak: Int, postPeak: Int, artLength: Int,
+        sliceTrigger: Bool,
+        epochChunks: [[Int]],
+        censoredEpochs: Set<Int>,
+        obsHPF: [Double], mode: OBSMode,
+        randomizeEpochSelection: Bool,
+        metal: FastrMetalBackend?
+    ) -> [Double] {
+        let upLength = idata.count
+        guard let prep = prepareOBS(
+            idata: idata, iNoise: iNoise, alignedMarkers: alignedMarkers,
+            prePeak: prePeak, postPeak: postPeak, artLength: artLength,
+            sliceTrigger: sliceTrigger, epochChunks: epochChunks,
+            censoredEpochs: censoredEpochs,
+            obsHPF: obsHPF, mode: mode,
+            randomizeEpochSelection: randomizeEpochSelection
+        ) else { return [Double](repeating: 0, count: upLength) }
+
+        var fittedRes = [Double](repeating: 0, count: upLength)
+        for (chunkIndex, chunkEpochs) in epochChunks.enumerated() {
+            guard let columns = prep.chunkColumns[safe: chunkIndex] ?? nil else { continue }
+            let epochStarts = chunkEpochs.map { alignedMarkers[$0] - prePeak }
+            if let metalFit = metal?.fitOptimalBasis(
+                data: prep.ipca,
+                epochStarts: epochStarts,
+                columns: columns
+            ) {
+                for i in 0..<upLength { fittedRes[i] += metalFit[i] }
+            } else {
+                for s in chunkEpochs {
+                    let start = alignedMarkers[s] - prePeak
+                    let end = alignedMarkers[s] + postPeak
+                    guard start >= 0, end < upLength else { continue }
+                    let target = Array(prep.ipca[start...end])
+                    let fit = DSP.leastSquaresFit(target: target, design: columns)
+                    for i in 0..<artLength { fittedRes[start + i] = fit[i] }
+                }
+            }
         }
         return fittedRes
     }
@@ -905,8 +1701,26 @@ struct FastrCorrector {
         guard variance > 0 else { return clean }
         let mu = 0.05 / (Double(filterOrder) * variance)
         let (out, y) = DSP.lmsAdaptiveFilter(reference: scaledRefs, data: clean, order: filterOrder, mu: mu)
-        if y.contains(where: { $0.isInfinite || $0.isNaN }) { return clean }
         _ = out
+
+        // `mu` is a single scalar tuned from this channel's *global* reference
+        // variance; plain LMS (no leakage) is only stable while mu stays below
+        // a bound tied to the *local* reference power, so a channel with
+        // strongly time-varying reference power can diverge partway through
+        // and then grow unboundedly for the rest of the recording — LMS has
+        // no mechanism to recover once that happens. Over hundreds of
+        // thousands of samples that eventually exceeds Double's range, but an
+        // isInfinite/isNaN check alone only catches it once it's fully blown
+        // up; a still-finite-but-enormous result can slip through here and
+        // overflow a later recursive filter (e.g. the post-processing
+        // Butterworth) into actual Inf/NaN, surfacing as an error on a
+        // different stage than where the divergence actually started. Treat
+        // "way outside the input's own scale" as divergence too, not just
+        // literal non-finite values.
+        let cleanScale = clean.reduce(0) { Swift.max($0, abs($1)) }
+        let divergenceBound = Swift.max(cleanScale, 1) * 1000
+        guard y.allSatisfy({ $0.isFinite && abs($0) <= divergenceBound }) else { return clean }
+
         return zip(clean, y).map(-)
     }
 
@@ -985,6 +1799,47 @@ struct FastrCorrector {
         return indices
     }
 
+    /// Evenly subsamples `indices` down to `maxPCAEpochCount` (preserving
+    /// spread across the recording rather than truncating to the front) when
+    /// FACET's own subsample exceeds it. A no-op below the cap.
+    private nonisolated static func capPCAEpochCount(_ indices: [Int]) -> [Int] {
+        guard indices.count > maxPCAEpochCount else { return indices }
+        let stride = Double(indices.count) / Double(maxPCAEpochCount)
+        return (0..<maxPCAEpochCount).map { indices[Int(Double($0) * stride)] }
+    }
+
+    /// Groups epoch indices into contiguous `chunkSeconds`-long windows by
+    /// each epoch's upsampled marker sample position, for FASTR's per-chunk
+    /// OBS PCA (`Config.obsChunkSeconds`). `alignedMarkers` is assumed
+    /// time-ordered (epochs are derived from sequential slice/volume
+    /// triggers), so each chunk is a contiguous run of epoch indices.
+    private nonisolated static func obsChunkEpochIndices(
+        alignedMarkers: [Int],
+        chunkSeconds: Double,
+        samplingRate: Double,
+        L: Int
+    ) -> [[Int]] {
+        guard !alignedMarkers.isEmpty else { return [] }
+        guard chunkSeconds > 0, samplingRate > 0, L > 0 else {
+            return [Array(alignedMarkers.indices)]
+        }
+        let chunkSamples = max(1, Int((chunkSeconds * samplingRate * Double(L)).rounded()))
+
+        var chunks: [[Int]] = []
+        var currentChunk: [Int] = []
+        var chunkStartSample = alignedMarkers[0]
+        for (index, marker) in alignedMarkers.enumerated() {
+            if !currentChunk.isEmpty, marker - chunkStartSample >= chunkSamples {
+                chunks.append(currentChunk)
+                currentChunk = []
+                chunkStartSample = marker
+            }
+            currentChunk.append(index)
+        }
+        if !currentChunk.isEmpty { chunks.append(currentChunk) }
+        return chunks
+    }
+
     nonisolated static func ancHighPassFrequency(
         triggers: [Int],
         L: Int,
@@ -1048,9 +1903,11 @@ struct FastrCorrector {
         searchWindow: Int
     ) -> [Int] {
         var aligned = baseMarkers
-        for s in baseMarkers.indices {
+        // Each epoch aligns against its own template independently, so this
+        // scales across CPU cores instead of running serially.
+        fillResults(&aligned, iterations: baseMarkers.count) { s in
             guard s < templates.count, let template = templates[s], template.count == prePeak + postPeak + 1 else {
-                continue
+                return baseMarkers[s]
             }
             let shift = bestIntegerShift(
                 dataUp: dataUp,
@@ -1060,7 +1917,7 @@ struct FastrCorrector {
                 postPeak: postPeak,
                 searchWindow: searchWindow
             )
-            aligned[s] = baseMarkers[s] + shift
+            return baseMarkers[s] + shift
         }
         return aligned
     }
@@ -1423,7 +2280,7 @@ struct FastrCorrector {
         guard kept.count < target else { return kept }
         var result = kept
         var have = Set(kept)
-        let maxRadius = max(target * stride * 3, stride * 8)
+        let maxRadius = max(stride, numTrig * stride)
         var d = stride
         while result.count < target && d <= maxRadius {
             for cand in [s - d, s + d] {
@@ -1493,7 +2350,10 @@ struct FastrCorrector {
             }
             let reference = Array(dataUp[(refStart - prePeak)...(refStart + postPeak)])
 
-            for s in markersUp.indices {
+            // Every epoch's shift search is independent of the others, so this
+            // scales across CPU cores instead of running serially — the same
+            // pattern used for per-channel work elsewhere in FASTR.
+            fillResults(&aligned, iterations: markersUp.count) { s in
                 let shift = bestIntegerShift(
                     dataUp: dataUp,
                     template: reference,
@@ -1502,7 +2362,7 @@ struct FastrCorrector {
                     postPeak: postPeak,
                     searchWindow: searchWindow
                 )
-                aligned[s] = markersUp[s] + shift
+                return markersUp[s] + shift
             }
 
             let fractionalShifts = subSample
@@ -1521,13 +2381,17 @@ struct FastrCorrector {
             guard refStart >= 0, refEnd < dataUp.count else { return shifts }
             let reference = Array(dataUp[refStart...refEnd])
 
-            for s in markers.indices.dropFirst() {
+            // Epoch 0 defines the reference and keeps shift 0; every other
+            // epoch's bisection search is independent, so it can run across
+            // CPU cores instead of serially.
+            fillResults(&shifts, iterations: markers.count) { s in
+                guard s != 0 else { return 0 }
                 let start = markers[s] - prePeak - pad
                 let end = markers[s] + postPeak + pad
-                guard start >= 0, end < dataUp.count else { continue }
+                guard start >= 0, end < dataUp.count else { return 0 }
                 let segment = Array(dataUp[start...end])
-                guard segment.count == reference.count else { continue }
-                shifts[s] = bestFractionalShift(segment: segment, reference: reference)
+                guard segment.count == reference.count else { return 0 }
+                return bestFractionalShift(segment: segment, reference: reference)
             }
             return shifts
         }

@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  App-wide, persisted defaults that seed each newly-opened recording's
 //  per-run processing stores (L4 view-models). This is the "global-default"
 //  half of the settings split from REFACTOR.md: the domain VMs hold per-run
@@ -65,7 +60,7 @@ final class ProcessingDefaults {
         static let ocularBlinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
         static let ocularMovementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
         static let interpolatedHealthFromNeighbors = true
-        static let autoRunSegmentHealthAfterSegmentation = false
+        static let autoRunSegmentHealthAfterSegmentation = true
     }
 
     // MARK: Filter defaults

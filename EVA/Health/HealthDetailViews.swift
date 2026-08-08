@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Self-contained segment- and channel-health detail / popover / badge views
 //  extracted from WaveformView (REFACTOR.md L5). Pure presentation.
 //
@@ -49,7 +44,10 @@ struct SegmentHealthBand: View {
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                guard NSEvent.modifierFlags.contains(.command) else { return }
+                // Option-click pins the segment's health detail — the same
+                // interaction modifier the waveform uses (see
+                // `WaveformView.installOptionKeyMonitor`).
+                guard NSEvent.modifierFlags.contains(.option) else { return }
                 pinsDetails = true
                 showsDetails = true
             }
@@ -526,7 +524,7 @@ struct ChannelHealthDetailsView: View {
     let progress: Double
     let statusMessage: String?
     let onRefresh: () -> Void
-    @Binding var waveletFamily: WaveletCleaningFamily
+    @Binding var waveletFamily: WaveletReductionFamily
     @Binding var waveletLevelCount: Int
     @Binding var waveletThresholdModel: WaveletCleaningThresholdModel
     @Binding var waveletThresholdRule: WaveletCleaningThresholdRule
@@ -708,7 +706,7 @@ struct ChannelHealthDetailsView: View {
 }
 
 struct WaveletRunPopover: View {
-    @Binding var family: WaveletCleaningFamily
+    @Binding var family: WaveletReductionFamily
     @Binding var levelCount: Int
     @Binding var thresholdModel: WaveletCleaningThresholdModel
     @Binding var thresholdRule: WaveletCleaningThresholdRule
@@ -731,7 +729,7 @@ struct WaveletRunPopover: View {
                 GridRow {
                     Text("Wavelet")
                     Picker("", selection: $family) {
-                        ForEach(WaveletCleaningFamily.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden()
                     .frame(width: 130)

@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Parses an EGI `coordinates.xml` file into 3D electrode positions (unit
 //  vectors on a sphere), used for spherical-spline channel interpolation.
 //  Unlike `sensorLayout.xml` (a flat 2D projection with z = 0), coordinates.xml

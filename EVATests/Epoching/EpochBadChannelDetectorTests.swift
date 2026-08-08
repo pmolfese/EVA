@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 
 import Testing
 @testable import EVA
@@ -254,6 +249,7 @@ struct PSABuildJobEpochRejectionTests {
             signal: signal,
             events: events,
             categoriesBySegmentValue: ["stim": ["stim"]],
+            categoryRegexRules: [],
             timingMarkersBySegmentValue: [:],
             timingEventsBySegmentValue: [:],
             artifactEventsForRejection: [],
@@ -269,7 +265,8 @@ struct PSABuildJobEpochRejectionTests {
             interpolatesBadChannelsPerEpoch: true,
             epochBadChannelThresholds: thresholds,
             electrodePositions: positions,
-            globallyBadChannels: []
+            globallyBadChannels: [],
+            artifactRejectionWindow: nil
         )
     }
 
@@ -334,5 +331,94 @@ struct PSABuildJobEpochRejectionTests {
         #expect(result?.message.contains("rejected") == true)
         #expect(result?.epochBadChannelCounts[0] == 1)
         #expect(result?.totalEpochsEvaluated == 2)
+    }
+}
+
+/// Time-boxed artifact rejection: `PSABuildJob.artifactRejectionWindow`
+/// restricts which part of the epoch an artifact has to fall in to reject it.
+struct PSABuildJobArtifactWindowTests {
+
+    /// Two −100…800 ms epochs: one around a stimulus at t = 2 s with an artifact
+    /// 750 ms after it (the case that motivated the option), and a clean one at
+    /// t = 6 s. The clean trial keeps the result non-nil — `buildEpochs` returns
+    /// nil outright when nothing survives, which would hide the skip counts.
+    private func makeJob(window: ClosedRange<Double>?) -> PSABuildJob {
+        let samplingRate = 1000.0
+        let sampleCount = 10_000
+        let signal = SyntheticSignal.make(
+            [[Float]](repeating: [Float](repeating: 0, count: sampleCount), count: 2),
+            samplingRate: samplingRate
+        )
+        let stimulus = MFFEvent(
+            id: "e1", code: "stim", beginTimeSeconds: 2.0, rawBeginTime: "2.0", sourceFile: "test")
+        let cleanStimulus = MFFEvent(
+            id: "e2", code: "stim", beginTimeSeconds: 6.0, rawBeginTime: "6.0", sourceFile: "test")
+        let lateBlink = MFFEvent(
+            id: "a1", code: "Eye Blink", beginTimeSeconds: 2.75, rawBeginTime: "2.75", sourceFile: "test")
+
+        return PSABuildJob(
+            signal: signal,
+            events: [stimulus, cleanStimulus],
+            categoriesBySegmentValue: ["stim": ["stim"]],
+            categoryRegexRules: [],
+            timingMarkersBySegmentValue: [:],
+            timingEventsBySegmentValue: [:],
+            artifactEventsForRejection: [lateBlink],
+            artifactEventsForRejectionByLabel: ["Eye Blink": [lateBlink]],
+            preSamples: 100,                       // −100 ms
+            epochLength: 900,                      // −100…800 ms
+            psaOffset: 0,
+            sampleCount: sampleCount,
+            colorIndices: ["stim": 0],
+            skipIfContainsArtifact: true,
+            artifactRejectionLabel: "artifacts",
+            timingTolerance: 0.5,
+            interpolatesBadChannelsPerEpoch: false,
+            epochBadChannelThresholds: EpochBadChannelThresholds(),
+            electrodePositions: [:],
+            globallyBadChannels: [],
+            artifactRejectionWindow: window
+        )
+    }
+
+    /// Baseline: with no window the blink at 750 ms is inside the epoch, so the
+    /// trial is lost — the behaviour the option exists to change.
+    @Test func artifactAnywhereInTheEpochRejectsWithoutAWindow() async {
+        let result = await makeJob(window: nil).buildEpochs()
+        #expect(result?.segments.count == 1)   // only the clean trial survives
+        #expect(result?.exclusionSummary.skippedArtifacts == 1)
+        #expect(result?.exclusionSummary.skippedArtifactBreakdown["Eye Blink"] == 1)
+    }
+
+    /// Time-boxed to −100…500 ms, the same blink is outside the window and the
+    /// trial survives.
+    @Test func artifactOutsideTheWindowKeepsTheEpoch() async {
+        let result = await makeJob(window: -0.1...0.5).buildEpochs()
+        #expect(result?.segments.count == 2)   // both trials kept
+        #expect(result?.exclusionSummary.skippedArtifacts == 0)
+        #expect(result?.exclusionSummary.skippedArtifactBreakdown.isEmpty == true)
+    }
+
+    /// A window that does contain the blink still rejects, so the option narrows
+    /// rejection rather than disabling it.
+    @Test func artifactInsideTheWindowStillRejects() async {
+        let result = await makeJob(window: 0.7...0.8).buildEpochs()
+        #expect(result?.segments.count == 1)
+        #expect(result?.exclusionSummary.skippedArtifacts == 1)
+    }
+
+    /// The window is relative to the anchor, so its bounds are inclusive at the
+    /// artifact's exact offset.
+    @Test func windowBoundsAreInclusive() async {
+        #expect(await makeJob(window: 0.75...0.75).buildEpochs()?.exclusionSummary.skippedArtifacts == 1)
+        #expect(await makeJob(window: 0.0...0.749).buildEpochs()?.exclusionSummary.skippedArtifacts == 0)
+    }
+
+    /// A window wider than the epoch is intersected with it, so it behaves
+    /// exactly like no window at all.
+    @Test func windowWiderThanTheEpochBehavesLikeNoWindow() async {
+        let result = await makeJob(window: -5.0...5.0).buildEpochs()
+        #expect(result?.segments.count == 1)
+        #expect(result?.exclusionSummary.skippedArtifacts == 1)
     }
 }

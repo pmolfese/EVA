@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Sticky, app-wide configuration for the channel-goodness fit metrics. The
 //  spectral and neighbor-prediction detectors run as part of the default health
 //  pass; the wavelet burden detector is run on demand. All knobs are grouped in
@@ -24,7 +19,7 @@ import SwiftUI
 
 /// Configuration for the on-demand wavelet channel-burden detector.
 struct ChannelWaveletGoodnessSettings: Codable, Sendable {
-    var family: WaveletCleaningFamily = .bior44
+    var family: WaveletReductionFamily = .bior44
     var levelCount: Int = 8
     var thresholdModel: WaveletCleaningThresholdModel = .bayesShrink
     var thresholdRule: WaveletCleaningThresholdRule = .hard
@@ -369,7 +364,7 @@ struct ChannelGoodnessSettingsView: View {
             GridRow {
                 MetricHelpLabel(name: "Wavelet", help: FieldHelp.waveletFamily)
                 Picker("", selection: $settings.wavelet.family) {
-                    ForEach(WaveletCleaningFamily.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .labelsHidden()
                 .frame(width: 150)

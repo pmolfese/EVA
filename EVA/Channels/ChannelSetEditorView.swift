@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Full editor for creating, viewing, and managing channel sets.
 //  Shows a NavigationSplitView: built-in and user-defined sets in the sidebar,
 //  an interactive scalp map + name field in the detail pane.

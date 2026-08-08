@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Butterfly (averaged-category) plot panel, overlay/noise-band toggles, and the multi-condition overlay helpers it depends on,
 //  This is an extension of WaveformView (not a standalone type), following the
 //  same pattern as the other L5 slices -- a file split, not a state extraction.
@@ -382,7 +377,7 @@ extension WaveformView {
                         }
                     }
 
-                    if isCommandKeyPressed {
+                    if isOptionKeyPressed {
                         TopomapScaleControl(
                             mode: $epoching.topomapScaleMode,
                             symmetric: $epoching.topomapSymmetric,
@@ -497,7 +492,7 @@ extension WaveformView {
         })
     }
 
-    /// Seeds µV min/max and z mean/SD from the data so the ⌘ control opens at the
+    /// Seeds µV min/max and z mean/SD from the data so the ⌥ control opens at the
     /// current auto values (only while the respective mode is still auto).
     func seedTopomapScale(autoScale: Double, autoZ: (mean: Double, sd: Double)) {
         if !epoching.topomapScaleManual {

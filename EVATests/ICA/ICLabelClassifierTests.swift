@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  ICLabelClassifier's real inference path depends on a bundled Core ML model
 //  and produces model-dependent (not source-controlled) output, so it isn't a
 //  good fit for pinned unit assertions. What IS deterministic and worth

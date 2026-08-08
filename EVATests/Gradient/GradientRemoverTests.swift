@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 
 import Testing
 import Foundation
@@ -174,6 +169,56 @@ struct GradientRemoverTests {
             (0..<spacing).reduce(0.0) { $0 + Double(values[tr * spacing + $1] * values[tr * spacing + $1]) }
         }
         #expect(energy(amriWindow[0], tr: 0) < energy(sideWindow[0], tr: 0) * 0.2)
+    }
+
+    @Test func metalMASAndMARCloselyMatchCPU() throws {
+        guard GradientRemoverMetalBackend.shared != nil else { return }
+        let spacing = 128
+        let nTR = 24
+        let sampleCount = spacing * nTR
+        var channel = [Float](repeating: 0, count: sampleCount)
+        for t in 0..<sampleCount {
+            let gradient = 75 * Float(sin(Double(t % spacing) * 0.23))
+                + 18 * Float((t % spacing) % 13)
+            let physiology = 4 * Float(sin(Double(t) * 0.047))
+            let drift = Float(t / spacing) * 0.08 * gradient
+            channel[t] = gradient + drift + physiology
+        }
+        let triggers = Array(stride(from: 0, to: sampleCount, by: spacing))
+
+        for fit in [GradientRemover.TemplateFit.subtract, .regress] {
+            let cpu = try GradientRemover.correct(
+                channels: [channel, channel],
+                trSamples: triggers,
+                window: .default,
+                reducer: .median,
+                fit: fit,
+                donorSelection: .amriMovingWindow,
+                computeBackend: .cpu,
+                samplingRate: 1_000
+            )
+            let gpu = try GradientRemover.correct(
+                channels: [channel, channel],
+                trSamples: triggers,
+                window: .default,
+                reducer: .median,
+                fit: fit,
+                donorSelection: .amriMovingWindow,
+                computeBackend: .metal,
+                samplingRate: 1_000
+            )
+
+            #expect(gpu.count == cpu.count)
+            for channelIndex in cpu.indices {
+                let squaredError = zip(cpu[channelIndex], gpu[channelIndex]).reduce(0.0) { sum, pair in
+                    let difference = Double(pair.0 - pair.1)
+                    return sum + difference * difference
+                }
+                let rms = (squaredError / Double(sampleCount)).squareRoot()
+                #expect(gpu[channelIndex].allSatisfy { $0.isFinite })
+                #expect(rms < 0.01)
+            }
+        }
     }
 
     @Test func throwsWithTooFewTriggers() {

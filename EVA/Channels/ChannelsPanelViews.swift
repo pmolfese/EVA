@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Per-channel row UI: bad/hidden toggles, context menus, channel list rendering,
 //  This is an extension of WaveformView (not a standalone type), following the
 //  same pattern as the other L5 slices -- a file split, not a state extraction.
@@ -339,7 +334,7 @@ extension WaveformView {
     }
 
     func updateWaveformHover(at location: CGPoint, in signal: MFFSignalData) {
-        guard isCommandKeyPressed,
+        guard isOptionKeyPressed,
               let channelIndex = waveformHoverChannelIndex(atY: location.y, in: signal),
               signal.data.indices.contains(channelIndex),
               !channels.hidden.contains(channelIndex) else {
@@ -364,7 +359,7 @@ extension WaveformView {
 
     @ViewBuilder
     func waveformHoverOverlay() -> some View {
-        if isCommandKeyPressed, let waveformHoverInfo {
+        if isOptionKeyPressed, let waveformHoverInfo {
             ButterflyChannelBadge(
                 name: waveformHoverInfo.channelLabel,
                 valueMicrovolts: waveformHoverInfo.valueMicrovolts,

@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Swift translation of nimh-sfim/gradient_remover (GradientRemover.py).
 //  Upstream author: Joshua Teves. No upstream license was found; see
 //  THIRD_PARTY_NOTICES.md.
@@ -32,7 +27,7 @@
 //  MAS/MAR (median-reduced template, with optional regression fit instead of
 //  plain subtraction) are inspired by the same-named methods in `amri_eeg_gac.m`
 //  from the Advanced MRI (AMRI) section, NINDS, NIH MATLAB toolbox
-//  (https://amri.ninds.nih.gov/software.html; GPL-3.0), itself implementing:
+//  (https://amri.ninds.nih.gov/software.html), itself implementing:
 //  Liu Z, de Zwart JA, van Gelderen P, Kuo L-W, Duyn JH. Statistical feature
 //  extraction for artifact removal from concurrent fMRI-EEG recordings.
 //  NeuroImage (2012), 59(3): 2073-2087. See THIRD_PARTY_NOTICES.md.
@@ -63,6 +58,11 @@ enum GradientRemoverError: LocalizedError {
 }
 
 struct GradientRemover {
+    enum ComputeBackend: String, Sendable {
+        case cpu
+        case metal
+    }
+
     /// Number of neighboring TRs averaged into the template, before and after
     /// the current TR. Mirrors the Python `window=(4, 4)` default.
     struct Window {
@@ -128,6 +128,7 @@ struct GradientRemover {
         reducer: TemplateReducer = .weightedMean,
         fit: TemplateFit = .subtract,
         donorSelection: DonorSelection = .sideWindow,
+        computeBackend: ComputeBackend = .cpu,
         samplingRate: Double? = nil,
         amriNoWindowSeconds: Double = 0.3,
         progress: (@Sendable (Double) -> Void)? = nil
@@ -159,6 +160,11 @@ struct GradientRemover {
         }
 
         let channelCount = channels.count
+        let metal: GradientRemoverMetalBackend?
+        switch computeBackend {
+        case .cpu: metal = nil
+        case .metal: metal = GradientRemoverMetalBackend.shared
+        }
         let weightBefore = Float(window.before) / Float(window.before + window.after)
         let weightAfter = Float(window.after) / Float(window.before + window.after)
 
@@ -187,6 +193,7 @@ struct GradientRemover {
                     reducer: reducer,
                     fit: fit,
                     donorSelection: donorSelection,
+                    metal: metal,
                     samplingRate: samplingRate,
                     amriNoWindowSeconds: amriNoWindowSeconds
                 )
@@ -220,6 +227,7 @@ struct GradientRemover {
         reducer: TemplateReducer = .weightedMean,
         fit: TemplateFit = .subtract,
         donorSelection: DonorSelection = .sideWindow,
+        metal: GradientRemoverMetalBackend? = nil,
         samplingRate: Double? = nil,
         amriNoWindowSeconds: Double = 0.3
     ) -> [Float] {
@@ -249,6 +257,53 @@ struct GradientRemover {
             minimumDistanceTRs = max(Int((amriNoWindowSeconds * samplingRate / Double(spacing)).rounded()), 0)
         } else {
             minimumDistanceTRs = 0
+        }
+
+        if let metal {
+            let usesMedian: Bool
+            switch reducer {
+            case .weightedMean: usesMedian = false
+            case .median: usesMedian = true
+            }
+            if usesMedian {
+                var donors = [[Int]](repeating: [], count: nTR)
+                for n in 0..<nTR {
+                    guard !Task.isCancelled else { return channel }
+                    switch donorSelection {
+                    case .sideWindow:
+                        guard n >= window.before, n <= nTR - window.after - 1 else { continue }
+                        let before = ((n - window.before)..<n).filter { !excludedTRs.contains($0) }
+                        let after = ((n + 1)..<(n + window.after + 1)).filter { !excludedTRs.contains($0) }
+                        donors[n] = before + after
+                    case .amriMovingWindow:
+                        donors[n] = amriWindowIndices(
+                            center: n, before: window.before, after: window.after, count: nTR
+                        ).filter {
+                            $0 != n
+                                && !excludedTRs.contains($0)
+                                && !outlierTRs.contains($0)
+                                && abs($0 - n) > minimumDistanceTRs
+                        }
+                    }
+                }
+
+                let fitRegression: Bool
+                switch fit {
+                case .subtract: fitRegression = false
+                case .regress: fitRegression = true
+                }
+                if let correctedSegments = metal.correctMedianSegments(
+                    detrended,
+                    donors: donors,
+                    fitRegression: fitRegression
+                ) {
+                    for n in 0..<nTR {
+                        let start = offset + n * spacing
+                        row.replaceSubrange(start..<(start + spacing), with: correctedSegments[n])
+                    }
+                    return row
+                }
+            }
         }
 
         for n in 0..<nTR {
