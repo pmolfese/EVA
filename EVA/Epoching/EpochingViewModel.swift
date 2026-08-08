@@ -139,6 +139,16 @@ final class EpochingViewModel {
     var skipEyeMovements = true
     /// Drives the popover listing which artifact kinds to reject on.
     var showsArtifactRejectionOptions = false
+    /// Restricts rejection to a sub-window of the epoch instead of the whole
+    /// thing, so an artifact late in a long post-stimulus interval (a blink at
+    /// 750 ms in a −100…800 ms epoch) doesn't have to cost the trial. Off by
+    /// default: the whole epoch counts, which is the historical behaviour.
+    var limitsArtifactRejectionWindow = false
+    /// Bounds of that window in **seconds relative to the anchor** (negative =
+    /// before it), matching how `preStimulus`/`postStimulus` are expressed.
+    /// Clamped to the epoch by `effectiveArtifactRejectionWindow`.
+    var artifactRejectionWindowStart = -0.2
+    var artifactRejectionWindowEnd = 0.8
     var skippedDefinedArtifactIDs = Set<DefinedArtifact.ID>()
     var knownArtifactIDsForRejection = Set<DefinedArtifact.ID>()
     /// Excludes segments the user manually marked "Bad" (Segment Health
@@ -261,6 +271,34 @@ final class EpochingViewModel {
         overlaySelectedCategories = current
     }
 
+    /// The artifact-rejection window actually applied, in seconds relative to
+    /// the anchor, or `nil` for "the whole epoch".
+    ///
+    /// Clamped to the epoch, since an artifact outside the epoch was never a
+    /// rejection candidate. An inverted window (end before start) collapses to a
+    /// zero-width instant rather than falling back to the whole epoch — a
+    /// mistyped bound should reject *less*, never silently reject everything.
+    var effectiveArtifactRejectionWindow: ClosedRange<Double>? {
+        guard limitsArtifactRejectionWindow else { return nil }
+        let lower = max(artifactRejectionWindowStart, -preStimulus)
+        let upper = min(artifactRejectionWindowEnd, postStimulus)
+        return lower...max(lower, upper)
+    }
+
+    /// True when the configured bounds are inverted, so the UI can say so
+    /// instead of silently rejecting nothing.
+    var artifactRejectionWindowIsInverted: Bool {
+        limitsArtifactRejectionWindow && artifactRejectionWindowEnd <= artifactRejectionWindowStart
+    }
+
+    /// Seeds the window from the current epoch bounds, so switching the limit on
+    /// starts from "the whole epoch" and is narrowed from there rather than
+    /// starting at stale numbers from a different epoch length.
+    func seedArtifactRejectionWindowFromEpoch() {
+        artifactRejectionWindowStart = -preStimulus
+        artifactRejectionWindowEnd = postStimulus
+    }
+
     var parameters: [String: String] {
         var p: [String: String] = [
             "preStimulusMs": String(format: "%.0f", preStimulus * 1000),
@@ -275,6 +313,11 @@ final class EpochingViewModel {
             "skipLabeledBad": "\(skipIfLabeledBad)",
             "interpolateBadChannelsPerEpoch": "\(interpolatesBadChannelsPerEpoch)"
         ]
+        if skipIfContainsArtifact, limitsArtifactRejectionWindow {
+            p["artifactWindowLimited"] = "true"
+            p["artifactWindowStartMs"] = String(format: "%.0f", artifactRejectionWindowStart * 1000)
+            p["artifactWindowEndMs"] = String(format: "%.0f", artifactRejectionWindowEnd * 1000)
+        }
         if interpolatesBadChannelsPerEpoch {
             p.merge(epochBadChannelThresholds.flatParameters(prefix: "badChannel")) { current, _ in current }
             p["badChannel.escalateToGlobal"] = "\(escalatesBadChannelsToGlobal)"
@@ -318,6 +361,11 @@ final class EpochingViewModel {
         if let v = p["skipEyeBlinks"] { skipEyeBlinks = (v == "true") }
         if let v = p["skipEyeMovements"] { skipEyeMovements = (v == "true") }
         if let v = p["skipArtifacts"] { skipIfContainsArtifact = (v == "true") }
+        // Absent keys mean "not limited", matching how `parameters` only writes
+        // them when the limit is on.
+        limitsArtifactRejectionWindow = p["artifactWindowLimited"] == "true"
+        if let v = p["artifactWindowStartMs"].flatMap(Double.init) { artifactRejectionWindowStart = v / 1000 }
+        if let v = p["artifactWindowEndMs"].flatMap(Double.init) { artifactRejectionWindowEnd = v / 1000 }
         if let v = p["skipLabeledBad"] { skipIfLabeledBad = (v == "true") }
         if let v = p["interpolateBadChannelsPerEpoch"] { interpolatesBadChannelsPerEpoch = (v == "true") }
         epochBadChannelThresholds = EpochBadChannelThresholds.fromFlatParameters(
@@ -476,7 +524,8 @@ final class EpochingViewModel {
             interpolatesBadChannelsPerEpoch: interpolatesBadChannelsPerEpoch,
             epochBadChannelThresholds: epochBadChannelThresholds,
             electrodePositions: electrodePositions,
-            globallyBadChannels: globallyBadChannels
+            globallyBadChannels: globallyBadChannels,
+            artifactRejectionWindow: skipArtifacts ? effectiveArtifactRejectionWindow : nil
         )
     }
 

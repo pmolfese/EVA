@@ -106,8 +106,8 @@ struct WaveformView: View {
     }
     @State var horizontalJumpValue: Double = 0
     @State var isSyncingSliderFromScroll = false
-    @State var isCommandKeyPressed = false
-    @State private var commandKeyMonitor: Any?
+    @State var isOptionKeyPressed = false
+    @State private var optionKeyMonitor: Any?
     @State var showsEventsPanel = false
     @State var selectedEventID: MFFEvent.ID?
     /// Artifact event whose window is highlighted in the waveform (tap its flag).
@@ -577,7 +577,7 @@ struct WaveformView: View {
             await loadRecordingIfNeeded()
         }
         .onAppear {
-            installCommandKeyMonitor()
+            installOptionKeyMonitor()
         }
         .onDisappear {
             tearDownRecordingSessionForClose()
@@ -1796,7 +1796,7 @@ struct WaveformView: View {
                     contentOffset: horizontalOffset,
                     visibleRange: visibleHorizontalRange,
                     viewportWidth: horizontalViewportWidth,
-                    isCommandKeyPressed: isCommandKeyPressed,
+                    isOptionKeyPressed: isOptionKeyPressed,
                     timeMarkerStyle: waveformTimeMarkerStyle,
                     laneCount: eventLaneCount,
                     onSelectEvent: { event, color in
@@ -1891,11 +1891,11 @@ struct WaveformView: View {
                 physioPane(pns, eegSamplingRate: signal.samplingRate)
             }
 
-            if isCommandKeyPressed || selectedSampleRange != nil || isShowingEpochs {
+            if isOptionKeyPressed || selectedSampleRange != nil || isShowingEpochs {
                 Divider()
 
                 HStack(spacing: 16) {
-                    if isCommandKeyPressed {
+                    if isOptionKeyPressed {
                         Text("Jump")
                             .font(.caption.weight(.semibold))
                             .frame(width: labelColumnWidth, alignment: .leading)
@@ -2292,7 +2292,7 @@ struct WaveformView: View {
     }
 
     private func clearRecordingStateForClose() {
-        removeCommandKeyMonitor()
+        removeOptionKeyMonitor()
 
         filter.resetForClose()
         ica.resetForClose()
@@ -2464,25 +2464,30 @@ struct WaveformView: View {
 
     // MARK: - Keyboard state
 
-    private func installCommandKeyMonitor() {
-        guard commandKeyMonitor == nil else { return }
-        isCommandKeyPressed = NSEvent.modifierFlags.contains(.command)
-        commandKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-            let commandIsPressed = event.modifierFlags.contains(.command)
-            isCommandKeyPressed = commandIsPressed
-            if !commandIsPressed {
+    /// Option (⌥) is the app's interaction modifier: held, it reveals the jump
+    /// slider, the per-sample hover badge, the event-stack chooser, and the
+    /// topomap colour-scale controls. Option rather than Command because
+    /// Command-click is already claimed by the system for list/table
+    /// multi-selection, and ⌥ is the conventional macOS "alternate action".
+    private func installOptionKeyMonitor() {
+        guard optionKeyMonitor == nil else { return }
+        isOptionKeyPressed = NSEvent.modifierFlags.contains(.option)
+        optionKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            let optionIsPressed = event.modifierFlags.contains(.option)
+            isOptionKeyPressed = optionIsPressed
+            if !optionIsPressed {
                 waveformHoverInfo = nil
             }
             return event
         }
     }
 
-    private func removeCommandKeyMonitor() {
-        if let commandKeyMonitor {
-            NSEvent.removeMonitor(commandKeyMonitor)
+    private func removeOptionKeyMonitor() {
+        if let optionKeyMonitor {
+            NSEvent.removeMonitor(optionKeyMonitor)
         }
-        commandKeyMonitor = nil
-        isCommandKeyPressed = false
+        optionKeyMonitor = nil
+        isOptionKeyPressed = false
         waveformHoverInfo = nil
     }
 

@@ -302,10 +302,10 @@ extension WaveformView {
                                     }
                                 }
                             }
-                            .padding(.trailing, isCommandKeyPressed ? 10 : 0)
+                            .padding(.trailing, isOptionKeyPressed ? 10 : 0)
                         }
 
-                        if isCommandKeyPressed {
+                        if isOptionKeyPressed {
                             TopomapScaleControl(
                                 mode: $epoching.topomapScaleMode,
                                 symmetric: $epoching.topomapSymmetric,

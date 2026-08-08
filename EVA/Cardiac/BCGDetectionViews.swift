@@ -1046,7 +1046,6 @@ extension WaveformView {
         }
 
         bcg.detectsArtifacts = !newEvents.isEmpty
-        showsEventsPanel = !newEvents.isEmpty
         if !newEvents.isEmpty {
             selectedEventCodes = [useCode]
             registerBCGDefinedArtifact(events: newEvents, eventCode: useCode)

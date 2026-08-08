@@ -801,7 +801,7 @@ struct ButterflyChannelBadge: View {
     }
 }
 
-/// Vertical topomap color-scale control (shown while ⌘ is held): µV min/max with
+/// Vertical topomap color-scale control (shown while ⌥ is held): µV min/max with
 /// an optional symmetry lock, or a Z-score scale of ±N SD about the mean.
 struct TopomapScaleControl: View {
     @Binding var mode: EpochingViewModel.TopomapScaleMode
@@ -1459,7 +1459,7 @@ struct EventTrackView: View {
     let contentOffset: CGFloat
     let visibleRange: ClosedRange<CGFloat>
     let viewportWidth: CGFloat
-    let isCommandKeyPressed: Bool
+    let isOptionKeyPressed: Bool
     var timeMarkerStyle = WaveformTimeMarkerStyle.defaultValue
     /// Number of distinct source lanes events are staggered into.
     var laneCount: Int = 1
@@ -1531,7 +1531,7 @@ struct EventTrackView: View {
                 }
             }
 
-            if isCommandKeyPressed, let hoveredEventStack {
+            if isOptionKeyPressed, let hoveredEventStack {
                 inlineEventStackChooser(hoveredEventStack)
             }
         }
@@ -1545,7 +1545,7 @@ struct EventTrackView: View {
         .onChange(of: key) { _, newKey in
             updateEventIndexIfNeeded(key: newKey, signature: signature)
         }
-        .onChange(of: isCommandKeyPressed) { _, pressed in
+        .onChange(of: isOptionKeyPressed) { _, pressed in
             if !pressed {
                 hoveredEventStack = nil
             }
@@ -1824,7 +1824,7 @@ struct EventTrackView: View {
     }
 
     private func updateHoveredEventStack(at location: CGPoint, visibleMarkers: [EventTrackMarker]) {
-        guard isCommandKeyPressed else {
+        guard isOptionKeyPressed else {
             hoveredEventStack = nil
             return
         }

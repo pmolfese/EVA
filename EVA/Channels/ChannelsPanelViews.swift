@@ -334,7 +334,7 @@ extension WaveformView {
     }
 
     func updateWaveformHover(at location: CGPoint, in signal: MFFSignalData) {
-        guard isCommandKeyPressed,
+        guard isOptionKeyPressed,
               let channelIndex = waveformHoverChannelIndex(atY: location.y, in: signal),
               signal.data.indices.contains(channelIndex),
               !channels.hidden.contains(channelIndex) else {
@@ -359,7 +359,7 @@ extension WaveformView {
 
     @ViewBuilder
     func waveformHoverOverlay() -> some View {
-        if isCommandKeyPressed, let waveformHoverInfo {
+        if isOptionKeyPressed, let waveformHoverInfo {
             ButterflyChannelBadge(
                 name: waveformHoverInfo.channelLabel,
                 valueMicrovolts: waveformHoverInfo.valueMicrovolts,

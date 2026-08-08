@@ -44,7 +44,10 @@ struct SegmentHealthBand: View {
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                guard NSEvent.modifierFlags.contains(.command) else { return }
+                // Option-click pins the segment's health detail — the same
+                // interaction modifier the waveform uses (see
+                // `WaveformView.installOptionKeyMonitor`).
+                guard NSEvent.modifierFlags.contains(.option) else { return }
                 pinsDetails = true
                 showsDetails = true
             }

@@ -377,7 +377,7 @@ extension WaveformView {
                         }
                     }
 
-                    if isCommandKeyPressed {
+                    if isOptionKeyPressed {
                         TopomapScaleControl(
                             mode: $epoching.topomapScaleMode,
                             symmetric: $epoching.topomapSymmetric,
@@ -492,7 +492,7 @@ extension WaveformView {
         })
     }
 
-    /// Seeds µV min/max and z mean/SD from the data so the ⌘ control opens at the
+    /// Seeds µV min/max and z mean/SD from the data so the ⌥ control opens at the
     /// current auto values (only while the respective mode is still auto).
     func seedTopomapScale(autoScale: Double, autoZ: (mean: Double, sd: Double)) {
         if !epoching.topomapScaleManual {

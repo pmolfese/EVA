@@ -1226,7 +1226,6 @@ extension WaveformView {
         upsertDefinedArtifact(from: result, configuration: configuration, source: .waveform)
         artifactVM.events = definedArtifactEventList()
         selectedEventCodes = [configuration.eventCode]
-        showsEventsPanel = true
         template.confirmedSource = .waveform
         artifactVM.statusMessage = "\(result.selectedEvents.count) waveform matches"
     }
@@ -1246,7 +1245,6 @@ extension WaveformView {
         }
         artifactVM.events = template.definedArtifacts.isEmpty ? result.topographyEvents : definedArtifactEventList()
         selectedEventCodes = [template.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)]
-        showsEventsPanel = true
         template.confirmedSource = .topography
         artifactVM.statusMessage = "\(result.topographyEvents.count) topography matches"
     }
@@ -1351,7 +1349,6 @@ extension WaveformView {
             upsertDefinedArtifact(from: result, configuration: configuration, source: source)
             artifactVM.events = definedArtifactEventList()
             selectedEventCodes = [configuration.eventCode]
-            showsEventsPanel = true
             template.confirmedSource = source
             artifactVM.statusMessage = source == .topography
                 ? "\(result.topographyEvents.count) topography matches"

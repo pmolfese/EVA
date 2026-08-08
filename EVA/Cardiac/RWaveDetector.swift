@@ -136,6 +136,10 @@ struct RWaveCandidate: Sendable {
     var score: Double
     var sourceID: String
     var sourceLabel: String
+    /// Measured width of the R deflection around the peak — see
+    /// `RWaveDetector.complexWidthSeconds`. `nil` when it could not be measured
+    /// (flat or non-finite neighbourhood).
+    var widthSeconds: Double?
 }
 
 nonisolated enum RWaveDetector {
@@ -155,6 +159,16 @@ nonisolated enum RWaveDetector {
     private static let pulseSmoothingWindowSeconds = 0.090
     private static let adaptivePeakSpacingSeconds = 0.080
     private static let rPeakRefinementWindowSeconds = 0.080
+    /// Half-width of the search for the complex's onset and offset. A QRS
+    /// complex is under 120 ms normally and under ~200 ms even when abnormal, so
+    /// 100 ms each side comfortably contains it while bounding the walk on a
+    /// noisy trace that never returns toward baseline.
+    private static let complexWidthSearchSeconds = 0.100
+    /// Onset/offset are taken where the deflection has decayed to this fraction
+    /// of its peak. True QRS onset is a return to baseline, which is not
+    /// robustly identifiable on a single beat, so a fixed fraction of the peak
+    /// is the usual proxy.
+    private static let complexWidthAmplitudeFraction = 0.20
 
     static func detect(
         sources: [ECGDetectionSource],
@@ -184,7 +198,11 @@ nonisolated enum RWaveDetector {
                 code: eventCode,
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
-                sourceFile: "\(sourceFile): \(configuration.algorithm.rawValue)"
+                sourceFile: "\(sourceFile): \(configuration.algorithm.rawValue)",
+                // The marker stays on the R peak, so unlike an imported event
+                // this duration is the deflection's width *around* the onset
+                // time rather than a span starting at it.
+                durationSeconds: candidate.widthSeconds
             )
         }
     }
@@ -642,7 +660,13 @@ nonisolated enum RWaveDetector {
                 timeSeconds: time,
                 score: score,
                 sourceID: source.id,
-                sourceLabel: source.label
+                sourceLabel: source.label,
+                widthSeconds: complexWidthSeconds(
+                    at: refinedSample,
+                    processedChannels: processedChannels,
+                    samplingRate: source.samplingRate,
+                    polarity: polarity
+                )
             ))
         }
 
@@ -690,7 +714,13 @@ nonisolated enum RWaveDetector {
                         timeSeconds: time,
                         score: score,
                         sourceID: source.id,
-                        sourceLabel: source.label
+                        sourceLabel: source.label,
+                        widthSeconds: complexWidthSeconds(
+                            at: refinedSample,
+                            processedChannels: processedChannels,
+                            samplingRate: source.samplingRate,
+                            polarity: polarity
+                        )
                     ))
                 }
                 signalLevel = 0.125 * score + 0.875 * signalLevel
@@ -942,6 +972,85 @@ nonisolated enum RWaveDetector {
         }
 
         return bestSample
+    }
+
+    /// Width of the detected complex, measured on the trace rather than assumed,
+    /// so a user can click the event and check the detection against the ECG or
+    /// PNS channels.
+    ///
+    /// Every algorithm's `waveform` is the baseline-removed (or band-passed)
+    /// signal, so zero is the local baseline and `polarity.score` gives the
+    /// deflection in the direction the detector was looking. Onset and offset are
+    /// the first samples either side of the peak where that deflection has
+    /// decayed to `complexWidthAmplitudeFraction` of its peak value; the width is
+    /// the span between them.
+    ///
+    /// Measured on the single channel carrying the peak, not the aggregate:
+    /// averaging across leads with different QRS morphologies would widen the
+    /// complex by their misalignment rather than measuring any of them.
+    ///
+    /// This is the width of the **R deflection**, not full QRS onset-to-offset.
+    /// The Q and S limbs cross baseline, so the deflection falls under the
+    /// cutoff there and the walk stops regardless of polarity. Reporting a true
+    /// QRS interval would need separate Q-onset and S-offset detection, which is
+    /// a different (and much less robust) measurement than this one.
+    ///
+    /// Returns `nil` rather than 0 when there is nothing to measure, so callers
+    /// can leave the event's duration unset instead of reporting a false 0 ms.
+    static func complexWidthSeconds(
+        at sample: Int,
+        processedChannels: [ECGProcessedChannel],
+        samplingRate: Double,
+        polarity: ECGDetectionPolarity
+    ) -> Double? {
+        guard samplingRate > 0,
+              let sampleCount = processedChannels.map(\.waveform.count).min(),
+              sample >= 0, sample < sampleCount else {
+            return nil
+        }
+
+        var peakWaveform: [Double]?
+        var peakAmplitude = 0.0
+        for channel in processedChannels {
+            let value = channel.waveform[sample]
+            guard value.isFinite else { continue }
+            let amplitude = polarity.score(value)
+            if amplitude > peakAmplitude {
+                peakAmplitude = amplitude
+                peakWaveform = channel.waveform
+            }
+        }
+        guard let waveform = peakWaveform, peakAmplitude > 0 else { return nil }
+
+        let radius = sampleWindow(
+            seconds: complexWidthSearchSeconds,
+            samplingRate: samplingRate,
+            minimum: 1
+        )
+        let cutoff = peakAmplitude * complexWidthAmplitudeFraction
+
+        var onset = sample
+        var index = sample - 1
+        let lower = max(0, sample - radius)
+        while index >= lower {
+            let value = waveform[index]
+            guard value.isFinite, polarity.score(value) > cutoff else { break }
+            onset = index
+            index -= 1
+        }
+
+        var offset = sample
+        index = sample + 1
+        let upper = min(sampleCount - 1, sample + radius)
+        while index <= upper {
+            let value = waveform[index]
+            guard value.isFinite, polarity.score(value) > cutoff else { break }
+            offset = index
+            index += 1
+        }
+
+        guard offset > onset else { return nil }
+        return Double(offset - onset) / samplingRate
     }
 
     private static func robustStats(

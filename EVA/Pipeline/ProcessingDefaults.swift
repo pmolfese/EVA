@@ -60,7 +60,7 @@ final class ProcessingDefaults {
         static let ocularBlinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
         static let ocularMovementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
         static let interpolatedHealthFromNeighbors = true
-        static let autoRunSegmentHealthAfterSegmentation = false
+        static let autoRunSegmentHealthAfterSegmentation = true
     }
 
     // MARK: Filter defaults

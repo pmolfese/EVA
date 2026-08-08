@@ -776,6 +776,14 @@ nonisolated struct PSABuildJob: Sendable {
     let epochBadChannelThresholds: EpochBadChannelThresholds
     let electrodePositions: [Int: SIMD3<Double>]
     let globallyBadChannels: Set<Int>
+    /// Sub-window of the epoch, in seconds relative to the anchor (negative =
+    /// before it), within which an artifact must fall to reject the epoch.
+    /// `nil` — the default — means the whole epoch counts.
+    ///
+    /// Intersected with the epoch, so a window wider than the epoch behaves the
+    /// same as `nil`. See `EpochingViewModel.effectiveArtifactRejectionWindow`,
+    /// which clamps it before it gets here.
+    let artifactRejectionWindow: ClosedRange<Double>?
 
     /// One accepted (event, category) pairing, cheap to compute — everything
     /// EXCEPT the per-channel sample extraction and (optional) per-epoch
@@ -853,9 +861,17 @@ nonisolated struct PSABuildJob: Sendable {
                 continue
             }
             if skipIfContainsArtifact, !artifactRejectionGroups.isEmpty {
-                let startSeconds = Double(startSample) / signal.samplingRate
-                let endSeconds = Double(endSample) / signal.samplingRate
-                let matchedLabels = artifactRejectionGroups.compactMap { label, events -> String? in
+                // Default window is the whole epoch; `artifactRejectionWindow`
+                // narrows it, relative to the anchor (t = 0), and can only ever
+                // shrink it — an artifact outside the epoch was never a
+                // rejection candidate.
+                var startSeconds = Double(startSample) / signal.samplingRate
+                var endSeconds = Double(endSample) / signal.samplingRate
+                if let window = artifactRejectionWindow {
+                    startSeconds = max(startSeconds, anchorTimeSeconds + window.lowerBound)
+                    endSeconds = min(endSeconds, anchorTimeSeconds + window.upperBound)
+                }
+                let matchedLabels = startSeconds > endSeconds ? [] : artifactRejectionGroups.compactMap { label, events -> String? in
                     events.contains { artifact in
                         artifact.beginTimeSeconds >= startSeconds && artifact.beginTimeSeconds <= endSeconds
                     } ? label : nil

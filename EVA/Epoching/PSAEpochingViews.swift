@@ -438,11 +438,92 @@ extension WaveformView {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                Divider()
+                psaArtifactRejectionWindowSection()
             }
             .padding(16)
             .frame(width: 300, alignment: .leading)
         }
         .frame(maxHeight: 420)
+    }
+
+    /// Time-boxes rejection to part of the epoch, so an artifact late in a long
+    /// post-stimulus interval need not cost the trial.
+    @ViewBuilder
+    func psaArtifactRejectionWindowSection() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Where the artifact must occur")
+                .font(.headline)
+
+            Toggle("Only part of the epoch", isOn: Binding(
+                get: { epoching.limitsArtifactRejectionWindow },
+                set: { newValue in
+                    // Seed from the epoch on the way on, so the window starts as
+                    // "everything" and is narrowed from there rather than opening
+                    // on stale bounds from a differently-sized epoch.
+                    if newValue, !epoching.limitsArtifactRejectionWindow {
+                        epoching.seedArtifactRejectionWindowFromEpoch()
+                    }
+                    epoching.limitsArtifactRejectionWindow = newValue
+                }
+            ))
+            .help("Off: an artifact anywhere in the epoch rejects it. On: only artifacts inside the window below do.")
+
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                GridRow {
+                    Text("From (s)")
+                        .font(.caption.weight(.semibold))
+                    TextField("From", value: $epoching.artifactRejectionWindowStart,
+                              format: .number.precision(.fractionLength(3)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                }
+                GridRow {
+                    Text("To (s)")
+                        .font(.caption.weight(.semibold))
+                    TextField("To", value: $epoching.artifactRejectionWindowEnd,
+                              format: .number.precision(.fractionLength(3)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                }
+            }
+            .disabled(!epoching.limitsArtifactRejectionWindow)
+
+            Text(psaArtifactRejectionWindowSummary())
+                .font(.caption)
+                .foregroundStyle(epoching.artifactRejectionWindowIsInverted ? Color.orange : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Spells out the window that will actually be used, in ms, including any
+    /// clamping to the epoch — so a window wider than the epoch doesn't look
+    /// like it is doing something it isn't.
+    func psaArtifactRejectionWindowSummary() -> String {
+        let epochText = String(
+            format: "The epoch spans %.0f to %.0f ms.",
+            -epoching.preStimulus * 1000, epoching.postStimulus * 1000
+        )
+        guard epoching.limitsArtifactRejectionWindow else {
+            return "An artifact anywhere in the epoch rejects it. \(epochText)"
+        }
+        if epoching.artifactRejectionWindowIsInverted {
+            return "“To” must be later than “From” — nothing will be rejected. \(epochText)"
+        }
+        guard let window = epoching.effectiveArtifactRejectionWindow else {
+            return epochText
+        }
+        var text = String(
+            format: "Rejecting only for artifacts between %.0f and %.0f ms.",
+            window.lowerBound * 1000, window.upperBound * 1000
+        )
+        let clampedStart = epoching.artifactRejectionWindowStart < -epoching.preStimulus
+        let clampedEnd = epoching.artifactRejectionWindowEnd > epoching.postStimulus
+        if clampedStart || clampedEnd {
+            text += " Clamped to the epoch."
+        }
+        return "\(text) \(epochText)"
     }
 
     func psaArtifactRejectionRow(
@@ -1586,7 +1667,8 @@ extension WaveformView {
             interpolatesBadChannelsPerEpoch: epoching.interpolatesBadChannelsPerEpoch,
             epochBadChannelThresholds: epoching.epochBadChannelThresholds,
             electrodePositions: electrodeGeometry?.positions ?? [:],
-            globallyBadChannels: channels.bad
+            globallyBadChannels: channels.bad,
+            artifactRejectionWindow: epoching.effectiveArtifactRejectionWindow
         )
     }
 
