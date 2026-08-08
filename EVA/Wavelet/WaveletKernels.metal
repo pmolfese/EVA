@@ -190,6 +190,212 @@ struct WaveletLevelEnergyParameters {
     uint softThreshold;
 };
 
+// MARK: - Reduction (decompose → threshold → reconstruct on-device)
+//
+// The Wavelet Artifact Reducer's whole per-channel pipeline —
+// decompose, threshold the detail bands, reconstruct the artifact from the
+// kept coefficients plus the approximation — runs on-device. The host only
+// pads/detrends the input, computes the robust (median/MAD) thresholds from
+// a strided subsample of the resident bands, and reads back the final
+// artifact plane. Each kernel mirrors its CPU counterpart in
+// `WaveletTransform` exactly (same taps, same circular boundary, same order)
+// so the two backends agree to float-vs-double precision.
+
+struct WaveletDWTParameters {
+    uint inputLength;    // band length at this level (even)
+    uint channelCount;
+    uint lowLength;
+    uint highLength;
+};
+
+/// One decimated analysis step (`WaveletTransform.dwtStep`): one thread per
+/// (output coefficient, channel). Input is channel-major with stride
+/// `inputLength`; outputs are channel-major with stride `inputLength / 2`.
+kernel void waveletDWTLevel(
+    device const float *input           [[buffer(0)]],
+    device float *approx                [[buffer(1)]],
+    device float *detail                [[buffer(2)]],
+    device const float *lowPass         [[buffer(3)]],
+    device const float *highPass        [[buffer(4)]],
+    constant WaveletDWTParameters &p    [[buffer(5)]],
+    uint2 gid                           [[thread_position_in_grid]]
+) {
+    const uint halfLength = p.inputLength / 2;
+    const uint i = gid.x;
+    const uint channel = gid.y;
+    if (i >= halfLength || channel >= p.channelCount) {
+        return;
+    }
+    const uint base = channel * p.inputLength;
+
+    float sumLow = 0.0f;
+    for (uint k = 0; k < p.lowLength; ++k) {
+        sumLow += lowPass[k] * input[base + (2 * i + k) % p.inputLength];
+    }
+    float sumHigh = 0.0f;
+    for (uint k = 0; k < p.highLength; ++k) {
+        sumHigh += highPass[k] * input[base + (2 * i + k) % p.inputLength];
+    }
+    approx[channel * halfLength + i] = sumLow;
+    detail[channel * halfLength + i] = sumHigh;
+}
+
+struct WaveletIDWTParameters {
+    uint outputLength;   // band length being reconstructed (even)
+    uint channelCount;
+    uint lowLength;
+    uint highLength;
+    int shift;           // bank.reconstructionShift (0 for orthonormal banks)
+};
+
+/// One decimated synthesis step (`WaveletTransform.idwtStep`), in gather form:
+/// the CPU scatters `y[(2i + k + shift) % n] += recLow[k]·a[i]`, so each
+/// output sample gathers the taps whose scatter index lands on it — for tap k
+/// the source index `m = (j − shift − k) mod n` must be even, and then
+/// `i = m / 2`. n is even, so the mod preserves parity and the evenness test
+/// is exact. The high-pass branch uses the negated shift, as on the CPU.
+kernel void waveletIDWTLevel(
+    device const float *approx          [[buffer(0)]],   // outputLength / 2 per channel
+    device const float *detail          [[buffer(1)]],
+    device float *output                [[buffer(2)]],   // outputLength per channel
+    device const float *recLow          [[buffer(3)]],
+    device const float *recHigh         [[buffer(4)]],
+    constant WaveletIDWTParameters &p   [[buffer(5)]],
+    uint2 gid                           [[thread_position_in_grid]]
+) {
+    const uint n = p.outputLength;
+    const uint halfLength = n / 2;
+    const uint j = gid.x;
+    const uint channel = gid.y;
+    if (j >= n || channel >= p.channelCount) {
+        return;
+    }
+    const uint coefBase = channel * halfLength;
+
+    float sum = 0.0f;
+    for (uint k = 0; k < p.lowLength; ++k) {
+        int m = (int(j) - p.shift - int(k)) % int(n);
+        if (m < 0) { m += int(n); }
+        if ((m & 1) == 0) {
+            sum += recLow[k] * approx[coefBase + uint(m) / 2];
+        }
+    }
+    for (uint k = 0; k < p.highLength; ++k) {
+        int m = (int(j) + p.shift - int(k)) % int(n);
+        if (m < 0) { m += int(n); }
+        if ((m & 1) == 0) {
+            sum += recHigh[k] * detail[coefBase + uint(m) / 2];
+        }
+    }
+    output[channel * n + j] = sum;
+}
+
+struct WaveletISWTParameters {
+    uint sampleCount;
+    uint channelCount;
+    uint lowLength;
+    uint highLength;
+    uint dilation;
+    int shift;           // bank.reconstructionShift * dilation, as on the CPU
+};
+
+/// One undecimated synthesis step (`WaveletTransform.iswtStep`), in gather
+/// form: the CPU scatters `y[(i + k·dilation ± shift) % n] += 0.5·rec[k]·c[i]`,
+/// so each output gathers `c[(j − k·dilation ∓ shift) mod n]` per tap.
+kernel void waveletISWTLevel(
+    device const float *approx          [[buffer(0)]],
+    device const float *detail          [[buffer(1)]],
+    device float *output                [[buffer(2)]],
+    device const float *recLow          [[buffer(3)]],
+    device const float *recHigh         [[buffer(4)]],
+    constant WaveletISWTParameters &p   [[buffer(5)]],
+    uint2 gid                           [[thread_position_in_grid]]
+) {
+    const uint n = p.sampleCount;
+    const uint j = gid.x;
+    const uint channel = gid.y;
+    if (j >= n || channel >= p.channelCount) {
+        return;
+    }
+    const uint base = channel * n;
+
+    float sum = 0.0f;
+    for (uint k = 0; k < p.lowLength; ++k) {
+        int m = (int(j) - int(k * p.dilation) - p.shift) % int(n);
+        if (m < 0) { m += int(n); }
+        sum += 0.5f * recLow[k] * approx[base + uint(m)];
+    }
+    for (uint k = 0; k < p.highLength; ++k) {
+        int m = (int(j) - int(k * p.dilation) + p.shift) % int(n);
+        if (m < 0) { m += int(n); }
+        sum += 0.5f * recHigh[k] * detail[base + uint(m)];
+    }
+    output[base + j] = sum;
+}
+
+struct WaveletShrinkParameters {
+    uint bandLength;
+    uint channelCount;
+    uint windowCount;    // 1 = one global threshold per (channel, level)
+    float thresholdScale;
+    uint softThreshold;
+};
+
+/// Thresholds one detail band in place, keeping only the coefficients above
+/// the (optionally windowed, linearly interpolated) gate — the kept values
+/// are the artifact estimate that the inverse transform reconstructs.
+kernel void waveletShrinkDetail(
+    device float *detail                 [[buffer(0)]],
+    device const float *thresholds       [[buffer(1)]],   // channel * windowCount + window
+    device const uint *centers           [[buffer(2)]],
+    constant WaveletShrinkParameters &p  [[buffer(3)]],
+    uint2 gid                            [[thread_position_in_grid]]
+) {
+    const uint sample = gid.x;
+    const uint channel = gid.y;
+    if (sample >= p.bandLength || channel >= p.channelCount) {
+        return;
+    }
+    const float threshold = interpolatedThreshold(
+        thresholds + channel * p.windowCount, centers, p.windowCount, sample) * p.thresholdScale;
+    const uint index = channel * p.bandLength + sample;
+    detail[index] = shrink(detail[index], threshold, p.softThreshold);
+}
+
+/// Per-channel total and kept (artifact) energy for one band, computed
+/// BEFORE `waveletShrinkDetail` mutates it — one thread per channel doing a
+/// plain linear sweep, same pattern as `waveletLevelEnergy`. Feeds the
+/// reducer's per-level removed-energy metric without reading the band back.
+kernel void waveletReduceBandEnergy(
+    device const float *detail            [[buffer(0)]],
+    device const float *thresholds        [[buffer(1)]],
+    device const uint *centers            [[buffer(2)]],
+    device float *totalEnergy             [[buffer(3)]],   // one per channel
+    device float *keptEnergy              [[buffer(4)]],
+    constant WaveletShrinkParameters &p   [[buffer(5)]],
+    uint gid                              [[thread_position_in_grid]]
+) {
+    const uint channel = gid;
+    if (channel >= p.channelCount) {
+        return;
+    }
+    const uint base = channel * p.bandLength;
+    const uint tableBase = channel * p.windowCount;
+
+    float total = 0.0f;
+    float kept = 0.0f;
+    for (uint sample = 0; sample < p.bandLength; ++sample) {
+        const float value = detail[base + sample];
+        total += value * value;
+        const float threshold = interpolatedThreshold(
+            thresholds + tableBase, centers, p.windowCount, sample) * p.thresholdScale;
+        const float keptValue = shrink(value, threshold, p.softThreshold);
+        kept += keptValue * keptValue;
+    }
+    totalEnergy[channel] = total;
+    keptEnergy[channel] = kept;
+}
+
 /// One thread per (level, channel), summing that band's total and retained
 /// energy. Only `levelCount * channelCount` threads, but each is a plain
 /// linear sweep — cheap enough on-device to be worth not reading the bands

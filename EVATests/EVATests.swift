@@ -84,6 +84,72 @@ struct EVATests {
         #expect(cleaned.count == signal.count)
     }
 
+    @Test func reductionWithUniversalThresholdRetainsMostVariance() {
+        // HAPPE-like behavior: on oscillation + sparse large spikes, the
+        // universal-threshold defaults should remove the spikes while keeping
+        // the bulk of the ongoing signal (variance retained well above half).
+        var signal = (0..<4000).map { sin(Double($0) * 0.2) + 0.3 * sin(Double($0) * 0.05) }
+        for index in stride(from: 100, to: 4000, by: 500) { signal[index] += 25 }
+
+        let config = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: 250)
+        let (cleaned, _, _) = WaveletReducer.reduceChannel(signal, configuration: config, samplingRate: 250)
+
+        func variance(_ v: [Double]) -> Double {
+            let mean = v.reduce(0, +) / Double(v.count)
+            return v.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(v.count)
+        }
+        // Compare against the spike-free background, which is what should survive.
+        let background = (0..<4000).map { sin(Double($0) * 0.2) + 0.3 * sin(Double($0) * 0.05) }
+        let retained = variance(cleaned) / variance(background)
+        #expect(retained > 0.5 && retained < 1.5, "variance vs background \(retained)")
+
+        let cleanedPeak = cleaned.map(abs).max() ?? 0
+        #expect(cleanedPeak < 10, "spikes should be substantially reduced, peak \(cleanedPeak)")
+    }
+
+    @Test func detrendKeepsBaselineOffsetOutOfTheSeam() {
+        // A large DC + drift offset between start and end used to wrap through
+        // the circular transform boundary as a spurious edge artifact. With
+        // detrending + reflection padding, the removed artifact near the edges
+        // should stay comparable to the interior.
+        let count = 2000
+        let signal = (0..<count).map { 200.0 * Double($0) / Double(count) + sin(Double($0) * 0.3) }
+
+        var config = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: 250)
+        config.levelCount = 6
+        let (cleaned, _, _) = WaveletReducer.reduceChannel(signal, configuration: config, samplingRate: 250)
+
+        // The drift (trend) belongs to the artifact; what survives should be
+        // the oscillation, without a blow-up at either edge.
+        let interiorPeak = cleaned[200..<(count - 200)].map(abs).max() ?? 0
+        let edgePeak = max(cleaned[..<200].map(abs).max() ?? 0, cleaned[(count - 200)...].map(abs).max() ?? 0)
+        #expect(edgePeak < interiorPeak * 3 + 1e-9, "edge \(edgePeak) vs interior \(interiorPeak)")
+    }
+
+    @Test func windowedThresholdsMatchGlobalOnStationarySignals() {
+        // On a stationary signal the local (windowed) thresholds should agree
+        // closely with the global statistic, so both configurations remove
+        // nearly the same artifact.
+        var signal = (0..<6000).map { sin(Double($0) * 0.25) }
+        for index in stride(from: 300, to: 6000, by: 700) { signal[index] += 15 }
+
+        var globalConfig = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: 100)
+        globalConfig.levelCount = 5
+        var localConfig = globalConfig
+        localConfig.thresholdWindowSeconds = 30
+
+        let (globalCleaned, _, _) = WaveletReducer.reduceChannel(signal, configuration: globalConfig, samplingRate: 100)
+        let (localCleaned, _, _) = WaveletReducer.reduceChannel(signal, configuration: localConfig, samplingRate: 100)
+
+        let difference = zip(globalCleaned, localCleaned).map { abs($0 - $1) }.max() ?? 0
+        let peak = globalCleaned.map(abs).max() ?? 1
+        #expect(difference < peak, "global vs local divergence \(difference) (peak \(peak))")
+
+        let globalPeak = globalCleaned.map(abs).max() ?? 0
+        let localPeak = localCleaned.map(abs).max() ?? 0
+        #expect(globalPeak < 10 && localPeak < 10, "both should remove the spikes")
+    }
+
     @Test func mffReaderAppliesGCALCalibration() throws {
         let packageURL = try makeMFFPackage()
         defer { try? FileManager.default.removeItem(at: packageURL) }

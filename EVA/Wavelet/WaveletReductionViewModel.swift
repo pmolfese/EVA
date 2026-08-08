@@ -83,7 +83,10 @@ final class WaveletReductionViewModel {
             "thresholdRule": config.thresholdRule.rawValue,
             "thresholdModel": config.thresholdModel.rawValue,
             "thresholdScale": "\(config.thresholdScale)",
-            "downsampleFactor": "\(config.downsampleFactor)"
+            "downsampleFactor": "\(config.downsampleFactor)",
+            "detrend": "\(config.detrend)",
+            "thresholdWindowSeconds": "\(config.thresholdWindowSeconds)",
+            "useGPU": "\(config.useGPU)"
         ]
     }
 
@@ -98,6 +101,9 @@ final class WaveletReductionViewModel {
         if let v = p["thresholdModel"].flatMap(WaveletCleaningThresholdModel.init(rawValue:)) { config.thresholdModel = v }
         if let v = p["thresholdScale"].flatMap(Double.init) { config.thresholdScale = v }
         if let v = p["downsampleFactor"].flatMap(Int.init) { config.downsampleFactor = v }
+        if let v = p["detrend"].flatMap(Bool.init) { config.detrend = v }
+        if let v = p["thresholdWindowSeconds"].flatMap(Double.init) { config.thresholdWindowSeconds = v }
+        if let v = p["useGPU"].flatMap(Bool.init) { config.useGPU = v }
     }
 
     // MARK: - Apply (the transform itself)

@@ -37,15 +37,21 @@ nonisolated enum WaveletCleaningPipeline: String, CaseIterable, Identifiable, Se
         }
     }
 
+    /// Robust universal (MAD σ · sqrt(2 ln N)) — the behaviorally closest
+    /// stand-in for MATLAB wdenoise's empirical-Bayes 'Bayes' method. Not
+    /// BayesShrink: its T = σ_n²/σ_s collapses on artifact-inflated EEG
+    /// bands, flagging nearly everything as artifact (see WaveletReducer's
+    /// header note).
     var defaultThresholdModel: WaveletCleaningThresholdModel {
-        .bayesShrink
+        .robustUniversal
     }
 
+    /// 1.0 = the textbook threshold for the chosen model. The scale is a gate
+    /// multiplier: raising it flags/removes less, lowering it flags/removes
+    /// more. (The ERP path's gentleness comes from soft thresholding, not
+    /// from a lowered gate — an earlier 0.85 here removed *more*, not less.)
     var defaultThresholdScale: Double {
-        switch self {
-        case .eeg: return 1.0
-        case .erp: return 0.85
-        }
+        1.0
     }
 
     func defaultLevelCount(samplingRate: Double) -> Int {

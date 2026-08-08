@@ -22,17 +22,24 @@
 //  wavelet-thresholded artifact rejection (Gabard-Durnam et al., 2018).
 //
 //  HAPPE parity notes:
-//    * HAPPE's modern continuous path calls MATLAB `wdenoise` (decimated DWT,
-//      bior6.8, level-dependent BayesShrink, hard threshold — bior4.4 was the
-//      earlier default) and SUBTRACTS the denoised reconstruction as the
-//      artifact estimate. This engine mirrors that method: threshold the detail
+//    * HAPPE's default path calls MATLAB `wdenoise` (decimated DWT; bior4.4
+//      continuous / coif4 ERP; 'DenoisingMethod','Bayes' with level-dependent
+//      noise) and SUBTRACTS the denoised reconstruction as the artifact
+//      estimate. This engine mirrors that structure: threshold the detail
 //      coefficients, reconstruct, subtract.
-//    * Families here include both orthonormal (coif4 — HAPPE's ERP family;
-//      sym4/db4 for continuous) and true biorthogonal (bior4.4, bior6.8) —
-//      the latter give exact linear phase, matching HAPPE's actual filters.
-//      `WaveletReductionMode.defaultConfiguration` still defaults continuous
-//      mode to `sym4` for now; pick `bior6.8` explicitly for closest HAPPE
-//      parity.
+//    * MATLAB's 'Bayes' is the Johnstone–Silverman *empirical Bayes* method
+//      (sparse mixture prior), NOT BayesShrink. In this subtract-the-kept-
+//      coefficients paradigm the two adapt in opposite directions: empirical
+//      Bayes keeps only sparse outliers (artifacts) above ~several sigma,
+//      while BayesShrink's T = σ_n²/σ_s collapses on heavy-tailed,
+//      artifact-inflated EEG bands — classifying nearly everything as
+//      artifact and gutting the EEG. Until a true empirical-Bayes model
+//      lands, the robust universal threshold (MAD σ · sqrt(2 ln N)) is the
+//      behaviorally closest stand-in and is the default here.
+//    * Families include both orthonormal (coif4 — HAPPE's ERP family;
+//      sym4/db4 alternatives) and true biorthogonal (bior4.4 — HAPPE's
+//      continuous family — and bior6.8), the latter giving exact linear
+//      phase, matching HAPPE's actual filters.
 //
 
 import Foundation
@@ -102,9 +109,9 @@ nonisolated enum WaveletReductionFamily: String, CaseIterable, Identifiable, Cod
         case .db4:
             return "Daubechies-4 — compact support, classic choice for transient artifacts."
         case .bior44:
-            return "Biorthogonal 4.4 — HAPPE's earlier continuous-path family. True linear phase (exactly symmetric), unlike the orthonormal families above."
+            return "Biorthogonal 4.4 — HAPPE's continuous-path family (happe_wavThresh). True linear phase (exactly symmetric), unlike the orthonormal families above."
         case .bior68:
-            return "Biorthogonal 6.8 — HAPPE's current continuous-path default (MATLAB wdenoise). Longer support than bior4.4, also exactly linear phase."
+            return "Biorthogonal 6.8 — longer support than bior4.4, also exactly linear phase."
         }
     }
 }
@@ -121,9 +128,9 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
     var explanation: String {
         switch self {
         case .continuousEEG:
-            return "HAPPE's continuous path: hard thresholding, more aggressive. Operates on the whole recording. (HAPPE uses bior6.8 by default, bior4.4 previously — both available here; this mode defaults to sym4.)"
+            return "HAPPE's continuous path: bior4.4, hard thresholding, whole recording. Only coefficients above the robust per-level threshold are treated as artifact and subtracted."
         case .erp:
-            return "HAPPE's task/ERP path: coif4 with gentler soft thresholding and an extra level, and quality assessed within the ERP analysis band."
+            return "HAPPE's task/ERP path: coif4 with soft thresholding and an extra level, run at the full sampling rate, with quality assessed within the ERP analysis band."
         }
     }
 
@@ -136,20 +143,22 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
         case .continuousEEG:
             let levels = samplingRate > 500 ? 10 : (samplingRate > 250 ? 9 : 8)
             return WaveletReductionConfiguration(
-                kind: .dwt, family: .sym4, levelCount: levels,
-                thresholdRule: .hard, thresholdModel: .bayesShrink, thresholdScale: 1,
-                downsampleFactor: 1
+                kind: .dwt, family: .bior44, levelCount: levels,
+                thresholdRule: .hard, thresholdModel: .robustUniversal, thresholdScale: 1,
+                downsampleFactor: 1,
+                useGPU: WaveletMetalBackend.isAvailable
             )
         case .erp:
-            // ERP analysis bands are low, so the heavy wavelet pass can run on a
-            // decimated copy (~250 Hz) for a large speed-up at no analysis cost.
-            let factor = WaveletReductionConfiguration.factor(forSourceRate: samplingRate, targetRate: 250)
-            let effectiveRate = samplingRate / Double(factor)
-            let levels = effectiveRate > 500 ? 11 : (effectiveRate > 250 ? 10 : 9)
+            // Full rate, like HAPPE. (An earlier default decimated to ~250 Hz,
+            // but block-averaging down and linearly upsampling the artifact
+            // estimate distorts exactly the sharp transients being removed;
+            // the Downsample picker remains for users who opt in.)
+            let levels = samplingRate > 500 ? 11 : (samplingRate > 250 ? 10 : 9)
             return WaveletReductionConfiguration(
                 kind: .dwt, family: .coif4, levelCount: levels,
-                thresholdRule: .soft, thresholdModel: .bayesShrink, thresholdScale: 1,
-                downsampleFactor: factor
+                thresholdRule: .soft, thresholdModel: .robustUniversal, thresholdScale: 1,
+                downsampleFactor: 1,
+                useGPU: WaveletMetalBackend.isAvailable
             )
         }
     }
@@ -161,12 +170,34 @@ nonisolated struct WaveletReductionConfiguration: Sendable {
     var levelCount: Int = 8
     var thresholdRule: WaveletCleaningThresholdRule = .hard
     var thresholdModel: WaveletCleaningThresholdModel = .bayesShrink
-    /// Multiplies the computed coefficient threshold. >1 removes more, <1 less.
+    /// Multiplies the computed coefficient threshold — the gate a coefficient
+    /// must exceed to be classified as artifact and subtracted. >1 raises the
+    /// gate (fewer coefficients removed, gentler); <1 lowers it (more removed,
+    /// more aggressive).
     var thresholdScale: Double = 1
     /// Decimation factor for the wavelet pass. 1 = full rate. Larger factors run
     /// the (expensive) transform on a downsampled copy and upsample the removed
     /// artifact back to full rate before subtracting.
     var downsampleFactor: Int = 1
+    /// Remove each channel's linear trend before the transform, folding it into
+    /// the artifact estimate afterward. HAPPE's approximation band swallows
+    /// drift anyway, so this is parity-neutral — but doing it explicitly keeps
+    /// the transform's periodic boundary from reading a start↔end offset as a
+    /// large spurious seam artifact (same rationale as the Explorer's
+    /// `detrendedForTransform`).
+    var detrend: Bool = true
+    /// 0 = one global threshold per level over the whole recording (HAPPE
+    /// parity: wdenoise's level-dependent estimate is a single statistic per
+    /// level). > 0 re-estimates each level's threshold in overlapping windows
+    /// of this many seconds, so a quiet stretch and a noisy stretch each get
+    /// their own noise floor — the Explorer's proven local-threshold scheme.
+    var thresholdWindowSeconds: Double = 0
+    /// Run the decompose → threshold → reconstruct chain on the GPU
+    /// (`WaveletMetalBackend`), batching channels into shared dispatches. The
+    /// GPU computes in Float where the CPU uses Double, so results agree
+    /// closely but not bitwise. Falls back to the CPU automatically when Metal
+    /// is unavailable or an encode fails.
+    var useGPU: Bool = false
 
     /// Factor that brings `sourceRate` down to ~`targetRate` (1 if already lower).
     static func factor(forSourceRate sourceRate: Double, targetRate: Double) -> Int {
@@ -233,8 +264,11 @@ nonisolated enum WaveletReducer {
     }
 
     /// Reduces the requested channels and returns the cleaned signal, the removed
-    /// artifact, and per-channel + global quality metrics. Channels are processed
-    /// concurrently across up to `coreCount` workers.
+    /// artifact, and per-channel + global quality metrics. With `useGPU` on and
+    /// a Metal device available, the decompose → threshold → reconstruct chain
+    /// runs on-device in channel batches; otherwise channels are processed
+    /// concurrently across up to `coreCount` CPU workers. A GPU encode failure
+    /// falls back to the CPU path transparently.
     static func reduce(
         signal: MFFSignalData,
         channelIndices: [Int],
@@ -242,6 +276,16 @@ nonisolated enum WaveletReducer {
         coreCount: Int = defaultCoreCount,
         progress: (@Sendable (Double) -> Void)? = nil
     ) -> WaveletReductionResult {
+        if configuration.useGPU, let backend = WaveletMetalBackend.shared,
+           let result = reduceOnGPU(
+               signal: signal,
+               channelIndices: channelIndices,
+               configuration: configuration,
+               backend: backend,
+               progress: progress
+           ) {
+            return result
+        }
         let indices = channelIndices.filter { signal.data.indices.contains($0) }
         nonisolated(unsafe) var cleanedData = signal.data
         nonisolated(unsafe) var artifactData = signal.data.map { [Float](repeating: 0, count: $0.count) }
@@ -262,7 +306,8 @@ nonisolated enum WaveletReducer {
             originalVariance: Double, cleanedVariance: Double, correlation: Double
         ) {
             let original = signal.data[channelIndex].map(Double.init)
-            let (cleaned, artifact, levelEnergies) = reduceChannel(original, configuration: configuration)
+            let (cleaned, artifact, levelEnergies) = reduceChannel(
+                original, configuration: configuration, samplingRate: signal.samplingRate)
             let originalVariance = variance(original)
             let cleanedVariance = variance(cleaned)
             let corr = correlation(original, cleaned)
@@ -330,9 +375,13 @@ nonisolated enum WaveletReducer {
     /// energy fraction). `cleaned = original - artifact`. When the configuration
     /// requests downsampling, the transform runs on a decimated copy and the
     /// removed artifact is upsampled back to full rate before subtracting.
+    /// `samplingRate` enables the windowed-threshold option
+    /// (`thresholdWindowSeconds`); callers without a rate (short event windows)
+    /// can omit it and get the global per-level threshold.
     static func reduceChannel(
         _ samples: [Double],
-        configuration: WaveletReductionConfiguration
+        configuration: WaveletReductionConfiguration,
+        samplingRate: Double = 0
     ) -> (cleaned: [Double], artifact: [Double], removedEnergyByLevel: [Double]) {
         let count = samples.count
         guard count > 4 else {
@@ -342,7 +391,9 @@ nonisolated enum WaveletReducer {
         let factor = max(configuration.downsampleFactor, 1)
         if factor > 1, count > factor * 8 {
             let decimated = Downsampler.blockAveraged(samples, by: factor)
-            let core = coreReduceChannel(decimated, configuration: configuration)
+            let core = coreReduceChannel(
+                decimated, configuration: configuration,
+                samplingRate: samplingRate / Double(factor))
             let artifact = Downsampler.linearUpsample(core.artifact, toLength: count, factor: factor)
             var cleaned = [Double](repeating: 0, count: count)
             for index in 0..<count {
@@ -351,14 +402,15 @@ nonisolated enum WaveletReducer {
             return (cleaned, artifact, core.removedEnergyByLevel)
         }
 
-        return coreReduceChannel(samples, configuration: configuration)
+        return coreReduceChannel(samples, configuration: configuration, samplingRate: samplingRate)
     }
 
     /// The wavelet decompose → threshold → reconstruct-artifact → subtract core,
     /// run at the sampling rate of the provided samples.
     private static func coreReduceChannel(
         _ samples: [Double],
-        configuration: WaveletReductionConfiguration
+        configuration: WaveletReductionConfiguration,
+        samplingRate: Double
     ) -> (cleaned: [Double], artifact: [Double], removedEnergyByLevel: [Double]) {
         let count = samples.count
         guard count > 4 else {
@@ -371,27 +423,62 @@ nonisolated enum WaveletReducer {
             return (samples, [Double](repeating: 0, count: count), [])
         }
 
+        // Detrend first (see `WaveletReductionConfiguration.detrend`): the
+        // trend is added back into the artifact estimate below, so the cleaned
+        // output is identical to what a drift-swallowing approximation band
+        // would have produced — minus the boundary seam.
+        var work = samples
+        var slope = 0.0
+        var intercept = 0.0
+        if configuration.detrend {
+            (slope, intercept) = linearTrend(samples)
+            if slope != 0 || intercept != 0 {
+                for index in 0..<count {
+                    work[index] -= intercept + slope * Double(index)
+                }
+            }
+        }
+
+        // Reflect-pad both ends by the deepest level's tap reach so the
+        // transform's periodic wrap splices mirrored (continuous) data instead
+        // of the raw start↔end seam. The artifact is cropped back to the
+        // original span after reconstruction.
+        let margin = min((bank.length - 1) * (1 << levels), max(count - 1, 0))
+        let padded = margin > 0 ? reflectPadded(work, margin: margin) : work
+
         let transform = WaveletTransform(bank: bank)
         let decomposition: WaveletDecomposition
         switch configuration.kind {
-        case .dwt: decomposition = transform.forwardDWT(samples, levels: levels)
-        case .swt: decomposition = transform.forwardSWT(samples, levels: levels)
+        case .dwt: decomposition = transform.forwardDWT(padded, levels: levels)
+        case .swt: decomposition = transform.forwardSWT(padded, levels: levels)
         }
 
         var artifactDetails = decomposition.details
         var removedEnergyByLevel = [Double](repeating: 0, count: decomposition.details.count)
+        let scale = max(configuration.thresholdScale, 0.01)
         for level in decomposition.details.indices {
             let detail = decomposition.details[level]
-            let threshold = coefficientThreshold(
+            // Detail bands are decimated per level under the DWT, so a
+            // wall-clock threshold window covers fewer coefficients there.
+            let bandRate = configuration.kind == .dwt
+                ? samplingRate / Double(1 << (level + 1))
+                : samplingRate
+            let localThresholds = windowedCoefficientThresholds(
                 for: detail,
-                model: configuration.thresholdModel
-            ) * max(configuration.thresholdScale, 0.01)
+                model: configuration.thresholdModel,
+                windowSeconds: configuration.thresholdWindowSeconds,
+                bandRate: bandRate
+            )
+            let globalThreshold = localThresholds == nil
+                ? coefficientThreshold(for: detail, model: configuration.thresholdModel)
+                : 0
             var kept = [Double](repeating: 0, count: detail.count)
             var totalEnergy = 0.0
             var keptEnergy = 0.0
             for index in detail.indices {
                 let value = detail[index]
                 totalEnergy += value * value
+                let threshold = (localThresholds?[index] ?? globalThreshold) * scale
                 let thresholded = applyThreshold(value, threshold: threshold, rule: configuration.thresholdRule)
                 kept[index] = thresholded
                 keptEnergy += thresholded * thresholded
@@ -408,17 +495,345 @@ nonisolated enum WaveletReducer {
             details: artifactDetails,
             originalLength: decomposition.originalLength
         )
-        let artifact: [Double]
+        let reconstructed: [Double]
         switch configuration.kind {
-        case .dwt: artifact = transform.inverseDWT(artifactDecomposition)
-        case .swt: artifact = transform.inverseSWT(artifactDecomposition)
+        case .dwt: reconstructed = transform.inverseDWT(artifactDecomposition)
+        case .swt: reconstructed = transform.inverseSWT(artifactDecomposition)
         }
 
+        var artifact = [Double](repeating: 0, count: count)
+        for index in 0..<count {
+            let paddedIndex = index + margin
+            artifact[index] = paddedIndex < reconstructed.count ? reconstructed[paddedIndex] : 0
+            if configuration.detrend {
+                artifact[index] += intercept + slope * Double(index)
+            }
+        }
         var cleaned = [Double](repeating: 0, count: count)
         for index in 0..<count {
-            cleaned[index] = samples[index] - (index < artifact.count ? artifact[index] : 0)
+            cleaned[index] = samples[index] - artifact[index]
         }
-        return (cleaned, Array(artifact.prefix(count)), removedEnergyByLevel)
+        return (cleaned, artifact, removedEnergyByLevel)
+    }
+
+    /// Least-squares (slope, intercept) of a channel, mirroring the Explorer's
+    /// `removeLinearTrend` but returning the fit so the trend can be folded
+    /// into the artifact estimate.
+    private static func linearTrend(_ samples: [Double]) -> (slope: Double, intercept: Double) {
+        let n = samples.count
+        guard n > 2 else { return (0, 0) }
+        let xMean = Double(n - 1) / 2
+        let yMean = samples.reduce(0, +) / Double(n)
+        var numerator = 0.0
+        var denominator = 0.0
+        for index in samples.indices {
+            let dx = Double(index) - xMean
+            numerator += dx * (samples[index] - yMean)
+            denominator += dx * dx
+        }
+        guard denominator > 1e-9 else { return (0, 0) }
+        let slope = numerator / denominator
+        return (slope, yMean - slope * xMean)
+    }
+
+    /// Mirrors `samples` outward by `margin` on both ends (edge sample not
+    /// repeated), so filter taps near a boundary see locally continuous data
+    /// instead of the circular start↔end splice. `margin` must be < count.
+    private static func reflectPadded(_ samples: [Double], margin: Int) -> [Double] {
+        let n = samples.count
+        var out = [Double]()
+        out.reserveCapacity(n + 2 * margin)
+        for index in stride(from: margin, through: 1, by: -1) {
+            out.append(samples[min(index, n - 1)])
+        }
+        out.append(contentsOf: samples)
+        for index in 0..<margin {
+            out.append(samples[max(n - 2 - index, 0)])
+        }
+        return out
+    }
+
+    /// Per-coefficient thresholds re-estimated in overlapping (50%-stride)
+    /// wall-clock windows and linearly interpolated between window centers —
+    /// the Explorer's local-threshold scheme, on this engine's Double bands.
+    /// Returns nil when windowing is off, the band rate is unknown, or the
+    /// band is too short for more than one window (global threshold applies).
+    private static func windowedCoefficientThresholds(
+        for detail: [Double],
+        model: WaveletCleaningThresholdModel,
+        windowSeconds: Double,
+        bandRate: Double
+    ) -> [Double]? {
+        guard windowSeconds > 0, bandRate > 0 else { return nil }
+        let windowSamples = max(Int((windowSeconds * bandRate).rounded()), 64)
+        let n = detail.count
+        guard n > windowSamples else { return nil }
+
+        let stride = max(windowSamples / 2, 1)
+        var centers: [Int] = []
+        var centerValues: [Double] = []
+        var start = 0
+        while start < n {
+            let end = min(start + windowSamples, n)
+            centers.append((start + end - 1) / 2)
+            centerValues.append(coefficientThreshold(for: Array(detail[start..<end]), model: model))
+            if end == n { break }
+            start += stride
+        }
+        guard centerValues.count > 1 else { return nil }
+
+        var curve = [Double](repeating: centerValues[0], count: n)
+        var upper = 1
+        for index in 0..<n {
+            if index <= centers[0] { continue }
+            if index >= centers[centers.count - 1] { curve[index] = centerValues[centerValues.count - 1]; continue }
+            while centers[upper] < index { upper += 1 }
+            let lower = upper - 1
+            let span = Double(centers[upper] - centers[lower])
+            let weight = span > 0 ? Double(index - centers[lower]) / span : 0
+            curve[index] = centerValues[lower] * (1 - weight) + centerValues[upper] * weight
+        }
+        return curve
+    }
+
+    // MARK: - GPU path
+
+    /// GPU form of the per-channel pipeline: identical prep (decimate, detrend,
+    /// reflect-pad) and post (crop, re-trend, upsample, metrics) on the host,
+    /// with the transform, thresholding, and reconstruction batched on-device
+    /// via `WaveletMetalBackend`. Only the robust threshold statistics stay on
+    /// the CPU (they need medians), computed from strided subsamples of the
+    /// resident bands — the same split as the Explorer's Metal path. Returns
+    /// nil on any encode failure so `reduce` falls back to the CPU.
+    private static func reduceOnGPU(
+        signal: MFFSignalData,
+        channelIndices: [Int],
+        configuration: WaveletReductionConfiguration,
+        backend: WaveletMetalBackend,
+        progress: (@Sendable (Double) -> Void)?
+    ) -> WaveletReductionResult? {
+        let indices = channelIndices.filter { signal.data.indices.contains($0) }
+        var cleanedData = signal.data
+        var artifactData = signal.data.map { [Float](repeating: 0, count: $0.count) }
+        var perChannel: [Int: WaveletChannelReductionMetrics] = [:]
+        var globalOriginalVariance = 0.0
+        var globalCleanedVariance = 0.0
+        var correlationSum = 0.0
+        var correlationCount = 0
+
+        func assembled() -> WaveletReductionResult {
+            WaveletReductionResult(
+                cleaned: signal.replacingData(cleanedData, signalTypeSuffix: "Wavelet Reduced"),
+                artifact: signal.replacingData(artifactData, signalTypeSuffix: "Wavelet Artifact"),
+                perChannel: perChannel,
+                varianceRetainedPercent: globalOriginalVariance > 1e-12
+                    ? globalCleanedVariance / globalOriginalVariance * 100
+                    : 100,
+                meanCorrelation: correlationCount > 0 ? correlationSum / Double(correlationCount) : 1
+            )
+        }
+
+        guard let firstIndex = indices.first else { return assembled() }
+        let sampleCount = signal.data[firstIndex].count
+        // Batching shares one geometry, so ragged channels go to the CPU path.
+        guard sampleCount > 4, indices.allSatisfy({ signal.data[$0].count == sampleCount }) else { return nil }
+
+        let factor = max(configuration.downsampleFactor, 1)
+        let decimates = factor > 1 && sampleCount > factor * 8
+        let workCount = decimates ? (sampleCount + factor - 1) / factor : sampleCount
+        let effectiveRate = signal.samplingRate / Double(decimates ? factor : 1)
+
+        let bank = configuration.family.filterBank
+        let levels = boundedLevelCount(configuration.levelCount, sampleCount: workCount)
+        guard levels >= 1 else { return nil }
+
+        let margin = min((bank.length - 1) * (1 << levels), max(workCount - 1, 0))
+        var paddedLength = workCount + 2 * margin
+        if configuration.kind == .dwt {
+            let multiple = 1 << levels
+            paddedLength = (paddedLength + multiple - 1) / multiple * multiple
+        }
+
+        let decompositionLow = bank.decompositionLowPass.map(Float.init)
+        let decompositionHigh = bank.decompositionHighPass.map(Float.init)
+        let reconstructionLow = bank.reconstructionLowPass.map(Float.init)
+        let reconstructionHigh = bank.reconstructionHighPass.map(Float.init)
+
+        let batchSize = min(
+            backend.maximumReductionBatchChannels(
+                paddedLength: paddedLength, levelCount: levels, kind: configuration.kind),
+            max(indices.count, 1)
+        )
+        let batchCount = (indices.count + batchSize - 1) / batchSize
+
+        for batchIndex in 0..<batchCount {
+            guard !Task.isCancelled else { break }
+            let batch = Array(indices[(batchIndex * batchSize)..<min((batchIndex + 1) * batchSize, indices.count)])
+            let batchBase = Double(batchIndex) / Double(batchCount)
+            let batchSpan = 1.0 / Double(batchCount)
+
+            // Host prep: decimate, detrend, reflect-pad — Double math, exactly
+            // as `coreReduceChannel`, converted to Float only for upload.
+            var trends = [(slope: Double, intercept: Double)](repeating: (0, 0), count: batch.count)
+            var paddedChannels = [[Float]](repeating: [], count: batch.count)
+            for (slot, channelIndex) in batch.enumerated() {
+                let original = signal.data[channelIndex].map(Double.init)
+                var work = decimates ? Downsampler.blockAveraged(original, by: factor) : original
+                if configuration.detrend {
+                    let trend = linearTrend(work)
+                    trends[slot] = trend
+                    if trend.slope != 0 || trend.intercept != 0 {
+                        for index in 0..<work.count {
+                            work[index] -= trend.intercept + trend.slope * Double(index)
+                        }
+                    }
+                }
+                var padded = margin > 0 ? reflectPadded(work, margin: margin) : work
+                let baseLength = padded.count
+                while padded.count < paddedLength {
+                    // Same tail extension as `WaveletTransform.padToMultiple`:
+                    // reflect off the end of the pre-extension array.
+                    let offset = padded.count - baseLength
+                    let mirrorIndex = baseLength - 2 - offset
+                    padded.append(mirrorIndex >= 0 ? padded[mirrorIndex] : (padded.last ?? 0))
+                }
+                paddedChannels[slot] = padded.map(Float.init)
+            }
+            progress?(batchBase + batchSpan * 0.15)
+
+            guard let bands = backend.reductionForward(
+                channels: paddedChannels,
+                kind: configuration.kind,
+                levelCount: levels,
+                decompositionLowPass: decompositionLow,
+                decompositionHighPass: decompositionHigh
+            ) else { return nil }
+            progress?(batchBase + batchSpan * 0.45)
+
+            // Robust thresholds from strided subsamples of the resident bands.
+            var thresholdValues: [[Float]] = []
+            var thresholdCenters: [[UInt32]] = []
+            for level in 0..<levels {
+                let bandLength = bands.bandLengths[level]
+                let bandRate = configuration.kind == .dwt
+                    ? effectiveRate / Double(1 << (level + 1))
+                    : effectiveRate
+                let windowSamples = configuration.thresholdWindowSeconds > 0 && bandRate > 0
+                    ? max(Int((configuration.thresholdWindowSeconds * bandRate).rounded()), 64)
+                    : Int.max
+                if windowSamples < bandLength {
+                    // Same window layout as `windowedCoefficientThresholds`.
+                    let stride = max(windowSamples / 2, 1)
+                    var starts: [Int] = []
+                    var centers: [UInt32] = []
+                    var start = 0
+                    while start < bandLength {
+                        let end = min(start + windowSamples, bandLength)
+                        starts.append(start)
+                        centers.append(UInt32((start + end - 1) / 2))
+                        if end == bandLength { break }
+                        start += stride
+                    }
+                    var values = [Float](repeating: 0, count: batch.count * centers.count)
+                    for slot in 0..<batch.count {
+                        for windowIndex in starts.indices {
+                            let windowStart = starts[windowIndex]
+                            let windowEnd = min(windowStart + windowSamples, bandLength)
+                            let sampleStride = max((windowEnd - windowStart) / 4096, 1)
+                            let subsample = bands.detailSubsample(
+                                level: level, channel: slot,
+                                from: windowStart, to: windowEnd, stride: sampleStride
+                            ).map(Double.init)
+                            values[slot * centers.count + windowIndex] = Float(coefficientThreshold(
+                                for: subsample,
+                                model: configuration.thresholdModel,
+                                populationCount: windowEnd - windowStart
+                            ))
+                        }
+                    }
+                    thresholdValues.append(values)
+                    thresholdCenters.append(centers)
+                } else {
+                    let sampleStride = max(bandLength / 16384, 1)
+                    var values = [Float](repeating: 0, count: batch.count)
+                    for slot in 0..<batch.count {
+                        let subsample = bands.detailSubsample(
+                            level: level, channel: slot,
+                            from: 0, to: bandLength, stride: sampleStride
+                        ).map(Double.init)
+                        values[slot] = Float(coefficientThreshold(
+                            for: subsample,
+                            model: configuration.thresholdModel,
+                            populationCount: bandLength
+                        ))
+                    }
+                    thresholdValues.append(values)
+                    thresholdCenters.append([0])
+                }
+            }
+            progress?(batchBase + batchSpan * 0.6)
+
+            guard let finish = backend.reductionFinish(
+                bands,
+                thresholds: WaveletMetalBackend.ReductionThresholds(
+                    values: thresholdValues, centers: thresholdCenters),
+                thresholdScale: Float(max(configuration.thresholdScale, 0.01)),
+                usesSoftThreshold: configuration.thresholdRule == .soft,
+                reconstructionLowPass: reconstructionLow,
+                reconstructionHighPass: reconstructionHigh,
+                reconstructionShift: bank.reconstructionShift
+            ) else { return nil }
+            progress?(batchBase + batchSpan * 0.85)
+
+            // Host post: crop the margin, restore the trend into the artifact,
+            // upsample if decimated, subtract, and score.
+            for (slot, channelIndex) in batch.enumerated() {
+                let padded = finish.artifact[slot]
+                var artifactWork = [Double](repeating: 0, count: workCount)
+                let trend = trends[slot]
+                for index in 0..<workCount {
+                    let paddedIndex = index + margin
+                    artifactWork[index] = paddedIndex < padded.count ? Double(padded[paddedIndex]) : 0
+                    if configuration.detrend {
+                        artifactWork[index] += trend.intercept + trend.slope * Double(index)
+                    }
+                }
+                let artifact = decimates
+                    ? Downsampler.linearUpsample(artifactWork, toLength: sampleCount, factor: factor)
+                    : artifactWork
+
+                let original = signal.data[channelIndex].map(Double.init)
+                var cleaned = [Double](repeating: 0, count: sampleCount)
+                for index in 0..<sampleCount {
+                    cleaned[index] = original[index] - artifact[index]
+                }
+
+                let originalVariance = variance(original)
+                let cleanedVariance = variance(cleaned)
+                let corr = correlation(original, cleaned)
+                let energies = (0..<levels).map { level -> Double in
+                    let total = finish.totalEnergyByLevel[slot][level]
+                    return total > 1e-12 ? finish.keptEnergyByLevel[slot][level] / total : 0
+                }
+                perChannel[channelIndex] = WaveletChannelReductionMetrics(
+                    channelIndex: channelIndex,
+                    varianceRetainedPercent: originalVariance > 1e-12 ? cleanedVariance / originalVariance * 100 : 100,
+                    correlation: corr,
+                    removedRMSMicrovolts: rms(artifact),
+                    peakReductionPercent: peakReductionPercent(original: original, cleaned: cleaned),
+                    removedEnergyByLevel: energies
+                )
+                cleanedData[channelIndex] = cleaned.map(Float.init)
+                artifactData[channelIndex] = artifact.map(Float.init)
+                globalOriginalVariance += originalVariance
+                globalCleanedVariance += cleanedVariance
+                correlationSum += corr
+                correlationCount += 1
+            }
+            progress?(batchBase + batchSpan)
+        }
+
+        return assembled()
     }
 
     /// Finds the windows where the most artifact energy was removed, ranked, so
@@ -498,14 +913,19 @@ nonisolated enum WaveletReducer {
         }
     }
 
+    /// `populationCount` is the full band/window size the statistic stands in
+    /// for — the `N` in the universal threshold's `sqrt(2 ln N)`. The GPU path
+    /// passes it because it estimates from a strided subsample of the resident
+    /// band; without it a subsample would get a systematically lower gate.
     private static func coefficientThreshold(
         for values: [Double],
-        model: WaveletCleaningThresholdModel
+        model: WaveletCleaningThresholdModel,
+        populationCount: Int? = nil
     ) -> Double {
         guard values.count > 2 else { return 0 }
         let sigma = robustSigma(values)
         let universal = sigma > 1e-12
-            ? sigma * sqrt(2 * log(Double(max(values.count, 2))))
+            ? sigma * sqrt(2 * log(Double(max(populationCount ?? values.count, 2))))
             : 0
 
         guard model == .bayesShrink, sigma > 1e-12 else { return universal }

@@ -177,4 +177,100 @@ struct WaveletMetalBackendTests {
         let scoreDelta = abs(cpuTop.score - gpuTop.score) / max(cpuTop.score, 1e-9)
         #expect(scoreDelta < 0.05, "top score differs by \(scoreDelta * 100)%: CPU \(cpuTop.score) vs GPU \(gpuTop.score)")
     }
+
+    // MARK: - Reducer GPU path
+
+    /// Multi-channel signal for the reducer: oscillation + drift + sparse
+    /// large spikes, so the cleaned output, artifact, and metrics all have
+    /// non-trivial content to compare across backends.
+    private func reducerSignal(samplingRate: Double = 250, count: Int = 12_000, channels channelCount: Int = 6) -> MFFSignalData {
+        let channels = (0..<channelCount).map { c -> [Float] in
+            var channel = noisyChannel(seed: UInt64(c + 31), count: count)
+            for index in channel.indices {
+                channel[index] += Float(6 * sin(Double(index) * 0.15 + Double(c)))
+                channel[index] += Float(30.0 * Double(index) / Double(count))   // drift
+            }
+            for spike in stride(from: 700 + c * 137, to: count, by: 1900) {
+                channel[spike] += 60
+            }
+            return channel
+        }
+        return SyntheticSignal.make(channels, samplingRate: samplingRate)
+    }
+
+    /// The "Use GPU" box must not change what the reducer removes: same
+    /// pipeline, float-vs-double arithmetic and subsampled thresholds being
+    /// the only divergences. Checked for both transform kinds, a biorthogonal
+    /// family (exercising the reconstruction shift), and windowed thresholds.
+    @Test(arguments: [
+        (WaveletTransformKind.dwt, WaveletReductionFamily.bior44, 0.0),
+        (WaveletTransformKind.dwt, WaveletReductionFamily.coif4, 30.0),
+        (WaveletTransformKind.swt, WaveletReductionFamily.bior44, 0.0)
+    ])
+    func gpuReductionMatchesCPU(kind: WaveletTransformKind, family: WaveletReductionFamily, windowSeconds: Double) throws {
+        let backend = try #require(
+            WaveletMetalBackend.shared,
+            "no Metal device available on this machine"
+        )
+        _ = backend
+
+        let signal = reducerSignal()
+        var config = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: signal.samplingRate)
+        config.kind = kind
+        config.family = family
+        config.levelCount = kind == .swt ? 6 : 8   // keep the SWT case quick
+        config.thresholdWindowSeconds = windowSeconds
+
+        var cpuConfig = config
+        cpuConfig.useGPU = false
+        var gpuConfig = config
+        gpuConfig.useGPU = true
+
+        let indices = Array(signal.data.indices)
+        let cpu = WaveletReducer.reduce(signal: signal, channelIndices: indices, configuration: cpuConfig)
+        let gpu = WaveletReducer.reduce(signal: signal, channelIndices: indices, configuration: gpuConfig)
+
+        for channel in indices {
+            let cpuCleaned = cpu.cleaned.data[channel]
+            let gpuCleaned = gpu.cleaned.data[channel]
+            #expect(cpuCleaned.count == gpuCleaned.count)
+
+            let scale = max(cpuCleaned.map { abs(Double($0)) }.max() ?? 0, 1e-6)
+            var worst = 0.0
+            for index in cpuCleaned.indices {
+                worst = max(worst, abs(Double(gpuCleaned[index]) - Double(cpuCleaned[index])) / scale)
+            }
+            // Thresholds come from a subsample on the GPU path, so individual
+            // coefficients can flip sides of the gate — tolerate a small
+            // relative divergence, not bitwise equality.
+            #expect(worst < 0.08, "\(kind.rawValue)/\(family.rawValue)/w\(windowSeconds) ch \(channel): worst relative deviation \(worst)")
+        }
+
+        // Aggregate quality metrics must tell the user the same story.
+        #expect(abs(cpu.varianceRetainedPercent - gpu.varianceRetainedPercent) < 2.0,
+                "variance retained: CPU \(cpu.varianceRetainedPercent) vs GPU \(gpu.varianceRetainedPercent)")
+        #expect(abs(cpu.meanCorrelation - gpu.meanCorrelation) < 0.02,
+                "correlation: CPU \(cpu.meanCorrelation) vs GPU \(gpu.meanCorrelation)")
+    }
+
+    /// The GPU path must chunk correctly when a batch can't hold every
+    /// channel: force tiny batches via a signal long enough to matter and
+    /// verify per-channel metrics exist for all channels.
+    @Test func gpuReductionCoversAllChannelsAcrossBatches() throws {
+        _ = try #require(
+            WaveletMetalBackend.shared,
+            "no Metal device available on this machine"
+        )
+        let signal = reducerSignal(count: 8_000, channels: 12)
+        var config = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: signal.samplingRate)
+        config.useGPU = true
+
+        let indices = Array(signal.data.indices)
+        let result = WaveletReducer.reduce(signal: signal, channelIndices: indices, configuration: config)
+        #expect(result.perChannel.count == indices.count)
+        for channel in indices {
+            #expect(result.perChannel[channel] != nil, "missing metrics for channel \(channel)")
+            #expect(result.artifact.data[channel].contains { $0 != 0 }, "no artifact removed on channel \(channel)")
+        }
+    }
 }

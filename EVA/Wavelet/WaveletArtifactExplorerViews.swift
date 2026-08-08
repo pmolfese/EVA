@@ -165,7 +165,7 @@ extension WaveformView {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "Wavelet",
-                            help: "The mother wavelet. coif4 is HAPPE's ERP family. sym4/db4 are orthonormal and near-symmetric — solid general-purpose defaults, but no orthogonal wavelet beyond Haar can be exactly symmetric. bior4.4/bior6.8 are HAPPE's true continuous-path families (bior6.8 is HAPPE's current default, bior4.4 the earlier one) — exactly linear-phase, so thresholding and subtracting the artifact estimate doesn't introduce a small time shift, which matters most right at artifact onsets and for timing-sensitive ERP work."
+                            help: "The mother wavelet. bior4.4 is HAPPE's continuous-path family and the Continuous EEG default; coif4 is HAPPE's ERP family. sym4/db4 are orthonormal and near-symmetric — solid general-purpose alternatives, but no orthogonal wavelet beyond Haar can be exactly symmetric. The biorthogonal families (bior4.4, bior6.8) are exactly linear-phase, so thresholding and subtracting the artifact estimate doesn't introduce a small time shift, which matters most right at artifact onsets and for timing-sensitive ERP work."
                         )
                         Picker("", selection: $wavelet.config.family) {
                             ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
@@ -185,7 +185,7 @@ extension WaveformView {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "Threshold model",
-                            help: "Universal (VisuShrink) uses one threshold per level — sigma × sqrt(2·ln N) from a robust noise estimate — simple and aggressive. BayesShrink (HAPPE's default) adapts each level's threshold to that level's estimated signal-to-noise ratio, so noisy, artifact-heavy levels get thresholded harder while cleaner levels are mostly left alone."
+                            help: "How each level's artifact gate is chosen. Universal — sigma × sqrt(2·ln N) from a robust (MAD) noise estimate — keeps only genuine outlier coefficients as artifact, the closest stand-in for the empirical-Bayes method MATLAB's wdenoise uses in HAPPE, and the recommended default. BayesShrink adapts to each level's estimated signal-to-noise ratio, but on artifact-heavy EEG its threshold collapses toward zero, classifying nearly the whole signal as artifact and flattening the output — avoid unless you know why you want it."
                         )
                         Picker("", selection: $wavelet.config.thresholdModel) {
                             ForEach(WaveletCleaningThresholdModel.allCases) { Text($0.rawValue).tag($0) }
@@ -203,15 +203,34 @@ extension WaveformView {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "Strength",
-                            help: "Multiplies the computed threshold. 1.0 is the textbook rule for the chosen model. Lower it to keep more signal on a dataset with subtle artifacts you want to review carefully; raise it on a dataset with strong, obvious artifacts you want cut aggressively."
+                            help: "Multiplies the computed threshold — the gate a coefficient must exceed to count as artifact and be subtracted. 1.0 is the textbook rule for the chosen model. Raise it to protect more signal (fewer coefficients cleared the gate, gentler cleaning); lower it to cut more aggressively on a dataset with strong, obvious artifacts."
                         )
                         TextField("x", value: $wavelet.config.thresholdScale, format: .number.precision(.fractionLength(2)))
                             .frame(width: 80)
                     }
                     GridRow {
                         ArtifactTemplateFieldLabel(
+                            title: "Threshold scope",
+                            help: "Global estimates one threshold per level from the whole recording — exactly what HAPPE's wdenoise does. Local (30 s) re-estimates each level's threshold in overlapping 30-second windows, so a quiet stretch and a noisy stretch each get their own noise floor — the same scheme the Wavelet Artifact Explorer uses. Local is an EVA improvement over HAPPE, useful for recordings whose noise level changes over time; use Global for strict HAPPE parity."
+                        )
+                        Picker("", selection: $wavelet.config.thresholdWindowSeconds) {
+                            Text("Global (HAPPE)").tag(0.0)
+                            Text("Local (30 s)").tag(30.0)
+                        }
+                        .labelsHidden().frame(width: 150)
+                    }
+                    GridRow {
+                        ArtifactTemplateFieldLabel(
+                            title: "Detrend",
+                            help: "Removes each channel's linear drift before the wavelet pass and folds it into the removed artifact. HAPPE's deepest approximation band swallows drift anyway, so this doesn't change what's kept — but it stops the transform's circular boundary from reading a start-to-end voltage offset as a large spurious artifact at the recording's edges. Leave on unless you're debugging."
+                        )
+                        Toggle("", isOn: $wavelet.config.detrend)
+                            .labelsHidden()
+                    }
+                    GridRow {
+                        ArtifactTemplateFieldLabel(
                             title: "Downsample",
-                            help: "Runs the wavelet pass on a decimated copy, then upsamples the removed-artifact estimate back to full rate before subtracting. Task / ERP defaults to ~250 Hz since ERP analysis bands are low there. Leave Continuous EEG at Full unless the recording is very high-rate and reduction is too slow."
+                            help: "Runs the wavelet pass on a decimated copy, then upsamples the removed-artifact estimate back to full rate before subtracting. Both modes default to Full rate, matching HAPPE — decimating distorts exactly the sharp transients being removed. Opt in only if the recording is very high-rate and reduction is too slow."
                         )
                         Picker("", selection: $wavelet.config.downsampleFactor) {
                             ForEach(downsampleFactorOptions(for: input.samplingRate), id: \.self) { factor in
@@ -222,11 +241,21 @@ extension WaveformView {
                     }
                     GridRow {
                         ArtifactTemplateFieldLabel(
+                            title: "Use GPU",
+                            help: "Runs the decompose–threshold–reconstruct chain on the Mac's GPU, processing whole batches of channels in shared dispatches — typically much faster than the CPU on high-density recordings. The GPU computes in 32-bit floats where the CPU uses 64-bit, so results agree closely but not to the last bit. Falls back to the CPU automatically if the GPU can't run. Unavailable when no Metal device is present."
+                        )
+                        Toggle("", isOn: $wavelet.config.useGPU)
+                            .labelsHidden()
+                            .disabled(!WaveletMetalBackend.isAvailable)
+                    }
+                    GridRow {
+                        ArtifactTemplateFieldLabel(
                             title: "CPU cores",
-                            help: "How many channels are wavelet-reduced in parallel. Turn this down if the reduction is competing with other work on the Mac; raise it (up to the maximum) to finish faster on a dataset with many channels."
+                            help: "How many channels are wavelet-reduced in parallel when running on the CPU (ignored while Use GPU is on). Turn this down if the reduction is competing with other work on the Mac; raise it (up to the maximum) to finish faster on a dataset with many channels."
                         )
                         Stepper("\(wavelet.coreCount) of \(WaveletReducer.maximumCoreCount)", value: $wavelet.coreCount, in: 1...WaveletReducer.maximumCoreCount)
                             .frame(width: 140)
+                            .disabled(wavelet.config.useGPU && WaveletMetalBackend.isAvailable)
                     }
                 }
                 .font(.callout)
