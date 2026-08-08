@@ -417,7 +417,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EVA/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.medical";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105; GPL-3.0.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -464,7 +464,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EVA/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.medical";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105; GPL-3.0.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

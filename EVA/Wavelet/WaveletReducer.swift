@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Wavelet-based artifact REDUCTION engine (distinct from the wavelet channel-
 //  health "burden" scorer, which uses a fast a-trous approximation). This engine
 //  implements real, perfect-reconstruction wavelet transforms — a decimated DWT

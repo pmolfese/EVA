@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Interactive scalp map for defining channel sets. Tap any electrode to
 //  toggle its membership. Selected channels render as filled blue circles
 //  with their number visible; deselected channels render as open,

@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Coverage for the headless apply-core (TODO.md Priority 1 / REFACTOR.md item
 //  E): applying a script's auto steps with no view must produce the same
 //  output as the interactive VM path, and must stop (not skip) at the first

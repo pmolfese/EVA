@@ -9,9 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  GPU form of the undecimated (stationary) wavelet transform's per-level step,
 //  used by the Wavelet Artifact Explorer's scan. One thread produces one
 //  output sample for one channel, so a whole net's worth of channels is a

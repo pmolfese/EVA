@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Parses plain-text physio exports for File → Import Physio: GE scanner logs
 //  (one sample per line, no header, no timebase) and delimited multi-column
 //  exports (e.g. Biopac text export, optionally with a header row and/or a

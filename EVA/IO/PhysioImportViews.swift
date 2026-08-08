@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  File → Import Physio: drag/drop (or choose) plain-text physio exports that
 //  didn't come from an MFF (GE scanner PPG/RESP logs, Biopac text exports),
 //  ask for the sampling rate and start/end trim per channel, preview the

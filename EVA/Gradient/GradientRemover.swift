@@ -9,11 +9,6 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Released under the terms of the GNU General Public License, version 3 (GPL-3.0).
-//  The U.S. Government authorizes the distribution and modification of this software
-//  subject to the copyleft requirements of the GPL-3.0.
-//  SPDX-License-Identifier: GPL-3.0-only
-//
 //  Swift translation of nimh-sfim/gradient_remover (GradientRemover.py).
 //  Upstream author: Joshua Teves. No upstream license was found; see
 //  THIRD_PARTY_NOTICES.md.
@@ -32,7 +27,7 @@
 //  MAS/MAR (median-reduced template, with optional regression fit instead of
 //  plain subtraction) are inspired by the same-named methods in `amri_eeg_gac.m`
 //  from the Advanced MRI (AMRI) section, NINDS, NIH MATLAB toolbox
-//  (https://amri.ninds.nih.gov/software.html; GPL-3.0), itself implementing:
+//  (https://amri.ninds.nih.gov/software.html), itself implementing:
 //  Liu Z, de Zwart JA, van Gelderen P, Kuo L-W, Duyn JH. Statistical feature
 //  extraction for artifact removal from concurrent fMRI-EEG recordings.
 //  NeuroImage (2012), 59(3): 2073-2087. See THIRD_PARTY_NOTICES.md.

@@ -1,9 +1,10 @@
 # Third-Party Notices
 
-EVA is licensed under the GNU General Public License version 3.0 only. Some
-source files include or were implemented with reference to third-party software,
-models, or publications. Those files keep local source-header attribution, and
-the related notices are collected here.
+EVA was developed by P. Molfese, National Institutes of Health (NIH), as a
+public work of the United States Government under 17 U.S.C. § 105. Some source
+files include or were implemented with reference to third-party software,
+models, or publications. Those files keep local attribution, and the related
+notices are collected here.
 
 This file is not a substitute for legal review. Entries marked "no known
 license" should be treated as attribution-only until the upstream copyright
@@ -16,7 +17,8 @@ holder grants explicit redistribution terms or the EVA code is replaced.
   - `EVA/IO/SignalImportReader.swift`
 - Upstream project: https://github.com/mne-tools/mne-python
 - Upstream license: BSD 3-Clause
-- Compatibility: BSD 3-Clause is compatible with GPL-3.0-only distribution.
+- Notice: retain the BSD 3-Clause attribution and disclaimer when redistributing
+  material derived from or adapted with reference to MNE-Python.
 
 EVA's ICA implementation and native readers for BrainVision, EDF/EDF+, EEGLAB,
 Persyst, BESA, and montage helpers were implemented with reference to the
@@ -56,7 +58,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   `EVATests/Fixtures/example_4.mff`, `EVATests/Fixtures/example_5.mff`
 - Upstream project: https://github.com/BEL-Public/mffpy
 - Upstream license: Apache License 2.0
-- Compatibility: Apache-2.0 is compatible with GPL-3.0-only distribution.
+- Notice: retain the Apache License 2.0 notice for the redistributed fixtures
+  and any material derived from or adapted with reference to mffpy.
 
 EVA's MFF signal block and epoch XML writer structure follows the public mffpy
 writer implementation, especially `mffpy/bin_writer.py`,
@@ -91,8 +94,9 @@ specific language governing permissions and limitations under the License.
 - Upstream authorship: SCCN; Luca Pion-Tonachini, Ken Kreutz-Delgado, and Scott
   Makeig
 - Upstream license: no repository-level license was found
-- Compatibility: not confirmed. Treat as attribution-only until explicit
-  GPL-compatible redistribution terms are obtained.
+- Notice: EVA currently bundles a Core ML conversion of the ICLabel network with
+  attribution. Redistribution terms for the upstream model were not identified
+  at review time; explicit permission is being sought.
 
 EVA bundles a Core ML conversion of the official ICLabel default MatConvNet
 network and implements the corresponding feature preparation path.
@@ -110,8 +114,8 @@ NeuroImage, 198, 181-197 (2019).
 - Upstream source: `src/gradient_remover/GradientRemover.py`
 - Upstream author: Joshua Teves
 - Upstream license: no repository-level license or source-file license was found
-- Compatibility: not confirmed. Treat as attribution-only until explicit
-  GPL-compatible redistribution terms are obtained or this code is replaced.
+- Notice: treat as attribution/provenance until explicit redistribution terms
+  are obtained or this code is replaced.
 
 EVA's MR gradient artifact removal implementation is a Swift translation of the
 upstream template-based gradient remover, with a documented correction to the
@@ -127,7 +131,8 @@ neighboring-TR "after" window.
   ballistocardiogram artefacts from simultaneous EEG and fMRI recordings.
   NeuroImage, 37(1), 202-211.
 - Upstream license (`CWRegrTool/LICENSE.txt`): MIT
-- Compatibility: MIT is compatible with GPL-3.0-only distribution.
+- Notice: retain the MIT attribution if redistributing copied CWRegrTool
+  material. EVA does not copy CWRegrTool code.
 
 No code was copied from CWRegrTool (a MATLAB/EEGLAB plugin); EVA's CWL
 correction is an original Swift implementation of the adaptive regression
@@ -152,9 +157,9 @@ license and is not redistributed with EVA.
 - wAAS/wAAR weighting additionally cites: Goldman RI, Stern JM, Engel J Jr,
   Cohen MS. Acquiring simultaneous EEG and functional MRI. Clinical
   Neurophysiology (2000), 111(11): 1974-1980.
-- Upstream license (`amri_eeg_gac.m`, `amri_eeg_cbc.m` file headers): GNU
-  General Public License v3.
-- Compatibility: same license as EVA (GPL-3.0-only).
+- Upstream source-file license: the referenced AMRI MATLAB files carry their
+  own license headers.
+- Notice: EVA does not redistribute or copy AMRI toolbox code in the app.
 
 No code was copied from the AMRI toolbox (MATLAB/EEGLAB functions); EVA's
 MAS/MAR (gradient and BCG) and wAAS/wAAR (BCG) are original Swift
