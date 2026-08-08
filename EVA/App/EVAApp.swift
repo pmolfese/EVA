@@ -90,6 +90,10 @@ struct EVAApp: App {
             CommandGroup(after: .windowArrangement) {
                 OpenDebugLogButton()
             }
+
+            CommandGroup(replacing: .help) {
+                OpenReleaseNotesButton()
+            }
         }
 
         Window("Debug Log", id: Self.debugLogWindowID) {
@@ -102,6 +106,11 @@ struct EVAApp: App {
         }
         .defaultSize(width: 800, height: 580)
 
+        Window("Release Notes", id: Self.releaseNotesWindowID) {
+            ReleaseNotesView()
+        }
+        .defaultSize(width: 1000, height: 720)
+
         Settings {
             PreferencesView()
                 .environment(goodnessSettings)
@@ -112,6 +121,7 @@ struct EVAApp: App {
 
     static let debugLogWindowID = "debug-log"
     static let channelSetsWindowID = "channel-sets"
+    static let releaseNotesWindowID = "release-notes"
 
     private func checkForUpdates() {
         guard !isCheckingForUpdates else { return }
@@ -136,6 +146,20 @@ struct EVAApp: App {
     private static var defaultWindowSize: CGSize {
         let frame = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
         return CGSize(width: frame.width * 2 / 3, height: frame.height / 2)
+    }
+}
+
+/// Help-menu item that opens the Release Notes window.
+///
+/// Replaces the default "EVA Help" item, which pointed at a help book EVA does
+/// not ship.
+private struct OpenReleaseNotesButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Release Notes") {
+            openWindow(id: EVAApp.releaseNotesWindowID)
+        }
     }
 }
 
