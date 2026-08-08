@@ -24,9 +24,35 @@ extension WaveformView {
         // Initialize the config from the current mode's defaults for this rate
         // unless a run already established settings.
         if wavelet.result == nil {
-            wavelet.config = wavelet.mode.defaultConfiguration(samplingRate: input.samplingRate)
+            wavelet.config = waveletDefaultConfiguration(for: wavelet.mode, input: input)
         }
+        wavelet.syncAdvancedRangeText()
         wavelet.showsSheet = true
+    }
+
+    /// The mode's defaults, plus the stopband-level count implied by the
+    /// filter step's low-pass cutoff. HAPPE's level table is keyed to the
+    /// sampling rate alone, which on band-limited data leaves the finest
+    /// levels sitting entirely above the cutoff with nothing in them but
+    /// roll-off residue — see `WaveletReductionConfiguration.skippedFineLevels`.
+    func waveletDefaultConfiguration(
+        for mode: WaveletReductionMode,
+        input: MFFSignalData
+    ) -> WaveletReductionConfiguration {
+        var config = mode.defaultConfiguration(samplingRate: input.samplingRate)
+        if let highCutoff = filter.lowPassCutoff {
+            config.skippedFineLevels = WaveletReductionConfiguration.stopbandLevelCount(
+                samplingRate: input.samplingRate,
+                highCutoff: highCutoff
+            )
+        }
+        return config
+    }
+
+    /// Recording length in seconds, for the analysis-range popover's bounds.
+    func waveletRecordingDuration(_ input: MFFSignalData) -> Double {
+        guard input.samplingRate > 0, let count = input.data.first?.count else { return 0 }
+        return Double(count) / input.samplingRate
     }
 
     func setWaveletReductionEnabled(_ isEnabled: Bool) {

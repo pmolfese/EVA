@@ -42,6 +42,14 @@ final class WaveletReductionViewModel {
 
     // MARK: UI state
     var showsSheet = false
+    /// Presentation state for the advanced analysis-range popover.
+    var showsAdvancedRange = false
+    /// Draft text for the range fields. Kept as strings so a half-typed value
+    /// never reaches the configuration; `commitAdvancedRange` parses them.
+    var advancedRangeStartText = ""
+    var advancedRangeEndText = ""
+    /// Validation feedback for the popover, cleared on a successful commit.
+    var advancedRangeMessage: String?
 
     // MARK: Parameters
     var mode = WaveletReductionMode.continuousEEG
@@ -81,7 +89,11 @@ final class WaveletReductionViewModel {
             "downsampleFactor": "\(config.downsampleFactor)",
             "detrend": "\(config.detrend)",
             "thresholdWindowSeconds": "\(config.thresholdWindowSeconds)",
-            "useGPU": "\(config.useGPU)"
+            "useGPU": "\(config.useGPU)",
+            "skippedFineLevels": "\(config.skippedFineLevels)",
+            // Absent keys mean "unbounded", matching the optionals.
+            "analysisStartSeconds": config.analysisStartSeconds.map { "\($0)" } ?? "",
+            "analysisEndSeconds": config.analysisEndSeconds.map { "\($0)" } ?? ""
         ]
     }
 
@@ -99,6 +111,54 @@ final class WaveletReductionViewModel {
         if let v = p["detrend"].flatMap(Bool.init) { config.detrend = v }
         if let v = p["thresholdWindowSeconds"].flatMap(Double.init) { config.thresholdWindowSeconds = v }
         if let v = p["useGPU"].flatMap(Bool.init) { config.useGPU = v }
+        if let v = p["skippedFineLevels"].flatMap(Int.init) { config.skippedFineLevels = v }
+        if let v = p["analysisStartSeconds"] { config.analysisStartSeconds = v.isEmpty ? nil : Double(v) }
+        if let v = p["analysisEndSeconds"] { config.analysisEndSeconds = v.isEmpty ? nil : Double(v) }
+        syncAdvancedRangeText()
+    }
+
+    // MARK: - Advanced analysis range
+
+    /// Refreshes the draft text from the configuration, so reopening the
+    /// popover shows what is actually in effect.
+    func syncAdvancedRangeText() {
+        advancedRangeStartText = config.analysisStartSeconds.map { String(format: "%g", $0) } ?? ""
+        advancedRangeEndText = config.analysisEndSeconds.map { String(format: "%g", $0) } ?? ""
+    }
+
+    /// Parses the draft text into the configuration. A blank or unparseable
+    /// field means "unbounded on that side"; an inverted or too-short span is
+    /// rejected so the run can't silently analyze nothing.
+    /// Returns a message when the input was rejected.
+    @discardableResult
+    func commitAdvancedRange(durationSeconds: Double) -> String? {
+        let start = Double(advancedRangeStartText.trimmingCharacters(in: .whitespaces))
+        let end = Double(advancedRangeEndText.trimmingCharacters(in: .whitespaces))
+        let effectiveStart = start ?? 0
+        let effectiveEnd = end ?? durationSeconds
+        guard effectiveEnd - effectiveStart > 0.05 else {
+            return "That range is empty — the end must be later than the start."
+        }
+        config.analysisStartSeconds = start.map { max($0, 0) }
+        config.analysisEndSeconds = end.map { min($0, durationSeconds) }
+        syncAdvancedRangeText()
+        return nil
+    }
+
+    func clearAdvancedRange() {
+        config.analysisStartSeconds = nil
+        config.analysisEndSeconds = nil
+        syncAdvancedRangeText()
+    }
+
+    /// "Full recording" or e.g. "0–529.0 s", for the settings row.
+    func analysisRangeSummary(durationSeconds: Double) -> String {
+        guard config.analysisStartSeconds != nil || config.analysisEndSeconds != nil else {
+            return "Full recording"
+        }
+        let start = config.analysisStartSeconds ?? 0
+        let end = config.analysisEndSeconds ?? durationSeconds
+        return String(format: "%.1f–%.1f s", start, end)
     }
 
     // MARK: - Apply (the transform itself)
@@ -168,8 +228,19 @@ final class WaveletReductionViewModel {
         artifact = result.artifact
         self.result = result
         bandVarianceRetained = bandRetained
+        let analyzedRange = config.analysisRange(
+            sampleCount: signal.data.first?.count ?? 0, samplingRate: signal.samplingRate)
         candidates = WaveletReducer.findCandidates(
-            artifact: result.artifact, channelIndices: Array(reduceIndices), maxCount: 40)
+            artifact: result.artifact,
+            channelIndices: Array(reduceIndices),
+            maxCount: 40,
+            sampleRange: analyzedRange,
+            edgeMarginSamples: WaveletReducer.candidateEdgeMargin(
+                family: config.family,
+                levelCount: config.levelCount,
+                sampleCount: analyzedRange?.count ?? 0
+            )
+        )
         selectedCandidateID = candidates.first?.id
         isEnabled = true
         isRunning = false

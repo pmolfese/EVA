@@ -248,6 +248,65 @@ struct WaveletMetalBackendTests {
                 "correlation: CPU \(cpu.meanCorrelation) vs GPU \(gpu.meanCorrelation)")
     }
 
+    /// The analysis range and the skipped-fine-levels gate are implemented
+    /// separately on each backend (the GPU expresses a skipped level as an
+    /// unreachable threshold), so they need their own agreement check.
+    @Test func gpuReductionMatchesCPUWithRangeAndSkippedLevels() throws {
+        _ = try #require(
+            WaveletMetalBackend.shared,
+            "no Metal device available on this machine"
+        )
+
+        let signal = reducerSignal(samplingRate: 250, count: 12_000, channels: 6)
+        var config = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: 250)
+        config.levelCount = 7
+        config.skippedFineLevels = 2
+        config.analysisStartSeconds = 2.0
+        config.analysisEndSeconds = 40.0
+
+        var cpuConfig = config
+        cpuConfig.useGPU = false
+        var gpuConfig = config
+        gpuConfig.useGPU = true
+
+        let indices = Array(signal.data.indices)
+        let cpu = WaveletReducer.reduce(signal: signal, channelIndices: indices, configuration: cpuConfig)
+        let gpu = WaveletReducer.reduce(signal: signal, channelIndices: indices, configuration: gpuConfig)
+
+        let startSample = Int(2.0 * 250)
+        let endSample = Int(40.0 * 250)
+        for channel in indices {
+            let cpuCleaned = cpu.cleaned.data[channel]
+            let gpuCleaned = gpu.cleaned.data[channel]
+
+            // Both backends must leave the excluded span byte-identical to the
+            // input — not merely close, since neither should touch it at all.
+            for index in 0..<startSample {
+                #expect(cpuCleaned[index] == signal.data[channel][index])
+                #expect(gpuCleaned[index] == signal.data[channel][index])
+            }
+            for index in endSample..<cpuCleaned.count {
+                #expect(cpuCleaned[index] == signal.data[channel][index])
+                #expect(gpuCleaned[index] == signal.data[channel][index])
+            }
+
+            let scale = max(cpuCleaned.map { abs(Double($0)) }.max() ?? 0, 1e-6)
+            var worst = 0.0
+            for index in startSample..<endSample {
+                worst = max(worst, abs(Double(gpuCleaned[index]) - Double(cpuCleaned[index])) / scale)
+            }
+            #expect(worst < 0.08, "ch \(channel): worst relative deviation inside the range \(worst)")
+        }
+
+        // Skipped levels must report zero removed energy on both backends.
+        for channel in indices {
+            let cpuEnergies = try #require(cpu.perChannel[channel]?.removedEnergyByLevel)
+            let gpuEnergies = try #require(gpu.perChannel[channel]?.removedEnergyByLevel)
+            #expect(cpuEnergies[0] == 0 && cpuEnergies[1] == 0, "CPU removed energy from a skipped level")
+            #expect(gpuEnergies[0] == 0 && gpuEnergies[1] == 0, "GPU removed energy from a skipped level")
+        }
+    }
+
     /// The GPU path must chunk correctly when a batch can't hold every
     /// channel: force tiny batches via a signal long enough to matter and
     /// verify per-channel metrics exist for all channels.

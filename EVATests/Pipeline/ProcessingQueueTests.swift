@@ -29,6 +29,15 @@ struct ProcessingQueueTests {
             concurrentCount -= 1
             completionOrder.append("first")
         }
+        // `async let` does not promise the child tasks start in source order,
+        // so wait until "first" genuinely holds the queue before enqueuing
+        // "second". Otherwise the FIFO expectation below is a race the test
+        // usually wins on an idle machine and can lose under parallel load.
+        var spins = 0
+        while queue.currentLabel != "first" && spins < 500 {
+            await Task.yield()
+            spins += 1
+        }
         async let second: Void = queue.run("second") {
             concurrentCount += 1
             maxConcurrentCount = max(maxConcurrentCount, concurrentCount)
@@ -48,11 +57,25 @@ struct ProcessingQueueTests {
         var snapshotDuringFirst: (current: String?, waiting: [String])?
 
         async let first: Void = queue.run("Filter") {
-            // Give `second` a moment to enqueue while `first` is still running.
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            // Wait for `second` to actually enqueue rather than assuming a
+            // fixed delay covers it. A sleep here races the scheduler: when the
+            // machine is loaded (a full parallel test run), the sibling task can
+            // fail to reach its `run` call before the delay expires, and the
+            // snapshot then records an empty queue and fails the expectation.
+            var polls = 0
+            while queue.waitingLabels.isEmpty && polls < 500 {
+                try? await Task.sleep(nanoseconds: 2_000_000)
+                polls += 1
+            }
             snapshotDuringFirst = (queue.currentLabel, queue.waitingLabels)
         }
-        try? await Task.sleep(nanoseconds: 5_000_000)
+        // Likewise, only enqueue `second` once `first` genuinely holds the
+        // queue, so the FIFO order under test is established rather than raced.
+        var spins = 0
+        while queue.currentLabel != "Filter" && spins < 500 {
+            await Task.yield()
+            spins += 1
+        }
         async let second: Void = queue.run("Channel Health") {}
 
         _ = await (first, second)

@@ -32,11 +32,13 @@ nonisolated enum WaveletCleaningPipeline: String, CaseIterable, Identifiable, Se
         }
     }
 
-    /// Robust universal (MAD σ · sqrt(2 ln N)) — the behaviorally closest
-    /// stand-in for MATLAB wdenoise's empirical-Bayes 'Bayes' method. Not
-    /// BayesShrink: its T = σ_n²/σ_s collapses on artifact-inflated EEG
-    /// bands, flagging nearly everything as artifact (see WaveletReducer's
-    /// header note).
+    /// Robust universal (MAD σ · sqrt(2 ln N)). This seeds the Explorer's
+    /// *detection*, not the Reducer's subtraction, and a fixed rule is what its
+    /// current behaviour is tuned around — the Reducer defaults to
+    /// `.empiricalBayes` (HAPPE parity) instead.
+    ///
+    /// Never `.bayesShrink`, whose T = σ_n²/σ_s collapses on artifact-inflated
+    /// EEG bands and flags nearly everything — see `WaveletReducer`'s header.
     var defaultThresholdModel: WaveletCleaningThresholdModel {
         .robustUniversal
     }
@@ -97,8 +99,24 @@ nonisolated enum WaveletCleaningThresholdRule: String, CaseIterable, Identifiabl
 nonisolated enum WaveletCleaningThresholdModel: String, CaseIterable, Identifiable, Codable, Sendable {
     case robustUniversal = "Universal"
     case bayesShrink = "BayesShrink"
+    /// Johnstone–Silverman empirical Bayes with the quasi-Cauchy prior — the
+    /// method behind MATLAB `wdenoise`'s `'Bayes'`, and therefore HAPPE's.
+    /// See `EmpiricalBayesThreshold`.
+    case empiricalBayes = "Empirical Bayes"
 
     var id: String { rawValue }
+
+    /// One-line description shared by every picker that offers these models.
+    var summary: String {
+        switch self {
+        case .robustUniversal:
+            return "sigma × sqrt(2·ln N) from a robust (MAD) noise estimate — a fixed rule, not fitted to the band."
+        case .bayesShrink:
+            return "T = sigma_n²/sigma_s. Shares only the name with the method HAPPE uses; on artifact-heavy EEG its gate collapses toward zero and nearly the whole signal is called artifact."
+        case .empiricalBayes:
+            return "Fits a sparse mixture prior to each level by marginal maximum likelihood and takes the gate where the posterior median first becomes nonzero — HAPPE parity. Method of Johnstone & Silverman (2005), Ann. Statist. 33(4), 1700–1752."
+        }
+    }
 }
 
 nonisolated struct WaveletCleaningConfiguration: Sendable {

@@ -28,9 +28,11 @@
 //      Bayes keeps only sparse outliers (artifacts) above ~several sigma,
 //      while BayesShrink's T = σ_n²/σ_s collapses on heavy-tailed,
 //      artifact-inflated EEG bands — classifying nearly everything as
-//      artifact and gutting the EEG. Until a true empirical-Bayes model
-//      lands, the robust universal threshold (MAD σ · sqrt(2 ln N)) is the
-//      behaviorally closest stand-in and is the default here.
+//      artifact and gutting the EEG. The empirical Bayes estimator is
+//      implemented in `EmpiricalBayesThreshold` and is this engine's default
+//      threshold model. The robust universal threshold (MAD σ · sqrt(2 ln N))
+//      remains available; it is the upper bound empirical Bayes is fitted
+//      under, and is what a band of pure noise fits to.
 //    * Families include both orthonormal (coif4 — HAPPE's ERP family;
 //      sym4/db4 alternatives) and true biorthogonal (bior4.4 — HAPPE's
 //      continuous family — and bior6.8), the latter giving exact linear
@@ -139,7 +141,7 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
             let levels = samplingRate > 500 ? 10 : (samplingRate > 250 ? 9 : 8)
             return WaveletReductionConfiguration(
                 kind: .dwt, family: .bior44, levelCount: levels,
-                thresholdRule: .hard, thresholdModel: .robustUniversal, thresholdScale: 1,
+                thresholdRule: .hard, thresholdModel: .empiricalBayes, thresholdScale: 1,
                 downsampleFactor: 1,
                 useGPU: WaveletMetalBackend.isAvailable
             )
@@ -151,7 +153,7 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
             let levels = samplingRate > 500 ? 11 : (samplingRate > 250 ? 10 : 9)
             return WaveletReductionConfiguration(
                 kind: .dwt, family: .coif4, levelCount: levels,
-                thresholdRule: .soft, thresholdModel: .robustUniversal, thresholdScale: 1,
+                thresholdRule: .soft, thresholdModel: .empiricalBayes, thresholdScale: 1,
                 downsampleFactor: 1,
                 useGPU: WaveletMetalBackend.isAvailable
             )
@@ -193,11 +195,57 @@ nonisolated struct WaveletReductionConfiguration: Sendable {
     /// closely but not bitwise. Falls back to the CPU automatically when Metal
     /// is unavailable or an encode fails.
     var useGPU: Bool = false
+    /// How many of the FINEST detail levels are excluded from artifact
+    /// extraction. Level *j* covers roughly `[rate/2^(j+1), rate/2^j]`, so on
+    /// data already low-passed well below Nyquist the first few levels sit
+    /// entirely in the filter's stopband. Those bands hold nothing but
+    /// roll-off residue, which drives their robust sigma (and therefore their
+    /// threshold) toward zero and makes essentially all of that residue read
+    /// as "artifact". Excluded levels contribute no artifact at all, so their
+    /// content passes through into the cleaned signal untouched.
+    var skippedFineLevels: Int = 0
+    /// Restrict the reduction to `[start, end]` seconds. `nil` on either side
+    /// means "from the beginning" / "to the end". Samples outside the span are
+    /// left exactly as they came in (artifact = 0 there), and every metric and
+    /// candidate is computed only within it — which is how a contaminated
+    /// stretch (a filter transient at the tail, say) is kept from dominating
+    /// the thresholds' population, the variance-retained figure, and the
+    /// candidate ranking.
+    var analysisStartSeconds: Double?
+    var analysisEndSeconds: Double?
 
     /// Factor that brings `sourceRate` down to ~`targetRate` (1 if already lower).
     static func factor(forSourceRate sourceRate: Double, targetRate: Double) -> Int {
         guard sourceRate > targetRate else { return 1 }
         return Downsampler.factor(sourceRate: sourceRate, targetRate: targetRate)
+    }
+
+    /// The sample span this configuration analyzes, clamped into the
+    /// recording. Returns nil if the requested span is too short to transform.
+    func analysisRange(sampleCount: Int, samplingRate: Double) -> Range<Int>? {
+        guard sampleCount > 0 else { return nil }
+        guard analysisStartSeconds != nil || analysisEndSeconds != nil else { return 0..<sampleCount }
+        guard samplingRate > 0 else { return 0..<sampleCount }
+        let rawStart = analysisStartSeconds.map { Int(($0 * samplingRate).rounded()) } ?? 0
+        let rawEnd = analysisEndSeconds.map { Int(($0 * samplingRate).rounded()) } ?? sampleCount
+        let start = min(max(rawStart, 0), sampleCount)
+        let end = min(max(rawEnd, start), sampleCount)
+        guard end - start > 4 else { return nil }
+        return start..<end
+    }
+
+    /// How many of the finest detail levels lie entirely above `highCutoff`
+    /// (the data's low-pass edge) and so contain no signal. Level *j*'s band
+    /// starts at `rate/2^(j+1)`; the level is pure stopband once that lower
+    /// edge is already at or above the cutoff.
+    ///
+    /// At 1000 Hz with a 30 Hz low-pass this returns 4: levels 1–4 span
+    /// 31–500 Hz, entirely inside the stopband, while level 5 (15.6–31.25 Hz)
+    /// straddles the cutoff and still carries signal.
+    static func stopbandLevelCount(samplingRate: Double, highCutoff: Double) -> Int {
+        guard samplingRate > 0, highCutoff > 0, highCutoff < samplingRate / 2 else { return 0 }
+        let count = Int(floor(log2(samplingRate / highCutoff))) - 1
+        return max(count, 0)
     }
 }
 
@@ -295,23 +343,45 @@ nonisolated enum WaveletReducer {
         let workerCount = min(max(coreCount, 1), max(indices.count, 1))
 
         // Process one channel; returns everything the aggregation step needs.
+        // Only `analysisRange` is transformed — samples outside it are passed
+        // through untouched, and every metric is scoped to the analyzed span so
+        // an excluded stretch can't skew the numbers the user reads.
         @Sendable func process(_ channelIndex: Int) -> (
             cleaned: [Float], artifact: [Float],
             metrics: WaveletChannelReductionMetrics,
             originalVariance: Double, cleanedVariance: Double, correlation: Double
         ) {
             let original = signal.data[channelIndex].map(Double.init)
-            let (cleaned, artifact, levelEnergies) = reduceChannel(
-                original, configuration: configuration, samplingRate: signal.samplingRate)
-            let originalVariance = variance(original)
-            let cleanedVariance = variance(cleaned)
-            let corr = correlation(original, cleaned)
+            let untouched = WaveletChannelReductionMetrics(
+                channelIndex: channelIndex, varianceRetainedPercent: 100, correlation: 1,
+                removedRMSMicrovolts: 0, peakReductionPercent: 0, removedEnergyByLevel: []
+            )
+            guard let range = configuration.analysisRange(
+                sampleCount: original.count, samplingRate: signal.samplingRate
+            ) else {
+                return (signal.data[channelIndex], [Float](repeating: 0, count: original.count), untouched, 0, 0, 1)
+            }
+
+            let segment = Array(original[range])
+            let (cleanedSegment, artifactSegment, levelEnergies) = reduceChannel(
+                segment, configuration: configuration, samplingRate: signal.samplingRate)
+
+            var cleaned = original
+            var artifact = [Double](repeating: 0, count: original.count)
+            for offset in 0..<segment.count {
+                cleaned[range.lowerBound + offset] = cleanedSegment[offset]
+                artifact[range.lowerBound + offset] = artifactSegment[offset]
+            }
+
+            let originalVariance = variance(segment)
+            let cleanedVariance = variance(cleanedSegment)
+            let corr = correlation(segment, cleanedSegment)
             let metrics = WaveletChannelReductionMetrics(
                 channelIndex: channelIndex,
                 varianceRetainedPercent: originalVariance > 1e-12 ? cleanedVariance / originalVariance * 100 : 100,
                 correlation: corr,
-                removedRMSMicrovolts: rms(artifact),
-                peakReductionPercent: peakReductionPercent(original: original, cleaned: cleaned),
+                removedRMSMicrovolts: rms(artifactSegment),
+                peakReductionPercent: peakReductionPercent(original: segment, cleaned: cleanedSegment),
                 removedEnergyByLevel: levelEnergies
             )
             return (cleaned.map(Float.init), artifact.map(Float.init), metrics, originalVariance, cleanedVariance, corr)
@@ -451,7 +521,17 @@ nonisolated enum WaveletReducer {
         var artifactDetails = decomposition.details
         var removedEnergyByLevel = [Double](repeating: 0, count: decomposition.details.count)
         let scale = max(configuration.thresholdScale, 0.01)
+        let skipped = min(max(configuration.skippedFineLevels, 0), decomposition.details.count)
         for level in decomposition.details.indices {
+            // Stopband levels contribute nothing to the artifact — see
+            // `skippedFineLevels`. Zeroing the band here (rather than never
+            // computing it) keeps the cascade intact: each level still feeds
+            // the next one's approximation.
+            guard level >= skipped else {
+                artifactDetails[level] = [Double](repeating: 0, count: decomposition.details[level].count)
+                removedEnergyByLevel[level] = 0
+                continue
+            }
             let detail = decomposition.details[level]
             // Detail bands are decimated per level under the DWT, so a
             // wall-clock threshold window covers fewer coefficients there.
@@ -633,9 +713,16 @@ nonisolated enum WaveletReducer {
         // Batching shares one geometry, so ragged channels go to the CPU path.
         guard sampleCount > 4, indices.allSatisfy({ signal.data[$0].count == sampleCount }) else { return nil }
 
+        // One analysis span shared by the whole batch; everything below works
+        // in segment coordinates and writes back at `range.lowerBound`.
+        guard let range = configuration.analysisRange(
+            sampleCount: sampleCount, samplingRate: signal.samplingRate
+        ) else { return nil }
+        let segmentCount = range.count
+
         let factor = max(configuration.downsampleFactor, 1)
-        let decimates = factor > 1 && sampleCount > factor * 8
-        let workCount = decimates ? (sampleCount + factor - 1) / factor : sampleCount
+        let decimates = factor > 1 && segmentCount > factor * 8
+        let workCount = decimates ? (segmentCount + factor - 1) / factor : segmentCount
         let effectiveRate = signal.samplingRate / Double(decimates ? factor : 1)
 
         let bank = configuration.family.filterBank
@@ -672,8 +759,8 @@ nonisolated enum WaveletReducer {
             var trends = [(slope: Double, intercept: Double)](repeating: (0, 0), count: batch.count)
             var paddedChannels = [[Float]](repeating: [], count: batch.count)
             for (slot, channelIndex) in batch.enumerated() {
-                let original = signal.data[channelIndex].map(Double.init)
-                var work = decimates ? Downsampler.blockAveraged(original, by: factor) : original
+                let segment = signal.data[channelIndex][range].map(Double.init)
+                var work = decimates ? Downsampler.blockAveraged(segment, by: factor) : segment
                 if configuration.detrend {
                     let trend = linearTrend(work)
                     trends[slot] = trend
@@ -708,8 +795,19 @@ nonisolated enum WaveletReducer {
             // Robust thresholds from strided subsamples of the resident bands.
             var thresholdValues: [[Float]] = []
             var thresholdCenters: [[UInt32]] = []
+            let skipped = min(max(configuration.skippedFineLevels, 0), levels)
             for level in 0..<levels {
                 let bandLength = bands.bandLengths[level]
+                // A stopband level contributes no artifact. An unreachable
+                // gate expresses that with no kernel change: `shrink` zeroes
+                // every coefficient below the threshold, and nothing clears
+                // `greatestFiniteMagnitude` — so both the shrink and the
+                // band-energy kernel see an entirely discarded band.
+                guard level >= skipped else {
+                    thresholdValues.append([Float](repeating: .greatestFiniteMagnitude, count: batch.count))
+                    thresholdCenters.append([0])
+                    continue
+                }
                 let bandRate = configuration.kind == .dwt
                     ? effectiveRate / Double(1 << (level + 1))
                     : effectiveRate
@@ -793,19 +891,26 @@ nonisolated enum WaveletReducer {
                         artifactWork[index] += trend.intercept + trend.slope * Double(index)
                     }
                 }
-                let artifact = decimates
-                    ? Downsampler.linearUpsample(artifactWork, toLength: sampleCount, factor: factor)
+                let artifactSegment = decimates
+                    ? Downsampler.linearUpsample(artifactWork, toLength: segmentCount, factor: factor)
                     : artifactWork
 
+                // Back to full-channel coordinates: only `range` changes.
                 let original = signal.data[channelIndex].map(Double.init)
-                var cleaned = [Double](repeating: 0, count: sampleCount)
-                for index in 0..<sampleCount {
-                    cleaned[index] = original[index] - artifact[index]
+                var cleaned = original
+                var artifact = [Double](repeating: 0, count: sampleCount)
+                var cleanedSegment = [Double](repeating: 0, count: segmentCount)
+                let segment = Array(original[range])
+                for offset in 0..<segmentCount {
+                    let value = segment[offset] - artifactSegment[offset]
+                    cleanedSegment[offset] = value
+                    cleaned[range.lowerBound + offset] = value
+                    artifact[range.lowerBound + offset] = artifactSegment[offset]
                 }
 
-                let originalVariance = variance(original)
-                let cleanedVariance = variance(cleaned)
-                let corr = correlation(original, cleaned)
+                let originalVariance = variance(segment)
+                let cleanedVariance = variance(cleanedSegment)
+                let corr = correlation(segment, cleanedSegment)
                 let energies = (0..<levels).map { level -> Double in
                     let total = finish.totalEnergyByLevel[slot][level]
                     return total > 1e-12 ? finish.keptEnergyByLevel[slot][level] / total : 0
@@ -814,8 +919,8 @@ nonisolated enum WaveletReducer {
                     channelIndex: channelIndex,
                     varianceRetainedPercent: originalVariance > 1e-12 ? cleanedVariance / originalVariance * 100 : 100,
                     correlation: corr,
-                    removedRMSMicrovolts: rms(artifact),
-                    peakReductionPercent: peakReductionPercent(original: original, cleaned: cleaned),
+                    removedRMSMicrovolts: rms(artifactSegment),
+                    peakReductionPercent: peakReductionPercent(original: segment, cleaned: cleanedSegment),
                     removedEnergyByLevel: energies
                 )
                 cleanedData[channelIndex] = cleaned.map(Float.init)
@@ -832,45 +937,95 @@ nonisolated enum WaveletReducer {
     }
 
     /// Finds the windows where the most artifact energy was removed, ranked, so
-    /// the UI can offer "jump to the biggest changes." One candidate per channel
-    /// (its strongest removed-artifact peak), then ranked across channels.
+    /// the UI can offer "jump to the biggest changes."
+    ///
+    /// The list is of distinct *events*, not of channels. Each channel can
+    /// contribute several peaks (non-max suppressed within `windowSeconds` of
+    /// each other), and peaks that coincide in time across channels are then
+    /// collapsed to the single strongest channel — because one blink or motion
+    /// event appears on most of the net at once, and a per-channel list would
+    /// spend every slot re-reporting whichever event happens to be largest.
+    ///
+    /// `sampleRange` scopes the search to the analyzed span, and
+    /// `edgeMarginSamples` drops peaks hugging either end of it, where a filter
+    /// or boundary transient in the input would otherwise outrank every real
+    /// artifact in the recording.
     static func findCandidates(
         artifact: MFFSignalData,
         channelIndices: [Int],
         maxCount: Int,
-        windowSeconds: Double = 1.0
+        windowSeconds: Double = 1.0,
+        sampleRange: Range<Int>? = nil,
+        edgeMarginSamples: Int = 0,
+        maxPerChannel: Int = 8
     ) -> [WaveletReductionCandidate] {
         let samplingRate = max(artifact.samplingRate, 1)
         let windowSamples = max(Int((windowSeconds * samplingRate).rounded()), 8)
         let half = windowSamples / 2
+        let limit = max(maxCount, 1)
 
         struct Peak { let channel: Int; let sample: Int; let value: Double; let rms: Double }
         var peaks: [Peak] = []
+
         for channelIndex in channelIndices where artifact.data.indices.contains(channelIndex) {
             let channel = artifact.data[channelIndex]
             guard channel.count > 4 else { continue }
-            var peakSample = 0
-            var peakValue = 0.0
-            for index in channel.indices {
-                let magnitude = abs(Double(channel[index]))
-                if magnitude > peakValue {
-                    peakValue = magnitude
-                    peakSample = index
+            let span = sampleRange.map { $0.clamped(to: 0..<channel.count) } ?? 0..<channel.count
+            let searchStart = span.lowerBound + max(edgeMarginSamples, 0)
+            let searchEnd = span.upperBound - max(edgeMarginSamples, 0)
+            guard searchEnd - searchStart > 2 else { continue }
+
+            // Bucket maxima first (one pass), then suppress within a window.
+            // Repeatedly rescanning the channel for each peak would cost a full
+            // sweep per peak per channel; a 128-channel net makes that the
+            // dominant cost of the whole reduction.
+            let bucketSize = max(half, 1)
+            var bucketPeaks: [(sample: Int, value: Double)] = []
+            bucketPeaks.reserveCapacity((searchEnd - searchStart) / bucketSize + 1)
+            var bucketStart = searchStart
+            while bucketStart < searchEnd {
+                let bucketEnd = min(bucketStart + bucketSize, searchEnd)
+                var bestSample = bucketStart
+                var bestValue = 0.0
+                for index in bucketStart..<bucketEnd {
+                    let magnitude = abs(Double(channel[index]))
+                    if magnitude > bestValue {
+                        bestValue = magnitude
+                        bestSample = index
+                    }
                 }
+                if bestValue > 1e-9 { bucketPeaks.append((bestSample, bestValue)) }
+                bucketStart = bucketEnd
             }
-            guard peakValue > 1e-9 else { continue }
-            let start = max(peakSample - half, 0)
-            let end = min(start + windowSamples, channel.count)
-            var energy = 0.0
-            for index in start..<end { energy += Double(channel[index]) * Double(channel[index]) }
-            let rms = (energy / Double(max(end - start, 1))).squareRoot()
-            peaks.append(Peak(channel: channelIndex, sample: peakSample, value: peakValue, rms: rms))
+
+            var acceptedSamples: [Int] = []
+            for candidate in bucketPeaks.sorted(by: { $0.value > $1.value }) {
+                guard acceptedSamples.count < max(maxPerChannel, 1) else { break }
+                guard !acceptedSamples.contains(where: { abs($0 - candidate.sample) < windowSamples }) else { continue }
+                acceptedSamples.append(candidate.sample)
+
+                let start = max(candidate.sample - half, span.lowerBound)
+                let end = min(start + windowSamples, span.upperBound)
+                var energy = 0.0
+                for index in start..<end { energy += Double(channel[index]) * Double(channel[index]) }
+                let rms = (energy / Double(max(end - start, 1))).squareRoot()
+                peaks.append(Peak(channel: channelIndex, sample: candidate.sample, value: candidate.value, rms: rms))
+            }
         }
 
-        let ranked = peaks.sorted { $0.rms > $1.rms }.prefix(max(maxCount, 1))
-        return ranked.enumerated().map { offset, peak in
+        // Collapse across channels: strongest first, and skip anything that
+        // overlaps an already-accepted event in time regardless of channel.
+        var events: [Peak] = []
+        for peak in peaks.sorted(by: { $0.rms > $1.rms }) {
+            guard events.count < limit else { break }
+            guard !events.contains(where: { abs($0.sample - peak.sample) < windowSamples }) else { continue }
+            events.append(peak)
+        }
+
+        return events.enumerated().map { offset, peak in
+            let channelCount = artifact.data[peak.channel].count
             let start = max(peak.sample - half, 0)
-            let end = min(start + windowSamples, artifact.data[peak.channel].count)
+            let end = min(start + windowSamples, channelCount)
             return WaveletReductionCandidate(
                 id: "wavelet-reduction-\(peak.channel)-\(peak.sample)",
                 rank: offset + 1,
@@ -889,6 +1044,23 @@ nonisolated enum WaveletReducer {
     static func boundedLevelCount(_ requested: Int, sampleCount: Int) -> Int {
         let maxBySamples = max(Int(floor(log2(Double(max(sampleCount, 2))))) - 1, 1)
         return min(max(requested, 1), maximumLevelCount, maxBySamples)
+    }
+
+    /// Samples at each end of the analyzed span where a candidate would not be
+    /// trustworthy, so none is reported there. Sized by the deepest level's tap
+    /// reach — the span whose coefficients see the boundary at all — and capped
+    /// at 5% of the analyzed length so a short span keeps a usable interior.
+    /// Mirrors `WaveletArtifactAnalyzer.edgeMargin`; the reduction itself still
+    /// runs over the whole span, this only governs what gets *reported*.
+    static func candidateEdgeMargin(
+        family: WaveletReductionFamily,
+        levelCount: Int,
+        sampleCount: Int
+    ) -> Int {
+        let bank = family.filterBank
+        let levels = boundedLevelCount(levelCount, sampleCount: max(sampleCount, 2))
+        let reach = (bank.length - 1) * (1 << levels)
+        return min(reach, sampleCount / 20)
     }
 
     // MARK: Thresholding
@@ -922,6 +1094,15 @@ nonisolated enum WaveletReducer {
         let universal = sigma > 1e-12
             ? sigma * sqrt(2 * log(Double(max(populationCount ?? values.count, 2))))
             : 0
+
+        if model == .empiricalBayes {
+            // Returns 0 for a degenerate band, and also for the (in practice
+            // vanishing) dense case where the fitted weight hits 1 — a gate of
+            // 0 would subtract the whole band, so fall back to the universal
+            // threshold, which is the estimator's own upper bound anyway.
+            let gate = EmpiricalBayesThreshold.threshold(for: values, populationCount: populationCount)
+            return gate > 0 ? gate : universal
+        }
 
         guard model == .bayesShrink, sigma > 1e-12 else { return universal }
 

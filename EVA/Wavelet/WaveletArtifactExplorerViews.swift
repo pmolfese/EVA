@@ -91,7 +91,7 @@ extension WaveformView {
 
             HStack(alignment: .top, spacing: 16) {
                 waveletReductionSettingsColumn(input: input, reduceCount: reduceCount)
-                    .frame(width: 320)
+                    .frame(width: 600)
 
                 Divider()
 
@@ -121,7 +121,7 @@ extension WaveformView {
             }
         }
         .padding(20)
-        .frame(width: 840, height: 640)
+        .frame(width: 1140, height: 680)
     }
 
     @ViewBuilder
@@ -138,7 +138,7 @@ extension WaveformView {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .onChange(of: wavelet.mode) { _, newMode in
-                    wavelet.config = newMode.defaultConfiguration(samplingRate: input.samplingRate)
+                    wavelet.config = waveletDefaultConfiguration(for: newMode, input: input)
                 }
 
                 Text(wavelet.mode.explanation)
@@ -146,7 +146,11 @@ extension WaveformView {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                // Two (label, control) pairs per row. The settings list grew
+                // past what a single narrow column could show without
+                // scrolling; pairing related controls halves the height and
+                // keeps each one beside its natural companion.
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 10) {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "Transform",
@@ -155,17 +159,17 @@ extension WaveformView {
                         Picker("", selection: $wavelet.config.kind) {
                             ForEach(WaveletTransformKind.allCases) { Text($0.rawValue).tag($0) }
                         }
-                        .labelsHidden().frame(width: 140)
-                    }
-                    GridRow {
+                        .labelsHidden().frame(width: 130)
+
                         ArtifactTemplateFieldLabel(
                             title: "Wavelet",
                             help: "The mother wavelet. bior4.4 is HAPPE's continuous-path family and the Continuous EEG default; coif4 is HAPPE's ERP family. sym4/db4 are orthonormal and near-symmetric — solid general-purpose alternatives, but no orthogonal wavelet beyond Haar can be exactly symmetric. The biorthogonal families (bior4.4, bior6.8) are exactly linear-phase, so thresholding and subtracting the artifact estimate doesn't introduce a small time shift, which matters most right at artifact onsets and for timing-sensitive ERP work."
                         )
+                        .gridColumnAlignment(.leading)
                         Picker("", selection: $wavelet.config.family) {
                             ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
                         }
-                        .labelsHidden().frame(width: 140)
+                        .labelsHidden().frame(width: 130)
                     }
                     GridRow {
                         ArtifactTemplateFieldLabel(
@@ -175,17 +179,25 @@ extension WaveformView {
                         Picker("", selection: $wavelet.config.thresholdRule) {
                             ForEach(WaveletCleaningThresholdRule.allCases) { Text($0.rawValue).tag($0) }
                         }
-                        .labelsHidden().frame(width: 140)
-                    }
-                    GridRow {
+                        .labelsHidden().frame(width: 130)
+
                         ArtifactTemplateFieldLabel(
                             title: "Threshold model",
-                            help: "How each level's artifact gate is chosen. Universal — sigma × sqrt(2·ln N) from a robust (MAD) noise estimate — keeps only genuine outlier coefficients as artifact, the closest stand-in for the empirical-Bayes method MATLAB's wdenoise uses in HAPPE, and the recommended default. BayesShrink adapts to each level's estimated signal-to-noise ratio, but on artifact-heavy EEG its threshold collapses toward zero, classifying nearly the whole signal as artifact and flattening the output — avoid unless you know why you want it."
+                            help: """
+                            How each level's artifact gate is chosen.
+
+                            Empirical Bayes — the default, and what HAPPE gets from MATLAB's wdenoise. \(WaveletCleaningThresholdModel.empiricalBayes.summary)
+
+                            Universal — \(WaveletCleaningThresholdModel.robustUniversal.summary) It is the upper bound empirical Bayes is fitted under, and what a band of pure noise fits to, so the two agree on quiet bands and diverge where artifacts are sparse.
+
+                            BayesShrink — \(WaveletCleaningThresholdModel.bayesShrink.summary) Avoid unless you know why you want it.
+                            """
                         )
+                        .gridColumnAlignment(.leading)
                         Picker("", selection: $wavelet.config.thresholdModel) {
                             ForEach(WaveletCleaningThresholdModel.allCases) { Text($0.rawValue).tag($0) }
                         }
-                        .labelsHidden().frame(width: 140)
+                        .labelsHidden().frame(width: 130)
                     }
                     GridRow {
                         ArtifactTemplateFieldLabel(
@@ -193,7 +205,22 @@ extension WaveformView {
                             help: "How many times the signal is halved in frequency. More levels reach lower frequencies (drift, slow artifacts), but each extra level has less data to estimate its threshold from, so pushing this too high risks overfitting to noise. The rate-dependent default (8–10 continuous, 9–11 ERP) mirrors HAPPE's own scheme."
                         )
                         Stepper("\(wavelet.config.levelCount)", value: $wavelet.config.levelCount, in: 1...WaveletReducer.maximumLevelCount)
-                            .frame(width: 120)
+                            .frame(width: 130)
+
+                        ArtifactTemplateFieldLabel(
+                            title: "Skip finest",
+                            help: "Excludes this many of the finest levels from artifact removal, leaving their content in the cleaned signal. Each level covers a band roughly half the width of the one below it, so on data already low-passed well under Nyquist the finest levels sit entirely in the filter's stopband. Those bands hold only roll-off residue, which drags their noise estimate — and therefore their threshold — toward zero, so nearly all of that residue gets called artifact. This is set automatically from the filter's low-pass cutoff; raise it to protect more high-frequency signal, set it to 0 for strict HAPPE behaviour."
+                        )
+                        .gridColumnAlignment(.leading)
+                        HStack(spacing: 6) {
+                            Stepper("\(wavelet.config.skippedFineLevels)", value: $wavelet.config.skippedFineLevels, in: 0...max(wavelet.config.levelCount - 1, 0))
+                                .frame(width: 74)
+                            Text(waveletSkippedLevelSummary(input: input))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        .frame(width: 130, alignment: .leading)
                     }
                     GridRow {
                         ArtifactTemplateFieldLabel(
@@ -202,17 +229,17 @@ extension WaveformView {
                         )
                         TextField("x", value: $wavelet.config.thresholdScale, format: .number.precision(.fractionLength(2)))
                             .frame(width: 80)
-                    }
-                    GridRow {
+
                         ArtifactTemplateFieldLabel(
                             title: "Threshold scope",
                             help: "Global estimates one threshold per level from the whole recording — exactly what HAPPE's wdenoise does. Local (30 s) re-estimates each level's threshold in overlapping 30-second windows, so a quiet stretch and a noisy stretch each get their own noise floor — the same scheme the Wavelet Artifact Explorer uses. Local is an EVA improvement over HAPPE, useful for recordings whose noise level changes over time; use Global for strict HAPPE parity."
                         )
+                        .gridColumnAlignment(.leading)
                         Picker("", selection: $wavelet.config.thresholdWindowSeconds) {
                             Text("Global (HAPPE)").tag(0.0)
                             Text("Local (30 s)").tag(30.0)
                         }
-                        .labelsHidden().frame(width: 150)
+                        .labelsHidden().frame(width: 130)
                     }
                     GridRow {
                         ArtifactTemplateFieldLabel(
@@ -221,18 +248,18 @@ extension WaveformView {
                         )
                         Toggle("", isOn: $wavelet.config.detrend)
                             .labelsHidden()
-                    }
-                    GridRow {
+
                         ArtifactTemplateFieldLabel(
                             title: "Downsample",
                             help: "Runs the wavelet pass on a decimated copy, then upsamples the removed-artifact estimate back to full rate before subtracting. Both modes default to Full rate, matching HAPPE — decimating distorts exactly the sharp transients being removed. Opt in only if the recording is very high-rate and reduction is too slow."
                         )
+                        .gridColumnAlignment(.leading)
                         Picker("", selection: $wavelet.config.downsampleFactor) {
                             ForEach(downsampleFactorOptions(for: input.samplingRate), id: \.self) { factor in
                                 Text(downsampleFactorLabel(factor: factor, rate: input.samplingRate)).tag(factor)
                             }
                         }
-                        .labelsHidden().frame(width: 150)
+                        .labelsHidden().frame(width: 130)
                     }
                     GridRow {
                         ArtifactTemplateFieldLabel(
@@ -242,15 +269,36 @@ extension WaveformView {
                         Toggle("", isOn: $wavelet.config.useGPU)
                             .labelsHidden()
                             .disabled(!WaveletMetalBackend.isAvailable)
-                    }
-                    GridRow {
+
                         ArtifactTemplateFieldLabel(
                             title: "CPU cores",
                             help: "How many channels are wavelet-reduced in parallel when running on the CPU (ignored while Use GPU is on). Turn this down if the reduction is competing with other work on the Mac; raise it (up to the maximum) to finish faster on a dataset with many channels."
                         )
+                        .gridColumnAlignment(.leading)
                         Stepper("\(wavelet.coreCount) of \(WaveletReducer.maximumCoreCount)", value: $wavelet.coreCount, in: 1...WaveletReducer.maximumCoreCount)
-                            .frame(width: 140)
+                            .frame(width: 130)
                             .disabled(wavelet.config.useGPU && WaveletMetalBackend.isAvailable)
+                    }
+                    GridRow {
+                        ArtifactTemplateFieldLabel(
+                            title: "Analysis range",
+                            help: "Limits the reduction to a span of the recording. Samples outside it are passed through untouched, and the quality metrics and the found-changes list are both scoped to the span. Use it to exclude a contaminated stretch — a filter transient or amplifier step in the last few seconds, say — which would otherwise dominate the variance-retained figure and fill the changes list with one giant event."
+                        )
+                        HStack(spacing: 8) {
+                            Text(wavelet.analysisRangeSummary(durationSeconds: waveletRecordingDuration(input)))
+                                .font(.callout.monospacedDigit())
+                                .foregroundStyle(wavelet.config.analysisStartSeconds == nil && wavelet.config.analysisEndSeconds == nil ? .secondary : .primary)
+                            Button("Advanced…") {
+                                wavelet.syncAdvancedRangeText()
+                                wavelet.advancedRangeMessage = nil
+                                wavelet.showsAdvancedRange = true
+                            }
+                            .controlSize(.small)
+                            .popover(isPresented: $wavelet.showsAdvancedRange, arrowEdge: .trailing) {
+                                waveletAnalysisRangePopover(input: input)
+                            }
+                        }
+                        .gridCellColumns(3)
                     }
                 }
                 .font(.callout)
@@ -358,6 +406,74 @@ extension WaveformView {
     func downsampleFactorLabel(factor: Int, rate: Double) -> String {
         let decimatedRate = Int((rate / Double(max(factor, 1))).rounded())
         return factor == 1 ? "Full (\(decimatedRate) Hz)" : "\(decimatedRate) Hz"
+    }
+
+    /// The frequency floor the skipped levels sit above, so the stepper reads
+    /// as a band rather than as a bare count.
+    func waveletSkippedLevelSummary(input: MFFSignalData) -> String {
+        let skipped = wavelet.config.skippedFineLevels
+        guard skipped > 0, input.samplingRate > 0 else { return "none" }
+        let floorHz = input.samplingRate / Double(1 << (skipped + 1))
+        return String(format: "above %.1f Hz", floorHz)
+    }
+
+    /// Start/end fields for the analysis span. Blank means "unbounded on that
+    /// side", so trimming a tail is just a value in End.
+    @ViewBuilder
+    func waveletAnalysisRangePopover(input: MFFSignalData) -> some View {
+        let duration = waveletRecordingDuration(input)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Analysis Range")
+                .font(.headline)
+            Text(String(format: "Recording is %.1f s. Leave a field blank for the recording's own start or end.", duration))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("Start (s)")
+                    TextField("0", text: $wavelet.advancedRangeStartText)
+                        .frame(width: 100)
+                }
+                GridRow {
+                    Text("End (s)")
+                    TextField(String(format: "%.1f", duration), text: $wavelet.advancedRangeEndText)
+                        .frame(width: 100)
+                }
+            }
+            .font(.callout)
+
+            if let message = wavelet.advancedRangeMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Button("Trim last 5 s") {
+                    wavelet.advancedRangeEndText = String(format: "%g", max(duration - 5, 0))
+                    wavelet.advancedRangeMessage = nil
+                }
+                .controlSize(.small)
+                Button("Full recording") {
+                    wavelet.clearAdvancedRange()
+                    wavelet.advancedRangeMessage = nil
+                }
+                .controlSize(.small)
+                Spacer()
+                Button("Apply") {
+                    let message = wavelet.commitAdvancedRange(durationSeconds: duration)
+                    wavelet.advancedRangeMessage = message
+                    if message == nil { wavelet.showsAdvancedRange = false }
+                }
+                .keyboardShortcut(.defaultAction)
+                .controlSize(.small)
+            }
+        }
+        .padding(16)
+        .frame(width: 320)
     }
 
     var selectedWaveletCandidate: WaveletReductionCandidate? {
@@ -705,7 +821,9 @@ extension WaveformView {
 
                     ArtifactTemplateFieldLabel(
                         title: "Model",
-                        help: "Universal uses a robust MAD threshold per level. BayesShrink adapts each level's threshold from estimated noise and signal variance."
+                        help: """
+                        How each level's detection gate is chosen. Universal — \(WaveletCleaningThresholdModel.robustUniversal.summary) Empirical Bayes — \(WaveletCleaningThresholdModel.empiricalBayes.summary) BayesShrink adapts each level's threshold from estimated noise and signal variance.
+                        """
                     )
                     Picker("Model", selection: $waveletExplorer.thresholdModel) {
                         ForEach(WaveletCleaningThresholdModel.allCases) { model in

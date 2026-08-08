@@ -10,6 +10,34 @@ This file is not a substitute for legal review. Entries marked "no known
 license" should be treated as attribution-only until the upstream copyright
 holder grants explicit redistribution terms or the EVA code is replaced.
 
+## Copyleft components
+
+**EVA currently incorporates no copyleft-licensed code.** Every entry below is
+permissively licensed (BSD, Apache, MIT), attribution-only pending upstream
+terms, or a literature citation with no code copied.
+
+If that changes, section 3 of `LICENSE` governs, and this convention applies:
+
+- A file that carries copyleft-licensed material gets an
+  `SPDX-License-Identifier` in its header naming the applicable license, and an
+  entry in this file. A file with no such marker is Government-authored and
+  carries no license conditions.
+- Copyleft terms can govern the distribution of EVA as a whole, not just the
+  covered files. Adding such a component is a decision about how the whole
+  application is distributed, so make it deliberately.
+- Marking a Government-authored file with a copyleft identifier does not make it
+  copyleft — a public work has no copyright for a license to attach to. Mark
+  only files that actually carry third-party material.
+
+Reimplementing a published method from a paper does not create a license
+obligation, even when the reference implementation is copyleft. Copying or
+translating that implementation's code does. EVA replicates methods from several
+GPL-licensed toolboxes (HAPPE, EEGLAB) on the literature-only basis recorded at
+the end of this file.
+
+Never take a reference implementation from a proprietary source. See
+`docs/empirical-bayes-port.md` for the constraints that apply to one such case.
+
 ## MNE-Python
 
 - EVA files:
@@ -274,7 +302,8 @@ concern. The corresponding source-file headers carry the same references.
 ### Wavelet-thresholded artifact reduction and denoising
 
 - EVA files: `EVA/Wavelet/WaveletReducer.swift`,
-  `EVA/Wavelet/WaveletDenoiser.swift`
+  `EVA/Wavelet/WaveletDenoiser.swift`,
+  `EVA/Wavelet/EmpiricalBayesThreshold.swift`
 - References:
   - Gabard-Durnam LJ, Mendez Leal AS, Wilkinson CL, Levin AR. The Harvard
     Automated Processing Pipeline for Electroencephalography (HAPPE).
@@ -282,3 +311,21 @@ concern. The corresponding source-file headers carry the same references.
     rejection; the reduction engine mirrors HAPPE's `wdenoise`-based method)
   - Donoho DL, Johnstone IM. Ideal spatial adaptation by wavelet shrinkage.
     Biometrika (1994), 81(3): 425-455. (VisuShrink / SureShrink thresholds)
+  - Johnstone IM, Silverman BW. Empirical Bayes selection of wavelet
+    thresholds. The Annals of Statistics (2005), 33(4): 1700-1752.
+    (`EmpiricalBayesThreshold` — the estimator behind `wdenoise`'s
+    `'DenoisingMethod','Bayes'`, and therefore behind HAPPE's threshold choice.
+    Written from the paper's §2.2-2.3: the quasi-Cauchy marginal, the
+    marginal-maximum-likelihood score, and the posterior-median threshold. The
+    two algebraic reductions the file actually evaluates are derived in its
+    header.)
+
+  The authors also publish an R package, **EbayesThresh** (CRAN, GPL >= 2). It
+  is **not** incorporated, linked, or ported — no copyleft obligation attaches
+  to EVA. It is used only as an external oracle at development time:
+  `Tools/generate_ebayes_reference.R` runs it and records its printed numbers
+  into `EVATests/Fixtures/ebayes-thresh-reference.json`, which
+  `EVATests/Wavelet/EmpiricalBayesThresholdTests.swift` compares the Swift
+  against. Running a program and comparing outputs creates no derivative work,
+  and nothing of the package ships. If a comparison ever fails, fix the Swift
+  against the paper — do not port from the package.

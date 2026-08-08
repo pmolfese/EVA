@@ -1,23 +1,77 @@
-EVA Public Work Notice
+EVA License and Public Work Notice
 
-Unless otherwise stated in a specific file or third-party notice, EVA was
-developed by P. Molfese, National Institutes of Health (NIH), as part of
-official duties for the United States Government.
+This notice is not a substitute for legal review. Questions about redistributing
+EVA, or about combining it with licensed third-party code, should go to the
+appropriate NIH technology transfer or software release office.
 
-This software is a "work of the United States Government" under 17 U.S.C.
-§ 105 and is not subject to copyright protection within the United States.
+
+1. EVA's own code
+
+Unless otherwise stated in a specific file or in THIRD_PARTY_NOTICES.md, EVA was
+developed by P. Molfese, National Institutes of Health (NIH), as part of official
+duties for the United States Government.
+
+This software is a "work of the United States Government" under 17 U.S.C. § 105
+and is not subject to copyright protection within the United States.
 International copyright protections may apply.
 
 To the extent that any rights can be asserted by the United States Government,
-the Government makes EVA available for public use, copying, modification, and
-redistribution without fee or copyright restriction.
+the Government makes its own contributions to EVA available for public use,
+copying, modification, and redistribution without fee or copyright restriction.
+
+Nothing elsewhere in this notice narrows that grant. The Government-authored
+files remain a public work in their own right: they may be extracted from EVA
+and reused under no conditions at all, whatever license governs the assembled
+application.
+
+
+2. Third-party components
+
+EVA incorporates, adapts, or redistributes third-party software, models, data,
+and documentation that are subject to their own licenses and attribution
+requirements. Those licenses govern those components.
+
+The United States Government cannot and does not waive, grant, or modify rights
+held by third parties. Where a third-party license imposes conditions —
+attribution, notice retention, source availability, or copyleft — those
+conditions apply in full to the covered material.
+
+Per-file headers carry local attribution. THIRD_PARTY_NOTICES.md collects the
+corresponding notices and identifies which EVA files are affected.
+
+
+3. Copyleft components, and EVA as a whole
+
+Some third-party components may be licensed under the GNU General Public License
+or another copyleft license. Copyleft terms reach beyond the covered files: where
+such a component is incorporated into a build, that license governs the covered
+component and may govern the distribution of EVA as a whole, in both source and
+binary form.
+
+Where that is the case:
+
+  - The covered files are marked with an SPDX-License-Identifier in their header
+    and are listed in THIRD_PARTY_NOTICES.md. Files that do not carry such a
+    marker are Government-authored and fall under section 1.
+
+  - EVA as distributed is offered under the terms of the applicable copyleft
+    license, and the corresponding source is made available as that license
+    requires.
+
+  - Section 1 still holds for the Government-authored files themselves. A public
+    work imposes no conditions, so it combines with copyleft-licensed code
+    without conflict; the conditions come from the third-party license, not from
+    the Government's contribution.
+
+At the time of writing, EVA incorporates no copyleft-licensed code. This section
+states the terms that apply if and when it does, so that the intent is recorded
+in advance rather than settled after the fact.
+
+
+4. Warranty and liability
 
 EVA is provided "as is", without warranty of any kind, express or implied,
 including but not limited to warranties of merchantability, fitness for a
 particular purpose, and noninfringement. In no event shall the United States
 Government, NIH, or the contributors be liable for any claim, damages, or other
 liability arising from use of EVA.
-
-Third-party software, models, data, examples, and documentation may be subject
-to their own licenses or attribution requirements. See THIRD_PARTY_NOTICES.md
-and any notices distributed with those materials.

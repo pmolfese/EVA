@@ -1485,6 +1485,14 @@ nonisolated enum WaveletArtifactAnalyzer {
             universalThreshold = rmsValue > 0 ? rmsValue * 2.5 : 0
         }
 
+        if model == .empiricalBayes {
+            // Same fallback rule as `WaveletReducer.coefficientThreshold`: a
+            // gate of 0 means "no estimate", not "gate everything".
+            let gate = EmpiricalBayesThreshold.threshold(
+                for: values.map(Double.init), populationCount: populationCount ?? values.count)
+            return gate > 0 ? Float(gate) : universalThreshold
+        }
+
         guard model == .bayesShrink, sigma > 1e-12 else {
             return universalThreshold
         }

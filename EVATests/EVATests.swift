@@ -145,6 +145,146 @@ struct EVATests {
         #expect(globalPeak < 10 && localPeak < 10, "both should remove the spikes")
     }
 
+    // MARK: - Candidates, analysis range, stopband levels
+
+    /// Builds an artifact-shaped signal: `channelCount` channels that all carry
+    /// the same events at the same times (as a real blink or motion artifact
+    /// does), plus one much larger event at the very end standing in for a
+    /// filter transient.
+    private func artifactSignal(
+        samplingRate: Double = 250,
+        count: Int = 10_000,
+        channelCount: Int = 16,
+        eventSamples: [Int] = [2_000, 4_000, 6_000],
+        tailTransient: Bool = true
+    ) -> MFFSignalData {
+        let channels = (0..<channelCount).map { channel -> [Float] in
+            var trace = [Float](repeating: 0, count: count)
+            for (order, event) in eventSamples.enumerated() {
+                // Amplitude varies by channel so one channel is unambiguously
+                // strongest, and by event so the ranking is deterministic.
+                let amplitude = Float(100 - order * 10) + Float(channel)
+                for k in 0..<80 where event + k < count {
+                    trace[event + k] = amplitude * Float(sin(Double(k) / 80.0 * .pi))
+                }
+            }
+            if tailTransient {
+                for k in 0..<200 where count - 200 + k < count {
+                    trace[count - 200 + k] = 5_000 * Float(k) / 200
+                }
+            }
+            return trace
+        }
+        return SyntheticSignal.make(channels, samplingRate: samplingRate)
+    }
+
+    @Test func candidatesReportDistinctEventsNotOnePerChannel() {
+        let artifact = artifactSignal(tailTransient: false)
+        let candidates = WaveletReducer.findCandidates(
+            artifact: artifact,
+            channelIndices: Array(artifact.data.indices),
+            maxCount: 40
+        )
+
+        // Three events exist, on 16 channels each. The old one-peak-per-channel
+        // behaviour returned 16 rows all describing the single largest event;
+        // the list should now be the three distinct events instead.
+        #expect(candidates.count == 3, "expected 3 distinct events, got \(candidates.count)")
+
+        let peakTimes = candidates.map { $0.peakTimeSeconds }.sorted()
+        for (index, expected) in [8.0, 16.0, 24.0].enumerated() {
+            #expect(abs(peakTimes[index] - expected) < 0.5, "event \(index) at \(peakTimes[index])s, expected ~\(expected)s")
+        }
+    }
+
+    @Test func candidateEdgeMarginSuppressesTailTransient() {
+        let artifact = artifactSignal()   // includes the 5000 µV tail transient
+        let indices = Array(artifact.data.indices)
+        let sampleCount = artifact.data[0].count
+
+        let unguarded = WaveletReducer.findCandidates(
+            artifact: artifact, channelIndices: indices, maxCount: 40)
+        // Without a margin the transient is the top-ranked event, as in the
+        // report that motivated this.
+        #expect(abs((unguarded.first?.peakTimeSeconds ?? 0) - 39.5) < 1.0)
+
+        let margin = WaveletReducer.candidateEdgeMargin(
+            family: .coif4, levelCount: 9, sampleCount: sampleCount)
+        #expect(margin > 0)
+        let guarded = WaveletReducer.findCandidates(
+            artifact: artifact, channelIndices: indices, maxCount: 40,
+            edgeMarginSamples: margin)
+
+        let tailSeconds = Double(sampleCount - margin) / artifact.samplingRate
+        #expect(!guarded.contains { $0.peakTimeSeconds >= tailSeconds },
+                "a candidate was still reported inside the suppressed margin")
+        #expect(guarded.count == 3, "the three real events should remain, got \(guarded.count)")
+    }
+
+    /// At 1000 Hz with a 30 Hz low-pass, levels 1–4 span 31–500 Hz and hold
+    /// nothing; level 5 (15.6–31.25 Hz) straddles the cutoff and must survive.
+    @Test func stopbandLevelCountMatchesTheFilterBand() {
+        #expect(WaveletReductionConfiguration.stopbandLevelCount(samplingRate: 1000, highCutoff: 30) == 4)
+        #expect(WaveletReductionConfiguration.stopbandLevelCount(samplingRate: 250, highCutoff: 100) == 0)
+        #expect(WaveletReductionConfiguration.stopbandLevelCount(samplingRate: 500, highCutoff: 30) == 3)
+        // Degenerate inputs must not produce a negative or nonsensical count.
+        #expect(WaveletReductionConfiguration.stopbandLevelCount(samplingRate: 0, highCutoff: 30) == 0)
+        #expect(WaveletReductionConfiguration.stopbandLevelCount(samplingRate: 1000, highCutoff: 600) == 0)
+    }
+
+    @Test func skippingFineLevelsLeavesHighFrequencyContentAlone() {
+        // Slow content plus sparse spikes. The spikes are broadband, so they
+        // put removable energy into the finest levels — which a band-limited
+        // recording's stopband levels would not legitimately contain. A pure
+        // sinusoid would not work here: it sets its own band's noise floor, so
+        // the universal threshold leaves it alone with or without skipping.
+        let count = 8_000
+        var signal = (0..<count).map { sin(Double($0) * 0.05) * 20 }
+        for spike in stride(from: 500, to: count, by: 900) { signal[spike] += 120 }
+        var config = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: 250)
+        config.levelCount = 6
+        config.useGPU = false
+
+        let (keptAll, _, _) = WaveletReducer.reduceChannel(signal, configuration: config, samplingRate: 250)
+        config.skippedFineLevels = 2
+        let (keptSkipped, artifactSkipped, energies) = WaveletReducer.reduceChannel(
+            signal, configuration: config, samplingRate: 250)
+
+        // Skipped levels must report no removed energy at all.
+        #expect(energies[0] == 0 && energies[1] == 0, "skipped levels still reported removed energy")
+        // And the cleaned trace must retain strictly more of the original.
+        func distance(_ v: [Double]) -> Double {
+            zip(v, signal).reduce(0) { $0 + ($1.0 - $1.1) * ($1.0 - $1.1) }
+        }
+        #expect(distance(keptSkipped) < distance(keptAll), "skipping levels should remove less, not more")
+        #expect(artifactSkipped.count == signal.count)
+    }
+
+    @Test func analysisRangeLeavesExcludedSamplesUntouched() {
+        let signal = artifactSignal(samplingRate: 250, count: 10_000, channelCount: 4)
+        var config = WaveletReductionMode.continuousEEG.defaultConfiguration(samplingRate: 250)
+        config.levelCount = 6
+        config.useGPU = false
+        // Analyse everything except the final 5 s, where the transient lives.
+        config.analysisEndSeconds = 35.0
+
+        let result = WaveletReducer.reduce(
+            signal: signal, channelIndices: Array(signal.data.indices), configuration: config)
+
+        let cutoffSample = Int(35.0 * 250)
+        for channel in signal.data.indices {
+            // Outside the span, cleaned == original and artifact == 0.
+            for index in cutoffSample..<signal.data[channel].count {
+                #expect(result.cleaned.data[channel][index] == signal.data[channel][index],
+                        "ch \(channel) sample \(index) was modified outside the analysis range")
+                #expect(result.artifact.data[channel][index] == 0)
+            }
+            // Inside it, something was actually removed.
+            #expect(result.artifact.data[channel][0..<cutoffSample].contains { $0 != 0 },
+                    "ch \(channel) had nothing removed inside the analysis range")
+        }
+    }
+
     @Test func mffReaderAppliesGCALCalibration() throws {
         let packageURL = try makeMFFPackage()
         defer { try? FileManager.default.removeItem(at: packageURL) }
