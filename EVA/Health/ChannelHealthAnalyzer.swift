@@ -23,6 +23,11 @@
 //  Neuroscience Methods, 192(1), 152-162.
 //  https://doi.org/10.1016/j.jneumeth.2010.07.015
 //
+//  Some UI-facing presets mirror HAPPE/EEGLAB/clean_rawdata behavior. HAPPE and
+//  clean_rawdata reference copies carry GPL-3.0 terms; this analyzer should
+//  remain an independently implemented metric model with paper/spec-level
+//  references only. See docs/copyleft-provenance-plan.md.
+//
 
 import Accelerate
 import Foundation

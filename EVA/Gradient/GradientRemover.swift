@@ -9,9 +9,10 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Swift translation of nimh-sfim/gradient_remover (GradientRemover.py).
-//  Upstream author: Joshua Teves. No upstream license was found; see
-//  THIRD_PARTY_NOTICES.md.
+//  Swift translation/reimagining of nimh-sfim/gradient_remover
+//  (GradientRemover.py). Upstream authors: P. Molfese and Joshua Teves. The
+//  upstream implementation is NIH-authored Government work covered by EVA's
+//  public-work / Government-license provenance; see THIRD_PARTY_NOTICES.md.
 //
 //  Removes MR gradient artifact from simultaneous EEG/fMRI recordings using a
 //  per-TR template: each TR-length segment is linearly detrended, a template is
@@ -26,7 +27,10 @@
 //
 //  MAS/MAR (median-reduced template, with optional regression fit instead of
 //  plain subtraction) are inspired by the same-named methods in `amri_eeg_gac.m`
-//  from the Advanced MRI (AMRI) section, NINDS, NIH MATLAB toolbox
+//  from the Advanced MRI (AMRI) section, NINDS, NIH MATLAB toolbox. The local
+//  AMRI reference copy carries a GPL-3.0 header, but the code is also
+//  Government-authored NINDS/NIH work; EVA treats the GPL marker as a
+//  provenance item to verify, not as copied code incorporated here
 //  (https://amri.ninds.nih.gov/software.html), itself implementing:
 //  Liu Z, de Zwart JA, van Gelderen P, Kuo L-W, Duyn JH. Statistical feature
 //  extraction for artifact removal from concurrent fMRI-EEG recordings.

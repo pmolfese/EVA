@@ -16,6 +16,12 @@
 //  EVA (TREV markers), with the per-volume acquisition optionally subdivided into
 //  per-slice epochs.
 //
+//  Reference implementation licenses: the local FMRIB reference includes GPL-2.0
+//  text; FACET's reference source is GPL-2.0-or-later. This file should be
+//  treated as a software port/reimagining until it is clean-room reimplemented
+//  from the papers and an independently written specification; see
+//  docs/copyleft-provenance-plan.md.
+//
 //  Pipeline per channel: upsample -> align slice epochs (integer + optional
 //  sub-sample) -> average-artifact template -> FACET template-specific
 //  re-alignment -> amplitude-scaled subtraction -> optional OBS residual

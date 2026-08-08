@@ -6,15 +6,18 @@ files include or were implemented with reference to third-party software,
 models, or publications. Those files keep local attribution, and the related
 notices are collected here.
 
-This file is not a substitute for legal review. Entries marked "no known
-license" should be treated as attribution-only until the upstream copyright
+This file is not a substitute for legal review. Entries marked "permission
+pending" should be treated as attribution-only until the upstream copyright
 holder grants explicit redistribution terms or the EVA code is replaced.
 
 ## Copyleft components
 
-**EVA currently incorporates no copyleft-licensed code.** Every entry below is
-permissively licensed (BSD, Apache, MIT), attribution-only pending upstream
-terms, or a literature citation with no code copied.
+**EVA currently intends to incorporate no copyleft-licensed code.** Every entry
+below is permissively licensed (BSD, Apache, MIT), covered by Government-work
+provenance, attribution-only pending upstream terms, or a literature citation
+with no code copied. The remaining port/reimagining items are tracked in
+`docs/copyleft-provenance-plan.md` until they are either clean-room
+reimplemented or explicitly cleared.
 
 If that changes, section 3 of `LICENSE` governs, and this convention applies:
 
@@ -124,7 +127,8 @@ specific language governing permissions and limitations under the License.
 - Upstream license: no repository-level license was found
 - Notice: EVA currently bundles a Core ML conversion of the ICLabel network with
   attribution. Redistribution terms for the upstream model were not identified
-  at review time; explicit permission is being sought.
+  at review time; explicit permission has been requested and EVA is proceeding
+  internally on the premise that permission will be granted before distribution.
 
 EVA bundles a Core ML conversion of the official ICLabel default MatConvNet
 network and implements the corresponding feature preparation path.
@@ -140,14 +144,14 @@ NeuroImage, 198, 181-197 (2019).
 - EVA file: `EVA/Gradient/GradientRemover.swift`
 - Upstream project: https://github.com/nimh-sfim/gradient_remover
 - Upstream source: `src/gradient_remover/GradientRemover.py`
-- Upstream author: Joshua Teves
-- Upstream license: no repository-level license or source-file license was found
-- Notice: treat as attribution/provenance until explicit redistribution terms
-  are obtained or this code is replaced.
+- Upstream authors: P. Molfese and Joshua Teves
+- Upstream license/provenance: NIH-authored Government work, covered by the same
+  Public Use / Government-work licensing posture as EVA.
+- Notice: this is no longer treated as a third-party permission gap.
 
-EVA's MR gradient artifact removal implementation is a Swift translation of the
-upstream template-based gradient remover, with a documented correction to the
-neighboring-TR "after" window.
+EVA's MR gradient artifact removal implementation is a Swift translation and
+reimagining of the upstream template-based gradient remover, with a documented
+correction to the neighboring-TR "after" window.
 
 ## CWL-Webinar / CWRegrTool (carbon-wire-loop regression)
 
@@ -185,8 +189,11 @@ license and is not redistributed with EVA.
 - wAAS/wAAR weighting additionally cites: Goldman RI, Stern JM, Engel J Jr,
   Cohen MS. Acquiring simultaneous EEG and functional MRI. Clinical
   Neurophysiology (2000), 111(11): 1974-1980.
-- Upstream source-file license: the referenced AMRI MATLAB files carry their
-  own license headers.
+- Upstream source-file license/provenance: the referenced AMRI MATLAB files
+  carry GPL-3.0 headers, but they also identify the work as created by Advanced
+  MRI, NINDS, NIH. Treat the GPL marker as a provenance item to verify with the
+  AMRI/NINDS ownership chain, not as a concession that AMRI source code can bind
+  EVA.
 - Notice: EVA does not redistribute or copy AMRI toolbox code in the app.
 
 No code was copied from the AMRI toolbox (MATLAB/EEGLAB functions); EVA's

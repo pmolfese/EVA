@@ -22,9 +22,9 @@
 //  score) and §2.3 (the closed forms for the quasi-Cauchy prior). No code was
 //  derived from, or consulted in, any existing implementation, so the file
 //  carries no third-party licence obligation. The authors' own R package
-//  (EbayesThresh, GPL >= 2) was used solely as an external oracle to check
-//  numeric agreement in `EmpiricalBayesThresholdTests`; running a program to
-//  compare outputs creates no derivative work.
+//  (EbayesThresh, GPL-2.0-or-later / GPL-3.0-or-later) was used solely as an
+//  external oracle to check numeric agreement in `EmpiricalBayesThresholdTests`;
+//  running a program to compare outputs creates no derivative work.
 //
 //  Why this exists: HAPPE's wavelet-thresholding stage calls MATLAB `wdenoise`
 //  with `'DenoisingMethod','Bayes'`, which is this estimator — a sparse mixture

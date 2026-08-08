@@ -38,6 +38,11 @@
 //      continuous family — and bior6.8), the latter giving exact linear
 //      phase, matching HAPPE's actual filters.
 //
+//  Reference implementation license: HAPPE is distributed under GPL-3.0. This
+//  file is intended as an independently written Swift implementation of the
+//  published wavelet-denoising structure and MATLAB `wdenoise` behavior, not a
+//  translation of HAPPE source; see docs/copyleft-provenance-plan.md.
+//
 
 import Foundation
 
