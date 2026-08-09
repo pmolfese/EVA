@@ -412,7 +412,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         report(
             0.05,
             "Wavelet scan configured",
-            "Using \(channels.count) channels, \(waveletWorkerCount(for: channels.count)) wavelet workers, \(String(format: "%.1f", effectiveRate)) Hz effective sampling, \(configuration.cleaningMode.rawValue), intensity \(String(format: "%.2f", configuration.intensity)), \(configuration.waveletFamily.rawValue), \(configuration.thresholdModel.rawValue), \(configuration.thresholdRule.rawValue.lowercased()) thresholding, \(levelCount) levels, and a \(String(format: "%.2f", configuration.thresholdScale))x effective coefficient gate."
+            "Using \(channels.count) channels, \(waveletWorkerCount(for: channels.count)) wavelet workers, \(String(format: "%.1f", effectiveRate)) Hz effective sampling, \(configuration.cleaningMode.displayName), intensity \(String(format: "%.2f", configuration.intensity)), \(configuration.waveletFamily.rawValue), \(configuration.thresholdModel.rawValue), \(configuration.thresholdRule.rawValue.lowercased()) thresholding, \(levelCount) levels, and a \(String(format: "%.2f", configuration.thresholdScale))x effective coefficient gate."
         )
 
         report(0.10, "Resolving channel roles", "Loading net geometry to weight ocular/lateral channel groups for artifact-type classification.")
@@ -538,7 +538,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         report(
             0.04,
             "Wavelet channel-goodness configured",
-            "Scoring \(channels.count) channels with \(configuration.cleaningMode.rawValue), intensity \(String(format: "%.2f", configuration.intensity)), \(configuration.waveletFamily.rawValue), \(configuration.thresholdModel.rawValue), and \(levelCount) levels."
+            "Scoring \(channels.count) channels with \(configuration.cleaningMode.displayName), intensity \(String(format: "%.2f", configuration.intensity)), \(configuration.waveletFamily.rawValue), \(configuration.thresholdModel.rawValue), and \(levelCount) levels."
         )
 
         let data = prepareChannels(

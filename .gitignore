@@ -26,3 +26,19 @@ build/
 .vscode/
 *.swp
 *~
+
+# Local reference and test material. None of it is part of EVA, and some of it
+# is third-party code EVA explicitly does not redistribute — see
+# THIRD_PARTY_NOTICES.md. Ignoring the whole tree rather than naming the
+# copyleft ones individually, because the named list was the dangerous shape:
+# it left the AMRI toolbox, the CWL-Webinar reference, and 1.4 GB of test
+# recordings a `git add .` away from being committed.
+#
+# Dirty-room reviewers keep these locally; see docs/provenance/README.md.
+resources/
+
+# Dirty-room notes quote reference-toolbox internals and must not be committed.
+docs/dirty-room/
+
+# Documentation build output
+site/

@@ -18,7 +18,7 @@
 //      ---
 //      version: 0.1.6
 //      date: 2026-08-08
-//      title: GPU acceleration and HAPPE-parity wavelets
+//      title: GPU acceleration and empirical Bayes wavelets
 //      ---
 //
 //  `version` is required (it is what the list is keyed and sorted by); `date` and

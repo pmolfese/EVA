@@ -99,4 +99,92 @@ struct LinearAlgebraTests {
             }
         }
     }
+
+    // MARK: - Truncated eigen-decomposition
+
+    /// A matrix with a known spectrum, built as `sum lambda_k v_k v_k^T` from an
+    /// orthonormal basis, so the eigenvalues are exactly what was put in.
+    private func matrix(withEigenvalues values: [Double]) -> [[Double]] {
+        let n = values.count
+        // Orthonormal DCT-II basis: cheap to write down and exactly orthogonal.
+        let basis = (0..<n).map { k in
+            (0..<n).map { i -> Double in
+                let scale = (k == 0 ? 1.0 : 2.0) / Double(n)
+                return scale.squareRoot() * cos(.pi * Double(k) * (Double(i) + 0.5) / Double(n))
+            }
+        }
+        var result = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
+        for k in 0..<n {
+            for i in 0..<n {
+                for j in 0..<n {
+                    result[i][j] += values[k] * basis[k][i] * basis[k][j]
+                }
+            }
+        }
+        return result
+    }
+
+    @Test func leadingEigenpairsMatchTheKnownSpectrum() throws {
+        let spectrum = [50.0, 20.0, 9.0, 4.0, 1.0, 0.25, 0.1, 0.01]
+        let a = matrix(withEigenvalues: spectrum)
+        let (values, vectors) = LinearAlgebra.leadingSymmetricEigenpairs(a, count: 3)
+
+        #expect(values.count == 3)
+        #expect(vectors.count == 3)
+        // Descending, and the three largest of what was put in.
+        for (found, expected) in zip(values, [50.0, 20.0, 9.0]) {
+            #expect(abs(found - expected) < 1e-8, "eigenvalue \(found) vs \(expected)")
+        }
+        for vector in vectors {
+            #expect(abs(LinearAlgebra.dot(vector, vector) - 1) < 1e-9)
+        }
+        #expect(abs(LinearAlgebra.dot(vectors[0], vectors[1])) < 1e-9)
+        #expect(abs(LinearAlgebra.dot(vectors[0], vectors[2])) < 1e-9)
+    }
+
+    /// The point of the truncated path: it must agree with the full
+    /// decomposition, not merely be plausible. Signs are arbitrary, so the
+    /// comparison is on the eigenvalues and on `A v = lambda v`.
+    @Test func leadingEigenpairsAgreeWithTheFullDecomposition() {
+        let a = matrix(withEigenvalues: (0..<12).map { 100.0 / Double($0 + 1) })
+        let full = LinearAlgebra.symmetricEigenDecomposition(a)
+        let leading = LinearAlgebra.leadingSymmetricEigenpairs(a, count: 4)
+
+        // The full solver returns ascending values; the leading ones are last.
+        let expected = full.values.suffix(4).reversed()
+        for (found, want) in zip(leading.values, expected) {
+            #expect(abs(found - want) < 1e-8, "\(found) vs \(want)")
+        }
+        for (index, vector) in leading.vectors.enumerated() {
+            let product = (0..<a.count).map { row in
+                LinearAlgebra.dot(a[row], vector)
+            }
+            for row in 0..<a.count {
+                #expect(abs(product[row] - leading.values[index] * vector[row]) < 1e-7,
+                        "A v != lambda v at component \(index) row \(row)")
+            }
+        }
+    }
+
+    @Test func leadingEigenpairsHandleDegenerateRequests() {
+        let a = [[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]
+        #expect(LinearAlgebra.leadingSymmetricEigenpairs(a, count: 0).values.isEmpty)
+        #expect(LinearAlgebra.leadingSymmetricEigenpairs(a, count: -1).values.isEmpty)
+        #expect(LinearAlgebra.leadingSymmetricEigenpairs([], count: 2).values.isEmpty)
+        // Asking for more than the matrix has returns everything, not a failure.
+        #expect(LinearAlgebra.leadingSymmetricEigenpairs(a, count: 9).values.count == 3)
+        // A ragged matrix is rejected rather than read out of bounds.
+        #expect(LinearAlgebra.leadingSymmetricEigenpairs([[1.0, 2.0], [3.0]], count: 1).values.isEmpty)
+    }
+
+    @Test func leadingEigenpairsOfARankDeficientMatrix() {
+        // Rank 2 in a 5x5: the trailing eigenvalues are zero and must not be
+        // mistaken for the leading ones.
+        let a = matrix(withEigenvalues: [7.0, 3.0, 0, 0, 0])
+        let (values, _) = LinearAlgebra.leadingSymmetricEigenpairs(a, count: 3)
+        #expect(values.count == 3)
+        #expect(abs(values[0] - 7) < 1e-9)
+        #expect(abs(values[1] - 3) < 1e-9)
+        #expect(abs(values[2]) < 1e-9)
+    }
 }

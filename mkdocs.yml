@@ -1,0 +1,59 @@
+site_name: EVA User Manual
+site_description: User manual and tutorials for EVA, the Electrophysiology Viewer and Analysis app.
+site_url: https://pmolfese.github.io/EVA/
+repo_url: https://github.com/pmolfese/EVA
+repo_name: pmolfese/EVA
+docs_dir: docs/manual
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.tabs
+    - toc.follow
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: teal
+      accent: deep orange
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - User Guide:
+      - Overview: user-guide/overview.md
+      - Getting Started: user-guide/getting-started.md
+      - Importing Data: user-guide/importing-data.md
+      - Viewing Recordings: user-guide/viewing-recordings.md
+      - Channels And Sensor Layouts: user-guide/channels.md
+      - Filtering And Referencing: user-guide/filtering.md
+      - Artifact Review And Cleaning: user-guide/artifacts.md
+      - ICA: user-guide/ica.md
+      - Epochs And Averages: user-guide/epoching.md
+      - Health Scoring: user-guide/health-scoring.md
+      - Exporting Results: user-guide/exporting.md
+  - Tutorials:
+      - Tutorial Overview: tutorials/index.md
+      - Open And Inspect A Recording: tutorials/open-and-inspect.md
+      - Mark And Interpolate Bad Channels: tutorials/bad-channels.md
+      - Filter, Epoch, And Average: tutorials/filter-epoch-average.md
+      - Review Health Scores: tutorials/review-health-scores.md
+  - Reference:
+      - Supported Formats: reference/supported-formats.md
+      - Processing Concepts: reference/processing-concepts.md
+      - Troubleshooting: reference/troubleshooting.md
+      - Glossary: reference/glossary.md
+  - Contributor Notes:
+      - Writing With An LLM: contributor-guide/llm-docs-workflow.md
+      - Documentation Maintenance: contributor-guide/documentation-maintenance.md

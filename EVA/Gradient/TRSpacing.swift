@@ -22,7 +22,7 @@ nonisolated struct TRSpacingInfo: Sendable {
     let intervalsSamples: [Int]
     let samplingRate: Double
     /// Max allowed deviation (in samples) from the median before markers are
-    /// considered unevenly spaced. Mirrors `GradientRemover`'s spacingTolerance.
+    /// considered unevenly spaced.
     let toleranceSamples: Int
 
     var triggerCount: Int { intervalsSamples.count + (intervalsSamples.isEmpty ? 0 : 1) }

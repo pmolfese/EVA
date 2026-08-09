@@ -16,7 +16,7 @@ holder grants explicit redistribution terms or the EVA code is replaced.
 below is permissively licensed (BSD, Apache, MIT), covered by Government-work
 provenance, attribution-only pending upstream terms, or a literature citation
 with no code copied. The remaining port/reimagining items are tracked in
-`docs/copyleft-provenance-plan.md` until they are either clean-room
+`docs/provenance/copyleft-plan.md` until they are either clean-room
 reimplemented or explicitly cleared.
 
 If that changes, section 3 of `LICENSE` governs, and this convention applies:
@@ -34,12 +34,13 @@ If that changes, section 3 of `LICENSE` governs, and this convention applies:
 
 Reimplementing a published method from a paper does not create a license
 obligation, even when the reference implementation is copyleft. Copying or
-translating that implementation's code does. EVA replicates methods from several
-GPL-licensed toolboxes (HAPPE, EEGLAB) on the literature-only basis recorded at
-the end of this file.
+translating that implementation's code does. EVA implements published methods
+that also appear in several GPL-licensed toolboxes (HAPPE, EEGLAB) on the
+literature-only / functional-specification basis recorded at the end of this
+file.
 
 Never take a reference implementation from a proprietary source. See
-`docs/empirical-bayes-port.md` for the constraints that apply to one such case.
+`docs/provenance/empirical-bayes-port.md` for the constraints that apply to one such case.
 
 ## MNE-Python
 
@@ -196,12 +197,63 @@ license and is not redistributed with EVA.
   EVA.
 - Notice: EVA does not redistribute or copy AMRI toolbox code in the app.
 
+EVA's MAS/MAR/wAAS/wAAR were re-grounded through the clean-room process in
+`EVA/Gradient/LocalTemplateArtifactCorrector.swift`, written from
+`docs/provenance/amri-functional-spec.md`. Track record and
+status: `docs/provenance/README.md`.
+
 No code was copied from the AMRI toolbox (MATLAB/EEGLAB functions); EVA's
 MAS/MAR (gradient and BCG) and wAAS/wAAR (BCG) are original Swift
 implementations of the same concepts — a median- or exponentially-weighted
 local template built from a moving window of neighboring TRs/events, optionally
 scaled by a least-squares fit (`k = dot(y, template) / dot(y, y)`, matching the
 AMRI toolbox's fit direction) before subtracting.
+
+## FMRIB FASTR / FACET / BERGEN — gradient-artifact correction
+
+- EVA files: `EVA/Gradient/GradientTemplateCorrector.swift` and the
+  supporting files in the same directory (`GradientAcceleration.swift`,
+  `GradientMetalBackend.swift`, `GradientCleanroomKernels.metal`,
+  `GradientEpochLayout.swift`, `GradientEpochAligner.swift`,
+  `GradientDonorSelection.swift`, `GradientSincResampler.swift`,
+  `GradientOBS.swift`, `GradientFilters.swift`, `GradientANC.swift`,
+  `GradientCorrectionTypes.swift`)
+- References:
+  - Niazy RK, Beckmann CF, Iannetti GD, Brady JM, Smith SM. Removal of FMRI
+    environment artifacts from EEG data using optimal basis sets. NeuroImage
+    (2005), 28(3): 720-737.
+  - Moosmann M, Schonfelder VH, Specht K, Scheeringa R, Nordby H, Hugdahl K.
+    Realignment parameter-informed artefact correction for simultaneous
+    EEG-fMRI recordings. NeuroImage (2009), 45(4): 1144-1150.
+  - van der Meer JN, Tijssen MAJ, Bour LJ, van Rootselaar AF, Nederveen AJ.
+    Robust EMG-fMRI artifact reduction for motion (FARM). Clinical
+    Neurophysiology (2010), 121(5): 766-776.
+  - Glaser J, Beisteiner R, Bauer H, Fischmeister FPS. FACET - a "Flexible
+    Artifact Correction and Evaluation Toolbox" for concurrently recorded
+    EEG/fMRI data. BMC Neuroscience (2013), 14: 138.
+
+EVA implements the FASTR family through a documented dirty-room / clean-room
+process. The implementation was written from the published papers, public method
+descriptions, and EVA-owned functional specifications
+(`docs/provenance/fastr-functional-spec.md`), by an implementer who did not
+read the reference toolboxes or EVA's earlier ported implementation. FMRIB FASTR,
+FACET, and BERGEN are cited as historical and scientific references; **their
+source code is not incorporated.**
+
+- Clean-room specification: `docs/provenance/fastr-functional-spec.md`
+- Audit log: `docs/provenance/fastr-audit-log.md`
+- GPU port plan and measured parity: `docs/provenance/fastr-gpu-port-plan.md`
+- Validation: `EVATests/Gradient/` — spec-derived acceptance tests, the
+  end-to-end suites parameterised over the CPU and Metal backends, and
+  `GradientBackendParityTests.swift`, which asserts the two backends agree
+  exactly on every discrete decision and within a documented numerical tolerance.
+- Dirty-room behavioral validation against EVA's earlier ported implementation
+  passed on 2026-08-09, after which that implementation and its tests were
+  deleted. The one-shot comparison artifact was deleted with them; it was
+  validation material, never implementation guidance.
+
+The non-distributed reference trees under `resources/` are reference copies only,
+and are off-limits to clean-room work on this method.
 
 ## Perrin et al. Spherical Spline Method
 
@@ -315,17 +367,25 @@ concern. The corresponding source-file headers carry the same references.
   - Gabard-Durnam LJ, Mendez Leal AS, Wilkinson CL, Levin AR. The Harvard
     Automated Processing Pipeline for Electroencephalography (HAPPE).
     Frontiers in Neuroscience (2018), 12: 97. (wavelet-thresholded artifact
-    rejection; the reduction engine mirrors HAPPE's `wdenoise`-based method)
+    rejection; cited for pipeline/configuration context. HAPPE source code is
+    not incorporated.)
   - Donoho DL, Johnstone IM. Ideal spatial adaptation by wavelet shrinkage.
     Biometrika (1994), 81(3): 425-455. (VisuShrink / SureShrink thresholds)
   - Johnstone IM, Silverman BW. Empirical Bayes selection of wavelet
     thresholds. The Annals of Statistics (2005), 33(4): 1700-1752.
-    (`EmpiricalBayesThreshold` — the estimator behind `wdenoise`'s
-    `'DenoisingMethod','Bayes'`, and therefore behind HAPPE's threshold choice.
+    (`EmpiricalBayesThreshold` — the estimator behind `wdenoise`'s documented
+    `'DenoisingMethod','Bayes'` behavior, which HAPPE selects in its pipeline.
     Written from the paper's §2.2-2.3: the quasi-Cauchy marginal, the
     marginal-maximum-likelihood score, and the posterior-median threshold. The
     two algebraic reductions the file actually evaluates are derived in its
     header.)
+
+  HAPPE compliance note: EVA cites HAPPE only as a scientific reference and as
+  historical context for public pipeline choices such as wavelet family,
+  decomposition levels, threshold rule, MATLAB `wdenoise` option names, and
+  subtraction semantics. HAPPE code, scripts, folder structure, tests, fixtures,
+  and documentation are not incorporated into EVA. The local `resources/HAPPE`
+  tree is a non-distributed reference copy only.
 
   The authors also publish an R package, **EbayesThresh** (CRAN, GPL >= 2). It
   is **not** incorporated, linked, or ported — no copyleft obligation attaches

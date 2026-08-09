@@ -851,7 +851,7 @@ nonisolated enum ArtifactCleaner {
     ///
     /// Each channel is corrected independently (its template only ever draws
     /// on that same channel's own neighboring epochs), so channels are
-    /// processed across all CPU cores, mirroring `GradientRemover.correct`.
+    /// processed across all CPU cores.
     /// The donor-event plan is built per channel because optional AMRI
     /// preprocessing can shift/drop windows differently for each channel.
     private static func applyLocalTemplate(
@@ -888,7 +888,7 @@ nonisolated enum ArtifactCleaner {
 
         data.withUnsafeMutableBufferPointer { out in
             // Each iteration writes a distinct index, so concurrent writes
-            // don't overlap; same pattern as `GradientRemover.correct`.
+            // don't overlap.
             nonisolated(unsafe) let out = out
             evaConcurrentPerform(iterations: channels.count) { index in
                 guard !Task.isCancelled else { return }

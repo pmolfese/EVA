@@ -31,7 +31,7 @@ extension WaveformView {
     }
 
     /// The mode's defaults, plus the stopband-level count implied by the
-    /// filter step's low-pass cutoff. HAPPE's level table is keyed to the
+    /// filter step's low-pass cutoff. HAPPE's public level defaults are keyed to the
     /// sampling rate alone, which on band-limited data leaves the finest
     /// levels sitting entirely above the cutoff with nothing in them but
     /// roll-off residue — see `WaveletReductionConfiguration.skippedFineLevels`.

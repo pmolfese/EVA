@@ -26,11 +26,12 @@
 //  external oracle to check numeric agreement in `EmpiricalBayesThresholdTests`;
 //  running a program to compare outputs creates no derivative work.
 //
-//  Why this exists: HAPPE's wavelet-thresholding stage calls MATLAB `wdenoise`
-//  with `'DenoisingMethod','Bayes'`, which is this estimator — a sparse mixture
-//  prior fitted per level by marginal maximum likelihood — and *not* BayesShrink
-//  despite the shared word. The two adapt in opposite directions on
-//  artifact-laden EEG; see `WaveletReducer`'s header.
+//  Why this exists: a common reference pipeline, HAPPE, selects MATLAB
+//  `wdenoise` with `'DenoisingMethod','Bayes'`, whose documented behavior maps
+//  to this estimator — a sparse mixture prior fitted per level by marginal
+//  maximum likelihood — and *not* BayesShrink despite the shared word. The two
+//  adapt in opposite directions on artifact-laden EEG; see `WaveletReducer`'s
+//  header. HAPPE source code is not incorporated or translated here.
 //
 //  ── The estimator ─────────────────────────────────────────────────────────
 //  Each detail coefficient is modelled as z = µ + ε, ε ~ N(0,1) after dividing

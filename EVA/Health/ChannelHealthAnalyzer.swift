@@ -13,10 +13,12 @@
 //  metrics model first: the feature/result shape can later feed a trained Core
 //  ML ranker, while today's UI already has useful reasons for every score.
 //
-//  Several channel-quality features (variance, correlation with neighbors,
-//  Hurst exponent, heavy-tailed/kurtosis pops) follow the channel statistics
-//  used by FASTER. They are original Swift implementations of the published
-//  metrics.
+//  Several channel-quality features (amplitude/variance typicality, neighbor
+//  agreement, heavy-tailed/kurtosis pops) are conceptually aligned with
+//  bad-channel statistics described by FASTER. They are original Swift
+//  implementations from paper/spec-level metric definitions; local FASTER
+//  source under resources/HAPPE/... is reference material only and is not
+//  incorporated here.
 //
 //  Reference: Nolan, H., Whelan, R., & Reilly, R. B. (2010). FASTER: Fully
 //  Automated Statistical Thresholding for EEG artifact Rejection. Journal of
@@ -26,7 +28,7 @@
 //  Some UI-facing presets mirror HAPPE/EEGLAB/clean_rawdata behavior. HAPPE and
 //  clean_rawdata reference copies carry GPL-3.0 terms; this analyzer should
 //  remain an independently implemented metric model with paper/spec-level
-//  references only. See docs/copyleft-provenance-plan.md.
+//  references only. See docs/provenance/copyleft-plan.md.
 //
 
 import Accelerate

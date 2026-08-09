@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  L4 store for the wavelet-reduction (HAPPE-style) pipeline stage, extracted
+//  L4 store for the wavelet-reduction pipeline stage, extracted
 //  from WaveformView (REFACTOR.md slice 3). State-ownership extraction: the
 //  store holds the domain's parameters, run state, and reduced outputs;
 //  WaveformView still drives the reduction orchestration.
@@ -24,8 +24,11 @@ final class WaveletReductionViewModel {
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
 
-    init(store: RecordingStore) {
+    init(store: RecordingStore, defaults: ProcessingDefaults = .shared) {
         self.store = store
+        // The backend is a global preference, not a per-run control. It still
+        // falls back to the CPU on its own when no Metal device is present.
+        config.useGPU = defaults.waveletUsesGPU && WaveletMetalBackend.isAvailable
     }
 
     // MARK: Results
@@ -251,7 +254,8 @@ final class WaveletReductionViewModel {
     }
 
     /// Variance retained = var(cleaned_band)/var(original_band) over the
-    /// reduced channels, mirroring HAPPE's in-band ERP quality assessment.
+    /// reduced channels, following HAPPE's documented in-band ERP quality
+    /// assessment convention.
     /// Ported from `WaveletReductionSheetViews.bandLimitedVarianceRetained`.
     private nonisolated func bandLimitedVarianceRetained(
         original: MFFSignalData,

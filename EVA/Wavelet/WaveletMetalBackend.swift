@@ -13,7 +13,7 @@
 //  the transform runs here — it's the dominant cost and is perfectly parallel
 //  over (sample x channel). The windowed median/MAD statistics and candidate
 //  extraction stay on the CPU, where sorting and sequential run-walking belong.
-//  Same split as `FastrMetalBackend`: dense kernels on the GPU, algorithmic
+//  Same split as `GradientMetalBackend`: dense kernels on the GPU, algorithmic
 //  choices on the CPU.
 //
 //  Results are float, where the CPU path is double, so the two agree closely

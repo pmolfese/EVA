@@ -37,6 +37,17 @@
 			);
 			target = 77BE28BA2FED64E10080DAF5 /* EVA */;
 		};
+		77BE28E62FED64E40080DAF5 /* Exceptions for "EVATests" folder in "EVATests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Fixtures/.DS_Store,
+				"Fixtures/ebayes-thresh-reference.json",
+				Fixtures/example_1.mfz,
+				Fixtures/example_2.json,
+				"Fixtures/LICENSE-mffpy.txt",
+			);
+			target = 77BE28C72FED64E30080DAF5 /* EVATests */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -50,6 +61,9 @@
 		};
 		77BE28CB2FED64E30080DAF5 /* EVATests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				77BE28E62FED64E40080DAF5 /* Exceptions for "EVATests" folder in "EVATests" target */,
+			);
 			path = EVATests;
 			sourceTree = "<group>";
 		};
@@ -407,7 +421,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20260812;
+				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -422,7 +436,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -445,7 +459,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20260812;
+				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -469,7 +483,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva;
 				PRODUCT_NAME = "$(TARGET_NAME)";

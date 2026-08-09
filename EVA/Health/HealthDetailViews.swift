@@ -737,7 +737,7 @@ struct WaveletRunPopover: View {
                 GridRow {
                     Text("Cleaning mode")
                     Picker("", selection: $cleaningMode) {
-                        ForEach(WaveletCleaningMode.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(WaveletCleaningMode.allCases) { Text($0.displayName).tag($0) }
                     }
                     .labelsHidden()
                     .frame(width: 160)

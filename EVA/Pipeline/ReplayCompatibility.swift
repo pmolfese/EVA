@@ -12,7 +12,7 @@
 //  Compatibility pre-flight (TODO.md Priority 1): checks one recorded step
 //  against a target signal's actual sampling rate / channel count / events,
 //  so an incompatible step is auto-flagged and unchecked in the replay config
-//  pane instead of silently no-oping (or throwing deep inside `GradientRemover`/
+//  pane instead of silently no-oping (or throwing deep inside the gradient/
 //  `EEGSignalFilter`) partway through a run. Same shape as
 //  `RecordingCombiner.compatibility(of:reference:)` (build flags, surface them
 //  in a sanity list), scoped to "does this one step fit this one file" rather

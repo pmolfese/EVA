@@ -80,9 +80,10 @@ struct EVATests {
     }
 
     @Test func reductionWithUniversalThresholdRetainsMostVariance() {
-        // HAPPE-like behavior: on oscillation + sparse large spikes, the
-        // universal-threshold defaults should remove the spikes while keeping
-        // the bulk of the ongoing signal (variance retained well above half).
+        // Expected wavelet-reduction behavior: on oscillation + sparse large
+        // spikes, the universal-threshold defaults should remove the spikes
+        // while keeping the bulk of the ongoing signal (variance retained well
+        // above half).
         var signal = (0..<4000).map { sin(Double($0) * 0.2) + 0.3 * sin(Double($0) * 0.05) }
         for index in stride(from: 100, to: 4000, by: 500) { signal[index] += 25 }
 

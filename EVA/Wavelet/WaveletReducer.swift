@@ -13,15 +13,17 @@
 //  health "burden" scorer, which uses a fast a-trous approximation). This engine
 //  implements real, perfect-reconstruction wavelet transforms — a decimated DWT
 //  and a shift-invariant (undecimated) SWT — so that the artifact estimate it
-//  subtracts is a faithful wavelet reconstruction, in the spirit of HAPPE's
-//  wavelet-thresholded artifact rejection (Gabard-Durnam et al., 2018).
+//  subtracts is a faithful wavelet reconstruction. HAPPE is used here as a
+//  cited pipeline/configuration reference for wavelet-thresholded artifact
+//  rejection (Gabard-Durnam et al., 2018), not as implementation source.
 //
-//  HAPPE parity notes:
+//  Provenance notes:
 //    * HAPPE's default path calls MATLAB `wdenoise` (decimated DWT; bior4.4
 //      continuous / coif4 ERP; 'DenoisingMethod','Bayes' with level-dependent
 //      noise) and SUBTRACTS the denoised reconstruction as the artifact
-//      estimate. This engine mirrors that structure: threshold the detail
-//      coefficients, reconstruct, subtract.
+//      estimate. This engine independently implements the same public
+//      wavelet-denoising workflow: threshold detail coefficients, reconstruct
+//      an artifact estimate, and subtract it.
 //    * MATLAB's 'Bayes' is the Johnstone–Silverman *empirical Bayes* method
 //      (sparse mixture prior), NOT BayesShrink. In this subtract-the-kept-
 //      coefficients paradigm the two adapt in opposite directions: empirical
@@ -33,15 +35,16 @@
 //      threshold model. The robust universal threshold (MAD σ · sqrt(2 ln N))
 //      remains available; it is the upper bound empirical Bayes is fitted
 //      under, and is what a band of pure noise fits to.
-//    * Families include both orthonormal (coif4 — HAPPE's ERP family;
-//      sym4/db4 alternatives) and true biorthogonal (bior4.4 — HAPPE's
-//      continuous family — and bior6.8), the latter giving exact linear
-//      phase, matching HAPPE's actual filters.
+//    * Families include both orthonormal (coif4 — the ERP family selected by
+//      HAPPE; sym4/db4 alternatives) and true biorthogonal (bior4.4 — a
+//      continuous-family option selected by HAPPE — and bior6.8), the latter
+//      giving exact linear phase.
 //
 //  Reference implementation license: HAPPE is distributed under GPL-3.0. This
-//  file is intended as an independently written Swift implementation of the
-//  published wavelet-denoising structure and MATLAB `wdenoise` behavior, not a
-//  translation of HAPPE source; see docs/copyleft-provenance-plan.md.
+//  file is an independently written Swift implementation of public
+//  wavelet-denoising methods and documented MATLAB `wdenoise` behavior. It does
+//  not incorporate or translate HAPPE source, tests, fixtures, or documentation;
+//  see docs/provenance/copyleft-plan.md.
 //
 
 import Foundation
@@ -57,7 +60,7 @@ nonisolated enum WaveletTransformKind: String, CaseIterable, Identifiable, Codab
     var explanation: String {
         switch self {
         case .dwt:
-            return "Decimated discrete wavelet transform — what HAPPE's wdenoise uses. Compact and fast."
+            return "Decimated discrete wavelet transform — the transform used by MATLAB wdenoise. Compact and fast."
         case .swt:
             return "Undecimated (stationary) wavelet transform — shift-invariant, cleaner for visualizing what was removed."
         }
@@ -76,8 +79,8 @@ nonisolated enum WaveletReductionFamily: String, CaseIterable, Identifiable, Cod
     /// The analysis/synthesis filter bank for this family. `coif4`/`sym4`/`db4`
     /// are orthonormal (one filter generates the rest via QMF relations, and
     /// reconstruction reuses the decomposition filters). `bior4.4`/`bior6.8` are
-    /// true biorthogonal spline wavelets — HAPPE's actual continuous (bior6.8,
-    /// with bior4.4 the earlier HAPPE default) and this is what gives them exact
+    /// true biorthogonal spline wavelets — including bior4.4, which HAPPE
+    /// selects for its continuous path — and this is what gives them exact
     /// linear phase (no time-shift distortion from thresholding), unlike the
     /// near-symmetric-but-not-exact orthonormal families.
     var filterBank: WaveletFilterBank {
@@ -105,22 +108,23 @@ nonisolated enum WaveletReductionFamily: String, CaseIterable, Identifiable, Cod
     var explanation: String {
         switch self {
         case .coif4:
-            return "Coiflet-4 — HAPPE's ERP family. Near-symmetric, good time-frequency balance."
+            return "Coiflet-4 — the ERP-family default used by HAPPE. Near-symmetric, good time-frequency balance."
         case .sym4:
             return "Symlet-4 — near-symmetric Daubechies variant, a solid default for continuous EEG."
         case .db4:
             return "Daubechies-4 — compact support, classic choice for transient artifacts."
         case .bior44:
-            return "Biorthogonal 4.4 — HAPPE's continuous-path family (happe_wavThresh). True linear phase (exactly symmetric), unlike the orthonormal families above."
+            return "Biorthogonal 4.4 — the continuous-path default selected by HAPPE. True linear phase (exactly symmetric), unlike the orthonormal families above."
         case .bior68:
             return "Biorthogonal 6.8 — longer support than bior4.4, also exactly linear phase."
         }
     }
 }
 
-/// HAPPE has two wavelet forms: continuous (EEG) and task/event (ERP). The mode
-/// selects sensible defaults (family, levels, threshold rule) and, for ERP,
-/// whether quality is assessed on the band-limited signal.
+/// EVA exposes continuous EEG and task/event ERP wavelet-reduction modes. Their
+/// defaults are informed by HAPPE's published pipeline choices (family, levels,
+/// threshold rule) and, for ERP, whether quality is assessed on the
+/// band-limited signal.
 nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case continuousEEG = "Continuous EEG"
     case erp = "Task / ERP"
@@ -130,14 +134,15 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
     var explanation: String {
         switch self {
         case .continuousEEG:
-            return "HAPPE's continuous path: bior4.4, hard thresholding, whole recording. Only coefficients above the robust per-level threshold are treated as artifact and subtracted."
+            return "Continuous EEG path: bior4.4, hard thresholding, whole recording. Only coefficients above the robust per-level threshold are treated as artifact and subtracted."
         case .erp:
-            return "HAPPE's task/ERP path: coif4 with soft thresholding and an extra level, run at the full sampling rate, with quality assessed within the ERP analysis band."
+            return "Task/ERP path: coif4 with soft thresholding and an extra level, run at the full sampling rate, with quality assessed within the ERP analysis band."
         }
     }
 
     /// Whether reduction quality (variance retained, correlation) is assessed on
-    /// the band-limited signal, as HAPPE does for ERP analyses.
+    /// the band-limited signal, matching HAPPE's documented ERP analysis
+    /// convention.
     var assessesInBand: Bool { self == .erp }
 
     func defaultConfiguration(samplingRate: Double) -> WaveletReductionConfiguration {
@@ -151,7 +156,7 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
                 useGPU: WaveletMetalBackend.isAvailable
             )
         case .erp:
-            // Full rate, like HAPPE. (An earlier default decimated to ~250 Hz,
+            // Full rate by default. (An earlier default decimated to ~250 Hz,
             // but block-averaging down and linearly upsampling the artifact
             // estimate distorts exactly the sharp transients being removed;
             // the Downsample picker remains for users who opt in.)
@@ -182,15 +187,15 @@ nonisolated struct WaveletReductionConfiguration: Sendable {
     /// artifact back to full rate before subtracting.
     var downsampleFactor: Int = 1
     /// Remove each channel's linear trend before the transform, folding it into
-    /// the artifact estimate afterward. HAPPE's approximation band swallows
-    /// drift anyway, so this is parity-neutral — but doing it explicitly keeps
+    /// the artifact estimate afterward. The deepest approximation band tends
+    /// to absorb drift; doing it explicitly keeps
     /// the transform's periodic boundary from reading a start↔end offset as a
     /// large spurious seam artifact (same rationale as the Explorer's
     /// `detrendedForTransform`).
     var detrend: Bool = true
-    /// 0 = one global threshold per level over the whole recording (HAPPE
-    /// parity: wdenoise's level-dependent estimate is a single statistic per
-    /// level). > 0 re-estimates each level's threshold in overlapping windows
+    /// 0 = one global threshold per level over the whole recording, matching
+    /// wdenoise's documented level-dependent estimate as a single statistic per
+    /// level. > 0 re-estimates each level's threshold in overlapping windows
     /// of this many seconds, so a quiet stretch and a noisy stretch each get
     /// their own noise floor — the Explorer's proven local-threshold scheme.
     var thresholdWindowSeconds: Double = 0
@@ -568,8 +573,8 @@ nonisolated enum WaveletReducer {
         }
 
         // Artifact estimate = reconstruction of the thresholded (large) detail
-        // coefficients plus the approximation band — exactly HAPPE's subtracted
-        // "wdenoise" output. Cleaned = original - artifact.
+        // coefficients plus the approximation band — the public wdenoise-style
+        // artifact estimate. Cleaned = original - artifact.
         let artifactDecomposition = WaveletDecomposition(
             approx: decomposition.approx,
             details: artifactDetails,

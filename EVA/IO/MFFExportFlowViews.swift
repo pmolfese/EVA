@@ -404,6 +404,9 @@ extension WaveformView {
     /// settings, not this file's resulting channel/epoch decisions.
     func currentProcessingAuditLogLines() -> [String] {
         var lines: [String] = []
+        // What the gradient run excluded and why. None of this is recoverable
+        // from the corrected samples, so it only exists if it is recorded here.
+        lines.append(contentsOf: gradient.auditLogLines)
         if !epoching.skippedLabeledBadSegmentsSummary.isEmpty {
             lines.append("segment result: skippedLabeledBadSegments=\(epoching.skippedLabeledBadSegmentsSummary.joined(separator: "; "))")
         }

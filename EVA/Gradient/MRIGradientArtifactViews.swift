@@ -75,13 +75,40 @@ extension WaveformView {
                         mriMethodHelp()
                     }
                 }
-                Picker("Method", selection: $gradient.method) {
-                    ForEach(MRIGradientMethod.allCases) { method in
-                        Text(method.label).tag(method)
+                // Two levels rather than one flat list: the tab is the decision
+                // that actually changes the shape of the panel below it, and the
+                // dropdown is the variant within that family.
+                Picker("Family", selection: gradient.categoryBinding) {
+                    ForEach(MRIGradientCategory.allCases) { category in
+                        Text(category.rawValue).tag(category)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+
+                // A retired method is not offered, but it is still shown while
+                // it is the selection — a replay can load one, and a Picker
+                // whose selection is absent from its content renders blank.
+                Picker("Method", selection: $gradient.method) {
+                    ForEach(gradient.selectableMethods) { method in
+                        Text(method.isDeprecated ? "\(method.label) (retired)" : method.label)
+                            .tag(method)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 200, alignment: .leading)
+
+                if let note = gradient.method.deprecationNote {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(note)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -136,42 +163,47 @@ extension WaveformView {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Template Window (neighboring TRs)")
-                    .font(.caption.weight(.semibold))
+            if gradient.method.usesDonorWindow {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Donor Volumes")
+                        .font(.caption.weight(.semibold))
+                    HStack {
+                        TextField("Volumes", value: $gradient.donorVolumes, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Stepper("", value: $gradient.donorVolumes, in: 1...128)
+                            .labelsHidden()
+                        Text("neighbouring volumes")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .help("How many neighbouring volumes contribute to each artifact template, in total. The methods take them from both sides of the target and keep reaching outward at the ends of the recording, so an early or late volume still gets a full set rather than half of one.")
+                }
+            }
+
+            if gradient.method.supportsSliceEpochs {
                 HStack {
-                    Text("Pre")
+                    Text("Slices / volume")
                         .font(.caption)
-                        .frame(width: 36, alignment: .leading)
-                    TextField("Pre", value: $gradient.windowBefore, format: .number)
+                        .frame(width: 96, alignment: .leading)
+                    TextField("Slices", value: $gradient.slicesPerVolume, format: .number)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 70)
-                    Stepper("", value: $gradient.windowBefore, in: 1...64)
+                    Stepper("", value: $gradient.slicesPerVolume, in: 1...128)
                         .labelsHidden()
                 }
-                HStack {
-                    Text("Post")
-                        .font(.caption)
-                        .frame(width: 36, alignment: .leading)
-                    TextField("Post", value: $gradient.windowAfter, format: .number)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                    Stepper("", value: $gradient.windowAfter, in: 1...64)
-                        .labelsHidden()
-                }
+                .help("Number of fMRI slices per volume. Each TR interval is split into this many equal slice epochs.")
             }
 
             let motionLoaded = (gradient.motionParameters?.count ?? 0) >= 2
 
-            if gradient.method == .moosmann, motionLoaded {
-                Text("Using motion: \(gradient.motionParameters?.sourceName ?? "") (\(gradient.motionParameters?.count ?? 0) vols), \(gradient.moosmannMotionMetric.label.lowercased()) metric, threshold \(String(format: "%.2f", gradient.motionFDThreshold)) mm")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if gradient.method.usesMotion, motionLoaded {
+                mriMotionSummary()
             }
 
-            // Optional motion-censoring for AAS/FASTR/FARM (Moosmann censors
-            // intrinsically, so the toggle is hidden there).
-            if motionLoaded, gradient.method != .moosmann {
+            // Optional motion-censoring for every method except Moosmann, which
+            // censors intrinsically, so the toggle is hidden there.
+            if motionLoaded, !gradient.method.usesMotion {
                 Toggle(isOn: $gradient.excludeHighMotion) {
                     Text("Exclude high-motion TRs")
                         .font(.caption)
@@ -185,131 +217,28 @@ extension WaveformView {
                     .help("Apply the selected MRI gradient artifact correction to physio/PNS channels using the same TR markers.")
             }
 
-            if gradient.method == .mas || gradient.method == .mar {
-                Toggle("Use Metal GPU", isOn: $gradient.fastrUseMetal)
-                    .font(.caption)
-                    .disabled(!GradientRemoverMetalBackend.isAvailable)
-                    .help(GradientRemoverMetalBackend.isAvailable
-                          ? "Build median artifact templates and perform subtraction or regression on the GPU. Donor and outlier selection remain on the CPU."
-                          : "No compatible Metal GPU is available; correction will use the CPU.")
-            }
+            mriMethodOptions()
 
-            if gradient.method.isFASTR {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 6) {
-                        Text("FASTR Options")
-                            .font(.caption.weight(.semibold))
-                        Button {
-                            gradient.showsFastrOptionsHelp = true
-                        } label: {
-                            Image(systemName: "questionmark.circle")
-                        }
-                        .buttonStyle(.plain)
-                        .help("About FASTR options")
-                        .popover(isPresented: $gradient.showsFastrOptionsHelp, arrowEdge: .trailing) {
-                            mriFastrOptionsHelp()
-                        }
-                    }
-                    HStack {
-                        Text("Slices / volume")
-                            .font(.caption)
-                            .frame(width: 96, alignment: .leading)
-                        TextField("Slices", value: $gradient.fastrSlices, format: .number)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 70)
-                        Stepper("", value: $gradient.fastrSlices, in: 1...128)
-                            .labelsHidden()
-                    }
-                    .help("Number of fMRI slices per volume. Each TR interval is split into this many slice epochs.")
-                    Toggle("Use Metal GPU", isOn: $gradient.fastrUseMetal)
-                        .font(.caption)
-                        .disabled(!FastrCorrector.isMetalAvailable)
-                        .help(FastrCorrector.isMetalAvailable
-                              ? "Run interpolation, template scaling and subtraction, OBS fitting, and decimation on the GPU. Alignment, OBS PCA, donor selection, and ANC remain on the CPU."
-                              : "No compatible Metal GPU is available; FASTR will use the CPU.")
-                    Toggle("Sub-sample alignment", isOn: $gradient.fastrSubSample)
-                        .font(.caption)
-                        .help("FACET-style fractional-sample epoch alignment.")
-                    Toggle("FACET 30-artifact window", isOn: $gradient.fastrUseFacetWindow)
-                        .font(.caption)
-                        .help("Use FACET's AvgWindow=30 donor rows with border saturation instead of EVA's Pre/Post template window.")
-                    Toggle("OBS residual removal (auto PCs)", isOn: $gradient.fastrOBSAuto)
-                        .font(.caption)
-                        .help("Remove residual artifact via an optimal basis set of residual PCs.")
-                    if gradient.fastrOBSAuto {
-                        HStack(spacing: 6) {
-                            Toggle("Random OBS epoch sampling", isOn: $gradient.fastrOBSRandomSampling)
-                                .font(.caption)
-                                .help("Use FACET's random 2/3 epoch subset when building the OBS PCA matrix. Leave off for reproducible EVA runs.")
-                            Button {
-                                gradient.showsOBSRandomHelp = true
-                            } label: {
-                                Image(systemName: "questionmark.circle")
-                            }
-                            .buttonStyle(.plain)
-                            .help("About random OBS epoch sampling")
-                            .popover(isPresented: $gradient.showsOBSRandomHelp, arrowEdge: .trailing) {
-                                mriOBSRandomHelp()
-                            }
-                        }
-                        HStack(spacing: 6) {
-                            Text("OBS chunk")
-                                .font(.caption)
-                                .frame(width: 96, alignment: .leading)
-                            TextField("Seconds", value: $gradient.fastrOBSChunkSeconds, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 70)
-                            Text("s")
-                                .font(.caption)
+            mriAdvancedOptions()
+
+            if !gradient.auditLogLines.isEmpty {
+                DisclosureGroup(isExpanded: $gradient.showsRunDetails) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(gradient.auditLogLines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.caption2.monospaced())
                                 .foregroundStyle(.secondary)
-                        }
-                        .help("PCA for the optimal basis set is recomputed independently every this many seconds of the recording, matching FASTR's reference implementation (Niazy et al., 2005). Shorter chunks adapt faster to changing artifact shape but use fewer epochs per PCA fit; longer chunks average over more data but assume the artifact stays stable throughout. Default: 60s.")
-                    }
-                    Toggle("Adaptive noise cancellation (ANC)", isOn: $gradient.fastrANC)
-                        .font(.caption)
-                        .help("Apply LMS adaptive noise cancellation after template subtraction.")
-                    if gradient.fastrANC {
-                        HStack(spacing: 6) {
-                            Toggle("Slice-rate ANC high-pass", isOn: $gradient.fastrANCSliceHighPass)
-                                .font(.caption)
-                                .help("Use FACET's 0.75×slice-trigger-rate high-pass for slice-triggered FASTR. Off keeps EVA/FMRIB's fixed 2 Hz cutoff.")
-                            Button {
-                                gradient.showsANCHighPassHelp = true
-                            } label: {
-                                Image(systemName: "questionmark.circle")
-                            }
-                            .buttonStyle(.plain)
-                            .help("About ANC high-pass mode")
-                            .popover(isPresented: $gradient.showsANCHighPassHelp, arrowEdge: .trailing) {
-                                mriANCHighPassHelp()
-                            }
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 6) {
-                            Text("Donor selection")
-                                .font(.caption.weight(.semibold))
-                            Button {
-                                gradient.showsFastrDonorHelp = true
-                            } label: {
-                                Image(systemName: "questionmark.circle")
-                            }
-                            .buttonStyle(.plain)
-                            .help("About FASTR-family donor selection")
-                            .popover(isPresented: $gradient.showsFastrDonorHelp, arrowEdge: .trailing) {
-                                mriFastrDonorHelp()
-                            }
-                        }
-                        Picker("Donor selection", selection: $gradient.fastrDonorSelection) {
-                            ForEach(FastrDonorSelection.allCases) { selection in
-                                Text(selection.label).tag(selection)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .help(gradient.fastrDonorSelection.help)
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+                } label: {
+                    Text("What the last run did")
+                        .font(.caption.weight(.semibold))
                 }
+                .help("Epochs left uncorrected, donors turned away, and stages that stood down. These same lines are written into log_eva_<date>_<time>.txt when the recording is exported.")
             }
 
             Divider()
@@ -330,9 +259,8 @@ extension WaveformView {
             }
 
             HStack {
-                Button("Reset 4 / 4") {
-                    gradient.windowBefore = GradientRemover.Window.default.before
-                    gradient.windowAfter = GradientRemover.Window.default.after
+                Button("Reset \(GradientViewModel.defaultDonorVolumes)") {
+                    gradient.donorVolumes = GradientViewModel.defaultDonorVolumes
                 }
 
                 if gradient.correctedSignal != nil {
@@ -550,195 +478,551 @@ extension WaveformView {
         if gradient.method == .moosmann, !motionUsable {
             return "Moosmann requires a motion file. Load one via Configure Motion… to enable Apply."
         }
-        return "Apply \(gradient.method.rawValue) gradient artifact removal."
+        return "Apply \(gradient.method.label) gradient artifact removal."
     }
 
-    /// Explanation of the AAS vs FASTR choice with references.
+    // MARK: - Small control rows
+
+    /// Kept as small typed helpers rather than inline expressions: a popover
+    /// with this many controls will otherwise blow the SwiftUI type-checker's
+    /// budget, which is what "unable to type-check this expression in
+    /// reasonable time" means when it appears here.
+    func mriIntRow(
+        _ title: String,
+        value: Binding<Int>,
+        range: ClosedRange<Int>,
+        help: String
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .frame(width: 132, alignment: .leading)
+            TextField(title, value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 64)
+            Stepper("", value: value, in: range)
+                .labelsHidden()
+        }
+        .help(help)
+    }
+
+    func mriDoubleRow(
+        _ title: String,
+        value: Binding<Double>,
+        suffix: String = "",
+        help: String
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .frame(width: 132, alignment: .leading)
+            TextField(title, value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 64)
+            if !suffix.isEmpty {
+                Text(suffix)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .help(help)
+    }
+
+    /// Motion source line for Moosmann, assembled outside the view body for the
+    /// same type-checking reason.
+    @ViewBuilder
+    func mriMotionSummary() -> some View {
+        let name = gradient.motionParameters?.sourceName ?? ""
+        let volumes = gradient.motionParameters?.count ?? 0
+        let metric = gradient.motionMetric.label.lowercased()
+        let threshold = String(format: "%.2f", gradient.motionFDThreshold)
+        Text("Using motion: \(name) (\(volumes) vols), \(metric) metric, threshold \(threshold) mm")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    // MARK: - Per-method options
+
+    @ViewBuilder
+    func mriMethodOptions() -> some View {
+        switch gradient.method.engine {
+        case .sliceTemplate: mriSliceTemplateOptions()
+        case .averageTemplate: mriAverageTemplateOptions()
+        case .localTemplate: mriLocalTemplateOptions()
+        }
+    }
+
+    @ViewBuilder
+    func mriSliceTemplateOptions() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("FASTR Options")
+                .font(.caption.weight(.semibold))
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("Template scaling")
+                        .font(.caption)
+                    Button {
+                        gradient.showsSafetyHelp = true
+                    } label: {
+                        Image(systemName: "questionmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .help("About template scaling and EVA's signal-preservation guards")
+                    .popover(isPresented: $gradient.showsSafetyHelp, arrowEdge: .trailing) {
+                        mriSafetyHelp()
+                    }
+                }
+                Picker("Template scaling", selection: $gradient.templateScaling) {
+                    ForEach(GradientTemplateScaling.allCases) { scaling in
+                        Text(scaling.label).tag(scaling)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 220, alignment: .leading)
+            }
+
+            Toggle("Epoch alignment", isOn: $gradient.alignmentEnabled)
+                .font(.caption)
+                .help("Search for a small per-epoch integer shift so triggers that do not land on the same sample of the artifact still average cleanly.")
+            if gradient.alignmentEnabled {
+                Toggle("Sub-sample alignment", isOn: $gradient.subSampleAlignment)
+                    .font(.caption)
+                    .help("Additionally estimate a fractional-sample offset per epoch and resample onto a shared sub-sample grid before averaging.")
+            }
+
+            HStack(spacing: 6) {
+                Text("OBS residual removal")
+                    .font(.caption)
+                Picker("OBS", selection: $gradient.obsSelection) {
+                    ForEach(GradientOBSSelection.allCases) { selection in
+                        Text(selection.label).tag(selection)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 190)
+            }
+            .help("Remove what template subtraction leaves behind by projecting each epoch onto an optimal basis set of the residuals.")
+            if gradient.obsSelection == .fixed {
+                mriIntRow(
+                    "Components",
+                    value: $gradient.obsFixedComponents,
+                    range: 1...32,
+                    help: "Remove exactly this many components per chunk."
+                )
+            }
+
+            Toggle("Adaptive noise cancellation (ANC)", isOn: $gradient.ancEnabled)
+                .font(.caption)
+                .help("Adapt against the artifact estimate the epoch-wise stages removed and take out whatever of it is still present. Follows artifact that drifts continuously, which the epoch-wise stages cannot.")
+            if gradient.ancEnabled {
+                Toggle("Slice-rate ANC high-pass", isOn: $gradient.ancSliceHighPass)
+                    .font(.caption)
+                    .help("Derive the pre-filter cutoff from the epoch rate rather than using a fixed 2 Hz. Only differs when volumes are subdivided into slices.")
+            }
+
+            if gradient.obsSelection != .off || gradient.ancEnabled {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Template-only channels")
+                        .font(.caption)
+                    ChannelSetPickerView(
+                        label: "Template-only channels",
+                        selectedSetID: $gradient.templateOnlyChannelSetID,
+                        channelCount: recording.signal?.numberOfChannels ?? 0
+                    )
+                    Text(gradient.templateOnlyChannelSetID == nil
+                         ? "Every channel gets the full pipeline."
+                         : "\(gradient.templateOnlyChannels.count) channels get template subtraction only.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .help("These channels are still corrected, but skip OBS and ANC. Both stages model the residual — OBS pools epochs into a shared basis, ANC adapts against the artifact estimate — so a questionable channel distorts them for itself and, in OBS's case, is best kept out. Use Excluded Channels instead if a channel should not be corrected at all.")
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("Donor ranking")
+                        .font(.caption)
+                    Button {
+                        gradient.showsDonorHelp = true
+                    } label: {
+                        Image(systemName: "questionmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .help("About donor ranking")
+                    .popover(isPresented: $gradient.showsDonorHelp, arrowEdge: .trailing) {
+                        mriDonorHelp()
+                    }
+                }
+                Picker("Donor ranking", selection: $gradient.donorRanking) {
+                    ForEach(GradientDonorRanking.allCases) { ranking in
+                        Text(ranking.label).tag(ranking)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .help(gradient.donorRanking.help)
+            }
+        }
+    }
+
+    @ViewBuilder
+    func mriAverageTemplateOptions() -> some View {
+        if gradient.method == .allenIAR {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Allen IAR Options")
+                    .font(.caption.weight(.semibold))
+                mriIntRow(
+                    "Section epochs",
+                    value: $gradient.allenSectionEpochs,
+                    range: 0...400,
+                    help: "How many epochs the running average template spans. Allen et al. use a fixed section rather than a window centred on the target. Leave at 0 to let the preset choose: the slice preset derives roughly 7.5 seconds of epochs from the epoch rate, which is far more than the volume preset's 25."
+                )
+                if gradient.allenSectionEpochs == 0 {
+                    Text("0 = automatic, from the epoch rate.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                mriDoubleRow(
+                    "Correlation gate",
+                    value: $gradient.allenCorrelationGate,
+                    help: "An epoch only updates the running template if it correlates with the current template at least this well. Keeps a disturbed epoch from contaminating everything after it."
+                )
+                mriIntRow(
+                    "Always include first",
+                    value: $gradient.allenInitialEpochs,
+                    range: 0...64,
+                    help: "Accept this many epochs at the start unconditionally, before there is a template stable enough to gate against."
+                )
+                Toggle("Adaptive noise cancellation (ANC)", isOn: $gradient.ancEnabled)
+                    .font(.caption)
+                    .help("Allen's method pairs template subtraction with adaptive noise cancellation; it is on by default for this preset.")
+                if gradient.ancEnabled {
+                    Toggle("Slice-rate ANC high-pass", isOn: $gradient.ancSliceHighPass)
+                        .font(.caption)
+                        .help("Derive the pre-filter cutoff from the epoch rate rather than using a fixed 2 Hz.")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    func mriLocalTemplateOptions() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(gradient.method.label) Options")
+                .font(.caption.weight(.semibold))
+            mriIntRow(
+                "Min donor distance",
+                value: $gradient.localMinimumDonorDistance,
+                range: 0...100_000,
+                help: "Samples a donor must be from the target before it may contribute. Keeps an artifact from helping to build the template that will be subtracted from it."
+            )
+            mriIntRow(
+                "Min donor count",
+                value: $gradient.localMinimumDonorCount,
+                range: 1...64,
+                help: "Fewest donors a usable template may be built from."
+            )
+            if gradient.method.weightsDonorsByDistance {
+                mriDoubleRow(
+                    "Weighting constant",
+                    value: $gradient.localWeightingTimeConstantSeconds,
+                    suffix: "s",
+                    help: "Donors are weighted by exp(-distance / this). A donor this far from the target counts for 1/e of an adjacent one, so nearer artifacts dominate the template. Shorter tracks a changing artifact faster; longer averages more donors together."
+                )
+            }
+            Toggle("Reject uncorrelated donors", isOn: $gradient.localRejectsUncorrelatedDonors)
+                .font(.caption)
+                .help("Nearness in time is a proxy for similarity, and usually a good one — but a donor interrupted by movement or a dropout is still a near neighbour. This compares each donor's waveform against the target's directly and drops the ones that do not match. Scored on the highest-variance channel, so every channel corrects with the same donor set.")
+            if gradient.localRejectsUncorrelatedDonors {
+                mriDoubleRow(
+                    "Minimum donor r",
+                    value: $gradient.localMinimumDonorCorrelation,
+                    help: "Smallest Pearson correlation a donor must reach against the target. A target that no donor reaches is left uncorrected and reported, rather than having a template subtracted that does not describe it — so a floor set too high shows up as skipped events, not as silently worse output."
+                )
+            }
+            Toggle("Skip targets with too few donors", isOn: $gradient.localSkipsTargetsWithoutEnoughDonors)
+                .font(.caption)
+                .help("On: an event without enough donors is left uncorrected and reported. Off: it is corrected with whatever donors are available.")
+        }
+    }
+
+    // MARK: - Advanced
+
+    @ViewBuilder
+    func mriAdvancedOptions() -> some View {
+        if gradient.method.isFASTR || gradient.method == .allenIAR {
+            DisclosureGroup(isExpanded: $gradient.showsAdvanced) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if gradient.method.isFASTR {
+                        mriAdvancedAlignment()
+                        Divider()
+                        mriAdvancedScaling()
+                        Divider()
+                        if gradient.method == .farm || gradient.donorRanking == .squaredCorrelation {
+                            mriAdvancedCorrelation()
+                            Divider()
+                        }
+                        if gradient.obsSelection != .off {
+                            mriAdvancedOBS()
+                            Divider()
+                        }
+                    }
+                    if gradient.ancEnabled {
+                        mriAdvancedANC()
+                    }
+                }
+                .padding(.top, 6)
+            } label: {
+                Text("Advanced")
+                    .font(.caption.weight(.semibold))
+            }
+        }
+    }
+
+    @ViewBuilder
+    func mriAdvancedAlignment() -> some View {
+        mriIntRow(
+            "Upsample factor",
+            value: $gradient.upsampleFactor,
+            range: 1...10,
+            help: "Correct on an internally upsampled axis so epochs can be aligned on a finer grid than the recorded rate. What is downsampled afterwards is the artifact estimate, not the signal, so samples outside a corrected epoch are untouched at any factor."
+        )
+        mriDoubleRow(
+            "Trigger position",
+            value: $gradient.relativeTriggerPosition,
+            help: "Where the trigger sits inside its artifact epoch, as a fraction of the epoch. 0 puts the whole window after the trigger."
+        )
+    }
+
+    @ViewBuilder
+    func mriAdvancedScaling() -> some View {
+        mriIntRow(
+            "Scale smoothing epochs",
+            value: $gradient.templateScaleSmoothingEpochs,
+            range: 1...201,
+            help: "Epochs the drift-tracking median spans. Wider rejects more epoch-to-epoch scatter but takes longer to follow a real amplitude change."
+        )
+        mriDoubleRow(
+            "Scale minimum",
+            value: $gradient.templateScaleMinimum,
+            help: "A fitted scale below this is treated as a failed fit rather than applied."
+        )
+        mriDoubleRow(
+            "Scale maximum",
+            value: $gradient.templateScaleMaximum,
+            help: "A fitted scale above this is treated as a failed fit. A template needing 10x scaling to match its epoch did not describe that epoch."
+        )
+    }
+
+    @ViewBuilder
+    func mriAdvancedCorrelation() -> some View {
+        mriDoubleRow(
+            "Correlation threshold",
+            value: $gradient.correlationThreshold,
+            help: "Minimum correlation a candidate must reach to qualify as a donor. Too few qualifying candidates falls back to temporal neighbours for that epoch."
+        )
+        mriIntRow(
+            "Min qualified donors",
+            value: $gradient.minimumCorrelatedDonors,
+            range: 1...64,
+            help: "If fewer than this many candidates qualify, that epoch falls back to temporal neighbours."
+        )
+        mriIntRow(
+            "Search window",
+            value: $gradient.correlationSearchWindow,
+            range: 1...5000,
+            help: "How many same-slice epochs on each side of the target are considered. Bounds an otherwise quadratic search."
+        )
+    }
+
+    @ViewBuilder
+    func mriAdvancedOBS() -> some View {
+        if gradient.obsSelection == .automatic {
+            mriDoubleRow(
+                "Variance threshold",
+                value: $gradient.obsVarianceThreshold,
+                help: "Share of residual variance the retained components must explain."
+            )
+            mriIntRow(
+                "Max components",
+                value: $gradient.obsMaximumComponents,
+                range: 1...32,
+                help: "Ceiling on automatic component selection."
+            )
+        }
+        mriDoubleRow(
+            "Chunk length",
+            value: $gradient.obsChunkSeconds,
+            suffix: "s",
+            help: "Length of recording each basis is estimated over. The residual's shape drifts across a long scan, so one basis for the whole session fits none of it well."
+        )
+        mriIntRow(
+            "Epochs per basis",
+            value: $gradient.obsMaximumEpochsPerChunk,
+            range: 8...1024,
+            help: "Cap on epochs contributing to one basis. Raising this no longer costs much: only the leading components are ever computed."
+        )
+        mriDoubleRow(
+            "Residual floor",
+            value: $gradient.obsResidualEnergyFloor,
+            help: "Minimum residual energy, as a fraction of what template subtraction already removed, for OBS to run on a chunk. This is the guard that stops OBS removing brain signal once the artifact is already gone — see the template scaling help."
+        )
+    }
+
+    @ViewBuilder
+    func mriAdvancedANC() -> some View {
+        mriIntRow(
+            "ANC filter length",
+            value: $gradient.ancFilterLength,
+            range: 1...512,
+            help: "Adaptive filter taps."
+        )
+        mriDoubleRow(
+            "ANC step size",
+            value: $gradient.ancStepSize,
+            help: "Normalized-LMS step. Stable below 2, but stability is not the only concern: a large step lets the weights chase sample-to-sample detail and start fitting brain signal that has nothing to do with the reference. The default is deliberately small."
+        )
+    }
+
+    // MARK: - Help
+
+    /// Explanation of the method choice with references.
     @ViewBuilder
     func mriMethodHelp() -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Gradient Artifact Removal Methods")
-                .font(.headline)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Gradient Artifact Removal Methods")
+                    .font(.headline)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("AAS — Average Artifact Subtraction")
-                    .font(.subheadline.weight(.semibold))
-                Text("Builds one artifact template per TR by averaging neighboring volumes and subtracts it. Fast and robust when motion is low. This is EVA's per-TR template method (Allen et al. 2000).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+                mriMethodEntry(
+                    "Fast AAS — retired",
+                    "Built one artifact template per TR by averaging neighbouring volumes. It existed to be the quick option; the other methods are now GPU-backed and faster, so it has been withdrawn from the picker. MAS is the nearer replacement. Files that already select it still reproduce."
+                )
+                mriMethodEntry(
+                    "Allen AAS — Imaging Artifact Reduction",
+                    "Allen et al.'s running-template variant: the template spans a fixed section of epochs rather than a window centred on the target, an epoch only updates it if it correlates well enough, and adaptive noise cancellation follows subtraction."
+                )
+                mriMethodEntry(
+                    "MAS — Median Artifact Subtraction",
+                    "Same per-TR template family, but the template is the elementwise median of a centred moving window, excluding ignored, outlier, and too-near donor volumes. The median resists a single contaminated donor in a way a mean does not."
+                )
+                mriMethodEntry(
+                    "MAR — Median Artifact Regression",
+                    "The MAS template, scaled by a least-squares fit before subtracting, so its amplitude can track slow artifact drift a fixed 1:1 subtraction cannot."
+                )
+                mriMethodEntry(
+                    "wAAS / wAAR — distance-weighted templates",
+                    "The same local-template family as MAS/MAR, but donors are weighted by how far they sit from the target rather than reduced with an unweighted median, so nearby artifacts dominate. wAAR additionally fits the template's amplitude by least squares before subtracting."
+                )
+                mriMethodEntry(
+                    "FASTR Original — Slice Template Removal",
+                    "Subdivides each volume into slice epochs, aligns them (optionally at sub-sample resolution), subtracts a per-slice template, then optionally removes residual artifact with an Optimal Basis Set and adaptive noise cancellation. Better suppression, more parameters."
+                )
+                mriMethodEntry(
+                    "Moosmann — motion-informed averaging",
+                    "A FASTR variant that builds each volume's template from motion-free neighbours, treating a high-motion volume as a wall rather than averaging across it. Requires a motion file. Falls back to temporal neighbours when no volume exceeds the threshold."
+                )
+                mriMethodEntry(
+                    "FARM — most-correlated-epoch averaging",
+                    "A FASTR variant whose template averages the most similar artifacts by waveform correlation rather than temporal neighbours."
+                )
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("MAS — Median Artifact Subtraction")
-                    .font(.subheadline.weight(.semibold))
-                Text("Same per-TR template family as AAS, but the template is the elementwise median of an AMRI-style centered moving window, excluding ignored, outlier, and too-near donor volumes. Inspired by the AMRI (Advanced MRI, NINDS/NIH) MATLAB toolbox's `amri_eeg_gac.m`.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+                Divider()
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("MAR — Median Artifact Regression")
-                    .font(.subheadline.weight(.semibold))
-                Text("The AMRI-style MAS template, scaled by a least-squares fit before subtracting, so its amplitude can track slow gradient-artifact drift a fixed 1:1 subtraction can't. Inspired by `amri_eeg_gac.m`.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("FASTR — fMRI Artifact Slice Template Removal")
-                    .font(.subheadline.weight(.semibold))
-                Text("Subdivides each volume into slice epochs, aligns them (optionally at sub-sample resolution), subtracts a per-slice template, then removes residual artifact with an Optimal Basis Set (OBS) and optional adaptive noise cancellation (ANC). Better suppression, more parameters (Niazy et al. 2005).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Moosmann — RP-informed averaging")
-                    .font(.subheadline.weight(.semibold))
-                Text("A FASTR variant (Bergen toolbox) that builds each volume's template from a motion-warped temporal window of low-motion volumes — excluding high-motion volumes and avoiding averaging across head-movement events. The default RP-info metric is BERGEN's translation-only motion; Motion Configuration can include all six parameters. Falls back to a plain moving average when no motion exceeds the threshold.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("FARM — most-correlated-epoch averaging")
-                    .font(.subheadline.weight(.semibold))
-                Text("A FASTR variant whose template, for each artifact, averages the most similar artifacts (highest waveform correlation, ≥ 0.9) rather than temporal neighbors. The BERGEN r² option switches FASTR-family donor ranking to squared correlation with self eligible, matching BERGEN's best-rsquare helper more closely.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("References")
-                    .font(.caption.weight(.semibold))
-                Text("• Allen, Josephs & Turner (2000). NeuroImage 12:230–239.")
-                Text("• Liu, de Zwart, van Gelderen, Kuo & Duyn (2012). NeuroImage 59(3):2073–2087 (MAS/MAR; AMRI toolbox, https://amri.ninds.nih.gov/software.html).")
-                Text("• Niazy, Beckmann, Iannetti, Brady & Smith (2005). NeuroImage 28(3):720–737.")
-                Text("• Moosmann et al. (2009). NeuroImage 45(4):1144–1150.")
-                Text("• van der Meer et al. (2010). NeuroImage 49(3):2495–2505.")
-                Text("• Glaser et al. (2013). FACET toolbox. BMC Neuroscience 14:138.")
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-
-            Text("EVA's FASTR is a port of the FMRIB/FACET implementations. See the in-app TODO for pending MATLAB-reference validation.")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Method references")
+                        .font(.caption.weight(.semibold))
+                    Text("• Allen, Josephs & Turner (2000). NeuroImage 12:230–239.")
+                    Text("• Liu, de Zwart, van Gelderen, Kuo & Duyn (2012). NeuroImage 59(3):2073–2087.")
+                    Text("• Niazy, Beckmann, Iannetti, Brady & Smith (2005). NeuroImage 28(3):720–737.")
+                    Text("• Moosmann et al. (2009). NeuroImage 45(4):1144–1150.")
+                    Text("• van der Meer et al. (2010). Clinical Neurophysiology 121(5):766–776.")
+                    Text("• Glaser et al. (2013). BMC Neuroscience 14:138.")
+                    Text("• Power et al. (2012). NeuroImage 59(3):2142–2154 (framewise displacement).")
+                }
                 .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(.secondary)
+
+                Text("These are EVA's own implementations, written from the published method descriptions and EVA's functional specifications. The toolboxes associated with these papers are cited as historical and scientific references; their source code is not incorporated. See THIRD_PARTY_NOTICES.md.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(16)
         }
-        .padding(16)
-        .frame(width: 360)
+        .frame(width: 380, height: 520)
     }
 
     @ViewBuilder
-    func mriFastrOptionsHelp() -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("FASTR Options")
-                .font(.headline)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("AutoPreTrig")
-                    .font(.subheadline.weight(.semibold))
-                Text("FACET can re-estimate the artifact window's pre-trigger length by comparing the first two aligned artifacts near the first trigger and choosing the onset that minimizes their mismatch. It helps when scanner triggers are slightly inside the artifact rather than at a fixed relative position. EVA currently uses the relative trigger position plus alignment, not this onset-search step.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("OBS Sampling")
-                    .font(.subheadline.weight(.semibold))
-                Text("OBS builds PCA components from a subset of residual artifact epochs. EVA's default subset is deterministic for reproducible replay. Random sampling follows FACET's rand-driven 2/3-step selection, which can slightly change the fitted residual basis between runs.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("ANC High-Pass")
-                    .font(.subheadline.weight(.semibold))
-                Text("ANC high-passes the signal before LMS adaptive filtering. The fixed 2 Hz cutoff matches EVA's current behavior and FACET's volume-trigger path. Slice-rate mode uses FACET's slice-trigger rule: 0.75 times the estimated trigger count per second, only when volumes are subdivided into slices.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("FACET Window")
-                    .font(.subheadline.weight(.semibold))
-                Text("The FACET 30-artifact window uses FACET's AvgWindow/HalfWindow donor rows, including edge saturation and odd/even slice rows. Leave it off to use EVA's explicit Pre/Post template window.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(14)
-        .frame(width: 380)
-    }
-
-    @ViewBuilder
-    func mriOBSRandomHelp() -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Random OBS Sampling")
-                .font(.headline)
-            Text("FACET chooses OBS PCA epochs using random 2/3-step jumps through the artifact list. EVA leaves this off by default so repeated runs are exactly reproducible; turning it on is closer to FACET and may slightly change the residual basis each run.")
+    func mriMethodEntry(_ title: String, _ body: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Text(body)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(14)
-        .frame(width: 320)
     }
 
+    /// The three signal-preservation guards, which are EVA-specific and worth
+    /// explaining where the user meets them.
     @ViewBuilder
-    func mriANCHighPassHelp() -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("ANC High-Pass")
-                .font(.headline)
-            Text("Off keeps the current EVA/FMRIB behavior: a fixed 2 Hz high-pass before LMS ANC. On uses FACET's slice-trigger path: estimate the trigger count in the first second and use 0.75 times that rate. It only differs when FASTR is running with slice subdivision.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+    func mriSafetyHelp() -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Template Scaling and Signal Preservation")
+                    .font(.headline)
+
+                mriMethodEntry(
+                    "Why scaling is a trade-off",
+                    "The scale is fitted from a single epoch-length window, and over a window that short a physiological rhythm is not orthogonal to the artifact. Part of the brain signal is absorbed into the fitted scale and subtracted along with the artifact."
+                )
+                mriMethodEntry(
+                    "Drift-Tracking (default)",
+                    "Fits a scale per epoch, then takes a running median across neighbouring epochs. An amplitude change that persists — what motion and hardware drift produce — survives the median and is tracked; epoch-to-epoch scatter does not. A median also passes a step change through sharply rather than ramping across it."
+                )
+                mriMethodEntry(
+                    "Unscaled Average",
+                    "Subtracts the donor average as-is. Cannot absorb correlated signal; cannot follow a changing artifact amplitude either. Note that a sustained amplitude change needs no scaling at all — once the donor window has moved past the transition, the donors already carry the new amplitude."
+                )
+                mriMethodEntry(
+                    "Per-Epoch Least Squares",
+                    "Uses each epoch's raw fit. Tracks any amplitude change immediately, including a single-epoch spike, at the cost of absorbing whatever signal correlates with the template in that window. This is the mode for a one-volume spike, which drift tracking rejects by design."
+                )
+
+                Divider()
+
+                mriMethodEntry(
+                    "OBS residual floor",
+                    "Variance-explained component selection is scale-free: it removes whatever dominates the residual, and PCA cannot tell structured brain signal from structured artifact. Where template subtraction has already explained the artifact, the residual is the signal. The floor makes OBS stand down there rather than delete data."
+                )
+                mriMethodEntry(
+                    "ANC step size",
+                    "A short adaptive filter driven by a periodic reference cannot synthesize an unrelated frequency with fixed weights, but weights that adapt every sample can, because the weight trajectory itself carries the beat. The default step is deliberately small, trading convergence speed for a filter that tracks artifact drift and little else."
+                )
+
+                Text("Fitted scales outside the configured range are treated as failed fits rather than applied, and neighbouring epochs are used instead.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(16)
         }
-        .padding(14)
-        .frame(width: 320)
+        .frame(width: 380, height: 480)
     }
 
     @ViewBuilder
-    func mriFastrDonorHelp() -> some View {
+    func mriDonorHelp() -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("FASTR Donor Selection")
+            Text("Donor Ranking")
                 .font(.headline)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Default")
-                    .font(.subheadline.weight(.semibold))
-                Text("Uses the selected method's donor rule: FASTR averages temporal pre/post neighbors, FARM chooses high-correlation epochs, and Moosmann uses BERGEN-style RP-informed low-motion donors.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("BERGEN r²")
-                    .font(.subheadline.weight(.semibold))
-                Text("Uses BERGEN's best-rsquare donor ranking inside EVA's FASTR-family pipeline: candidates are scored by squared waveform correlation, with the target artifact eligible as a donor. FASTR/FARM rank same-slice candidates; Moosmann ranks within its RP-informed candidate pool.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Divider()
-
-            Text("This is the light BERGEN port. EVA does not yet support the full BERGEN generic matrix assignment workflow, where an arbitrary row-normalized weighting matrix directly controls every artifact's template donors.")
+            mriMethodEntry("Default", GradientDonorRanking.methodDefault.help)
+            mriMethodEntry("Squared r", GradientDonorRanking.squaredCorrelation.help)
+            Text("Squared ranking replaces the method's own donor rule and lets the target epoch contribute to its own template, which is why it is a separate choice rather than a modifier.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

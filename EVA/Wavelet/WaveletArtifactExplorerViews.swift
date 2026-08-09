@@ -79,7 +79,7 @@ extension WaveformView {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Wavelet Artifact Reduction")
                         .font(.title3.weight(.semibold))
-                    Text("Subtracts a wavelet reconstruction of the large coefficients (HAPPE-style), leaving the low-amplitude signal.")
+                    Text("Subtracts a wavelet reconstruction of large coefficients, leaving the low-amplitude signal.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -130,7 +130,7 @@ extension WaveformView {
             VStack(alignment: .leading, spacing: 12) {
                 ArtifactTemplateFieldLabel(
                     title: "Mode",
-                    help: "HAPPE's two wavelet-cleaning tracks. Continuous EEG is the more aggressive, hard-thresholding pass run over the whole recording. Task / ERP is gentler (soft thresholding, one extra decomposition level, quality assessed within the ERP analysis band) so it doesn't smear stimulus-locked components. Switching modes resets the settings below to that track's defaults — pick this first, then fine-tune."
+                    help: "Two wavelet-cleaning tracks informed by HAPPE's published pipeline choices. Continuous EEG is the more aggressive, hard-thresholding pass run over the whole recording. Task / ERP is gentler (soft thresholding, one extra decomposition level, quality assessed within the ERP analysis band) so it doesn't smear stimulus-locked components. Switching modes resets the settings below to that track's defaults — pick this first, then fine-tune."
                 )
                 Picker("Mode", selection: $wavelet.mode) {
                     ForEach(WaveletReductionMode.allCases) { Text($0.rawValue).tag($0) }
@@ -154,7 +154,7 @@ extension WaveformView {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "Transform",
-                            help: "DWT (decimated) is what HAPPE's wdenoise uses — fast and compact, the standard choice. SWT (undecimated/stationary) is shift-invariant, so the removed-artifact estimate doesn't shift depending on where a spike falls in the decimation grid — useful for inspecting exactly what a level removed, at the cost of more compute."
+                            help: "DWT (decimated) is the transform used by MATLAB wdenoise — fast and compact, the standard choice. SWT (undecimated/stationary) is shift-invariant, so the removed-artifact estimate doesn't shift depending on where a spike falls in the decimation grid — useful for inspecting exactly what a level removed, at the cost of more compute."
                         )
                         Picker("", selection: $wavelet.config.kind) {
                             ForEach(WaveletTransformKind.allCases) { Text($0.rawValue).tag($0) }
@@ -163,7 +163,7 @@ extension WaveformView {
 
                         ArtifactTemplateFieldLabel(
                             title: "Wavelet",
-                            help: "The mother wavelet. bior4.4 is HAPPE's continuous-path family and the Continuous EEG default; coif4 is HAPPE's ERP family. sym4/db4 are orthonormal and near-symmetric — solid general-purpose alternatives, but no orthogonal wavelet beyond Haar can be exactly symmetric. The biorthogonal families (bior4.4, bior6.8) are exactly linear-phase, so thresholding and subtracting the artifact estimate doesn't introduce a small time shift, which matters most right at artifact onsets and for timing-sensitive ERP work."
+                            help: "The mother wavelet. bior4.4 is the Continuous EEG default and coif4 is the ERP-oriented default; both are also selected in HAPPE's public pipeline configuration. sym4/db4 are orthonormal and near-symmetric — solid general-purpose alternatives, but no orthogonal wavelet beyond Haar can be exactly symmetric. The biorthogonal families (bior4.4, bior6.8) are exactly linear-phase, so thresholding and subtracting the artifact estimate doesn't introduce a small time shift, which matters most right at artifact onsets and for timing-sensitive ERP work."
                         )
                         .gridColumnAlignment(.leading)
                         Picker("", selection: $wavelet.config.family) {
@@ -186,7 +186,7 @@ extension WaveformView {
                             help: """
                             How each level's artifact gate is chosen.
 
-                            Empirical Bayes — the default, and what HAPPE gets from MATLAB's wdenoise. \(WaveletCleaningThresholdModel.empiricalBayes.summary)
+                            Empirical Bayes — the default, matching MATLAB wdenoise's documented Bayes-denoising method. \(WaveletCleaningThresholdModel.empiricalBayes.summary)
 
                             Universal — \(WaveletCleaningThresholdModel.robustUniversal.summary) It is the upper bound empirical Bayes is fitted under, and what a band of pure noise fits to, so the two agree on quiet bands and diverge where artifacts are sparse.
 
@@ -202,14 +202,14 @@ extension WaveformView {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "Levels",
-                            help: "How many times the signal is halved in frequency. More levels reach lower frequencies (drift, slow artifacts), but each extra level has less data to estimate its threshold from, so pushing this too high risks overfitting to noise. The rate-dependent default (8–10 continuous, 9–11 ERP) mirrors HAPPE's own scheme."
+                            help: "How many times the signal is halved in frequency. More levels reach lower frequencies (drift, slow artifacts), but each extra level has less data to estimate its threshold from, so pushing this too high risks overfitting to noise. The rate-dependent default (8–10 continuous, 9–11 ERP) follows the same public parameter choices HAPPE uses."
                         )
                         Stepper("\(wavelet.config.levelCount)", value: $wavelet.config.levelCount, in: 1...WaveletReducer.maximumLevelCount)
                             .frame(width: 130)
 
                         ArtifactTemplateFieldLabel(
                             title: "Skip finest",
-                            help: "Excludes this many of the finest levels from artifact removal, leaving their content in the cleaned signal. Each level covers a band roughly half the width of the one below it, so on data already low-passed well under Nyquist the finest levels sit entirely in the filter's stopband. Those bands hold only roll-off residue, which drags their noise estimate — and therefore their threshold — toward zero, so nearly all of that residue gets called artifact. This is set automatically from the filter's low-pass cutoff; raise it to protect more high-frequency signal, set it to 0 for strict HAPPE behaviour."
+                            help: "Excludes this many of the finest levels from artifact removal, leaving their content in the cleaned signal. Each level covers a band roughly half the width of the one below it, so on data already low-passed well under Nyquist the finest levels sit entirely in the filter's stopband. Those bands hold only roll-off residue, which drags their noise estimate — and therefore their threshold — toward zero, so nearly all of that residue gets called artifact. This is set automatically from the filter's low-pass cutoff; raise it to protect more high-frequency signal, set it to 0 to keep every level eligible for removal."
                         )
                         .gridColumnAlignment(.leading)
                         HStack(spacing: 6) {
@@ -232,11 +232,11 @@ extension WaveformView {
 
                         ArtifactTemplateFieldLabel(
                             title: "Threshold scope",
-                            help: "Global estimates one threshold per level from the whole recording — exactly what HAPPE's wdenoise does. Local (30 s) re-estimates each level's threshold in overlapping 30-second windows, so a quiet stretch and a noisy stretch each get their own noise floor — the same scheme the Wavelet Artifact Explorer uses. Local is an EVA improvement over HAPPE, useful for recordings whose noise level changes over time; use Global for strict HAPPE parity."
+                            help: "Global estimates one threshold per level from the whole recording, matching MATLAB wdenoise's documented level-dependent behavior. Local (30 s) re-estimates each level's threshold in overlapping 30-second windows, so a quiet stretch and a noisy stretch each get their own noise floor — the same scheme the Wavelet Artifact Explorer uses. Local is an EVA improvement for recordings whose noise level changes over time."
                         )
                         .gridColumnAlignment(.leading)
                         Picker("", selection: $wavelet.config.thresholdWindowSeconds) {
-                            Text("Global (HAPPE)").tag(0.0)
+                            Text("Global").tag(0.0)
                             Text("Local (30 s)").tag(30.0)
                         }
                         .labelsHidden().frame(width: 130)
@@ -244,14 +244,14 @@ extension WaveformView {
                     GridRow {
                         ArtifactTemplateFieldLabel(
                             title: "Detrend",
-                            help: "Removes each channel's linear drift before the wavelet pass and folds it into the removed artifact. HAPPE's deepest approximation band swallows drift anyway, so this doesn't change what's kept — but it stops the transform's circular boundary from reading a start-to-end voltage offset as a large spurious artifact at the recording's edges. Leave on unless you're debugging."
+                            help: "Removes each channel's linear drift before the wavelet pass and folds it into the removed artifact. The deepest approximation band tends to absorb drift anyway, so this doesn't change what's kept — but it stops the transform's circular boundary from reading a start-to-end voltage offset as a large spurious artifact at the recording's edges. Leave on unless you're debugging."
                         )
                         Toggle("", isOn: $wavelet.config.detrend)
                             .labelsHidden()
 
                         ArtifactTemplateFieldLabel(
                             title: "Downsample",
-                            help: "Runs the wavelet pass on a decimated copy, then upsamples the removed-artifact estimate back to full rate before subtracting. Both modes default to Full rate, matching HAPPE — decimating distorts exactly the sharp transients being removed. Opt in only if the recording is very high-rate and reduction is too slow."
+                            help: "Runs the wavelet pass on a decimated copy, then upsamples the removed-artifact estimate back to full rate before subtracting. Both modes default to Full rate because decimating distorts exactly the sharp transients being removed. Opt in only if the recording is very high-rate and reduction is too slow."
                         )
                         .gridColumnAlignment(.leading)
                         Picker("", selection: $wavelet.config.downsampleFactor) {
@@ -263,12 +263,13 @@ extension WaveformView {
                     }
                     GridRow {
                         ArtifactTemplateFieldLabel(
-                            title: "Use GPU",
-                            help: "Runs the decompose–threshold–reconstruct chain on the Mac's GPU, processing whole batches of channels in shared dispatches — typically much faster than the CPU on high-density recordings. The GPU computes in 32-bit floats where the CPU uses 64-bit, so results agree closely but not to the last bit. Falls back to the CPU automatically if the GPU can't run. Unavailable when no Metal device is present."
+                            title: "Compute",
+                            help: "Where the decompose–threshold–reconstruct chain runs. Set once in Settings › Processing rather than per run: it changes how fast a reduction is, not what it means, and it falls back to the CPU automatically when no Metal device is present. The GPU computes in 32-bit floats where the CPU uses 64-bit, so results agree closely but not to the last bit. The path actually taken is recorded per run in the replay parameters."
                         )
-                        Toggle("", isOn: $wavelet.config.useGPU)
-                            .labelsHidden()
-                            .disabled(!WaveletMetalBackend.isAvailable)
+                        Text(wavelet.config.useGPU ? "GPU (Metal)" : "CPU")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 130, alignment: .leading)
 
                         ArtifactTemplateFieldLabel(
                             title: "CPU cores",
@@ -691,7 +692,7 @@ extension WaveformView {
                 GridRow {
                     ArtifactTemplateFieldLabel(
                         title: "Pipeline",
-                        help: "Preset defaults for HAPPE-inspired wavelet cleaning. EEG emphasizes stronger transient rejection; ERP keeps a smoother, gentler residual."
+                        help: "Preset defaults for wavelet cleaning. EEG emphasizes stronger transient rejection; ERP keeps a smoother, gentler residual."
                     )
                     Picker(
                         "Pipeline",
@@ -712,7 +713,7 @@ extension WaveformView {
 
                     ArtifactTemplateFieldLabel(
                         title: "Wavelet",
-                        help: "bior4.4 is the non-ERP HAPPE-style choice; coif4 is the ERP-oriented choice."
+                        help: "bior4.4 is the Continuous EEG default; coif4 is the ERP-oriented default."
                     )
                     Picker("Wavelet", selection: $waveletExplorer.waveletFamily) {
                         ForEach(WaveletReductionFamily.allCases) { family in
@@ -738,7 +739,7 @@ extension WaveformView {
                         }
                     ) {
                         ForEach(WaveletCleaningMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
+                            Text(mode.displayName).tag(mode)
                         }
                     }
                     .pickerStyle(.menu)

@@ -227,6 +227,96 @@ nonisolated enum LinearAlgebra {
         return x
     }
 
+    /// The `count` largest eigenpairs of a symmetric matrix, largest first.
+    ///
+    /// A full decomposition spends most of its time producing eigenvectors, so a
+    /// caller that only wants the leading few — principal-component work almost
+    /// always does — is paying for `n` of them to use a handful. LAPACK's
+    /// `dsyevr` takes an index range and back-transforms only the vectors in it.
+    ///
+    /// This is exact, not approximate: the same reduction and the same solver as
+    /// `symmetricEigenDecomposition`, just asked for less. Note that eigenvector
+    /// *signs* are arbitrary and need not match what the full decomposition
+    /// returns for the same matrix; only the subspace is meaningful.
+    ///
+    /// - Returns: Eigenvalues descending, and `vectors[i]` as the unit
+    ///   eigenvector for `values[i]`. Empty if the decomposition fails or the
+    ///   inputs are degenerate; the caller should fall back rather than guess.
+    static func leadingSymmetricEigenpairs(
+        _ matrix: [[Double]],
+        count: Int
+    ) -> (values: [Double], vectors: [[Double]]) {
+        let n = matrix.count
+        let wanted = min(max(count, 0), n)
+        guard n > 0, wanted > 0, matrix.allSatisfy({ $0.count == n }) else { return ([], []) }
+
+        // A symmetric matrix is its own transpose, so row-major storage is
+        // already the column-major form LAPACK expects.
+        var input = [Double](repeating: 0, count: n * n)
+        for row in 0..<n {
+            for column in 0..<n { input[column * n + row] = matrix[row][column] }
+        }
+
+        var jobz = Int8(UnicodeScalar("V").value)
+        var range = Int8(UnicodeScalar("I").value)
+        var uplo = Int8(UnicodeScalar("U").value)
+        var dimension = LAPACKInt(n)
+        var leadingDimension = LAPACKInt(n)
+        var lowerValue = 0.0
+        var upperValue = 0.0
+        // `I` selects by ascending index, so the largest `wanted` are the last.
+        var lowerIndex = LAPACKInt(n - wanted + 1)
+        var upperIndex = LAPACKInt(n)
+        // 0 asks dsyevr for the default tolerance, which is the accurate choice.
+        var tolerance = 0.0
+        var found = LAPACKInt(0)
+        var eigenvalues = [Double](repeating: 0, count: n)
+        var eigenvectors = [Double](repeating: 0, count: n * max(wanted, 1))
+        var vectorLeadingDimension = LAPACKInt(n)
+        var support = [LAPACKInt](repeating: 0, count: 2 * max(wanted, 1))
+        var info = LAPACKInt(0)
+
+        var queryWork = 0.0
+        var queryWorkSize = LAPACKInt(-1)
+        var queryIntegerWork = LAPACKInt(0)
+        var queryIntegerWorkSize = LAPACKInt(-1)
+
+        dsyevr_(
+            &jobz, &range, &uplo, &dimension, &input, &leadingDimension,
+            &lowerValue, &upperValue, &lowerIndex, &upperIndex, &tolerance,
+            &found, &eigenvalues, &eigenvectors, &vectorLeadingDimension, &support,
+            &queryWork, &queryWorkSize, &queryIntegerWork, &queryIntegerWorkSize, &info
+        )
+        guard info == 0 else { return ([], []) }
+
+        var workSize = LAPACKInt(max(Int(queryWork.rounded(.up)), 26 * n))
+        var work = [Double](repeating: 0, count: Int(workSize))
+        var integerWorkSize = LAPACKInt(max(Int(queryIntegerWork), 10 * n))
+        var integerWork = [LAPACKInt](repeating: 0, count: Int(integerWorkSize))
+        info = 0
+
+        dsyevr_(
+            &jobz, &range, &uplo, &dimension, &input, &leadingDimension,
+            &lowerValue, &upperValue, &lowerIndex, &upperIndex, &tolerance,
+            &found, &eigenvalues, &eigenvectors, &vectorLeadingDimension, &support,
+            &work, &workSize, &integerWork, &integerWorkSize, &info
+        )
+        guard info == 0, Int(found) == wanted else { return ([], []) }
+
+        // dsyevr returns the selected range ascending; the leading components are
+        // at the end.
+        var values = [Double]()
+        var vectors = [[Double]]()
+        values.reserveCapacity(wanted)
+        vectors.reserveCapacity(wanted)
+        for offset in stride(from: wanted - 1, through: 0, by: -1) {
+            values.append(eigenvalues[offset])
+            let base = offset * n
+            vectors.append(Array(eigenvectors[base..<(base + n)]))
+        }
+        return (values, vectors)
+    }
+
     static func symmetricEigenDecomposition(_ matrix: [[Double]]) -> (values: [Double], vectors: [[Double]]) {
         let n = matrix.count
         guard n > 0, matrix.allSatisfy({ $0.count == n }) else {

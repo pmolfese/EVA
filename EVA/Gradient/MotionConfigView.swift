@@ -23,7 +23,7 @@ struct MotionConfigView: View {
     @Binding var fileFormat: MotionFileFormat
     @Binding var fdThreshold: Double
     @Binding var radiusMm: Double
-    @Binding var moosmannMotionMetric: FastrCorrector.MotionMetric
+    @Binding var motionMetric: GradientMotionMetric
     @Binding var skipStart: Int
     @Binding var skipEnd: Int
     @Binding var trSeconds: Double
@@ -33,8 +33,7 @@ struct MotionConfigView: View {
     /// All TR (TREV) marker sample indices in the recording, before trimming.
     let trMarkerSamples: [Int]
     let samplingRate: Double
-    let windowBefore: Int
-    let windowAfter: Int
+    let donorVolumes: Int
 
     let onClose: () -> Void
 
@@ -134,7 +133,7 @@ struct MotionConfigView: View {
                 }
                 GridRow {
                     Text("Template window").foregroundStyle(.secondary)
-                    Text("\(windowBefore) pre / \(windowAfter) post TRs")
+                    Text("\(donorVolumes) donor volumes")
                         .monospacedDigit()
                 }
                 GridRow {
@@ -468,14 +467,14 @@ struct MotionConfigView: View {
                 Text("Moosmann RP-info")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Picker("Moosmann motion metric", selection: $moosmannMotionMetric) {
-                    ForEach(FastrCorrector.MotionMetric.allCases) { metric in
+                Picker("Motion metric", selection: $motionMetric) {
+                    ForEach(GradientMotionMetric.allCases) { metric in
                         Text(metric.label).tag(metric)
                     }
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 180)
-                Text(moosmannMotionMetric.help)
+                Text(motionMetric.help)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

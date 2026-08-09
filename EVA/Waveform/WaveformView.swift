@@ -20,8 +20,58 @@ import SwiftData
 import UniformTypeIdentifiers
 
 /// Selectable MR gradient-artifact removal algorithm.
+/// Which correction engine a method runs on.
+///
+/// EVA has three clean-room gradient engines, all under
+/// `EVA/Gradient/`. They are separate implementations rather than one
+/// configurable pipeline because the families genuinely differ: local-template
+/// averaging, AMRI-style robust reduction, and slice-epoch FASTR with OBS/ANC
+/// each have their own donor rules, guardrails, and diagnostics.
+enum MRIGradientEngine {
+    /// `GradientAAS` — local-neighbour and Allen-style average templates.
+    case averageTemplate
+    /// `LocalTemplateArtifactCorrector` — AMRI-style median/weighted templates.
+    case localTemplate
+    /// `GradientTemplateCorrector` — the FASTR family.
+    case sliceTemplate
+}
+
+/// The top-level split the MRI sheet presents: whole-epoch template methods on
+/// one side, slice-epoch FASTR-family methods on the other.
+///
+/// This is a user-facing grouping, not an engine boundary — the Template tab
+/// spans two engines — because the distinction that matters when choosing is
+/// "one template per volume" versus "subdivide the volume and model the
+/// residual".
+enum MRIGradientCategory: String, CaseIterable, Identifiable {
+    case template = "Template"
+    case fastr = "FASTR"
+
+    var id: String { rawValue }
+
+    /// Methods offered in the picker: everything in this family that is not
+    /// retired. A retired method still exists and still runs — a replay file
+    /// that names one must reproduce, and `MRIGradientMethod(rawValue:)` still
+    /// resolves it — it is only withdrawn from new selections.
+    var methods: [MRIGradientMethod] {
+        MRIGradientMethod.allCases.filter { $0.category == self && !$0.isDeprecated }
+    }
+
+    /// Every method in this family, retired ones included.
+    var allMethods: [MRIGradientMethod] {
+        MRIGradientMethod.allCases.filter { $0.category == self }
+    }
+}
+
 enum MRIGradientMethod: String, CaseIterable, Identifiable {
-    /// Average artifact subtraction — the per-TR template in `GradientRemover`.
+    /// Average artifact subtraction — EVA's local-neighbour volume template.
+    ///
+    /// Retired 2026-08-09. It existed because it was the fast option, and that
+    /// is no longer a distinction: the local-template and FASTR engines are now
+    /// GPU-backed and MAS runs a 64-channel ten-minute recording in about a
+    /// tenth of a second. MAS is the nearer replacement — the same
+    /// local-neighbour template, reduced with a median that resists a single
+    /// contaminated donor.
     case aas = "AAS"
     /// Median artifact subtraction — same per-TR template, elementwise median
     /// instead of a weighted mean across donor TRs. Inspired by `amri_eeg_gac.m`
@@ -36,26 +86,88 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
     case moosmann = "Moosmann"
     /// FASTR with FARM (van der Meer 2010) most-correlated-epoch averaging.
     case farm = "FARM"
+    /// Allen et al. (2000) imaging artifact reduction: fixed running sections,
+    /// correlation-gated template updates, and ANC.
+    case allenIAR = "Allen IAR"
+    /// Weighted average artifact subtraction — the local template family with an
+    /// exponentially weighted reducer, so nearer donors count for more.
+    case waas = "wAAS"
+    /// Weighted average artifact regression — wAAS plus a least-squares fit.
+    case waar = "wAAR"
 
     var id: String { rawValue }
 
+    /// Display name. Kept separate from `rawValue`, which is the persistence key
+    /// and must stay stable across renames.
     var label: String {
         switch self {
-        case .aas: return "AAS"
+        case .aas: return "Fast AAS"
+        case .allenIAR: return "Allen AAS"
         case .mas: return "MAS"
         case .mar: return "MAR"
-        case .fastr: return "FASTR"
+        case .waas: return "wAAS"
+        case .waar: return "wAAR"
+        case .fastr: return "FASTR Original"
         case .moosmann: return "Moosmann"
         case .farm: return "FARM"
         }
     }
 
-    /// Whether this method runs the FASTR pipeline (slice/OBS/ANC options apply).
-    var isFASTR: Bool { self == .fastr || self == .moosmann || self == .farm }
+    var category: MRIGradientCategory {
+        switch self {
+        case .aas, .allenIAR, .mas, .mar, .waas, .waar: return .template
+        case .fastr, .moosmann, .farm: return .fastr
+        }
+    }
 
-    /// Whether this method runs through `GradientRemover`'s per-TR template
-    /// path (as opposed to the FASTR pipeline).
-    var isTemplateBased: Bool { self == .aas || self == .mas || self == .mar }
+    /// Withdrawn from the picker but still resolvable and still runnable, so
+    /// existing eva.xml files keep reproducing.
+    var isDeprecated: Bool { self == .aas }
+
+    /// Why it was retired, and what to use instead. Shown in the sheet when a
+    /// replay selects one.
+    var deprecationNote: String? {
+        switch self {
+        case .aas:
+            return "Fast AAS has been retired: it existed to be the quick option, and the other methods are now GPU-backed and faster. Allen AAS is the default in its place; MAS is the nearer match if you specifically want a local-neighbour template. Existing files that select Fast AAS still reproduce exactly."
+        default:
+            return nil
+        }
+    }
+
+    var engine: MRIGradientEngine {
+        switch self {
+        case .aas, .allenIAR: return .averageTemplate
+        case .mas, .mar, .waas, .waar: return .localTemplate
+        case .fastr, .moosmann, .farm: return .sliceTemplate
+        }
+    }
+
+    /// Whether the template is a least-squares-scaled fit rather than a plain
+    /// subtraction. Only meaningful for the local-template engine.
+    var fitsTemplateScale: Bool { self == .mar || self == .waar }
+
+    /// Whether donors are weighted by temporal distance rather than reduced with
+    /// an unweighted median.
+    var weightsDonorsByDistance: Bool { self == .waas || self == .waar }
+
+    /// Whether this method runs the FASTR pipeline (slice/OBS/ANC options apply).
+    var isFASTR: Bool { engine == .sliceTemplate }
+
+    /// Whether volumes are subdivided into slice epochs, which decides whether
+    /// the slices-per-volume control and the slice-rate ANC cutoff mean anything.
+    var supportsSliceEpochs: Bool { isFASTR || self == .allenIAR }
+
+    /// Whether the method reads motion parameters at all.
+    var usesMotion: Bool { self == .moosmann }
+
+    /// Whether a donor-volume count means anything for this method.
+    ///
+    /// Allen AAS builds a running template over a fixed section of epochs rather
+    /// than a neighbourhood of the target, so it is sized by "Section epochs"
+    /// instead. Showing a donor count there would be offering a control the
+    /// engine never reads.
+    var usesDonorWindow: Bool { self != .allenIAR }
 }
 
 struct WaveformView: View {
@@ -169,7 +281,7 @@ struct WaveformView: View {
     @State var filter: FilterViewModel
     @State var showsFilterPopover = false
     @State var showsFilterLineNoiseOptions = false
-    // Wavelet artifact reduction (HAPPE-style) pipeline stage.
+    // Wavelet artifact reduction pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
     @State var wavelet: WaveletReductionViewModel
     @State var channelStatusIsError = false
@@ -940,15 +1052,14 @@ struct WaveformView: View {
                 fileFormat: $gradient.motionFileFormat,
                 fdThreshold: $gradient.motionFDThreshold,
                 radiusMm: $gradient.motionRadiusMm,
-                moosmannMotionMetric: $gradient.moosmannMotionMetric,
+                motionMetric: $gradient.motionMetric,
                 skipStart: $gradient.skipStart,
                 skipEnd: $gradient.skipEnd,
                 trSeconds: $gradient.trSeconds,
                 trMarkerCode: gradient.trMarkerCode,
                 trMarkerSamples: recording.signal.map { trMarkerSamples(in: $0, code: gradient.trMarkerCode) } ?? [],
                 samplingRate: recording.signal?.samplingRate ?? 0,
-                windowBefore: gradient.windowBefore,
-                windowAfter: gradient.windowAfter,
+                donorVolumes: gradient.donorVolumes,
                 onClose: {
                     gradient.showsMotionConfig = false
                     gradient.showsPopover = true

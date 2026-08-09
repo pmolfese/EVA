@@ -372,7 +372,7 @@ struct ChannelGoodnessSettingsView: View {
             GridRow {
                 MetricHelpLabel(name: "Cleaning mode", help: FieldHelp.waveletCleaningMode)
                 Picker("", selection: $settings.wavelet.cleaningMode) {
-                    ForEach(WaveletCleaningMode.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(WaveletCleaningMode.allCases) { Text($0.displayName).tag($0) }
                 }
                 .labelsHidden()
                 .frame(width: 180)
