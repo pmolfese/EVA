@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Coverage for Phase 2 of the batch roadmap (TODO.md): processing a real
+//  Coverage for Phase 2 of the batch roadmap (ROADMAP.md): processing a real
 //  fixture with no window at all, end to end — load, apply, write — and the
 //  two "can't finish headlessly" outcomes (a decision step, an unreadable file).
 //

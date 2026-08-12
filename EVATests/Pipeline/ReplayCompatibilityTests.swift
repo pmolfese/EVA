@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Coverage for the compatibility pre-flight (TODO.md Priority 1): a step
+//  Coverage for the compatibility pre-flight (ROADMAP.md (completed batch suite)): a step
 //  captured on one file must be flagged, not silently no-op'd or crash, when
 //  it doesn't fit a different target file.
 //

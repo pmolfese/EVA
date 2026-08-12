@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Headless apply-core (REFACTOR.md item E / TODO.md Priority 1): applies an
+//  Headless apply-core (ROADMAP.md, completed batch suite): applies an
 //  `EVAProcessingScript`'s auto steps to a signal with NO SwiftUI view, panel,
 //  or gate involved — the prerequisite for unattended (windowless) batch.
 //  Unlike `WaveformView.interactiveReplay()` (which drives popovers/sheets for
@@ -21,7 +21,7 @@
 //  its own transform (`FilterViewModel.apply(to:pnsInput:onApplied:)`,
 //  `GradientViewModel.apply(to:pnsSignal:onApplied:)`, …) so it stays
 //  independently testable and this file doesn't balloon into a second god
-//  object as more steps become headless-safe. See TODO.md for the sequencing.
+//  object as more steps become headless-safe. See ROADMAP.md for the sequencing.
 //
 
 import Foundation

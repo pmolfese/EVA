@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Phase 2 of the batch roadmap (TODO.md): processes one file with NO window
+//  Phase 2 of the batch roadmap (ROADMAP.md): processes one file with NO window
 //  at all — load → ProcessingCore.applyAutoSteps → write output. Used when a
 //  batch's configured script has no decision steps (ICA / drawn artifact
 //  cleaning), so there's nothing a human needs to see. Builds a fresh

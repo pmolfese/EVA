@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Compatibility pre-flight (TODO.md Priority 1): checks one recorded step
+//  Compatibility pre-flight (ROADMAP.md (completed batch suite)): checks one recorded step
 //  against a target signal's actual sampling rate / channel count / events,
 //  so an incompatible step is auto-flagged and unchecked in the replay config
 //  pane instead of silently no-oping (or throwing deep inside the gradient/
