@@ -1778,12 +1778,10 @@ extension WaveformView {
     }
 
     func setArtifactCleaningEnabled(_ isEnabled: Bool) {
-        guard artifactVM.cleanedSignal != nil,
-              artifactVM.cleaningIsEnabled != isEnabled else {
-            return
-        }
-        artifactVM.cleaningIsEnabled = isEnabled
-        invalidateEpochsForSignalChange()
+        PipelineStageToggles.setArtifactCleaningEnabled(
+            isEnabled, artifactVM: artifactVM, store: recordingStore,
+            epoching: epoching, segHealth: segHealth
+        )
     }
 
 }

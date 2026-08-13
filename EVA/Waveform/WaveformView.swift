@@ -325,8 +325,6 @@ struct WaveformView: View {
     // BCG detection
     // BCG detection domain, extracted into an L4 store (REFACTOR.md).
     @State var bcg: BCGDetectionViewModel
-    /// Stable UUID so re-running detection updates the existing DefinedArtifact rather than appending a new one.
-    let bcgDefinedArtifactID = UUID()
     // Artifact detection + cleaning domain, extracted into an L4 store. See
     // REFACTOR.md slice 5.
     @State var artifactVM: ArtifactViewModel

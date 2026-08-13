@@ -1903,31 +1903,13 @@ extension WaveformView {
     }
 
     func clearEpochs() {
-        epoching.epochedSignal = nil
-        epoching.epochSegments = []
-        segmentedEpochSignal = nil
-        segmentedEpochSegments = []
-        epoching.isAveraged = false
+        // Task handles stay with the view — cancelling one is lifecycle, not
+        // domain state, so it does not belong in the shared toggle.
         snrTask?.cancel()
         snrTask = nil
-        epoching.isComputingAverageSNR = false
-        epoching.averageSNRByCategory = [:]
-        selectedSampleRange = nil
-        dragSelectionStartSample = nil
-        dragSelectionEndSample = nil
-        topomapSample = nil
-        epoching.butterflyTopomapRelativeSample = nil
-        epoching.psaExclusionSummary = PSAExclusionSummary()
-        epoching.averagedDisplayMode = .waveform
-        epoching.showsButterflyPlot = false
-        selectedEventCodes.removeAll()
-        epoching.statusMessage = nil
-        epoching.epochBadChannelSummary.removeAll()
-        epoching.epochBadChannelAllSegmentsSummary.removeAll()
-        epoching.interpolatedChannelsBySegmentSummary.removeAll()
-        epoching.skippedLabeledBadSegmentsSummary.removeAll()
-        segHealth.clearAnalysis(hide: true, clearLabels: true)
-        horizontalScrollPosition.scrollTo(x: 0)
+        PipelineStageToggles.clearEpochs(
+            epoching: epoching, segHealth: segHealth, store: recordingStore
+        )
     }
 
     func epochCategorySummaries() -> [EpochCategorySummary] {

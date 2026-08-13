@@ -39,6 +39,20 @@ final class BCGDetectionViewModel {
     var detectsArtifacts = false
     var showsSheet = false
 
+    /// Stable identity for the `DefinedArtifact` this detector contributes, so
+    /// re-running detection updates the existing entry rather than appending a
+    /// new one.
+    ///
+    /// Lives here rather than on `WaveformView`, where it used to be a
+    /// `let bcgDefinedArtifactID = UUID()`. That was fragile as well as
+    /// unreachable: a `let` initialiser on a `View` struct runs whenever SwiftUI
+    /// re-initialises the struct, and if it ever did, the id would change and
+    /// every lookup keyed on it — updating the artifact, removing it on disable,
+    /// invalidating its OBS variance cache — would silently miss the entry it was
+    /// looking for and leave a stale artifact behind. Tied to the view model's
+    /// lifetime, it is stable for exactly as long as the detector's output is.
+    @ObservationIgnored let definedArtifactID = UUID()
+
     // MARK: Method + shared output
     var method = BCGDetectionMethod.periodicity
     var eventCode = "BCG"

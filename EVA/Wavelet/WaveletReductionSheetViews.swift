@@ -56,24 +56,17 @@ extension WaveformView {
     }
 
     func setWaveletReductionEnabled(_ isEnabled: Bool) {
-        guard wavelet.reducedSignal != nil, wavelet.isEnabled != isEnabled else { return }
-        wavelet.isEnabled = isEnabled
-        invalidateEpochsForSignalChange()
-        invalidateInterpolations()
+        PipelineStageToggles.setWaveletReductionEnabled(
+            isEnabled, wavelet: wavelet, store: recordingStore,
+            epoching: epoching, segHealth: segHealth
+        )
     }
 
     func revertWaveletReduction() {
-        guard wavelet.reducedSignal != nil else { return }
-        wavelet.reducedSignal = nil
-        wavelet.artifact = nil
-        wavelet.result = nil
-        wavelet.bandVarianceRetained = nil
-        wavelet.statusMessage = "Reverted wavelet reduction."
-        wavelet.candidates = []
-        wavelet.selectedCandidateID = nil
-        invalidateEpochsForSignalChange()
-        invalidateInterpolations()
-        artifactVM.detectionRefreshToken += 1
+        PipelineStageToggles.revertWaveletReduction(
+            wavelet: wavelet, artifactVM: artifactVM, store: recordingStore,
+            epoching: epoching, segHealth: segHealth
+        )
     }
 
     func runWaveletReduction(on input: MFFSignalData) {

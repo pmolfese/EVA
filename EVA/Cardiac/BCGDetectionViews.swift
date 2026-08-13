@@ -931,11 +931,7 @@ extension WaveformView {
     }
 
     func disableBCGDetection() {
-        bcg.detectsArtifacts = false
-        artifactVM.events = artifactVM.events.filter { $0.sourceFile != BCGDetector.sourceFile }
-        template.definedArtifacts.removeAll { $0.id == bcgDefinedArtifactID }
-        bcg.refinedTemplate = nil
-        bcg.refinedKeptCount = nil
+        PipelineStageToggles.disableBCGDetection(bcg: bcg, artifactVM: artifactVM, template: template)
     }
 
     /// When the "auto-select proxy set" default is on, pick a compatible
@@ -1120,7 +1116,7 @@ extension WaveformView {
 
     func registerBCGDefinedArtifact(events: [MFFEvent], eventCode: String) {
         let artifact = DefinedArtifact(
-            id: bcgDefinedArtifactID,
+            id: bcg.definedArtifactID,
             type: .bcg,
             name: "BCG",
             eventCode: eventCode,
@@ -1131,14 +1127,14 @@ extension WaveformView {
             topography: nil,
             cleaningMethod: .obs
         )
-        if let index = template.definedArtifacts.firstIndex(where: { $0.id == bcgDefinedArtifactID }) {
+        if let index = template.definedArtifacts.firstIndex(where: { $0.id == bcg.definedArtifactID }) {
             let previous = template.definedArtifacts[index]
             template.definedArtifacts[index] = artifact
             template.definedArtifacts[index].preserveCleaningSettings(from: previous)
         } else {
             template.definedArtifacts.append(artifact)
         }
-        invalidateOBSVarianceCache(for: bcgDefinedArtifactID)
+        invalidateOBSVarianceCache(for: bcg.definedArtifactID)
         clearAppliedArtifactCleaning()
     }
 
