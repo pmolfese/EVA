@@ -269,6 +269,19 @@ final class FilterViewModel {
             params["lineNoiseHz"] = String(format: "%.0f", lineNoiseFrequency)
             params["lineNoiseHarmonics"] = "\(lineNoiseHarmonics)"
         }
+        // CleanLine's window and strength are read by `apply(to:)` and change the
+        // output samples, so leaving them out made a replayed adaptive-CleanLine
+        // filter silently use the destination's defaults. Found by the REWIND
+        // determinism audit (2026-08-13) — same class as `categoryGroups`:
+        // anything a stage reads but does not serialize is invisible to replay.
+        if activeLineNoiseMode == .adaptiveCleanLine {
+            params["lineNoiseWindowSeconds"] = String(format: "%.3g", lineNoiseWindowSeconds)
+            params["lineNoiseStrength"] = String(format: "%.3g", lineNoiseStrength)
+        }
+        // Whether the PNS channels were filtered alongside the EEG. Read by both
+        // apply paths (`ProcessingCore` and `FilteringViews`) and visible in the
+        // exported PNS samples.
+        params["filterPNS"] = "\(filterPNS)"
         params["precision"] = precision.rawValue
         return params
     }
@@ -299,6 +312,11 @@ final class FilterViewModel {
         }
         if let hz = p["lineNoiseHz"].flatMap(Double.init) { lineNoiseFrequency = hz }
         if let h = p["lineNoiseHarmonics"].flatMap(Int.init) { lineNoiseHarmonics = h }
+        // Absent keys leave the current value alone, so a pre-audit eva.xml
+        // replays exactly as it did before this was serialized.
+        if let w = p["lineNoiseWindowSeconds"].flatMap(Double.init) { lineNoiseWindowSeconds = w }
+        if let s = p["lineNoiseStrength"].flatMap(Double.init) { lineNoiseStrength = s }
+        if let v = p["filterPNS"] { filterPNS = (v == "true") }
         averageReference = p["averageReference"] == "true"
         if let prec = p["precision"].flatMap(FilterPrecision.init(rawValue:)) { precision = prec }
     }

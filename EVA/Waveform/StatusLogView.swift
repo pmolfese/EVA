@@ -55,7 +55,6 @@ struct StatusLogSnapshot: Equatable {
     /// Simple labelled bars for operations that only report a fraction.
     var progressRows: [StatusLogProgressRow] = []
     var messages: [StatusLogLine] = []
-    var hasHistory = false
 
     /// True when nothing is running and there is nothing to say.
     var isIdle: Bool { operations.isEmpty && progressRows.isEmpty && messages.isEmpty }
@@ -85,7 +84,9 @@ struct StatusLogView: View, Equatable {
                 }
 
                 if snapshot.isIdle {
-                    Text(snapshot.hasHistory ? "Ready · click for history" : "Ready")
+                    // "history" here means the processing tree, which is what
+                    // the popover now leads with when nothing is running.
+                    Text("Ready · click for queue and history")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
@@ -104,7 +105,7 @@ struct StatusLogView: View, Equatable {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Click to see the full status history")
+        .help("Click for the processing queue and history")
         .accessibilityLabel("Status log")
     }
 }

@@ -43,6 +43,9 @@ final class RecordingStore {
     var physio = PhysioDisplayModel()
     /// Toolbar status line and its history.
     var status = RecordingStatusModel()
+    /// The processing history tree and the History rail's display state. Derived
+    /// from the processing script for now — see `RecordingHistoryModel`.
+    var processingHistory = RecordingHistoryModel()
     /// Single owner of in-flight operation progress, replacing the per-view-model
     /// `operationProgress` properties. See `OperationProgressCenter`.
     var operationProgress = OperationProgressCenter()

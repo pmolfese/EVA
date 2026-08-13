@@ -71,6 +71,7 @@ extension WaveformView {
         // Capture the active processing pipeline for eva.xml + the process log.
         let processingScript = currentProcessingScript()
         let auditLogLines = currentProcessingAuditLogLines()
+        let icaPayload = currentICAReplayPayload()
 
         mffExportTask?.cancel()
         let sessionID = recordingSessionID
@@ -81,7 +82,8 @@ extension WaveformView {
                     pnsForExport: pnsForExport,
                     script: processingScript,
                     to: url,
-                    auditLogLines: auditLogLines
+                    auditLogLines: auditLogLines,
+                    icaPayload: icaPayload
                 )
             }
             // A newer export owns `isExportingMFF` — clearing it here would blank
@@ -111,14 +113,16 @@ extension WaveformView {
         pnsForExport: MFFSignalData?,
         script: EVAProcessingScript,
         to url: URL,
-        auditLogLines: [String] = []
+        auditLogLines: [String] = [],
+        icaPayload: ICAReplayPayload? = nil
     ) async -> Result<URL, Error> {
         await MFFExportWriter.write(
             snapshot: snapshot,
             pnsSignal: pnsForExport,
             script: script,
             to: url,
-            auditLogLines: auditLogLines
+            auditLogLines: auditLogLines,
+            icaPayload: icaPayload
         )
     }
 
@@ -179,6 +183,9 @@ extension WaveformView {
         let pnsForExport = pnsSignalForMFFExport()
         let processingScript = currentProcessingScript()
         let auditLogLines = currentProcessingAuditLogLines()
+        // The ICA operator is channel × component, so it stays valid across a
+        // time split — both halves carry the same removal.
+        let icaPayload = currentICAReplayPayload()
         isExportingMFF = true
         mffExportStatusMessage = "Splitting MFF at \(formattedEventTime(splitTime))..."
 
@@ -219,6 +226,7 @@ extension WaveformView {
                             note: "Created by right-click Split File export."
                         ))
                         try? EVAProcessingScriptXML.write(script, toPackage: output.url)
+                        try? icaPayload?.write(toPackage: output.url)
 
                         let log = EVAProcessLog(header: "EVA split export — \(output.url.lastPathComponent)")
                         for step in script.steps {
@@ -404,7 +412,30 @@ extension WaveformView {
         if epoching.epochedSignal != nil, !epoching.selectedEventCodes.isEmpty {
             script.append(EVAProcessingStep(operation: .segment, parameters: epoching.parameters))
         }
-        return script
+        // Bad-channel marks and interpolation, as provenance. Shared with the
+        // headless path so the two cannot drift — `HeadlessBatchProcessor` writes
+        // back the script it was handed, so without this a batch-produced package
+        // would omit decisions its own PSA escalation had made.
+        return ChannelDecisionSteps.inserted(
+            into: script,
+            badChannels: channels.bad,
+            interpolatedChannels: Set(channels.interpolated.keys)
+        )
+    }
+
+    /// The subject-specific ICA payload for `eva_ica.json`, or `nil` when no ICA
+    /// removal is part of the exported state.
+    ///
+    /// Deliberately keyed on `ica.cleanedSignal != nil` rather than on the mere
+    /// presence of a decomposition: a fit the user never applied is not part of
+    /// this package's processing, and writing its operator would describe a step
+    /// that did not happen. Same condition `currentProcessingScript()` uses to
+    /// emit the `icaClean` step, so the sidecar and the script cannot disagree.
+    func currentICAReplayPayload() -> ICAReplayPayload? {
+        guard ica.cleanedSignal != nil,
+              let decomposition = ica.decomposition,
+              !decomposition.excludedComponents.isEmpty else { return nil }
+        return ICAReplayPayload(decomposition: decomposition, method: ica.method)
     }
 
     func artifactCleaningParameters() -> [String: String] {

@@ -33,7 +33,7 @@ nonisolated struct CategoryRejection: Codable, Sendable, Hashable {
 
 /// One processing operation with typed string parameters.
 nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable {
-    enum Operation: String, Codable, Sendable {
+    enum Operation: String, Codable, Sendable, CaseIterable {
         case filter
         case reference
         case mriGradientCorrection

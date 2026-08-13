@@ -629,32 +629,31 @@ extension WaveformView {
         let sessionID = recordingSessionID
         icaRemovalTask = Task {
           await processingQueue.run("ICA Component Removal") { [self] in
+            // Shared with headless replay (`ICAReplay.activationSignal`) so the
+            // interactive and re-applied reconstructions cannot drift.
+            //
+            // This used to swallow a filter failure and carry on with a `nil`
+            // activation — which does not fail, it reconstructs the sources from
+            // the *unfiltered* base signal and returns different samples than the
+            // fit implies. Silently different data is worse than no removal, so
+            // the removal now aborts and says why.
             var reconstructionActivationSignal: MFFSignalData?
-            if let fitFilter = decomposition.fitFilter {
+            if decomposition.fitFilter != nil {
+                ica.statusMessage = "Filtering ICA activation copy..."
                 do {
-                    ica.statusMessage = "Filtering ICA activation copy..."
-                    let activationData = try await EEGSignalFilter.bandPass(
-                        channels: signal.data,
-                        samplingRate: signal.samplingRate,
-                        lowCutoff: fitFilter.lowCutoff,
-                        highCutoff: fitFilter.highCutoff,
-                        notch60HzEnabled: fitFilter.notch60HzEnabled
-                    )
-
-                    reconstructionActivationSignal = MFFSignalData(
-                        signalURL: signal.signalURL,
-                        signalType: "\(signal.signalType) ICA Activation Filtered",
-                        numberOfChannels: signal.numberOfChannels,
-                        samplingRate: signal.samplingRate,
-                        duration: signal.duration,
-                        recordingStartTime: signal.recordingStartTime,
-                        events: signal.events,
-                        data: activationData,
-                        channelNames: signal.channelNames
+                    reconstructionActivationSignal = try await ICAReplay.activationSignal(
+                        for: signal,
+                        fitFilter: decomposition.fitFilter
                     )
                 } catch {
+                    ica.statusMessage = error.localizedDescription
+                    ica.isRemovingComponents = false
                     filter.statusMessage = error.localizedDescription
                     filter.statusIsError = true
+                    icaRemovalTask = nil
+                    // Sheet stays open: nothing was applied, so the components
+                    // are still selected and the user can retry.
+                    return
                 }
             }
 

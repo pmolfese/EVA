@@ -250,7 +250,20 @@ nonisolated enum EpochSNR {
             trialScalar[t] = acc * invCh
         }
 
-        var rng = SystemRandomNumberGenerator()
+        // Seeded, not `SystemRandomNumberGenerator`. The bootstrap used to draw
+        // from the system generator, so two runs over the *same* epochs reported
+        // different SME — up to ~19% relative apart on categories with few
+        // trials. Nothing else moved: every sample and every other metric already
+        // matched. But `REWIND.md` promises that navigating back to a node
+        // returns you to the same data, and a reported number that changes on
+        // every recomputation weakens that for no benefit. A bootstrap needs
+        // *arbitrary* draws, not *unpredictable* ones.
+        //
+        // The seed is fixed rather than derived from the data: a data-derived
+        // seed would make the estimate depend on the input in a second, hidden
+        // way, and two categories drawing the same resample indices is
+        // statistically harmless — the draws are independent of trial identity.
+        var rng = SeededGenerator(seed: 0x5EED_B007_5712_4D0C)
         let invN = 1.0 / Double(n)
         var estimates = [Double](repeating: 0, count: iterations)
         for i in 0..<iterations {

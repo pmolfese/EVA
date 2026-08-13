@@ -153,5 +153,9 @@ final class RecordingStatusModel {
     /// Dedupes repeated identical messages from the same feature.
     var lastRecordedStatusBySource: [String: String] = [:]
     var showsStatusHistory = false
+    /// Which tab the status popover opens on. Set from the status area on each
+    /// activation, so the popover leads with whichever half is relevant — see
+    /// `ProcessingStatusPopover.swift`.
+    var statusPopoverTab: ProcessingStatusTab = .queue
     var showsRecentProcessingHistory = false
 }

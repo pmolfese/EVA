@@ -91,7 +91,7 @@ struct ICAConfiguration: Sendable {
     var minimumIterations: Int
 }
 
-struct ICAFitFilterSettings: Codable, Sendable {
+nonisolated struct ICAFitFilterSettings: Codable, Sendable, Hashable {
     var lowCutoff: Double
     var highCutoff: Double
     var notch60HzEnabled: Bool
@@ -151,7 +151,7 @@ struct SavedICAArtifactSet: Codable, Sendable {
     var explainedVariance: [Double]
 }
 
-struct SavedICAComponent: Codable, Sendable {
+nonisolated struct SavedICAComponent: Codable, Sendable, Hashable {
     var index: Int
     var label: String
     var topography: [Double]

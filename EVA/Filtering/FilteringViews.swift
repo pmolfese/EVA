@@ -501,7 +501,8 @@ extension WaveformView {
             pnsForExport: pnsSignalWithRenames(),
             script: currentProcessingScript(),
             to: url,
-            auditLogLines: currentProcessingAuditLogLines()
+            auditLogLines: currentProcessingAuditLogLines(),
+            icaPayload: currentICAReplayPayload()
         )
         if batch.isActive, batch.matches(recording: recording) {
             batch.updateProgress(stepName: "Exporting", stepProgress: 1, fileProgress: 1)

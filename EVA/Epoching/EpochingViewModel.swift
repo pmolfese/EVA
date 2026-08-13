@@ -307,6 +307,11 @@ final class EpochingViewModel {
 
     var parameters: [String: String] {
         var p: [String: String] = [
+            // Which field the segmentation reads. Both apply paths branch on it
+            // — `.artifact` segments on detected artifacts instead of on event
+            // codes, an entirely different set of epochs — and it was not
+            // serialized until the REWIND determinism audit (2026-08-13).
+            "segmentField": segmentField.rawValue,
             "preStimulusMs": String(format: "%.0f", preStimulus * 1000),
             "postStimulusMs": String(format: "%.0f", postStimulus * 1000),
             "offsetMs": String(format: "%.0f", offset * 1000),
@@ -378,6 +383,9 @@ final class EpochingViewModel {
     /// DIN pairings are portable when the target also has the paired marker
     /// code's events (`makeBuildJob` already validates that at apply time).
     func apply(parameters p: [String: String]) {
+        // Absent means a pre-audit script, which could only have been `.code` —
+        // that was the only value `parameters` was capable of describing.
+        if let v = p["segmentField"].flatMap(PSASegmentField.init(rawValue:)) { segmentField = v }
         if let v = p["preStimulusMs"].flatMap(Double.init) { preStimulus = v / 1000 }
         if let v = p["postStimulusMs"].flatMap(Double.init) { postStimulus = v / 1000 }
         if let v = p["offsetMs"].flatMap(Double.init) { offset = v / 1000 }

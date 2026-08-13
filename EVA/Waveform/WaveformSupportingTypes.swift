@@ -1242,7 +1242,9 @@ enum ArtifactDetectionMethod: String, CaseIterable, Identifiable {
     static var selectableCases: [ArtifactDetectionMethod] { [.threshold, .ica] }
 }
 
-enum PSASegmentField: String, CaseIterable, Identifiable {
+/// `nonisolated` so the pipeline layer can read it without a main-actor hop —
+/// `HistoryStepSummary` renders a recorded `segmentField` off the view.
+nonisolated enum PSASegmentField: String, CaseIterable, Identifiable {
     case code = "Code"
     case label = "Label"
     case artifact = "Artifacts"

@@ -1168,6 +1168,12 @@ struct WaveformView: View {
                 key: newKey
             )
         }
+        // REWIND work item 1: rebuild the derived history when the chain moves.
+        // Keyed on a signature of stage outputs rather than run per body pass —
+        // see `WaveformHistoryRail.swift` for why that is both cheap and correct.
+        .onChange(of: processingChainSignature, initial: true) { _, _ in
+            rebuildProcessingHistory()
+        }
         // B3: one `.sheet(item:)` in place of 18 chained `.sheet(isPresented:)`.
         // Presentation is still driven by the same per-VM booleans — they are
         // derived into `activeSheet` rather than each owning a modifier. See
@@ -1225,6 +1231,9 @@ struct WaveformView: View {
         isShowingEpochs: Bool
     ) -> some View {
         HStack(spacing: 0) {
+            // The processing history is *not* a panel here. It lives in the
+            // status popover's History tab (`ProcessingStatusPopover.swift`), so
+            // it costs no waveform width — see that file for the reasoning.
             waveformArea(for: signal, events: events, isShowingEpochs: isShowingEpochs)
 
             if showsEventsPanel {
@@ -1734,7 +1743,6 @@ struct WaveformView: View {
         }
 
         snapshot.messages = activeLogMessages
-        snapshot.hasHistory = !statusHistory.isEmpty
         return snapshot
     }
 
@@ -1743,178 +1751,32 @@ struct WaveformView: View {
     func statusLog() -> some View {
         StatusLogView(
             snapshot: statusLogSnapshot,
-            onActivate: { showsStatusHistory = true }
+            onActivate: {
+                // Open on whichever tab answers the question you probably have:
+                // if something is running, that; otherwise the tree. Preserves
+                // what the old two-popover switch did, without making the other
+                // half unreachable — which is what it used to do.
+                recordingStore.status.statusPopoverTab =
+                    activeOperationProgress.isEmpty ? .history : .queue
+                showsStatusHistory = true
+            }
         )
         .equatable()
         .onChange(of: activeLogMessages) { _, lines in
             recordStatusHistory(lines)
         }
         .popover(isPresented: binding(recordingStore.status, \.showsStatusHistory), arrowEdge: .bottom) {
-            if activeOperationProgress.isEmpty {
-                statusHistoryPopover()
-            } else {
-                processingStatusPopover(activeOperationProgress)
-            }
+            ProcessingStatusPopoverView(
+                operations: activeOperationProgress,
+                statusHistory: statusHistory,
+                historyNodes: historyRailNodes,
+                historyShortID: recordingStore.processingHistory.currentShortID,
+                tab: binding(recordingStore.status, \.statusPopoverTab),
+                onClearStatusHistory: { statusHistory.removeAll() }
+            )
         }
     }
 
-    @ViewBuilder
-    private func statusHistoryPopover() -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Status History")
-                    .font(.headline)
-                Spacer()
-                Button("Clear") {
-                    statusHistory.removeAll()
-                }
-                .disabled(statusHistory.isEmpty)
-            }
-
-            Divider()
-
-            if statusHistory.isEmpty {
-                Text("No status messages yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(statusHistory.reversed()) { entry in
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text(entry.source.uppercased())
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(entry.isError ? Color.red : Color.secondary)
-                                    Spacer()
-                                    Text(entry.date, format: .dateTime.hour().minute().second())
-                                        .font(.caption2.monospacedDigit())
-                                        .foregroundStyle(.tertiary)
-                                }
-                                Text(entry.text)
-                                    .font(.callout)
-                                    .foregroundStyle(entry.isError ? Color.red : Color.primary)
-                                    .textSelection(.enabled)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .padding(12)
-        .frame(width: 420, height: 380, alignment: .topLeading)
-    }
-
-    @ViewBuilder
-    private func processingStatusPopover(_ operations: [OperationProgress]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(operations.enumerated()), id: \.offset) { index, operation in
-                if index > 0 { Divider() }
-                processingOperationView(operation)
-            }
-
-            if !statusHistory.isEmpty {
-                Divider()
-                DisclosureGroup("Recent history", isExpanded: binding(recordingStore.status, \.showsRecentProcessingHistory)) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(statusHistory.suffix(3).reversed())) { entry in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(entry.source.uppercased())
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(entry.isError ? Color.red : Color.secondary)
-                                Text(entry.text)
-                                    .font(.caption)
-                                    .lineLimit(2)
-                                    .foregroundStyle(entry.isError ? Color.red : Color.secondary)
-                            }
-                        }
-                    }
-                    .padding(.top, 6)
-                }
-                .font(.caption)
-            }
-        }
-        .padding(14)
-        .frame(width: 460, alignment: .topLeading)
-    }
-
-    private func processingOperationView(_ operation: OperationProgress) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(operation.title)
-                        .font(.headline)
-                    Text(operation.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(elapsedText(since: operation.startedAt, now: context.date))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            HStack(spacing: 8) {
-                ProgressView(value: operation.clampedFraction)
-                    .progressViewStyle(.linear)
-                Text("\(Int((operation.clampedFraction * 100).rounded()))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 38, alignment: .trailing)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(operation.phase)
-                    .font(.callout.weight(.medium))
-                if let detail = operation.detail {
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(operation.stages) { stage in
-                    HStack(spacing: 7) {
-                        Image(systemName: stageIcon(stage.state))
-                            .foregroundStyle(stageColor(stage.state))
-                            .frame(width: 14)
-                        Text(stage.name)
-                            .font(.caption)
-                            .foregroundStyle(stage.state == .pending ? Color.secondary : Color.primary)
-                    }
-                }
-            }
-        }
-    }
-
-
-    private func stageIcon(_ state: OperationProgress.StageState) -> String {
-        switch state {
-        case .complete: return "checkmark.circle.fill"
-        case .active: return "circle.inset.filled"
-        case .pending: return "circle"
-        }
-    }
-
-    private func stageColor(_ state: OperationProgress.StageState) -> Color {
-        switch state {
-        case .complete: return .green
-        case .active: return .accentColor
-        case .pending: return .secondary
-        }
-    }
-
-    private func elapsedText(since start: Date, now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(start)))
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
-    }
 
 
     // MARK: - Waveform area

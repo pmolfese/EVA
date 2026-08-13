@@ -22,7 +22,8 @@ enum MFFExportWriter {
         pnsSignal: MFFSignalData?,
         script: EVAProcessingScript,
         to url: URL,
-        auditLogLines: [String] = []
+        auditLogLines: [String] = [],
+        icaPayload: ICAReplayPayload? = nil
     ) async -> Result<URL, Error> {
         // Stamp what we are actually writing, so re-opening this package does not
         // have to infer it from the EGI structure. The writer is the one place
@@ -49,6 +50,12 @@ enum MFFExportWriter {
                     to: url
                 )
                 try? EVAProcessingScriptXML.write(script, toPackage: url)
+                // The subject-specific half of the `icaClean` step. `eva.xml`
+                // records that ICA ran and with which portable settings; this
+                // carries the operator and the exclusion decision, which is what
+                // makes the step re-applicable without a refit. See
+                // `ICAReplayPayload`.
+                try? icaPayload?.write(toPackage: url)
                 let log = EVAProcessLog(
                     header: "EVA \(EVAProcessingScriptXML.currentAppVersion) export — \(url.lastPathComponent)"
                 )

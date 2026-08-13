@@ -546,6 +546,17 @@ final class GradientViewModel {
             params["motionMetric"] = motionMetric.rawValue
             params["motionRadiusMm"] = String(format: "%.1f", motionRadiusMm)
         }
+        // Four inputs the correction reads but this block used to omit — found by
+        // the REWIND determinism audit (2026-08-13). `skipStart`/`skipEnd` trim
+        // the TR-marker list in `trimmedTRMarkers`, so they change which volumes
+        // are corrected at all; `appliesToPNS` decides whether the PNS channels
+        // are corrected; `excludeHighMotion` gates `highMotionVolumeSet()`.
+        // Motion censoring already serialized its *threshold* while omitting the
+        // switch that turns it on, which is the more confusing half to lose.
+        params["skipStart"] = "\(skipStart)"
+        params["skipEnd"] = "\(skipEnd)"
+        params["appliesToPNS"] = "\(appliesToPNS)"
+        params["excludeHighMotion"] = "\(excludeHighMotion)"
         return params
     }
 
@@ -630,8 +641,16 @@ final class GradientViewModel {
         if let v = p["motionRadiusMm"].flatMap(Double.init) { motionRadiusMm = v }
         if let v = p["motionFDThreshold"].flatMap(Double.init) {
             motionFDThreshold = v
+            // Legacy inference: scripts written before `excludeHighMotion` was
+            // serialized only emitted a threshold when censoring was on (or the
+            // method needed motion anyway), so a present threshold implied it.
+            // The explicit key below overrides this when it exists.
             excludeHighMotion = true
         }
+        if let v = p["skipStart"].flatMap(Int.init) { skipStart = v }
+        if let v = p["skipEnd"].flatMap(Int.init) { skipEnd = v }
+        if let v = p["appliesToPNS"] { appliesToPNS = (v == "true") }
+        if let v = p["excludeHighMotion"] { excludeHighMotion = (v == "true") }
     }
 
     // MARK: - Apply (the transform itself)

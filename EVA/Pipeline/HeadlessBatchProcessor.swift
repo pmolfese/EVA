@@ -92,10 +92,20 @@ enum HeadlessBatchProcessor {
             epoching: core.epoching,
             channels: store.channels
         )
+        // The script written out is the one handed in *plus* the channel
+        // decisions this run made — PSA's globally-bad escalation can mark and
+        // interpolate channels the input script never mentioned. Writing the
+        // input script verbatim would describe a run that did not happen. Same
+        // shared definition the interactive path uses.
+        let outgoingScript = ChannelDecisionSteps.inserted(
+            into: script,
+            badChannels: store.channels.bad,
+            interpolatedChannels: Set(store.channels.interpolated.keys)
+        )
         switch await MFFExportWriter.write(
             snapshot: snapshot,
             pnsSignal: pnsSignal,
-            script: script,
+            script: outgoingScript,
             to: outputURL,
             auditLogLines: auditLogLines
         ) {
