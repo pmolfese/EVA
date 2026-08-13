@@ -155,6 +155,12 @@ extension WaveformView {
                 progressContinuation.finish()
                 progressTask.cancel()
 
+                // Clear the spinner *before* the publish guard, not after: a
+                // scan that is cancelled, superseded, or whose results are no
+                // longer wanted still has to release `isAnalyzing`. Clearing it
+                // only on the success path left the progress row stuck on.
+                channels.isAnalyzingHealth = false
+
                 guard !Task.isCancelled,
                       channels.showsHealth,
                       chanHealth.signature == signature else {
@@ -162,7 +168,6 @@ extension WaveformView {
                 }
 
                 channels.healthResults = analysis.resultsByChannel
-                channels.isAnalyzingHealth = false
                 channels.healthProgress = 1
                 chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
                     ? "No wavelet channel-goodness metrics available."
@@ -363,6 +368,12 @@ extension WaveformView {
                 progressContinuation.finish()
                 progressTask.cancel()
 
+                // Clear the spinner *before* the publish guard, not after: a
+                // scan that is cancelled, superseded, or whose results are no
+                // longer wanted still has to release `isAnalyzing`. Clearing it
+                // only on the success path left the progress row stuck on.
+                channels.isAnalyzingHealth = false
+
                 guard !Task.isCancelled,
                       channels.showsHealth,
                       chanHealth.signature == signature else {
@@ -370,7 +381,6 @@ extension WaveformView {
                 }
 
                 channels.healthResults = analysis.resultsByChannel
-                channels.isAnalyzingHealth = false
                 channels.healthProgress = 1
                 chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
                     ? "No channel health metrics available."

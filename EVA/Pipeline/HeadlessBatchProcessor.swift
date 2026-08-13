@@ -40,11 +40,15 @@ enum HeadlessBatchProcessor {
         outputFolder: URL,
         progress: ((ProcessingCore.ProgressUpdate) -> Void)? = nil
     ) async throws -> Outcome {
-        let (signal, pnsSignal) = try await Task.detached(priority: .userInitiated) {
+        let (signal, pnsSignal, geometry) = try await Task.detached(priority: .userInitiated) {
             let reader = MFFReader()
             let signal = try reader.loadSignal(from: url)
             let pnsSignal = try? reader.loadPNSSignal(from: url)
-            return (signal, pnsSignal)
+            // Without this the headless PSA cannot interpolate per-epoch bad
+            // channels or escalate persistently-bad ones, so it produced
+            // measurably different averages from the interactive path.
+            let geometry = ElectrodeGeometry.load(fromPackageContaining: signal.signalURL)
+            return (signal, pnsSignal, geometry)
         }.value
 
         let store = RecordingStore()
@@ -55,7 +59,10 @@ enum HeadlessBatchProcessor {
             ica: ICAViewModel(store: store),
             artifactVM: ArtifactViewModel(store: store),
             epoching: EpochingViewModel(store: store),
-            wavelet: WaveletReductionViewModel(store: store)
+            wavelet: WaveletReductionViewModel(store: store),
+            template: ArtifactTemplateViewModel(store: store),
+            segHealth: SegmentHealthViewModel(store: store),
+            electrodePositions: geometry?.positions ?? [:]
         )
 
         let result = await core.applyAutoSteps(script, to: signal, pnsSignal: pnsSignal, progress: progress)
@@ -77,7 +84,21 @@ enum HeadlessBatchProcessor {
         let baseName = url.deletingPathExtension().lastPathComponent
         let outputURL = outputFolder.appendingPathComponent("\(baseName)-\(snapshot.kind.replayOutputSuffix).mff")
         progress?(ProcessingCore.ProgressUpdate(stepName: "Exporting", stepProgress: nil, fileProgress: 0.95))
-        switch await MFFExportWriter.write(snapshot: snapshot, pnsSignal: pnsSignal, script: script, to: outputURL) {
+        // Same provenance the interactive export writes. Omitting it here meant a
+        // batch-produced package silently lacked every "result" line — bad
+        // channels, escalated/interpolated channels, per-category SNR.
+        let auditLogLines = ProcessingAuditLog.lines(
+            gradient: core.gradient,
+            epoching: core.epoching,
+            channels: store.channels
+        )
+        switch await MFFExportWriter.write(
+            snapshot: snapshot,
+            pnsSignal: pnsSignal,
+            script: script,
+            to: outputURL,
+            auditLogLines: auditLogLines
+        ) {
         case .success:
             progress?(ProcessingCore.ProgressUpdate(stepName: "Exporting", stepProgress: 1, fileProgress: 1))
             return .completed(outputURL)

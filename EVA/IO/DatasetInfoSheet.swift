@@ -20,6 +20,12 @@ import SwiftUI
 struct DatasetInfoSheet: View {
     var recording: MFFRecording
     var epoching: EpochingViewModel
+    /// The kind EVA is working with — the override if one is set, else detected.
+    let effectiveType: MFFFileType?
+    /// Whether the user has overridden detection for this session.
+    let isTypeOverridden: Bool
+    /// Applies (or clears, with `nil`) the session override.
+    let onChangeType: (MFFFileType?) -> Void
     let onClose: () -> Void
 
     @State private var ampType: String?
@@ -34,13 +40,48 @@ struct DatasetInfoSheet: View {
 
     private var signal: MFFSignalData? { recording.signal }
 
+    /// File type, with a session-only override.
+    ///
+    /// EVA detects the kind from the package's epoch/category structure, and
+    /// records it authoritatively in `eva.xml` for packages it wrote itself. This
+    /// control exists for everything else: an unusual import, a hand-edited
+    /// package, or a file from another tool that EVA reads wrongly. Changing it
+    /// re-interprets the recording immediately — it enables the averaged
+    /// workspace and butterfly plots, not just the label — so a bad detection can
+    /// never block the work.
+    @ViewBuilder
+    private func typeRow(detected: MFFFileType) -> some View {
+        let selection = Binding<MFFFileType>(
+            get: { effectiveType ?? detected },
+            set: { onChangeType($0) }
+        )
+
+        Picker("Type", selection: selection) {
+            ForEach(MFFFileType.allCases) { type in
+                Text(type.displayName).tag(type)
+            }
+        }
+
+        if isTypeOverridden {
+            HStack(spacing: 8) {
+                Text("Overridden for this session — EVA detected \(detected.displayName).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Reset") { onChangeType(nil) }
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Form {
                 Section("Dataset") {
                     LabeledContent("Name", value: recording.packageName)
                     if let signal {
-                        LabeledContent("Type", value: signal.detectedFileType.displayName)
+                        typeRow(detected: signal.detectedFileType)
                         LabeledContent("Channels", value: "\(signal.numberOfChannels)")
                         LabeledContent("Sampling rate", value: String(format: "%.0f Hz", signal.samplingRate))
                         LabeledContent("Duration", value: String(format: "%.2f s", signal.duration))

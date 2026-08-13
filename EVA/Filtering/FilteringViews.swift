@@ -296,10 +296,13 @@ extension WaveformView {
 
     /// Downstream invalidation shared by interactive filtering and replay.
     func postFilterInvalidation() {
-        clearAppliedArtifactCleaning()
-        artifactVM.detectionRefreshToken += 1
-        invalidateEpochsForSignalChange()
-        invalidateInterpolations()
+        PipelineInvalidation.downstreamOfFilterChange(
+            store: recordingStore,
+            artifactVM: artifactVM,
+            template: template,
+            epoching: epoching,
+            segHealth: segHealth
+        )
     }
 
     /// Launches the interactive replay once the user confirms the config pane.

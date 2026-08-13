@@ -202,6 +202,9 @@ extension WaveformView {
             DatasetInfoSheet(
                 recording: recording,
                 epoching: epoching,
+                effectiveType: effectiveFileType,
+                isTypeOverridden: recordingStore.fileTypeOverride != nil,
+                onChangeType: { setFileTypeOverride($0) },
                 onClose: { showsDatasetInfo = false }
             )
 

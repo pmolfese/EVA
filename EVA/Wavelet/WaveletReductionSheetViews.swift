@@ -104,9 +104,12 @@ extension WaveformView {
         await processingQueue.run("Wavelet Reduction") { [self] in
             await wavelet.apply(to: signal, excludedChannels: excludedChannels, analysisBand: analysisBand) { [self] in
                 guard sessionID == recordingSessionID else { return }
-                invalidateEpochsForSignalChange()
-                invalidateInterpolations()
-                artifactVM.detectionRefreshToken += 1
+                PipelineInvalidation.downstreamOfWaveletChange(
+                    store: recordingStore,
+                    artifactVM: artifactVM,
+                    epoching: epoching,
+                    segHealth: segHealth
+                )
             }
         }
     }
@@ -242,17 +245,12 @@ extension WaveformView {
         artifactVM.statusMessage = artifactVM.cleaningStatusMessage
     }
 
+    /// Interactive entry point for the shared cascade. See `PipelineInvalidation`.
     func clearAppliedArtifactCleaning() {
-        let hadCleaning = artifactVM.cleanedSignal != nil || template.definedArtifacts.contains { $0.appliedMethod != nil }
-        artifactVM.cleanedSignal = nil
-        artifactVM.cleaningIsEnabled = true
-        artifactVM.cleaningSummaries = []
-        artifactVM.cleaningProgress = nil
-        artifactVM.cleaningStatusMessage = nil
-        for index in template.definedArtifacts.indices {
-            template.definedArtifacts[index].appliedMethod = nil
-            template.definedArtifacts[index].cleanedAt = nil
-        }
+        let hadCleaning = PipelineInvalidation.appliedArtifactCleaning(
+            artifactVM: artifactVM,
+            template: template
+        )
         guard hadCleaning else { return }
         artifactVM.detectionRefreshToken += 1
         invalidateEpochsForSignalChange()

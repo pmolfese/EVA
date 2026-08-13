@@ -99,6 +99,29 @@ extension EVAProcessingStep {
 /// `eva.xml` persistence and the future replay ("Copy Processing From…") engine.
 nonisolated struct EVAProcessingScript: Codable, Sendable {
     var version: Int = 1
+    /// What EVA wrote this package as — the authoritative record of the file's
+    /// kind, independent of any inference from `categories.xml`/`epochs.xml`.
+    ///
+    /// Detection from the EGI structure is heuristic (it reads `#seg` counts and
+    /// `<name>Average</name>` markers, with a legacy fallback), and a package
+    /// written by another tool, hand-edited, or produced by an unusual import can
+    /// defeat it. When EVA itself wrote the file it *knows* the answer, so it
+    /// records it here and the reader trusts it over the heuristic.
+    ///
+    /// Optional because packages written before this field, or by other tools,
+    /// won't have it — those still fall back to detection.
+    var fileType: MFFFileType?
+    /// EVA build that wrote this package, e.g. `"0.1.6 (142)"`.
+    ///
+    /// Provenance, not configuration: when a result looks wrong months later, the
+    /// first question is which build produced it, and that is not recoverable
+    /// from the samples.
+    ///
+    /// Populated on *read* with whatever wrote that package. Writing always
+    /// stamps `currentAppVersion` instead of echoing this — a script replayed via
+    /// Copy Processing carries the *source* package's version, and preserving it
+    /// would misattribute the new file to a build that never touched it.
+    var appVersion: String?
     var steps: [EVAProcessingStep] = []
 
     mutating func append(_ step: EVAProcessingStep) {
@@ -115,10 +138,19 @@ nonisolated struct EVAProcessingScript: Codable, Sendable {
 nonisolated enum EVAProcessingScriptXML {
     static let fileName = "eva.xml"
 
+    /// This build, as `"<short version> (<build>)"`. Resolved once — the bundle
+    /// cannot change while the app is running.
+    static let currentAppVersion: String = {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = info?["CFBundleVersion"] as? String
+        return build.map { "\(short) (\($0))" } ?? short
+    }()
+
     static func data(for script: EVAProcessingScript) -> Data {
         var xml = """
         <?xml version="1.0" encoding="UTF-8"?>
-        <evaProcessing version="\(script.version)" appName="EVA" writtenAt="\(iso(Date()))">
+        <evaProcessing version="\(script.version)" appName="EVA" appVersion="\(escape(currentAppVersion))" writtenAt="\(iso(Date()))"\(script.fileType.map { " fileType=\"\($0.rawValue)\"" } ?? "")>
 
         """
         for step in script.steps {
@@ -172,6 +204,9 @@ nonisolated enum EVAProcessingScriptXML {
 
         var script = EVAProcessingScript()
         script.version = Int(root.attribute(forName: "version")?.stringValue ?? "1") ?? 1
+        script.fileType = root.attribute(forName: "fileType")?.stringValue
+            .flatMap(MFFFileType.init(rawValue:))
+        script.appVersion = root.attribute(forName: "appVersion")?.stringValue
 
         for node in root.elements(forName: "step") {
             guard let opRaw = node.attribute(forName: "op")?.stringValue,

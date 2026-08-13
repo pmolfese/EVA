@@ -22,8 +22,42 @@
 import Testing
 @testable import EVA
 
+/// Lets a test hold a run open until it explicitly releases it.
+///
+/// Replaces `Task.sleep` + `async let`: `async let` does not promise a child
+/// starts before the next statement runs, so a sleep-based "slow" run could
+/// finish before the "fast" run ever claimed the runner, inverting the ordering
+/// under test. (`ProcessingQueueTests` documents the same trap.) A gate makes the
+/// interleaving deterministic instead of probable.
+@MainActor
+private final class RunGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var isReleased = false
+
+    func wait() async {
+        if isReleased { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        isReleased = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 @MainActor
 struct LatestOnlyRunnerTests {
+
+    /// Spins until `condition` holds, failing rather than hanging if it never does.
+    private func waitUntil(_ label: String, _ condition: () -> Bool) async {
+        var spins = 0
+        while !condition() && spins < 10_000 {
+            await Task.yield()
+            spins += 1
+        }
+        if !condition() { Issue.record("timed out waiting for \(label)") }
+    }
 
     @Test func completedRunReportsItsValue() async {
         let runner = LatestOnlyRunner()
@@ -42,31 +76,25 @@ struct LatestOnlyRunnerTests {
     /// The core of the shipped bug: a superseded run must not publish.
     @Test func supersededRunStandsDownAndNewestRunPublishes() async {
         let runner = LatestOnlyRunner()
+        let gate = RunGate()
         var published: [String] = []
 
-        // Start a slow run, let it actually claim ownership, then supersede it
-        // with a fast one. The slow run finishes last — the ordering that made
-        // the original bug overwrite fresh results with stale ones.
-        async let slow: Void = {
+        // Hold a run open, supersede it, then let it finish last — the ordering
+        // that made the original bug overwrite fresh results with stale ones.
+        let slow = Task { @MainActor in
             let outcome = await runner.run("slow") {
-                try? await Task.sleep(nanoseconds: 40_000_000)
+                await gate.wait()
                 return "stale"
             }
             if case .completed(let value) = outcome { published.append(value) }
-        }()
-
-        var spins = 0
-        while runner.activeLabel != "slow" && spins < 500 {
-            await Task.yield()
-            spins += 1
         }
+        await waitUntil("the slow run to claim") { runner.activeLabel == "slow" }
 
-        async let fast: Void = {
-            let outcome = await runner.run("fast") { "fresh" }
-            if case .completed(let value) = outcome { published.append(value) }
-        }()
+        let fastOutcome = await runner.run("fast") { "fresh" }
+        if case .completed(let value) = fastOutcome { published.append(value) }
 
-        _ = await (slow, fast)
+        gate.release()
+        await slow.value
 
         #expect(published == ["fresh"], "a superseded run must publish nothing")
         #expect(!runner.isRunning)
@@ -76,23 +104,20 @@ struct LatestOnlyRunnerTests {
     /// run that replaced it still owns the shared state.
     @Test func supersededRunIsReportedAsSupersededNotCancelled() async {
         let runner = LatestOnlyRunner()
+        let gate = RunGate()
         var slowOutcome: LatestOnlyRunner.Outcome<String>?
 
-        async let slow: Void = {
+        let slow = Task { @MainActor in
             slowOutcome = await runner.run("slow") {
-                try? await Task.sleep(nanoseconds: 40_000_000)
+                await gate.wait()
                 return "stale"
             }
-        }()
-
-        var spins = 0
-        while runner.activeLabel != "slow" && spins < 500 {
-            await Task.yield()
-            spins += 1
         }
+        await waitUntil("the slow run to claim") { runner.activeLabel == "slow" }
 
-        async let fast: Void = { _ = await runner.run("fast") { "fresh" } }()
-        _ = await (slow, fast)
+        _ = await runner.run("fast") { "fresh" }
+        gate.release()
+        await slow.value
 
         guard case .superseded = slowOutcome else {
             Issue.record("expected .superseded, got \(String(describing: slowOutcome))")
@@ -132,28 +157,24 @@ struct LatestOnlyRunnerTests {
     /// identical request cannot be mistaken for the one already in flight.
     @Test func identicalLabelsAreStillDistinctRuns() async {
         let runner = LatestOnlyRunner()
+        let gate = RunGate()
         var published: [Int] = []
 
-        async let first: Void = {
+        let first = Task { @MainActor in
             let outcome = await runner.run("same") {
-                try? await Task.sleep(nanoseconds: 40_000_000)
+                await gate.wait()
                 return 1
             }
             if case .completed(let value) = outcome { published.append(value) }
-        }()
-
-        var spins = 0
-        while !runner.isRunning && spins < 500 {
-            await Task.yield()
-            spins += 1
         }
+        await waitUntil("the first run to claim") { runner.isRunning }
 
-        async let second: Void = {
-            let outcome = await runner.run("same") { 2 }
-            if case .completed(let value) = outcome { published.append(value) }
-        }()
+        let secondOutcome = await runner.run("same") { 2 }
+        if case .completed(let value) = secondOutcome { published.append(value) }
 
-        _ = await (first, second)
+        gate.release()
+        await first.value
+
         #expect(published == [2])
     }
 
@@ -161,22 +182,20 @@ struct LatestOnlyRunnerTests {
     /// case, where late results would land in reused state.
     @Test func invalidateStopsAnInFlightRunFromPublishing() async {
         let runner = LatestOnlyRunner()
+        let gate = RunGate()
         var outcome: LatestOnlyRunner.Outcome<String>?
 
-        async let run: Void = {
+        let run = Task { @MainActor in
             outcome = await runner.run("closing") {
-                try? await Task.sleep(nanoseconds: 30_000_000)
+                await gate.wait()
                 return "late"
             }
-        }()
-
-        var spins = 0
-        while runner.activeLabel != "closing" && spins < 500 {
-            await Task.yield()
-            spins += 1
         }
+        await waitUntil("the run to claim") { runner.activeLabel == "closing" }
+
         runner.invalidate()
-        _ = await run
+        gate.release()
+        await run.value
 
         guard case .superseded = outcome else {
             Issue.record("expected .superseded after invalidate, got \(String(describing: outcome))")

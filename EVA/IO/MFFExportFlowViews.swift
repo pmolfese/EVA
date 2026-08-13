@@ -75,15 +75,23 @@ extension WaveformView {
         mffExportTask?.cancel()
         let sessionID = recordingSessionID
         mffExportTask = Task {
-            let result = await performMFFExport(
-                snapshot: snapshot,
-                pnsForExport: pnsForExport,
-                script: processingScript,
-                to: url,
-                auditLogLines: auditLogLines
-            )
-            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            let outcome = await recordingStore.exportRunner.run("mffExport") {
+                await performMFFExport(
+                    snapshot: snapshot,
+                    pnsForExport: pnsForExport,
+                    script: processingScript,
+                    to: url,
+                    auditLogLines: auditLogLines
+                )
+            }
+            // A newer export owns `isExportingMFF` — clearing it here would blank
+            // the indicator for an export still in flight.
+            guard case .completed(let result) = outcome else {
+                if case .cancelled = outcome { isExportingMFF = false }
+                return
+            }
             isExportingMFF = false
+            guard sessionID == recordingSessionID else { return }
             switch result {
             case .success(let outputURL):
                 mffExportStatusMessage = "Exported \(snapshot.kind.statusName) MFF: \(outputURL.lastPathComponent)"
@@ -228,16 +236,27 @@ extension WaveformView {
                     return Result<[URL], Error>.failure(error)
                 }
             }
-            let result = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                }
-            )
+            let outcome = await recordingStore.exportRunner.run("mffSplitExport") {
+                await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                    }
+                )
+            }
 
-            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            // Same contract as the full-export path: a superseded run leaves the
+            // spinner to the export that replaced it; a cancelled one releases it.
+            guard case .completed(let result) = outcome else {
+                if case .cancelled = outcome { isExportingMFF = false }
+                return
+            }
+            guard sessionID == recordingSessionID else {
+                isExportingMFF = false
+                return
+            }
             await MainActor.run {
                 isExportingMFF = false
                 switch result {
@@ -403,42 +422,7 @@ extension WaveformView {
     /// part of `eva.xml` because Copy Processing should replay the portable
     /// settings, not this file's resulting channel/epoch decisions.
     func currentProcessingAuditLogLines() -> [String] {
-        var lines: [String] = []
-        // What the gradient run excluded and why. None of this is recoverable
-        // from the corrected samples, so it only exists if it is recorded here.
-        lines.append(contentsOf: gradient.auditLogLines)
-        if !epoching.skippedLabeledBadSegmentsSummary.isEmpty {
-            lines.append("segment result: skippedLabeledBadSegments=\(epoching.skippedLabeledBadSegmentsSummary.joined(separator: "; "))")
-        }
-        if !epoching.epochBadChannelSummary.isEmpty {
-            lines.append("segment result: perEpochBadChannels=\(epoching.epochBadChannelSummary.joined(separator: "; "))")
-        }
-        if !epoching.epochBadChannelAllSegmentsSummary.isEmpty {
-            lines.append("segment result: badChannelsInAllKeptSegments=\(epoching.epochBadChannelAllSegmentsSummary.joined(separator: ", "))")
-        }
-        if !channels.interpolated.isEmpty {
-            var fields = [
-                "channels=\(channels.interpolated.keys.sorted().map { String($0 + 1) }.joined(separator: ","))"
-            ]
-            if !epoching.escalatedChannelSummaries.isEmpty {
-                fields.append("escalatedFromPerEpochDetection=\(epoching.escalatedChannelSummaries.joined(separator: "; "))")
-            }
-            lines.append("interpolateChannels result: \(fields.joined(separator: ", "))")
-        }
-        if !channels.bad.isEmpty {
-            lines.append("markBad result: channels=\(channels.bad.sorted().map { String($0 + 1) }.joined(separator: ","))")
-        }
-        for category in epoching.averageSNRByCategory.keys.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
-            let m = epoching.averageSNRByCategory[category] ?? SNRMetrics()
-            func f(_ v: Double?, _ digits: Int = 2) -> String {
-                guard let v, v.isFinite else { return "n/a" }
-                return String(format: "%.\(digits)f", v)
-            }
-            lines.append(
-                "average SNR [\(category)]: trials=\(m.trialCount), plusMinusSNR=\(f(m.plusMinusSNR)), baselineSNR=\(f(m.baselineSNR)), gfpSNR=\(f(m.gfpSNR)), sme=\(f(m.standardizedMeasurementError, 3)), splitHalfReliability=\(f(m.splitHalfReliability))"
-            )
-        }
-        return lines
+        ProcessingAuditLog.lines(gradient: gradient, epoching: epoching, channels: channels)
     }
 
     func currentMFFExportSnapshot() -> MFFExportSnapshot? {

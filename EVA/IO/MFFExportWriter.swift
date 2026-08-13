@@ -24,6 +24,20 @@ enum MFFExportWriter {
         to url: URL,
         auditLogLines: [String] = []
     ) async -> Result<URL, Error> {
+        // Stamp what we are actually writing, so re-opening this package does not
+        // have to infer it from the EGI structure. The writer is the one place
+        // that knows for certain, and it serves the interactive and headless
+        // paths alike. A grand average is still detected on read (it depends on
+        // the segments' subjects), so only the three authored kinds are stamped.
+        var script = script
+        script.fileType = {
+            switch snapshot.kind {
+            case .continuous: return .continuous
+            case .epoched: return .segmented
+            case .averaged: return .averaged
+            }
+        }()
+
         let worker = Task.detached(priority: .userInitiated) {
             do {
                 try Task.checkCancellation()
@@ -35,7 +49,9 @@ enum MFFExportWriter {
                     to: url
                 )
                 try? EVAProcessingScriptXML.write(script, toPackage: url)
-                let log = EVAProcessLog(header: "EVA export — \(url.lastPathComponent)")
+                let log = EVAProcessLog(
+                    header: "EVA \(EVAProcessingScriptXML.currentAppVersion) export — \(url.lastPathComponent)"
+                )
                 for step in script.steps {
                     let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
                     log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")

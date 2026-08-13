@@ -32,6 +32,7 @@ final class ChannelHealthViewModel {
     var statusMessage: String?
     var signature: String?
     @ObservationIgnored var task: Task<Void, Never>?
+
     var showsDetails = false
     var detailsRequest = 0
 

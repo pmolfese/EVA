@@ -46,6 +46,16 @@ final class RecordingStore {
     /// Single owner of in-flight operation progress, replacing the per-view-model
     /// `operationProgress` properties. See `OperationProgressCenter`.
     var operationProgress = OperationProgressCenter()
+    /// Owns the in-flight MFF export. Needed because both export paths set
+    /// `isExportingMFF = true` *before* cancelling the previous task, so a
+    /// superseded export resuming later would otherwise clear the flag the newer
+    /// one just set. See `LatestOnlyRunner`.
+    @ObservationIgnored let exportRunner = LatestOnlyRunner()
+    /// User's session-only correction of the detected file type (File ▸ Dataset
+    /// Info). Not written to disk and not part of `eva.xml`'s authoritative
+    /// `fileType` — this is the escape hatch for a package EVA reads wrongly, so
+    /// a bad detection never blocks the work.
+    var fileTypeOverride: MFFFileType?
     /// Cached composition of the current processed signal with channel
     /// interpolation recipes. Kept per recording window.
     var interpolatedSignalResolver = InterpolatedSignalResolver()

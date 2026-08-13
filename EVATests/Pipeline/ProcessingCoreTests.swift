@@ -31,7 +31,9 @@ struct ProcessingCoreTests {
             ica: ICAViewModel(store: store),
             artifactVM: ArtifactViewModel(store: store),
             epoching: EpochingViewModel(store: store),
-            wavelet: WaveletReductionViewModel(store: store)
+            wavelet: WaveletReductionViewModel(store: store),
+            template: ArtifactTemplateViewModel(store: store),
+            segHealth: SegmentHealthViewModel(store: store)
         )
     }
 

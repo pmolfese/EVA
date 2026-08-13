@@ -277,6 +277,12 @@ extension WaveformView {
                 progressContinuation.finish()
                 progressTask.cancel()
 
+                // Clear the spinner *before* the publish guard, not after: a
+                // scan that is cancelled, superseded, or whose results are no
+                // longer wanted still has to release `isAnalyzing`. Clearing it
+                // only on the success path left the progress row stuck on.
+                segHealth.isAnalyzing = false
+
                 guard !Task.isCancelled,
                       segHealth.shows,
                       segHealth.signature == signature else {
@@ -284,7 +290,6 @@ extension WaveformView {
                 }
 
                 segHealth.analysis = analysis
-                segHealth.isAnalyzing = false
                 segHealth.progress = 1
                 segHealth.statusMessage = analysis.results.isEmpty
                     ? "No segment health metrics available."

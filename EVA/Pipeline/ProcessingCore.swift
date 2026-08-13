@@ -35,6 +35,17 @@ final class ProcessingCore {
     let artifactVM: ArtifactViewModel
     let epoching: EpochingViewModel
     let wavelet: WaveletReductionViewModel
+    // Needed so the headless path can run the *same* invalidation cascade as the
+    // interactive one. Without these two it could only clear part of it, which is
+    // exactly the divergence `PipelineInvalidation` exists to remove.
+    let template: ArtifactTemplateViewModel
+    let segHealth: SegmentHealthViewModel
+    /// Spherical electrode positions, needed for PSA's per-epoch bad-channel
+    /// interpolation and the escalation of persistently-bad channels to globally
+    /// bad. Empty degrades to reject-only, which is what the headless path did
+    /// before this was plumbed — silently producing different averages from the
+    /// interactive path on the same input.
+    let electrodePositions: [Int: SIMD3<Double>]
 
     init(
         store: RecordingStore,
@@ -43,7 +54,10 @@ final class ProcessingCore {
         ica: ICAViewModel,
         artifactVM: ArtifactViewModel,
         epoching: EpochingViewModel,
-        wavelet: WaveletReductionViewModel
+        wavelet: WaveletReductionViewModel,
+        template: ArtifactTemplateViewModel,
+        segHealth: SegmentHealthViewModel,
+        electrodePositions: [Int: SIMD3<Double>] = [:]
     ) {
         self.store = store
         self.filter = filter
@@ -52,6 +66,9 @@ final class ProcessingCore {
         self.artifactVM = artifactVM
         self.epoching = epoching
         self.wavelet = wavelet
+        self.template = template
+        self.segHealth = segHealth
+        self.electrodePositions = electrodePositions
     }
 
     /// Result of a headless run: the signal as far as this core could take it,
@@ -102,21 +119,39 @@ final class ProcessingCore {
             switch step.operation {
             case .mriGradientCorrection:
                 gradient.apply(parameters: step.parameters)
-                await gradient.apply(to: current, pnsSignal: pnsSignal) { [ica, filter] in
-                    // The base signal changed, so any ICA/filter output
-                    // computed on the old base is now stale.
-                    ica.cleanedSignal = nil
-                    ica.decomposition = nil
-                    filter.output = nil
-                    filter.pnsOutput = nil
-                    filter.pnsInputSignalType = nil
+                await gradient.apply(to: current, pnsSignal: pnsSignal) { [self] in
+                    // The base signal changed. This used to clear only ICA and
+                    // filter output here, while the interactive path also cleared
+                    // artifact cleaning, epochs, and interpolations — so a
+                    // headless or replayed run carried stale downstream state.
+                    // One cascade now serves both.
+                    PipelineInvalidation.downstreamOfBaseSignalChange(
+                        store: store,
+                        ica: ica,
+                        filter: filter,
+                        artifactVM: artifactVM,
+                        template: template,
+                        epoching: epoching,
+                        segHealth: segHealth
+                    )
                 }
                 current = gradient.correctedSignal ?? current
 
             case .filter:
                 filter.apply(parameters: step.parameters)
                 let pnsInput = filter.filterPNS ? pnsFilterBaseSignal(pnsSignal: pnsSignal) : nil
-                await filter.apply(to: current, pnsInput: pnsInput, onApplied: {})
+                await filter.apply(to: current, pnsInput: pnsInput) { [self] in
+                    // Was `onApplied: {}` — the interactive path cleared applied
+                    // artifact cleaning, epochs, and interpolations here, so a
+                    // headless run carried stale downstream state.
+                    PipelineInvalidation.downstreamOfFilterChange(
+                        store: store,
+                        artifactVM: artifactVM,
+                        template: template,
+                        epoching: epoching,
+                        segHealth: segHealth
+                    )
+                }
                 current = filter.output ?? current
 
             case .thresholdArtifactDetection:
@@ -132,7 +167,21 @@ final class ProcessingCore {
                     guard let low = filter.highPassCutoff, let high = filter.lowPassCutoff else { return nil }
                     return (low, high)
                 }()
-                await wavelet.apply(to: current, excludedChannels: store.channels.bad, analysisBand: analysisBand)
+                // Previously passed no `onApplied` at all, so headless wavelet
+                // reduction left stale epochs, interpolations, and artifact
+                // detection behind.
+                await wavelet.apply(
+                    to: current,
+                    excludedChannels: store.channels.bad,
+                    analysisBand: analysisBand
+                ) { [self] in
+                    PipelineInvalidation.downstreamOfWaveletChange(
+                        store: store,
+                        artifactVM: artifactVM,
+                        epoching: epoching,
+                        segHealth: segHealth
+                    )
+                }
                 current = wavelet.reducedSignal ?? current
 
             case .segment:
@@ -141,6 +190,7 @@ final class ProcessingCore {
                     from: current,
                     events: epoching.segmentField == .artifact ? artifactVM.events : current.events,
                     artifactRejectionEvents: psaArtifactRejectionEvents(for: current),
+                    electrodePositions: electrodePositions,
                     globallyBadChannels: store.channels.bad
                 ) else {
                     return Result(signal: current, remainingSteps: Array(steps[index...]))
@@ -149,7 +199,9 @@ final class ProcessingCore {
                     job,
                     averageReference: epoching.averageReference,
                     baselineCorrect: epoching.baselineCorrected,
-                    badChannels: store.channels.bad
+                    badChannels: store.channels.bad,
+                    electrodePositions: electrodePositions,
+                    continuousSignal: current
                 ) {
                     current = averaged
                 }

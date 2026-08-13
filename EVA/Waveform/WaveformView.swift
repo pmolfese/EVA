@@ -341,8 +341,16 @@ struct WaveformView: View {
     // PSA epoching / averaging + averaged-data display, extracted into an L4
     // store. See REFACTOR.md slice 4.
     @State var epoching: EpochingViewModel
-    @State var segmentedEpochSignal: MFFSignalData?
-    @State var segmentedEpochSegments: [EpochSegment] = []
+    // Moved to `EpochingViewModel` so the shared invalidation cascade can reach
+    // them headlessly; forwarders keep existing call sites unchanged.
+    var segmentedEpochSignal: MFFSignalData? {
+        get { epoching.segmentedEpochSignal }
+        nonmutating set { epoching.segmentedEpochSignal = newValue }
+    }
+    var segmentedEpochSegments: [EpochSegment] {
+        get { epoching.segmentedEpochSegments }
+        nonmutating set { epoching.segmentedEpochSegments = newValue }
+    }
     // Single Trial Analysis domain, extracted into an L4 store — reads the
     // raw per-trial epochs above (segmentedEpochSignal/segmentedEpochSegments),
     // not epoching's averaged output.
@@ -757,16 +765,34 @@ struct WaveformView: View {
         installEpochAndLifecycleHandlers(on: installRequestHandlers(on: content))
     }
 
+    /// Runs `action` after the current SwiftUI update finishes.
+    ///
+    /// Menu commands arrive here as `@State` request counters, so their
+    /// `.onChange` handlers run *inside* SwiftUI's update — which AppKit performs
+    /// within a CoreAnimation transaction commit. `NSSavePanel`/`NSOpenPanel`
+    /// refuse to run there:
+    ///
+    ///     Suppressing invocation of -[NSApplication runModalForWindow:].
+    ///     … cannot run inside a transaction begin/commit pair …
+    ///
+    /// The panel silently never appears — intermittently, because it depends on
+    /// whether the command lands mid-transaction. Hopping to the next main-queue
+    /// turn guarantees the commit has finished. (Same reason the ICA sheet is
+    /// opened via `DispatchQueue.main.async` in `content(for:)`.)
+    private func afterCurrentTransaction(_ action: @escaping () -> Void) {
+        DispatchQueue.main.async(execute: action)
+    }
+
     private func installRequestHandlers(on content: some View) -> some View {
         content
         .onChange(of: resetToOriginalRequest) { _, _ in
             resetToOriginalData()
         }
         .onChange(of: mffExportRequest) { _, _ in
-            exportCurrentSignalToMFF()
+            afterCurrentTransaction { exportCurrentSignalToMFF() }
         }
         .onChange(of: copyProcessingRequest) { _, _ in
-            importProcessingFromOtherFile()
+            afterCurrentTransaction { importProcessingFromOtherFile() }
         }
         .onChange(of: datasetInfoRequest) { _, _ in
             showsDatasetInfo = true
@@ -775,7 +801,7 @@ struct WaveformView: View {
             showsPhysioImportSheet = true
         }
         .onChange(of: channelLabelMetricsExportRequest) { _, _ in
-            saveChannelLabelMetricsJSON()
+            afterCurrentTransaction { saveChannelLabelMetricsJSON() }
         }
         .onChange(of: segHealth.detailsRequest) { _, _ in
             guard segmentHealthIsAvailable else {
@@ -893,18 +919,57 @@ struct WaveformView: View {
     /// epochs (with stimulus-locked markers) instead of a misleading continuous
     /// strip with out-of-place events.
     private func adoptOnDiskEpochsIfPresent() {
-        guard epoching.epochedSignal == nil,
-              let signal = recording.signal,
-              signal.isSegmented,
-              !signal.epochSegments.isEmpty else {
+        guard epoching.epochedSignal == nil else { return }
+        applyFileTypeInterpretation()
+    }
+
+    /// The file kind EVA is working with: the user's session override if they set
+    /// one in Dataset Info, otherwise what the reader detected.
+    var effectiveFileType: MFFFileType? {
+        recordingStore.fileTypeOverride ?? recording.signal?.detectedFileType
+    }
+
+    /// Sets (or clears, with `nil`) the session override and re-interprets the
+    /// recording accordingly.
+    func setFileTypeOverride(_ type: MFFFileType?) {
+        recordingStore.fileTypeOverride = type
+        applyFileTypeInterpretation()
+    }
+
+    /// Brings the epoch state in line with `effectiveFileType`.
+    ///
+    /// Used both on load and when the user corrects the type by hand, so the
+    /// override is a real escape hatch rather than a relabelling: choosing
+    /// "Averaged" on a package EVA misread actually enables the averaged
+    /// workspace, butterfly plots, and the rest.
+    func applyFileTypeInterpretation() {
+        guard let signal = recording.signal else { return }
+        let type = effectiveFileType ?? .continuous
+
+        guard type != .continuous else {
+            // Treat as a continuous strip: drop any adopted on-disk epochs.
+            epoching.epochedSignal = nil
+            epoching.epochSegments = []
+            epoching.isAveraged = false
+            segmentedEpochSignal = nil
+            segmentedEpochSegments = []
+            epoching.statusMessage = nil
             return
         }
+
+        guard !signal.epochSegments.isEmpty else {
+            // Nothing on disk to adopt — say so rather than silently doing nothing.
+            epoching.statusMessage = "This package has no epoch/category structure to read as \(type.displayName.lowercased())."
+            return
+        }
+
+        let averaged = (type == .averaged || type == .grandAverage)
         segmentedEpochSignal = signal
         segmentedEpochSegments = signal.epochSegments
         epoching.epochedSignal = signal
         epoching.epochSegments = signal.epochSegments
-        epoching.isAveraged = signal.isAveraged
-        epoching.statusMessage = signal.isAveraged
+        epoching.isAveraged = averaged
+        epoching.statusMessage = averaged
             ? "Loaded \(signal.epochSegments.count) averaged categories"
             : "Loaded \(signal.epochSegments.count) epochs"
     }
@@ -2201,9 +2266,9 @@ struct WaveformView: View {
 
     /// Interpolated channels are derived from the source data, so they go stale
     /// when the gradient/filter pipeline changes.
+    /// Interactive entry point for the shared cascade. See `PipelineInvalidation`.
     func invalidateInterpolations() {
-        channels.removeAllInterpolations()
-        recordingStore.interpolatedSignalResolver.reset()
+        PipelineInvalidation.interpolations(store: recordingStore)
     }
 
     private func tearDownRecordingSessionForClose() {
@@ -2394,26 +2459,13 @@ struct WaveformView: View {
         artifactVM.detectionRefreshToken += 1
     }
 
+    /// Interactive entry point for the shared cascade. See `PipelineInvalidation`.
     func invalidateEpochsForSignalChange() {
-        epoching.epochedSignal = nil
-        epoching.epochSegments = []
-        segmentedEpochSignal = nil
-        segmentedEpochSegments = []
-        epoching.isAveraged = false
-        selectedSampleRange = nil
-        dragSelectionStartSample = nil
-        dragSelectionEndSample = nil
-        topomapSample = nil
-        epoching.butterflyTopomapRelativeSample = nil
-        epoching.psaExclusionSummary = PSAExclusionSummary()
-        epoching.averagedDisplayMode = .waveform
-        epoching.showsButterflyPlot = false
-        epoching.showsOverlaidCategories = false
-        epoching.epochBadChannelSummary.removeAll()
-        epoching.epochBadChannelAllSegmentsSummary.removeAll()
-        epoching.interpolatedChannelsBySegmentSummary.removeAll()
-        epoching.skippedLabeledBadSegmentsSummary.removeAll()
-        segHealth.clearAnalysis(hide: true, clearLabels: true)
+        PipelineInvalidation.epochsAndDerived(
+            epoching: epoching,
+            segHealth: segHealth,
+            selection: recordingStore.selection
+        )
     }
 
     // MARK: - SwiftData markers

@@ -1429,16 +1429,19 @@ extension WaveformView {
                 }
             )
 
-            guard !Task.isCancelled,
-                  sessionID == recordingSessionID,
-                  generation == waveletExplorer.runGeneration else { return }
+            // Superseded by a newer scan: it owns `isRunning` and will clear it.
+            guard generation == waveletExplorer.runGeneration else { return }
+            // We still own the run, so release the spinner on every remaining
+            // path — including cancellation, which previously leaked it.
+            waveletExplorer.isRunning = false
+
+            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             waveletExplorer.result = result
             waveletExplorer.excludedCandidateIDs = []
             waveletExplorer.progress = 1
             waveletExplorer.statusTitle = "Wavelet artifact explorer scan complete"
             waveletExplorer.statusDetail = "\(result.candidates.count) candidates across \(result.channelCount) channels over \(String(format: "%.1f", result.analyzedDurationSeconds)) seconds."
             waveletExplorer.statusMessage = "\(result.candidates.count) wavelet candidates found"
-            waveletExplorer.isRunning = false
             waveletExplorerTask = nil
             refreshWaveletExplorerEvents()
             precomputeWaveletExplorerPreviews(in: signal)

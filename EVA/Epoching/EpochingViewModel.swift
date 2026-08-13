@@ -193,6 +193,12 @@ final class EpochingViewModel {
     var segmentingProgress: Double?
 
     // MARK: Results
+    /// Pre-average raw epochs, cached so PSA options can be re-toggled without
+    /// rebuilding. Lives here (rather than on `WaveformView`) so the shared
+    /// invalidation cascade can clear it without a live view — see
+    /// `PipelineInvalidation`.
+    var segmentedEpochSignal: MFFSignalData?
+    var segmentedEpochSegments: [EpochSegment] = []
     var epochedSignal: MFFSignalData?
     var epochSegments: [EpochSegment] = []
     var isAveraged = false
@@ -546,7 +552,9 @@ final class EpochingViewModel {
         _ job: PSABuildJob,
         averageReference: Bool,
         baselineCorrect: Bool,
-        badChannels: Set<Int>
+        badChannels: Set<Int>,
+        electrodePositions: [Int: SIMD3<Double>] = [:],
+        continuousSignal: MFFSignalData? = nil
     ) async -> MFFSignalData? {
         isApplying = true
         phaseMessage = "Segmenting…"
@@ -668,10 +676,48 @@ final class EpochingViewModel {
                 statusText += " · \(built.rejectedForTooManyBadChannels) epoch\(built.rejectedForTooManyBadChannels == 1 ? "" : "s") rejected for too many bad channels"
             }
         }
+        // Promote persistently-bad channels to globally bad and interpolate them.
+        // This used to be interactive-only, so a batch run left those channels raw
+        // — different averages from the same script. See `PSABadChannelEscalation`.
+        var resultSignal = finalResult.signal
+        if let continuousSignal {
+            let escalation = await PSABadChannelEscalation.escalate(
+                counts: epochBadChannelCounts,
+                totalEpochs: totalEpochsEvaluated,
+                isEnabled: escalatesBadChannelsToGlobal,
+                thresholdPercent: escalationThresholdPercent,
+                continuousSignal: continuousSignal,
+                epochedSignal: resultSignal,
+                positions: electrodePositions,
+                channels: store.channels
+            )
+            escalatedChannelSummaries = escalation.summaries
+            if let patched = escalation.patchedEpochedSignal {
+                resultSignal = patched
+                // `epochedSignal` was assigned above, *before* escalation, and it
+                // is what callers export (`HeadlessBatchProcessor` builds its
+                // snapshot from `epoching.epochedSignal`, not from this return
+                // value). Without this line the escalation ran, reported itself in
+                // the log, and was then discarded — the exported package kept the
+                // raw channels. Measured: exactly Ch8/Ch21/Ch25 differing from the
+                // interactive run, up to 48.8 µV, with everything else identical.
+                epochedSignal = patched
+            } else if escalation.requiresEpochInvalidation {
+                // Stale/mismatched epoched layout: the interactive path invalidates
+                // its epochs here. Headless has nothing to invalidate — the caller
+                // is about to export — so keep the unpatched averages rather than
+                // silently shipping half-escalated data.
+                escalatedChannelSummaries = escalation.summaries
+            }
+            if !escalation.errors.isEmpty {
+                statusText += " · " + escalation.errors.joined(separator: " · ")
+            }
+        }
+
         statusMessage = statusText
         isApplying = false
         phaseMessage = nil
-        return finalResult.signal
+        return resultSignal
     }
 
     func resetForClose() {

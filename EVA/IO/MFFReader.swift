@@ -1118,18 +1118,26 @@ nonisolated final class MFFReader {
         // singleton category averages use #seg == 1, so the name is the reliable
         // marker). Older EVA exports omitted that name; recover those from the
         // last recorded PSA segment step when its persisted `average` option was on.
-        let legacyEVAAverage = EVAProcessingScriptXML.read(fromPackage: packageURL)?
+        let evaScript = EVAProcessingScriptXML.read(fromPackage: packageURL)
+        let legacyEVAAverage = evaScript?
             .steps
             .last(where: { $0.operation == .segment })?
             .parameters["average"] == "true"
-        let isAveraged = legacyEVAAverage
-            || categorySegments.allSatisfy { $0.contributingEpochCount > 1 || $0.isAverage }
+        // `eva.xml`'s `fileType` is authoritative when present: EVA stamps what it
+        // actually wrote, so there is no need to re-infer it from the EGI
+        // structure. Everything below is the fallback for packages written before
+        // that field, or by another tool.
+        let declaredType = evaScript?.fileType
+        let isAveraged = declaredType.map { $0 == .averaged || $0 == .grandAverage }
+            ?? (legacyEVAAverage
+                || categorySegments.allSatisfy { $0.contributingEpochCount > 1 || $0.isAverage })
         // Grand average = averaged AND the same category is contributed by more
         // than one segment (one per subject/group), or segments carry subject ids.
         let distinctCategories = Set(categorySegments.map(\.category)).count
         let categoriesRepeat = distinctCategories < categorySegments.count
         let hasSubjects = categorySegments.contains { $0.subject != nil }
-        let isGrandAverage = isAveraged && (categoriesRepeat || hasSubjects)
+        let isGrandAverage = declaredType.map { $0 == .grandAverage }
+            ?? (isAveraged && (categoriesRepeat || hasSubjects))
 
         return OnDiskEpochInfo(
             segments: segments,

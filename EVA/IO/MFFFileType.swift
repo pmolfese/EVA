@@ -15,7 +15,7 @@
 
 import Foundation
 
-nonisolated enum MFFFileType: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum MFFFileType: String, CaseIterable, Identifiable, Sendable, Codable {
     case continuous
     case segmented
     case averaged

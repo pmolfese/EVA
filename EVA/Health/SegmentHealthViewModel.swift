@@ -49,6 +49,7 @@ final class SegmentHealthViewModel {
     var signature: String?
     @ObservationIgnored var task: Task<Void, Never>?
 
+
     // MARK: Menu request tokens
     var detailsRequest = 0
     var refreshRequest = 0
