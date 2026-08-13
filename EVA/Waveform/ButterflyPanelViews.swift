@@ -690,12 +690,7 @@ extension WaveformView {
     }
 
     func categoryColorIndices(for categories: [String]) -> [String: Int] {
-        let uniqueCategories = Array(Set(categories)).sorted {
-            $0.localizedStandardCompare($1) == .orderedAscending
-        }
-        return Dictionary(uniqueKeysWithValues: uniqueCategories.enumerated().map { index, category in
-            (category, index)
-        })
+        EpochingViewModel.colorIndices(for: categories)
     }
 
 }

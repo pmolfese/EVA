@@ -336,6 +336,26 @@ final class EpochingViewModel {
         for code in selectedEventCodes where (categoryNames[code].map { $0 != code } ?? false) {
             p["category.\(code)"] = categoryNames[code]!
         }
+        // Category groups pool several codes into one extra shared category
+        // (`correct` = {LC++, RC++}), producing segments IN ADDITION to each
+        // code's own. Without these the script is not a complete description of
+        // the processing: a batch or Copy Processing replay silently produced
+        // only the raw codes, which is how an interactive run with groups came
+        // out as 6 categories / 134 evaluated epochs and its headless replay as
+        // 4 / 67 (2026-08-13).
+        for (name, members) in categoryGroups where !members.isEmpty {
+            p["categoryGroup.\(name)"] = members.sorted().joined(separator: ",")
+        }
+        // Regex sub-selection rules, one flattened key per field so a pattern
+        // containing separators cannot corrupt the encoding.
+        for (index, rule) in categoryRegexRules.values
+            .sorted(by: { $0.id.uuidString < $1.id.uuidString })
+            .enumerated() {
+            p["categoryRegex.\(index).source"] = rule.sourceCode
+            p["categoryRegex.\(index).pattern"] = rule.pattern
+            p["categoryRegex.\(index).name"] = rule.categoryName
+            p["categoryRegex.\(index).caseSensitive"] = "\(rule.isCaseSensitive)"
+        }
         // DIN (timing marker) adjustment: which segment values use it, and which
         // marker code each one pairs with. Only emitted when at least one is on,
         // matching the "only non-default state" convention above.
@@ -389,6 +409,33 @@ final class EpochingViewModel {
         for (key, value) in p where key.hasPrefix("category.") {
             categoryNames[String(key.dropFirst("category.".count))] = value
         }
+        var groups = [String: Set<String>]()
+        for (key, value) in p where key.hasPrefix("categoryGroup.") {
+            let name = String(key.dropFirst("categoryGroup.".count))
+            let members = value.split(separator: ",").map(String.init)
+            if !members.isEmpty { groups[name] = Set(members) }
+        }
+        if !groups.isEmpty { categoryGroups = groups }
+
+        var rules = [String: CategoryRegexRule]()
+        let regexIndices = Set(p.keys.compactMap { key -> Int? in
+            guard key.hasPrefix("categoryRegex.") else { return nil }
+            return Int(key.dropFirst("categoryRegex.".count).prefix(while: \.isNumber))
+        })
+        for index in regexIndices.sorted() {
+            guard let source = p["categoryRegex.\(index).source"],
+                  let pattern = p["categoryRegex.\(index).pattern"],
+                  let name = p["categoryRegex.\(index).name"] else { continue }
+            let rule = CategoryRegexRule(
+                sourceCode: source,
+                pattern: pattern,
+                categoryName: name,
+                isCaseSensitive: p["categoryRegex.\(index).caseSensitive"] == "true"
+            )
+            rules[rule.id.uuidString] = rule
+        }
+        if !rules.isEmpty { categoryRegexRules = rules }
+
         if let v = p["timingTolerance"].flatMap(Double.init) { timingTolerance = v }
         var dinEnabled = Set<String>()
         var dinValues = [String: String]()
@@ -447,7 +494,14 @@ final class EpochingViewModel {
         return timingMarkersBySegmentValue
     }
 
-    private static func colorIndices(for categories: [String]) -> [String: Int] {
+    /// Stable per-category color index, assigned in localized-sorted order.
+    ///
+    /// Not private: `ButterflyPanelViews` held a verbatim copy, which is exactly
+    /// how two renderings of the same averages drift into different colors.
+    /// (`MFFReader` and `RecordingCombiner` have their own, deliberately
+    /// different, orderings — first-appearance and positional respectively — so
+    /// those are *not* the same function and must not be merged in.)
+    static func colorIndices(for categories: [String]) -> [String: Int] {
         let uniqueCategories = Array(Set(categories)).sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
         }
@@ -548,14 +602,50 @@ final class EpochingViewModel {
     /// `WaveformView.interpolate(_:in:)`, which needs live electrode geometry
     /// and updates view-only status text — a live-view-only feature, not
     /// meaningful for a one-shot headless run).
-    func applyBuildJob(
-        _ job: PSABuildJob,
+    /// Result of the shared PSA sequence: the raw per-trial build and the
+    /// post-processed (optionally averaged) output.
+    struct PSAApplyOutcome {
+        /// Raw single trials, before averaging. SNR and per-epoch bad-channel
+        /// reporting must read this — `average()`/`postProcessed()` build fresh
+        /// results that no longer carry per-trial information.
+        let built: PSABuildResult
+        let finalResult: PSABuildResult
+        let wasAveraged: Bool
+    }
+
+    /// Build epochs → optionally average → post-process.
+    ///
+    /// The single implementation of the PSA sequence, shared by the interactive
+    /// path (`WaveformView.applyPSACore`) and the headless one
+    /// (`applyBuildJob`). Those two used to each carry their own copy, and every
+    /// headless/interactive divergence found on 2026-08-13 came from that shape
+    /// of duplication.
+    ///
+    /// What stays with the callers, because it genuinely differs:
+    /// - **SNR scheduling.** Interactive computes it in the background so the
+    ///   sheet can close immediately; headless awaits it inline because it is
+    ///   about to export.
+    /// - **Status composition and UI teardown** (selection reset, sheet
+    ///   dismissal, segment-health enable) — view-only.
+    /// - **`excludedSegmentIndices`.** Interactive supplies segments the user
+    ///   labelled bad in Segment Health. Those labels are session state that a
+    ///   batch run has no equivalent of, so headless legitimately passes none.
+    ///
+    /// `isCurrent` is the interactive session guard: the view can outlive a run
+    /// (same-window "Close Recording" mid-flight), so it re-checks between
+    /// phases. Headless has no such concept and leaves it at the default.
+    ///
+    /// Returns `nil` when cancelled, superseded, or nothing survived — having
+    /// already cleared `isApplying`/`phaseMessage` and set `statusMessage`.
+    func buildAndPostProcess(
+        job: PSABuildJob,
+        shouldAverage: Bool,
         averageReference: Bool,
         baselineCorrect: Bool,
         badChannels: Set<Int>,
-        electrodePositions: [Int: SIMD3<Double>] = [:],
-        continuousSignal: MFFSignalData? = nil
-    ) async -> MFFSignalData? {
+        excludedSegmentIndices: ([EpochSegment]) -> Set<Int> = { _ in [] },
+        isCurrent: () -> Bool = { true }
+    ) async -> PSAApplyOutcome? {
         isApplying = true
         phaseMessage = "Segmenting…"
         segmentingProgress = nil
@@ -577,94 +667,135 @@ final class EpochingViewModel {
         progressTask.cancel()
         segmentingProgress = nil
 
-        guard !Task.isCancelled else {
-            isApplying = false
-            phaseMessage = nil
+        guard !Task.isCancelled, isCurrent() else {
+            finishApplying()
             return nil
         }
         guard let built else {
-            isApplying = false
-            phaseMessage = nil
+            finishApplying()
             statusMessage = "No trials survived PSA segmentation. All candidate epochs were rejected, skipped, or out of bounds."
             return nil
         }
 
-        var exclusionSummary = built.exclusionSummary
-        let epochBadChannelCounts = built.epochBadChannelCounts
-        let totalEpochsEvaluated = built.totalEpochsEvaluated
-
         let finalResult: PSABuildResult
         let wasAveraged: Bool
-        if averageOnApply {
+
+        if shouldAverage {
             phaseMessage = "Averaging…"
             let colorIndices = Self.colorIndices(for: built.segments.map(\.category))
+            let excluded = excludedSegmentIndices(built.segments)
             let averageWorker = Task.detached(priority: .userInitiated) {
-                built.average(colorIndices: colorIndices)
+                built.average(colorIndices: colorIndices, excludedIndices: excluded)
             }
             let averagedOpt = await withTaskCancellationHandler(
                 operation: { await averageWorker.value },
                 onCancel: { averageWorker.cancel() }
             )
-            guard !Task.isCancelled, let averaged = averagedOpt else {
-                isApplying = false
-                phaseMessage = nil
+            guard !Task.isCancelled, isCurrent(), let averaged = averagedOpt else {
+                finishApplying()
                 statusMessage = "No averages could be computed."
                 return nil
             }
             phaseMessage = "Post-processing…"
-            // SNR is measured from the RAW single trials (`built`), before
-            // post-processing collapses them, so plus-minus/split-half/SME have
-            // the individual trials they need.
-            let snrWorker = Task.detached(priority: .userInitiated) {
-                built.categorySNR()
-            }
             let postWorker = Task.detached(priority: .userInitiated) {
-                averaged.postProcessed(averageReference: averageReference, baselineCorrect: baselineCorrect, badChannels: badChannels)
+                averaged.postProcessed(
+                    averageReference: averageReference,
+                    baselineCorrect: baselineCorrect,
+                    badChannels: badChannels
+                )
             }
             finalResult = await withTaskCancellationHandler(
                 operation: { await postWorker.value },
                 onCancel: { postWorker.cancel() }
-            )
-            averageSNRByCategory = await withTaskCancellationHandler(
-                operation: { await snrWorker.value },
-                onCancel: { snrWorker.cancel() }
             )
             wasAveraged = true
         } else {
             phaseMessage = "Post-processing…"
             let postWorker = Task.detached(priority: .userInitiated) {
-                built.postProcessed(averageReference: averageReference, baselineCorrect: baselineCorrect, badChannels: badChannels)
+                built.postProcessed(
+                    averageReference: averageReference,
+                    baselineCorrect: baselineCorrect,
+                    badChannels: badChannels
+                )
             }
             finalResult = await withTaskCancellationHandler(
                 operation: { await postWorker.value },
                 onCancel: { postWorker.cancel() }
             )
-            averageSNRByCategory = [:]
             wasAveraged = false
         }
 
-        guard !Task.isCancelled else {
-            isApplying = false
-            phaseMessage = nil
+        guard !Task.isCancelled, isCurrent() else {
+            finishApplying()
             return nil
         }
+        return PSAApplyOutcome(built: built, finalResult: finalResult, wasAveraged: wasAveraged)
+    }
+
+    /// Clears the in-progress flags. Every early exit from the PSA sequence has
+    /// to do this — forgetting it is what leaves the spinner stuck on.
+    private func finishApplying() {
+        isApplying = false
+        phaseMessage = nil
+    }
+
+    func applyBuildJob(
+        _ job: PSABuildJob,
+        averageReference: Bool,
+        baselineCorrect: Bool,
+        badChannels: Set<Int>,
+        electrodePositions: [Int: SIMD3<Double>] = [:],
+        continuousSignal: MFFSignalData? = nil
+    ) async -> MFFSignalData? {
+        guard let outcome = await buildAndPostProcess(
+            job: job,
+            shouldAverage: averageOnApply,
+            averageReference: averageReference,
+            baselineCorrect: baselineCorrect,
+            badChannels: badChannels
+            // No `excludedSegmentIndices`: Segment Health quality labels are a
+            // manual, session-only decision that a batch run has no equivalent of.
+        ) else {
+            return nil
+        }
+
+        let built = outcome.built
+        let finalResult = outcome.finalResult
+        let epochBadChannelCounts = built.epochBadChannelCounts
+        let totalEpochsEvaluated = built.totalEpochsEvaluated
+
+        // SNR from the RAW single trials — awaited inline here (unlike the
+        // interactive path, which backgrounds it) because the caller is about to
+        // export and the metrics belong in that package's audit log.
+        if outcome.wasAveraged {
+            let snrWorker = Task.detached(priority: .userInitiated) { built.categorySNR() }
+            averageSNRByCategory = await withTaskCancellationHandler(
+                operation: { await snrWorker.value },
+                onCancel: { snrWorker.cancel() }
+            )
+        } else {
+            averageSNRByCategory = [:]
+        }
+
+        // Raw epochs cached so post-processing can be re-toggled, matching the
+        // interactive path.
+        segmentedEpochSignal = built.signal
+        segmentedEpochSegments = built.segments
+
         epochedSignal = finalResult.signal
         epochSegments = finalResult.segments
-        isAveraged = wasAveraged
+        isAveraged = outcome.wasAveraged
+
+        var exclusionSummary = built.exclusionSummary
         exclusionSummary.outputSegments = finalResult.segments.count
         exclusionSummary.badChannelCount = epochBadChannelCounts.count
         psaExclusionSummary = exclusionSummary
-        if wasAveraged {
-            showsButterflyPlot = true
-        } else {
-            showsButterflyPlot = false
+        showsButterflyPlot = outcome.wasAveraged
+        if !outcome.wasAveraged {
             averagedDisplayMode = .waveform
         }
 
-        var parts: [String] = []
-        if averageReference { parts.append("avg ref") }
-        if baselineCorrect { parts.append("baseline corrected") }
-        var statusText = finalResult.message + (parts.isEmpty ? "" : " · " + parts.joined(separator: ", "))
+        var statusText = finalResult.message
         epochBadChannelSummary = []
         if interpolatesBadChannelsPerEpoch, totalEpochsEvaluated > 0, !epochBadChannelCounts.isEmpty {
             let segmentBadChannels = epochBadChannelCounts.keys.sorted().map { "Ch\($0 + 1)" }
@@ -676,9 +807,8 @@ final class EpochingViewModel {
                 statusText += " · \(built.rejectedForTooManyBadChannels) epoch\(built.rejectedForTooManyBadChannels == 1 ? "" : "s") rejected for too many bad channels"
             }
         }
+
         // Promote persistently-bad channels to globally bad and interpolate them.
-        // This used to be interactive-only, so a batch run left those channels raw
-        // — different averages from the same script. See `PSABadChannelEscalation`.
         var resultSignal = finalResult.signal
         if let continuousSignal {
             let escalation = await PSABadChannelEscalation.escalate(
@@ -694,20 +824,11 @@ final class EpochingViewModel {
             escalatedChannelSummaries = escalation.summaries
             if let patched = escalation.patchedEpochedSignal {
                 resultSignal = patched
-                // `epochedSignal` was assigned above, *before* escalation, and it
-                // is what callers export (`HeadlessBatchProcessor` builds its
-                // snapshot from `epoching.epochedSignal`, not from this return
-                // value). Without this line the escalation ran, reported itself in
-                // the log, and was then discarded — the exported package kept the
-                // raw channels. Measured: exactly Ch8/Ch21/Ch25 differing from the
-                // interactive run, up to 48.8 µV, with everything else identical.
+                // `epochedSignal` is what callers export
+                // (`HeadlessBatchProcessor` snapshots it, not this return value),
+                // so the patch has to land there too — otherwise the escalation
+                // runs, reports itself in the log, and is silently discarded.
                 epochedSignal = patched
-            } else if escalation.requiresEpochInvalidation {
-                // Stale/mismatched epoched layout: the interactive path invalidates
-                // its epochs here. Headless has nothing to invalidate — the caller
-                // is about to export — so keep the unpatched averages rather than
-                // silently shipping half-escalated data.
-                escalatedChannelSummaries = escalation.summaries
             }
             if !escalation.errors.isEmpty {
                 statusText += " · " + escalation.errors.joined(separator: " · ")

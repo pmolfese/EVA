@@ -1305,58 +1305,33 @@ extension WaveformView {
         return baseStatus + " · " + clauses.joined(separator: " · ")
     }
 
+    /// Interactive PSA apply.
+    ///
+    /// The build → average → post-process sequence lives in
+    /// `EpochingViewModel.buildAndPostProcess`, shared with the headless path.
+    /// What remains here is what genuinely differs: the session guard, the
+    /// Segment Health label exclusions, background SNR so the sheet can close
+    /// immediately, the richer status line, and the UI teardown.
     private func applyPSACore(to signal: MFFSignalData, job: PSABuildJob) async {
         let sessionID = recordingSessionID
         let shouldAverage = epoching.averageOnApply
-        let shouldAvgRef = epoching.averageReference
-        let shouldBaseline = epoching.baselineCorrected
         let badChannels = channels.bad
         let suffix = psaPostProcessingSuffix()
 
-        epoching.isApplying = true
-        epoching.phaseMessage = "Segmenting…"
-        epoching.segmentingProgress = nil
-
-        let (progressContinuation, progressTask) = ProgressBridge.make { [self] (update: EpochBuildProgress) in
-            epoching.phaseMessage = "Segmenting… (\(update.completed) of \(update.total))"
-            epoching.segmentingProgress = update.fraction
-        }
-
-        let buildWorker = Task.detached(priority: .userInitiated) {
-            await job.buildEpochs { completed, total in
-                progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
-            }
-        }
-        let built = await withTaskCancellationHandler(
-            operation: {
-                await buildWorker.value
-            },
-            onCancel: {
-                buildWorker.cancel()
-            }
-        )
-        progressContinuation.finish()
-        progressTask.cancel()
-        epoching.segmentingProgress = nil
-
-        guard !Task.isCancelled, sessionID == recordingSessionID else {
-            epoching.isApplying = false
-            epoching.phaseMessage = nil
-            return
-        }
-        guard let built else {
-            epoching.isApplying = false
-            epoching.phaseMessage = nil
-            epoching.statusMessage = "No trials survived PSA segmentation. All candidate epochs were rejected, skipped, or out of bounds."
+        guard let outcome = await epoching.buildAndPostProcess(
+            job: job,
+            shouldAverage: shouldAverage,
+            averageReference: epoching.averageReference,
+            baselineCorrect: epoching.baselineCorrected,
+            badChannels: badChannels,
+            excludedSegmentIndices: { [self] segments in excludedBadSegmentIndices(segments) },
+            isCurrent: { [self] in sessionID == recordingSessionID }
+        ) else {
             return
         }
 
-        // Captured from the RAW (pre-average) build — per-trial bad-channel
-        // detection only exists at this stage; `average()`/`postProcessed()`
-        // below construct fresh `PSABuildResult`s that don't carry it, so
-        // relying on `finalResult.message` for this would silently lose it
-        // whenever averaging is on (which `average()` always overwrites with
-        // its own "N categories, N epochs averaged" message).
+        let built = outcome.built
+        let finalResult = outcome.finalResult
         let epochBadChannelCounts = built.epochBadChannelCounts
         let totalEpochsEvaluated = built.totalEpochsEvaluated
         let rejectedForTooManyBadChannels = built.rejectedForTooManyBadChannels
@@ -1367,86 +1342,38 @@ extension WaveformView {
         segmentedEpochSignal = built.signal
         segmentedEpochSegments = built.segments
 
-        let finalResult: PSABuildResult
-        let wasAveraged: Bool
-        if shouldAverage {
-            epoching.phaseMessage = "Averaging…"
-            let colorIndices = categoryColorIndices(for: built.segments.map(\.category))
-            let excludedIndices = excludedBadSegmentIndices(built.segments)
-            let averageWorker = Task.detached(priority: .userInitiated) {
-                built.average(colorIndices: colorIndices, excludedIndices: excludedIndices)
-            }
-            let averagedOpt = await withTaskCancellationHandler(
-                operation: {
-                    await averageWorker.value
-                },
-                onCancel: {
-                    averageWorker.cancel()
-                }
+        if outcome.wasAveraged {
+            // SNR is measured from the RAW single trials, but it does NOT block
+            // closing the sheet — the user sees their average right away and the
+            // Averages workspace shows a spinner until SNR lands.
+            computeAverageSNRInBackground(
+                from: built,
+                excludedIndices: skippedBadIndices,
+                sessionID: sessionID
             )
-            guard !Task.isCancelled, sessionID == recordingSessionID, let averaged = averagedOpt else {
-                epoching.isApplying = false
-                epoching.phaseMessage = nil
-                epoching.statusMessage = "No averages could be computed."
-                return
-            }
-            epoching.phaseMessage = "Post-processing…"
-            let postWorker = Task.detached(priority: .userInitiated) {
-                averaged.postProcessed(averageReference: shouldAvgRef, baselineCorrect: shouldBaseline, badChannels: badChannels)
-            }
-            finalResult = await withTaskCancellationHandler(
-                operation: {
-                    await postWorker.value
-                },
-                onCancel: {
-                    postWorker.cancel()
-                }
-            )
-            // SNR is measured from the RAW single trials (`built`), but it does
-            // NOT block closing the sheet — the user sees their average right
-            // away and the Averages workspace shows a spinner until SNR lands.
-            computeAverageSNRInBackground(from: built, excludedIndices: excludedIndices, sessionID: sessionID)
-            wasAveraged = true
         } else {
-            epoching.phaseMessage = "Post-processing…"
-            let postWorker = Task.detached(priority: .userInitiated) {
-                built.postProcessed(averageReference: shouldAvgRef, baselineCorrect: shouldBaseline, badChannels: badChannels)
-            }
-            finalResult = await withTaskCancellationHandler(
-                operation: {
-                    await postWorker.value
-                },
-                onCancel: {
-                    postWorker.cancel()
-                }
-            )
             snrTask?.cancel()
             snrTask = nil
             epoching.isComputingAverageSNR = false
             epoching.averageSNRByCategory = [:]
-            wasAveraged = false
         }
 
-        guard !Task.isCancelled, sessionID == recordingSessionID else {
-            epoching.isApplying = false
-            epoching.phaseMessage = nil
-            return
-        }
         epoching.epochedSignal = finalResult.signal
         epoching.epochSegments = finalResult.segments
-        epoching.isAveraged = wasAveraged
+        epoching.isAveraged = outcome.wasAveraged
         enableSegmentHealthAfterSegmentationIfNeeded()
         exclusionSummary.skippedLabeledBadSegments = shouldAverage ? skippedBadIndices.count : 0
         exclusionSummary.outputSegments = finalResult.segments.count
         exclusionSummary.badChannelCount = epochBadChannelCounts.count
         epoching.psaExclusionSummary = exclusionSummary
-        if wasAveraged {
+        if outcome.wasAveraged {
             epoching.showsButterflyPlot = true
         } else {
             epoching.showsButterflyPlot = false
             epoching.averagedDisplayMode = .waveform
         }
         refreshPSAEpochDiagnostics(from: built)
+
         // Bad-channel reporting is composed here (not read off finalResult.message)
         // because average()/postProcessed() replace the message wholesale —
         // relying on it would silently drop this whenever averaging is on.
@@ -1461,6 +1388,7 @@ extension WaveformView {
             includeSkippedLabeledBadSegments: shouldAverage
         )
         epoching.statusMessage = statusText
+
         await escalateBadChannelsIfNeeded(
             counts: epochBadChannelCounts,
             totalEpochs: totalEpochsEvaluated,
