@@ -202,7 +202,12 @@ extension WaveformView {
             polarity: ecg.polarity
         )
 
-        let detectedEvents = await withTaskGroup(of: [MFFEvent].self) { group in
+        // Ownership of `events` / `isDetecting` runs through `LatestOnlyRunner`,
+        // so a superseded run cannot publish stale results and the cancellation
+        // path cannot silently skip clearing the spinner. See that type for the
+        // bug this replaced.
+        let outcome = await artifactVM.detectionRunner.run("artifactDetection") {
+            await withTaskGroup(of: [MFFEvent].self) { group in
             if detectBlinks {
                 group.addTask(priority: .userInitiated) {
                     guard !Task.isCancelled else { return [] }
@@ -235,15 +240,28 @@ extension WaveformView {
                     return RWaveDetector.detect(sources: ecgSources, configuration: ecgConfiguration)
                 }
             }
-            var events: [MFFEvent] = []
-            for await batch in group { events += batch }
-            return events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+                var events: [MFFEvent] = []
+                for await batch in group { events += batch }
+                return events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+            }
         }
 
-        guard !Task.isCancelled else { return }
-        artifactVM.events = detectedEvents
-        artifactVM.statusMessage = artifactDetectionSummary(for: detectedEvents)
-        artifactVM.isDetecting = false
+        switch outcome {
+        case .completed(let detectedEvents):
+            artifactVM.isDetecting = false
+            artifactVM.events = detectedEvents
+            artifactVM.statusMessage = artifactDetectionSummary(for: detectedEvents)
+
+        case .cancelled:
+            // No successor is coming, so release the spinner. Results are not
+            // published: the inputs may already be stale.
+            artifactVM.isDetecting = false
+
+        case .superseded:
+            // A newer run owns `events` and `isDetecting` now. Touching either
+            // here is what the original bug did.
+            break
+        }
     }
 
     func artifactDetectionSummary(for events: [MFFEvent]) -> String {

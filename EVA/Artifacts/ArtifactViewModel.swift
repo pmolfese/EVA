@@ -40,6 +40,15 @@ final class ArtifactViewModel {
     var statusMessage: String?
     /// Bumped by upstream pipeline stages (filter/gradient) to force a re-detect.
     var detectionRefreshToken = 0
+    /// Owns the in-flight detection run: only the newest may publish, and the
+    /// cancellation path cannot silently skip clearing `isDetecting`.
+    ///
+    /// Replaces a hand-written request-id guard that shipped the intermittent
+    /// "blinks never appear, spinner stuck on" bug. See `LatestOnlyRunner`.
+    ///
+    /// `@ObservationIgnored` because it is bookkeeping: no view reads it, and
+    /// tracking it would invalidate views on every detection start.
+    @ObservationIgnored let detectionRunner = LatestOnlyRunner()
 
     // MARK: Threshold detector settings
     /// Two-tab config panel for the threshold-based ocular detector.
@@ -63,6 +72,9 @@ final class ArtifactViewModel {
         isDetecting = false
         statusMessage = nil
         detectionRefreshToken += 1
+        // Disown any in-flight detection so a run started for the recording being
+        // closed cannot publish its results into the reused view model.
+        detectionRunner.invalidate()
         showsThresholdSheet = false
         showsCleaningSheet = false
         isCleaning = false

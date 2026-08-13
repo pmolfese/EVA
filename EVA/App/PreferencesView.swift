@@ -79,9 +79,10 @@ nonisolated struct WaveformTimeMarkerStyle: Codable, Equatable {
         dashOff = try container.decodeIfPresent(Double.self, forKey: .dashOff) ?? Self.defaultValue.dashOff
     }
 
-    static var defaultData: Data {
-        (try? JSONEncoder().encode(defaultValue)) ?? Data()
-    }
+    /// Stored rather than computed: this is the `@AppStorage` default value at
+    /// several declaration sites, so a computed version re-ran `JSONEncoder` on
+    /// every containing-view `init` (and `WaveformView` is re-initialized often).
+    static let defaultData: Data = (try? JSONEncoder().encode(defaultValue)) ?? Data()
 
     static func decoded(from data: Data) -> WaveformTimeMarkerStyle {
         guard !data.isEmpty,
@@ -109,6 +110,34 @@ nonisolated struct WaveformTimeMarkerStyle: Codable, Equatable {
 
     private static func clamped(_ value: Double, to range: ClosedRange<Double>) -> Double {
         min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+/// One-entry memo for `WaveformTimeMarkerStyle.decoded(from:)`.
+///
+/// The style is read *per channel row* while building the waveform stack
+/// (`waveformRow`), so an uncached `decoded(from:)` allocated a `JSONDecoder` and
+/// re-normalized once per channel on every body pass — 128–256 decodes per frame
+/// during a selection drag. `.equatable()` on the row doesn't help: it skips the
+/// row's `body`, but the parent still builds the row's inputs to compare them.
+///
+/// Comparing the stored `Data` is O(bytes) over ~150 bytes, which is far cheaper
+/// than decoding, and unlike a `@State` cache refreshed in `onChange` it can
+/// never serve a stale value for a frame.
+///
+/// `@MainActor` because every reader is a SwiftUI view body; that isolation is
+/// what makes the shared mutable state race-free without a lock.
+@MainActor
+enum WaveformTimeMarkerStyleCache {
+    private static var cachedData: Data?
+    private static var cachedStyle = WaveformTimeMarkerStyle.defaultValue
+
+    static func style(for data: Data) -> WaveformTimeMarkerStyle {
+        if let cachedData, cachedData == data { return cachedStyle }
+        let style = WaveformTimeMarkerStyle.decoded(from: data)
+        cachedData = data
+        cachedStyle = style
+        return style
     }
 }
 

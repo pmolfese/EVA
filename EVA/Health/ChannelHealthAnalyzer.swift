@@ -34,7 +34,7 @@
 import Accelerate
 import Foundation
 
-nonisolated enum ChannelHealthGrade: String, Codable, Sendable {
+nonisolated enum ChannelHealthGrade: String, Codable, Sendable, Equatable {
     case good
     case watch
     case poor
@@ -48,7 +48,7 @@ nonisolated enum ChannelHealthGrade: String, Codable, Sendable {
     }
 }
 
-nonisolated struct ChannelHealthMetric: Codable, Identifiable, Sendable {
+nonisolated struct ChannelHealthMetric: Codable, Identifiable, Sendable, Equatable {
     var name: String
     var score: Double
     var grade: ChannelHealthGrade
@@ -58,7 +58,7 @@ nonisolated struct ChannelHealthMetric: Codable, Identifiable, Sendable {
     var id: String { name }
 }
 
-nonisolated struct ChannelHealthResult: Codable, Identifiable, Sendable {
+nonisolated struct ChannelHealthResult: Codable, Identifiable, Sendable, Equatable {
     var channelIndex: Int
     var goodPercentage: Int
     var grade: ChannelHealthGrade

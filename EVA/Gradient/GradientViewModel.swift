@@ -102,7 +102,13 @@ final class GradientViewModel {
     // MARK: Run state
     var isProcessing = false
     var progress = 0.0
-    var operationProgress: OperationProgress?
+    /// Forwards into the shared `OperationProgressCenter` so the status area has
+    /// one source to read. See `OperationProgressCenter`.
+    var operationProgress: OperationProgress? {
+        get { store.operationProgress.progress(for: Self.progressSource) }
+        set { store.operationProgress.set(newValue, for: Self.progressSource) }
+    }
+    static let progressSource = "MRI"
     var statusMessage: String?
     var statusIsError = false
 

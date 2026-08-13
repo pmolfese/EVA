@@ -29,6 +29,23 @@ import SwiftUI
 final class RecordingStore {
     /// Per-window channel state (hidden / bad / interpolated).
     var channels = ChannelModel()
+
+    // MARK: Waveform UI state (B4)
+    // Lifted out of `WaveformView`'s `@State` and grouped by lifetime/domain, so
+    // it is no longer copied with the view struct and menu-bar commands can reach
+    // it the same way they reach `channels`. See `WaveformUIModels.swift`.
+
+    /// Time selection, drag tracking, hover, transient highlights.
+    var selection = WaveformSelectionModel()
+    /// Events panel, event-track caches, category-group popover.
+    var events = WaveformEventDisplayModel()
+    /// Physio (PNS) pane display state.
+    var physio = PhysioDisplayModel()
+    /// Toolbar status line and its history.
+    var status = RecordingStatusModel()
+    /// Single owner of in-flight operation progress, replacing the per-view-model
+    /// `operationProgress` properties. See `OperationProgressCenter`.
+    var operationProgress = OperationProgressCenter()
     /// Cached composition of the current processed signal with channel
     /// interpolation recipes. Kept per recording window.
     var interpolatedSignalResolver = InterpolatedSignalResolver()

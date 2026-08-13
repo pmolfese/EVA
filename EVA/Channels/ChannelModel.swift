@@ -75,6 +75,14 @@ final class ChannelModel {
 
     private var interpolationState = InterpolationState()
 
+    /// Memo for `interpolationSnapshot`, keyed by `interpolationState.revision`.
+    ///
+    /// `@ObservationIgnored` is required, not cosmetic: the snapshot is built
+    /// lazily inside a getter that view bodies call, so a *tracked* cache would
+    /// register a mutation during view update and re-invalidate the reader that
+    /// just read it.
+    @ObservationIgnored private var cachedInterpolationSnapshot: ChannelInterpolationSnapshot?
+
     /// Channels whose trace is not drawn (row stays in place).
     var hidden = Set<Int>()
     /// Channels marked bad (drawn gray).
@@ -173,14 +181,30 @@ final class ChannelModel {
     /// the end of the processing pipeline. The donor weights are persistent;
     /// the replacement samples are re-derived so filtering, OBS, wavelets, and
     /// other upstream transforms cannot reveal the original target channel.
+    /// Cached on `revision` (ROADMAP C4). Rebuilding this `mapValues`-ed a fresh
+    /// recipe dictionary on every access, and it is read on every `WaveformView`
+    /// body pass — twice on the interpolating path. Every mutation of
+    /// `interpolationState` bumps `revision`, and the state is never reset to a
+    /// fresh value, so the revision is a monotonic key that cannot go stale.
+    ///
+    /// Reading `interpolationState` here still registers the observation
+    /// dependency, so views refresh exactly as before when interpolation changes.
     var interpolationSnapshot: ChannelInterpolationSnapshot {
-        ChannelInterpolationSnapshot(
-            revision: interpolationRevision,
-            cachedReplacements: interpolated,
-            recipes: interpolationSources.mapValues {
+        let state = interpolationState
+        if let cachedInterpolationSnapshot,
+           cachedInterpolationSnapshot.revision == state.revision {
+            return cachedInterpolationSnapshot
+        }
+
+        let snapshot = ChannelInterpolationSnapshot(
+            revision: state.revision,
+            cachedReplacements: state.replacements,
+            recipes: state.sources.mapValues {
                 ChannelInterpolationRecipe(indices: $0.indices, weights: $0.weights)
             }
         )
+        cachedInterpolationSnapshot = snapshot
+        return snapshot
     }
 
     func applyingInterpolations(to signal: MFFSignalData) -> MFFSignalData {

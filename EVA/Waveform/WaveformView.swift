@@ -12,6 +12,27 @@
 //  Recording content view: scrolling multi-channel EEG waveforms, an event
 //  track, a double-click-to-open scalp topomap, and an events panel.
 //
+//  ---------------------------------------------------------------------------
+//  ADDING NEW UI HERE? PLEASE DON'T. (ROADMAP Priority 1, B5)
+//
+//  New view code goes in a standalone `View` struct that takes value inputs and
+//  action closures — see `WaveformChannelRows.swift` for the pattern. The
+//  `extension WaveformView` files are legacy: they are functions on one giant
+//  struct, so SwiftUI has no per-child dependency boundary and every
+//  AttributeGraph node that captures `self` copies the whole view. That copy is
+//  a real, measured cost (`initializeWithCopy for WaveformView`, still ~1.5% of
+//  the main thread and spiking during selection drags in `trace2.trace`).
+//
+//  Likewise, new *state* goes on one of the `@Observable` UI models in
+//  `WaveformUIModels.swift` (hung off `RecordingStore`), not in a new `@State`
+//  here. State behind a reference is not copied with the struct, Observation
+//  tracks it per property, and menu-bar commands and the planned REWIND history
+//  tree can reach it without a live view.
+//
+//  This file went 15,400 → ~2,700 lines once, then grew back to 3,014. The
+//  point of the note is to stop that happening a third time.
+//  ---------------------------------------------------------------------------
+//
 
 import Accelerate
 import AppKit
@@ -201,8 +222,11 @@ struct WaveformView: View {
         get { recordingStore.timeScale }
         nonmutating set { recordingStore.timeScale = newValue }
     }
+    /// Read once per channel row in `waveformRow`, so it goes through the memo
+    /// rather than decoding JSON per row per body pass. See
+    /// `WaveformTimeMarkerStyleCache`.
     var waveformTimeMarkerStyle: WaveformTimeMarkerStyle {
-        WaveformTimeMarkerStyle.decoded(from: waveformTimeMarkerStyleData)
+        WaveformTimeMarkerStyleCache.style(for: waveformTimeMarkerStyleData)
     }
     var horizontalOffset: CGFloat {
         get { recordingStore.horizontalOffset }
@@ -220,32 +244,82 @@ struct WaveformView: View {
     @State var isSyncingSliderFromScroll = false
     @State var isOptionKeyPressed = false
     @State private var optionKeyMonitor: Any?
-    @State var showsEventsPanel = false
-    @State var selectedEventID: MFFEvent.ID?
+    // B4: events-panel and selection state now live on `recordingStore.events` /
+    // `recordingStore.selection`. These forwarders keep every existing call site
+    // in the ~20 `extension WaveformView` files working unchanged; they come out
+    // as children start reading the store directly.
+    var showsEventsPanel: Bool {
+        get { recordingStore.events.showsEventsPanel }
+        nonmutating set { recordingStore.events.showsEventsPanel = newValue }
+    }
+    var selectedEventID: MFFEvent.ID? {
+        get { recordingStore.events.selectedEventID }
+        nonmutating set { recordingStore.events.selectedEventID = newValue }
+    }
     /// Artifact event whose window is highlighted in the waveform (tap its flag).
-    @State var highlightedArtifactEvent: MFFEvent?
-    @State var highlightedArtifactColor: Color = .orange
-    @State var selectedEventCodes = Set<String>()
-    @State private var displayedEventsCache = WaveformDisplayedEventsCache.empty
-    @State private var eventTrackSourceSummary = EventTrackSourceSummary.empty
-    @State var topomapSample: Int?
-    @State var selectedSampleRange: ClosedRange<Int>?
-    @State var dragSelectionStartSample: Int?
-    @State var dragSelectionEndSample: Int?
-    @State var eventTrackContextSample: Int?
-    @State var waveformHoverInfo: WaveformHoverInfo?
+    var highlightedArtifactEvent: MFFEvent? {
+        get { recordingStore.selection.highlightedArtifactEvent }
+        nonmutating set { recordingStore.selection.highlightedArtifactEvent = newValue }
+    }
+    var highlightedArtifactColor: Color {
+        get { recordingStore.selection.highlightedArtifactColor }
+        nonmutating set { recordingStore.selection.highlightedArtifactColor = newValue }
+    }
+    var selectedEventCodes: Set<String> {
+        get { recordingStore.events.selectedEventCodes }
+        nonmutating set { recordingStore.events.selectedEventCodes = newValue }
+    }
+    private var displayedEventsCache: WaveformDisplayedEventsCache {
+        get { recordingStore.events.displayedEventsCache }
+        nonmutating set { recordingStore.events.displayedEventsCache = newValue }
+    }
+    private var eventTrackSourceSummary: EventTrackSourceSummary {
+        get { recordingStore.events.eventTrackSourceSummary }
+        nonmutating set { recordingStore.events.eventTrackSourceSummary = newValue }
+    }
+    var topomapSample: Int? {
+        get { recordingStore.selection.topomapSample }
+        nonmutating set { recordingStore.selection.topomapSample = newValue }
+    }
+    var selectedSampleRange: ClosedRange<Int>? {
+        get { recordingStore.selection.selectedSampleRange }
+        nonmutating set { recordingStore.selection.selectedSampleRange = newValue }
+    }
+    var dragSelectionStartSample: Int? {
+        get { recordingStore.selection.dragSelectionStartSample }
+        nonmutating set { recordingStore.selection.dragSelectionStartSample = newValue }
+    }
+    var dragSelectionEndSample: Int? {
+        get { recordingStore.selection.dragSelectionEndSample }
+        nonmutating set { recordingStore.selection.dragSelectionEndSample = newValue }
+    }
+    var eventTrackContextSample: Int? {
+        get { recordingStore.selection.eventTrackContextSample }
+        nonmutating set { recordingStore.selection.eventTrackContextSample = newValue }
+    }
+    var waveformHoverInfo: WaveformHoverInfo? {
+        get { recordingStore.selection.waveformHoverInfo }
+        nonmutating set { recordingStore.selection.waveformHoverInfo = newValue }
+    }
     /// Timestamp of the last stationary click, used to detect a double-click
     /// manually inside the single waveform interaction gesture.
-    @State var lastWaveformClick: (time: Date, x: CGFloat)?
+    var lastWaveformClick: (time: Date, x: CGFloat)? {
+        get { recordingStore.selection.lastWaveformClick }
+        nonmutating set { recordingStore.selection.lastWaveformClick = newValue }
+    }
     /// Live global x of the scrolling waveform content's leading edge. Used to
     /// convert a gesture's global x into a scroll-independent content x.
-    @State var waveformContentMinX: CGFloat = 0
+    var waveformContentMinX: CGFloat {
+        get { recordingStore.selection.waveformContentMinX }
+        nonmutating set { recordingStore.selection.waveformContentMinX = newValue }
+    }
     @State var detectsEyeBlinkArtifacts = false
     @State var detectsEyeMovementArtifacts = false
     /// Raw text buffers for the threshold-panel ocular-channel override fields
     /// (kept out of the config so mid-typing doesn't reparse the entry).
-    @State private var blinkChannelOverrideText = ""
-    @State private var movementChannelOverrideText = ""
+    /// Not `private`: bound by the single sheet host in `WaveformSheetHost.swift` (B3).
+    @State var blinkChannelOverrideText = ""
+    @State var movementChannelOverrideText = ""
     // ECG / QRS detection domain, extracted into an L4 store.
     @State var ecg: ECGDetectionViewModel
     // BCG detection
@@ -284,26 +358,58 @@ struct WaveformView: View {
     // Wavelet artifact reduction pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
     @State var wavelet: WaveletReductionViewModel
-    @State var channelStatusIsError = false
+    // B4: status and physio display state now live on `recordingStore.status` /
+    // `recordingStore.physio`.
+    var channelStatusIsError: Bool {
+        get { recordingStore.status.channelStatusIsError }
+        nonmutating set { recordingStore.status.channelStatusIsError = newValue }
+    }
     // Scrollable status history (newest first), shown when the status area is clicked.
-    @State private var statusHistory: [StatusHistoryEntry] = []
-    @State private var lastRecordedStatusBySource: [String: String] = [:]
-    @State private var showsStatusHistory = false
-    @State private var showsRecentProcessingHistory = false
+    private var statusHistory: [StatusHistoryEntry] {
+        get { recordingStore.status.statusHistory }
+        nonmutating set { recordingStore.status.statusHistory = newValue }
+    }
+    private var lastRecordedStatusBySource: [String: String] {
+        get { recordingStore.status.lastRecordedStatusBySource }
+        nonmutating set { recordingStore.status.lastRecordedStatusBySource = newValue }
+    }
     // Physio (PNS) channel display. Shown by default when present; pinned below
     // the EEG channels and synced to the EEG time axis.
-    @State var showsPhysioChannels = true
-    @State var physioRanges: [ClosedRange<Float>] = []
-    @State var physioScaleFactors: [Int: Double] = [:]
-    @State var physioMaxScaledChannels = Set<Int>()
-    @State var physioFlippedPolarity = Set<Int>()
+    var showsPhysioChannels: Bool {
+        get { recordingStore.physio.showsPhysioChannels }
+        nonmutating set { recordingStore.physio.showsPhysioChannels = newValue }
+    }
+    var physioRanges: [ClosedRange<Float>] {
+        get { recordingStore.physio.ranges }
+        nonmutating set { recordingStore.physio.ranges = newValue }
+    }
+    var physioScaleFactors: [Int: Double] {
+        get { recordingStore.physio.scaleFactors }
+        nonmutating set { recordingStore.physio.scaleFactors = newValue }
+    }
+    var physioMaxScaledChannels: Set<Int> {
+        get { recordingStore.physio.maxScaledChannels }
+        nonmutating set { recordingStore.physio.maxScaledChannels = newValue }
+    }
+    var physioFlippedPolarity: Set<Int> {
+        get { recordingStore.physio.flippedPolarity }
+        nonmutating set { recordingStore.physio.flippedPolarity = newValue }
+    }
     /// User-assigned renames for physio channels (keyed by merged channel index).
-    @State var physioChannelRenames: [Int: String] = [:]
+    var physioChannelRenames: [Int: String] {
+        get { recordingStore.physio.channelRenames }
+        nonmutating set { recordingStore.physio.channelRenames = newValue }
+    }
     /// Index of the channel currently being renamed (nil when no rename in progress).
-    @State var physioRenameTarget: Int? = nil
-    @State var physioRenameText: String = ""
+    var physioRenameTarget: Int? {
+        get { recordingStore.physio.renameTarget }
+        nonmutating set { recordingStore.physio.renameTarget = newValue }
+    }
     /// Synthetic PNS channels created from ICA components.
-    @State var syntheticPNSChannels: [SyntheticPNSChannel] = []
+    var syntheticPNSChannels: [SyntheticPNSChannel] {
+        get { recordingStore.physio.syntheticPNSChannels }
+        nonmutating set { recordingStore.physio.syntheticPNSChannels = newValue }
+    }
 
 
     // MRI gradient-artifact removal domain (AAS / FASTR / FARM / Moosmann),
@@ -320,11 +426,15 @@ struct WaveformView: View {
     /// that only hold `store` can reach it too.
     var processingQueue: ProcessingQueue { recordingStore.processingQueue }
     @State var electrodeGeometry: ElectrodeGeometry?
-    @State var channelStatusMessage: String?
+    var channelStatusMessage: String? {
+        get { recordingStore.status.channelStatusMessage }
+        nonmutating set { recordingStore.status.channelStatusMessage = newValue }
+    }
     @State private var channelLabelMetricsExportRequest = 0
     // Channel-health coordination, extracted into an L4 store (REFACTOR.md).
     @State var chanHealth: ChannelHealthViewModel
-    @State private var showsChannelGoodnessSettings = false
+    // Not `private`: read by the single sheet host in `WaveformSheetHost.swift` (B3).
+    @State var showsChannelGoodnessSettings = false
     @State private var channelGoodnessSettingsRequest = 0
     // Segment-health domain, extracted into an L4 store (REFACTOR.md).
     @State var segHealth: SegmentHealthViewModel
@@ -332,12 +442,16 @@ struct WaveformView: View {
     @State private var mffExportRequest = 0
     @State private var copyProcessingRequest = 0
     @State private var datasetInfoRequest = 0
-    @State private var showsDatasetInfo = false
+    // Not `private`: read by the single sheet host in `WaveformSheetHost.swift` (B3).
+    @State var showsDatasetInfo = false
     @State private var importPhysioRequest = 0
     @State var showsPhysioImportSheet = false
     /// Set to scroll the channel list to that row (e.g. from a topomap/butterfly
     /// click); `.scrollPosition(id:)` on the vertical channel ScrollView consumes it.
-    @State var scrollToChannelRequest: Int?
+    var scrollToChannelRequest: Int? {
+        get { recordingStore.selection.scrollToChannelRequest }
+        nonmutating set { recordingStore.selection.scrollToChannelRequest = newValue }
+    }
     @State var showsChannelInspector = false
     @State var channelInspectorSelection: ChannelInspectorSelection = .channel(0)
     @State var channelInspectorOverlayEnabled = true
@@ -348,12 +462,43 @@ struct WaveformView: View {
     @State var averageSNRSortOrder: [KeyPathComparator<AverageSNRRow>] = [
         KeyPathComparator(\AverageSNRRow.category, order: .forward)
     ]
-    @State var showsCategoryGroupPopover = false
-    @State var categoryGroupMode: CategoryGroupMode = .codes
-    @State var categoryGroupName = ""
-    @State var categoryGroupSelectedCodes = Set<String>()
-    @State var categoryRegexSourceCode = ""
-    @State var categoryRegexPattern = ""
+    // B4: category-group popover state now lives on `recordingStore.events`.
+    var categoryGroupSelectedCodes: Set<String> {
+        get { recordingStore.events.categoryGroupSelectedCodes }
+        nonmutating set { recordingStore.events.categoryGroupSelectedCodes = newValue }
+    }
+    var showsCategoryGroupPopover: Bool {
+        get { recordingStore.events.showsCategoryGroupPopover }
+        nonmutating set { recordingStore.events.showsCategoryGroupPopover = newValue }
+    }
+    var categoryGroupMode: CategoryGroupMode {
+        get { recordingStore.events.categoryGroupMode }
+        nonmutating set { recordingStore.events.categoryGroupMode = newValue }
+    }
+    var categoryGroupName: String {
+        get { recordingStore.events.categoryGroupName }
+        nonmutating set { recordingStore.events.categoryGroupName = newValue }
+    }
+    var categoryRegexSourceCode: String {
+        get { recordingStore.events.categoryRegexSourceCode }
+        nonmutating set { recordingStore.events.categoryRegexSourceCode = newValue }
+    }
+    var categoryRegexPattern: String {
+        get { recordingStore.events.categoryRegexPattern }
+        nonmutating set { recordingStore.events.categoryRegexPattern = newValue }
+    }
+    var physioRenameText: String {
+        get { recordingStore.physio.renameText }
+        nonmutating set { recordingStore.physio.renameText = newValue }
+    }
+    var showsStatusHistory: Bool {
+        get { recordingStore.status.showsStatusHistory }
+        nonmutating set { recordingStore.status.showsStatusHistory = newValue }
+    }
+    var showsRecentProcessingHistory: Bool {
+        get { recordingStore.status.showsRecentProcessingHistory }
+        nonmutating set { recordingStore.status.showsRecentProcessingHistory = newValue }
+    }
     @State var isExportingMFF = false
     @State var mffExportStatusMessage: String?
     @State var recordingSessionID = UUID()
@@ -452,7 +597,7 @@ struct WaveformView: View {
         let realCount = recording.pnsSignal?.numberOfChannels ?? 0
         let total = realCount + syntheticPNSChannels.count
         return PhysioViewControls(
-            showsPhysio: $showsPhysioChannels,
+            showsPhysio: binding(recordingStore.physio, \.showsPhysioChannels),
             hasPhysio: total > 0,
             channelCount: total
         )
@@ -935,6 +1080,7 @@ struct WaveformView: View {
                 displayMode: displayMode,
                 signal: signal,
                 events: events,
+                eventsKey: eventCacheKey,
                 isShowingEpochs: isShowingEpochs
             )
             .animation(.easeInOut(duration: 0.16), value: displayMode)
@@ -957,115 +1103,20 @@ struct WaveformView: View {
                 key: newKey
             )
         }
-        .sheet(isPresented: $epoching.showsSheet) {
-            psaSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $template.showsSheet) {
-            artifactTemplateSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $artifactVM.showsCleaningSheet) {
-            artifactCleaningSheet(for: cleaningBase)
-        }
-        .sheet(isPresented: $ecg.showsSheet) {
-            ecgDetectionSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $artifactVM.showsThresholdSheet) {
-            EyeArtifactThresholdSheet(
-                signal: continuousSignal,
-                sensorLayoutName: recording.sensorLayout?.name,
-                detectsEyeBlinkArtifacts: $detectsEyeBlinkArtifacts,
-                detectsEyeMovementArtifacts: $detectsEyeMovementArtifacts,
-                blinkChannelOverrideText: $blinkChannelOverrideText,
-                movementChannelOverrideText: $movementChannelOverrideText,
-                artifactVM: artifactVM
-            )
-        }
-        .sheet(isPresented: $bcg.showsSheet) {
-            bcgDetectionSheet(for: continuousSignal, selection: activeSelectionRange(in: continuousSignal))
-                .onAppear {
-                    autoSelectBCGProxySetIfEnabled(for: continuousSignal)
-                    prepareCWLDefaults(pns: displayedPhysioSignal())
-                }
-        }
-        .sheet(isPresented: $waveletExplorer.showsSheet) {
-            waveletArtifactExplorerSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $wavelet.showsSheet) {
-            waveletReductionSheet(input: waveletInput)
-        }
-        .sheet(isPresented: $ica.showsSheet) {
-            icaSheet(for: base)
-        }
-        .sheet(isPresented: $replay.showsConfigPane) {
-            ReplayConfigSheet(
-                controller: replay,
-                onStart: { startInteractiveReplay() },
-                onCancel: { replay.reset() }
-            )
-        }
-        .sheet(isPresented: $showsChannelInspector) {
-            channelInspectorSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $showsDatasetInfo) {
-            DatasetInfoSheet(
-                recording: recording,
-                epoching: epoching,
-                onClose: { showsDatasetInfo = false }
-            )
-        }
-        .sheet(isPresented: $showsPhysioImportSheet) {
-            PhysioImportSheet(
-                recording: recording,
-                onComplete: { showsPhysioImportSheet = false },
-                onCancel: { showsPhysioImportSheet = false }
+        // B3: one `.sheet(item:)` in place of 18 chained `.sheet(isPresented:)`.
+        // Presentation is still driven by the same per-VM booleans — they are
+        // derived into `activeSheet` rather than each owning a modifier. See
+        // `WaveformSheetHost.swift` for why the chain was the measured cost.
+        .sheet(item: activeSheetBinding) { sheet in
+            sheetContent(
+                sheet,
+                base: base,
+                cleaningBase: cleaningBase,
+                waveletInput: waveletInput,
+                continuousSignal: continuousSignal
             )
         }
         .overlay(alignment: .top) { replayBanner() }
-        .sheet(isPresented: $eegAnalysis.showsSheet) {
-            EEGAnalysisSheet(
-                viewModel: eegAnalysis,
-                packageName: recording.packageName,
-                signal: continuousSignal,
-                processing: eegAnalysisProcessingSnapshot(),
-                artifactSources: eegArtifactRejectionSources(),
-                excludedChannelIndices: channels.bad,
-                channelSets: ChannelSetStore.shared.allSets,
-                sensorLayout: recording.sensorLayout,
-                onClose: {
-                    eegAnalysis.showsSheet = false
-                }
-            )
-        }
-        .sheet(isPresented: $chanHealth.showsDetails) {
-            channelHealthDetailsSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $showsChannelGoodnessSettings) {
-            ChannelGoodnessSettingsView()
-                .environment(goodnessSettings)
-        }
-        .sheet(isPresented: $segHealth.showsDetails) {
-            segmentHealthDetailsSheet()
-        }
-        .sheet(isPresented: $gradient.showsMotionConfig) {
-            MotionConfigView(
-                parameters: $gradient.motionParameters,
-                fileFormat: $gradient.motionFileFormat,
-                fdThreshold: $gradient.motionFDThreshold,
-                radiusMm: $gradient.motionRadiusMm,
-                motionMetric: $gradient.motionMetric,
-                skipStart: $gradient.skipStart,
-                skipEnd: $gradient.skipEnd,
-                trSeconds: $gradient.trSeconds,
-                trMarkerCode: gradient.trMarkerCode,
-                trMarkerSamples: recording.signal.map { trMarkerSamples(in: $0, code: gradient.trMarkerCode) } ?? [],
-                samplingRate: recording.signal?.samplingRate ?? 0,
-                donorVolumes: gradient.donorVolumes,
-                onClose: {
-                    gradient.showsMotionConfig = false
-                    gradient.showsPopover = true
-                }
-            )
-        }
         .onChange(of: artifactVM.detectionMethod) { _, method in
             if method == .ica {
                 DispatchQueue.main.async {
@@ -1102,15 +1153,33 @@ struct WaveformView: View {
     }
 
     @ViewBuilder
-    private func waveformWorkspace(for signal: MFFSignalData, events: [MFFEvent], isShowingEpochs: Bool) -> some View {
+    private func waveformWorkspace(
+        for signal: MFFSignalData,
+        events: [MFFEvent],
+        eventsKey: WaveformDisplayedEventsCache.Key,
+        isShowingEpochs: Bool
+    ) -> some View {
         HStack(spacing: 0) {
             waveformArea(for: signal, events: events, isShowingEpochs: isShowingEpochs)
 
             if showsEventsPanel {
                 Divider()
-                eventsPanel(for: signal, events: events)
-                    .frame(width: eventsPanelWidth)
-                    .background(Color(nsColor: .windowBackgroundColor))
+                // B2/C1: a standalone `Equatable` view, so unrelated state
+                // changes (drag ticks, progress ticks) no longer re-run this
+                // body — which is why its derived lists need no cache.
+                EventsPanelView(
+                    events: events,
+                    eventsKey: eventsKey,
+                    selectedEventCodes: selectedEventCodes,
+                    selectedEventID: selectedEventID,
+                    onSelectEvent: { jumpToEvent($0, in: signal) },
+                    onToggleCode: { toggleEventCode($0) },
+                    onClearCodes: { selectedEventCodes.removeAll() },
+                    onClose: { showsEventsPanel = false }
+                )
+                .equatable()
+                .frame(width: eventsPanelWidth)
+                .background(Color(nsColor: .windowBackgroundColor))
             }
 
             if epoching.showsButterflyPlot, epoching.isAveraged {
@@ -1129,9 +1198,16 @@ struct WaveformView: View {
 
             if let topomapSample {
                 Divider()
-                topomapPanel(for: signal, sample: topomapSample)
-                    .frame(width: topomapPanelWidth)
-                    .background(Color(nsColor: .windowBackgroundColor))
+                TopomapPanelView(
+                    layout: recording.sensorLayout,
+                    values: topomapValues(at: topomapSample, in: signal),
+                    timeSeconds: signal.samplingRate > 0 ? Double(topomapSample) / signal.samplingRate : 0,
+                    channelName: { eegChannelDisplayName(index: $0, signal: signal) },
+                    onTapChannel: { openChannelInspector(channel: $0) },
+                    onClose: { self.topomapSample = nil }
+                )
+                .frame(width: topomapPanelWidth)
+                .background(Color(nsColor: .windowBackgroundColor))
             }
 
             if let relSample = epoching.butterflyTopomapRelativeSample, epoching.isAveraged {
@@ -1496,60 +1572,47 @@ struct WaveformView: View {
 
     // MARK: - Status log
 
-    /// A single line shown in the toolbar log area.
-    private struct LogLine: Hashable {
-        let source: String
-        let text: String
-        let isError: Bool
-    }
-
-    /// A timestamped entry kept in the scrollable status history.
-    struct StatusHistoryEntry: Identifiable, Hashable {
-        let id = UUID()
-        let source: String
-        let text: String
-        let isError: Bool
-        let date: Date
-    }
+    // `StatusHistoryEntry` moved to `WaveformUIModels.swift` (B4), beside
+    // `RecordingStatusModel`, which now owns the history.
 
     /// Messages currently worth surfacing, gathered from each feature's status.
-    private var activeLogMessages: [LogLine] {
-        var lines: [LogLine] = []
+    private var activeLogMessages: [StatusLogLine] {
+        var lines: [StatusLogLine] = []
         if !gradient.isProcessing, let mriStatus = gradient.statusMessage {
-            lines.append(LogLine(source: "MRI", text: mriStatus, isError: gradient.statusIsError))
+            lines.append(StatusLogLine(source: "MRI", text: mriStatus, isError: gradient.statusIsError))
         }
         if !filter.isFiltering, let filterStatusMessage = filter.statusMessage {
-            lines.append(LogLine(source: "Filter", text: filterStatusMessage, isError: filter.statusIsError))
+            lines.append(StatusLogLine(source: "Filter", text: filterStatusMessage, isError: filter.statusIsError))
         }
         if let psaStatus = epoching.statusMessage {
-            lines.append(LogLine(source: "Segment", text: psaStatus, isError: false))
+            lines.append(StatusLogLine(source: "Segment", text: psaStatus, isError: false))
         }
         if let channelStatusMessage {
-            lines.append(LogLine(source: "Channel", text: channelStatusMessage, isError: channelStatusIsError))
+            lines.append(StatusLogLine(source: "Channel", text: channelStatusMessage, isError: channelStatusIsError))
         }
         if let chanStatus = chanHealth.statusMessage {
-            lines.append(LogLine(source: "Channel Health", text: chanStatus, isError: false))
+            lines.append(StatusLogLine(source: "Channel Health", text: chanStatus, isError: false))
         }
         if let segStatus = segHealth.statusMessage {
-            lines.append(LogLine(source: "Segment Health", text: segStatus, isError: false))
+            lines.append(StatusLogLine(source: "Segment Health", text: segStatus, isError: false))
         }
         if let cleaningStatus = artifactVM.cleaningStatusMessage {
-            lines.append(LogLine(source: "Artifact", text: cleaningStatus, isError: false))
+            lines.append(StatusLogLine(source: "Artifact", text: cleaningStatus, isError: false))
         }
         if let explorerStatus = waveletExplorer.statusMessage {
-            lines.append(LogLine(source: "Wavelet", text: explorerStatus, isError: false))
+            lines.append(StatusLogLine(source: "Wavelet", text: explorerStatus, isError: false))
         }
         if let waveletStatus = wavelet.statusMessage {
-            lines.append(LogLine(source: "Wavelet Reduction", text: waveletStatus, isError: false))
+            lines.append(StatusLogLine(source: "Wavelet Reduction", text: waveletStatus, isError: false))
         }
         if let mffExportStatusMessage {
-            lines.append(LogLine(source: "Export", text: mffExportStatusMessage, isError: false))
+            lines.append(StatusLogLine(source: "Export", text: mffExportStatusMessage, isError: false))
         }
         return lines
     }
 
     /// Appends any newly-changed status messages to the scrollable history.
-    private func recordStatusHistory(_ lines: [LogLine]) {
+    private func recordStatusHistory(_ lines: [StatusLogLine]) {
         for line in lines where lastRecordedStatusBySource[line.source] != line.text {
             lastRecordedStatusBySource[line.source] = line.text
             statusHistory.append(StatusHistoryEntry(
@@ -1564,100 +1627,70 @@ struct WaveformView: View {
         }
     }
 
+    /// One source instead of reaching into each view model by name, so a new
+    /// long-running stage appears here by reporting progress rather than by
+    /// editing this property. See `OperationProgressCenter`.
     private var activeOperationProgress: [OperationProgress] {
-        var operations: [OperationProgress] = []
-        if gradient.isProcessing, let progress = gradient.operationProgress {
-            operations.append(progress)
+        recordingStore.operationProgress.operations
+    }
+
+    /// Flattens the eight view models the status area reads into one comparable
+    /// value, so `StatusLogView` re-renders only when the displayed status
+    /// changes. See `StatusLogView.swift` for why this boundary exists.
+    private var statusLogSnapshot: StatusLogSnapshot {
+        var snapshot = StatusLogSnapshot()
+
+        // Rich progress comes from the one center; the fallback bars below are
+        // for stages that only report a bare fraction.
+        snapshot.operations = recordingStore.operationProgress.operations
+        if gradient.isProcessing, gradient.operationProgress == nil {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "MRI", value: gradient.progress))
         }
-        if filter.isFiltering, let progress = filter.operationProgress {
-            operations.append(progress)
+        if filter.isFiltering, filter.operationProgress == nil {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Filter", value: filter.progress))
         }
-        return operations
+        if let cleaningProgress = artifactVM.cleaningProgress {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Artifact", value: cleaningProgress.fraction))
+        }
+        if waveletExplorer.isRunning {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Wavelet", value: waveletExplorer.progress))
+        }
+        if wavelet.isRunning {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Reduction", value: wavelet.progress))
+        }
+        if channels.isAnalyzingHealth {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Health", value: channels.healthProgress))
+        }
+        if segHealth.isAnalyzing {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Segments", value: segHealth.progress))
+        }
+        if isExportingMFF {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "MFF", value: 0.5))
+        }
+
+        snapshot.messages = activeLogMessages
+        snapshot.hasHistory = !statusHistory.isEmpty
+        return snapshot
     }
 
     /// Consolidated status/progress area shown at the far right of the toolbar,
     /// so individual buttons no longer push inline messages into the layout.
-    @ViewBuilder
     func statusLog() -> some View {
-        Button {
-            showsStatusHistory = true
-        } label: {
-            VStack(alignment: .leading, spacing: 3) {
-                if gradient.isProcessing {
-                    if let operation = gradient.operationProgress {
-                        operationProgressSummary(operation)
-                    } else {
-                        logProgressRow(label: "MRI", value: gradient.progress)
-                    }
-                }
-                if filter.isFiltering {
-                    if let operation = filter.operationProgress {
-                        operationProgressSummary(operation)
-                    } else {
-                        logProgressRow(label: "Filter", value: filter.progress)
-                    }
-                }
-                if let cleaningProgress = artifactVM.cleaningProgress {
-                    logProgressRow(label: "Artifact", value: cleaningProgress.fraction)
-                }
-                if waveletExplorer.isRunning {
-                    logProgressRow(label: "Wavelet", value: waveletExplorer.progress)
-                }
-                if wavelet.isRunning {
-                    logProgressRow(label: "Reduction", value: wavelet.progress)
-                }
-                if channels.isAnalyzingHealth {
-                    logProgressRow(label: "Health", value: channels.healthProgress)
-                }
-                if segHealth.isAnalyzing {
-                    logProgressRow(label: "Segments", value: segHealth.progress)
-                }
-                if isExportingMFF {
-                    logProgressRow(label: "MFF", value: 0.5)
-                }
-
-                ForEach(activeLogMessages, id: \.self) { line in
-                    StatusLogLineView(line: line)
-                }
-
-                if !gradient.isProcessing,
-                   !filter.isFiltering,
-                   !waveletExplorer.isRunning,
-                   !wavelet.isRunning,
-                   !channels.isAnalyzingHealth,
-                   !segHealth.isAnalyzing,
-                   activeLogMessages.isEmpty {
-                    Text(statusHistory.isEmpty ? "Ready" : "Ready · click for history")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 0.5)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Click to see the full status history")
+        StatusLogView(
+            snapshot: statusLogSnapshot,
+            onActivate: { showsStatusHistory = true }
+        )
+        .equatable()
         .onChange(of: activeLogMessages) { _, lines in
             recordStatusHistory(lines)
         }
-        .popover(isPresented: $showsStatusHistory, arrowEdge: .bottom) {
+        .popover(isPresented: binding(recordingStore.status, \.showsStatusHistory), arrowEdge: .bottom) {
             if activeOperationProgress.isEmpty {
                 statusHistoryPopover()
             } else {
                 processingStatusPopover(activeOperationProgress)
             }
         }
-        .accessibilityLabel("Status log")
     }
 
     @ViewBuilder
@@ -1720,7 +1753,7 @@ struct WaveformView: View {
 
             if !statusHistory.isEmpty {
                 Divider()
-                DisclosureGroup("Recent history", isExpanded: $showsRecentProcessingHistory) {
+                DisclosureGroup("Recent history", isExpanded: binding(recordingStore.status, \.showsRecentProcessingHistory)) {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(statusHistory.suffix(3).reversed())) { entry in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -1796,25 +1829,6 @@ struct WaveformView: View {
         }
     }
 
-    private func operationProgressSummary(_ operation: OperationProgress) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(operation.source)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Text(operation.phase)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 4)
-                Text("\(Int((operation.clampedFraction * 100).rounded()))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            ProgressView(value: operation.clampedFraction)
-                .progressViewStyle(.linear)
-        }
-    }
 
     private func stageIcon(_ state: OperationProgress.StageState) -> String {
         switch state {
@@ -1837,33 +1851,6 @@ struct WaveformView: View {
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 
-    private func logProgressRow(label: String, value: Double) -> some View {
-        HStack(spacing: 6) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ProgressView(value: value)
-                .progressViewStyle(.linear)
-            Text("\(Int(value * 100))%")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 36, alignment: .trailing)
-        }
-    }
-
-    private struct StatusLogLineView: View {
-        let line: LogLine
-
-        var body: some View {
-            Text(line.text)
-                .font(.caption)
-                .foregroundStyle(line.isError ? Color.red : Color.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel(line.text)
-        }
-    }
 
     // MARK: - Waveform area
 
@@ -1940,7 +1927,21 @@ struct WaveformView: View {
                     .frame(width: labelColumnWidth, alignment: .topLeading)
 
                     ScrollView(.horizontal, showsIndicators: true) {
-                        LazyVStack(alignment: .leading, spacing: rowSpacing) {
+                        // Plain `VStack`, not `LazyVStack` — deliberate, and measured.
+                        //
+                        // This stack's scroll container is the *horizontal* ScrollView,
+                        // so a lazy stack here re-runs its placement algorithm on every
+                        // horizontal offset change while its laziness (vertical) is
+                        // governed by the outer vertical ScrollView. In `trace3.trace`
+                        // that was ~30% of the wheel-scroll window —
+                        // `LazyStack.place` 10.6%, `resolveIndexAndPosition` 10.5%,
+                        // `StackPlacement.measureBackwards`/`flushBackwards` 9.1% —
+                        // and **absent entirely** from the click-drag window, which is
+                        // what pinned it to scrolling rather than to rendering.
+                        //
+                        // The rows are `.equatable()`, so eagerly building them is cheap
+                        // (`WaveformChannelRow` is 0.55% of the whole trace).
+                        VStack(alignment: .leading, spacing: rowSpacing) {
                             ForEach(channelIndices(in: signal), id: \.self) { index in
                                 waveformRow(index: index, channel: signal.data[index], plotWidth: plotWidth, signal: signal)
                             }
@@ -1992,7 +1993,7 @@ struct WaveformView: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 16)
             }
-            .scrollPosition(id: $scrollToChannelRequest, anchor: .center)
+            .scrollPosition(id: binding(recordingStore.selection, \.scrollToChannelRequest), anchor: .center)
 
             // Pinned physio (PNS) pane: always visible below the EEG channels
             // (separated by a gap), sharing the EEG time axis. Like the events
@@ -2060,6 +2061,7 @@ struct WaveformView: View {
         displayMode: EpochingViewModel.AveragedDisplayMode,
         signal: MFFSignalData,
         events: [MFFEvent],
+        eventsKey: WaveformDisplayedEventsCache.Key,
         isShowingEpochs: Bool
     ) -> some View {
         if displayMode == .averages {
@@ -2069,170 +2071,18 @@ struct WaveformView: View {
             singleTrialAnalysisWorkspace()
                 .transition(.opacity)
         } else {
-            waveformWorkspace(for: signal, events: events, isShowingEpochs: isShowingEpochs)
-                .transition(.opacity)
-        }
-    }
-
-    // MARK: - Topomap panel
-
-    @ViewBuilder
-    private func topomapPanel(for signal: MFFSignalData, sample: Int) -> some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Topography")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    topomapSample = nil
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
-
-            if let layout = recording.sensorLayout {
-                TopomapView(
-                    layout: layout,
-                    values: topomapValues(at: sample, in: signal),
-                    timeSeconds: signal.samplingRate > 0 ? Double(sample) / signal.samplingRate : 0,
-                    fixedScale: nil,
-                    channelName: { eegChannelDisplayName(index: $0, signal: signal) },
-                    onTapChannel: { openChannelInspector(channel: $0) }
-                )
-                Spacer(minLength: 0)
-            } else {
-                ContentUnavailableView(
-                    "No Sensor Layout",
-                    systemImage: "circle.dashed",
-                    description: Text("This package has no readable sensorLayout.xml, so a topographic map can't be drawn.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-    }
-
-    // MARK: - Events panel
-
-    @ViewBuilder
-    private func eventsPanel(for signal: MFFSignalData, events: [MFFEvent]) -> some View {
-        let summaries = groupedEventSummaries(events)
-        let visibleEvents = filteredEvents(events)
-
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Events")
-                        .font(.headline)
-                    Text("\(visibleEvents.count) of \(events.count) markers")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    showsEventsPanel = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
-            .padding(.bottom, 10)
-
-            if !summaries.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        codeChip(title: "All Events", count: events.count, isSelected: selectedEventCodes.isEmpty) {
-                            selectedEventCodes.removeAll()
-                        }
-                        ForEach(summaries) { summary in
-                            codeChip(title: summary.code, count: summary.count, isSelected: selectedEventCodes.contains(summary.code)) {
-                                toggleEventCode(summary.code)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
-                }
-            }
-
-            Divider()
-
-            if events.isEmpty {
-                ContentUnavailableView(
-                    "No Events",
-                    systemImage: "list.bullet.rectangle",
-                    description: Text("This recording has no event markers yet.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                let numberWidth = max(28, CGFloat(String(max(visibleEvents.count, 1)).count) * 8 + 14)
-                List(Array(visibleEvents.enumerated()), id: \.element.id) { offset, event in
-                    Button {
-                        jumpToEvent(event, in: signal)
-                    } label: {
-                        HStack(alignment: .top, spacing: 10) {
-                            Text("\(offset + 1)")
-                                .font(.system(.caption, design: .monospaced).weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .frame(width: numberWidth, alignment: .trailing)
-                                .padding(.top, 2)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(event.code)
-                                    .font(.system(.body, design: .monospaced).weight(.semibold))
-                                ForEach(eventMetadataRows(for: event), id: \.self) { row in
-                                    Text(row)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-                                Text(formattedEventTime(event.beginTimeSeconds))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(event.sourceFile)
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 4)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Event \(offset + 1), \(eventAccessibilitySummary(event)), \(formattedEventTime(event.beginTimeSeconds))")
-                    .listRowBackground(
-                        selectedEventID == event.id ? Color.accentColor.opacity(0.14) : Color.clear
-                    )
-                }
-                .listStyle(.sidebar)
-            }
-        }
-    }
-
-    private func codeChip(title: String, count: Int, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-                Text("\(count)")
-                    .font(.caption2)
-            }
-            .foregroundStyle(isSelected ? Color.accentColor : .primary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(
-                Capsule().fill(isSelected ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08))
+            waveformWorkspace(
+                for: signal,
+                events: events,
+                eventsKey: eventsKey,
+                isShowingEpochs: isShowingEpochs
             )
+            .transition(.opacity)
         }
-        .buttonStyle(.plain)
     }
+
+    // The topomap and events panels moved to `TopomapPanelView.swift` and
+    // `EventsPanelView.swift` (B2).
 
     // MARK: - Channel interpolation
 
@@ -2785,41 +2635,11 @@ struct WaveformView: View {
         horizontalScrollPosition.scrollTo(x: clampedOffset)
     }
 
+    /// Kept here because `MFFExportFlowViews` and `WaveletArtifactExplorerViews`
+    /// also call it; delegates to the panel's implementation so the two cannot
+    /// drift apart.
     func formattedEventTime(_ seconds: Double) -> String {
-        if seconds >= 60 {
-            let minutes = Int(seconds) / 60
-            let remainingSeconds = seconds.truncatingRemainder(dividingBy: 60)
-            return String(format: "%d:%06.3f", minutes, remainingSeconds)
-        }
-        return String(format: "%.3fs", seconds)
-    }
-
-    private func eventMetadataRows(for event: MFFEvent) -> [String] {
-        var rows: [String] = []
-        if let label = event.label {
-            rows.append("Label: \(label)")
-        }
-        if let description = event.eventDescription {
-            rows.append("Description: \(description)")
-        }
-        if let cell = event.cell {
-            rows.append("Cell: \(cell)")
-        }
-        return rows
-    }
-
-    private func eventAccessibilitySummary(_ event: MFFEvent) -> String {
-        ([event.code] + eventMetadataRows(for: event)).joined(separator: ", ")
-    }
-
-    private func groupedEventSummaries(_ events: [MFFEvent]) -> [EventSummary] {
-        Dictionary(grouping: events, by: \.code)
-            .map { EventSummary(code: $0.key, count: $0.value.count) }
-            .sorted { lhs, rhs in
-                lhs.count == rhs.count
-                    ? lhs.code.localizedStandardCompare(rhs.code) == .orderedAscending
-                    : lhs.count > rhs.count
-            }
+        EventsPanelView.formattedEventTime(seconds)
     }
 
     func groupedPSAEventSummaries(_ events: [MFFEvent]) -> [EventSummary] {
@@ -2973,10 +2793,6 @@ struct WaveformView: View {
         case .artifact:
             return event.code
         }
-    }
-
-    private func filteredEvents(_ events: [MFFEvent]) -> [MFFEvent] {
-        selectedEventCodes.isEmpty ? events : events.filter { selectedEventCodes.contains($0.code) }
     }
 
     private func toggleEventCode(_ code: String) {

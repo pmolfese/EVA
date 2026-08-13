@@ -122,7 +122,13 @@ struct WaveformChannelRow: View, Equatable {
 /// One label-column row: channel name, state icon (hidden/interpolated/bad),
 /// health badge, and the per-channel context menu. Value inputs + action
 /// closures only — no `WaveformView`/`ChannelModel` capture.
-struct ChannelLabelRow: View {
+///
+/// `Equatable` for the same reason `WaveformChannelRow` is, and it was measured
+/// to matter more: in `trace2.trace` the label column cost ~3× the trace rows
+/// (721 vs 235 inclusive samples) precisely because B1 gave the plot row a skip
+/// boundary and left this one without. Action closures are excluded from `==`;
+/// everything they depend on is represented by the compared value inputs.
+struct ChannelLabelRow: View, Equatable {
     let index: Int
     let label: String
     let isHidden: Bool
@@ -147,6 +153,20 @@ struct ChannelLabelRow: View {
     let onExportJSONWithEvents: () -> Void
     let onExport1D: () -> Void
     let onExport1DWithEvents: () -> Void
+
+    static func == (lhs: ChannelLabelRow, rhs: ChannelLabelRow) -> Bool {
+        lhs.index == rhs.index
+            && lhs.label == rhs.label
+            && lhs.isHidden == rhs.isHidden
+            && lhs.isBad == rhs.isBad
+            && lhs.isInterpolated == rhs.isInterpolated
+            && lhs.color == rhs.color
+            && lhs.rowHeight == rhs.rowHeight
+            && lhs.healthResult == rhs.healthResult
+            && lhs.isAnalyzingHealth == rhs.isAnalyzingHealth
+            && lhs.canInterpolate == rhs.canInterpolate
+            && lhs.moveToPhysioTitle == rhs.moveToPhysioTitle
+    }
 
     var body: some View {
         HStack(spacing: 6) {

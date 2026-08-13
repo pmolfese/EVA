@@ -146,7 +146,7 @@ extension WaveformView {
                 }
                 .disabled(allSummaries.isEmpty)
                 .help("Combine several event codes/labels into one pooled category, or sub-select one code's events by a regex on their description.")
-                .popover(isPresented: $showsCategoryGroupPopover) {
+                .popover(isPresented: binding(recordingStore.events, \.showsCategoryGroupPopover)) {
                     categoryGroupPopover(events: events, allSummaries: allSummaries)
                 }
             }
@@ -707,7 +707,7 @@ extension WaveformView {
             Text("New Category")
                 .font(.headline)
 
-            Picker("Mode", selection: $categoryGroupMode) {
+            Picker("Mode", selection: binding(recordingStore.events, \.categoryGroupMode)) {
                 ForEach(CategoryGroupMode.allCases) { mode in
                     Text(mode.rawValue).tag(mode)
                 }
@@ -733,7 +733,7 @@ extension WaveformView {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
-        TextField("Category name (e.g. \"emotional\")", text: $categoryGroupName)
+        TextField("Category name (e.g. \"emotional\")", text: binding(recordingStore.events, \.categoryGroupName))
             .textFieldStyle(.roundedBorder)
 
         ScrollView {
@@ -793,7 +793,7 @@ extension WaveformView {
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
 
-        Picker("Source code", selection: $categoryRegexSourceCode) {
+        Picker("Source code", selection: binding(recordingStore.events, \.categoryRegexSourceCode)) {
             Text("Choose a code…").tag("")
             ForEach(allSummaries) { summary in
                 Text("\(summary.code) — \(summary.count) events").tag(summary.code)
@@ -805,7 +805,7 @@ extension WaveformView {
         Text("Pattern (applied to description field)")
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
-        TextField("e.g. cond=(\\d+)_correct", text: $categoryRegexPattern)
+        TextField("e.g. cond=(\\d+)_correct", text: binding(recordingStore.events, \.categoryRegexPattern))
             .textFieldStyle(.roundedBorder)
             .font(.system(.body, design: .monospaced))
 
@@ -868,7 +868,7 @@ extension WaveformView {
             }
         }
 
-        TextField("New category name (e.g. \"emotional\" or \"n2_$1\")", text: $categoryGroupName)
+        TextField("New category name (e.g. \"emotional\" or \"n2_$1\")", text: binding(recordingStore.events, \.categoryGroupName))
             .textFieldStyle(.roundedBorder)
             .help("Use $1, $2, … to reference the pattern's capture groups — one rule then fans out into a category per captured value instead of needing a separate rule for each.")
 

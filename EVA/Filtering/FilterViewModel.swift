@@ -92,7 +92,13 @@ final class FilterViewModel {
     // MARK: Run state
     var isFiltering = false
     var progress = 0.0
-    var operationProgress: OperationProgress?
+    /// Forwards into the shared `OperationProgressCenter` so the status area has
+    /// one source to read. See `OperationProgressCenter`.
+    var operationProgress: OperationProgress? {
+        get { store.operationProgress.progress(for: Self.progressSource) }
+        set { store.operationProgress.set(newValue, for: Self.progressSource) }
+    }
+    static let progressSource = "Filter"
     var statusMessage: String?
     var statusIsError = false
 
