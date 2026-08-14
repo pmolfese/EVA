@@ -188,8 +188,13 @@ struct HistoryRailRenderTests {
             statusHistory: sampleStatusHistory,
             historyNodes: sampleNodes,
             historyShortID: "a4f1c9",
+            canStepBack: true,
+            canStepForward: false,
             tab: .constant(tab),
-            onClearStatusHistory: {}
+            onClearStatusHistory: {},
+            onSelectNode: { _ in },
+            onStepBack: {},
+            onStepForward: {}
         )
     }
 

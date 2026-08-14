@@ -10,8 +10,10 @@
 //  may apply.
 //
 //  The history rail from `REWIND.md` — the trunk, the current-node highlight,
-//  and each node's defining parameters. Read-only for now: it renders the chain
-//  that produced the signal on screen, and clicking a node does not yet navigate.
+//  and each node's defining parameters. Clicking a node navigates to it: the
+//  pipeline is restored from that node's snapshot, so undo and redo are just
+//  moving the pointer. A node whose snapshot has been evicted is shown disabled
+//  rather than offered and then refused.
 //
 //  **These are the rail's contents, not a panel.** The rail is presented inside
 //  the status popover's History tab (`ProcessingStatusPopover.swift`), which is
@@ -47,16 +49,33 @@ import SwiftUI
 /// `HistoryRailRenderTests`.
 struct HistoryRailNodeList: View, Equatable {
     let nodes: [HistoryRailNode]
+    /// Navigate to a node. Value-typed id, so the list holds no tree reference.
+    var onSelect: ((String) -> Void)?
+
+    static func == (lhs: HistoryRailNodeList, rhs: HistoryRailNodeList) -> Bool {
+        lhs.nodes == rhs.nodes
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(nodes.enumerated()), id: \.element.id) { index, node in
-                HistoryRailRow(
+                let row = HistoryRailRow(
                     node: node,
                     isFirst: index == 0,
                     isLast: index == nodes.count - 1
                 )
                 .equatable()
+
+                if let onSelect, !node.isCurrent {
+                    Button { onSelect(node.id) } label: { row }
+                        .buttonStyle(.plain)
+                        .disabled(!node.isInstant)
+                        .help(node.isInstant
+                              ? "Go to this point in the processing history"
+                              : "This step's signal is no longer in memory, so it cannot be restored yet.")
+                } else {
+                    row
+                }
             }
         }
         .padding(.vertical, 10)
@@ -87,9 +106,14 @@ struct HistoryRailRow: View, Equatable {
             label
             Spacer(minLength: 0)
         }
-        .padding(.leading, 12)
+        .padding(.leading, 12 + CGFloat(node.depth) * 14)
         .padding(.trailing, 10)
         .background(alignment: .topLeading) { spine }
+        // Branches you have left stay visible but recede, so the current lineage
+        // reads at a glance. Dimming rather than hiding is the whole point — the
+        // rail used to render only the path to the current node, which made
+        // stepping back look like the steps after it had been destroyed.
+        .opacity(node.isOnCurrentPath ? 1 : 0.55)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
     }
@@ -140,7 +164,7 @@ struct HistoryRailRow: View, Equatable {
                 .frame(maxHeight: .infinity)
         }
         .frame(width: spineWidth)
-        .padding(.leading, 12)
+        .padding(.leading, 12 + CGFloat(node.depth) * 14)
     }
 
     private var lineColor: Color { Color.secondary.opacity(0.35) }
@@ -152,6 +176,7 @@ struct HistoryRailRow: View, Equatable {
         var text = node.title
         if !node.subtitle.isEmpty { text += ", \(node.subtitle)" }
         if node.isCurrent { text += ", current" }
+        if !node.isOnCurrentPath { text += ", on another branch" }
         return text
     }
 }

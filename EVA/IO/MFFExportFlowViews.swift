@@ -393,6 +393,19 @@ extension WaveformView {
         }
         if filter.output != nil {
             script.append(EVAProcessingStep(operation: .filter, parameters: filter.parameters))
+            // Re-referencing is its own step, emitted *after* the filter that
+            // produced the samples it acts on. Interactively the pass still runs
+            // inside `FilterViewModel` on the buffer it already owns; headlessly
+            // it runs here. Same operation, same samples, same point in the
+            // chain — see `Rereferencing` for the parity claim.
+            if filter.averageReference {
+                script.append(EVAProcessingStep(
+                    operation: .reference,
+                    parameters: Rereferencing.parameters(
+                        scheme: .average, domain: .continuous, excluding: channels.bad
+                    )
+                ))
+            }
         }
         if artifactVM.isCleaningActive, artifactVM.cleaningIsEnabled {
             // Artifact cleaning is defined per-subject (drawn templates / events),
@@ -422,6 +435,18 @@ extension WaveformView {
         // PSA: segment (+ optional baseline / average) is portable when the target
         // has the same event codes. Replayable.
         if epoching.epochedSignal != nil, !epoching.selectedEventCodes.isEmpty {
+            // Emitted *before* `segment`, unlike the continuous one: epoch
+            // referencing happens inside the PSA fold, after trial rejection and
+            // before baseline correction, so it cannot be performed from
+            // outside. Replaying it configures the segmentation that follows.
+            if epoching.averageReference {
+                script.append(EVAProcessingStep(
+                    operation: .reference,
+                    parameters: Rereferencing.parameters(
+                        scheme: .average, domain: .epoch, excluding: channels.bad
+                    )
+                ))
+            }
             script.append(EVAProcessingStep(operation: .segment, parameters: epoching.parameters))
         }
         // Bad-channel marks and interpolation, as provenance. Shared with the

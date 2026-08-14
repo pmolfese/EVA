@@ -1796,7 +1796,7 @@ extension WaveformView {
     /// into the epoched signal, the reference correctly uses their reconstructed
     /// values and excludes bad channels.
     func averageReferencedEpochs(_ result: PSABuildResult) -> PSABuildResult {
-        let referencedData = EEGSignalFilter.averageReferenced(result.signal.data, excluding: channels.bad)
+        let referencedData = Rereferencing.applied(result.signal.data, excluding: channels.bad)
         let referenced = MFFSignalData(
             signalURL: result.signal.signalURL,
             signalType: result.signal.signalType,

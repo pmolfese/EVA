@@ -708,7 +708,7 @@ nonisolated struct PSABuildResult {
     }
 
     private func withAverageReference(excluding bad: Set<Int>) -> PSABuildResult {
-        let referencedData = EEGSignalFilter.averageReferenced(signal.data, excluding: bad)
+        let referencedData = Rereferencing.applied(signal.data, excluding: bad)
         let s = MFFSignalData(signalURL: signal.signalURL, signalType: signal.signalType,
                               numberOfChannels: signal.numberOfChannels, samplingRate: signal.samplingRate,
                               duration: signal.duration, recordingStartTime: signal.recordingStartTime,

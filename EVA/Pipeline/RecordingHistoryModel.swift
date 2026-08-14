@@ -27,9 +27,14 @@
 //  would record a lineage that does not reproduce the bytes, and reproducing the
 //  bytes is the whole promise of a node ID. See `EVAHistory.adopt`.
 //
-//  **Still missing before this is a full record:** measured `computeCost` per
-//  node, which only the apply sites know, and navigation — clicking a node does
-//  nothing yet. Both are `REWIND.md` work item 2's territory.
+//  Navigation restores from `PipelineSnapshot` rather than re-deriving, which is
+//  what makes undo/redo instant — see that file for why the design's
+//  re-derivation model is right for reproducing a package and wrong for moving
+//  around inside a session.
+//
+//  **Still missing:** measured `computeCost` per node, which only the apply sites
+//  know, and re-derivation for nodes whose snapshot has been evicted (today they
+//  are simply not offered). Both are `REWIND.md` work item 2's territory.
 //
 //  It lives here rather than in `WaveformUIModels.swift` because that file is
 //  explicitly display state that "nothing here belongs in eva.xml or affects
@@ -68,6 +73,7 @@ final class RecordingHistoryModel {
         script: EVAProcessingScript,
         payloadDigests: [EVAProcessingStep.Operation: String] = [:]
     ) {
+        guard !isNavigating else { return }
         if recordingKey != self.recordingKey {
             self.recordingKey = recordingKey
             history = EVAHistory(recordingKey: recordingKey)
@@ -81,6 +87,121 @@ final class RecordingHistoryModel {
         history = updated
     }
 
+    // MARK: - Snapshots
+
+    /// Stage outputs per node, so navigating restores instead of recomputing.
+    ///
+    /// A side table rather than a field on `EVAHistoryNode`, deliberately:
+    /// `EVAHistory` is a pure `Codable` value that work item 6 writes to disk,
+    /// and sample buffers must never end up in `eva_history.json`. Snapshots are
+    /// session-lived; the tree outlives them.
+    @ObservationIgnored private var snapshots: [EVAHistoryNodeID: PipelineSnapshot] = [:]
+    /// Node ids in the order they were snapshotted, oldest first — the eviction
+    /// queue.
+    @ObservationIgnored private var snapshotOrder: [EVAHistoryNodeID] = []
+
+    /// How much sample data snapshots may hold before the oldest are dropped.
+    ///
+    /// Dropping a snapshot does not lose anything: the node keeps its steps, so
+    /// it can still be re-derived. It only means that click is slow rather than
+    /// instant, which is the right thing to trade away first. Some stages are
+    /// fast enough that re-deriving them is imperceptible anyway.
+    ///
+    /// Sized from physical memory rather than a flat constant, because the number
+    /// that matters is a *fraction of this machine*, not an absolute. One signal
+    /// from a 129-channel, 9-minute, 1 kHz recording is ~276 MB, and a snapshot
+    /// whose gradient/ICA/filter/artifact outputs are all distinct is over a
+    /// gigabyte — so a fixed 2 GB budget was several snapshots' worth on a small
+    /// machine and nothing on a large one. The first version used exactly that,
+    /// and it made the app swap.
+    ///
+    /// A default rather than a preference for now — the mechanism is here so the
+    /// preference is a one-line change when it is wanted.
+    var snapshotByteBudget = RecordingHistoryModel.defaultSnapshotByteBudget
+
+    /// ~14% of physical memory, clamped to a range that is neither useless nor
+    /// ruinous: below ~384 MB a single stage output would not fit, and past
+    /// 1.5 GB the snapshots start competing with the live pipeline, which needs
+    /// its own copy of everything it is currently showing. The ceiling is
+    /// deliberately *below* the 2 GB constant this replaced — scaling down on a
+    /// small machine was the point, and scaling up on a large one was not.
+    static let defaultSnapshotByteBudget: Int = {
+        let physical = Int(ProcessInfo.processInfo.physicalMemory)
+        return min(max(physical / 7, 384_000_000), 1_500_000_000)
+    }()
+
+    /// A second guard, independent of size. Bookkeeping stays bounded even when
+    /// every snapshot is small — a short recording can produce hundreds of nodes
+    /// in a session without ever approaching the byte budget.
+    var snapshotCountLimit = 24
+
+    /// Whether navigating to `id` would be instant.
+    func hasSnapshot(for id: EVAHistoryNodeID) -> Bool { snapshots[id] != nil }
+
+    var snapshotBytes: Int { snapshots.values.reduce(0) { $0 + $1.estimatedBytes } }
+    var snapshotCount: Int { snapshots.count }
+
+    /// Files the snapshot under the current node, evicting oldest-first if that
+    /// puts the total over budget.
+    ///
+    /// The current node is never evicted — it describes the state on screen, and
+    /// dropping it would make navigating *away and back* slow for no reason.
+    func storeSnapshot(_ snapshot: PipelineSnapshot) {
+        let id = history.currentID
+        if snapshots[id] == nil { snapshotOrder.append(id) }
+        snapshots[id] = snapshot
+        evictSnapshotsBeyondBudget()
+    }
+
+    func snapshot(for id: EVAHistoryNodeID) -> PipelineSnapshot? { snapshots[id] }
+
+    private func evictSnapshotsBeyondBudget() {
+        var total = snapshotBytes
+        var index = 0
+        while index < snapshotOrder.count,
+              total > snapshotByteBudget || snapshots.count > snapshotCountLimit {
+            let candidate = snapshotOrder[index]
+            guard candidate != history.currentID, let victim = snapshots[candidate] else {
+                index += 1
+                continue
+            }
+            total -= victim.estimatedBytes
+            snapshots.removeValue(forKey: candidate)
+            snapshotOrder.remove(at: index)
+        }
+    }
+
+    // MARK: - Navigation
+
+    /// True while a restore is in flight.
+    ///
+    /// Restoring changes every stage output, which trips the chain-signature
+    /// observer that folds the chain back into the tree — and that would move
+    /// the pointer straight back to the tip, undoing the navigation the user just
+    /// asked for. The convergence *should* be harmless (the restored state
+    /// derives the same script, so `adopt` lands on the same node), but relying
+    /// on that would make undo silently depend on every view model's
+    /// `parameters` being a perfect inverse of its `apply`. This is the belt.
+    private(set) var isNavigating = false
+
+    /// Moves the current pointer without touching the pipeline. The caller
+    /// restores, because only it holds the view models.
+    @discardableResult
+    func beginNavigation(to id: EVAHistoryNodeID) -> PipelineSnapshot? {
+        guard history.node(id) != nil, history.navigate(to: id) else { return nil }
+        isNavigating = true
+        return snapshots[id]
+    }
+
+    func endNavigation() {
+        isNavigating = false
+    }
+
+    var canStepBack: Bool { history.canStepBack }
+    var canStepForward: Bool { history.canStepForward }
+    var stepBackTarget: EVAHistoryNodeID? { history.current.parent }
+    var stepForwardTarget: EVAHistoryNodeID? { history.forwardChild }
+
     /// Rail rows for the current tree, root first.
     ///
     /// Value types, resolved here rather than in the view, so the rail's `View`
@@ -88,15 +209,30 @@ final class RecordingHistoryModel {
     /// measured as the one that actually pays (`ChannelLabelRow`'s one-line
     /// `Equatable` was the single biggest win in the whole refactor).
     func railNodes(rawSubtitle: String) -> [HistoryRailNode] {
-        history.currentPath.map { node in
-            HistoryRailNode(
+        let onPath = Set(history.currentPath.map(\.id))
+        var rows: [HistoryRailNode] = []
+
+        func walk(_ id: EVAHistoryNodeID, depth: Int) {
+            guard let node = history.node(id) else { return }
+            rows.append(HistoryRailNode(
                 id: node.id.hex,
                 title: node.step.map { HistoryStepSummary.title(for: $0.operation) } ?? node.displayLabel,
                 subtitle: node.step.map { HistoryStepSummary.subtitle(for: $0) } ?? rawSubtitle,
                 isCurrent: node.id == history.currentID,
-                isPinned: node.isPinned
-            )
+                isPinned: node.isPinned,
+                isInstant: snapshots[node.id] != nil,
+                depth: depth,
+                isOnCurrentPath: onPath.contains(node.id)
+            ))
+            // Indent only at a fork. A linear history stays flat — indenting
+            // every step would turn an ordinary session into a staircase.
+            let children = node.children
+            let childDepth = children.count > 1 ? depth + 1 : depth
+            for child in children { walk(child, depth: childDepth) }
         }
+
+        walk(history.rootID, depth: 0)
+        return rows
     }
 
     func setPinned(_ pinned: Bool, for id: EVAHistoryNodeID) {
@@ -114,6 +250,9 @@ final class RecordingHistoryModel {
     func reset() {
         recordingKey = ""
         history = EVAHistory(recordingKey: "")
+        snapshots.removeAll()
+        snapshotOrder.removeAll()
+        isNavigating = false
     }
 }
 
@@ -124,4 +263,14 @@ nonisolated struct HistoryRailNode: Identifiable, Hashable, Sendable {
     var subtitle: String
     var isCurrent: Bool
     var isPinned: Bool
+    /// Whether navigating here restores from a snapshot rather than needing a
+    /// re-derivation that does not exist yet. `REWIND.md` asks for the cost hint
+    /// to be shown *before* the click, not after.
+    var isInstant: Bool = true
+    /// Indentation level. Only increases at a fork, so a linear session stays
+    /// flat rather than becoming a staircase.
+    var depth: Int = 0
+    /// Whether this node is an ancestor of, or is, the current one. Off-path
+    /// nodes are the branches you left — dimmed, but reachable.
+    var isOnCurrentPath: Bool = true
 }

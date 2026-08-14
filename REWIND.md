@@ -3,7 +3,192 @@
 Design for a **history tree**: git-style navigation over a recording's processing
 history, with real undo/redo, branching, and step-by-step scrubbing.
 
-Written 2026-08-11. Nothing here is implemented yet.
+Written 2026-08-11.
+
+**Where this stands after 2026-08-13.** Undo and redo work: the History tab in
+the status popover shows the processing tree, clicking a node restores that point
+instantly, and back/forward transport is live. Items 1, 4, and 9 are built;
+5 and 8 have had a substantial first pass. What is *not* built is forking as a
+deliberate act, A/B compare, session persistence, and re-derivation for nodes
+whose snapshot has been evicted.
+
+**Read `Open threads` at the bottom first** if you are picking this up — it
+carries the unresolved items and two things that are verified only by reasoning.
+
+---
+
+## Status 2026-08-13 — prerequisites done, then the first three pieces built
+
+The morning's status: nothing in this document had been built, but the ground it
+stands on had changed. That is still the right framing for the table below, which
+records what the Priority 1 refactor and the parity work handed this design.
+**What has since been built is listed under *What has to be built*, item by
+item** — `EVAHistory`, the ICA payload, and the determinism audit's first pass.
+
+The `ROADMAP.md` Priority 1 refactor completed, and a day of headless/interactive
+parity work landed several things this design assumed it would have to create:
+
+| This design needs | Now exists |
+|---|---|
+| One place that knows "which sheet is open" (to reopen a stage from a node) | `ActiveRecordingSheet` + a single `.sheet(item:)` (ROADMAP B3) |
+| UI state reachable without a live view | Four `@Observable` models on `RecordingStore` (B4) |
+| **Item 9, progress consolidation** | **Done** — `OperationProgressCenter` owns all in-flight progress; `StatusLogSnapshot` is the aggregation boundary the Queue tab needs |
+| Async work that can be superseded safely | `LatestOnlyRunner` — `.completed` / `.superseded` / `.cancelled`, mutation-tested |
+| One invalidation cascade instead of hand-written per-stage ones | `PipelineInvalidation` — the precursor to item 3 |
+| Re-applying a step headlessly and getting the same answer | **Verified byte-identical** (see below) |
+
+**Item 9 (progress consolidation) is complete.** Item 3 (generic invalidation) is
+partly staged: the cascade is now defined once, so replacing it with a *derived*
+one means changing one file rather than hunting `clear*()` functions.
+
+### Determinism is no longer hypothetical
+
+The core premise — *the step list is the truth, the signal is a cache* — assumes
+re-applying a step reproduces the same bytes. That is now tested rather than
+assumed: an interactive export and a headless batch of the same file, on a script
+covering filter → threshold detection → segmentation → averaging → per-epoch
+bad-channel interpolation → globally-bad escalation → category grouping, produce
+a **byte-identical `signal1.bin`**, identical `categories.xml`/`epochs.xml`, and
+matching provenance.
+
+Getting there required closing four divergences and two bugs nobody was looking
+for. **Every one was found by comparing bytes, not by reading code** — twice the
+logs agreed while the data did not. Any determinism claim this design makes
+should be verified the same way.
+
+### Determinism audit (item 5) — first pass done 2026-08-13
+
+The three entries the parity work left open, plus a sweep of every operation in
+the table below against the code. Two of the three are closed; the third stands.
+
+**1. SME bootstrap — fixed.** `EpochSNR.standardizedMeasurementError` drew its
+200 resampling iterations from `SystemRandomNumberGenerator`, so paired runs
+reported values up to ~19% relative apart on categories with few trials. It now
+uses `SeededGenerator` (`EVA/Core/SeededGenerator.swift`, SplitMix64) with a
+fixed seed. A bootstrap needs *arbitrary* draws, not *unpredictable* ones. The
+seed is a constant rather than data-derived, so the estimate does not acquire a
+second hidden dependence on its input. `EpochSNRDeterminismTests` pins both
+halves: paired runs now agree exactly, **and** SME still falls as trials
+accumulate and still responds to the data — a seed that collapsed the resampling
+would also be perfectly reproducible and completely useless.
+
+**Reach for `SeededGenerator`, never `SystemRandomNumberGenerator`, in anything
+that contributes to a reported number or a written sample.** A sweep for
+`Int.random`/`shuffled()`/`arc4random` across `EVA/` found exactly one other
+use, and it was already seeded (`deterministicShuffle` in the ICA solver).
+
+**2. The `parameters`-vs-apply-path sweep — done, four more found.** The
+`categoryGroups` bug was not the only one. Every view model with a `parameters`
+block had inputs its apply path reads and its serialization omitted:
+
+| View model | Was missing | What replay silently changed |
+|---|---|---|
+| `FilterViewModel` | `lineNoiseWindowSeconds`, `lineNoiseStrength`, `filterPNS` | adaptive CleanLine ran with the *destination's* window and strength; PNS filtering switched on or off |
+| `GradientViewModel` | `skipStart`, `skipEnd`, `appliesToPNS`, `excludeHighMotion` | which TR volumes were corrected at all, and whether PNS was corrected |
+| `EpochingViewModel` | `segmentField` | segmenting on detected artifacts replayed as segmenting on event codes — a different set of epochs entirely |
+| `ICAViewModel` | 9 fit inputs: `varianceThreshold`, `downsampleRate`, `maxIterations`, `minimumIterations`, `convergenceTolerance`, and the whole activation pre-filter | a different decomposition |
+
+All now serialized, with absent keys leaving the current value alone so a
+pre-audit `eva.xml` replays exactly as it did before. Covered by
+`ParameterSerializationAuditTests`, including the XML boundary — which is where
+`categoryGroups` was found — and the legacy-inference case in gradient
+(a present `motionFDThreshold` used to *imply* `excludeHighMotion`; that
+inference is kept for old files and overridden by the explicit key).
+
+`WaveletReductionViewModel` was the one clean sweep: all 13 configuration fields
+were already carried.
+
+**3. `segmentedEpochSignal` is still not patched by globally-bad escalation**, so
+toggling post-processing afterwards re-derives from pre-escalation raw epochs.
+Unchanged, and still not a parity issue — both paths do it identically — but
+still a real edge for a tree that re-derives from cached nodes.
+
+#### What the sweep of the operation table found
+
+- ~~**`markBad`, `interpolateChannels`, and `ecgDetection` are declared
+  operations that nothing ever emits.**~~ **`markBad` and `interpolateChannels`
+  fixed 2026-08-13** — see work item 4. `ecgDetection` is still emitted by
+  nothing; unlike the other two it has no decision to lose, so it is a loose end
+  rather than a gap.
+- **GPU-computed nodes are reproducible on a machine, not across machines.**
+  `WaveletReductionConfiguration.useGPU` and
+  `GradientViewModel.computeBackend` both compute in `Float` on the GPU where the
+  CPU path uses `Double`, and both are documented as close-but-not-bitwise. Both
+  *are* serialized, so a CPU node and a GPU node are correctly different nodes.
+  The consequence for work item 2 is narrower and worth writing down: **a
+  cached signal computed on the GPU should be treated as machine-local** — safe
+  to keep for this session, not safe to trust from a package written elsewhere.
+  The same caveat applies more weakly to every Accelerate path, ICA included.
+- **The filter is deterministic, including its `.auto` paths.** Precision
+  resolution is a pure function of the cutoffs and slopes, and the
+  float→double fallback is data-driven but deterministic on the same data.
+- **The ICA fit copy took `bandPass`'s `.iir` default silently.** The activation
+  filter passed only cutoffs and the notch flag, so it was IIR no matter what
+  family the user had chosen — two filters in one session, different families,
+  neither recorded. `ICAFitFilterSettings` had no field for it, which also made
+  it an unrecorded input to the payload: change the default and old
+  `eva_ica.json` files reproduce differently. Fixed 2026-08-13 with a `Fit Type`
+  control in the ICA sheet. Note the hand-written decoder that came with it —
+  **a Swift default value is not a decoding fallback**, and the synthesized
+  `init(from:)` would have made every pre-existing sidecar fail to decode, which
+  `ICAReplayPayload.read` turns into a silent `nil`.
+- **But the filter has an unrecorded input: the bad-channel set.** With average
+  reference on, `EEGSignalFilter.averageReferenceInPlace(_:excluding:)` excludes
+  bad channels, so the set changes the output samples while appearing in neither
+  the step's parameters nor the node hash. Found 2026-08-13; the fix is the
+  per-stage recording described under *Channel decisions: the carry-through
+  rules*. This
+  is a fifth instance of the `categoryGroups` class, and the first one found by
+  asking what a *node* needs rather than what a stage serializes.
+- **Motion parameters are loaded per-recording from an external file** and are
+  deliberately not in `eva.xml`. Correct as scope, but it means a gradient node
+  using motion censoring is not fully described by its ancestry — the motion
+  file is an unrecorded input.
+
+#### Verified by paired run 2026-08-13 15:56 / 15:57
+
+The serialization changes were confirmed the only way that counts — an
+interactive export and a headless batch of the same file, compared byte for
+byte, on a script covering filter (adaptive CleanLine) → threshold detection →
+segmentation → averaging → per-epoch bad-channel interpolation → globally-bad
+escalation:
+
+- **`signal1.bin` byte-identical** (3,102,312 bytes). `categories.xml`,
+  `epochs.xml`, `info1.xml`, `coordinates.xml`, `sensorLayout.xml`, and
+  `Events_EVA.xml` identical.
+- **`eva.xml` identical apart from timestamps**, with `lineNoiseWindowSeconds`,
+  `lineNoiseStrength`, `filterPNS`, and `segmentField` present in both.
+- **`sme` is now reproducible** — every `average SNR` line matches exactly, where
+  paired runs previously differed by up to ~19% relative. The `SeededGenerator`
+  fix, confirmed on real data rather than synthetic trials.
+- **The 1-based channel conversion agrees with the audit log**: `eva.xml` step
+  `channels 8,21,25` against the log's `channels=8,21,25`. An off-by-one here
+  would have been invisible until someone acted on it.
+- `subject.xml` differs only in its Patient ID, which `MFFWriter` seeds from the
+  export's package name by design.
+
+**What that run did not exercise**, so the green result is not read as broader
+than it is:
+
+- **`markBad` was never emitted** — correctly, because all three escalated
+  channels were interpolated and interpolation removes a channel from `bad`, so
+  the bad set was empty. The two sets were disjoint as documented, but the
+  `markBad` path needs a run where a channel is marked bad and *not* repaired.
+- **Gradient's `skipStart` / `skipEnd` / `appliesToPNS` / `excludeHighMotion` are
+  unverified** — absent from both files because the script had no gradient step.
+  Needs a concurrent-MRI recording.
+
+The standing rule is unchanged: the test suite cannot prove parity. Any future
+change to the processing chain wants the same comparison, and twice now the logs
+have agreed while the data did not.
+
+### One thing this design should reconsider
+
+`ROADMAP.md` B2 concluded, with trace evidence, that extracting `WaveformAreaView`
+as a single struct would make things *worse*: 7+ generic parameters, and deep
+generic nesting is what made the body's type metadata cost 358 ms to instantiate.
+The sidebar UI in item 8 should be built as several small `View` types with value
+inputs, not one large generic container.
 
 ---
 
@@ -95,20 +280,99 @@ this is the single most important design constraint:
 | `mriGradientCorrection` | yes, given same params | none |
 | `interpolateChannels` | yes, given the channel list | channel indices |
 | `markBad` | n/a — it *is* a decision | channel indices |
-| `icaClean` | **no** — stochastic fit | `unmixingMatrix` + `channelMeans` + excluded indices |
+| `icaClean` | **yes, in EVA** — see below | `unmixingMatrix` + `mixingMatrix` + excluded indices |
 | `artifactClean` | **no** — user-drawn templates | template/event definitions |
 | `bcgDetection` | subject-specific | detection parameters + marks |
-
-For ICA the fix is neat: store the unmixing matrix (~70 KB at 128 ch) and the
-excluded set, and "re-applying ICA" becomes a matrix multiply rather than a
-refit — faster *and* exactly reproducible. Refitting would silently produce a
-different decomposition and break the guarantee that navigating back to a node
-returns you to the same data.
 
 Every payload is small. Nothing here approaches the size of a signal.
 
 **This overlaps `REPORTS.md` work item 1** — persisting ICA state is a
 prerequisite for both the report and the history tree. Do it once, serve both.
+
+### ICA payload — settled 2026-08-13, and three things above were wrong
+
+Built as `ICAReplayPayload` / `ICAReplay` (`EVA/ICA/ICAReplayPayload.swift`),
+written into the package as `eva_ica.json` beside `eva.xml`, covered by
+`ICAReplayPayloadTests` — including the load-bearing one: a payload round-tripped
+through disk and re-applied produces **exactly equal `Float` samples**, not
+samples within a tolerance.
+
+Three corrections, each checked against the code rather than reasoned from first
+principles:
+
+1. **`mixingMatrix` is required; the table said `channelMeans`.**
+   `ICAArtifactDetector.cleanedSignal` factors the artifact as
+   `mixing[:,excl] · (unmixing[excl,:] · x)` — it reads *both* matrices. Mixing is
+   mathematically `pinv(unmixing)` (with `unmixing = R·W`, `mixing = dewhitening·R⁻¹`,
+   the identity holds exactly), but recomputing a pseudo-inverse would not
+   reproduce the same floating-point bytes. Persist both: `2·k·n` doubles,
+   ≈41 KB at 128 ch / 20 components, ≈1 MB at a full-rank 256 ch.
+2. **`channelMeans` is not the payload it looks like.** `cleanedSignal`
+   recomputes the means from the *activation* data it is handed; the fitted means
+   never enter the arithmetic (only `channelMeans.count` is read, as a length
+   clamp). They are persisted anyway — they are the right thing for reports and
+   source reconstruction — but they are not why replay works.
+3. **`icaClean` is not stochastic in EVA.** The solvers are seeded: identity
+   starts for Infomax/FastICA, a fixed-constant LCG for the Picard orthonormal
+   start, and a `deterministicShuffle`. `ICAArtifactDetectorTests
+   .isDeterministicAcrossRuns` already asserts bit-identical unmixing matrices
+   across two fits of the same input, for both Picard and Picard-O.
+
+   That third correction changes the *design*, not just the prose. If the fit
+   were stochastic, a missing payload would be an unrecoverable loss and the
+   node would have to be marked cache-only. Because it is deterministic, **a
+   payload miss degrades to a refit** — slow, but correct — so `eva_ica.json`
+   can be a plain optimization with a safe fallback rather than a hard
+   dependency. That is a much cheaper promise to keep.
+
+   The payload still earns its place: re-applying is two skinny matmuls against
+   a full eigendecomposition plus an iterative solve; determinism holds for a
+   given binary on a given machine but not across Accelerate versions or
+   microarchitectures, and the fit runs in `Float`; and **the exclusion set is a
+   human decision that no amount of refitting recovers.**
+
+**One real bug fell out of this.** The interactive removal path rebuilt the
+band-passed activation copy and, on filter failure, *swallowed the error and
+carried on with a `nil` activation* — which does not fail, it reconstructs the
+sources from the unfiltered base and returns different samples. Both paths now
+go through `ICAReplay.activationSignal`, and both abort rather than substitute a
+different activation. Same shape as the four parity divergences: no error, just
+quietly different data.
+
+**Re-rooted 2026-08-13.** The apply orchestration was on `WaveformView`, so
+`ProcessingCore` could not perform `icaClean` at all. The pipeline half now lives
+in `ICAComponentRemoval` (`EVA/ICA/ICAComponentRemoval.swift`) — reconstruct via
+`ICAReplay.apply`, then commit and cascade — and both paths run it.
+`ProcessingCore` gained an `.icaClean` case, and `HeadlessBatchProcessor` reads
+**the input package's own** `eva_ica.json` to feed it.
+
+**The safety property is structural, not a check.** The payload comes from the
+file being processed, never from the file the script came from, so a script
+copied across subjects arrives without a sidecar and nothing happens. Carrying
+one subject's unmixing matrix onto another's electrodes would produce plausible,
+wrong data — the worst failure mode in this design.
+
+Deliberately *not* folded into the shared core: re-applying the filter afterwards.
+The interactive path does it because the user already had a filter on the old
+base; in a script that is the next step's job, since `currentProcessingScript()`
+emits `filter` after `icaClean`. Folding it in would filter twice headlessly.
+Viewport, sheet, debug report, and the replay gate stay with the caller that has
+a view — the same split PSA unification settled on.
+
+The batch setup gate moved with it: `icaClean` counted as a decision that forces
+a window, which is right only while the decision is *unmade*. It is now checked
+per **file** — when every selected package carries its own sidecar, the removal
+is already recorded and re-applying it asks nobody anything. Per file rather than
+per script, because "this script contains ICA" says nothing about whether a given
+file can re-apply it.
+
+**One thing that looked like a bug and is not**, recorded so it is not "fixed"
+later: with no payload, `ProcessingCore` *skips* `icaClean` rather than stopping.
+That reads like a silent omission and is not one — a non-replayable step is
+classified `.skip`, and the batch config pane lists it as "Recorded for
+provenance only", unchecked. The user has already been told it will not run.
+Making the absent-payload case stop would divert batches that complete today into
+windowed replay for no reason.
 
 ---
 
@@ -365,21 +629,169 @@ pointed at a node's ancestry instead of an imported script.
 
 ## What has to be built
 
-1. **`EVAHistory`** — the tree: nodes, current pointer, insert/navigate/branch/
-   delete-branch, node ID hashing.
+1. ~~**`EVAHistory`**~~ — **done 2026-08-13** (`EVA/Pipeline/EVAHistory.swift`,
+   `EVAHistoryTests`). A pure value type: no SwiftUI, no view models, no signals,
+   no I/O. Nodes, current pointer, `apply`/`navigate`/`stepBack`/`stepForward`/
+   `deleteBranch`, per-node annotations (label, pin, measured `computeCost`), and
+   `currentScript` — the tree's answer to "the chain order is knowledge held in
+   three places".
+
+   Node ID is `SHA-256(parentID, operation, sorted parameters, payload digest)`,
+   over **length-prefixed** fields rather than separator-joined ones: a parameter
+   value containing the separator would otherwise let two different parameter
+   sets hash identically, which in a content-addressed tree means serving one
+   node's cached signal for another's. Same hazard the `categoryRegex`
+   serialization avoided with one key per field. Excluded from the hash:
+   `EVAProcessingStep.id` and `appliedAt` (a UUID and a wall clock would make
+   every node unique), `note`/`rejections`/`replayable` (prose, a result, a
+   classification), and the annotations (renaming a node must not move it).
+
+   **One design correction, and it changes behavior rather than prose.** This
+   document says a user flipping a toggle six times should not produce six nodes,
+   and that the ancestry hash makes that automatic. Half true. Appending
+   "correction off" then "correction on" yields the ancestry `[…, off, on]`,
+   which is a genuinely different node from `[…]` — same samples, different
+   identity, no deduplication. Only re-applying the *same* step at the *same*
+   parent deduplicates. So **an undo-shaped action must be expressed as
+   `stepBack()`, not as appending an inverse step**; that is the rule that keeps
+   the tree finite while someone explores, and both halves are pinned in the
+   tests.
+
+   Also settled while building it: `eva_history.json` should be written with
+   `EVAHistory.encoder()`, which uses `.deferredToDate`. `.iso8601` truncates at
+   whole seconds and `.secondsSince1970` re-bases by 978307200 and loses low
+   mantissa bits, so neither decodes back equal to what wrote it.
+
+   **Recording landed 2026-08-13 — as `adopt`, not as per-apply-site calls.**
+   Every pipeline mutation now has its half off `WaveformView` — the five stage toggles (`PipelineStageToggles`),
+   ICA removal (`ICAComponentRemoval`), averaging (`PSAAveraging`), and
+   artifact cleaning (`ArtifactCleaningCore`), joining the gradient/filter/
+   wavelet/segment applies that were already VM-level. That is what makes the
+   tree *recordable*. In the event the recording is driven from the canonical
+   chain rather than from those call sites — see the `adopt` note in item 8 for
+   why application order is the wrong thing to write down — but the extraction
+   still pays: those commits are where measured `computeCost` has to come from,
+   and cost is what work item 2's eviction policy runs on.
+
+   **Still owed before this is a full record:** per-node `computeCost`, and
+   navigation. Clicking a node does nothing yet, and navigation is what forces
+   the cache design.
+
+   Not built here, deliberately: branching has no separate primitive because it
+   does not need one — navigate to a node, apply a different step, and the fork
+   is the ordinary result of content addressing.
 2. **Signal cache** — two tiers (decimated preview, full-rate), pinning,
    cost-per-byte eviction, scratch-disk spill, measured `computeCost` per node,
    neighbor speculation, and ping-pong detection.
+
+   **Partly superseded 2026-08-13, and the design had a false premise.** This
+   document's model — *the step list is the truth, the signal is a cache* — reads
+   as "navigating means re-applying the steps", and everything in this item
+   follows from that. It is the right model for **reproducing a package
+   elsewhere**, which is what the payload and batch work serves. It is the wrong
+   model for **undo/redo inside a session**, where re-running a gradient
+   correction to answer a click is absurd when the answer is still in memory.
+
+   So navigation now *restores* — `PipelineSnapshot`
+   (`EVA/Pipeline/PipelineSnapshot.swift`) captures every stage output plus the
+   channel decisions as the chain moves, and clicking a node puts them back.
+   Instant, and it needs no payloads at all.
+
+   Two things this cost less than the document assumed:
+   - **Not 614 MB per node.** `MFFSignalData.data` is `[[Float]]` — copy-on-write
+     — so a snapshot holds a *reference* to the buffer the view model already
+     holds. Nodes sharing an unchanged filter output share one allocation. Real
+     memory is spent only on signals nothing else references.
+   - **No eviction policy needed to start.** A byte budget with oldest-first
+     eviction (never the current node) is enough; the cost-per-byte machinery can
+     wait for a measurement rather than a guess.
+
+   **What is still genuinely wanted from this item:** re-derivation for nodes
+   whose snapshot has been evicted — today those rows are disabled rather than
+   offered and then refused — the decimated preview tier, measured `computeCost`,
+   and a preference for the memory budget so the user chooses when EVA switches
+   from restoring to re-deriving.
 3. **Generic invalidation** — replace the hand-written cascades. Once the tree
    knows the chain order, "everything after node N is invalid" is derived, and
    `clearGradientCorrection()` and its siblings collapse into
    `history.navigate(to: node.parent)`.
-4. **Payload persistence** — ICA unmixing + excluded set, artifact templates, bad
-   channel lists. Shared with `REPORTS.md` item 1.
-5. **Determinism audit** — verify each operation in the table above actually
-   reproduces bit-for-bit given identical inputs. Anything that doesn't must
-   either become payload-backed or be marked cache-only (never evicted, because
-   it cannot be regenerated).
+   *Partly staged 2026-08-13:* the cascade is now defined **once**, in
+   `PipelineInvalidation` (`epochsAndDerived`, `interpolations`,
+   `appliedArtifactCleaning`, `downstreamOfBaseSignalChange`,
+   `downstreamOfFilterChange`, `downstreamOfWaveletChange`), used by both the
+   interactive and headless paths. Deriving it from the tree now means replacing
+   one file rather than hunting per-stage `clear*()` functions. Note the
+   deliberate asymmetry encoded there — filter clears applied artifact cleaning,
+   wavelet does not, because cleaning sits between them in the chain.
+4. **Payload persistence** — **ICA and channel decisions done 2026-08-13.**
+   - `ICAReplayPayload` / `eva_ica.json` — see the ICA payload section above.
+   - `ChannelDecisionSteps` (`EVA/Pipeline/ChannelDecisionSteps.swift`) closes
+     the hole the determinism audit found: `markBad` and `interpolateChannels`
+     were declared operations that **nothing ever emitted**, so those decisions
+     reached disk only as prose in `log_eva_*.txt` and the rail could not show
+     the `mark bad · 4 ch` node this document's own figure has in it. Both are
+     now written into `eva.xml`, 1-based to match the log and the UI.
+
+     **Emitted `replayable: false`, deliberately.** Replaying "interpolate
+     channel 8" onto another subject would repair a channel that may be perfectly
+     good there. Making them replayable is a product decision, not a
+     serialization one, and it should be taken on purpose.
+
+     **Two things to settle before making them replayable.** First, position:
+     they are inserted immediately before `segment`, which is right for
+     interpolation (that is exactly where `currentMFFExportSnapshot()` applies
+     it) but **not obviously right for `markBad`** — wavelet reduction reads
+     `channels.bad` as its excluded set, and that runs upstream of this position.
+     A replay engine trusting the position would exclude nothing from a wavelet
+     pass it should have. Second, the interpolation *recipe* (neighbour indices
+     and spline weights) is still not persisted; it does not need to be, because
+     spherical-spline interpolation is deterministic given the channel list, the
+     bad set, and the electrode positions — but that reasoning should be
+     re-checked rather than inherited.
+
+     One divergence closed on the way: `HeadlessBatchProcessor` wrote back the
+     script it was *handed*, so a batch run whose PSA escalation marked and
+     interpolated channels described a run that did not happen. Both paths now go
+     through the same insertion.
+
+   - `ArtifactReplayPayload` (`EVA/Artifacts/ArtifactReplayPayload.swift`) —
+     `eva_artifacts.json`, read by a `ProcessingCore.artifactClean` case and by
+     the per-file batch gate, on exactly the terms ICA uses.
+
+     **It stores definitions, not waveforms**: event times, channels, window,
+     method and its parameters. The averaged template is re-derived from the
+     signal at apply time. That is not a size optimisation — it is already how
+     five of the six cleaning methods work. OBS, SSP/PCA, and the local-template
+     family never read a stored average; only `applyTemplateRegression` did, and
+     it was the odd one out.
+
+     **Re-deriving is also more correct, and this is the one part that changes
+     results.** `PipelineInvalidation.appliedArtifactCleaning` clears the applied
+     state on a signal change but keeps the drawn `average`, so a template drawn
+     before a filter was applied would be subtracted from post-filter data —
+     describing samples that are no longer there. Re-derivation ties the template
+     to the signal it is subtracted from, which is what regression means. **Wants
+     a paired run.**
+
+     Two things that had to be got right: re-derivation must use the *detector's*
+     averager, not the preview's (they centre on different event fields and one
+     detrends — `ArtifactTemplateDetector.templateAverage` is now the exposed
+     canonical one); and `DefinedArtifact` is `Codable` by **synthesis** rather
+     than an explicit `CodingKeys` list, so a cleaning parameter added later is
+     persisted automatically. An explicit key list is precisely the shape that
+     lost `categoryGroups`, `segmentField`, and nine ICA fit inputs.
+
+   Work item 4 is now closed for every payload the pipeline produces.
+
+   **The `markBad` / interpolation carry-through rules** these decisions
+   imply are designed but not built — see *Channel decisions: the carry-through
+   rules* below, after the work-item list.
+
+5. **Determinism audit** — **first pass done 2026-08-13**; see the audit section
+   above for what it found (the SME seeding fix, four more
+   serialized-vs-read gaps, and the GPU/machine-locality caveat for the cache).
+   Not finished: nothing here proves interactive/headless parity, which needs a
+   paired run and a byte comparison rather than a green test suite.
 6. **Session persistence** — write the tree into the package as `eva_history.json`
    so reopening a file restores its history. `eva.xml` remains the *current*
    linear chain, i.e. the path from root to the current node; the history file is
@@ -390,10 +802,327 @@ pointed at a node's ancestry instead of an imported script.
 8. **UI** — the left sidebar: Queue / History tab view, tree rail, current-node
    highlight, stale-descendant rendering, transport controls, per-node cost hint,
    pin toggle, branch labels, and the right-click menu.
-9. **Progress consolidation** — migrate per-VM `operationProgress` into the queue
-   so there is one progress surface instead of one per stage.
+
+   **Navigation landed 2026-08-13.** Rail rows are clickable and the History tab
+   has working back/forward transport; clicking restores that node's snapshot.
+   The cost hint is there in its simplest form — a node without a snapshot is
+   disabled with a tooltip saying why, which is `REWIND.md`'s "surface that
+   before the click, not after" at the coarsest useful resolution.
+
+   **The next real gap is branches.** The rail renders `history.currentPath`, so
+   siblings are invisible: fork a filter and the branch you left is in the tree,
+   reachable by nothing. Drawing the tree instead of the path — the indented
+   rendering in `REWIND_FIG_1.png` — is what makes forking usable, and it is the
+   prerequisite for A/B compare (item 10) since you cannot select two nodes you
+   cannot see.
+
+   **Read-only first pass done 2026-08-13**, and it lives in **the status
+   popover as a Queue / History tab view** — the layout in
+   `docs/figures/REWIND_FIG_2.png` — not in a sidebar.
+   `ProcessingStatusPopoverView` (`EVA/Waveform/ProcessingStatusPopover.swift`)
+   hosts it; `HistoryRailNodeList` / `HistoryRailRow`
+   (`EVA/Waveform/HistoryRailView.swift`) draw the trunk, dots, connectors,
+   per-node parameter subtitles (`HistoryStepSummary`), current-node highlight,
+   and pin indicator. Clicking a node does nothing yet, and the transport
+   controls from the figure are deliberately **absent rather than
+   present-and-disabled**: a dead button is a worse explanation than none.
+
+   **It began as a 260 pt sidebar left of the waveform and that was wrong.** It
+   worked, but it spent permanent horizontal room on something consulted
+   occasionally, and the waveform is what people are actually looking at. The
+   status area already owns "what is this app doing", already opens a popover,
+   and is already where progress appears — so the tree costs no waveform width
+   and sits beside the queue, which is what this document says they are: two
+   renderings of the same objects, one positional and one temporal.
+
+   **This also fixed an older problem.** The status area used to switch between a
+   live-progress popover and a status-history popover depending on whether
+   anything was running, so whichever one you wanted, you got the other. Both are
+   temporal, so both are now the Queue tab: running operations on top, the
+   message log beneath. Nothing was lost — the log's Clear button and full
+   scrollback came across — and the popover opens on Queue when something is
+   running, History when nothing is.
+
+   **The tree accumulates as of 2026-08-13** — `EVAHistory.adopt` folds the
+   canonical chain in on every change, and content addressing resolves the
+   unchanged prefix to the nodes that already exist while forking at the stage
+   that differs. Widen a filter after narrowing it and both nodes exist, with the
+   branch you came from still carrying its pin and its label. The earlier version
+   rebuilt the tree from scratch each time, which made branches impossible by
+   construction.
+
+   **Driven from the chain, not from each apply site — and that is the correct
+   choice, not a shortcut.** Applying a stage upstream of one already applied,
+   gradient after filter, invalidates the downstream stage; so the order things
+   *happened* in is not the order that describes the resulting signal. A node
+   appended in application order would claim filter → gradient produced this data
+   when gradient → filter did. The canonical script is the one that reproduces
+   the bytes, and reproducing the bytes is the whole promise of a node ID.
+
+   ICA's payload digest is threaded in alongside, because two removals that
+   excluded different components carry *identical* portable parameters — without
+   it they would collapse to one node and navigating there would serve the wrong
+   cached signal.
+
+   The rebuild hangs off an `.onChange` of a signature made of stage-output
+   `dataRevision`s, not off the body. `dataRevision` is what makes that correct
+   rather than merely cheap: re-running a stage always produces new sample data,
+   so a re-apply with different parameters is caught even though the signature
+   never reads a parameter — and a parameter edited *without* applying correctly
+   changes nothing.
+
+   **Sequencing note for whoever picks this up.** Doing the rail before the
+   cache, before navigation, and before recorded nodes was deliberate: this
+   document flags granularity as "the one most likely to be got wrong", and a
+   real rail beside a real recording answers it by looking rather than by
+   reasoning. The questions it is there to settle — does "turn artifact
+   correction off" deserve a node, does a re-applied filter, is one node per
+   stage the right density — are cheaper to answer now than after the cache is
+   built around an assumption.
+
+   Two things worth knowing before extending it:
+   - **`ImageRenderer` renders nothing inside a `ScrollView`.** A headless render
+     of the whole popover shows its tab bar and footer with empty space between,
+     which looks exactly like every row collapsing. That is why both tabs'
+     contents are separate views (`HistoryRailNodeList`, `QueueTabContent`) and
+     why `HistoryRailRenderTests` checks chrome and content separately. Worth
+     remembering, because it cost a wrong diagnosis here.
+   - **The first version of that render test passed on a blank rail.** It counted
+     distinct colours across the whole image, and the header, footer, and
+     dividers alone cleared the threshold. It now measures ink between the
+     chrome, and separately in each half, so rows that collapse onto one another
+     fail too.
+9. ~~**Progress consolidation**~~ — **done 2026-08-13.**
+   `OperationProgressCenter` on `RecordingStore` owns all in-flight
+   `OperationProgress`, keyed by source; `WaveformView` and the status area read
+   that one list instead of reaching into view models by name. A new stage joins
+   by *reporting*, not by editing the status view.
 10. **A/B compare** — overlay, difference trace, and side-by-side metrics for two
     selected nodes.
+
+---
+
+## Channel decisions: the carry-through rules
+
+Designed 2026-08-13, not yet built. Bad-channel marks and interpolation recipes
+behave unlike every other step — they are *ambient decisions* whose effects are
+re-derived, not transforms positioned in a chain. Pretending otherwise is what
+made their placement in `ChannelDecisionSteps` "not obviously right".
+
+**They are an input to other stages, not a transform of their own.**
+`FilterViewModel.apply` passes `store.channels.bad` to
+`EEGSignalFilter.averageReferenceInPlace(_:excluding:)`; wavelet reduction takes
+it as its excluded set; PSA reads it for per-epoch interpolation and escalation.
+So with average reference on, **the bad set changes the filter's output samples**
+— and it appears in neither the filter step's `eva.xml` parameters nor the filter
+node's hash. Two filters with different bad sets produce different data and hash
+to the same node. Same class as the ICA payload gap, and it means a cached signal
+can be served for a state that did not produce it.
+
+**The rule:** emit the absolute bad set immediately before each stage that reads
+it, recording the set as it was *when that stage ran*.
+
+Everything else falls out of that rather than needing its own mechanism:
+
+- **Marks coalesce when nothing consumed them in between.** Mark 8, then mark 16
+  with no stage between → one node, `markBad{8,16}`.
+- **They stay separate when a stage ran between.** Mark 8 → filter → mark 16
+  gives `markBad{8}` → `filter` → `markBad{8,16}`, because the filter genuinely
+  ran with only `{8}` and its node has to say so.
+- **Absolute, never incremental.** An incremental encoding reads better as a
+  chain but makes *unmarking* inexpressible: an inverse step does not deduplicate
+  (see the toggle rule above), and `stepBack()` only works if the mark was the
+  last thing you did. Absolute keeps unmark trivial — a node with a smaller set.
+- **The cost is sibling fan-out.** Under `adopt`, `markBad{8}` and `markBad{8,16}`
+  differ in parameters and so fork at the same parent, leaving the earlier set as
+  an abandoned branch. That is a *display* problem — collapse consecutive sibling
+  `markBad` nodes in the rail — not a correctness one, and it is the right trade
+  against making a real operation impossible to express.
+
+**Prerequisite:** `currentProcessingScript()` builds from current state and
+cannot reconstruct what was bad when the filter ran. Each stage has to record the
+bad set it ran with (`filter.appliedBadChannels` and siblings). That is also the
+fix for the identity gap, since the recorded set is what belongs in the step's
+parameters and therefore in the node hash.
+
+**Scope when this is built** — one pass, because the pieces share a prerequisite
+and a verification run:
+
+1. Per-stage bad-set recording, into the step parameters and the node hash.
+2. `markBad` emitted before each stage that reads it, absolute, with the
+   coalescing behaviour above falling out.
+3. Interpolation recipes surviving base-signal changes (`isEmpty` fix included),
+   and re-deriving when the bad-or-interpolated set changes.
+4. The status-line notice, its error tier for a failed re-solve, and the
+   lost-interpolation state behind the warning triangle on the channel row.
+
+All four change what the exported samples are, so they want **one paired run
+together** rather than four separately — a single byte comparison covers the lot,
+and a divergence is easier to attribute when the change is one coherent idea
+rather than four unrelated ones.
+
+### `interpolateChannels` carries too — and the code already half-agrees
+
+An earlier draft of this section said interpolation "is genuinely positioned and
+recomputed, not ambient". **That was wrong**, and wrong in a way that mattered,
+because it was used to exclude interpolation from the carry-through design.
+`PipelineInvalidation.interpolations` does not *recompute* — it deletes.
+
+`ChannelInterpolationSnapshot.applying(to:)` already re-derives each target from
+its donor recipe against whatever signal it is handed, falling back to cached
+samples only for state written before recipes were retained. Its own
+documentation states the intended rule:
+
+> The donor weights are persistent; the replacement samples are re-derived so
+> filtering, OBS, wavelets, and other upstream transforms cannot reveal the
+> original target channel.
+
+But `interpolations(store:)` calls `removeAllInterpolations()`, which wipes
+`replacements` **and** `sources`. So the recipe that is designed to persist is
+destroyed on every gradient, ICA, or wavelet change, and the user re-does the
+work by hand. The mechanism and the cascade disagree.
+
+**So interpolation is ambient in the same sense `markBad` is**, which is why
+`ChannelDecisionSteps` groups them: the *decision* ("channel 8 is unusable,
+reconstruct it") persists, and the samples are derived.
+
+Three things to get right when this is built:
+
+- **`isEmpty` blocks the obvious fix.** `ChannelInterpolationSnapshot.isEmpty`
+  keys off `cachedReplacements`, and `applying(to:)` early-returns on it. Keeping
+  the recipes while clearing the cached samples would silently apply nothing. It
+  has to become `cachedReplacements.isEmpty && recipes.isEmpty`.
+- **Re-derivation is triggered by the bad set *and* the interpolated set.** The
+  donor pool is `not the target, not bad, not already interpolated, has a
+  position`. So interpolating channel 12 invalidates any recipe that used 12,
+  exactly as marking it bad would. Both sets are inputs to every recipe's
+  validity.
+- **Re-deriving is a full re-solve, not a weight deletion.** Spherical-spline
+  weights come from a solved system (`SphericalSpline.interpolationWeights`);
+  dropping a donor's weight and renormalising is not the same answer. And the
+  solve can fail when too few good channels remain — that path already exists and
+  reports an error. On a re-derivation, a failed solve must **drop the
+  interpolation and return the channel to bad** rather than leave a stale
+  reconstruction standing.
+
+Placement stays where it is: immediately before `segment`, matching where
+`currentMFFExportSnapshot()` applies interpolation.
+
+### Telling the user, without a modal
+
+Marking a channel bad can silently re-interpolate other channels, so it has to
+say so — but it is a side effect of a routine action, not something to block on.
+
+Reuse `RecordingStatusModel.channelStatusMessage`, the line that already carries
+"Interpolated Ch 8 from 125 neighbors." It is non-blocking, it is the established
+channel for exactly this class of message, it is recorded into `statusHistory`
+and therefore into the status popover's Queue tab, so it is recoverable if
+missed, and it costs no new UI:
+
+> Marked Ch 12 bad · re-interpolated Ch 8 and Ch 21 without it.
+
+The failure case takes the existing error tier, because a channel silently losing
+its repair is worse than the interruption:
+
+> Marked Ch 12 bad · Ch 8 no longer has enough good neighbours; its interpolation
+> was removed.
+
+The History rail is the durable half of the same message. Re-interpolation
+changes the chain, so it produces a node — the transient line says it happened,
+and the rail says exactly when, weeks later. Worth designing the two together
+rather than treating the notification as the only surface.
+
+#### And a warning triangle on the channel itself
+
+A status line is transient and the rail needs looking for. A channel whose repair
+broke should say so where the user is already looking: in its own row.
+
+`ChannelLabelRow` currently picks one icon from a three-way chain —
+`eye.slash` when hidden, **`wand.and.stars` when interpolated**, `xmark.circle`
+when bad. Replace the wand with a yellow `exclamationmark.triangle.fill` when the
+interpolation was lost.
+
+**It needs a third state, not a variation on the existing two.** When a re-solve
+fails the channel is dropped back to plain bad, so `isInterpolated` goes false and
+`isBad` goes true — the row falls through to `xmark.circle` and the fact that it
+*used to be repaired* is gone. So `ChannelModel` needs a set alongside `bad` and
+`interpolated`: channels whose interpolation was lost. It:
+
+- **outranks `isBad` in the icon chain**, because "your repair broke" is the more
+  informative fact than "this channel is bad" — the user already knew the second
+  one;
+- **stays below `isHidden`**, since hiding a channel is an explicit choice not to
+  look at it;
+- **clears when the user acts** — a successful re-interpolation, or unmarking the
+  donor that caused it. It is a transition, not a standing property.
+
+The triangle carries the explanation the status line only had time to flash:
+
+> `.help("Interpolation lost — Ch 12 was marked bad and Ch 8 no longer has enough good neighbours.")`
+
+Two things to get right:
+
+- **`ChannelLabelRow.==` is hand-written.** ROADMAP B2 measured that one-line
+  `Equatable` as the single biggest win in the whole Priority 1 refactor, and it
+  compares a fixed list of inputs. A new input that is not added to it means the
+  triangle simply never appears — the row is skipped as unchanged. This is the
+  exact shape of silent failure this codebase keeps finding, and the compiler will
+  not catch it.
+- **A *degraded* re-solve gets no triangle.** If a donor goes bad and the re-solve
+  succeeds with fewer neighbours, that is a normal outcome and the status line
+  already reports it. Reserving the triangle for actual loss is what keeps it
+  meaning something.
+
+The loss should also reach `log_eva_*.txt` through `ProcessingAuditLog` — "Ch 8's
+interpolation was dropped when Ch 12 was marked bad" is provenance, not just UI.
+It is the kind of thing someone asks about months later, and by then the status
+line is long gone.
+
+The general rule worth stating once, since it has now come up in three places:
+**stages record absolute state, and navigation is how you go backwards.**
+
+## Open: replay and batch should let you *make* the per-file decisions
+
+Raised 2026-08-13. Steps classified `.skip` — `markBad`, `interpolateChannels`,
+`bcgDetection`, and anything non-replayable without a payload — are shown in the
+replay/batch config pane greyed out, with their toggle `.disabled`, and then
+simply do not happen. The user is told "Recorded for provenance only", which is
+accurate and unhelpful: the step *should* happen on this file, just with
+**this file's** answer rather than the source file's.
+
+The proposal is to let those steps open their own interface mid-replay, in chain
+order, so the operator makes the choice for the new recording and replay
+continues. "The source marked 3 channels bad — here is the channel panel, mark
+yours." "The source removed 5 ICA components — here is the sheet."
+
+**Most of the machinery exists.** `ReplayController` already gates `.decision`
+steps exactly this way: it pauses, the relevant sheet opens, the user resolves,
+and `replay.resume(.proceed)` continues the walk. That is how ICA behaves in
+windowed replay today. What is missing is the classification and one gate per
+operation, not an engine.
+
+Design questions worth settling before building it:
+
+- **Which `.skip` steps become interactive, and which stay inert?**
+  `markBad` and `interpolateChannels` obviously qualify. `bcgDetection` probably.
+  A `split` step almost certainly does not.
+- **Does a payload change the answer?** With `eva_ica.json` present, ICA needs no
+  human at all — the per-file batch gate already skips the window for it. So the
+  classification is not a property of the *operation*; it is a property of
+  (operation, what this file carries). That is a third state beyond
+  auto/decision: *resolvable-from-payload*.
+- **What does Full Auto mean then?** Today "Full Auto" and "no decision steps
+  included" are the same thing, which is why the headless gate can be a static
+  check. If skip steps become interactive, Full Auto needs to mean "use each
+  file's own payloads, and skip what cannot be resolved" — and files that need a
+  human get routed to windowed replay individually rather than the whole batch
+  falling back.
+
+This is arguably a document of its own (a `REPLAY.md` covering the replay/batch
+engine — `ReplayController`, `ReplayConfigSheet`, `BatchController`,
+`ProcessingCore`, `HeadlessBatchProcessor` — which has no design doc despite
+being most of the batch suite). Recorded here for now because the payload work
+above is what makes the third state necessary.
 
 ---
 
@@ -413,6 +1142,161 @@ which is a genuinely novel thing to offer ("what did ICA actually buy me?").
 trees converging on one node. Probably the combined output starts a fresh tree
 that records its inputs' node IDs as provenance, rather than trying to merge
 trees. Deferred.
+
+---
+
+## Open threads — 2026-08-13
+
+Carried out of a long session. Roughly in the order they would bite.
+
+### Fixed: navigation walked off the node you clicked
+
+Reported as "raw → filter → artifact; go back to filter and artifact stays; go to
+raw and it goes to a *second* artifact." One cause, and it is a new instance of
+the family this document keeps finding.
+
+`detectsEyeBlinkArtifacts` is a plain `Bool` on the view that decides whether
+`thresholdArtifactDetection` is in the script **at all**. Restoring never reset
+it, so the chain-signature observer immediately re-derived a script that still
+contained the step: at `filter` that walked the pointer forward onto the artifact
+node again, and at the root the same step had a different ancestry and therefore
+a different content address — the second artifact.
+
+The general rule, now in `ReplaySettingsRestore`:
+
+> A setting whose value lives *inside* a step is restored by replaying that
+> step's parameters, and a stale one is cosmetic. A setting that decides whether
+> the step **exists** cannot be restored that way, because an absent step cannot
+> say it is absent. Those must be reset to absent and then re-asserted by the
+> path — total over the operation set, not driven by the steps present.
+
+`definedArtifacts` moved into `PipelineSnapshot` for the second-order version of
+the same thing: it is a *decision* like `badChannels` rather than a sheet
+parameter, `artifactClean`'s address is computed from it, and the step's
+parameters are a lossy summary that cannot rebuild it.
+
+Still open here: `blinkThresholdConfig` / `movementThresholdConfig` change the
+step's parameters but are absent from `ProcessingChainSignature`, so editing a
+threshold records nothing and a later unrelated re-record forks. Adding them to
+the signature would record a node per slider tick, so the fix is not simply to
+add them.
+
+### Re-referencing is its own step now
+
+`averageReference` was a `Bool` serialized as a parameter of whichever stage
+hosted it — `filter` and `segment`. It is now an `EVAProcessingStep.Operation`
+`.reference` (an operation that already existed in the enum and was never
+emitted), with `scheme`, `domain`, and the **excluded-channel list**. Three
+reasons, in order of how much they matter:
+
+1. Referenced-versus-not is the A/B people actually run, and as a filter
+   parameter it forks the tree at `filter` and recomputes a band-pass that did
+   not change.
+2. It reads the bad-channel set, and nothing recorded that — the "channel
+   decisions are ambient" problem in its worst form, because the effect is on
+   every channel at once. Now the excluded set is a hashed parameter.
+3. Two toggles for one concept meant ticking both referenced twice, silently.
+
+Continuous and epoch are one operation with two domains rather than two
+operations, but they are **not** interchangeable: the epoch one runs inside the
+PSA fold, after trial rejection and before baseline correction, so it sees a
+different channel mean. That is why `.continuous` is emitted after `filter` and
+`.epoch` before `segment`. The arithmetic stayed exactly where it was in both
+cases; replay derives the *flags* from the step list rather than re-implementing
+the pass, so there is no interactive/headless split to diverge. `ReferenceScheme`
+is an enum so linked-mastoid and single-channel references are a case, not
+another `Bool`.
+
+**eva.xml changes for every file.** `signal1.bin` must not — that is the paired
+run this wants.
+
+### Fixed: stale segment health reported a clean recording
+
+"Going from segments to filtered re-runs the segment quality check and marks the
+whole recording green."
+
+Navigating empties `epochSegments`, so `SegmentHealthAnalyzer.analysisSegments`
+falls through to fixed continuous windows with different IDs. Green was
+structural, not luck: nearly every metric is scored *relative to this
+recording's own distribution*, which makes the median window good by
+construction, and the one decisive absolute metric is artifact overlap — which
+`PipelineSnapshotting.restore` had just emptied along with `artifactVM.events`.
+The panel therefore made its strongest claim at the moment it knew least.
+
+Restore now takes the panel down rather than clearing it, because
+`refreshSegmentHealthIfNeeded` re-runs on any signature change while `shows` is
+true. Accept/reject labels survive — those are the operator's decisions, not
+derived state, and they reappear when their segments do.
+
+Worth deciding separately, and **not** changed: the `artifact` metric scores
+"fully good" when no detection has ever run, which conflates *no artifacts
+found* with *nobody looked*. Skipping it instead of passing it would be more
+honest, but it changes scoring semantics for already-exported training data
+(`SegmentHealthTrainingExport`), so it is a call to make deliberately.
+
+### Unverified, and wanting a paired run
+
+Five changes to the sample path have **not** been confirmed byte-for-byte. Use
+`Tools/compare-paired-run.sh`, and remember it proves parity only when both sides
+start from the same raw input.
+
+1. **Artifact regression re-derives its template** instead of using the frozen
+   average. This is the only change that deliberately alters existing results —
+   see work item 4 — and the size of the effect is unmeasured.
+2. **The ICA replay path** (`ICAComponentRemoval`, `ProcessingCore.icaClean`).
+3. **`markBad` is now applied** by `ProcessingCore` rather than skipped, and the
+   headless batch honours step inclusion.
+4. **Gradient's `skipStart`/`skipEnd`/`appliesToPNS`/`excludeHighMotion`**, which
+   need a concurrent-MRI recording to exercise at all.
+5. **The `reference` step.** eva.xml is expected to differ; `signal1.bin` is
+   expected not to. Run it with average reference on in both the filter and PSA,
+   and with at least one channel marked bad so the exclusion list is non-empty.
+
+### One thing that does not add up
+
+A paired run produced an output whose `eva.xml` contains **no `icaClean` step**
+while `eva_ica.json` was written beside it. Writing that sidecar requires
+`core.ica.cleanedSignal != nil`, which requires the step to have run — and a step
+that ran would be in the outgoing script. Both cannot be true as the code reads.
+Three explanations were proposed and all three were wrong (file copy-through:
+`MFFWriter` copies only `coordinates.xml` and `info.xml`; stale output: the
+writer deletes an existing package first; wrong input file: confirmed by the
+user). **Do not guess a fourth — instrument it.**
+
+### Verified by reasoning only
+
+- **The double-window fix.** `WindowGroup` → `Window` makes a second window
+  structurally impossible, and that argument is stronger than one observation of
+  an intermittent bug — but a Finder double-click was never actually tested, cold
+  or warm. The failure mode to watch for is the opposite one: files not opening.
+- **The snapshot memory budget.** Sized from physical memory now, but the
+  original slowness report is *unexplained*. The retention theory was disproved
+  (137 GB machine, 2 GB budget — not swapping). The one real cost found and fixed
+  was `processingChainSignature` building a `String` on every body pass. Whether
+  that was the cause is unknown; the discriminating question is whether the
+  slowness is per-frame, per-operation, or per-panel.
+
+### Known-stale UI
+
+- **`ReplayInteraction` cannot express the third state.** A step is `auto`,
+  `review`, `decision`, or `skip` — with no way to say *resolvable from this
+  file's own record*. The batch pane works around it with a local
+  `resolvesFromPayload` check. That belongs in the type, and doing it properly is
+  the same work as *Open: replay and batch should let you make the per-file
+  decisions* below.
+
+### Next, in order
+
+1. **Forking as a deliberate act.** The tree already forks and the rail now draws
+   branches, so what is missing is intent: a "branch from here" affordance, and
+   deciding what happens to the branch you left.
+2. **A/B compare** (item 10). Needs two selected nodes, which needs the branch
+   rendering that just landed.
+3. **Re-derivation** for evicted snapshots, plus the memory preference. Nodes
+   without a snapshot are currently disabled rather than slow.
+4. **The `markBad` carry-through work**, designed but unbuilt — see *Channel
+   decisions: the carry-through rules*. It is the fix for the filter's unrecorded
+   bad-channel input, which is a live content-addressing gap.
 
 ---
 

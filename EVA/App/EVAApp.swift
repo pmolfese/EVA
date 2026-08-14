@@ -27,7 +27,26 @@ struct EVAApp: App {
     @State private var isCheckingForUpdates = false
 
     var body: some Scene {
-        WindowGroup {
+        // `Window`, not `WindowGroup`, and that is the fix for double-opening.
+        //
+        // A `WindowGroup` can instantiate more than one window, and macOS uses
+        // that: on a Finder open the group creates its launch window *and* then
+        // spawns a second one to deliver the URL to, so you get two windows with
+        // the file in the front one. Intermittent, because it depends on whether
+        // the open-file Apple event lands before or after the launch window
+        // exists.
+        //
+        // A `Window` scene is single-instance by construction, so the second
+        // window cannot be created and `onOpenURL` is delivered to the one that
+        // is already there.
+        //
+        // This is also the honest description of the app: `recording` is `@State`
+        // on `EVAApp`, so every window of a group would render the *same*
+        // recording. Two windows were never useful here — they were two views of
+        // one document that could not diverge. "New Window" was already absent
+        // too, since `CommandGroup(replacing: .newItem)` replaces New with
+        // "Open Recording…".
+        Window("EVA", id: "main") {
             ContentView(
                 recording: $recording,
                 openRecordingRequest: $openRecordingRequest,

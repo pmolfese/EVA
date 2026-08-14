@@ -316,7 +316,6 @@ final class EpochingViewModel {
             "postStimulusMs": String(format: "%.0f", postStimulus * 1000),
             "offsetMs": String(format: "%.0f", offset * 1000),
             "baselineCorrected": "\(baselineCorrected)",
-            "averageReference": "\(averageReference)",
             "average": "\(averageOnApply)",
             "skipEyeBlinks": "\(skipEyeBlinks)",
             "skipEyeMovements": "\(skipEyeMovements)",

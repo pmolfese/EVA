@@ -239,7 +239,12 @@ final class FilterViewModel {
     /// Portable parameters for the eva.xml `filter` step.
     var parameters: [String: String] {
         let cutoffs = try? currentCutoffs()
-        var params: [String: String] = ["averageReference": "\(averageReference)"]
+        // `averageReference` is deliberately absent: re-referencing is its own
+        // `reference` step now, so that flipping it forks the history *after*
+        // the filter instead of recomputing a band-pass that did not change,
+        // and so that the excluded-channel set it depends on is recorded.
+        // See `Rereferencing`.
+        var params: [String: String] = [:]
         if let highPassHz = cutoffs?.highPassHz {
             params["highPassHz"] = String(format: "%.3g", highPassHz)
         }
@@ -317,7 +322,9 @@ final class FilterViewModel {
         if let w = p["lineNoiseWindowSeconds"].flatMap(Double.init) { lineNoiseWindowSeconds = w }
         if let s = p["lineNoiseStrength"].flatMap(Double.init) { lineNoiseStrength = s }
         if let v = p["filterPNS"] { filterPNS = (v == "true") }
-        averageReference = p["averageReference"] == "true"
+        // Read but no longer written: the `reference` step owns this now, and
+        // a pre-`reference` eva.xml still replays correctly from the old key.
+        if let v = p["averageReference"] { averageReference = (v == "true") }
         if let prec = p["precision"].flatMap(FilterPrecision.init(rawValue:)) { precision = prec }
     }
 
@@ -676,7 +683,7 @@ final class FilterViewModel {
             )
         }
         if averageReference {
-            EEGSignalFilter.averageReferenceInPlace(&bandPassed, excluding: excludedChannels)
+            Rereferencing.applyInPlace(&bandPassed, excluding: excludedChannels)
         }
         return bandPassed
     }

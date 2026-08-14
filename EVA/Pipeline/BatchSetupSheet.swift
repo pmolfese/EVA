@@ -218,12 +218,44 @@ struct BatchSetupSheet: View {
                     .font(.caption2)
                     .foregroundStyle(.orange)
             } else if kind == .skip {
-                Label("not replayable", systemImage: "nosign")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                // A `.skip` step is no longer automatically inert. When every
+                // selected file carries its own payload — the ICA operator, the
+                // drawn artifact definitions — the decision is already recorded
+                // and re-applying it asks nobody anything. Saying "not
+                // replayable" there is worse than saying nothing: it tells the
+                // user a step will not happen while it does.
+                if resolvesFromPayload(step.wrappedValue.step.operation) {
+                    Label("from this file's own record", systemImage: "checkmark.seal")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                        .help("Every selected file carries its own saved settings for this step, so it re-applies exactly without needing a decision.")
+                } else {
+                    Label("not replayable", systemImage: "nosign")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .help("Specific to the recording it came from, so it is recorded for provenance and not applied to other files.")
+                }
             }
         }
-        .opacity(kind == .skip ? 0.5 : 1)
+        .opacity(kind == .skip && !resolvesFromPayload(step.wrappedValue.step.operation) ? 0.5 : 1)
+    }
+
+    /// Whether a provenance-only step will in fact run, because every selected
+    /// file carries the payload it needs.
+    ///
+    /// The third state between "portable" and "subject-specific": *resolvable
+    /// from this file's own record*. It is a property of (operation, what these
+    /// files carry) rather than of the operation alone, which is why it cannot
+    /// come from `ReplayInteraction`.
+    private func resolvesFromPayload(_ operation: EVAProcessingStep.Operation) -> Bool {
+        switch operation {
+        case .icaClean: return everyFileHasItsOwn(ICAReplayPayload.read)
+        case .artifactClean: return everyFileHasItsOwn(ArtifactReplayPayload.read)
+        // Bad-channel marks and interpolation carry their own channel lists in
+        // `eva.xml`; `ProcessingCore` applies them directly.
+        case .markBad: return true
+        default: return false
+        }
     }
 
     private func settingsPopoverBinding(for id: Int) -> Binding<Bool> {
@@ -336,18 +368,20 @@ struct BatchSetupSheet: View {
             // "yes, apply this" rather than being indistinguishable from one the
             // user deliberately left off.
             //
-            // Channel decisions are kept regardless. They are not steps you opt
-            // into — their `included` toggle is disabled in the pane — they are
-            // *state* the output has to carry, and dropping them is how the
-            // source file's bad-channel record went missing from a batch output.
+            // **Only steps the user could actually uncheck are dropped.** A
+            // `.skip`-classified step is forced to `included = false` and its
+            // toggle is `.disabled`, so its inclusion state is not a decision —
+            // it is a default nobody can change. Honouring it stripped `icaClean`
+            // and `artifactClean` out of the headless script, which meant neither
+            // ran even when the file carried its own payload, and the batch
+            // output silently described a chain that had not happened. Whether a
+            // provenance step runs is decided by payload presence in
+            // `ProcessingCore`, not by a checkbox that cannot be ticked.
             var includedScript = script
-            let includedIndices = Set(config.steps.filter(\.included).map(\.id))
+            let toggleable = Set(config.steps.filter { $0.kind != .skip }.map(\.id))
+            let excluded = Set(config.steps.filter { !$0.included }.map(\.id))
             includedScript.steps = script.steps.enumerated()
-                .filter { index, step in
-                    includedIndices.contains(index)
-                        || step.operation == .markBad
-                        || step.operation == .interpolateChannels
-                }
+                .filter { index, _ in !(toggleable.contains(index) && excluded.contains(index)) }
                 .map(\.element)
             Task {
                 await batch.startHeadless(

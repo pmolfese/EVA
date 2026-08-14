@@ -140,6 +140,15 @@ final class ProcessingCore {
                 // script said one was. Found by a paired run, 2026-08-13.
                 || $0.operation == .markBad
         }
+        // Lights off before the walk, so the script alone decides. Without this
+        // a script with no `reference` step still average-referenced its epochs,
+        // because `EpochingViewModel.averageReference` defaults to *true* and
+        // "leave it alone" is not the same as "off". Same derivation the
+        // interactive navigation uses — see `ReplaySettingsRestore`.
+        let lights = ReplaySettingsRestore.settings(for: steps)
+        filter.averageReference = lights.continuousReference != nil
+        epoching.averageReference = lights.epochReference != nil
+
         for (index, step) in steps.enumerated() {
             let stepName = ReplayStepDisplay.label(for: step.operation)
             let stepBase = steps.isEmpty ? 1 : Double(index) / Double(steps.count)
@@ -185,6 +194,25 @@ final class ProcessingCore {
                     )
                 }
                 current = filter.output ?? current
+
+            case .reference:
+                // Nothing to do here, and that is the point.
+                //
+                // The flags this step encodes were set from the *whole* step
+                // list before the walk started, so the re-reference happens
+                // inside `FilterViewModel`'s tail (continuous) or inside the PSA
+                // fold (epoch) — the same two places, on the same buffers, at
+                // the same points in the chain as an interactive run.
+                //
+                // The first version of this applied a separate pass over
+                // `filter.output` here, which was one ordering argument away
+                // from re-referencing twice: `.filter` had already done it,
+                // because `averageReference` was still set. Deriving the flags
+                // up front and leaving the arithmetic where it has always lived
+                // removes the interactive/headless split rather than reasoning
+                // about it, which is what every paired-run divergence in this
+                // project has argued for.
+                break
 
             case .icaClean:
                 // Unreachable without a payload — the filter above kept the step

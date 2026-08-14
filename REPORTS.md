@@ -243,16 +243,27 @@ handles them by prefix match.
 
 The report cannot be built from a saved package today. In dependency order:
 
-1. **ICA sidecar.** `eva.xml` records only `averageReference` for `icaClean`;
-   removed component indices, labels, and topographies exist in memory only.
-   `SavedICAArtifactSet` / `SavedICAComponent`
-   (`EVA/ICA/ICAArtifactDetector.swift`) are already defined, `Codable`, and
-   carry exactly `index`/`label`/`topography` — but nothing in the codebase
-   references them. Wire them up, extend with a time-course excerpt and PSD, and
-   write as `eva_ica.json` into the package. Cost ≈ 9 KB per excluded component;
-   ~50 KB for a typical rejection. Do **not** persist `componentSources` — 61 MB
-   for a 128-ch/20-min run, 1.5 GB at 256 ch/60 min. Persist `unmixingMatrix` +
-   `channelMeans` (~70 KB) if full reconstruction is ever needed.
+1. ~~**ICA sidecar.**~~ **Done 2026-08-13** — `ICAReplayPayload`
+   (`EVA/ICA/ICAReplayPayload.swift`), written into the package as
+   `eva_ica.json` by `MFFExportWriter`, read back by
+   `ICAReplayPayload.read(fromPackage:)`. It carries the excluded components with
+   their labels and normalized topographies (the `SavedICAComponent` block), the
+   per-component explained variance, and the fit provenance — everything §7 asks
+   for except the time-course excerpt and PSD, which still need adding.
+
+   Two notes for whoever writes §7 against it:
+   - **`componentSources` is deliberately absent**, as this item always said —
+     61 MB for a 128-ch/20-min run, 1.5 GB at 256 ch/60 min. The time-course
+     excerpt and PSD must therefore be *computed at removal time and stored*, not
+     derived later from the sidecar.
+   - Both the `unmixingMatrix` **and the `mixingMatrix`** are persisted, not the
+     `unmixingMatrix` + `channelMeans` this item used to suggest. `REWIND.md`'s
+     ICA payload section explains why; the short version is that the apply path
+     reads both matrices and never reads the fitted means. Matrices go to disk as
+     base64 little-endian `Float64` so no value round-trips through decimal text.
+
+   (`SavedICAArtifactSet` was not, as this item claimed, unreferenced —
+   `saveICAJSON` has been writing it from the ICA sheet's manual export.)
 
 2. **Typed results in `eva.xml`.** Promote the bad-channel, interpolation, and
    per-condition SNR lines out of `currentProcessingAuditLogLines()` prose into

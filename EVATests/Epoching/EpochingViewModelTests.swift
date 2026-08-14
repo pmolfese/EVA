@@ -36,12 +36,20 @@ struct EpochingViewModelTests {
     }
 
     @MainActor
-    @Test func parametersReflectAverageReferenceToggle() {
+    /// Average reference is no longer a `segment` parameter — it is its own
+    /// `reference` step with `domain: epoch`, emitted just before this one.
+    ///
+    /// The old key is still *read*, so a pre-`reference` eva.xml replays as it
+    /// always did; it is simply no longer written.
+    @Test func averageReferenceIsNoLongerASegmentParameter() {
         let vm = EpochingViewModel(store: RecordingStore())
         vm.averageReference = true
-        #expect(vm.parameters["averageReference"] == "true")
+        #expect(vm.parameters["averageReference"] == nil)
         vm.averageReference = false
-        #expect(vm.parameters["averageReference"] == "false")
+        #expect(vm.parameters["averageReference"] == nil)
+
+        vm.apply(parameters: ["averageReference": "true"])
+        #expect(vm.averageReference == true)
     }
 
     @MainActor

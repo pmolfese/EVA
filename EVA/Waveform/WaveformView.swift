@@ -1769,8 +1769,13 @@ struct WaveformView: View {
                 statusHistory: statusHistory,
                 historyNodes: historyRailNodes,
                 historyShortID: recordingStore.processingHistory.currentShortID,
+                canStepBack: recordingStore.processingHistory.canStepBack,
+                canStepForward: recordingStore.processingHistory.canStepForward,
                 tab: binding(recordingStore.status, \.statusPopoverTab),
-                onClearStatusHistory: { statusHistory.removeAll() }
+                onClearStatusHistory: { statusHistory.removeAll() },
+                onSelectNode: { navigateHistory(to: EVAHistoryNodeID(hex: $0)) },
+                onStepBack: { stepHistoryBack() },
+                onStepForward: { stepHistoryForward() }
             )
         }
     }

@@ -59,8 +59,13 @@ struct ProcessingStatusPopoverView: View {
     let statusHistory: [StatusHistoryEntry]
     let historyNodes: [HistoryRailNode]
     let historyShortID: String
+    let canStepBack: Bool
+    let canStepForward: Bool
     @Binding var tab: ProcessingStatusTab
     let onClearStatusHistory: () -> Void
+    let onSelectNode: (String) -> Void
+    let onStepBack: () -> Void
+    let onStepForward: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,8 +80,15 @@ struct ProcessingStatusPopoverView: View {
                         onClearStatusHistory: onClearStatusHistory
                     )
                 case .history:
-                    HistoryTabView(nodes: historyNodes, shortID: historyShortID)
-                        .equatable()
+                    HistoryTabView(
+                        nodes: historyNodes,
+                        shortID: historyShortID,
+                        canStepBack: canStepBack,
+                        canStepForward: canStepForward,
+                        onSelectNode: onSelectNode,
+                        onStepBack: onStepBack,
+                        onStepForward: onStepForward
+                    )
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -295,18 +307,19 @@ struct StatusHistoryEntryView: View {
 // MARK: - History
 
 /// Positional view: where in the tree the current signal sits.
-struct HistoryTabView: View, Equatable {
+struct HistoryTabView: View {
     let nodes: [HistoryRailNode]
     let shortID: String
-
-    static func == (lhs: HistoryTabView, rhs: HistoryTabView) -> Bool {
-        lhs.nodes == rhs.nodes && lhs.shortID == rhs.shortID
-    }
+    let canStepBack: Bool
+    let canStepForward: Bool
+    let onSelectNode: (String) -> Void
+    let onStepBack: () -> Void
+    let onStepForward: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
-                HistoryRailNodeList(nodes: nodes)
+                HistoryRailNodeList(nodes: nodes, onSelect: onSelectNode)
                     .equatable()
             }
             Divider()
@@ -314,24 +327,32 @@ struct HistoryTabView: View, Equatable {
         }
     }
 
-    /// Position and identity, plus the standing caveat. The transport controls in
-    /// the design figure are deliberately absent rather than present-and-disabled
-    /// — nothing navigates yet, and a dead button is a worse explanation than
-    /// none.
+    /// Transport, position, and identity. The controls are live now — clicking a
+    /// node or stepping restores that point in the history.
     private var footer: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
+            Button(action: onStepBack) {
+                Image(systemName: "chevron.left")
+            }
+            .disabled(!canStepBack)
+            .help("Back one step")
+            .accessibilityLabel("Step back")
+
+            Button(action: onStepForward) {
+                Image(systemName: "chevron.right")
+            }
+            .disabled(!canStepForward)
+            .help("Forward one step")
+            .accessibilityLabel("Step forward")
+
             Text("\(nodes.count) \(nodes.count == 1 ? "step" : "steps")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Spacer()
             Text(shortID)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.tertiary)
                 .help("Identity of the current node: a hash of every step that produced it.")
-            Spacer()
-            Image(systemName: "info.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .help("Read-only for now — this is the chain that produced the current signal. Navigation and branching are not wired up yet.")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)

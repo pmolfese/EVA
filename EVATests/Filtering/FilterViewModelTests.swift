@@ -31,7 +31,10 @@ struct FilterViewModelTests {
         let params = vm.parameters
         #expect(params["highPassHz"] == "0.5")
         #expect(params["lowPassHz"] == "40")
-        #expect(params["averageReference"] == "true")
+        // Deliberately absent: re-referencing moved out to its own `reference`
+        // step so it can be branched and so its excluded-channel dependency is
+        // recorded. See `Rereferencing` and `ReplaySettingsRestoreTests`.
+        #expect(params["averageReference"] == nil)
         #expect(params["notchHz"] == "60")
         #expect(params["precision"] == "auto")
         // Enriched keys for exact replay.

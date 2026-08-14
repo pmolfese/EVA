@@ -46,7 +46,7 @@ nonisolated enum HistoryStepSummary {
         case .average: return "average"
         case .combine: return "combine"
         case .split: return "split"
-        case .reference: return "reference"
+        case .reference: return "Reference"
         case .bcgDetection: return "BCG detection"
         case .ecgDetection: return "ECG detection"
         }
@@ -125,7 +125,16 @@ nonisolated enum HistoryStepSummary {
                 parts.append("spherical spline")
             }
 
-        case .baseline, .average, .combine, .split, .reference:
+        case .reference:
+            parts.append(Rereferencing.scheme(from: p).displayName.lowercased())
+            if Rereferencing.domain(from: p) == .epoch { parts.append("epochs") }
+            // The excluded set is the whole reason this is a step rather than a
+            // filter option, so the rail says so rather than making you open it.
+            if let count = p["excludedCount"].flatMap(Int.init), count > 0 {
+                parts.append("\(count) ch excluded")
+            }
+
+        case .baseline, .average, .combine, .split:
             break
         }
 
