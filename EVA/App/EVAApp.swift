@@ -16,6 +16,10 @@ import SwiftUI
 
 @main
 struct EVAApp: App {
+    /// Quits when the last window closes. Paired with `ContentView`'s
+    /// `WindowAccessor`, which refuses to close a window that still holds a
+    /// recording — see `WindowCloseBehavior` for why that pairing is what makes
+    /// this safe to turn on.
     @State private var recording: MFFRecording?
     @State private var openRecordingRequest = 0
     @State private var closeRecordingRequest = 0
@@ -87,8 +91,23 @@ struct EVAApp: App {
                     closeRecordingRequest += 1
                 }
                 .disabled(recording == nil)
+            }
 
-                Button("Quit") {
+            // Quit belongs to the **App** menu, not the File menu.
+            //
+            // It used to live in the `CommandGroup(replacing: .newItem)` block
+            // above, which builds *File*-menu content. That content is scene
+            // scoped: open Settings and the Settings scene becomes frontmost, so
+            // SwiftUI tears down the main window scene's File items — and the
+            // app's only ⌘Q went with them. Closing Settings did not reliably
+            // bring them back, which is why the reported repro was "launch, do
+            // not open a file, open Settings, close Settings, ⌘Q is gone."
+            //
+            // `.appTermination` is the App menu's own Quit slot. It is present
+            // whatever is frontmost, which is exactly the property a quit
+            // command needs and the reason macOS puts it there.
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit EVA") {
                     NSApp.terminate(nil)
                 }
                 .keyboardShortcut("q", modifiers: .command)

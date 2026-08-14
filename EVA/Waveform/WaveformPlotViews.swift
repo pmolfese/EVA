@@ -314,7 +314,7 @@ struct WaveformPlot: View {
 
             let xScale = CGFloat(timeScale)
             let midY = size.height / 2
-            let pointsPerMicrovolt = (nominalHeight / 2) / max(amplitudeScale, 1)
+            let pointsPerMicrovolt = (nominalHeight * WaveformScaleUnits.channelRowFraction) / max(amplitudeScale, 1)
 
             strokeBaseline(in: &context, midY: midY)
             if showsTimeMarkers {
@@ -474,7 +474,7 @@ struct OverlaidCategoryChannelPlot: View {
             guard epochLength > 1 else { return }
 
             let midY = size.height / 2
-            let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
+            let pointsPerMicrovolt = (size.height * WaveformScaleUnits.traceRowFraction) / max(amplitudeScale, 1)
             let xScale = size.width / CGFloat(max(epochLength - 1, 1))
             let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
 
@@ -636,7 +636,7 @@ struct ButterflyConditionPlot: View {
             guard epochLength > 1 else { return }
 
             let midY = size.height / 2
-            let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
+            let pointsPerMicrovolt = (size.height * WaveformScaleUnits.traceRowFraction) / max(amplitudeScale, 1)
             let xScale = size.width / CGFloat(max(epochLength - 1, 1))
             let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
 
@@ -743,7 +743,7 @@ private func nearestButterflyTrace(
     guard let first = segments.first, first.endSample > first.startSample, size.width > 0 else { return nil }
     let epochLength = first.endSample - first.startSample + 1
     let midY = size.height / 2
-    let pointsPerMicrovolt = (size.height * 0.42) / CGFloat(max(amplitudeScale, 1))
+    let pointsPerMicrovolt = (size.height * WaveformScaleUnits.traceRowFraction) / CGFloat(max(amplitudeScale, 1))
     let xScale = size.width / CGFloat(max(epochLength - 1, 1))
     let localSample = min(max(Int((location.x / xScale).rounded()), 0), epochLength - 1)
 
@@ -978,7 +978,7 @@ struct OverlayButterflyPlot: View {
             guard epochLength > 1 else { return }
 
             let midY = size.height / 2
-            let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
+            let pointsPerMicrovolt = (size.height * WaveformScaleUnits.traceRowFraction) / max(amplitudeScale, 1)
             let xScale = size.width / CGFloat(max(epochLength - 1, 1))
             let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
 
@@ -1044,7 +1044,7 @@ struct ArtifactTemplateAveragePlot: View {
 
             let midY = size.height / 2
             let maxAbs = max(fixedScaleMicrovolts ?? average.allChannelSamples.flatMap { $0.map(abs) }.max() ?? 1, 1)
-            let yScale = (size.height * 0.42) / CGFloat(maxAbs)
+            let yScale = (size.height * WaveformScaleUnits.traceRowFraction) / CGFloat(maxAbs)
             let xScale = size.width / CGFloat(sampleCount - 1)
             let peakByChannel = Dictionary(uniqueKeysWithValues: average.channelSummaries.map {
                 ($0.channelIndex, $0.peakAbsoluteMicrovolts)
@@ -1167,7 +1167,7 @@ struct ICATimeCoursePlot: View {
 
             let midY = size.height / 2
             let scale = robustScale(samples, in: range)
-            let yScale = (size.height * 0.42) / CGFloat(scale.amplitude)
+            let yScale = (size.height * WaveformScaleUnits.traceRowFraction) / CGFloat(scale.amplitude)
             let binCount = max(Int(size.width.rounded(.down)), 2)
             let visibleCount = range.upperBound - range.lowerBound + 1
 

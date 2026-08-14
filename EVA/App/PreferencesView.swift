@@ -22,6 +22,24 @@ nonisolated enum EVAGeneralPreferences {
     static let pixelAdaptiveWaveformRenderingKey = "pixelAdaptiveWaveformRenderingEnabled"
     static let waveformTimeMarkersAcrossTracesKey = "waveformTimeMarkersAcrossTracesEnabled"
     static let waveformTimeMarkerStyleKey = "waveformTimeMarkerStyle.v1"
+
+    /// Starting display scale for a newly-opened recording, stored in **physical
+    /// units** rather than as raw `amplitudeScale` / `timeScale`.
+    ///
+    /// That is the useful choice, not just the tidy one. A stored `timeScale`
+    /// would start a 250 Hz file and a 1000 Hz file at visibly different sweep
+    /// speeds, because the decimation stride is an integer and only lands on its
+    /// target for rates that are multiples of 200 — see
+    /// `WaveformScaleUnits.pointsPerSecond`. Storing mm/s and converting per file
+    /// at open means "30 mm/s" means 30 mm/s whatever you opened.
+    static let defaultSensitivityKey = "waveformDefaultMicrovoltsPerMillimeter"
+    static let defaultSweepKey = "waveformDefaultMillimetersPerSecond"
+
+    /// EVA's historical defaults (`amplitudeScale` 100, `timeScale` 1 at
+    /// 1000 Hz), expressed in the new units so nothing moves for anyone who
+    /// never opens the panel.
+    static let defaultSensitivity: Double = 8.1
+    static let defaultSweep: Double = 70.6
 }
 
 nonisolated struct WaveformTimeMarkerStyle: Codable, Equatable {
@@ -165,6 +183,10 @@ private struct GeneralPreferencesView: View {
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkersAcrossTracesKey) private var waveformTimeMarkersAcrossTraces = false
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkerStyleKey) private var waveformTimeMarkerStyleData = WaveformTimeMarkerStyle.defaultData
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
+    @AppStorage(EVAGeneralPreferences.defaultSensitivityKey)
+    private var defaultSensitivity = EVAGeneralPreferences.defaultSensitivity
+    @AppStorage(EVAGeneralPreferences.defaultSweepKey)
+    private var defaultSweep = EVAGeneralPreferences.defaultSweep
 
     var body: some View {
         let markerStyle = WaveformTimeMarkerStyle.decoded(from: waveformTimeMarkerStyleData)
@@ -177,6 +199,45 @@ private struct GeneralPreferencesView: View {
                 Text("Interface")
             } footer: {
                 Text("Pixel-adaptive rendering compresses dense traces to the visible screen resolution while preserving min/max excursions. Turn it off to use the original sample-by-sample path renderer.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                HStack {
+                    Text("Sensitivity")
+                    Slider(value: $defaultSensitivity, in: 1...50)
+                    Text("\(WaveformScaleUnits.format(defaultSensitivity)) µV/mm")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 78, alignment: .trailing)
+                }
+                HStack {
+                    Text("Sweep speed")
+                    Slider(value: $defaultSweep, in: 5...200)
+                    Text("\(WaveformScaleUnits.format(defaultSweep)) mm/s")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 78, alignment: .trailing)
+                }
+                HStack {
+                    Button("Clinical") {
+                        defaultSensitivity = WaveformScaleUnits.clinicalMicrovoltsPerMillimeter
+                        defaultSweep = WaveformScaleUnits.clinicalMillimetersPerSecond
+                    }
+                    Button("EVA Default") {
+                        defaultSensitivity = EVAGeneralPreferences.defaultSensitivity
+                        defaultSweep = EVAGeneralPreferences.defaultSweep
+                    }
+                }
+            } header: {
+                Text("Default Display Scale")
+            } footer: {
+                Text("Applied when a recording opens; the toolbar sliders still change "
+                     + "the current view. Stored in physical units, so the same sweep speed "
+                     + "holds across files at different sampling rates. Millimetres are "
+                     + "nominal — 72 points per inch — because EVA does not measure your "
+                     + "display. Clinical review is 7 µV/mm at 30 mm/s.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

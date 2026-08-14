@@ -524,7 +524,8 @@ struct SingleTrialAnalysisSheet: View {
                     trialFigureSaveMenu(
                         title: singleTrialButterflyTitle(segments: plottedSegments),
                         legend: legendItems(for: plottedSegments),
-                        size: CGSize(width: 820, height: 300)
+                        size: CGSize(width: 820, height: 300),
+                        seconds: figureSeconds(plottedSegments, samplingRate: signal.samplingRate)
                     ) {
                         SingleTrialWindowPicker(
                             data: signal.data,
@@ -602,7 +603,8 @@ struct SingleTrialAnalysisSheet: View {
                     trialFigureSaveMenu(
                         title: singleTrialChannelInspectorTitle(channel: selectedChannel),
                         legend: singleChannelLegendItems(),
-                        size: CGSize(width: 820, height: 320)
+                        size: CGSize(width: 820, height: 320),
+                        seconds: figureSeconds(averagedSegments, samplingRate: averageSignal.samplingRate)
                     ) {
                         SingleTrialChannelInspectorPlot(
                             averagedSignal: averageSignal,
@@ -855,17 +857,38 @@ struct SingleTrialAnalysisSheet: View {
     }
 
     @ViewBuilder
+
+    /// Seconds of signal an epoch figure spans, for the exported scale caption.
+    /// Nil when there is nothing to measure, so the caption omits the sweep
+    /// speed rather than inventing one.
+    private func figureSeconds(_ segments: [EpochSegment], samplingRate: Double) -> Double? {
+        guard let segment = segments.first, samplingRate > 0 else { return nil }
+        let samples = segment.endSample - segment.startSample + 1
+        guard samples > 0 else { return nil }
+        return Double(samples) / samplingRate
+    }
+
     private func trialFigureSaveMenu<Figure: View>(
         title: String,
         legend: [(String, Color)],
         size: CGSize,
+        /// Seconds of signal spanning `size.width`, so the caption can state a
+        /// sweep speed. Omitted rather than guessed when the caller does not
+        /// know — see `FigureScale`.
+        seconds: Double? = nil,
         @ViewBuilder figure: @escaping () -> Figure
     ) -> some View {
         Menu("Save Figure As…") {
             ForEach(FigureFormat.allCases) { format in
                 Button(format.label) {
                     FigureExporter.save(
-                        FigureCard(title: title, legend: legend, size: size, content: figure),
+                        FigureCard(
+                            title: title, legend: legend, size: size,
+                            scale: FigureScale(
+                                amplitudeScale: amplitudeScale, plotSize: size, seconds: seconds
+                            ),
+                            content: figure
+                        ),
                         defaultName: figureFileName(title),
                         format: format
                     )

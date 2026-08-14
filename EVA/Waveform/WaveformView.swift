@@ -313,6 +313,18 @@ struct WaveformView: View {
         get { recordingStore.selection.waveformContentMinX }
         nonmutating set { recordingStore.selection.waveformContentMinX = newValue }
     }
+    /// Physical-unit entry for the scale popover. Text rather than numbers so a
+    /// half-typed value does not re-scale the view on every keystroke.
+    @AppStorage(EVAGeneralPreferences.defaultSensitivityKey)
+    private var defaultSensitivityPreference = EVAGeneralPreferences.defaultSensitivity
+    @AppStorage(EVAGeneralPreferences.defaultSweepKey)
+    private var defaultSweepPreference = EVAGeneralPreferences.defaultSweep
+    /// Load can be re-entered (`loadIfNeeded`), and re-seeding would discard
+    /// scale changes the user made after opening.
+    @State private var hasSeededDisplayScale = false
+    @State private var showsScaleUnitsPopover = false
+    @State private var sensitivityEntry = ""
+    @State private var sweepEntry = ""
     @State var detectsEyeBlinkArtifacts = false
     @State var detectsEyeMovementArtifacts = false
     /// Raw text buffers for the threshold-panel ocular-channel override fields
@@ -873,8 +885,40 @@ struct WaveformView: View {
         ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
         ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
         seedPhysioPolarityDefaultsIfNeeded()
+        seedDisplayScaleDefaults()
         adoptOnDiskEpochsIfPresent()
         autoStartBatchIfNeeded()
+    }
+
+    /// Puts the newly-opened recording at the preferred sensitivity and sweep
+    /// speed from Settings.
+    ///
+    /// Converted here rather than stored as raw scales, because the sweep
+    /// conversion needs *this file's* sampling rate: the decimation stride is an
+    /// integer, so a stored `timeScale` would mean a different physical speed in
+    /// a 250 Hz file than in a 1000 Hz one. See
+    /// `WaveformScaleUnits.pointsPerSecond`.
+    ///
+    /// Only on load, never on a settings change — the preference is a starting
+    /// point, and yanking the view out from under someone who has since adjusted
+    /// the sliders would be worse than useless. Clamped to the sliders' ranges so
+    /// a preference outside them lands at the edge rather than somewhere the
+    /// controls cannot represent.
+    private func seedDisplayScaleDefaults() {
+        guard !hasSeededDisplayScale else { return }
+        hasSeededDisplayScale = true
+        amplitudeScale = clampedAmplitudeScale(
+            WaveformScaleUnits.amplitudeScale(
+                forMicrovoltsPerMillimeter: defaultSensitivityPreference,
+                rowHeight: channelRowHeight
+            )
+        )
+        timeScale = clampedTimeScale(
+            WaveformScaleUnits.timeScale(
+                forMillimetersPerSecond: defaultSweepPreference,
+                samplingRate: scaleUnitsSamplingRate
+            )
+        )
     }
 
     /// Honor each PNS sensor's own `<positiveUp>` convention as the initial
@@ -1576,9 +1620,9 @@ struct WaveformView: View {
                 Slider(value: amplitudeScaleSliderBinding, in: amplitudeScaleSliderBounds)
                     .frame(width: 170)
                     .help("Lower values make traces taller.")
-                Text("±\(formatAmplitudeScale(amplitudeScale)) µV")
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 86, alignment: .trailing)
+                scaleReadout(WaveformScaleUnits.sensitivityLabel(
+                    amplitudeScale: amplitudeScale, rowHeight: channelRowHeight
+                ))
             }
 
             if showsTimeScale {
@@ -1588,12 +1632,177 @@ struct WaveformView: View {
                         .frame(width: 72, alignment: .leading)
                     Slider(value: Binding(get: { timeScale }, set: { timeScale = $0 }), in: 0.2...8, step: 0.1)
                         .frame(width: 170)
-                    Text(String(format: "%.1fx", timeScale))
-                        .font(.caption.monospacedDigit())
-                        .frame(width: 64, alignment: .trailing)
+                    scaleReadout(WaveformScaleUnits.sweepLabel(
+                        timeScale: timeScale, samplingRate: scaleUnitsSamplingRate
+                    ))
                 }
             }
         }
+        // Once for the whole control. Both readouts open the same sheet, and two
+        // `.popover` modifiers sharing one binding would each try to present it.
+        .popover(isPresented: $showsScaleUnitsPopover, arrowEdge: .bottom) {
+            scaleUnitsPopover()
+        }
+    }
+
+    /// The readout beside a scale slider.
+    ///
+    /// One line, in physical units only, **left**-justified in a fixed frame —
+    /// which is what makes the amplitude and time rows line up with each other.
+    /// The first version stacked the raw value above the physical one and
+    /// right-aligned each in a differently-sized frame (86 pt and 64 pt), so the
+    /// two rows could not agree on an edge in either direction. The raw
+    /// `amplitudeScale` and `timeScale` numbers moved into the popover, where
+    /// they are still available but are not the headline.
+    @ViewBuilder
+    private func scaleReadout(_ label: String) -> some View {
+        Button {
+            showsScaleUnitsPopover = true
+        } label: {
+            Text(label)
+                .font(.caption.monospacedDigit())
+                .frame(width: scaleReadoutWidth, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Click to type an exact sensitivity or sweep speed.")
+    }
+
+    /// Wide enough for the longest reading either row produces — "9.6 µV/mm" —
+    /// so neither truncates and both share one left edge.
+    private var scaleReadoutWidth: CGFloat { 80 }
+
+    /// Typed entry in physical units, plus the clinical preset.
+    ///
+    /// The units are **nominal** — 72 points to the inch — because the true size
+    /// of a point needs the display's physical dimensions, which macOS reports
+    /// from EDID and which is wrong or missing on plenty of external monitors.
+    /// Saying so in the popover is the point: a figure stated with authority and
+    /// quietly false would be worse than no figure at all. See
+    /// `WaveformScaleUnits`.
+    @ViewBuilder
+    private func scaleUnitsPopover() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Display Scale")
+                .font(.headline)
+
+            Text("±\(formatAmplitudeScale(amplitudeScale)) µV per half row  ·  "
+                 + String(format: "%.1f×", timeScale) + " time")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
+                GridRow {
+                    Text("Sensitivity").font(.caption)
+                    TextField("", text: $sensitivityEntry)
+                        .frame(width: 64)
+                        .onSubmit(applySensitivityEntry)
+                    Text("µV/mm").font(.caption).foregroundStyle(.secondary)
+                }
+                GridRow {
+                    Text("Sweep").font(.caption)
+                    TextField("", text: $sweepEntry)
+                        .frame(width: 64)
+                        .onSubmit(applySweepEntry)
+                    Text("mm/s").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 8) {
+                Button("Apply") {
+                    applySensitivityEntry()
+                    applySweepEntry()
+                }
+                .keyboardShortcut(.defaultAction)
+                Button("Clinical") {
+                    amplitudeScale = clampedAmplitudeScale(
+                        WaveformScaleUnits.amplitudeScale(
+                            forMicrovoltsPerMillimeter: WaveformScaleUnits.clinicalMicrovoltsPerMillimeter,
+                            rowHeight: channelRowHeight
+                        )
+                    )
+                    timeScale = clampedTimeScale(
+                        WaveformScaleUnits.timeScale(
+                            forMillimetersPerSecond: WaveformScaleUnits.clinicalMillimetersPerSecond,
+                            samplingRate: scaleUnitsSamplingRate
+                        )
+                    )
+                    syncScaleUnitEntries()
+                }
+                .help("7 µV/mm and 30 mm/s — the standard clinical review settings.")
+            }
+
+            Divider()
+
+            Text("Nominal millimetres, assuming 72 points per inch. EVA does not "
+                 + "yet measure this display, so on-screen size may differ. Exported "
+                 + "PDFs are exact at 100%.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 240, alignment: .leading)
+        }
+        .padding(14)
+        .onAppear(perform: syncScaleUnitEntries)
+    }
+
+    /// The loaded file's rate, because the sweep speed genuinely depends on it —
+    /// see `WaveformScaleUnits.pointsPerSecond`. Falls back to the rate the
+    /// stride was designed around so an empty window still shows a sane number.
+    private var scaleUnitsSamplingRate: Double {
+        let rate = recording.signal?.samplingRate ?? 0
+        return rate > 0 ? rate : referenceDisplaySampleRate
+    }
+
+    private func syncScaleUnitEntries() {
+        sensitivityEntry = WaveformScaleUnits.format(
+            WaveformScaleUnits.microvoltsPerMillimeter(
+                amplitudeScale: amplitudeScale, rowHeight: channelRowHeight
+            )
+        )
+        sweepEntry = WaveformScaleUnits.format(
+            WaveformScaleUnits.millimetersPerSecond(
+                timeScale: timeScale, samplingRate: scaleUnitsSamplingRate
+            )
+        )
+    }
+
+    private func applySensitivityEntry() {
+        guard let value = Double(sensitivityEntry), value > 0 else {
+            syncScaleUnitEntries()
+            return
+        }
+        amplitudeScale = clampedAmplitudeScale(
+            WaveformScaleUnits.amplitudeScale(
+                forMicrovoltsPerMillimeter: value, rowHeight: channelRowHeight
+            )
+        )
+        syncScaleUnitEntries()
+    }
+
+    private func applySweepEntry() {
+        guard let value = Double(sweepEntry), value > 0 else {
+            syncScaleUnitEntries()
+            return
+        }
+        timeScale = clampedTimeScale(
+            WaveformScaleUnits.timeScale(
+                forMillimetersPerSecond: value, samplingRate: scaleUnitsSamplingRate
+            )
+        )
+        syncScaleUnitEntries()
+    }
+
+    /// Both clamps exist so a typed value out of the slider's range lands at the
+    /// edge rather than silently doing nothing — and so the readout that follows
+    /// reports what was actually applied rather than what was asked for.
+    private func clampedAmplitudeScale(_ value: Double) -> Double {
+        min(max(value, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound)
+    }
+
+    private func clampedTimeScale(_ value: Double) -> Double {
+        min(max(value, 0.2), 8)
     }
 
     func averagedModePicker() -> some View {
@@ -2385,9 +2594,13 @@ struct WaveformView: View {
         displaySampleStride(for: signal.samplingRate)
     }
 
+    /// Delegates to `WaveformScaleUnits`, which is also what the µV/mm and mm/s
+    /// readouts use. Two copies of this rounding would let the stated sweep
+    /// speed drift from the drawn one — and because the stride is an integer,
+    /// that drift is up to 25% rather than a rounding wobble.
     func displaySampleStride(for samplingRate: Double) -> Int {
         guard samplingRate > 0 else { return referenceDisplaySampleStride }
-        return max(Int((samplingRate / targetDisplaySamplesPerSecond).rounded()), 1)
+        return WaveformScaleUnits.displaySampleStride(samplingRate: samplingRate)
     }
 
     private func quantizedGeometryValue(_ value: CGFloat) -> CGFloat {
