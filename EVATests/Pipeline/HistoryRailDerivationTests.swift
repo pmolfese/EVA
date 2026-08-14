@@ -83,27 +83,21 @@ struct HistoryRailDerivationTests {
         #expect(a.currentID == b.currentID)
     }
 
-    /// A pin survives a rebuild. Without `adoptAnnotations` the user's pin would
-    /// vanish the next time any stage ran, with nothing to explain why.
+    /// Re-adopting an unchanged prefix must resolve to the nodes that already
+    /// exist, not build parallel ones — that is what makes accumulation cheap.
     @MainActor
-    @Test func rebuildKeepsAnnotationsOnSurvivingNodes() {
+    @Test func readoptingAPrefixReusesItsNodes() {
         let model = RecordingHistoryModel()
-        model.rebuild(recordingKey: "r", script: script([step(.filter, ["highPassHz": "0.1"])]))
-        var history = model.history
-        let filterNode = history.currentID
-        history.setPinned(true, for: filterNode)
-        history.setLabel("keep this one", for: filterNode)
+        model.record(recordingKey: "r", script: script([step(.filter, ["highPassHz": "0.1"])]))
+        let filterNode = model.history.currentID
 
-        // Re-apply the same filter and add a stage after it.
-        var rebuilt = EVAHistory(recordingKey: "r", script: script([
+        model.record(recordingKey: "r", script: script([
             step(.filter, ["highPassHz": "0.1"]),
             step(.segment, ["eventCodes": "LC++"])
         ]))
-        rebuilt.adoptAnnotations(from: history)
 
-        #expect(rebuilt.node(filterNode)?.isPinned == true)
-        #expect(rebuilt.node(filterNode)?.displayLabel == "keep this one")
-        #expect(rebuilt.current.step?.operation == .segment)
+        #expect(model.history.current.parent == filterNode)
+        #expect(model.history.count == 3, "root, filter, segment — no duplicate filter")
     }
 
     @Test func changingAParameterChangesOnlyTheTail() {
@@ -132,7 +126,7 @@ struct HistoryRailDerivationTests {
     @MainActor
     @Test func railRowsRunRootFirstWithTheTipCurrent() {
         let model = RecordingHistoryModel()
-        model.rebuild(recordingKey: "r", script: script([
+        model.record(recordingKey: "r", script: script([
             step(.filter, ["highPassHz": "0.1", "lowPassHz": "40"]),
             step(.segment, ["eventCodes": "LC++,RC++", "preStimulusMs": "-100", "postStimulusMs": "600"])
         ]))
@@ -147,16 +141,108 @@ struct HistoryRailDerivationTests {
     }
 
     /// The model assigns only when the tree actually differs, so a redundant
-    /// rebuild does not invalidate the rail. Cheap to get wrong and invisible
+    /// record does not invalidate the rail. Cheap to get wrong and invisible
     /// when it is.
     @MainActor
-    @Test func redundantRebuildDoesNotChangeTheHistory() {
+    @Test func redundantRecordDoesNotChangeTheHistory() {
         let model = RecordingHistoryModel()
         let steps = script([step(.filter, ["highPassHz": "0.1"])])
-        model.rebuild(recordingKey: "r", script: steps)
+        model.record(recordingKey: "r", script: steps)
         let first = model.history
-        model.rebuild(recordingKey: "r", script: steps)
+        model.record(recordingKey: "r", script: steps)
         #expect(model.history == first)
+    }
+
+    // MARK: - Accumulation
+
+    /// The property that separates a history from a readout: changing a stage
+    /// forks, and the branch you came from is still there. The old rebuild threw
+    /// the tree away each time, which made branches impossible by construction.
+    @MainActor
+    @Test func changingAStageForksAndKeepsTheOldBranch() {
+        let model = RecordingHistoryModel()
+        model.record(recordingKey: "r", script: script([
+            step(.mriGradientCorrection, ["method": "FASTR"]),
+            step(.filter, ["highPassHz": "0.1", "lowPassHz": "40"])
+        ]))
+        let wide = model.history.currentID
+        let branchPoint = try? #require(model.history.current.parent)
+
+        model.record(recordingKey: "r", script: script([
+            step(.mriGradientCorrection, ["method": "FASTR"]),
+            step(.filter, ["highPassHz": "1", "lowPassHz": "30"])
+        ]))
+        let narrow = model.history.currentID
+
+        #expect(wide != narrow)
+        #expect(model.history.node(wide) != nil, "the branch we came from must survive")
+        #expect(model.history.currentID == narrow, "and the pointer follows the new chain")
+        #expect(branchPoint.map { model.history.children(of: $0).count } == 2)
+    }
+
+    /// Annotations ride along, because nothing is discarded any more.
+    @MainActor
+    @Test func aPinSurvivesLaterChainChanges() {
+        let model = RecordingHistoryModel()
+        model.record(recordingKey: "r", script: script([step(.filter, ["highPassHz": "0.1"])]))
+        let pinned = model.history.currentID
+        model.setPinned(true, for: pinned)
+
+        model.record(recordingKey: "r", script: script([
+            step(.filter, ["highPassHz": "0.1"]),
+            step(.segment, ["eventCodes": "LC++"])
+        ]))
+
+        #expect(model.history.node(pinned)?.isPinned == true)
+    }
+
+    /// Removing a stage walks back up the existing trunk rather than building a
+    /// parallel one — undo should not double the tree.
+    @MainActor
+    @Test func removingAStageReturnsToTheExistingNode() {
+        let model = RecordingHistoryModel()
+        model.record(recordingKey: "r", script: script([step(.filter, ["highPassHz": "0.1"])]))
+        let filterNode = model.history.currentID
+        model.record(recordingKey: "r", script: script([
+            step(.filter, ["highPassHz": "0.1"]),
+            step(.segment, ["eventCodes": "LC++"])
+        ]))
+        let countWithSegment = model.history.count
+
+        model.record(recordingKey: "r", script: script([step(.filter, ["highPassHz": "0.1"])]))
+
+        #expect(model.history.currentID == filterNode)
+        #expect(model.history.count == countWithSegment, "the segment node is kept, not recreated")
+    }
+
+    /// Opening a different recording must not inherit the previous one's tree.
+    @MainActor
+    @Test func aDifferentRecordingStartsAFreshTree() {
+        let model = RecordingHistoryModel()
+        model.record(recordingKey: "sub-014.mff", script: script([step(.filter, ["highPassHz": "0.1"])]))
+        let first = model.history.currentID
+
+        model.record(recordingKey: "sub-015.mff", script: script([step(.filter, ["highPassHz": "0.1"])]))
+
+        #expect(model.history.node(first) == nil)
+        #expect(model.history.count == 2, "root plus the one step")
+    }
+
+    /// ICA's portable parameters are identical for two removals that excluded
+    /// different components. Without the payload digest they would collapse to
+    /// one node, and navigating to it would serve the wrong cached signal.
+    @MainActor
+    @Test func payloadDigestsSeparateOtherwiseIdenticalSteps() {
+        let model = RecordingHistoryModel()
+        let icaScript = script([step(.icaClean, ["method": "picard", "components": "20"])])
+
+        model.record(recordingKey: "r", script: icaScript, payloadDigests: [.icaClean: "aaaa"])
+        let first = model.history.currentID
+        model.record(recordingKey: "r", script: icaScript, payloadDigests: [.icaClean: "bbbb"])
+        let second = model.history.currentID
+
+        #expect(first != second)
+        #expect(model.history.children(of: model.history.rootID).count == 2)
     }
 
     // MARK: - Subtitles

@@ -186,7 +186,7 @@ enum ArtifactOBSStrategy: String, CaseIterable, Identifiable, Codable, Sendable 
     }
 }
 
-struct DefinedArtifact: Identifiable, Sendable {
+struct DefinedArtifact: Identifiable, Sendable, Codable {
     nonisolated static let defaultOBSComponentCount = 2
     nonisolated static let maximumOBSComponentCount = 8
     nonisolated static let defaultOBSEdgeTaperSeconds = 0.10

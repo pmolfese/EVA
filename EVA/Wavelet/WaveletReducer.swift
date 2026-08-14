@@ -171,7 +171,7 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
     }
 }
 
-nonisolated struct WaveletReductionConfiguration: Sendable {
+nonisolated struct WaveletReductionConfiguration: Sendable, Codable {
     var kind: WaveletTransformKind = .dwt
     var family: WaveletReductionFamily = .coif4
     var levelCount: Int = 8

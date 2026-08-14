@@ -502,7 +502,8 @@ extension WaveformView {
             script: currentProcessingScript(),
             to: url,
             auditLogLines: currentProcessingAuditLogLines(),
-            icaPayload: currentICAReplayPayload()
+            icaPayload: currentICAReplayPayload(),
+            artifactPayload: currentArtifactReplayPayload()
         )
         if batch.isActive, batch.matches(recording: recording) {
             batch.updateProgress(stepName: "Exporting", stepProgress: 1, fileProgress: 1)

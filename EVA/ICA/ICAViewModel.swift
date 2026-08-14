@@ -55,6 +55,10 @@ final class ICAViewModel {
     var fitLowCutoff = 1.0
     var fitHighCutoff = 40.0
     var fitNotch60HzEnabled = false
+    /// Family for the fit/activation filter. Independent of the main filter
+    /// popover's family on purpose — the ICA fit band is its own choice, and a
+    /// 1 Hz high-pass has different tradeoffs from a 0.1 Hz display filter.
+    var fitFilterFamily: FilterFamily = .iir
 
     // MARK: Results
     var decomposition: ICADecomposition?
@@ -95,6 +99,7 @@ final class ICAViewModel {
             p["fitLowCutoff"] = "\(fitLowCutoff)"
             p["fitHighCutoff"] = "\(fitHighCutoff)"
             p["fitNotch60Hz"] = "\(fitNotch60HzEnabled)"
+            p["fitFilterFamily"] = fitFilterFamily.rawValue
         }
         return p
     }
@@ -118,6 +123,7 @@ final class ICAViewModel {
         if let v = p["fitLowCutoff"].flatMap(Double.init) { fitLowCutoff = v }
         if let v = p["fitHighCutoff"].flatMap(Double.init) { fitHighCutoff = v }
         if let v = p["fitNotch60Hz"] { fitNotch60HzEnabled = (v == "true") }
+        if let v = p["fitFilterFamily"].flatMap(FilterFamily.init(rawValue:)) { fitFilterFamily = v }
     }
 
     func resetForClose() {

@@ -1725,29 +1725,19 @@ extension WaveformView {
             )
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             computeAverageSNRInBackground(from: base, excludedIndices: excludedIndices, sessionID: sessionID)
-            epoching.epochedSignal = display.signal
-            epoching.epochSegments = display.segments
-            epoching.isAveraged = true
-            segHealth.clearAnalysis(hide: true, clearLabels: false)
-            selectedSampleRange = nil
-            dragSelectionStartSample = nil
-            dragSelectionEndSample = nil
-            topomapSample = nil
-            epoching.butterflyTopomapRelativeSample = nil
-            selectedEventCodes.removeAll()
-            horizontalScrollPosition.scrollTo(x: 0)
-            var exclusionSummary = epoching.psaExclusionSummary
-            if exclusionSummary.acceptedEpochs == 0 {
-                exclusionSummary.acceptedEpochs = base.segments.count
-            }
-            exclusionSummary.skippedLabeledBadSegments = excludedIndices.count
-            exclusionSummary.outputSegments = display.segments.count
-            epoching.psaExclusionSummary = exclusionSummary
-            epoching.statusMessage = appendPSAEpochDiagnostics(
-                to: averaged.message + suffix,
-                sourceSegments: base.segments,
-                skippedIndices: excludedIndices,
-                includeSkippedLabeledBadSegments: true
+            PSAAveraging.commit(
+                averaged: display,
+                sourceSegmentCount: base.segments.count,
+                excludedSegmentCount: excludedIndices.count,
+                statusMessage: appendPSAEpochDiagnostics(
+                    to: averaged.message + suffix,
+                    sourceSegments: base.segments,
+                    skippedIndices: excludedIndices,
+                    includeSkippedLabeledBadSegments: true
+                ),
+                epoching: epoching,
+                segHealth: segHealth,
+                store: recordingStore
             )
             psaTask = nil
         }

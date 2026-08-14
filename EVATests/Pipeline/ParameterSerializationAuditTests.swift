@@ -183,6 +183,7 @@ struct ParameterSerializationAuditTests {
         vm.fitLowCutoff = 2
         vm.fitHighCutoff = 35
         vm.fitNotch60HzEnabled = true
+        vm.fitFilterFamily = .fir
 
         let restored = ICAViewModel(store: RecordingStore())
         restored.apply(parameters: vm.parameters)
@@ -199,6 +200,31 @@ struct ParameterSerializationAuditTests {
         #expect(restored.fitLowCutoff == 2)
         #expect(restored.fitHighCutoff == 35)
         #expect(restored.fitNotch60HzEnabled)
+        #expect(restored.fitFilterFamily == .fir)
+    }
+
+    /// The ICA fit copy used to take `bandPass`'s `.iir` default silently, no
+    /// matter what family the user had chosen — an unrecorded input to both the
+    /// fit and the payload. It is now a setting of its own and must round-trip.
+    @MainActor
+    @Test func icaCarriesTheFitFilterFamily() {
+        let vm = ICAViewModel(store: RecordingStore())
+        vm.usesFitFilter = true
+        vm.fitFilterFamily = .fir
+        #expect(vm.parameters["fitFilterFamily"] == FilterFamily.fir.rawValue)
+
+        let restored = ICAViewModel(store: RecordingStore())
+        #expect(restored.fitFilterFamily == .iir, "default matches what the code did before")
+        restored.apply(parameters: vm.parameters)
+        #expect(restored.fitFilterFamily == .fir)
+    }
+
+    /// A payload written before the family existed must reproduce what it
+    /// originally did, which was IIR.
+    @Test func icaFitFilterSettingsDefaultToIIROnDecode() throws {
+        let json = Data(#"{"lowCutoff":1,"highCutoff":40,"notch60HzEnabled":false}"#.utf8)
+        let decoded = try JSONDecoder().decode(ICAFitFilterSettings.self, from: json)
+        #expect(decoded.family == .iir)
     }
 
     @MainActor

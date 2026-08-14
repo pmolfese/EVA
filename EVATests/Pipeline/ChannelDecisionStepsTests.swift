@@ -197,6 +197,78 @@ struct ChannelDecisionStepsTests {
         #expect(interpolated.map(HistoryStepSummary.subtitle(for:)) == "2 ch · spherical spline")
     }
 
+    /// The data loss a paired run exposed: `markBad` was carried in the script,
+    /// never applied, and then **stripped** from the output — because the
+    /// outgoing script is rebuilt from the run's own (empty) bad set. The batch
+    /// output claimed no channels were bad when its own script said one was.
+    @MainActor
+    @Test func headlessCoreAppliesMarkBadAndPreservesItOnTheWayOut() async throws {
+        let signal = SyntheticSignal.make(
+            (0..<4).map { _ in [Float](repeating: 1, count: 200) },
+            samplingRate: 100
+        )
+        let store = RecordingStore()
+        let core = ProcessingCore(
+            store: store,
+            filter: FilterViewModel(store: store),
+            gradient: GradientViewModel(store: store),
+            ica: ICAViewModel(store: store),
+            artifactVM: ArtifactViewModel(store: store),
+            epoching: EpochingViewModel(store: store),
+            wavelet: WaveletReductionViewModel(store: store),
+            template: ArtifactTemplateViewModel(store: store),
+            segHealth: SegmentHealthViewModel(store: store)
+        )
+
+        let incoming = ChannelDecisionSteps.inserted(
+            into: script([.filter]),
+            badChannels: [0, 2],
+            interpolatedChannels: []
+        )
+        _ = await core.applyAutoSteps(incoming, to: signal)
+
+        #expect(store.channels.bad == [0, 2], "the mark must be applied, not just carried")
+
+        // And therefore survives the rebuild of the outgoing script.
+        let outgoing = ChannelDecisionSteps.inserted(
+            into: incoming,
+            badChannels: store.channels.bad,
+            interpolatedChannels: Set(store.channels.interpolated.keys)
+        )
+        let markBad = try #require(outgoing.steps.first { $0.operation == .markBad })
+        #expect(markBad.parameters["channels"] == "1,3")
+    }
+
+    /// Absolute, not additive — the step replaces the set rather than unioning,
+    /// which is what makes "unmark a channel" an ordinary step.
+    @MainActor
+    @Test func applyingMarkBadReplacesRatherThanUnions() async throws {
+        let signal = SyntheticSignal.make([[0, 1, 2, 3]], samplingRate: 100)
+        let store = RecordingStore()
+        store.channels.bad = [5, 9]
+        let core = ProcessingCore(
+            store: store,
+            filter: FilterViewModel(store: store),
+            gradient: GradientViewModel(store: store),
+            ica: ICAViewModel(store: store),
+            artifactVM: ArtifactViewModel(store: store),
+            epoching: EpochingViewModel(store: store),
+            wavelet: WaveletReductionViewModel(store: store),
+            template: ArtifactTemplateViewModel(store: store),
+            segHealth: SegmentHealthViewModel(store: store)
+        )
+
+        var incoming = EVAProcessingScript()
+        incoming.append(EVAProcessingStep(
+            operation: .markBad,
+            parameters: ["channels": "1"],
+            replayable: false
+        ))
+        _ = await core.applyAutoSteps(incoming, to: signal)
+
+        #expect(store.channels.bad == [0], "replaced, not unioned with 5 and 9")
+    }
+
     @Test func historyGivesTheseStepsTheirOwnNodes() {
         let script = ChannelDecisionSteps.inserted(
             into: self.script([.filter, .segment]),

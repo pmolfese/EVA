@@ -375,6 +375,8 @@ nonisolated enum ICAReplay {
                 samplingRate: signal.samplingRate,
                 lowCutoff: fitFilter.lowCutoff,
                 highCutoff: fitFilter.highCutoff,
+                highPassFamily: fitFilter.family,
+                lowPassFamily: fitFilter.family,
                 notch60HzEnabled: fitFilter.notch60HzEnabled
             )
         } catch {

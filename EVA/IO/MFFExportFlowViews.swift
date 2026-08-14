@@ -72,6 +72,7 @@ extension WaveformView {
         let processingScript = currentProcessingScript()
         let auditLogLines = currentProcessingAuditLogLines()
         let icaPayload = currentICAReplayPayload()
+        let artifactPayload = currentArtifactReplayPayload()
 
         mffExportTask?.cancel()
         let sessionID = recordingSessionID
@@ -83,7 +84,8 @@ extension WaveformView {
                     script: processingScript,
                     to: url,
                     auditLogLines: auditLogLines,
-                    icaPayload: icaPayload
+                    icaPayload: icaPayload,
+                    artifactPayload: artifactPayload
                 )
             }
             // A newer export owns `isExportingMFF` — clearing it here would blank
@@ -114,7 +116,8 @@ extension WaveformView {
         script: EVAProcessingScript,
         to url: URL,
         auditLogLines: [String] = [],
-        icaPayload: ICAReplayPayload? = nil
+        icaPayload: ICAReplayPayload? = nil,
+        artifactPayload: ArtifactReplayPayload? = nil
     ) async -> Result<URL, Error> {
         await MFFExportWriter.write(
             snapshot: snapshot,
@@ -122,7 +125,8 @@ extension WaveformView {
             script: script,
             to: url,
             auditLogLines: auditLogLines,
-            icaPayload: icaPayload
+            icaPayload: icaPayload,
+            artifactPayload: artifactPayload
         )
     }
 
@@ -374,7 +378,15 @@ extension WaveformView {
         if ica.cleanedSignal != nil {
             script.append(EVAProcessingStep(
                 operation: .icaClean,
-                parameters: ["averageReference": "\(ica.usesAverageReference)"],
+                // `ica.parameters`, not a hand-built dictionary. This used to
+                // emit `averageReference` alone, which quietly defeated the
+                // determinism audit's ICA fix: nine fit inputs were added to
+                // `ICAViewModel.parameters` and none of them reached `eva.xml`,
+                // because this builder never asked for them. The audit checked
+                // that each view model *serializes* what its apply path reads;
+                // it did not check that the script builder *uses* what the view
+                // model serializes. Same bug class, one level up.
+                parameters: ica.parameters,
                 replayable: false,
                 note: "ICA settings are portable; removed component indices are subject-specific."
             ))
@@ -432,10 +444,20 @@ extension WaveformView {
     /// that did not happen. Same condition `currentProcessingScript()` uses to
     /// emit the `icaClean` step, so the sidecar and the script cannot disagree.
     func currentICAReplayPayload() -> ICAReplayPayload? {
-        guard ica.cleanedSignal != nil,
-              let decomposition = ica.decomposition,
-              !decomposition.excludedComponents.isEmpty else { return nil }
-        return ICAReplayPayload(decomposition: decomposition, method: ica.method)
+        guard ica.cleanedSignal != nil else { return nil }
+        return ICAComponentRemoval.stagedPayload(ica)
+    }
+
+    /// The drawn-artifact definitions for `eva_artifacts.json`, or `nil` when no
+    /// cleaning is part of the exported state.
+    ///
+    /// Keyed on the same condition `currentProcessingScript()` uses to emit the
+    /// `artifactClean` step, so the sidecar and the script cannot disagree about
+    /// whether cleaning happened.
+    func currentArtifactReplayPayload() -> ArtifactReplayPayload? {
+        guard artifactVM.isCleaningActive, artifactVM.cleaningIsEnabled,
+              !template.definedArtifacts.isEmpty else { return nil }
+        return ArtifactReplayPayload(artifacts: template.definedArtifacts)
     }
 
     func artifactCleaningParameters() -> [String: String] {

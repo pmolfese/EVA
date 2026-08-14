@@ -65,7 +65,22 @@ enum HeadlessBatchProcessor {
             electrodePositions: geometry?.positions ?? [:]
         )
 
-        let result = await core.applyAutoSteps(script, to: signal, pnsSignal: pnsSignal, progress: progress)
+        // **This file's own** ICA operator, not the script source's. Read from
+        // the input package, so re-processing a package EVA already ran ICA on
+        // re-applies that recording's recorded removal, while a script copied
+        // from another subject finds no sidecar and `ProcessingCore` stops at
+        // `icaClean` as before. Carrying one subject's unmixing matrix onto
+        // another's electrodes would produce plausible, wrong data.
+        let icaPayload = ICAReplayPayload.read(fromPackage: url)
+        // Likewise this file's own drawn artifacts. A template is a waveform
+        // traced on one subject's blink; re-applying it to another's would be
+        // plausible and wrong.
+        let artifactPayload = ArtifactReplayPayload.read(fromPackage: url)
+
+        let result = await core.applyAutoSteps(
+            script, to: signal, pnsSignal: pnsSignal,
+            icaPayload: icaPayload, artifactPayload: artifactPayload, progress: progress
+        )
         guard result.remainingSteps.isEmpty, let output = result.signal else {
             return .needsInput
         }
@@ -107,7 +122,11 @@ enum HeadlessBatchProcessor {
             pnsSignal: pnsSignal,
             script: outgoingScript,
             to: outputURL,
-            auditLogLines: auditLogLines
+            auditLogLines: auditLogLines,
+            // Carry the operator forward, so the output package is re-processable
+            // on the same terms its input was.
+            icaPayload: core.ica.cleanedSignal != nil ? icaPayload : nil,
+            artifactPayload: core.artifactVM.cleanedSignal != nil ? artifactPayload : nil
         ) {
         case .success:
             progress?(ProcessingCore.ProgressUpdate(stepName: "Exporting", stepProgress: 1, fileProgress: 1))

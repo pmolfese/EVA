@@ -226,7 +226,7 @@ struct ArtifactTemplateDetectionResult: Sendable {
 /// The reference scalp topography used for spatial matching, plus the result
 /// of scanning the recording for it.
 /// One display frame sampled from the trajectory reference window.
-struct ArtifactTrajectoryFrame: Sendable, Identifiable {
+struct ArtifactTrajectoryFrame: Sendable, Identifiable, Codable {
     var id: Int { frameIndex }
     /// Index within the full (decimated) trajectory.
     var frameIndex: Int
@@ -241,7 +241,7 @@ struct ArtifactTrajectoryFrame: Sendable, Identifiable {
     var gfp: Float
 }
 
-struct ArtifactTemplateTopography: Sendable {
+struct ArtifactTemplateTopography: Sendable, Codable {
     var mode: ArtifactTopographyMode
     /// Absolute sample whose scalp map was used (window centre, peak GFP sample,
     /// or — for `.average` — the window centre as a nominal time reference).
@@ -274,7 +274,7 @@ struct ArtifactTemplateScopeCount: Identifiable, Sendable {
     var id: String { "\(name)-\(channelCount)-\(matchCount)" }
 }
 
-struct ArtifactTemplateAverage: Sendable {
+struct ArtifactTemplateAverage: Sendable, Codable {
     var samplingRate: Double
     var windowSizeSeconds: Double
     var eventCount: Int
@@ -283,7 +283,7 @@ struct ArtifactTemplateAverage: Sendable {
     var channelSummaries: [ArtifactTemplateChannelSummary]
 }
 
-struct ArtifactTemplateChannelSummary: Identifiable, Sendable {
+struct ArtifactTemplateChannelSummary: Identifiable, Sendable, Codable {
     var channelIndex: Int
     var peakAbsoluteMicrovolts: Float
     var rmsMicrovolts: Float
@@ -1686,6 +1686,31 @@ nonisolated enum ArtifactTemplateDetector {
             let fraction = Float(position - Double(lower))
             return samples[lower] * (1 - fraction) + samples[upper] * fraction
         }
+    }
+
+    /// The canonical template average, in window seconds rather than samples.
+    ///
+    /// Exposed so `ArtifactReplayPayload` can re-derive a stored artifact's
+    /// template against the signal it is about to clean, using **this**
+    /// averager. That matters: `ArtifactPreviewViews` has a second averager that
+    /// centres on `centerTimeSeconds` and applies a linear baseline detrend, and
+    /// the two do not agree. This one built `DefinedArtifact.average`, so this
+    /// one has to rebuild it, or regression's output moves for reasons that have
+    /// nothing to do with the data.
+    static func templateAverage(
+        signal: MFFSignalData,
+        events: [MFFEvent],
+        selectedChannelIndices: [Int],
+        windowSizeSeconds: Double
+    ) -> ArtifactTemplateAverage? {
+        guard signal.samplingRate > 0 else { return nil }
+        let windowSamples = max(Int((windowSizeSeconds * signal.samplingRate).rounded()), 3)
+        return average(
+            signal: signal,
+            events: events,
+            selectedChannelIndices: selectedChannelIndices,
+            windowSamples: windowSamples
+        )
     }
 
     private static func average(

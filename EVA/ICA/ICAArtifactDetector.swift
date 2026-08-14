@@ -95,6 +95,40 @@ nonisolated struct ICAFitFilterSettings: Codable, Sendable, Hashable {
     var lowCutoff: Double
     var highCutoff: Double
     var notch60HzEnabled: Bool
+    /// Filter family for the fit/activation copy.
+    ///
+    /// Added 2026-08-13. It was previously absent, which meant the activation
+    /// filter silently took `EEGSignalFilter.bandPass`'s `.iir` default no matter
+    /// what family the user had chosen in the filter popover — two filters in one
+    /// session, different families, with nothing recorded either way. That also
+    /// made it an unrecorded input to the payload: had the default ever changed,
+    /// existing `eva_ica.json` files would have reproduced differently.
+    ///
+    /// Defaults to `.iir` on decode so payloads written before this field
+    /// reproduce exactly what they originally did.
+    var family: FilterFamily = .iir
+
+    init(lowCutoff: Double, highCutoff: Double, notch60HzEnabled: Bool, family: FilterFamily = .iir) {
+        self.lowCutoff = lowCutoff
+        self.highCutoff = highCutoff
+        self.notch60HzEnabled = notch60HzEnabled
+        self.family = family
+    }
+
+    /// Hand-written because **a default value is not a decoding fallback.**
+    /// Swift's synthesized `init(from:)` requires every non-optional key to be
+    /// present and ignores the property's default entirely, so adding `family`
+    /// with `= .iir` would have made every `eva_ica.json` written before today
+    /// fail to decode — and `ICAReplayPayload.read` swallows a decode failure by
+    /// returning `nil`, so the whole payload would have vanished silently.
+    /// Caught by `icaFitFilterSettingsDefaultToIIROnDecode`.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        lowCutoff = try container.decode(Double.self, forKey: .lowCutoff)
+        highCutoff = try container.decode(Double.self, forKey: .highCutoff)
+        notch60HzEnabled = try container.decode(Bool.self, forKey: .notch60HzEnabled)
+        family = try container.decodeIfPresent(FilterFamily.self, forKey: .family) ?? .iir
+    }
 }
 
 struct ICAComponentSuggestion: Sendable {

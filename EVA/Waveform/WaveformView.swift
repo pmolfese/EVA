@@ -1166,11 +1166,11 @@ struct WaveformView: View {
                 key: newKey
             )
         }
-        // REWIND work item 1: rebuild the derived history when the chain moves.
+        // REWIND work item 1: fold the chain into the history tree when it moves.
         // Keyed on a signature of stage outputs rather than run per body pass —
         // see `WaveformHistoryRail.swift` for why that is both cheap and correct.
         .onChange(of: processingChainSignature, initial: true) { _, _ in
-            rebuildProcessingHistory()
+            recordProcessingHistory()
         }
         // B3: one `.sheet(item:)` in place of 18 chained `.sheet(isPresented:)`.
         // Presentation is still driven by the same per-VM booleans — they are

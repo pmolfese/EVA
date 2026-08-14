@@ -160,26 +160,20 @@ extension WaveformView {
                     }
                     return
                 }
-                artifactVM.cleanedSignal = outcome.signal
-                artifactVM.cleaningIsEnabled = true
-                artifactVM.cleaningSummaries = outcome.summaries
-                let summariesByID = Dictionary(uniqueKeysWithValues: outcome.summaries.map { ($0.artifactID, $0) })
-                let now = Date()
-                for index in template.definedArtifacts.indices {
-                    if summariesByID[template.definedArtifacts[index].id] != nil,
-                       template.definedArtifacts[index].cleaningMethod.removesArtifact {
-                        template.definedArtifacts[index].appliedMethod = template.definedArtifacts[index].cleaningMethod
-                        template.definedArtifacts[index].cleanedAt = now
-                    } else {
-                        template.definedArtifacts[index].appliedMethod = nil
-                        template.definedArtifacts[index].cleanedAt = nil
-                    }
-                }
-
-                artifactVM.cleaningStatusMessage = artifactCleaningSummaryText(outcome.summaries)
-                artifactVM.statusMessage = artifactVM.cleaningStatusMessage
-                artifactVM.detectionRefreshToken += 1
-                invalidateEpochsForSignalChange()
+                // Pipeline half shared with anything else that lands a cleaning
+                // result; the task handles, progress bridge, session guard,
+                // replay gate, and preview precompute below stay here because
+                // only a caller with a view has them.
+                ArtifactCleaningCore.commit(
+                    cleanedSignal: outcome.signal,
+                    summaries: outcome.summaries,
+                    statusMessage: artifactCleaningSummaryText(outcome.summaries),
+                    artifactVM: artifactVM,
+                    template: template,
+                    epoching: epoching,
+                    segHealth: segHealth,
+                    store: recordingStore
+                )
                 artifactVM.cleaningProgress = nil
                 artifactVM.isCleaning = false
                 artifactCleaningTask = nil

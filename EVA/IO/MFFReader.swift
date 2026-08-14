@@ -141,7 +141,7 @@ nonisolated struct MFFSignalData: Sendable {
     }
 }
 
-nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
+nonisolated struct MFFEvent: Identifiable, Hashable, Sendable, Codable {
     let id: String
     let code: String
     let label: String?

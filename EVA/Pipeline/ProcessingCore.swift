@@ -103,11 +103,43 @@ final class ProcessingCore {
         _ script: EVAProcessingScript,
         to signal: MFFSignalData,
         pnsSignal: MFFSignalData? = nil,
+        icaPayload: ICAReplayPayload? = nil,
+        artifactPayload: ArtifactReplayPayload? = nil,
         progress: ((ProgressUpdate) -> Void)? = nil
     ) async -> Result {
         var current = ica.cleanedSignal ?? gradient.correctedSignal ?? signal
 
-        let steps = script.replayableSteps
+        // `icaClean` is `replayable: false` — correctly, because the fitted
+        // operator belongs to one subject's electrodes and Copy Processing must
+        // not carry it onto another. But when the caller supplies **that
+        // package's own** `eva_ica.json`, the step is re-applicable after all:
+        // it becomes two matrix multiplies against the recorded operator, not a
+        // refit. So it joins the walk, and the `.icaClean` case below decides.
+        //
+        // **Only when a payload is in hand.** Without one the step stays out of
+        // the walk, exactly as `replayableSteps` left it before — which is not a
+        // silent omission: a non-replayable step is classified `.skip`, and the
+        // batch config pane shows it as "Recorded for provenance only", unchecked
+        // by default. The user has already been told it will not run. Making the
+        // absent-payload case *stop* instead would send batches that complete
+        // today off to windowed replay for no reason.
+        //
+        // The safety property is structural rather than checked: the payload is
+        // read from the *input package* (`HeadlessBatchProcessor`), never from
+        // whatever file the script came from, so a script copied from another
+        // subject arrives with no payload and nothing changes.
+        let steps = script.steps.filter {
+            $0.replayable
+                || ($0.operation == .icaClean && icaPayload != nil)
+                || ($0.operation == .artifactClean && artifactPayload != nil)
+                // `markBad` needs no payload — the channel list *is* the step —
+                // and it has to be applied, not merely carried. Skipping it left
+                // `store.channels.bad` empty, and because the outgoing script is
+                // rebuilt from that state, the incoming mark was then stripped:
+                // a batch output claiming no channels were bad when its own
+                // script said one was. Found by a paired run, 2026-08-13.
+                || $0.operation == .markBad
+        }
         for (index, step) in steps.enumerated() {
             let stepName = ReplayStepDisplay.label(for: step.operation)
             let stepBase = steps.isEmpty ? 1 : Double(index) / Double(steps.count)
@@ -153,6 +185,72 @@ final class ProcessingCore {
                     )
                 }
                 current = filter.output ?? current
+
+            case .icaClean:
+                // Unreachable without a payload — the filter above kept the step
+                // out of the walk. Belt and braces, and it keeps the `guard`
+                // honest if that filter ever changes.
+                guard let icaPayload else {
+                    return Result(signal: current, remainingSteps: Array(steps[index...]))
+                }
+                ica.apply(parameters: step.parameters)
+                do {
+                    current = try await ICAComponentRemoval.apply(
+                        to: current,
+                        payload: icaPayload,
+                        ica: ica,
+                        artifactVM: artifactVM,
+                        template: template,
+                        epoching: epoching,
+                        segHealth: segHealth,
+                        store: store
+                    )
+                } catch {
+                    // Stopping rather than continuing with the uncorrected
+                    // signal: a payload that does not fit this recording means
+                    // the rest of the script describes data we do not have.
+                    ica.statusMessage = error.localizedDescription
+                    return Result(signal: current, remainingSteps: Array(steps[index...]))
+                }
+
+            case .artifactClean:
+                // Same contract as `icaClean`: unreachable without a payload,
+                // and the payload comes from the input package rather than the
+                // script's source, so templates drawn on one subject's blink
+                // cannot be applied to another's.
+                guard let artifactPayload else {
+                    return Result(signal: current, remainingSteps: Array(steps[index...]))
+                }
+                // Templates are re-derived against `current` — the signal being
+                // cleaned — rather than restored from whatever the definition was
+                // drawn on. See `ArtifactReplayPayload`.
+                let artifacts = artifactPayload.artifacts(rederivedAgainst: current)
+                template.definedArtifacts = artifacts
+                let outcome = ArtifactCleaner.cleanedSignal(
+                    from: current,
+                    artifacts: artifacts,
+                    excluding: store.channels.bad.union(store.channels.interpolated.keys)
+                )
+                ArtifactCleaningCore.commit(
+                    cleanedSignal: outcome.signal,
+                    summaries: outcome.summaries,
+                    statusMessage: "Cleaned \(outcome.summaries.count) artifact(s).",
+                    artifactVM: artifactVM,
+                    template: template,
+                    epoching: epoching,
+                    segHealth: segHealth,
+                    store: store
+                )
+                current = outcome.signal
+
+            case .markBad:
+                // Absolute, not additive: the step carries the whole set, so it
+                // replaces rather than unions. That is what makes "unmark a
+                // channel" expressible as an ordinary step — see `REWIND.md`,
+                // *Channel decisions: the carry-through rules*.
+                store.channels.bad = ChannelDecisionSteps.channelIndices(
+                    from: step.parameters["channels"] ?? ""
+                )
 
             case .thresholdArtifactDetection:
                 artifactVM.detectionMethod = .threshold

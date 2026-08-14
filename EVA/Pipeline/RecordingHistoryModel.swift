@@ -11,26 +11,25 @@
 //
 //  Owns the recording window's `EVAHistory` and the rail's display state.
 //
-//  ## Derived today, authoritative later
+//  ## Accumulated from the chain, not appended per apply
 //
-//  Right now the history is **rebuilt from `currentProcessingScript()`** whenever
-//  the pipeline chain changes. Nothing calls `EVAHistory.apply(_:)` at the moment
-//  a stage runs, so the tree is a projection of live view model state rather than
-//  the record of what happened. Two consequences worth being honest about:
+//  Every time the pipeline chain moves, the canonical script is folded into the
+//  tree with `EVAHistory.adopt`. Content addressing makes that cheap and makes it
+//  *accumulate*: the unchanged prefix resolves to the nodes that already exist,
+//  and a changed stage forks at exactly that stage while the branch you came from
+//  survives with its cache, pin, and label. The tree therefore remembers states
+//  you have left, which is the property that separates a history from a readout.
 //
-//  - **The tree is always linear.** A branch is a path you left behind, and the
-//    script only describes the state you are in. Forks appear when the apply
-//    paths record nodes themselves.
-//  - **Re-applying a stage with the same parameters produces the same node**, so
-//    the rail does not grow while someone tunes a cutoff and re-applies. That is
-//    the right behavior and it comes free from content addressing — but it is
-//    worth knowing it is not yet evidence that node *recording* dedups, because
-//    nothing is recording.
+//  It is driven from the chain rather than from each apply site on purpose.
+//  Applying a stage upstream of one already applied — gradient after filter —
+//  invalidates the downstream stage, so the order things *happened* in is not the
+//  order that describes the resulting signal. Appending in application order
+//  would record a lineage that does not reproduce the bytes, and reproducing the
+//  bytes is the whole promise of a node ID. See `EVAHistory.adopt`.
 //
-//  This is deliberately the cheap half of `REWIND.md` work item 1. It puts a
-//  real, correct rail on screen against real recordings, which is how the
-//  granularity question — the one the design flags as most likely to be got
-//  wrong — gets answered by looking rather than by reasoning.
+//  **Still missing before this is a full record:** measured `computeCost` per
+//  node, which only the apply sites know, and navigation — clicking a node does
+//  nothing yet. Both are `REWIND.md` work item 2's territory.
 //
 //  It lives here rather than in `WaveformUIModels.swift` because that file is
 //  explicitly display state that "nothing here belongs in eva.xml or affects
@@ -42,27 +41,44 @@ import SwiftUI
 @MainActor
 @Observable
 final class RecordingHistoryModel {
-    /// The tree. Rebuilt from the processing script until the apply paths record
-    /// nodes directly — see the file header.
+    /// The tree. Accumulated from the processing chain — see the file header.
     private(set) var history = EVAHistory(recordingKey: "")
 
-    /// Rebuilds from `script`, keyed to `recordingKey` so two recordings never
-    /// share node identities.
+    /// The recording the current tree belongs to. A different key means a
+    /// different file, and nodes must not be shared across files.
+    private var recordingKey = ""
+
+    /// Folds the current processing chain into the tree and moves the pointer to
+    /// its tip.
     ///
-    /// Annotations on surviving nodes are carried across
-    /// (`EVAHistory.adoptAnnotations`), so a rebuild does not discard a pin the
-    /// user set — and so an unchanged chain rebuilds to something genuinely
-    /// equal, which is what makes the guard below work at all.
+    /// **Accumulates rather than rebuilds.** The previous version discarded the
+    /// tree and derived a fresh one every time the chain moved, which made
+    /// branches impossible by construction — every state you left was thrown
+    /// away. `EVAHistory.adopt` re-walks the canonical chain from the root
+    /// instead, and content addressing turns that into a no-op for the part that
+    /// has not changed and a fork at exactly the stage that has. Widen a filter
+    /// after narrowing it and both nodes now exist, with the branch you came from
+    /// still carrying its pin and its label.
     ///
-    /// Assigns only when the result differs. The comparison is a dictionary of
-    /// small values, far cheaper than the SwiftUI invalidation an unconditional
-    /// write would cause every time the chain signature moves — including the
-    /// many changes that produce the same tree.
-    func rebuild(recordingKey: String, script: EVAProcessingScript) {
-        var rebuilt = EVAHistory(recordingKey: recordingKey, script: script)
-        rebuilt.adoptAnnotations(from: history)
-        guard rebuilt != history else { return }
-        history = rebuilt
+    /// It is still driven from the chain rather than from each apply site, and
+    /// that is on purpose — see `EVAHistory.adopt` for why application order is
+    /// the wrong thing to record.
+    func record(
+        recordingKey: String,
+        script: EVAProcessingScript,
+        payloadDigests: [EVAProcessingStep.Operation: String] = [:]
+    ) {
+        if recordingKey != self.recordingKey {
+            self.recordingKey = recordingKey
+            history = EVAHistory(recordingKey: recordingKey)
+        }
+        var updated = history
+        updated.adopt(script, payloadDigests: payloadDigests)
+        // Assign only on a real change: `EVAHistory` is `Equatable` over small
+        // values, far cheaper than the SwiftUI invalidation an unconditional
+        // write would cause every time the chain signature moves.
+        guard updated != history else { return }
+        history = updated
     }
 
     /// Rail rows for the current tree, root first.
@@ -83,11 +99,20 @@ final class RecordingHistoryModel {
         }
     }
 
+    func setPinned(_ pinned: Bool, for id: EVAHistoryNodeID) {
+        history.setPinned(pinned, for: id)
+    }
+
+    func setLabel(_ label: String?, for id: EVAHistoryNodeID) {
+        history.setLabel(label, for: id)
+    }
+
     /// Short id of the current node, shown in the rail header the way git shows
     /// an abbreviated hash.
     var currentShortID: String { history.currentID.short }
 
     func reset() {
+        recordingKey = ""
         history = EVAHistory(recordingKey: "")
     }
 }

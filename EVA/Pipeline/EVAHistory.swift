@@ -157,18 +157,13 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
         lastVisitedChild = [:]
     }
 
-    /// A linear history built by applying `script`'s steps in order from the root.
+    /// A history containing exactly one script's chain, root to tip.
     ///
-    /// The bridge between the tree and the pipeline as it exists today: nothing
-    /// yet calls `apply(_:)` when a stage runs, but `currentProcessingScript()`
-    /// already derives the whole chain from live view model state, so replaying
-    /// it here produces a **real** history — the same steps, in the same
-    /// canonical order — without touching a single apply path.
-    ///
-    /// The result is necessarily linear. A tree built this way has no branches
-    /// because the script only describes the state you are in, not the ones you
-    /// passed through. Branching arrives when the apply paths record nodes
-    /// themselves; until then this is the honest shape of what EVA knows.
+    /// Convenience over `adopt` for a fresh tree — tests and one-shot
+    /// derivations. A tree built this way is linear because one script describes
+    /// one lineage; branches come from `adopt`-ing further chains into an
+    /// existing tree, where content addressing forks at the stage that differs
+    /// and leaves the rest alone.
     init(recordingKey: String, script: EVAProcessingScript) {
         self.init(recordingKey: recordingKey)
         for step in script.steps {
@@ -309,6 +304,39 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
         return id
     }
 
+    /// Walks `script` from the root, applying each step, and leaves the current
+    /// pointer on the result.
+    ///
+    /// This is how the tree **accumulates** rather than being rebuilt. Content
+    /// addressing does the work: a step that has been applied at this parent
+    /// before resolves to the node that already exists, so re-adopting an
+    /// unchanged chain touches nothing, while changing one stage's parameters
+    /// forks at exactly that stage and leaves the branch you came from intact,
+    /// cache, annotations, and all.
+    ///
+    /// Adopting the *canonical* chain rather than recording each apply as it
+    /// happens is the deliberate choice here, and it avoids a trap. Applying a
+    /// stage that sits upstream of one already applied — gradient after filter —
+    /// invalidates the downstream stage, so the order things *happened* in is not
+    /// the order that describes the resulting signal. A node appended in
+    /// application order would claim filter → gradient produced this data when
+    /// gradient → filter did. The canonical script is the one that reproduces
+    /// the bytes, and reproducing the bytes is what a node ID promises.
+    ///
+    /// `payloadDigests` supplies the subject-specific identity for steps that
+    /// need one (ICA's operator), keyed by operation — a script carries only
+    /// portable parameters, so without this two different ICA removals would
+    /// hash to one node.
+    mutating func adopt(
+        _ script: EVAProcessingScript,
+        payloadDigests: [EVAProcessingStep.Operation: String] = [:]
+    ) {
+        currentID = rootID
+        for step in script.steps {
+            apply(step, payloadDigest: payloadDigests[step.operation])
+        }
+    }
+
     /// Moves the current pointer. Returns `false` for an unknown node.
     ///
     /// Records the descent through every edge on the path, so a later
@@ -406,28 +434,6 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
     mutating func recordComputeCost(_ seconds: TimeInterval, for id: EVAHistoryNodeID) {
         guard nodesByID[id]?.computeCost == nil else { return }
         nodesByID[id]?.computeCost = seconds
-    }
-
-    /// Copies annotations — label, pin, measured cost, creation time — from
-    /// `other` onto every node the two trees share.
-    ///
-    /// Needed because the history is currently *rebuilt* from the processing
-    /// script rather than accumulated (see `RecordingHistoryModel`). Without
-    /// this, a rebuild would silently discard a pin the user set, and — more
-    /// quietly — a freshly built tree would never compare equal to the one it
-    /// replaces, since every node would carry a new `createdAt`. That would make
-    /// the "assign only when it actually changed" guard useless.
-    ///
-    /// Node identity is content-addressed, so "the same node" here means the same
-    /// steps in the same order, which is exactly when an annotation still
-    /// applies.
-    mutating func adoptAnnotations(from other: EVAHistory) {
-        for (id, previous) in other.nodesByID where nodesByID[id] != nil {
-            nodesByID[id]?.label = previous.label
-            nodesByID[id]?.isPinned = previous.isPinned
-            nodesByID[id]?.computeCost = previous.computeCost
-            nodesByID[id]?.createdAt = previous.createdAt
-        }
     }
 
     // MARK: - Codable

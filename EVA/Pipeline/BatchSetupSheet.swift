@@ -294,9 +294,33 @@ struct BatchSetupSheet: View {
     /// no window opened for any file. See `BatchController.startHeadless`.
     private var canRunHeadless: Bool {
         guard config.mode == .fullAuto else { return false }
-        return !config.steps.contains {
-            $0.included && ($0.kind == .decision || ($0.kind == .review && $0.pauseToReview))
+        return !config.steps.contains { step in
+            guard step.included else { return false }
+            if step.kind == .review, step.pauseToReview { return true }
+            guard step.kind == .decision else { return false }
+            // A decision step is a decision only while the decision is unmade.
+            // When every input package carries its own payload — the ICA
+            // operator, the drawn artifact definitions — the answer is already
+            // recorded and re-applying it asks nobody anything, so it stops
+            // being a reason to open a window.
+            switch step.step.operation {
+            case .icaClean: return !everyFileHasItsOwn(ICAReplayPayload.read)
+            case .artifactClean: return !everyFileHasItsOwn(ArtifactReplayPayload.read)
+            default: return true
+            }
         }
+    }
+
+    /// Whether every selected file carries its own payload of the given kind.
+    ///
+    /// Checked per *file*, not per script, and deliberately so: an ICA operator
+    /// belongs to one subject's electrodes and a drawn template to one subject's
+    /// blink, so "this script contains ICA" says nothing about whether any given
+    /// file can re-apply it. A file without a sidecar needs a human, which is
+    /// exactly the window this gate exists to open. Reading a few tens of KB of
+    /// JSON per file at setup is cheap next to being wrong about it.
+    private func everyFileHasItsOwn<Payload>(_ read: (URL) -> Payload?) -> Bool {
+        !files.isEmpty && files.allSatisfy { read($0) != nil }
     }
 
     private func start() {
@@ -304,10 +328,31 @@ struct BatchSetupSheet: View {
         var scoped = files
         scoped.append(outputFolder)
         if canRunHeadless {
+            // Only the steps the user left checked. The windowed path has always
+            // honoured `included` (it takes `config.steps`); headless received the
+            // whole script and applied every auto step regardless, so unchecking
+            // one did nothing there. Filtering here makes the two agree — and it
+            // is what lets a *checked* provenance step, like `markBad`, mean
+            // "yes, apply this" rather than being indistinguishable from one the
+            // user deliberately left off.
+            //
+            // Channel decisions are kept regardless. They are not steps you opt
+            // into — their `included` toggle is disabled in the pane — they are
+            // *state* the output has to carry, and dropping them is how the
+            // source file's bad-channel record went missing from a batch output.
+            var includedScript = script
+            let includedIndices = Set(config.steps.filter(\.included).map(\.id))
+            includedScript.steps = script.steps.enumerated()
+                .filter { index, step in
+                    includedIndices.contains(index)
+                        || step.operation == .markBad
+                        || step.operation == .interpolateChannels
+                }
+                .map(\.element)
             Task {
                 await batch.startHeadless(
                     files: files,
-                    script: script,
+                    script: includedScript,
                     sourceName: sourceName,
                     outputFolder: outputFolder,
                     scopedURLs: scoped

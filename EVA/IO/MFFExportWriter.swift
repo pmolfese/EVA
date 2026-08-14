@@ -23,7 +23,8 @@ enum MFFExportWriter {
         script: EVAProcessingScript,
         to url: URL,
         auditLogLines: [String] = [],
-        icaPayload: ICAReplayPayload? = nil
+        icaPayload: ICAReplayPayload? = nil,
+        artifactPayload: ArtifactReplayPayload? = nil
     ) async -> Result<URL, Error> {
         // Stamp what we are actually writing, so re-opening this package does not
         // have to infer it from the EGI structure. The writer is the one place
@@ -56,6 +57,11 @@ enum MFFExportWriter {
                 // makes the step re-applicable without a refit. See
                 // `ICAReplayPayload`.
                 try? icaPayload?.write(toPackage: url)
+                // The drawn-artifact definitions. Same split as ICA: `eva.xml`
+                // records that cleaning happened and with which portable
+                // settings, this carries the subject-specific definitions that
+                // make it re-appliable.
+                try? artifactPayload?.write(toPackage: url)
                 let log = EVAProcessLog(
                     header: "EVA \(EVAProcessingScriptXML.currentAppVersion) export — \(url.lastPathComponent)"
                 )
