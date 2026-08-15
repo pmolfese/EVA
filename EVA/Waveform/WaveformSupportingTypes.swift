@@ -831,9 +831,10 @@ nonisolated struct PSABuildJob: Sendable {
 
         for event in events {
             var categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""] ?? []
-            if let description = event.eventDescription, let rules = regexRulesByCode[event.code] {
+            if let rules = regexRulesByCode[event.code] {
                 for entry in rules {
-                    guard let match = description.firstMatch(of: entry.regex) else { continue }
+                    let matchText = entry.rule.matchField == .label ? event.label : event.eventDescription
+                    guard let matchText, let match = matchText.firstMatch(of: entry.regex) else { continue }
                     categories.append(entry.rule.resolvedCategoryName(for: match))
                 }
             }

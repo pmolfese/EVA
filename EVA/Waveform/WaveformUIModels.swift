@@ -89,6 +89,7 @@ final class WaveformEventDisplayModel {
     var categoryGroupSelectedCodes = Set<String>()
     var categoryRegexSourceCode = ""
     var categoryRegexPattern = ""
+    var categoryRegexMatchField: CategoryRegexMatchField = .description
 }
 
 /// Physio (PNS) pane display state: visibility, per-channel scaling, polarity,

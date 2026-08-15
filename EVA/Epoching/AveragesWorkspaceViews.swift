@@ -55,7 +55,8 @@ extension WaveformView {
                     description: Text("Create PSA averages to explore category waveforms, topographies, and channels.")
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if !showsPlotArea && !epoching.showsAveragesLog {
+            } else if !showsPlotArea && !epoching.showsAveragesLog
+                && !epoching.showsAveragesMultiButterfly && !epoching.showsAveragesDifference && !epoching.showsAveragesFilmstrip {
                 ContentUnavailableView(
                     "All Average Views Hidden",
                     systemImage: "rectangle.3.group",
@@ -106,6 +107,21 @@ extension WaveformView {
                     if showsPlotArea {
                         averagesLatencyScrubber(segment: segments[0], relativeSample: relativeSample)
                     }
+
+                    if epoching.showsAveragesMultiButterfly {
+                        averagesMultiButterflyPane(signal: signal, segments: segments)
+                            .frame(minHeight: 420)
+                    }
+
+                    if epoching.showsAveragesDifference {
+                        averagesDifferencePane(signal: signal, segments: segments)
+                            .frame(minHeight: 420)
+                    }
+
+                    if epoching.showsAveragesFilmstrip {
+                        averagesFilmstripPane(signal: signal, segments: segments)
+                            .frame(minHeight: 260)
+                    }
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -143,7 +159,30 @@ extension WaveformView {
                     systemImage: "list.bullet.rectangle",
                     isOn: $epoching.showsAveragesLog
                 )
+                averagesToolbarToggle(
+                    title: "Multi-Butterfly",
+                    systemImage: "rectangle.grid.1x2",
+                    isOn: $epoching.showsAveragesMultiButterfly
+                )
+                averagesToolbarToggle(
+                    title: "Difference",
+                    systemImage: "plusminus",
+                    isOn: $epoching.showsAveragesDifference
+                )
+                averagesToolbarToggle(
+                    title: "Filmstrip",
+                    systemImage: "square.grid.3x1.below.line.grid.1x2",
+                    isOn: $epoching.showsAveragesFilmstrip
+                )
             }
+
+            Divider()
+                .frame(height: 42)
+
+            Toggle("GFP", isOn: $epoching.showsAveragesGFP)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+                .help("Show a Global Field Power trace under every butterfly plot.")
 
             Divider()
                 .frame(height: 42)
@@ -198,60 +237,12 @@ extension WaveformView {
 
     private func averagesButterflyPane(signal: MFFSignalData, segments: [EpochSegment], relativeSample currentRelativeSample: Int) -> some View {
         averagesPanel {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Butterfly")
-                        .font(.headline)
-                    Spacer()
-                    Text(averagesLatencyText(segment: segments[0], relativeSample: currentRelativeSample, samplingRate: signal.samplingRate))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-
-                GeometryReader { proxy in
-                    OverlayButterflyPlot(
-                        data: signal.data,
-                        segments: segments,
-                        colors: segments.map { epochColor(for: $0.colorIndex) },
-                        hiddenChannels: channels.hidden,
-                        amplitudeScale: amplitudeScale,
-                        samplingRate: signal.samplingRate,
-                        highlightRelativeSample: currentRelativeSample,
-                        channelName: { eegChannelDisplayName(index: $0, signal: signal) },
-                        onTapChannel: { channelInspectorSelection = .channel($0) },
-                        onScrubRelativeSample: { sample in
-                            setAveragesWorkspaceLatency(sample, segment: segments[0])
-                        }
-                    )
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(
-                        SpatialTapGesture(count: 2, coordinateSpace: .local)
-                            .onEnded { value in
-                                setAveragesWorkspaceLatency(
-                                    relativeSample(forButterflyX: value.location.x, width: proxy.size.width, segment: segments[0]),
-                                    segment: segments[0]
-                                )
-                            }
-                    )
-                    .contextMenu {
-                        figureSaveMenu(
-                            title: "Averages Butterfly",
-                            legend: overlayLegendItems(),
-                            size: CGSize(width: 820, height: 300)
-                        ) {
-                            OverlayButterflyPlot(
-                                data: signal.data,
-                                segments: segments,
-                                colors: segments.map { epochColor(for: $0.colorIndex) },
-                                hiddenChannels: channels.hidden,
-                                amplitudeScale: amplitudeScale,
-                                samplingRate: signal.samplingRate,
-                                highlightRelativeSample: currentRelativeSample
-                            )
-                        }
-                    }
-                }
-            }
+            AveragesButterflyPaneContent(
+                view: self,
+                signal: signal,
+                segments: segments,
+                currentRelativeSample: currentRelativeSample
+            )
         }
     }
 
@@ -263,6 +254,14 @@ extension WaveformView {
                     Text("Topography")
                         .font(.headline)
                     Spacer()
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Slider(value: $epoching.topographyTopomapScale, in: 0.6...2.2)
+                            .frame(width: 90)
+                    }
+                    .help("Size of the topomaps below.")
                     Text(averagedTopomapLatencyText(relativeSample: relativeSample))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -274,10 +273,13 @@ extension WaveformView {
                     let autoZ = topomapAutoZ(samples: samples, in: signal)
                     let colorRange = topomapColorRange()
                     let zScaling = topomapZScaling(auto: autoZ)
+                    let tileScale = epoching.topographyTopomapScale
+                    let mapHeight = 135 * tileScale
+                    let cardHeight = 170 * tileScale
 
                     HStack(spacing: 0) {
                         ScrollView {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 12) {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150 * tileScale), spacing: 10)], spacing: 12) {
                                 ForEach(samples) { entry in
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(epoching.displayCategory(entry.category))
@@ -293,11 +295,11 @@ extension WaveformView {
                                             zScaling: zScaling,
                                             showsHeader: false,
                                             colorBarPlacement: .trailing,
-                                            minimumMapHeight: 135,
+                                            minimumMapHeight: mapHeight,
                                             channelName: { eegChannelDisplayName(index: $0, signal: signal) },
                                             onTapChannel: { channelInspectorSelection = .channel($0) }
                                         )
-                                        .frame(height: 170)
+                                        .frame(height: cardHeight)
                                         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                                     }
                                 }
@@ -342,10 +344,10 @@ extension WaveformView {
                     .contextMenu {
                         figureSaveMenu(
                             title: "Average Topographies",
-                            legend: [],
-                            size: CGSize(width: CGFloat(max(samples.count, 1)) * 300, height: 330)
+                            legend: topomapLegendItems(samples),
+                            size: CGSize(width: CGFloat(max(samples.count, 1)) * 300 * tileScale, height: 330 * tileScale)
                         ) {
-                            topomapsFigure(samples: samples, layout: layout, scale: autoScale, colorRange: colorRange, zScaling: zScaling, signal: signal)
+                            topomapsFigure(samples: samples, layout: layout, scale: autoScale, colorRange: colorRange, zScaling: zScaling, signal: signal, tileScale: tileScale)
                         }
                     }
                 } else {
@@ -408,7 +410,8 @@ extension WaveformView {
                         figureSaveMenu(
                             title: channelInspectorTitle(for: selection, signal: signal),
                             legend: overlayLegendItems(),
-                            size: CGSize(width: 720, height: 320)
+                            size: CGSize(width: 720, height: 320),
+                            seconds: figureSeconds(segments, samplingRate: signal.samplingRate)
                         ) {
                             ChannelInspectorPlot(
                                 signal: signal,
@@ -763,7 +766,9 @@ extension WaveformView {
         }
     }
 
-    private func averagesPanel<Content: View>(fillHeight: Bool = true, @ViewBuilder content: () -> Content) -> some View {
+    /// Not private: reused by `JointPlotView.swift`'s pane for the same
+    /// bordered-card chrome.
+    func averagesPanel<Content: View>(fillHeight: Bool = true, @ViewBuilder content: () -> Content) -> some View {
         content()
             .padding(12)
             .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
@@ -776,7 +781,7 @@ extension WaveformView {
         setAveragesWorkspaceLatency(segment.stimulusOffsetSamples, segment: segment)
     }
 
-    private func setAveragesWorkspaceLatency(_ value: Int, segment: EpochSegment) {
+    fileprivate func setAveragesWorkspaceLatency(_ value: Int, segment: EpochSegment) {
         let maxIndex = max(segment.endSample - segment.startSample, 0)
         epoching.butterflyTopomapRelativeSample = min(max(value, 0), maxIndex)
         topomapSample = nil
@@ -791,7 +796,7 @@ extension WaveformView {
         return min(max(first.stimulusOffsetSamples, 0), maxIndex)
     }
 
-    private func averagesLatencyText(segment: EpochSegment, relativeSample: Int, samplingRate: Double) -> String {
+    fileprivate func averagesLatencyText(segment: EpochSegment, relativeSample: Int, samplingRate: Double) -> String {
         guard samplingRate > 0 else { return "0 ms" }
         let latencyMilliseconds = Double(relativeSample - segment.stimulusOffsetSamples) / samplingRate * 1_000
         return String(format: "%+.0f ms", latencyMilliseconds)
@@ -880,5 +885,230 @@ private struct AveragesLatencyScrubberControl: View {
         guard samplingRate > 0 else { return "0 ms" }
         let latencyMilliseconds = Double(relativeSample - segment.stimulusOffsetSamples) / samplingRate * 1_000
         return String(format: "%+.0f ms", latencyMilliseconds)
+    }
+}
+
+/// The Butterfly pane's actual content — a plain struct (not another
+/// `@ViewBuilder` method on `WaveformView`) so it can hold the pointer
+/// position needed for "right-click → Add Joint" to place a marker exactly
+/// where the user clicked. Joint markers show a box (topomap per selected
+/// condition) above the plot, connected by a guide line down through it —
+/// see `JointMarkerOverlay.swift`.
+private struct AveragesButterflyPaneContent: View {
+    let view: WaveformView
+    let signal: MFFSignalData
+    let segments: [EpochSegment]
+    let currentRelativeSample: Int
+
+    @State private var pointerRelativeSample: Int?
+
+    var body: some View {
+        let gfpHeight: CGFloat = view.epoching.showsAveragesGFP ? 50 : 0
+        // For the export size (must be known before rendering, so it can't
+        // wait for a live GeometryReader's width): computed at the export
+        // card's own literal width, same call `AveragesButterflyFigure` uses.
+        let exportBoxHeight = view.jointMarkerLayout(
+            topomapSegments: segments, signal: signal, referenceSegment: segments[0],
+            width: 820, orientation: view.epoching.jointBoxOrientation
+        ).boxAreaHeight
+
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Butterfly")
+                    .font(.headline)
+                Spacer()
+                if !view.epoching.jointPlotMarkers.isEmpty {
+                    view.jointBoxControls(showsOrientation: segments.count > 1)
+                }
+                Text(view.averagesLatencyText(segment: segments[0], relativeSample: currentRelativeSample, samplingRate: signal.samplingRate))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            GeometryReader { proxy in
+                let width = proxy.size.width
+                let markerLayout = view.jointMarkerLayout(
+                    topomapSegments: segments, signal: signal, referenceSegment: segments[0],
+                    width: width, orientation: view.epoching.jointBoxOrientation
+                )
+                let boxHeight = markerLayout.boxAreaHeight
+                let butterflyHeight = max(proxy.size.height - boxHeight - gfpHeight, 0)
+
+                ZStack(alignment: .topLeading) {
+                    if boxHeight > 0 {
+                        JointMarkerGuideLines(
+                            view: view,
+                            topomapSegments: segments,
+                            signal: signal,
+                            referenceSegment: segments[0],
+                            width: width,
+                            totalHeight: proxy.size.height
+                        )
+                    }
+
+                    OverlayButterflyPlot(
+                        data: signal.data,
+                        segments: segments,
+                        colors: segments.map { view.epochColor(for: $0.colorIndex) },
+                        hiddenChannels: view.channels.hidden,
+                        amplitudeScale: view.amplitudeScale,
+                        samplingRate: signal.samplingRate,
+                        highlightRelativeSample: currentRelativeSample,
+                        channelName: { view.eegChannelDisplayName(index: $0, signal: signal) },
+                        onTapChannel: { view.channelInspectorSelection = .channel($0) },
+                        onScrubRelativeSample: { sample in
+                            view.setAveragesWorkspaceLatency(sample, segment: segments[0])
+                        }
+                    )
+                    .overlay(WaveformVoltageAxisOverlay(amplitudeScale: view.amplitudeScale))
+                    .offset(y: boxHeight)
+                    .frame(width: width, height: butterflyHeight)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(
+                        SpatialTapGesture(count: 2, coordinateSpace: .local)
+                            .onEnded { value in
+                                view.setAveragesWorkspaceLatency(
+                                    view.relativeSample(forButterflyX: value.location.x, width: width, segment: segments[0]),
+                                    segment: segments[0]
+                                )
+                            }
+                    )
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            pointerRelativeSample = view.relativeSample(forButterflyX: location.x, width: width, segment: segments[0])
+                        case .ended:
+                            break
+                        }
+                    }
+
+                    if view.epoching.showsAveragesGFP {
+                        GFPStripView(
+                            data: signal.data,
+                            segments: segments,
+                            colors: segments.map { view.epochColor(for: $0.colorIndex) }
+                        )
+                        .frame(width: width, height: gfpHeight - 6)
+                        .offset(y: boxHeight + butterflyHeight + 6)
+                    }
+
+                    if boxHeight > 0 {
+                        JointMarkerBoxesLayer(
+                            view: view,
+                            layout: view.recording.sensorLayout ?? SensorLayout(name: "", positions: []),
+                            signal: signal,
+                            topomapSegments: segments,
+                            referenceSegment: segments[0],
+                            width: width,
+                            markerLayout: markerLayout,
+                            coordinateSpaceName: "averagesButterflyJoint",
+                            orientation: view.epoching.jointBoxOrientation
+                        )
+                    }
+                }
+                .coordinateSpace(name: "averagesButterflyJoint")
+                .contextMenu {
+                    view.figureSaveMenu(
+                        title: "Averages Butterfly",
+                        legend: view.overlayLegendItems(),
+                        size: CGSize(width: 820, height: 300 + gfpHeight + exportBoxHeight + AveragesButterflyFigure.timeAxisHeight),
+                        seconds: view.figureSeconds(segments, samplingRate: signal.samplingRate),
+                        scaleSize: CGSize(width: 820, height: 300)
+                    ) {
+                        AveragesButterflyFigure(
+                            view: view,
+                            signal: signal,
+                            segments: segments,
+                            highlightRelativeSample: currentRelativeSample,
+                            gfpHeight: gfpHeight,
+                            boxHeight: exportBoxHeight
+                        )
+                    }
+                    Divider()
+                    view.addJointMarkerMenuItem(pointerRelativeSample: pointerRelativeSample)
+                }
+            }
+        }
+    }
+}
+
+/// Static export twin of `AveragesButterflyPaneContent`'s plot area (no
+/// hover/drag/tap gestures — export renders a fixed image), used by its
+/// "Save Figure As…" menu so exported figures include any joint markers.
+private struct AveragesButterflyFigure: View {
+    static let timeAxisHeight: CGFloat = 20
+
+    let view: WaveformView
+    let signal: MFFSignalData
+    let segments: [EpochSegment]
+    let highlightRelativeSample: Int
+    let gfpHeight: CGFloat
+    let boxHeight: CGFloat
+
+    var body: some View {
+        VStack(spacing: 0) {
+            GeometryReader { proxy in
+                let width = proxy.size.width
+                let markerLayout = view.jointMarkerLayout(
+                    topomapSegments: segments, signal: signal, referenceSegment: segments[0],
+                    width: width, orientation: view.epoching.jointBoxOrientation
+                )
+                let butterflyHeight = max(proxy.size.height - boxHeight - gfpHeight, 0)
+
+                ZStack(alignment: .topLeading) {
+                    if boxHeight > 0 {
+                        JointMarkerGuideLines(
+                            view: view,
+                            topomapSegments: segments,
+                            signal: signal,
+                            referenceSegment: segments[0],
+                            width: width,
+                            totalHeight: proxy.size.height
+                        )
+                    }
+
+                    OverlayButterflyPlot(
+                        data: signal.data,
+                        segments: segments,
+                        colors: segments.map { view.epochColor(for: $0.colorIndex) },
+                        hiddenChannels: view.channels.hidden,
+                        amplitudeScale: view.amplitudeScale,
+                        samplingRate: signal.samplingRate,
+                        highlightRelativeSample: highlightRelativeSample
+                    )
+                    .overlay(WaveformVoltageAxisOverlay(amplitudeScale: view.amplitudeScale))
+                    .offset(y: boxHeight)
+                    .frame(width: width, height: butterflyHeight)
+
+                    if gfpHeight > 0 {
+                        GFPStripView(
+                            data: signal.data,
+                            segments: segments,
+                            colors: segments.map { view.epochColor(for: $0.colorIndex) }
+                        )
+                        .frame(width: width, height: gfpHeight - 6)
+                        .offset(y: boxHeight + butterflyHeight + 6)
+                    }
+
+                    if boxHeight > 0, let layout = view.recording.sensorLayout {
+                        JointMarkerBoxesLayer(
+                            view: view,
+                            layout: layout,
+                            signal: signal,
+                            topomapSegments: segments,
+                            referenceSegment: segments[0],
+                            width: width,
+                            markerLayout: markerLayout,
+                            coordinateSpaceName: "averagesButterflyJointExport",
+                            isInteractive: false,
+                            orientation: view.epoching.jointBoxOrientation
+                        )
+                    }
+                }
+                .coordinateSpace(name: "averagesButterflyJointExport")
+            }
+            WaveformTimeAxisView(segment: segments[0], samplingRate: signal.samplingRate)
+                .frame(height: Self.timeAxisHeight)
+        }
     }
 }

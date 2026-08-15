@@ -18,6 +18,42 @@
 
 import SwiftUI
 
+/// How a joint marker box arranges more than one condition's topomap. See
+/// `EpochingViewModel.jointBoxOrientation`.
+enum JointBoxOrientation: String, CaseIterable, Identifiable, Sendable {
+    case vertical = "Vertical"
+    case horizontal = "Horizontal"
+    /// A roughly-square grid (e.g. 4 conditions → 2×2) instead of one long
+    /// row or column — for when there are enough conditions that either of
+    /// those gets unwieldy.
+    case fit = "Fit"
+    var id: String { rawValue }
+}
+
+/// One joint-plot time marker: a shared latency with a linked, draggable
+/// topomap box on every butterfly plot it's shown on (MNE `plot_joint`-style,
+/// but attached to whichever butterfly you right-click rather than a
+/// dedicated tab). `id` is stable across drags so SwiftUI doesn't recreate
+/// the topomap/box views mid-gesture; `relativeSample` is an epoch-relative
+/// sample index, same units as `EpochingViewModel.butterflyTopomapRelativeSample`.
+/// Session-only — not persisted to eva.xml, like the other `showsAverages*`
+/// display toggles.
+struct JointPlotMarker: Identifiable, Hashable, Sendable {
+    let id: UUID
+    var relativeSample: Int
+    /// `nil` inherits the plot-wide auto scale shared across every marker
+    /// (today's default). Set via right-click on the marker's topomap box to
+    /// give this one marker its own independent µV or Z-score scale,
+    /// computed from just its own values instead of every marker's.
+    var scaleMode: EpochingViewModel.TopomapScaleMode?
+
+    init(id: UUID = UUID(), relativeSample: Int, scaleMode: EpochingViewModel.TopomapScaleMode? = nil) {
+        self.id = id
+        self.relativeSample = relativeSample
+        self.scaleMode = scaleMode
+    }
+}
+
 /// Which flow the "Group…" popover is showing — pooling whole codes together,
 /// or sub-selecting one code's events by a regex on their description.
 enum CategoryGroupMode: String, CaseIterable, Identifiable {
@@ -27,13 +63,26 @@ enum CategoryGroupMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Which per-event text field a `CategoryRegexRule`'s pattern is matched
+/// against.
+enum CategoryRegexMatchField: String, CaseIterable, Identifiable, Codable, Sendable {
+    case description = "Description"
+    case label = "Label"
+
+    var id: String { rawValue }
+}
+
 /// One regex sub-selection rule: within `sourceCode`'s events, any whose
-/// `eventDescription` matches `pattern` get filed under `categoryName` in
-/// addition to their normal category. See `EpochingViewModel.categoryRegexRules`.
+/// `eventDescription` or `label` (per `matchField`) matches `pattern` get
+/// filed under `categoryName` in addition to their normal category. See
+/// `EpochingViewModel.categoryRegexRules`.
 struct CategoryRegexRule: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var sourceCode: String
     var pattern: String
+    /// Absent from older saved eva.xml — decodes to `.description` so
+    /// existing rules keep matching against descriptions as before.
+    var matchField: CategoryRegexMatchField = .description
     /// May reference the pattern's capture groups as `$1`, `$2`, … — e.g.
     /// pattern `n2_(\w+)` + this template `n2_$1` resolves per event to
     /// `n2_nov`, `n2_rep`, etc., so one rule can fan out into several
@@ -105,6 +154,20 @@ final class EpochingViewModel {
     var segmentField = PSASegmentField.code
     var eventSearchText = ""
     var selectedEventCodes = Set<String>()
+
+    /// Whether anything is actually selected to segment on — checkbox codes,
+    /// **or** a regex sub-selection rule with none of its source codes ticked.
+    ///
+    /// The second half matters: a regex rule can drive a live PSA build on its
+    /// own (`sourceCode` need not also be in `selectedEventCodes`), so
+    /// `selectedEventCodes.isEmpty` alone reads as "nothing selected" for a
+    /// regex-only session. That mismatch is exactly what let a genuine PSA
+    /// average — segment, per-epoch bad detection, interpolation escalation, SNR
+    /// — leave a `segment` result in the audit log but no `segment` step in
+    /// `eva.xml`: the export builder checked `selectedEventCodes` alone while
+    /// `canApplyPSA` (the actual live gate) already checked both. One property
+    /// for both callers, so they cannot drift apart again.
+    var hasSegmentSelection: Bool { !selectedEventCodes.isEmpty || !categoryRegexRules.isEmpty }
 
     // MARK: Epoch window (portable → eva.xml)
     var preStimulus = 0.2
@@ -222,6 +285,70 @@ final class EpochingViewModel {
     var showsAveragesTopography = true
     var showsAveragesInspector = true
     var showsAveragesLog = true
+    /// Joint-plot time markers: added via right-click "Add Joint" on ANY
+    /// butterfly plot (Butterfly pane, or a Multi-Butterfly row), not a
+    /// separate tab — each marker gets a linked, draggable topomap box on
+    /// every butterfly it's shown on. Shared across hosts so the same marker
+    /// (same latency) appears consistently on all of them.
+    var jointPlotMarkers: [JointPlotMarker] = []
+    /// Transient: set while a joint marker's box is being dragged, so every
+    /// host currently showing that marker (e.g. every Multi-Butterfly row)
+    /// updates live together, not just the row the drag started in. `nil`
+    /// when nothing is being dragged.
+    var jointMarkerLiveDrag: (id: UUID, relativeSample: Int)?
+    /// How the Butterfly pane arranges a joint marker box that holds more
+    /// than one condition's topomap (Multi-Butterfly rows always hold
+    /// exactly one, so this setting doesn't apply there). `.vertical` stacks
+    /// conditions with the label to the left of each map; `.horizontal` puts
+    /// them in a row, each with its own label above, and one time label
+    /// centered over the whole row.
+    var jointBoxOrientation: JointBoxOrientation = .vertical
+    /// Multiplier on the joint marker box's base topomap size — one shared
+    /// setting so it stays consistent everywhere joint boxes appear
+    /// (Butterfly pane, Multi-Butterfly).
+    var jointTopomapScale: Double = 1.0
+    /// Size multiplier for the Topomaps tab's grid (`averagesTopographyPane`)
+    /// — separate from `jointTopomapScale` since it's a different display
+    /// with its own tile size baseline.
+    var topographyTopomapScale: Double = 1.0
+    /// Multi-Butterfly's grid column count ("play with doing two per row" —
+    /// 1 keeps the original single-column stack).
+    var multiButterflyColumns: Int = 2
+
+    /// Adds a joint marker at exactly `relativeSample` — used by "Add Joint"
+    /// in a butterfly's right-click menu, where the click location itself is
+    /// the placement, not a default the user then has to drag into place.
+    func addJointMarker(atRelativeSample relativeSample: Int) {
+        jointPlotMarkers.append(JointPlotMarker(relativeSample: relativeSample))
+    }
+
+    func removeJointMarker(_ id: UUID) {
+        jointPlotMarkers.removeAll { $0.id == id }
+    }
+
+    func updateJointMarker(_ id: UUID, relativeSample: Int, epochLength: Int) {
+        guard let index = jointPlotMarkers.firstIndex(where: { $0.id == id }) else { return }
+        jointPlotMarkers[index].relativeSample = min(max(relativeSample, 0), max(epochLength - 1, 0))
+    }
+
+    /// Sets (or clears, with `nil`) one marker's own independent scale mode.
+    /// `nil` reverts it to inheriting the plot-wide shared scale.
+    func setJointMarkerScaleMode(_ id: UUID, mode: TopomapScaleMode?) {
+        guard let index = jointPlotMarkers.firstIndex(where: { $0.id == id }) else { return }
+        jointPlotMarkers[index].scaleMode = mode
+    }
+
+    var showsAveragesMultiButterfly = false
+    /// Shows a Global Field Power trace under every butterfly plot (Butterfly,
+    /// Multi-Butterfly) — one shared toggle since it's the same display
+    /// decision everywhere it appears.
+    var showsAveragesGFP = true
+    var showsAveragesDifference = false
+    var differenceCategoryA: String?
+    var differenceCategoryB: String?
+    var differenceRelativeSample: Int?
+    var showsAveragesFilmstrip = false
+    var filmstripTileCount = 8
     var psaExclusionSummary = PSAExclusionSummary()
 
     // MARK: Figure labeling (session-only; never mutates EpochSegment.category)
@@ -235,7 +362,7 @@ final class EpochingViewModel {
     }
 
     // MARK: Topomap color scale (Cmd-hold control in the topography pane)
-    enum TopomapScaleMode: String, CaseIterable, Identifiable { case microvolts = "µV", zScore = "Z"; var id: String { rawValue } }
+    enum TopomapScaleMode: String, CaseIterable, Identifiable, Hashable { case microvolts = "µV", zScore = "Z"; var id: String { rawValue } }
     var topomapScaleMode: TopomapScaleMode = .microvolts
 
     /// µV mode: when true, topomaps use the manual min/max below instead of the
@@ -878,6 +1005,20 @@ final class EpochingViewModel {
         showsAveragesTopography = true
         showsAveragesInspector = true
         showsAveragesLog = true
+        jointPlotMarkers.removeAll()
+        jointMarkerLiveDrag = nil
+        jointBoxOrientation = .vertical
+        jointTopomapScale = 1.0
+        topographyTopomapScale = 1.0
+        multiButterflyColumns = 2
+        showsAveragesMultiButterfly = false
+        showsAveragesGFP = true
+        showsAveragesDifference = false
+        differenceCategoryA = nil
+        differenceCategoryB = nil
+        differenceRelativeSample = nil
+        showsAveragesFilmstrip = false
+        filmstripTileCount = 8
         psaExclusionSummary = PSAExclusionSummary()
         categoryRenames.removeAll()
         overlaySelectedCategories.removeAll()

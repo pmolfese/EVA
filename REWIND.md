@@ -1149,6 +1149,72 @@ trees. Deferred.
 
 Carried out of a long session. Roughly in the order they would bite.
 
+### Fixed: opening a processed file showed "raw", discarding its lineage
+
+Reported with a real file: `Josh_pilot_run1_20260814_030010-averages.mff`, whose
+`eva.xml` records `filter → thresholdArtifactDetection → interpolateChannels`
+already baked into `signal1.bin`. Opening it showed the rail at a bare "raw"
+root, as if none of that had happened.
+
+**Cause.** `recordProcessingHistory()` only ever reflects *this session's*
+pipeline view models — `filter.output`, `ica.cleanedSignal`, and so on — and
+those are all `nil` the moment a file opens, whatever produced the bytes it
+loaded. There was no path from "what `eva.xml` says happened" to the history
+tree at all; the tree was built exclusively from live state.
+
+**Fix.** `RecordingHistoryModel.seedOnDiskPrefix` reads the package's `eva.xml`
+(`EVAProcessingScriptXML.read`, which already existed — only the write side had
+a caller) into a fixed prefix, and `record()` now walks `onDiskPrefix + <live
+steps>` on every call rather than the live steps alone. Called from
+`seedProcessingHistoryFromDisk()` in `loadRecordingIfNeeded()`, matching
+`currentPayloadDigests()`'s live disambiguation for `icaClean` so an on-disk ICA
+removal gets its own node too.
+
+Idempotent by design, and has to be: `recordProcessingHistory()` fires from an
+`.onChange(initial: true)` that runs once while the file is still loading
+(view models empty, signal nil) and again once it has finished — so seeding and
+live recording can arrive in either order. Storing the prefix as state every
+`record()` re-reads, rather than mutating the tree once, makes the result the
+same regardless of which comes first.
+
+**No snapshot exists for the prefix's interior nodes** — the intermediate
+signals were never in this session's memory, only the final loaded bytes are.
+That did not need new machinery: a node without a snapshot already renders
+disabled in the rail with a tooltip explaining why (REWIND's "surface the cost
+before the click"), so seeding real nodes rather than a cosmetic label gets
+"shown but not navigable" for free. The tip — what is actually on screen — gets
+an (empty) snapshot immediately after seeding, the same way live recording
+snapshots the node it just created.
+
+### Fixed: a regex-only PSA average left no `segment` step in eva.xml
+
+Same reported file (`Josh_pilot_run1_20260814_030010-averages.mff`), a second
+issue: its audit log (`log_eva_*.txt`) records a real segment result, per-epoch
+bad-channel detection, an interpolation escalation, and four categories' SNR —
+a genuine PSA average happened — but `eva.xml`'s `<step>` list has none of it:
+just `filter`, `thresholdArtifactDetection`, `interpolateChannels`. The seeded
+history above faithfully showed that truncated lineage, which is what surfaced
+the gap: "even though this file is filtered, the PSA averaging and average
+reference and baseline correction doesn't show up in the history."
+
+**Cause.** The export builder's guard for emitting `.segment` (and the
+epoch-domain `.reference` step ahead of it) was `!epoching.selectedEventCodes
+.isEmpty` — plain-checkbox codes only. The live PSA pipeline's own eligibility
+check, `canApplyPSA` in `PSAEpochingViews.swift`, already accounts for a second
+path: a regex sub-selection rule (`categoryRegexRules`) can drive a build on its
+own, with none of its source codes also ticked as a checkbox. A session that
+segments entirely by regex — plausible for the reported file, whose SNR log
+lines name categories `cb0/cb1/cb2/cb5`, not raw event codes — leaves
+`selectedEventCodes` empty while genuinely epoching and averaging. The export
+guard and the live gate had silently drifted apart.
+
+**Fix.** `EpochingViewModel.hasSegmentSelection` — `!selectedEventCodes.isEmpty
+|| !categoryRegexRules.isEmpty` — is now the one condition both `canApplyPSA`
+and the export builder use, so they cannot diverge again the way they just did.
+Regex rules were already fully serialized into `eva.xml` (`categoryRegex.N.*`
+flat keys, round-tripped by `apply(parameters:)`) — only the *gate on whether to
+emit the step at all* was wrong, not the step's own content.
+
 ### Fixed: navigation walked off the node you clicked
 
 Reported as "raw → filter → artifact; go back to filter and artifact stays; go to

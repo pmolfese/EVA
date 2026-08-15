@@ -127,6 +127,7 @@ struct EVAApp: App {
 
             CommandGroup(after: .windowArrangement) {
                 OpenDebugLogButton()
+                OpenFigureExportButton()
             }
 
             CommandGroup(replacing: .help) {
@@ -149,6 +150,11 @@ struct EVAApp: App {
         }
         .defaultSize(width: 1000, height: 720)
 
+        Window("Figure Export", id: Self.figureExportWindowID) {
+            FigureExportBasketView()
+        }
+        .defaultSize(width: 560, height: 520)
+
         Settings {
             PreferencesView()
                 .environment(goodnessSettings)
@@ -160,6 +166,7 @@ struct EVAApp: App {
     static let debugLogWindowID = "debug-log"
     static let channelSetsWindowID = "channel-sets"
     static let releaseNotesWindowID = "release-notes"
+    static let figureExportWindowID = "figure-export"
 
     private func checkForUpdates() {
         guard !isCheckingForUpdates else { return }
@@ -210,5 +217,17 @@ private struct OpenDebugLogButton: View {
             openWindow(id: EVAApp.debugLogWindowID)
         }
         .keyboardShortcut("d", modifiers: [.command, .shift])
+    }
+}
+
+/// Window-menu item that opens the Figure Export basket window.
+private struct OpenFigureExportButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Figure Export") {
+            openWindow(id: EVAApp.figureExportWindowID)
+        }
+        .keyboardShortcut("e", modifiers: [.command, .shift])
     }
 }

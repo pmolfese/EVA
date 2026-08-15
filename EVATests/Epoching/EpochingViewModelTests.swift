@@ -36,6 +36,29 @@ struct EpochingViewModelTests {
     }
 
     @MainActor
+    /// Reported bug: a PSA average built entirely from a regex sub-selection
+    /// rule (no source code also ticked as a plain checkbox) left a `segment`
+    /// result and an SNR average in the audit log but no `segment` step in
+    /// `eva.xml` — the export builder checked `selectedEventCodes.isEmpty`
+    /// alone, which a regex-only session leaves empty by construction, while the
+    /// live gate (`canApplyPSA`) already accounted for regex rules.
+    /// `hasSegmentSelection` is the one condition both now use.
+    @Test func hasSegmentSelectionAccountsForRegexOnlySelection() {
+        let vm = EpochingViewModel(store: RecordingStore())
+        #expect(vm.hasSegmentSelection == false)
+
+        vm.selectedEventCodes = ["stm+"]
+        #expect(vm.hasSegmentSelection == true)
+        vm.selectedEventCodes = []
+        #expect(vm.hasSegmentSelection == false)
+
+        vm.categoryRegexRules = [
+            "rule": CategoryRegexRule(sourceCode: "cb0", pattern: "cb\\d", categoryName: "cb")
+        ]
+        #expect(vm.hasSegmentSelection == true, "a regex rule alone must count as a selection")
+    }
+
+    @MainActor
     /// Average reference is no longer a `segment` parameter — it is its own
     /// `reference` step with `domain: epoch`, emitted just before this one.
     ///

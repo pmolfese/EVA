@@ -77,9 +77,75 @@ final class RecordingHistoryModel {
         if recordingKey != self.recordingKey {
             self.recordingKey = recordingKey
             history = EVAHistory(recordingKey: recordingKey)
+            // A new recording means a new file, and `onDiskPrefix` describes the
+            // *previous* one — clear it here rather than only in `seedOnDiskPrefix`,
+            // so a recording opened without a prefix (or before seeding runs) does
+            // not inherit the last file's history. See `seedOnDiskPrefix`.
+            onDiskPrefix = []
+            onDiskPayloadDigests = [:]
         }
+        adopt(liveSteps: script.steps, payloadDigests: payloadDigests)
+    }
+
+    /// What `eva.xml` already said happened to this file when it was opened —
+    /// steps that produced the bytes on disk, before this session touched
+    /// anything.
+    ///
+    /// Every `record()` call walks `onDiskPrefix + <live steps>` rather than the
+    /// live steps alone. Without this, a freshly-opened processed file records as
+    /// a bare "raw" root: `currentProcessingScript()` is built from the pipeline
+    /// view models (`filter.output`, `ica.cleanedSignal`, …), and those are all
+    /// `nil` until *this session* applies something — they have no way to know
+    /// the loaded signal already went through a filter, threshold detection, and
+    /// interpolation on a previous run. The file's own `eva.xml` does know, and
+    /// this is what lets the rail show that lineage instead of discarding it.
+    ///
+    /// There is no snapshot for any node in this prefix except its tip: the
+    /// intermediate signals were never in memory this session and cannot be
+    /// recovered, only re-derived (REWIND work item 2, not built). The rail's
+    /// existing "no snapshot" affordance — disabled row, tooltip — already
+    /// covers exactly this, which is the point of seeding real nodes rather than
+    /// a label: "shown but not navigable" falls out of machinery that already
+    /// exists rather than needing its own.
+    @ObservationIgnored private(set) var onDiskPrefix: [EVAProcessingStep] = []
+    /// Payload digests for `onDiskPrefix`'s own subject-specific steps (ICA's
+    /// operator, on disk) — kept separate from a live `record()` call's digests
+    /// since the two describe different steps and must not overwrite each other.
+    @ObservationIgnored private var onDiskPayloadDigests: [EVAProcessingStep.Operation: String] = [:]
+
+    /// Seeds `onDiskPrefix` from the package's `eva.xml` when a recording opens.
+    ///
+    /// Idempotent and safe to call before, after, or interleaved with `record()`
+    /// — `WaveformView.recordProcessingHistory()` fires from an `.onChange` that
+    /// runs once before the file has finished loading (recording state still
+    /// nil) and again once it has, so call order between this and `record()` is
+    /// not guaranteed. Storing the prefix as state that every `record()` call
+    /// re-reads, rather than a one-time tree mutation, makes the result the same
+    /// regardless of which arrives first.
+    func seedOnDiskPrefix(
+        recordingKey: String,
+        steps: [EVAProcessingStep],
+        payloadDigests: [EVAProcessingStep.Operation: String] = [:]
+    ) {
+        if recordingKey != self.recordingKey {
+            self.recordingKey = recordingKey
+            history = EVAHistory(recordingKey: recordingKey)
+        }
+        guard steps != onDiskPrefix else { return }
+        onDiskPrefix = steps
+        onDiskPayloadDigests = payloadDigests
+        adopt(liveSteps: [])
+    }
+
+    private func adopt(
+        liveSteps: [EVAProcessingStep],
+        payloadDigests: [EVAProcessingStep.Operation: String] = [:]
+    ) {
         var updated = history
-        updated.adopt(script, payloadDigests: payloadDigests)
+        updated.adopt(
+            EVAProcessingScript(steps: onDiskPrefix + liveSteps),
+            payloadDigests: onDiskPayloadDigests.merging(payloadDigests) { _, live in live }
+        )
         // Assign only on a real change: `EVAHistory` is `Equatable` over small
         // values, far cheaper than the SwiftUI invalidation an unconditional
         // write would cause every time the chain signature moves.
@@ -250,6 +316,8 @@ final class RecordingHistoryModel {
     func reset() {
         recordingKey = ""
         history = EVAHistory(recordingKey: "")
+        onDiskPrefix = []
+        onDiskPayloadDigests = [:]
         snapshots.removeAll()
         snapshotOrder.removeAll()
         isNavigating = false

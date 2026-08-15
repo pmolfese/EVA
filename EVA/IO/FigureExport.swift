@@ -69,6 +69,15 @@ enum FigureExporter {
     nonisolated static let rasterScale: CGFloat = 2
     nonisolated static var rasterDPI: Double { Double(WaveformScaleUnits.nominalPointsPerInch) * Double(rasterScale) }
 
+    /// Renders `view` to PDF data without prompting for a save location —
+    /// used by `FigureExportBasket` to snapshot a figure at "Add to Export"
+    /// time, and by `save` itself for the `.pdf` save-panel path.
+    static func pdfData<V: View>(_ view: V) -> Data? { pdf(view) }
+
+    /// Renders `view` to PNG data without prompting — used for the basket's
+    /// list thumbnails.
+    static func pngData<V: View>(_ view: V) -> Data? { raster(view, format: .png) }
+
     private static func raster<V: View>(_ view: V, format: FigureFormat) -> Data? {
         let renderer = ImageRenderer(content: view)
         renderer.scale = rasterScale // higher DPI for print

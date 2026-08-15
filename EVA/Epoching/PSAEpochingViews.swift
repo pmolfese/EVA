@@ -140,6 +140,7 @@ extension WaveformView {
                     categoryGroupName = ""
                     categoryRegexSourceCode = ""
                     categoryRegexPattern = ""
+                    categoryRegexMatchField = .description
                     showsCategoryGroupPopover = true
                 } label: {
                     Label("Group…", systemImage: "plus.circle")
@@ -779,12 +780,13 @@ extension WaveformView {
         let preview = regexMatchPreview(
             sourceCode: categoryRegexSourceCode,
             pattern: categoryRegexPattern,
+            matchField: categoryRegexMatchField,
             categoryNameTemplate: categoryGroupName,
             events: events
         )
         let patternIsValid = !categoryRegexPattern.isEmpty && preview != nil
 
-        Text("Sub-selects the events of ONE code whose description matches a pattern into a new category, in addition to that event's own category.")
+        Text("Sub-selects the events of ONE code whose description or label matches a pattern into a new category, in addition to that event's own category.")
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -802,12 +804,72 @@ extension WaveformView {
         .labelsHidden()
         .pickerStyle(.menu)
 
-        Text("Pattern (applied to description field)")
+        Text("Match against")
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
+
+        Picker("Match against", selection: binding(recordingStore.events, \.categoryRegexMatchField)) {
+            ForEach(CategoryRegexMatchField.allCases) { field in
+                Text(field.rawValue).tag(field)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+
+        HStack {
+            Text("Pattern (applied to \(categoryRegexMatchField.rawValue.lowercased()) field)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Menu {
+                ForEach(RegexPatternPreset.library) { preset in
+                    Button {
+                        categoryRegexPattern = preset.pattern
+                    } label: {
+                        Text(preset.title)
+                    }
+                    .help("\(preset.pattern) — \(preset.example)")
+                }
+            } label: {
+                Label("Examples", systemImage: "list.bullet.rectangle")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Pick a common pattern shape to start from, then tweak it and check the preview below.")
+        }
         TextField("e.g. cond=(\\d+)_correct", text: binding(recordingStore.events, \.categoryRegexPattern))
             .textFieldStyle(.roundedBorder)
             .font(.system(.body, design: .monospaced))
+
+        if categoryRegexPattern.isEmpty, !categoryRegexSourceCode.isEmpty,
+           let suggestion = RegexPatternSuggester.suggest(
+               from: regexSourceTexts(sourceCode: categoryRegexSourceCode, matchField: categoryRegexMatchField, events: events)
+           ) {
+            Button {
+                categoryRegexPattern = suggestion.pattern
+            } label: {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "wand.and.stars")
+                        .foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Suggested: \(suggestion.pattern)")
+                            .font(.system(.caption, design: .monospaced))
+                            .fontWeight(.semibold)
+                        Text(suggestion.rationale)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            .help("Inferred from this code's own \(categoryRegexMatchField.rawValue.lowercased())s — tap to use it, then edit as needed.")
+        }
 
         if categoryRegexSourceCode.isEmpty {
             Text("Choose a source code above.")
@@ -896,6 +958,14 @@ extension WaveformView {
         return shown + suffix
     }
 
+    /// Raw description/label values for `sourceCode`'s own events — feeds
+    /// `RegexPatternSuggester`, which diffs these to infer a starting pattern.
+    private func regexSourceTexts(sourceCode: String, matchField: CategoryRegexMatchField, events: [MFFEvent]) -> [String] {
+        events
+            .filter { $0.code == sourceCode }
+            .compactMap { matchField == .label ? $0.label : $0.eventDescription }
+    }
+
     /// `nil` means the pattern doesn't compile as a regex; otherwise the match
     /// count against `sourceCode`'s events, the full distinct set of
     /// categories this rule would actually produce, and ONE example
@@ -908,22 +978,24 @@ extension WaveformView {
     private func regexMatchPreview(
         sourceCode: String,
         pattern: String,
+        matchField: CategoryRegexMatchField,
         categoryNameTemplate: String,
         events: [MFFEvent]
     ) -> (matched: Int, total: Int, samples: [(description: String, category: String)], categories: [String])? {
         guard !sourceCode.isEmpty, !pattern.isEmpty else { return nil }
         guard let regex = try? Regex(pattern).ignoresCase() else { return nil }
-        let rule = CategoryRegexRule(sourceCode: sourceCode, pattern: pattern, categoryName: categoryNameTemplate)
+        let rule = CategoryRegexRule(sourceCode: sourceCode, pattern: pattern, matchField: matchField, categoryName: categoryNameTemplate)
         let codeEvents = events.filter { $0.code == sourceCode }
         var matchedCount = 0
         var exampleByCategory: [String: String] = [:]
         for event in codeEvents {
-            guard let description = event.eventDescription,
-                  let match = description.firstMatch(of: regex) else { continue }
+            let matchText = matchField == .label ? event.label : event.eventDescription
+            guard let matchText,
+                  let match = matchText.firstMatch(of: regex) else { continue }
             matchedCount += 1
             let category = rule.resolvedCategoryName(for: match)
             if exampleByCategory[category] == nil {
-                exampleByCategory[category] = description
+                exampleByCategory[category] = matchText
             }
         }
         let categories = exampleByCategory.keys.sorted()
@@ -959,11 +1031,12 @@ extension WaveformView {
         let pattern = categoryRegexPattern.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !pattern.isEmpty, !categoryRegexSourceCode.isEmpty,
               (try? Regex(pattern)) != nil else { return }
-        let rule = CategoryRegexRule(sourceCode: categoryRegexSourceCode, pattern: pattern, categoryName: name)
+        let rule = CategoryRegexRule(sourceCode: categoryRegexSourceCode, pattern: pattern, matchField: categoryRegexMatchField, categoryName: name)
         epoching.categoryRegexRules[rule.id.uuidString] = rule
         showsCategoryGroupPopover = false
         categoryRegexSourceCode = ""
         categoryRegexPattern = ""
+        categoryRegexMatchField = .description
         categoryGroupName = ""
     }
 
@@ -1060,6 +1133,7 @@ extension WaveformView {
             regexMatchPreview(
                 sourceCode: $0.sourceCode,
                 pattern: $0.pattern,
+                matchField: $0.matchField,
                 categoryNameTemplate: $0.categoryName,
                 events: events
             )
@@ -1074,7 +1148,7 @@ extension WaveformView {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(rule?.categoryName ?? "")
                         .font(.system(.body, design: .monospaced).weight(.semibold))
-                    Text(rule?.sourceCode ?? "")
+                    Text("\(rule?.sourceCode ?? "") · \(rule?.matchField.rawValue ?? "")")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -1163,7 +1237,7 @@ extension WaveformView {
 
     func canApplyPSA(events: [MFFEvent]) -> Bool {
         !events.isEmpty
-            && (!epoching.selectedEventCodes.isEmpty || !epoching.categoryRegexRules.isEmpty)
+            && epoching.hasSegmentSelection
             && epoching.preStimulus >= 0
             && epoching.postStimulus > 0
             && selectedPSACategoriesByCode() != nil

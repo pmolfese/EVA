@@ -434,7 +434,15 @@ extension WaveformView {
         }
         // PSA: segment (+ optional baseline / average) is portable when the target
         // has the same event codes. Replayable.
-        if epoching.epochedSignal != nil, !epoching.selectedEventCodes.isEmpty {
+        //
+        // Gated on `hasSegmentSelection` — the same condition `canApplyPSA` uses
+        // to decide whether a live build can even run — rather than
+        // `selectedEventCodes` alone. A regex-only session (no source code also
+        // ticked as a plain checkbox) genuinely segments and averages, and
+        // checking only the checkbox set silently dropped the `segment` step
+        // from eva.xml for exactly that session: the audit log recorded a
+        // segment result and an average, but the replayable script did not.
+        if epoching.epochedSignal != nil, epoching.hasSegmentSelection {
             // Emitted *before* `segment`, unlike the continuous one: epoch
             // referencing happens inside the PSA fold, after trial rejection and
             // before baseline correction, so it cannot be performed from

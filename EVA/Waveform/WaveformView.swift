@@ -505,6 +505,10 @@ struct WaveformView: View {
         get { recordingStore.events.categoryRegexPattern }
         nonmutating set { recordingStore.events.categoryRegexPattern = newValue }
     }
+    var categoryRegexMatchField: CategoryRegexMatchField {
+        get { recordingStore.events.categoryRegexMatchField }
+        nonmutating set { recordingStore.events.categoryRegexMatchField = newValue }
+    }
     var physioRenameText: String {
         get { recordingStore.physio.renameText }
         nonmutating set { recordingStore.physio.renameText = newValue }
@@ -710,39 +714,43 @@ struct WaveformView: View {
                 // Wavelet reduction stage: computed from `processed`, applied
                 // before interpolation. Toggleable and revertible like cleaning.
                 let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? processed) : processed
+                // `content(...)` is called from exactly ONE call site — not
+                // branched on `interpolationSnapshot.isEmpty` — because an
+                // if/else here would be a structural-identity change the
+                // moment the user interpolates their first channel: SwiftUI
+                // would tear down and remount the whole subtree, causing its
+                // `.task(id: channelHealthSignature(...))` below to fire as a
+                // fresh mount (wiping ALL channel health results) while its
+                // `.onChange(of: channels.interpolated.keys.sorted())` (meant
+                // to selectively patch just the interpolated channel) would
+                // NOT fire, since a fresh mount has no prior value to diff
+                // against. See recomputeChannelHealthForInterpolation.
                 let interpolationSnapshot = channels.interpolationSnapshot
-                if interpolationSnapshot.isEmpty {
-                    content(
-                        for: epoching.epochedSignal ?? waveletStage,
-                        base: base,
-                        cleaningBase: preArtifact,
-                        waveletInput: processed,
-                        continuousSignal: waveletStage
-                    )
-                } else {
-                    let resolutionKey = recordingStore.interpolatedSignalResolver.key(
-                        for: waveletStage,
-                        snapshot: interpolationSnapshot
-                    )
-                    let continuousSignal = recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey)
+                let resolutionKey: InterpolatedSignalResolver.Key? = interpolationSnapshot.isEmpty
+                    ? nil
+                    : recordingStore.interpolatedSignalResolver.key(for: waveletStage, snapshot: interpolationSnapshot)
+                let continuousSignal: MFFSignalData = {
+                    guard let resolutionKey else { return waveletStage }
+                    return recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey)
                         ?? recordingStore.interpolatedSignalResolver.displaySignal(
                             whileResolving: resolutionKey,
                             fallback: waveletStage
                         )
-                    content(
-                        for: epoching.epochedSignal ?? continuousSignal,
-                        base: base,
-                        cleaningBase: preArtifact,
-                        waveletInput: processed,
-                        continuousSignal: continuousSignal
-                    )
-                    .task(id: resolutionKey) {
-                        if recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey) == nil {
-                            await recordingStore.interpolatedSignalResolver.resolve(
-                                signal: waveletStage,
-                                snapshot: interpolationSnapshot
-                            )
-                        }
+                }()
+                content(
+                    for: epoching.epochedSignal ?? continuousSignal,
+                    base: base,
+                    cleaningBase: preArtifact,
+                    waveletInput: processed,
+                    continuousSignal: continuousSignal
+                )
+                .task(id: resolutionKey) {
+                    guard let resolutionKey else { return }
+                    if recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey) == nil {
+                        await recordingStore.interpolatedSignalResolver.resolve(
+                            signal: waveletStage,
+                            snapshot: interpolationSnapshot
+                        )
                     }
                 }
             } else {
@@ -886,8 +894,48 @@ struct WaveformView: View {
         ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
         seedPhysioPolarityDefaultsIfNeeded()
         seedDisplayScaleDefaults()
+        seedProcessingHistoryFromDisk()
         adoptOnDiskEpochsIfPresent()
         autoStartBatchIfNeeded()
+    }
+
+    /// Seeds the history rail with what `eva.xml` says already happened to this
+    /// file, so a processed recording does not read as "raw" the moment it
+    /// opens.
+    ///
+    /// `currentProcessingChainSignature`-driven recording (`recordProcessingHistory`)
+    /// only ever sees *this session's* pipeline view models, which start empty —
+    /// it has no way to know a previously-applied filter or interpolation is
+    /// already baked into the loaded samples. The package's own `eva.xml` does
+    /// know, so this reads it back with the matching reader
+    /// (`EVAProcessingScriptXML.read`) and hands the steps to
+    /// `RecordingHistoryModel.seedOnDiskPrefix`, which every future `record()`
+    /// call folds in ahead of whatever this session does. See that method for
+    /// why the nodes it creates are shown but not navigable.
+    ///
+    /// Only reads an ICA payload digest, matching what the *live* path
+    /// disambiguates (`currentPayloadDigests()`) — artifact cleaning's step
+    /// parameters are already sufficient on their own, live or on disk.
+    private func seedProcessingHistoryFromDisk() {
+        guard let script = EVAProcessingScriptXML.read(fromPackage: recording.packageURL),
+              !script.steps.isEmpty else { return }
+        var payloadDigests: [EVAProcessingStep.Operation: String] = [:]
+        if script.steps.contains(where: { $0.operation == .icaClean }),
+           let payload = ICAReplayPayload.read(fromPackage: recording.packageURL) {
+            payloadDigests[.icaClean] = EVAHistory.digest([
+                payload.replayIdentityBytes.base64EncodedString()
+            ])
+        }
+        recordingStore.processingHistory.seedOnDiskPrefix(
+            recordingKey: recording.packageName,
+            steps: script.steps,
+            payloadDigests: payloadDigests
+        )
+        // The tip is what is actually on screen right now — the loaded signal,
+        // with every pipeline view model still empty — so it is free to mark
+        // instant. Matches what `recordProcessingHistory()` does after every
+        // live `record()`: capture immediately follows adopt.
+        recordingStore.processingHistory.storeSnapshot(capturePipelineSnapshot())
     }
 
     /// Puts the newly-opened recording at the preferred sensitivity and sweep
@@ -1939,7 +1987,7 @@ struct WaveformView: View {
         if wavelet.isRunning {
             snapshot.progressRows.append(StatusLogProgressRow(label: "Reduction", value: wavelet.progress))
         }
-        if channels.isAnalyzingHealth {
+        if channels.isAnalyzingHealth, chanHealth.operationProgress == nil {
             snapshot.progressRows.append(StatusLogProgressRow(label: "Health", value: channels.healthProgress))
         }
         if segHealth.isAnalyzing {
