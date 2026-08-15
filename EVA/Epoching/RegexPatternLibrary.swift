@@ -9,8 +9,9 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Two free, on-device aids for the PSA regex sub-selection popover
-//  (CategoryRegexRule / PSAEpochingViews.swift), so writing a pattern doesn't
+//  Free, on-device aids for the PSA regex sub-selection popover
+//  (CategoryRegexRule / PSAEpochingViews.swift), so writing a pattern — and
+//  turning its capture groups into a category-name template — doesn't
 //  require already knowing regex:
 //
 //  - `RegexPatternPreset.library` — a fixed menu of common shapes ("number
@@ -19,6 +20,13 @@
 //    code's own descriptions/labels by diffing them (longest common
 //    prefix/suffix, generalize the varying middle), not a trained model or a
 //    network call.
+//  - `captureGroupCount(in:)` — how many `$1`/`$2`/… tokens a pattern
+//    actually has, so the popover can offer one insert button per group
+//    instead of the user counting parentheses.
+//  - `CategoryTemplateSuggester` — once a pattern is chosen, proposes a
+//    starting category-name template from what its capture group(s) actually
+//    match across the sample data (same diff-the-data approach as the
+//    pattern suggester, just one step further down the pipeline).
 //
 
 import Foundation
@@ -161,5 +169,71 @@ nonisolated enum RegexPatternSuggester {
             suffix = String(suffix.suffix(allowedSuffixLength))
         }
         return suffix
+    }
+}
+
+/// Number of *capturing* groups in `pattern` — `(...)`  counts,
+/// `(?:...)`/lookaround don't. `NSRegularExpression` already draws that
+/// distinction correctly (unlike counting `(` characters by hand), so this
+/// just asks it rather than re-implementing regex parsing. `0` for an
+/// invalid or group-less pattern.
+nonisolated func captureGroupCount(in pattern: String) -> Int {
+    (try? NSRegularExpression(pattern: pattern))?.numberOfCaptureGroups ?? 0
+}
+
+/// Proposes a starting category-name template from what a pattern's capture
+/// group(s) actually match across the sample data — the template-field
+/// counterpart to `RegexPatternSuggester`. Diffs real captured values rather
+/// than guessing blind: a single group whose captures already read like
+/// short category names (letters/digits/underscore, not too many distinct
+/// values) is suggested as-is (`$1`); anything else still gets `$1`, just
+/// with a plainer rationale. Multiple groups are joined with `_`
+/// (`$1_$2_$3`) as a reasonable, editable starting point.
+nonisolated enum CategoryTemplateSuggester {
+    struct Suggestion: Sendable, Equatable {
+        let template: String
+        let rationale: String
+    }
+
+    /// `samples` are the same raw description/label strings
+    /// `RegexPatternSuggester` and the live preview already use.
+    static func suggest(pattern: String, samples: [String]) -> Suggestion? {
+        guard !pattern.isEmpty, let regex = try? Regex(pattern).ignoresCase() else { return nil }
+        let groupCount = captureGroupCount(in: pattern)
+        guard groupCount > 0 else { return nil }
+
+        var firstGroupValues = Set<String>()
+        var matchCount = 0
+        for sample in samples {
+            guard let match = sample.firstMatch(of: regex) else { continue }
+            matchCount += 1
+            if match.output.count > 1, let substring = match.output[1].substring {
+                firstGroupValues.insert(String(substring))
+            }
+        }
+        guard matchCount > 0 else { return nil }
+
+        if groupCount == 1 {
+            let readableValues = firstGroupValues.allSatisfy { value in
+                !value.isEmpty && value.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+            }
+            if readableValues, !firstGroupValues.isEmpty, firstGroupValues.count <= 20 {
+                let examples = firstGroupValues.sorted().prefix(3).joined(separator: ", ")
+                return Suggestion(
+                    template: "$1",
+                    rationale: "The capture group already reads like a category name (e.g. \(examples)) — used as-is."
+                )
+            }
+            return Suggestion(
+                template: "$1",
+                rationale: "One capture group — \"$1\" uses its matched text directly as the category name."
+            )
+        }
+
+        let template = (1...groupCount).map { "$\($0)" }.joined(separator: "_")
+        return Suggestion(
+            template: template,
+            rationale: "\(groupCount) capture groups — joined as \(template); edit to reorder or drop any of them."
+        )
     }
 }

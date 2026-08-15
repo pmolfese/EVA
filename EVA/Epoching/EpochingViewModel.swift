@@ -616,10 +616,17 @@ final class EpochingViewModel {
         return categoriesByCode
     }
 
+    /// Eligible for DIN, not just the codes the user checked as their own
+    /// category: also any code that's only present as a `CategoryRegexRule`
+    /// source, since a regex-derived category's epochs come from that code's
+    /// events too and should get the same nearest-marker correction — see
+    /// `psaSegmentEventRow`, which enables the DIN checkbox for both.
     private func selectedTimingMarkersBySegmentValue(events: [MFFEvent]) -> [String: String]? {
         let availableValues = Set(events.map(segmentValue(for:)))
+        let regexSourceCodes = Set(categoryRegexRules.values.map(\.sourceCode))
+        let eligibleValues = selectedEventCodes.union(regexSourceCodes)
         var timingMarkersBySegmentValue = [String: String]()
-        for value in selectedEventCodes where timingMarkerEnabledValues.contains(value) {
+        for value in eligibleValues where timingMarkerEnabledValues.contains(value) {
             guard let timingValue = timingMarkerValuesBySegmentValue[value],
                   availableValues.contains(timingValue), timingValue != value else {
                 return nil

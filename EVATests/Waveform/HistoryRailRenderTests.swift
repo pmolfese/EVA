@@ -194,7 +194,8 @@ struct HistoryRailRenderTests {
             onClearStatusHistory: {},
             onSelectNode: { _ in },
             onStepBack: {},
-            onStepForward: {}
+            onStepForward: {},
+            onFork: {}
         )
     }
 

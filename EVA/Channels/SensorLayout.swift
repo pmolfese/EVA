@@ -26,7 +26,7 @@ import Foundation
 /// A single EEG electrode position, normalized into a unit circle centered on
 /// the electrode centroid. `x` increases to the right, `y` increases toward
 /// the nose (anterior).
-struct SensorPosition: Identifiable, Sendable {
+struct SensorPosition: Identifiable, Sendable, Equatable, Codable, Hashable {
     let channelIndex: Int
     let x: Double
     let y: Double
@@ -34,7 +34,7 @@ struct SensorPosition: Identifiable, Sendable {
     var id: Int { channelIndex }
 }
 
-struct SensorLayout: Sendable {
+struct SensorLayout: Sendable, Equatable {
     let name: String
     let positions: [SensorPosition]
 

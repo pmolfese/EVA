@@ -9,6 +9,11 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
+//  One instance of this view per "main" `WindowGroup` window. Each owns its
+//  own `recording` — see REWIND.md "EVA as a multi-window app" — so two
+//  windows genuinely show two different files rather than two views onto one
+//  shared `@State` the way the single-`Window` design worked before.
+//
 
 import AppKit
 import SwiftData
@@ -21,33 +26,76 @@ struct CombineRequest: Identifiable {
     let urls: [URL]
 }
 
-struct ContentView: View {
-    @Binding var recording: MFFRecording?
-    @Binding var openRecordingRequest: Int
-    @Binding var closeRecordingRequest: Int
-    @Binding var batchSetupRequest: Int
+/// What a recording window exposes to the File menu's "Close File" — see
+/// `CloseFileButton` in `EVAApp.swift`.
+///
+/// A small struct rather than a raw `Binding<MFFRecording?>`, so the command
+/// can ask "is there anything to close" and trigger closing without also
+/// being able to reach in and overwrite `recording` directly. `close()` is
+/// `closeRecording()` itself, which also tears down the recording and clears
+/// drop/importer state — a bare binding would make it too easy to bypass
+/// that by just setting `recording = nil`.
+struct RecordingWindowActions {
+    var hasRecording: Bool
+    var close: () -> Void
+}
 
-    @Environment(BatchController.self) private var batch
+extension FocusedValues {
+    var recordingWindowActions: RecordingWindowActions? {
+        get { self[RecordingWindowActionsKey.self] }
+        set { self[RecordingWindowActionsKey.self] = newValue }
+    }
+
+    private struct RecordingWindowActionsKey: FocusedValueKey {
+        typealias Value = RecordingWindowActions
+    }
+}
+
+struct ContentView: View {
+    @Environment(\.openWindow) private var openWindow
 
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
+
+    @State private var recording: MFFRecording?
+    /// Set only by the fork-claim branch in `.onAppear`, and read exactly
+    /// once — by `WaveformMarkerContainer` the first time it builds a
+    /// `WaveformView` for `recording.id`. Cleared by every other path that
+    /// sets `recording` (`open(_:)`), so a fork claimed once cannot leak
+    /// into a later, ordinary file opened into the same window.
+    @State private var claimedForkSeed: PendingWindowForks.Payload?
+    /// Every recording window needs *some* `BatchController` in its
+    /// environment, because `WaveformView` unconditionally reads one (for
+    /// `autoStartBatchIfNeeded()`, which lets a windowed batch run resume
+    /// review inside whichever window shows the current job's file). This
+    /// instance is never driven by anything — batch now runs in its own
+    /// dedicated window (`BatchWindowView`), which owns the controller that
+    /// actually matters. `isActive` stays permanently false here, so
+    /// `autoStartBatchIfNeeded()`'s guard fails immediately and the rest of
+    /// that method never runs. Cheap enough not to be worth a special-cased
+    /// optional environment key just to avoid instantiating an idle object.
+    @State private var batch = BatchController()
 
     @State private var showsFileImporter = false
     @State private var isDropTargeted = false
     @State private var openError: String?
     /// Multiple .mff files dropped at once → present the combine sheet.
     @State private var combineRequest: CombineRequest?
-    @State private var showsBatchSetup = false
-    @State private var batchSummary: BatchController.BatchSummary?
+    /// Guards `PendingWindowOpens` so a window claims its handoff at most
+    /// once — `.onAppear` can in principle fire more than once across a
+    /// view's lifetime, and claiming is destructive (`removeFirst()`), so a
+    /// second fire must not steal the *next* window's file.
+    @State private var hasClaimedPendingOpen = false
 
     var body: some View {
         Group {
             if let recording {
-                WaveformMarkerContainer(recording: recording)
+                WaveformMarkerContainer(recording: recording, forkSeed: claimedForkSeed)
                     .id(recording.id)
             } else {
                 launchScreen
             }
         }
+        .environment(batch)
         .overlay {
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: 14)
@@ -56,12 +104,13 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
         }
-        .overlay(alignment: .bottom) {
-            if batch.isActive, batch.isHeadlessRun {
-                headlessBatchBanner
-            }
-        }
         .dropDestination(for: URL.self) { urls, _ in
+            // Deliberately always loads into *this* window, even when it
+            // already has a recording open — unlike the menu's "Open
+            // Recording…", which always opens a new one (see
+            // `OpenRecordingButton`). A drop is inherently targeted: you put
+            // it on this window, so this window is where it goes, same as
+            // before multi-window existed.
             openDroppedURLs(urls)
         } isTargeted: { targeted in
             isDropTargeted = targeted
@@ -71,8 +120,37 @@ struct ContentView: View {
         // document type. Keep this on the same path as the Open panel and drag
         // and drop so validation, package handling, and security-scoped access
         // remain identical.
+        //
+        // Reuses *this* window if it is empty, otherwise opens a sibling —
+        // deliberately not the menu command's unconditional "always new"
+        // (`OpenRecordingButton`). On a cold launch this is what keeps a Finder
+        // double-click from producing an extra empty window: `WindowGroup`
+        // hands the open-file event to the launch window it is creating, whose
+        // `recording` is still nil, so it fills itself and never becomes a
+        // second window the way `Window` used to before 0.1.7.
+        //
+        // Verified 2026-08-15 NOT to cover every case, though: close a
+        // recording (window goes back to empty) and *then* double-click a
+        // file, and `WindowGroup` was observed spawning a fresh scene for the
+        // event rather than routing it to that already-open empty window —
+        // this check runs, but on the new instance, whose `recording` is
+        // *also* nil, so it fills itself too. The net effect is a stray empty
+        // window left sitting next to the new one, harmless but not what
+        // "reuse if empty" was written to do. Fixing that means intercepting
+        // the open request at the `NSApplicationDelegate` level
+        // (`application(_:open:)`) instead of `.onOpenURL`, so EVA decides
+        // which window receives it before `WindowGroup` does — see
+        // ROADMAP.md's "App-level fixes" for the write-up. Left as-is for now:
+        // the workaround (close the stray window) is cheap, and the fix
+        // touches launch-routing internals this project has been burned by
+        // guessing at before.
         .onOpenURL { url in
-            _ = openSelectedURLs([url])
+            if recording == nil {
+                _ = openSelectedURLs([url])
+            } else {
+                PendingWindowOpens.shared.push([url])
+                openWindow(id: "main")
+            }
         }
         .fileImporter(
             isPresented: $showsFileImporter,
@@ -80,14 +158,6 @@ struct ContentView: View {
             allowsMultipleSelection: true
         ) { result in
             handleImportResult(result)
-        }
-        .onChange(of: openRecordingRequest) { _, _ in
-            showsFileImporter = true
-        }
-        .onChange(of: closeRecordingRequest) { _, _ in
-            if recording != nil {
-                closeRecording()
-            }
         }
         .sheet(item: $combineRequest) { request in
             CombineRecordingsSheet(
@@ -99,102 +169,49 @@ struct ContentView: View {
                 onCancel: { combineRequest = nil }
             )
         }
-        .sheet(isPresented: $showsBatchSetup) {
-            BatchSetupSheet(onCancel: { showsBatchSetup = false },
-                            onStart: { showsBatchSetup = false })
-        }
-        .onChange(of: batchSetupRequest) { _, _ in
-            if batch.isActive == false { showsBatchSetup = true }
-        }
-        .onChange(of: batch.currentIndex) { _, idx in
-            // Windowed batch drives the open recording: swap to the current
-            // job's file. Headless batch never changes currentIndex (stays
-            // -1 throughout — see BatchController.startHeadless), so this
-            // never fires for it; completion is picked up below instead.
-            guard batch.isActive, idx >= 0, let url = batch.currentJobURL else { return }
-            recording?.tearDownForClose()
-            ChannelSetStore.shared.clearActiveRecordingContext()
-            recording = MFFRecording(packageURL: url) // fresh UUID → .id() rebuilds
-        }
-        .onChange(of: batch.summary) { _, summary in
-            if let summary { batchSummary = summary }
-        }
-        .alert("Batch complete", isPresented: Binding(
-            get: { batchSummary != nil },
-            set: { if !$0 { batchSummary = nil } }
-        )) {
-            Button("OK") { batchSummary = nil }
-        } message: {
-            if let s = batchSummary {
-                Text(batchSummaryMessage(s))
+        .onAppear {
+            guard !hasClaimedPendingOpen else { return }
+            hasClaimedPendingOpen = true
+            // Fork first: a window is created for exactly one reason (an
+            // ordinary open, or a fork), so the two queues never both have an
+            // entry meant for *this* window, but checking fork first keeps
+            // that assumption from mattering.
+            if let fork = PendingWindowForks.shared.claim() {
+                claimedForkSeed = fork
+                recording = MFFRecording(packageURL: fork.packageURL)
+            } else if let urls = PendingWindowOpens.shared.claim() {
+                _ = openSelectedURLs(urls)
             }
         }
-        .background(WindowAccessor(autosaveName: "EVAMainWindow",
-                                   hasRecording: recording != nil,
-                                   onConfirmedClose: closeRecording))
+        .focusedSceneValue(\.recordingWindowActions, RecordingWindowActions(
+            hasRecording: recording != nil, close: closeRecording
+        ))
+        .background(WindowAccessor(
+            hasRecording: recording != nil,
+            onConfirmedClose: closeRecording,
+            onBecomeMain: publishChannelSetContextForThisWindow
+        ))
     }
 
     /// Closes the current recording and returns the window to a fresh launch
     /// state. Because `WaveformView` is keyed by `recording.id`, dropping the
     /// recording discards all of its per-recording in-memory state; opening a
     /// new file builds a brand-new view.
-    private func batchSummaryMessage(_ s: BatchController.BatchSummary) -> String {
-        var lines = ["Processed \(s.done) of \(s.total)."]
-        if s.needsInput > 0 {
-            lines.append("\(s.needsInput) need\(s.needsInput == 1 ? "s" : "") a decision step — rerun those through a windowed batch.")
-        }
-        if s.skipped > 0 { lines.append("Skipped \(s.skipped).") }
-        if !s.failed.isEmpty { lines.append("Failed:\n" + s.failed.joined(separator: "\n")) }
-        return lines.joined(separator: "\n")
-    }
-
-    /// Progress banner for a headless (windowless) batch run — there's no
-    /// per-file WaveformView/`replayBanner()` to show progress through.
-    private var headlessBatchBanner: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                CircularStepProgressIndicator(progress: batch.currentStepProgress)
-                VStack(alignment: .leading, spacing: 1) {
-                    if batch.jobs.indices.contains(batch.headlessIndex) {
-                        Text("File \(batch.headlessIndex + 1) of \(batch.jobs.count) · \(batch.jobs[batch.headlessIndex].name)")
-                            .font(.callout.weight(.semibold))
-                    }
-                    Text(batch.currentStepName.isEmpty ? "Processing" : batch.currentStepName)
-                        .font(.caption.weight(.semibold))
-                    Text("Processing in the background — no windows will open.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 12)
-                Button("Stop Batch", role: .cancel) { batch.stop() }
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                ProgressView(value: batch.overallProgress)
-                    .progressViewStyle(.linear)
-                HStack {
-                    Text("Overall \(Int((batch.overallProgress * 100).rounded()))%")
-                    Spacer()
-                    if let progress = batch.currentStepProgress {
-                        Text("Current step \(Int((progress * 100).rounded()))%")
-                    }
-                }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-            }
-        }
-        .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.orange.opacity(0.35)))
-        .shadow(radius: 6)
-        .padding(12)
-        .frame(maxWidth: 640)
+    /// `WindowAccessor`'s `onBecomeMain` callback — see
+    /// `WaveformView.publishChannelSetContext()` for the full picture. This
+    /// is the same write from `ContentView`'s own `recording`, so the
+    /// Channel Sets editor updates the moment you click into a *different*
+    /// already-loaded recording window, not only when a window first loads
+    /// or edits a channel's role.
+    private func publishChannelSetContextForThisWindow() {
+        ChannelSetStore.shared.activeSensorLayout = recording?.sensorLayout
+        ChannelSetStore.shared.activeChannelNames = recording?.signal?.channelNames
     }
 
     private func closeRecording() {
         recording?.tearDownForClose()
-        ChannelSetStore.shared.clearActiveRecordingContext()
         recording = nil
+        claimedForkSeed = nil
         openError = nil
         isDropTargeted = false
         showsFileImporter = false
@@ -311,6 +328,10 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
+            // Loads into *this* window directly, unlike the menu command —
+            // this button is only ever visible when the window is already
+            // empty, so there is nothing here to preserve by opening a
+            // sibling instead.
             Button("Open Recording...") {
                 showsFileImporter = true
             }
@@ -321,6 +342,10 @@ struct ContentView: View {
             Text("Drop .mff, BrainVision, EDF, Persyst, or BESA .avr/.mul recordings here")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+
+            Text("Drop two or more .mff recordings together to combine or average them")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
 
             if let openError {
                 Text(openError)
@@ -376,6 +401,10 @@ struct ContentView: View {
         }
 
         openError = nil
+        // Defensive, not just for the common case: an ordinary open must
+        // never carry a stale fork claim into the new recording, however it
+        // was reached.
+        claimedForkSeed = nil
         recording = MFFRecording(packageURL: url, securityScopedURLs: securityScopedURLs)
         return true
     }
@@ -432,12 +461,30 @@ struct ContentView: View {
     }
 }
 
-/// Sets an AppKit frame-autosave name on the hosting window and intercepts
-/// the close button to show a discard-confirmation sheet when a recording is open.
-private struct WindowAccessor: NSViewRepresentable {
-    let autosaveName: String
+/// Intercepts the close button to show a discard-confirmation sheet when a
+/// recording is open.
+///
+/// **Does not set a frame-autosave name.** It used to — keyed by a
+/// `@State private var windowInstanceID = UUID()` generated fresh in
+/// `ContentView` on every launch. That name can never match a previously
+/// saved one, since it is different every time the app runs, so
+/// `NSWindow.setFrameAutosaveName` was silently doing nothing useful: found
+/// 2026-08-15 in manual testing, where two independently-positioned windows
+/// both snapped back to "whichever moved most recently" on relaunch instead
+/// of remembering their own spots. Worse, an imperative
+/// `setFrameAutosaveName` call actively takes over frame persistence under
+/// that key, which likely *suppressed* whatever automatic per-window-instance
+/// restoration `WindowGroup` already provides for free — removing the call
+/// is expected to let the platform default take over rather than trading one
+/// broken scheme for another. Unverified without a relaunch test of its own.
+struct WindowAccessor: NSViewRepresentable {
     var hasRecording: Bool = false
     var onConfirmedClose: (() -> Void)? = nil
+    /// Called whenever this window becomes the app's main window — see
+    /// `WaveformView.publishChannelSetContext()` for why: it's what makes the
+    /// Channel Sets editor follow *focus* across multiple recording windows
+    /// rather than only the one that loaded most recently.
+    var onBecomeMain: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -446,12 +493,9 @@ private struct WindowAccessor: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.hasRecording = hasRecording
         context.coordinator.onConfirmedClose = onConfirmedClose
-        let autosaveName = autosaveName
+        context.coordinator.onBecomeMain = onBecomeMain
         DispatchQueue.main.async {
             guard let window = nsView.window else { return }
-            if window.frameAutosaveName != autosaveName {
-                window.setFrameAutosaveName(autosaveName)
-            }
             context.coordinator.attach(to: window)
         }
     }
@@ -459,12 +503,43 @@ private struct WindowAccessor: NSViewRepresentable {
     /// Intercepts `windowShouldClose` to show a discard-confirmation alert sheet
     /// when a recording is open; forwards all other delegate messages to SwiftUI's
     /// original delegate so lifecycle and state restoration keep working.
+    ///
+    /// Also observes `didBecomeMainNotification` on the window, for
+    /// `onBecomeMain`. Plain `NotificationCenter`, not `@FocusedValue` — a
+    /// `.commands`-hosted mirror was tried first for the Channel Sets case
+    /// this exists to serve and found unreliable (see
+    /// `ChannelSetStore.swift`'s file header); a direct AppKit notification
+    /// on the window itself has no equivalent "does this actually
+    /// re-evaluate" uncertainty.
     final class Coordinator: NSObject, NSWindowDelegate {
         var hasRecording = false
         var onConfirmedClose: (() -> Void)?
+        var onBecomeMain: (() -> Void)?
         private weak var originalDelegate: NSWindowDelegate?
+        private var becomeMainObserver: NSObjectProtocol?
+
+        deinit {
+            if let becomeMainObserver {
+                NotificationCenter.default.removeObserver(becomeMainObserver)
+            }
+        }
 
         func attach(to window: NSWindow) {
+            if becomeMainObserver == nil {
+                becomeMainObserver = NotificationCenter.default.addObserver(
+                    forName: NSWindow.didBecomeMainNotification,
+                    object: window,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.onBecomeMain?()
+                }
+                // The window may already be main by the time this attaches
+                // (e.g. a freshly-opened window becomes main before SwiftUI
+                // hands this coordinator the window at all), in which case
+                // the notification above will never fire for it — fire once
+                // manually so that case is not silently missed.
+                if window.isMainWindow { onBecomeMain?() }
+            }
             guard window.delegate !== self else { return }
             originalDelegate = window.delegate
             window.delegate = self
@@ -508,13 +583,7 @@ private struct WindowAccessor: NSViewRepresentable {
 }
 
 #Preview {
-    ContentView(
-        recording: .constant(nil),
-        openRecordingRequest: .constant(0),
-        closeRecordingRequest: .constant(0),
-        batchSetupRequest: .constant(0)
-    )
-        .environment(BatchController())
+    ContentView()
 }
 
 /// Hosts the `UserMarker` SwiftData query so a marker-table change re-evaluates
@@ -523,6 +592,7 @@ private struct WindowAccessor: NSViewRepresentable {
 /// `WaveformView` re-renders only when its own markers actually change.
 private struct WaveformMarkerContainer: View {
     let recording: MFFRecording
+    var forkSeed: PendingWindowForks.Payload? = nil
     @Query private var markers: [UserMarker]
 
     var body: some View {
@@ -536,7 +606,8 @@ private struct WaveformMarkerContainer: View {
                         timeSeconds: $0.timeSeconds,
                         note: $0.note
                     )
-                }
+                },
+            forkSeed: forkSeed
         )
     }
 }

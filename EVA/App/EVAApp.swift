@@ -13,54 +13,44 @@
 import AppKit
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct EVAApp: App {
     /// Quits when the last window closes. Paired with `ContentView`'s
     /// `WindowAccessor`, which refuses to close a window that still holds a
     /// recording — see `WindowCloseBehavior` for why that pairing is what makes
-    /// this safe to turn on.
-    @State private var recording: MFFRecording?
-    @State private var openRecordingRequest = 0
-    @State private var closeRecordingRequest = 0
-    @State private var batchSetupRequest = 0
+    /// this safe to turn on. With `WindowGroup` there can be several main
+    /// windows; the flag still means exactly what it says — the *last* one
+    /// closing quits, regardless of how many existed a moment before.
+    @NSApplicationDelegateAdaptor(EVAAppDelegate.self) private var appDelegate
+
     @State private var goodnessSettings = ChannelGoodnessSettings()
     @State private var segmentGoodnessSettings = SegmentGoodnessSettings()
     @State private var processingDefaults = ProcessingDefaults.shared
-    @State private var batch = BatchController()
     @State private var isCheckingForUpdates = false
 
     var body: some Scene {
-        // `Window`, not `WindowGroup`, and that is the fix for double-opening.
+        // `WindowGroup`, not `Window` — REWIND.md "EVA as a multi-window app"
+        // (2026-08-15). `recording` is `ContentView`'s own `@State` now, not
+        // shared from here, so each window instance genuinely owns its own
+        // recording rather than every window rendering the same one. That is
+        // what makes a second instance meaningful instead of a stray
+        // duplicate — see `ContentView` for the corresponding half of this.
         //
-        // A `WindowGroup` can instantiate more than one window, and macOS uses
-        // that: on a Finder open the group creates its launch window *and* then
-        // spawns a second one to deliver the URL to, so you get two windows with
-        // the file in the front one. Intermittent, because it depends on whether
-        // the open-file Apple event lands before or after the launch window
-        // exists.
-        //
-        // A `Window` scene is single-instance by construction, so the second
-        // window cannot be created and `onOpenURL` is delivered to the one that
-        // is already there.
-        //
-        // This is also the honest description of the app: `recording` is `@State`
-        // on `EVAApp`, so every window of a group would render the *same*
-        // recording. Two windows were never useful here — they were two views of
-        // one document that could not diverge. "New Window" was already absent
-        // too, since `CommandGroup(replacing: .newItem)` replaces New with
-        // "Open Recording…".
-        Window("EVA", id: "main") {
-            ContentView(
-                recording: $recording,
-                openRecordingRequest: $openRecordingRequest,
-                closeRecordingRequest: $closeRecordingRequest,
-                batchSetupRequest: $batchSetupRequest
-            )
-            .environment(goodnessSettings)
-            .environment(segmentGoodnessSettings)
-            .environment(processingDefaults)
-            .environment(batch)
+        // The double-open bug `Window` fixed (0.1.7) was specifically that
+        // `recording` used to be `@State` on *this* struct, so a second
+        // window would have shown the same file rather than a different one.
+        // That reason is gone now that the state moved down; the fix for the
+        // Finder race itself lives in `ContentView`'s `.onOpenURL` instead
+        // (load into an empty receiving window, otherwise open a sibling —
+        // never blindly spawns a redundant second window the way the old bug
+        // did).
+        WindowGroup(id: "main") {
+            ContentView()
+                .environment(goodnessSettings)
+                .environment(segmentGoodnessSettings)
+                .environment(processingDefaults)
         }
         .modelContainer(for: UserMarker.self)
         .defaultSize(Self.defaultWindowSize)
@@ -73,24 +63,17 @@ struct EVAApp: App {
             }
 
             CommandGroup(replacing: .newItem) {
-                Button("Open Recording...") {
-                    openRecordingRequest += 1
-                }
-                .keyboardShortcut("o", modifiers: .command)
+                NewWindowButton()
+                    .keyboardShortcut("n", modifiers: .command)
+
+                OpenRecordingButton()
+                    .keyboardShortcut("o", modifiers: .command)
 
                 FileExportCommands()
 
-                Button("Batch Process...") {
-                    batchSetupRequest += 1
-                }
-                .keyboardShortcut("b", modifiers: [.command, .shift])
-
                 Divider()
 
-                Button("Close File") {
-                    closeRecordingRequest += 1
-                }
-                .disabled(recording == nil)
+                CloseFileButton()
             }
 
             // Quit belongs to the **App** menu, not the File menu.
@@ -128,6 +111,14 @@ struct EVAApp: App {
             CommandGroup(after: .windowArrangement) {
                 OpenDebugLogButton()
                 OpenFigureExportButton()
+                // Alongside the other single-instance utility windows, not
+                // in the File menu — moved here 2026-08-15 after manual
+                // testing found it in the File menu but looked for under
+                // Window, same place Debug Log/Channel Sets/Figure Export
+                // already live. Batch behaves exactly like those now (its
+                // own dedicated window), so this is where it belongs.
+                OpenBatchWindowButton()
+                    .keyboardShortcut("b", modifiers: [.command, .shift])
             }
 
             CommandGroup(replacing: .help) {
@@ -155,6 +146,23 @@ struct EVAApp: App {
         }
         .defaultSize(width: 560, height: 520)
 
+        // Batch's own window (REWIND.md "A significantly attractive option").
+        // Single-instance, like the three utility windows above, and for the
+        // same reason: there is only ever one batch run, so it does not need
+        // `WindowGroup`'s "which instance" question at all. It hosts the same
+        // `WaveformView` an ordinary recording window would — the
+        // review/decision steps batch pauses for are that view's own sheets —
+        // just driven by `BatchController.currentIndex` advancing through a
+        // queue instead of a person picking files. See `BatchWindowView`.
+        Window("Batch", id: Self.batchWindowID) {
+            BatchWindowView()
+                .environment(goodnessSettings)
+                .environment(segmentGoodnessSettings)
+                .environment(processingDefaults)
+        }
+        .modelContainer(for: UserMarker.self)
+        .defaultSize(Self.defaultWindowSize)
+
         Settings {
             PreferencesView()
                 .environment(goodnessSettings)
@@ -167,6 +175,7 @@ struct EVAApp: App {
     static let channelSetsWindowID = "channel-sets"
     static let releaseNotesWindowID = "release-notes"
     static let figureExportWindowID = "figure-export"
+    static let batchWindowID = "batch"
 
     private func checkForUpdates() {
         guard !isCheckingForUpdates else { return }
@@ -229,5 +238,99 @@ private struct OpenFigureExportButton: View {
             openWindow(id: EVAApp.figureExportWindowID)
         }
         .keyboardShortcut("e", modifiers: [.command, .shift])
+    }
+}
+
+/// File-menu item that opens (or fronts) the Batch window.
+///
+/// `openWindow(id:)` on a single-instance `Window` scene's id brings the
+/// existing instance forward if one is already open rather than creating a
+/// second — the same behavior `OpenDebugLogButton` already relies on. Batch
+/// needs no per-invocation data the way opening a *recording* does, so unlike
+/// `OpenRecordingButton` there is nothing else here: the window's own content
+/// decides what to show (its setup sheet if idle, progress if not).
+private struct OpenBatchWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Batch Process...") {
+            openWindow(id: EVAApp.batchWindowID)
+        }
+    }
+}
+
+/// File-menu "New Window" — a blank window, nothing else.
+///
+/// Genuinely this small on purpose. The discoverability gap it fixes: "I
+/// want to combine two files on disk" had no clear starting point before
+/// this, even though every piece downstream already existed — an empty
+/// window already accepts a drop, dropping 2+ `.mff` files already shows the
+/// combine sheet (`openSelectedURLs`'s `mffURLs.count > 1` branch), and that
+/// sheet's `onComplete` already loads the combined result into the same
+/// window that hosted it. What was missing was a way to *get* a blank
+/// window on purpose rather than by accident (closing a recording, or a
+/// lucky Finder-launch timing) — this is that, and nothing more. A dedicated
+/// "Combine" window (`Window`, single-instance, batch's own window as the
+/// precedent) was considered and set aside: batch's window is driven by a
+/// queue advancing through files chosen in advance, but combine is "I just
+/// decided, right now, to drag these two files together" — the per-window
+/// sheet already fits that better than a persistent utility window would,
+/// and it is what already delivers the result into place once you commit.
+private struct NewWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("New Window") {
+            openWindow(id: "main")
+        }
+    }
+}
+
+/// File-menu "Open Recording…" — always opens a brand-new window.
+///
+/// Deliberately not the same mechanism `ContentView`'s empty-state button or
+/// `.onOpenURL` use. Both of those have an obvious window to act on (the one
+/// they are already inside, or the one that received the event); this command
+/// does not — it lives in the menu bar, not in any particular window, so
+/// "load into the current window" has no unambiguous meaning for it. Always
+/// making a new one is simpler than guessing, and was the explicit answer to
+/// "should Open Recording ever reuse an existing window?" (2026-08-15).
+///
+/// Uses `NSOpenPanel` directly rather than SwiftUI's `.fileImporter`, which
+/// has to be attached to a view that is actually on screen — there is no
+/// window here to attach one to yet, since opening the window is the point.
+/// `ContentView.requestBrainVisionFolderAccess` already does the same thing
+/// for the same reason, elsewhere in the file this command used to live in.
+private struct OpenRecordingButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Open Recording...") {
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [.mff, .data, .plainText]
+            panel.allowsMultipleSelection = true
+            panel.message = "Choose a recording to open in a new window."
+            guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+            PendingWindowOpens.shared.push(panel.urls)
+            openWindow(id: "main")
+        }
+    }
+}
+
+/// File-menu "Close File" — acts on whichever recording window is currently
+/// focused.
+///
+/// Reads `@FocusedValue(\.recordingWindowActions)` rather than a shared
+/// `@State`, because with `WindowGroup` there is no longer one `recording` to
+/// point at — see `ContentView` for what it publishes and why closing goes
+/// through a closure rather than a raw binding.
+private struct CloseFileButton: View {
+    @FocusedValue(\.recordingWindowActions) private var actions
+
+    var body: some View {
+        Button("Close File") {
+            actions?.close()
+        }
+        .disabled(actions?.hasRecording != true)
     }
 }

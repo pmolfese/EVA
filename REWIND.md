@@ -792,10 +792,16 @@ pointed at a node's ancestry instead of an imported script.
    serialized-vs-read gaps, and the GPU/machine-locality caveat for the cache).
    Not finished: nothing here proves interactive/headless parity, which needs a
    paired run and a byte comparison rather than a green test suite.
-6. **Session persistence** — write the tree into the package as `eva_history.json`
-   so reopening a file restores its history. `eva.xml` remains the *current*
-   linear chain, i.e. the path from root to the current node; the history file is
-   the full tree. This keeps `eva.xml` backward compatible.
+6. **Session persistence** — was a one-line placeholder here; now has a real
+   design, see *The EVA cache: content-addressed snapshots and normalized
+   imports* below. Short version: a private, non-user-facing cache holds
+   snapshots content-addressed by `EVAHistoryNodeID` (so an evicted snapshot
+   is a disk read away instead of gone) and normalized copies of non-MFF
+   imports (so fork and reopen do not depend on a BrainVision file's original
+   scattered access). A slim `eva_history.json` sidecar may still travel with
+   the package for the tree structure itself — small and portable, versus
+   the cache's large and disposable snapshots — see that section's open
+   questions.
 7. **Queue integration** — node lifecycle states, the three work classes with
    preemptible speculation, and enqueueing user actions against a pending
    full-rate rebuild instead of reading a partial buffer.
@@ -1378,8 +1384,9 @@ user). **Do not guess a fourth — instrument it.**
    branches, so what is missing is intent: a "branch from here" affordance, and
    deciding what happens to the branch you left. Decided 2026-08-15: this means
    two things, not one — see *Forking to a new window* below, which is now the
-   design for the second of them and depends on the multi-window work in
-   *EVA as a multi-window app*.
+   design for the second of them. Its prerequisite, *EVA as a multi-window
+   app*, **is built** (2026-08-15) — forking itself is the next thing to
+   implement, not blocked on anything further.
 2. **A/B compare** (item 10). Needs two selected nodes, which needs the branch
    rendering that just landed.
 3. **Re-derivation** for evicted snapshots, plus the memory preference. Nodes
@@ -1390,10 +1397,70 @@ user). **Do not guess a fourth — instrument it.**
 
 ## Forking to a new window
 
-Raised 2026-08-15, in response to "what if fork opened a second window on the
-same file and let you keep editing independently from there?" Agreed, and
-worth being precise about the mechanism, because the obvious-sounding version
-("reprocess the file the same way in a new window") is the wrong one.
+**Built 2026-08-15**, same day as the multi-window work it depends on. Raised
+in response to "what if fork opened a second window on the same file and let
+you keep editing independently from there?" Agreed, and worth being precise
+about the mechanism, because the obvious-sounding version ("reprocess the
+file the same way in a new window") is the wrong one. Design record kept
+below; "What was actually built" is the as-shipped shape.
+
+### What was actually built
+
+- **`RecordingHistoryModel.ForkSeed`** (`RecordingHistoryModel.swift`) — a
+  plain struct (`history`, `snapshots`, `snapshotOrder`, `onDiskPrefix`,
+  `onDiskPayloadDigests`). `forkSeed()` exports the source window's; `seedFork(_:)`
+  applies one wholesale, replacing whatever the target model already has. No
+  defensive copying needed beyond the assignment itself — `EVAHistory` and the
+  snapshot dictionary are already value types, which is exactly the property
+  the design section below anticipated.
+- **`ChannelModel.copy()`** (`ChannelModel.swift`) — a fresh instance carrying
+  `bad`/`hidden`/`interpolated`/`interpolationSources`, *not* health results
+  (session-only derived state, same category `PipelineSnapshotting.restore`
+  already declines to carry over).
+- **`PendingWindowForks`** (`EVA/App/PendingWindowForks.swift`) — the same
+  FIFO-queue shape as `PendingWindowOpens`, carrying a richer payload:
+  `packageURL`, the `ForkSeed`, a freshly-captured live `PipelineSnapshot`,
+  and a `ChannelModel` copy. Known, accepted gap: only `packageURL` is
+  threaded through, not any BrainVision sidecar-folder security scope, so
+  forking a BrainVision-opened window can fail to load — visibly, the same
+  way any other open failure does, not silently. This is the problem *The EVA
+  cache* below exists to fix properly, by giving every non-MFF import a
+  normalized on-disk copy to reopen from instead of depending on the
+  original scattered files at all.
+- **`WaveformHistoryRail.forkToNewWindow()`** — captures
+  `recordingStore.processingHistory.forkSeed()`, a fresh
+  `capturePipelineSnapshot()`, and `recordingStore.channels.copy()`, pushes
+  them, then `openWindow(id: "main")`.
+- **`WaveformView.applyForkSeed()`** — runs *last* in `loadRecordingIfNeeded()`,
+  after `seedProcessingHistoryFromDisk()` and `adoptOnDiskEpochsIfPresent()`
+  rather than instead of them. Those still run (same file, same `eva.xml`,
+  harmlessly redundant); this call is what makes the fork's full — possibly
+  live-edited — history and live pipeline state win over their result rather
+  than depending on which happened to run last. Ends with the exact
+  `PipelineSnapshotting.restore` call ordinary history navigation already
+  uses, targeting the new window's freshly-constructed view models.
+- **The claim path**: `ContentView.onAppear` checks `PendingWindowForks`
+  before `PendingWindowOpens` (a window is only ever created for one reason,
+  so this ordering doesn't have to matter in practice, but costs nothing to
+  get right). `claimedForkSeed` is explicitly cleared in `open(_:)` and
+  `closeRecording()`, not just consumed once — a fork claimed into a window
+  that is later closed and reused for an ordinary file must not leak into it.
+- **The UI**: a toolbar button in the History tab's footer (`macwindow.badge.plus`),
+  next to the step-back/forward transport rather than a per-node context
+  menu — forking acts on *wherever the pointer currently is*, the same node
+  those controls already operate on.
+- **Tests**: `RecordingHistoryForkTests` — whole-tree and on-disk-prefix
+  carry-through, post-fork independence (mutating one tree doesn't touch the
+  other), identical-next-step hashing to the same node id across two
+  independently-copied trees (the content-addressing consequence the design
+  section predicted), and `ChannelModel.copy()`'s carry-through/omission/
+  independence.
+- **Not verified**: this needed the multi-window mechanism itself, which per
+  the plan above is manual-QA territory — the actual click of the fork
+  button, watching a second window open showing the same state, and editing
+  it independently, has not been done by a human yet.
+
+### Original design (kept for context)
 
 **Memory copy, not reprocessing.** Re-running the pipeline for the new window
 risks exactly the class of bug this document keeps finding: two code paths
@@ -1477,14 +1544,204 @@ scoping pass it was written as (`MULTIWINDOW.md`, 2026-08-15) now that forking
 gives the multi-window work a concrete first consumer rather than being
 speculative.
 
+## The EVA cache: content-addressed snapshots and normalized imports
+
+Not started. Scoped 2026-08-15, prompted by forking's one accepted gap —
+"forking a BrainVision-opened window can fail to load" — while asking a
+bigger question out loud: does EVA need its own file format, richer
+serialization into MFF, or something else entirely? The answer settled on is
+**something else**: not a new save format, not more sidecars — a private,
+non-user-facing cache EVA manages for itself. This is now the concrete design
+for work item 6 ("Session persistence"), which was a one-line placeholder
+before this.
+
+### Why not a native EVA project format
+
+The tempting version is a real EVA-owned file format — its own binary layout,
+replacing MFF as the working representation, something users save and reopen
+as *the* file. Worth naming why this document steers away from it: the moment
+people rely on it for real sessions, format compatibility becomes a permanent
+obligation in a way optional sidecars never asked for, and MFF export becomes
+a lossy round-trip out of a richer format instead of the native shape it is
+today. That is a much bigger commitment than either motivating problem below
+actually needs.
+
+### Why not more MFF sidecars
+
+The current trajectory — `eva.xml`, `eva_ica.json`, `eva_artifacts.json`, and
+the placeholder plan for `eva_history.json` — has been working, and stays for
+anything meant to leave the app: exports, and anything another tool or a
+collaborator might open. But it has a ceiling this document is now close to.
+MFF's schema belongs to EGI, not EVA; every sidecar is EVA quietly annexing
+territory in someone else's directory. Fine for a handful of small XML/JSON
+files. Not fine for what this section is actually for: a branching tree with
+a snapshot cache that today exists only in RAM, which is not a sidecar-sized
+problem, and non-MFF imports (BrainVision, EDF, Persyst, BESA), which have no
+package directory to annex at all — there is nowhere to *put* a sidecar for a
+recording that is three loose files in a folder the user did not intend to
+hand over to EVA.
+
+### What the cache actually is
+
+A directory EVA owns and the user never has to look at —
+`~/Library/Caches/EVA/`, keyed by source file — holding two independent
+things:
+
+1. **Content-addressed snapshot storage.** `EVAHistoryNodeID` is already a
+   stable hash of everything that produced a node — that hash can be a key
+   into an on-disk blob store exactly as well as it is a key into
+   `RecordingHistoryModel`'s in-memory `snapshots` dictionary. Once that
+   exists, an evicted snapshot stops meaning "gone, re-derive it" (REWIND's
+   "next, in order" item 3, unbuilt since the memory-budget work landed) and
+   starts meaning "not in RAM right now, one disk read away." This is the
+   highest-leverage single feature the cache offers: it turns the existing
+   memory-budget eviction from a hard loss into a soft one, for free, because
+   the addressing scheme was already built for an unrelated reason.
+2. **Normalized copies of non-native imports.** The moment EVA reads a
+   BrainVision (or EDF/Persyst/BESA) file, it is converted into
+   `MFFSignalData` in memory — every import format is already normalized to
+   one internal shape. The gap is only that this normalized form is never
+   written back to disk. Doing so once, on first load, gives fork (and
+   reopening generally) something to read that does not depend on the
+   original scattered files or their security scope — this is the direct fix
+   for the fork limitation that prompted this section. `eva.xml`-equivalent
+   metadata travels with the cached copy the same way it would with a real
+   MFF package.
+
+Both are genuinely optional: delete the cache directory and EVA loses
+*speed* (snapshots re-derive, non-native imports re-read their originals) but
+nothing it cannot recover on its own. That reversibility is what keeps this
+from becoming the native-format commitment the section above steers away
+from — it is allowed to be wrong, stale, or missing without ever being the
+thing anyone's data actually lives in.
+
+### Open questions
+
+- **Eviction policy for the on-disk store**, independent of the in-RAM
+  budget — presumably larger and slower to fill, but not unbounded.
+- **Invalidation**: a normalized import copy is only correct as long as the
+  original file has not changed on disk since. Needs a cheap staleness check
+  (mtime + size, most likely) rather than re-hashing a whole recording on
+  every open.
+- **Does this replace the `eva_history.json` sidecar plan, or sit alongside
+  it?** Leaning toward: the cache holds the *snapshots* (large, disposable,
+  never meant to leave the machine); a slim `eva_history.json` sidecar still
+  travels *with the package* for the tree structure itself (small, meant to
+  survive a copy to another machine — REWIND's original "should nodes
+  survive export?" open question). The cache is what makes the sidecar's
+  tree navigable without a full re-derive; the sidecar is what makes the
+  tree portable at all.
+
 ## EVA as a multi-window app
 
-Not started. First scoped 2026-08-15, after "make the main window
-single-instance" (0.1.7) closed a Finder double-open bug by making two
-windows structurally impossible rather than merely rare. This asks what it
-would take to make two windows possible again — on purpose, correctly — and
-folds in the finding that gave the work an actual reason to happen: forking,
-above.
+**Built 2026-08-15**, same day it was scoped — the answers to every open
+product question below (window scoping, batch's own window, close/quit
+rules) were settled first, which is what made this a same-day build rather
+than a longer pass. First scoped after "make the main window single-instance"
+(0.1.7) closed a Finder double-open bug by making two windows structurally
+impossible rather than merely rare. This section is kept as the design
+record; "What was actually built" below is the as-shipped shape, which
+matches the plan closely but not everywhere — read that first if you are
+touching this code.
+
+### What was actually built
+
+- `EVAApp.swift`: `Window("EVA", id: "main")` → `WindowGroup(id: "main") {
+  ContentView() }`. `recording` is `ContentView`'s own `@State`.
+- **`PendingWindowOpens`** (`EVA/App/PendingWindowOpens.swift`) — a tiny
+  `@MainActor` FIFO queue, not `WindowGroup(for:)`. Deliberate: `for:` ties a
+  window's identity to macOS state-restoration, which would try to relaunch
+  the exact file selection (via a possibly-stale security-scoped bookmark)
+  on EVA's *next* launch — a bigger commitment than "always open a new
+  window" was asking for. `OpenRecordingButton` pushes the picked URLs
+  immediately before calling `openWindow(id: "main")`; the new window's
+  `ContentView.onAppear` claims them once, guarded by
+  `hasClaimedPendingOpen` so a second `.onAppear` firing cannot steal a
+  *different* window's pending file.
+- **Three different "does this reuse a window?" rules, one per trigger, each
+  argued from what that trigger naturally means** — not the single uniform
+  "always new" the open question below originally posed:
+  - **Menu "Open Recording…"** (`OpenRecordingButton`): always a new window.
+    It lives in the menu bar, not inside any particular window, so "the
+    current window" has no unambiguous referent for it to reuse. Uses raw
+    `NSOpenPanel` rather than `.fileImporter`, which must attach to an
+    on-screen view that does not exist yet when this fires.
+  - **`.onOpenURL`** (Finder double-click / Open With): reuses *this*
+    window if it is empty, otherwise opens a sibling. Not "always new" —
+    a fresh launch delivers the open-file event to the `WindowGroup`'s
+    auto-created default window, which is empty, and filling it directly is
+    what keeps a Finder launch from spawning a redundant empty window every
+    time. A blind "always new" here would have reintroduced a milder,
+    on-purpose version of the exact double-open bug `Window` was built to
+    fix in 0.1.7.
+  - **Drag-and-drop**: unchanged from before multi-window — always loads
+    into the window it was dropped on, full stop. A drop is inherently
+    targeted.
+- **`@FocusedValue` routing** — `RecordingWindowActions` (`ContentView.swift`)
+  is a struct (`hasRecording`, `close: () -> Void`), not a raw
+  `Binding<MFFRecording?>`, so `CloseFileButton` can act without also being
+  able to overwrite `recording` directly and bypass `closeRecording()`'s
+  teardown. Turned out **not** needed for Open or Batch — both resolved to
+  an unambiguous target on their own (a new window; the single batch
+  window), so `@FocusedValue` ended up scoped to exactly one command, not
+  three as the original plan assumed.
+- **Batch's own window** — `BatchWindowView.swift`, a `Window("Batch", id:
+  "batch")` hosting the same `WaveformMarkerContainer`/`WaveformView` a
+  manual window does, with its own private `@State private var batch =
+  BatchController()`. **Closing it mid-run cancels the batch** (`.onDisappear
+  { if batch.isActive { batch.stop() } }`) — decided explicitly rather than
+  left to fall out of default behavior; no confirmation, since "Stop Batch"
+  already ends a run with none and completed files are already written.
+  `BatchSetupSheet`'s Cancel now closes the window itself
+  (`dismissWindow(id:)`) rather than leaving an empty background behind, for
+  the same "nothing to leave behind" reason.
+- **Every manual recording window carries its own private, always-idle
+  `BatchController`** — not a shared one. `WaveformView` unconditionally
+  reads `@Environment(BatchController.self)` (for
+  `autoStartBatchIfNeeded()`), so something has to be there; giving each
+  window its own means a manually-opened file can never accidentally
+  `.matches()` a batch running in the *other*, dedicated window and hijack
+  itself into review mode mid-edit — a real risk that would have existed had
+  `BatchController` stayed a single shared instance now that two kinds of
+  window both hold one.
+- **`ChannelSetStore.activeSensorLayout`/`activeChannelNames`** — kept as
+  storage, but the *write* moved from "wherever a recording loads" (stale
+  the moment two windows exist — reflects load order, not focus) to a
+  **focus mirror**: `ChannelSetContext` is a new `@FocusedValue`, published
+  by `WaveformView` alongside its existing dozen; `ChannelSetFocusMirror`
+  (`ChannelSetStore.swift`) is a zero-size view mounted in `.commands`
+  purely to keep that read live regardless of which window is key, then
+  writes what it sees into the store. It has to live in `.commands`
+  specifically — `@FocusedValue` read from *inside* the Channel Sets
+  editor's own window body would go nil the instant that window became key,
+  since the editor does not publish the value itself. This is the
+  "(a) track focus" option from the open question below, chosen over
+  "(b) per-window editor." `clearActiveRecordingContext()` and its three
+  call sites were deleted outright rather than kept as a no-op — the mirror
+  makes explicit clearing unnecessary (focus moving to a different or no
+  window updates or nils the mirrored value on its own).
+- **Per-window frame-autosave name** — `ContentView` generates a
+  `@State private var windowInstanceID = UUID()` once per window instance
+  and keys `WindowAccessor`'s autosave name off it. Deliberately *not* keyed
+  by the recording's package name, despite that being the more obvious
+  per-window-feeling identifier: window position/size is a property of the
+  window's slot on screen, not of whichever file happens to be showing —
+  keying by file would make a window forget its position every time a
+  different file opened in it, and would make two windows on the *same*
+  file collide on one saved geometry, reintroducing the exact autosave
+  collision this was fixing, just from a different cause.
+- **`@NSApplicationDelegateAdaptor(EVAAppDelegate.self)` restored.** Found
+  missing from `EVAApp.swift` while starting this work — the 0.1.7
+  last-window-closes-quits fix had regressed at some point after landing.
+  Fixed as part of this pass since multi-window depends on it working
+  correctly (closing the last of *N* windows still needs to quit).
+- **Not built in this pass, and not needed for it:** forking to a new
+  window (above — this was the prerequisite, not the feature itself); the
+  "can the same file be open twice" and "does Open Recording ever reuse an
+  empty frontmost window" open questions below were answered (always-new,
+  and no-reuse respectively) rather than left open.
+
+### Original scoping (kept for context)
 
 ### The headline finding
 
@@ -1690,15 +1947,19 @@ step 6 used to be — every remaining item has a known shape.
 
 ### Open questions specific to multi-window
 
-- **Can the same file be open twice?** Nothing prevents it once `WindowGroup`
-  allows a second window — "Open Recording…" would just create a second
-  `MFFRecording` pointed at the same package, independent of forking (which
-  explicitly wants this, on purpose, for one file). Two windows opened
-  separately on the same file could silently diverge with no indication
-  they are related. Decide whether to detect and warn, or allow it freely.
-- **Does "Open Recording…" always create a new window, or reuse an empty
-  one if the frontmost window has no recording?** Standard Mac document-app
-  behavior favors the latter.
+- **Can the same file be open twice?** Answered by omission, not by a
+  detection check: nothing stops it (menu "Open Recording…" always makes a
+  new window regardless of what is already open elsewhere), and no warning
+  was built. Two windows opened separately on the same file can silently
+  diverge with no indication they are related. Still true after the build;
+  revisit if it turns out to matter in practice.
+- ~~Does "Open Recording…" always create a new window, or reuse an empty
+  one if the frontmost window has no recording?~~ **Answered: always new,
+  for the menu command specifically.** `.onOpenURL` (Finder/Open With) got
+  the *other* answer — reuse this window if empty — because it has a
+  natural receiving window to reuse and the menu command does not. See
+  "What was actually built" above for why those needed to differ rather
+  than share one rule.
 - **Cross-window comparison beyond fork** — resolved above for the visual
   case (windows). Whether the tree-only, single-window rail view of A/B
   should still exist *in addition to* the windowed version, or whether

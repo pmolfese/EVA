@@ -210,6 +210,27 @@ final class ChannelModel {
     func applyingInterpolations(to signal: MFFSignalData) -> MFFSignalData {
         interpolationSnapshot.applying(to: signal)
     }
+
+    /// A fresh, independent `ChannelModel` holding the same bad/interpolated/
+    /// hidden state — needed because this class is a reference type.
+    ///
+    /// That matters specifically for forking a window (REWIND.md "Two
+    /// hazards, both concrete rather than hypothetical"): a naive fork would
+    /// leave the new window's `RecordingStore` pointing at *this exact*
+    /// instance, so marking a channel bad in one window would silently mark
+    /// it bad in the other. This is what makes the copy a real, independent
+    /// object instead.
+    ///
+    /// Health results are not copied — a scan result is session-only derived
+    /// state, the same category `PipelineSnapshotting.restore` already
+    /// declines to carry over (selection, viewport, sheet visibility).
+    func copy() -> ChannelModel {
+        let clone = ChannelModel()
+        clone.hidden = hidden
+        clone.bad = bad
+        clone.replaceInterpolations(interpolated, sources: interpolationSources)
+        return clone
+    }
 }
 
 extension FocusedValues {

@@ -66,6 +66,7 @@ struct ProcessingStatusPopoverView: View {
     let onSelectNode: (String) -> Void
     let onStepBack: () -> Void
     let onStepForward: () -> Void
+    let onFork: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,7 +88,8 @@ struct ProcessingStatusPopoverView: View {
                         canStepForward: canStepForward,
                         onSelectNode: onSelectNode,
                         onStepBack: onStepBack,
-                        onStepForward: onStepForward
+                        onStepForward: onStepForward,
+                        onFork: onFork
                     )
                 }
             }
@@ -315,6 +317,12 @@ struct HistoryTabView: View {
     let onSelectNode: (String) -> Void
     let onStepBack: () -> Void
     let onStepForward: () -> Void
+    /// "Fork to New Window" — REWIND.md "Forking to a new window". Sits next
+    /// to the transport controls rather than in a per-row menu: forking
+    /// forks *wherever the pointer currently is*, the same node stepping
+    /// back/forward already operates on, not an arbitrary row you might
+    /// right-click.
+    let onFork: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -348,7 +356,16 @@ struct HistoryTabView: View {
             Text("\(nodes.count) \(nodes.count == 1 ? "step" : "steps")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
             Spacer()
+
+            Button(action: onFork) {
+                Label("Fork to New Window", systemImage: "macwindow.badge.plus")
+                    .labelStyle(.iconOnly)
+            }
+            .help("Open a new window on this recording, starting from exactly what's on screen — edit it independently from here.")
+            .accessibilityLabel("Fork to new window")
+
             Text(shortID)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.tertiary)

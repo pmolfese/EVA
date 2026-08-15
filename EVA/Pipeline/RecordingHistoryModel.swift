@@ -322,6 +322,56 @@ final class RecordingHistoryModel {
         snapshotOrder.removeAll()
         isNavigating = false
     }
+
+    // MARK: - Forking
+
+    /// Everything a forked window's own `RecordingHistoryModel` needs to
+    /// start with the *same* tree and cache this one has — see REWIND.md
+    /// "Forking to a new window": "`EVAHistory` copies whole, not just the
+    /// current node" and "Snapshots copy whole too". Both are cheap for the
+    /// same reason undo/redo already is: `MFFSignalData.data` is
+    /// copy-on-write, so a snapshot dictionary copy shares buffers rather
+    /// than duplicating megabytes of samples.
+    ///
+    /// A plain struct rather than handing out mutable references to this
+    /// model's own storage — the two windows must be independent from the
+    /// moment of the fork, and a struct copy is what makes that automatic:
+    /// `history`/`snapshots` are already value types, so assigning them into
+    /// the new model's storage is the whole isolation guarantee, with
+    /// nothing further to get wrong.
+    struct ForkSeed {
+        var recordingKey: String
+        var history: EVAHistory
+        var snapshots: [EVAHistoryNodeID: PipelineSnapshot]
+        var snapshotOrder: [EVAHistoryNodeID]
+        var onDiskPrefix: [EVAProcessingStep]
+        var onDiskPayloadDigests: [EVAProcessingStep.Operation: String]
+    }
+
+    func forkSeed() -> ForkSeed {
+        ForkSeed(
+            recordingKey: recordingKey,
+            history: history,
+            snapshots: snapshots,
+            snapshotOrder: snapshotOrder,
+            onDiskPrefix: onDiskPrefix,
+            onDiskPayloadDigests: onDiskPayloadDigests
+        )
+    }
+
+    /// Applies a `ForkSeed` wholesale, replacing whatever this model already
+    /// has. Used once, right after a forked window's own on-disk seeding has
+    /// already run (harmlessly redundant — same file, same `eva.xml`) — this
+    /// call is what makes the fork's full, possibly-live-edited history win
+    /// over it. See `WaveformView.applyForkSeed`.
+    func seedFork(_ seed: ForkSeed) {
+        recordingKey = seed.recordingKey
+        history = seed.history
+        snapshots = seed.snapshots
+        snapshotOrder = seed.snapshotOrder
+        onDiskPrefix = seed.onDiskPrefix
+        onDiskPayloadDigests = seed.onDiskPayloadDigests
+    }
 }
 
 /// One row of the rail. A value, not a node reference — see `railNodes`.

@@ -333,6 +333,12 @@ extension WaveformView {
         let timingOptions = psaTimingMarkerOptions(in: allSummaries, excluding: summary.code)
         let isSelected = epoching.selectedEventCodes.contains(summary.code)
         let usesTimingMarker = epoching.timingMarkerEnabledValues.contains(summary.code)
+        // A code doesn't need its own checkbox to be DIN-eligible — a
+        // `CategoryRegexRule` sourced from it needs the same nearest-marker
+        // correction its own events would get, so DIN stays enabled whenever
+        // this code feeds a regex rule too, even with the plain category off.
+        let isRegexSource = epoching.categoryRegexRules.values.contains { $0.sourceCode == summary.code }
+        let isDINEligible = isSelected || isRegexSource
 
         return HStack(spacing: 12) {
             Toggle(isOn: psaEventCodeBinding(summary.code)) {
@@ -361,8 +367,10 @@ extension WaveformView {
 
             Toggle("DIN", isOn: psaTimingMarkerEnabledBinding(summary.code, options: timingOptions))
                 .toggleStyle(.checkbox)
-                .disabled(!isSelected || timingOptions.isEmpty)
-                .help("Use the nearest selected timing marker as this category's onset.")
+                .disabled(!isDINEligible || timingOptions.isEmpty)
+                .help(isSelected || !isRegexSource
+                    ? "Use the nearest selected timing marker as this category's onset."
+                    : "This code isn't selected on its own, but feeds a regex category below — DIN still applies to that category's onset.")
 
             Picker("Timing Marker", selection: psaTimingMarkerSelectionBinding(summary.code, options: timingOptions)) {
                 if timingOptions.isEmpty {
@@ -376,7 +384,7 @@ extension WaveformView {
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(width: 128)
-            .disabled(!isSelected || !usesTimingMarker || timingOptions.isEmpty)
+            .disabled(!isDINEligible || !usesTimingMarker || timingOptions.isEmpty)
             .help("Marker group whose nearest event supplies the true onset time.")
         }
     }
@@ -930,9 +938,64 @@ extension WaveformView {
             }
         }
 
-        TextField("New category name (e.g. \"emotional\" or \"n2_$1\")", text: binding(recordingStore.events, \.categoryGroupName))
+        let groupCount = captureGroupCount(in: categoryRegexPattern)
+
+        HStack {
+            Text("New category name")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            if groupCount > 0 {
+                HStack(spacing: 4) {
+                    Text("Insert:")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    ForEach(1...groupCount, id: \.self) { index in
+                        Button("$\(index)") {
+                            categoryGroupName += "$\(index)"
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .font(.system(.caption2, design: .monospaced))
+                        .help("Append $\(index) (this pattern's capture group \(index)) to the category name.")
+                    }
+                }
+            }
+        }
+        TextField("e.g. \"emotional\" or \"n2_$1\"", text: binding(recordingStore.events, \.categoryGroupName))
             .textFieldStyle(.roundedBorder)
+            .font(.system(.body, design: .monospaced))
             .help("Use $1, $2, … to reference the pattern's capture groups — one rule then fans out into a category per captured value instead of needing a separate rule for each.")
+
+        if categoryGroupName.isEmpty, !categoryRegexSourceCode.isEmpty, !categoryRegexPattern.isEmpty,
+           let templateSuggestion = CategoryTemplateSuggester.suggest(
+               pattern: categoryRegexPattern,
+               samples: regexSourceTexts(sourceCode: categoryRegexSourceCode, matchField: categoryRegexMatchField, events: events)
+           ) {
+            Button {
+                categoryGroupName = templateSuggestion.template
+            } label: {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "wand.and.stars")
+                        .foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Suggested: \(templateSuggestion.template)")
+                            .font(.system(.caption, design: .monospaced))
+                            .fontWeight(.semibold)
+                        Text(templateSuggestion.rationale)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            .help("Inferred from what this pattern's capture group(s) actually match — tap to use it, then edit as needed.")
+        }
 
         HStack {
             Spacer()

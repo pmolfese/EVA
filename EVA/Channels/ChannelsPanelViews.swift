@@ -113,8 +113,7 @@ extension WaveformView {
         channels.removeAllInterpolations()
         channels.clearHealthResults()
         electrodeGeometry = recording.electrodeGeometry
-        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
-        ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
+        publishChannelSetContext()
         physioRanges = Self.computePhysioRanges(displayedPhysioSignal())
         channelStatusMessage = message
         channelStatusIsError = false

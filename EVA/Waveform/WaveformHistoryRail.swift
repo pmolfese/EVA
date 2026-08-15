@@ -178,6 +178,29 @@ extension WaveformView {
         navigateHistory(to: target)
     }
 
+    /// "Fork to New Window" — REWIND.md "Forking to a new window". Opens a
+    /// second window on this same file, starting from exactly what is on
+    /// screen right now, so it can be edited independently from there.
+    ///
+    /// Memory copy, not reprocessing: everything pushed here is already in
+    /// memory (the tree, the snapshot cache, the live view models' current
+    /// outputs, the channel decisions), so nothing gets re-run. The one part
+    /// that is not free is the file re-read — `MFFRecording` cannot be shared
+    /// between the two windows, because `tearDownForClose()` nils out
+    /// `signal`/`pnsSignal` on close, and closing window A must not be able
+    /// to rip data out from under window B.
+    func forkToNewWindow() {
+        let historySeed = recordingStore.processingHistory.forkSeed()
+        let liveSnapshot = capturePipelineSnapshot()
+        PendingWindowForks.shared.push(PendingWindowForks.Payload(
+            packageURL: recording.packageURL,
+            historySeed: historySeed,
+            liveSnapshot: liveSnapshot,
+            channels: recordingStore.channels.copy()
+        ))
+        openWindow(id: "main")
+    }
+
     /// Subject-specific identity for the steps whose portable parameters do not
     /// determine their output.
     ///

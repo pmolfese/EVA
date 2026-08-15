@@ -38,3 +38,20 @@ struct ChannelSetExport: Codable {
     var version: Int = 1
     var sets: [ChannelSet]
 }
+
+/// A saved electrode net geometry, independent of any loaded recording — see
+/// `ChannelSetStore`'s file header for why this exists and where it comes
+/// from. `name` is what `ChannelSet.netType` matches against.
+struct KnownNetGeometry: Identifiable, Codable, Hashable, Sendable {
+    var id: UUID
+    var name: String
+    var positions: [SensorPosition]
+
+    init(id: UUID = UUID(), name: String, positions: [SensorPosition]) {
+        self.id = id
+        self.name = name
+        self.positions = positions
+    }
+
+    var asSensorLayout: SensorLayout { SensorLayout(name: name, positions: positions) }
+}

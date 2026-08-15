@@ -193,8 +193,13 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
 
 struct WaveformView: View {
     var recording: MFFRecording
+    /// Non-nil only when this window was created by "Fork to New Window" —
+    /// see `PendingWindowForks` and `applyForkSeed()`. `nil` for every
+    /// ordinary open.
+    let forkSeed: PendingWindowForks.Payload?
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openWindow) var openWindow
     @Environment(ChannelGoodnessSettings.self) var goodnessSettings
     @Environment(SegmentGoodnessSettings.self) var segmentGoodnessSettings
     @Environment(ProcessingDefaults.self) var processingDefaults
@@ -649,9 +654,14 @@ struct WaveformView: View {
     /// Swift only requires explicit assignment for properties whose default
     /// needs to change (here, `store` must be the SAME instance across
     /// `recordingStore` and every VM, not each's own default `RecordingStore()`).
-    init(recording: MFFRecording, userMarkers: [WaveformUserMarkerSignature]) {
+    init(
+        recording: MFFRecording,
+        userMarkers: [WaveformUserMarkerSignature],
+        forkSeed: PendingWindowForks.Payload? = nil
+    ) {
         self.recording = recording
         self.userMarkers = userMarkers
+        self.forkSeed = forkSeed
         let store = RecordingStore()
         _recordingStore = State(initialValue: store)
         _ecg = State(wrappedValue: ECGDetectionViewModel(store: store))
@@ -890,13 +900,61 @@ struct WaveformView: View {
         if electrodeGeometry == nil {
             electrodeGeometry = recording.electrodeGeometry
         }
-        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
-        ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
+        publishChannelSetContext()
         seedPhysioPolarityDefaultsIfNeeded()
         seedDisplayScaleDefaults()
         seedProcessingHistoryFromDisk()
         adoptOnDiskEpochsIfPresent()
+        applyForkSeed()
         autoStartBatchIfNeeded()
+    }
+
+    /// Publishes this window's electrode layout to `ChannelSetStore`, the
+    /// single-instance Channel Sets editor's data source.
+    ///
+    /// Two call sites, both direct writes rather than routed through
+    /// `@FocusedValue`/`.commands` — a `ChannelSetFocusMirror` living inside
+    /// `.commands` was tried first (2026-08-15) and found broken by manual
+    /// test: the editor read "no sensor layout available" even with a
+    /// recording open, most likely because an invisible, zero-size view
+    /// mounted purely for a `.onChange` side effect does not reliably get
+    /// re-evaluated the way a real, visible command button does — unverified
+    /// beyond that it did not work. This is deliberately the older, plainer
+    /// mechanism instead: call sites write directly, on load
+    /// (`loadRecordingIfNeeded`), on a channel-role edit
+    /// (`finishChannelRoleEdit`), and on this window becoming main
+    /// (`WindowAccessor`'s `onBecomeMain`, wired from `ContentView`) — the
+    /// last one is what makes the editor follow *focus* rather than *load
+    /// order* across multiple recording windows, which is the actual
+    /// multi-window requirement; the first two are what make it correct
+    /// within one window regardless of focus.
+    func publishChannelSetContext() {
+        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
+        ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
+    }
+
+    /// Applies a fork's captured state on top of ordinary load-time seeding —
+    /// see `PendingWindowForks` and REWIND.md "Forking to a new window".
+    /// Deliberately runs *after* `seedProcessingHistoryFromDisk()` and
+    /// `adoptOnDiskEpochsIfPresent()`, not instead of them: this window opened
+    /// the same file fresh, so that ordinary seeding runs and is harmlessly
+    /// redundant (same eva.xml), and this call is what makes the fork's
+    /// full — possibly live-edited — history and live pipeline state win over
+    /// it rather than a race depending on call order.
+    ///
+    /// `PipelineSnapshotting.restore` is the exact call ordinary history
+    /// navigation already uses — a fork is "restore this snapshot," just into
+    /// a freshly-constructed set of view models instead of this window's own.
+    private func applyForkSeed() {
+        guard let forkSeed else { return }
+        recordingStore.processingHistory.seedFork(forkSeed.historySeed)
+        recordingStore.channels = forkSeed.channels
+        PipelineSnapshotting.restore(
+            forkSeed.liveSnapshot,
+            store: recordingStore, gradient: gradient, bcg: bcg, ica: ica,
+            filter: filter, wavelet: wavelet, artifactVM: artifactVM, template: template,
+            segHealth: segHealth, epoching: epoching
+        )
     }
 
     /// Seeds the history rail with what `eva.xml` says already happened to this
@@ -2032,7 +2090,8 @@ struct WaveformView: View {
                 onClearStatusHistory: { statusHistory.removeAll() },
                 onSelectNode: { navigateHistory(to: EVAHistoryNodeID(hex: $0)) },
                 onStepBack: { stepHistoryBack() },
-                onStepForward: { stepHistoryForward() }
+                onStepForward: { stepHistoryForward() },
+                onFork: { forkToNewWindow() }
             )
         }
     }
@@ -2398,7 +2457,6 @@ struct WaveformView: View {
         cancelInFlightRecordingTasks()
         clearRecordingStateForClose()
         recording.tearDownForClose()
-        ChannelSetStore.shared.clearActiveRecordingContext()
     }
 
     private func cancelInFlightRecordingTasks() {
