@@ -148,6 +148,7 @@ final class ProcessingCore {
         let lights = ReplaySettingsRestore.settings(for: steps)
         filter.averageReference = lights.continuousReference != nil
         epoching.averageReference = lights.epochReference != nil
+        epoching.baselineCorrected = lights.baselineCorrection
 
         for (index, step) in steps.enumerated() {
             let stepName = ReplayStepDisplay.label(for: step.operation)
@@ -212,6 +213,12 @@ final class ProcessingCore {
                 // removes the interactive/headless split rather than reasoning
                 // about it, which is what every paired-run divergence in this
                 // project has argued for.
+                break
+
+            case .baseline:
+                // Same shape as `.reference`, and simpler: the flag was already
+                // set from the whole step list before the walk started, and
+                // `applyBuildJob`'s own fold applies it when `segment` runs.
                 break
 
             case .icaClean:

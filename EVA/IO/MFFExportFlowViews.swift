@@ -455,6 +455,15 @@ extension WaveformView {
                     )
                 ))
             }
+            // Same reasoning, and simpler: baseline correction is the other flag
+            // `applyBuildJob` folds into the same build, so it is a setting the
+            // upcoming `segment` consumes rather than a pass performable from
+            // outside. Unlike `reference` it reads nothing beyond the segment
+            // window `segment`'s own parameters already carry, so there is
+            // nothing to record here but the fact that it happened.
+            if epoching.baselineCorrected {
+                script.append(EVAProcessingStep(operation: .baseline))
+            }
             script.append(EVAProcessingStep(operation: .segment, parameters: epoching.parameters))
         }
         // Bad-channel marks and interpolation, as provenance. Shared with the

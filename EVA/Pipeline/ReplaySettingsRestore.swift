@@ -79,6 +79,11 @@ nonisolated enum ReplaySettingsRestore {
         // not the same operation.
         var continuousReference: ReferenceScheme?
         var epochReference: ReferenceScheme?
+
+        // `baseline` — no domain, no parameters: it reads nothing beyond the
+        // segment window `segment`'s own step already carries, so there is
+        // nothing to disambiguate. See `MFFExportFlowViews.currentProcessingScript()`.
+        var baselineCorrection = false
     }
 
     /// What `steps` implies. Absent by default: see the file header for why the
@@ -98,6 +103,9 @@ nonisolated enum ReplaySettingsRestore {
                 case .continuous: result.continuousReference = scheme
                 case .epoch: result.epochReference = scheme
                 }
+
+            case .baseline:
+                result.baselineCorrection = true
 
             default:
                 continue

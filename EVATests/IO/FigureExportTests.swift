@@ -35,3 +35,43 @@ struct FigureExportTests {
         #expect(FigureFormat.pdf.label == "PDF")
     }
 }
+
+/// `FigureExportBasket.filenames`/`sanitizedPrefix` — the naming scheme for
+/// "Export Individually", exercised without a real folder picker. See that
+/// file's header for why the numbering has to match what the basket list
+/// shows: the whole point of the feature is that the file on disk and the row
+/// in the window agree on which figure is which.
+@MainActor
+struct FigureExportBasketNamingTests {
+
+    @Test func namesAreOneIndexedAndPadded() {
+        let names = FigureExportBasket.filenames(prefix: "Fig", count: 3, format: .pdf)
+        #expect(names == ["Fig-1.pdf", "Fig-2.pdf", "Fig-3.pdf"])
+    }
+
+    @Test func doubleDigitCountsArePaddedForFinderSortOrder() {
+        let names = FigureExportBasket.filenames(prefix: "Fig", count: 12, format: .png)
+        #expect(names.first == "Fig-01.png")
+        #expect(names[8] == "Fig-09.png")
+        #expect(names[9] == "Fig-10.png")
+        #expect(names.last == "Fig-12.png")
+        // Lexical (Finder default) order must already be numeric order.
+        #expect(names == names.sorted())
+    }
+
+    @Test func zeroItemsProducesNoNames() {
+        #expect(FigureExportBasket.filenames(prefix: "Fig", count: 0, format: .pdf).isEmpty)
+    }
+
+    @Test func prefixSpacesBecomeHyphensAndPathSeparatorsAreStripped() {
+        #expect(FigureExportBasket.sanitizedPrefix("Grand Average") == "Grand-Average")
+        #expect(FigureExportBasket.sanitizedPrefix("Cond: A/B") == "Cond-AB")
+    }
+
+    @Test func blankOrAllInvalidPrefixFallsBackRatherThanProducingABareNumber() {
+        #expect(FigureExportBasket.sanitizedPrefix("") == "EVA-Figure")
+        #expect(FigureExportBasket.sanitizedPrefix("   ") == "EVA-Figure")
+        #expect(FigureExportBasket.sanitizedPrefix("/:") == "EVA-Figure")
+    }
+
+}

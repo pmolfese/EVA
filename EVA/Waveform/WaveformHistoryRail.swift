@@ -151,6 +151,7 @@ extension WaveformView {
         if lights.selectsThresholdMethod { artifactVM.detectionMethod = .threshold }
         filter.averageReference = lights.continuousReference != nil
         epoching.averageReference = lights.epochReference != nil
+        epoching.baselineCorrected = lights.baselineCorrection
 
         for node in path {
             guard let step = node.step else { continue }

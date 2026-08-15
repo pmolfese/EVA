@@ -134,7 +134,10 @@ nonisolated enum HistoryStepSummary {
                 parts.append("\(count) ch excluded")
             }
 
-        case .baseline, .average, .combine, .split:
+        case .baseline:
+            break // No parameters — the title alone ("baseline") says it all.
+
+        case .average, .combine, .split:
             break
         }
 

@@ -103,6 +103,68 @@ final class FigureExportBasket {
         items.removeAll()
     }
 
+    /// One PNG or PDF file per item, in one chosen folder, named
+    /// `<prefix>-<N>.<ext>` where `N` is the item's 1-based position in the
+    /// basket — the same number `FigureExportBasketView` shows beside each
+    /// row, so what gets written matches what was picked.
+    ///
+    /// No re-rendering: `pdfData`/`thumbnailData` are the exact bytes
+    /// `FigureExporter` would produce for a "Save Figure As…" click on that
+    /// same figure — `add(_:title:legend:size:)` captures both up front —
+    /// so this is a folder pick and a sequence of writes, nothing more.
+    /// JPEG isn't offered here: nothing in the basket is captured as one, and
+    /// re-rendering just for a third format isn't worth the added path.
+    func exportIndividually(prefix: String, format: FigureFormat) {
+        guard !items.isEmpty, format != .jpeg else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = "Choose a folder for \(items.count) exported figure\(items.count == 1 ? "" : "s")."
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+
+        let names = Self.filenames(prefix: prefix, count: items.count, format: format)
+        for (name, item) in zip(names, items) {
+            let data = format == .pdf ? item.pdfData : item.thumbnailData
+            try? data.write(to: folder.appendingPathComponent(name), options: .atomic)
+        }
+    }
+
+    /// `<prefix>-<N>.<ext>` for each of `count` items, 1-based and
+    /// zero-padded to the width of `count` itself — "-01", "-02", …, "-10"
+    /// rather than "-1", "-10", "-2", so Finder's default sort agrees with
+    /// basket order past nine items. Pulled out of `exportIndividually` so
+    /// the naming scheme is testable without driving a real folder picker,
+    /// and so `FigureExportBasketView`'s preview text can share it exactly
+    /// rather than reimplementing the padding rule.
+    static func filenames(prefix: String, count: Int, format: FigureFormat) -> [String] {
+        guard count > 0 else { return [] }
+        let cleanedPrefix = sanitizedPrefix(prefix)
+        let width = max(String(count).count, 1)
+        let ext = format.fileExtension
+        return (1...count).map { index in
+            "\(cleanedPrefix)-\(String(format: "%0\(width)d", index)).\(ext)"
+        }
+    }
+
+    /// Strips characters the filesystem would reject or that would otherwise
+    /// split the name across an unintended path component, and falls back to
+    /// a name that is never empty — an all-invalid or blank prefix must not
+    /// silently produce `-1.png` with nothing in front of it.
+    ///
+    /// Not `private`: `FigureExportBasketView`'s filename preview calls this
+    /// too, so what it shows before the folder picker opens is the name that
+    /// actually gets written, not a guess at what sanitizing will do to it.
+    static func sanitizedPrefix(_ raw: String) -> String {
+        let cleaned = raw
+            .trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: " ", with: "-")
+            .components(separatedBy: CharacterSet(charactersIn: "/:"))
+            .joined()
+        return cleaned.isEmpty ? "EVA-Figure" : cleaned
+    }
+
     /// Lays out every item as a single column, top to bottom, scaled to the
     /// page's width, wrapping to a new page when the next item wouldn't fit.
     /// Exports the whole multi-page contact sheet as one PDF.

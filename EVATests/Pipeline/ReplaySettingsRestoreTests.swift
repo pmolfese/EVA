@@ -83,6 +83,23 @@ struct ReplaySettingsRestoreTests {
         #expect(eye.selectsThresholdMethod == true)
     }
 
+    private func baselineStep() -> EVAProcessingStep {
+        EVAProcessingStep(operation: .baseline)
+    }
+
+    @Test("A path without a baseline step means uncorrected")
+    func absentBaselineMeansUncorrected() {
+        #expect(ReplaySettingsRestore.settings(for: [filterStep()]).baselineCorrection == false)
+    }
+
+    @Test("A path naming baseline derives it on")
+    func presentBaselineDerivesOn() {
+        #expect(ReplaySettingsRestore.settings(for: [baselineStep()]).baselineCorrection == true)
+        #expect(
+            ReplaySettingsRestore.settings(for: [referenceStep(.epoch), baselineStep()]).baselineCorrection
+        )
+    }
+
     @Test("A path without a reference step means not referenced, in both domains")
     func absentReferenceMeansUnreferenced() {
         let lights = ReplaySettingsRestore.settings(for: [filterStep()])

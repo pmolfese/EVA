@@ -442,7 +442,6 @@ final class EpochingViewModel {
             "preStimulusMs": String(format: "%.0f", preStimulus * 1000),
             "postStimulusMs": String(format: "%.0f", postStimulus * 1000),
             "offsetMs": String(format: "%.0f", offset * 1000),
-            "baselineCorrected": "\(baselineCorrected)",
             "average": "\(averageOnApply)",
             "skipEyeBlinks": "\(skipEyeBlinks)",
             "skipEyeMovements": "\(skipEyeMovements)",
@@ -515,6 +514,8 @@ final class EpochingViewModel {
         if let v = p["preStimulusMs"].flatMap(Double.init) { preStimulus = v / 1000 }
         if let v = p["postStimulusMs"].flatMap(Double.init) { postStimulus = v / 1000 }
         if let v = p["offsetMs"].flatMap(Double.init) { offset = v / 1000 }
+        // Read but no longer written: the `baseline` step owns this now, and a
+        // pre-`baseline` eva.xml still replays correctly from the old key.
         if let v = p["baselineCorrected"] { baselineCorrected = (v == "true") }
         if let v = p["averageReference"] { averageReference = (v == "true") }
         if let v = p["average"] { averageOnApply = (v == "true") }

@@ -1149,6 +1149,27 @@ trees. Deferred.
 
 Carried out of a long session. Roughly in the order they would bite.
 
+### Baseline correction is its own step too
+
+Same move as `reference`, and simpler. `baselineCorrected` was a `Bool` inside
+`segment`'s parameters; it is now its own `EVAProcessingStep.Operation.baseline`
+— another reserved-but-unfilled case from the original enum.
+
+Simpler than `reference` in every way that mattered there: one domain (baseline
+correction has no continuous equivalent — it is inherently per-epoch), no
+ambient dependency (`withBaselineCorrection()` reads only the segment window
+`segment`'s own step already carries), and no interactive/headless split to
+find (`applyBuildJob` was already the one shared path both directions use, so
+there was no duplicate pass to accidentally run twice the way the first
+`reference` draft did). The step itself needs no parameters — its node address
+comes entirely from its presence and its parent.
+
+Emitted before `segment`, alongside `reference (domain: .epoch)`, for the same
+reason: both are flags `applyBuildJob`'s fold consumes while building the
+epochs, not passes performable from outside afterward. `ReplaySettingsRestore`
+gained a fourth light (`baselineCorrection`) for the same total-derivation
+reason as the others.
+
 ### Fixed: opening a processed file showed "raw", discarding its lineage
 
 Reported with a real file: `Josh_pilot_run1_20260814_030010-averages.mff`, whose
@@ -1355,7 +1376,10 @@ user). **Do not guess a fourth — instrument it.**
 
 1. **Forking as a deliberate act.** The tree already forks and the rail now draws
    branches, so what is missing is intent: a "branch from here" affordance, and
-   deciding what happens to the branch you left.
+   deciding what happens to the branch you left. Decided 2026-08-15: this means
+   two things, not one — see *Forking to a new window* below, which is now the
+   design for the second of them and depends on the multi-window work in
+   *EVA as a multi-window app*.
 2. **A/B compare** (item 10). Needs two selected nodes, which needs the branch
    rendering that just landed.
 3. **Re-derivation** for evicted snapshots, plus the memory preference. Nodes
@@ -1363,6 +1387,322 @@ user). **Do not guess a fourth — instrument it.**
 4. **The `markBad` carry-through work**, designed but unbuilt — see *Channel
    decisions: the carry-through rules*. It is the fix for the filter's unrecorded
    bad-channel input, which is a live content-addressing gap.
+
+## Forking to a new window
+
+Raised 2026-08-15, in response to "what if fork opened a second window on the
+same file and let you keep editing independently from there?" Agreed, and
+worth being precise about the mechanism, because the obvious-sounding version
+("reprocess the file the same way in a new window") is the wrong one.
+
+**Memory copy, not reprocessing.** Re-running the pipeline for the new window
+risks exactly the class of bug this document keeps finding: two code paths
+computing "the same thing" and quietly diverging — that is what caused the
+double average-reference bug, the stale-detection-on-rewind bug, and the
+interactive/headless split found in `reference`. A copy has no such risk: it
+is the same bytes, guaranteed, not a claim that needs verifying by a paired
+run. And it is nearly free — `MFFSignalData.data` is `[[Float]]`,
+copy-on-write, the same property `PipelineSnapshot` already exploits for
+instant undo/redo. **Forking is structurally the same operation as navigating
+history — it just lands in a second window instead of the same one.**
+
+### Mechanism
+
+1. **`EVAHistory` copies whole, not just the current node.** It is already a
+   pure value struct (see "Undo/redo is snapshot-based, not re-derived" above),
+   so copying `RecordingHistoryModel.history` into the new window's own model
+   is cheap and correct. The new window can navigate the *shared* past just as
+   well as the original can. After the copy the two are independent values, so
+   each window's future edits diverge naturally with no explicit branch
+   bookkeeping needed — they are just two structs that used to be equal and no
+   longer are.
+2. **Snapshots copy whole too**, same copy-on-write reasoning — there is no
+   cost argument against it, and it gives the new window the same "instant
+   navigation" depth into pre-fork history that the original has, rather than
+   starting with only the current state recoverable.
+3. **The pipeline view models seed from a captured `PipelineSnapshot`**, via
+   `PipelineSnapshotting.restore` — literally the same restore call navigation
+   already uses, just targeting a freshly-constructed set of view models
+   instead of the current window's.
+
+A nice consequence of this that is not the point but falls out of it for
+free: because node IDs are content-addressed hashes, not object identity, two
+windows that independently apply the *same* next step compute the *same*
+node ID even though their `EVAHistory` copies are now separate structs. If
+session persistence (work item 6, not built) ever reads two forked windows'
+histories back in, they would still line up on their shared prefix.
+
+### Two hazards, both concrete rather than hypothetical
+
+- **`ChannelModel` is a reference type** (`final class`), not a value. A naive
+  fork would leave the new window's `RecordingStore` pointing at the *same*
+  `ChannelModel` instance — marking a channel bad in one window would silently
+  mark it bad in the other. Needs an explicit copy of `.bad`/`.interpolated`/
+  `.hidden`, not a shallow one.
+- **`MFFRecording` cannot be shared between the two windows at all.** It is a
+  class, and `tearDownForClose()` nils out `signal`/`pnsSignal` on close. If
+  both windows held the same instance, closing window A would rip the loaded
+  data out from under window B mid-edit. The new window needs its own
+  `MFFRecording(packageURL:)` — a fresh load of the raw file. That is the one
+  part of a fork that is not free: forking costs one file re-read, even though
+  the processing itself costs nothing.
+
+Session-only UI state (selection range, viewport scroll, sheet visibility) is
+not carried over — treated the same as `PipelineSnapshotting.restore` already
+treats it on ordinary navigation, where it is cleared because it may not make
+sense against a different signal. For a fork the signal starts identical, so
+it *could* be preserved, but consistency with the existing restore behavior
+argues for not special-casing it, at least at first.
+
+### Why alongside, not instead of, in-window branching
+
+This does not replace clicking an earlier rail node and continuing from there
+(the in-window branching item 1 above already mostly built). It sits next to
+it as a second gesture: "New Branch Here" stays in this window; "Fork to New
+Window" spawns a second one. The window version's actual selling point is
+real side-by-side comparison — two live `WaveformView`s on screen at once,
+independently scrollable and independently scaled — which the single-rail
+model cannot offer without building a whole separate split-view feature. This
+is arguably the *cheap* way to get that comparison, since it reuses the
+entire existing view rather than building a new one. It is also the
+resolution to *A/B compare*'s open question below about whether comparison
+means two tree nodes viewed one at a time or two actual windows: **windows**,
+for the visual case; the tree still holds both regardless of how they are
+viewed.
+
+**Hard dependency: this cannot be built before EVA is a multi-window app.**
+There is currently only one `recording` in the whole process to fork *from*.
+The rest of this section is that prerequisite, folded in from the standalone
+scoping pass it was written as (`MULTIWINDOW.md`, 2026-08-15) now that forking
+gives the multi-window work a concrete first consumer rather than being
+speculative.
+
+## EVA as a multi-window app
+
+Not started. First scoped 2026-08-15, after "make the main window
+single-instance" (0.1.7) closed a Finder double-open bug by making two
+windows structurally impossible rather than merely rare. This asks what it
+would take to make two windows possible again — on purpose, correctly — and
+folds in the finding that gave the work an actual reason to happen: forking,
+above.
+
+### The headline finding
+
+**Most of EVA is already scoped correctly for this.** The pipeline state that
+actually matters — filter output, ICA, artifact cleaning, wavelet reduction,
+channel decisions, the processing queue, the history tree itself — all lives
+in `RecordingStore`, and `RecordingStore` is already `@State` owned by
+`WaveformView`, freshly constructed every time `WaveformMarkerContainer` is
+re-keyed by `.id(recording.id)`. Two recordings already cannot
+cross-contaminate each other's *processing* state, because that state was
+never shared to begin with — REFACTOR.md's L4 extraction did this work
+already, for an unrelated reason (testability), and multi-window inherits the
+benefit for free.
+
+The actual work is concentrated in three places: **the window scene itself**
+(`Window` → `WindowGroup`), **routing menu commands to the right window** (a
+standard SwiftUI mechanism, not currently used anywhere in EVA), and **a
+short, specific list of true singletons** that assume exactly one recording is
+ever active. That list is short because most candidates checked turned out
+fine — see "Audited and fine" below.
+
+### What has to change
+
+**1. The window scene: `Window` → `WindowGroup`.**
+`EVAApp.swift` currently declares `Window("EVA", id: "main") { ContentView(
+recording: $recording, ...) }`, with `recording` as `@State` on `EVAApp`
+itself, passed down as a binding. That is *why* it is single-instance: there
+is exactly one `recording` variable in the whole app, so there can only ever
+be one window showing it.
+
+The fix is not a flag — it is moving that state to where it structurally
+belongs. `ContentView` should own `@State private var recording:
+MFFRecording?` itself; the scene becomes `WindowGroup(id: "main") {
+ContentView() }`. SwiftUI then gives each window instance its own
+independent `@State`, and — because `WaveformMarkerContainer`/
+`RecordingStore` are already downstream of that — its own entire pipeline,
+for free. This is the one piece of real leverage this plan has: the hard part
+(isolating processing state) is already done, and switching scene types is
+what turns "already isolated" into "actually usable across two windows."
+
+**2. Menu commands need to know which window they mean.** Today, "Close
+File", "Open Recording…", "Batch Process…" mutate the one `@State` on
+`EVAApp`. With a `WindowGroup` that indirection has nowhere to point — a menu
+click has to act on the frontmost window, not all of them and not an
+arbitrary one. SwiftUI's answer is `@FocusedValue`/`.focusedSceneValue`,
+unused anywhere in EVA yet but standard, documented multi-window SwiftUI —
+known shape, not an open design problem. `ContentView` publishes what the
+frontmost window needs (open/close/canClose, or a focused binding to
+`recording` itself); `.commands` reads it and disables items with no live
+target.
+
+**3. Window-frame autosave collides across instances.** `WindowAccessor`
+calls `window.setFrameAutosaveName(autosaveName)` with the fixed literal
+`"EVAMainWindow"`. Two windows sharing one AppKit frame-autosave name will
+fight over the same saved position/size. Needs a name keyed per window
+instance — the recording's package name is a reasonable choice, with a
+per-window UUID fallback for two windows on the same file (see the open
+question below).
+
+**4. `ChannelSetStore.activeSensorLayout`/`activeChannelNames`.** The one
+genuine "assumes a single active recording" singleton found in this audit.
+`ChannelsPanelViews.swift` sets these on every load; the separate Channel Sets
+editor window (single-instance) reads them to draw its electrode map. With
+two-plus recording windows this reduces to "whichever recording loaded or was
+touched most recently" — the editor would silently show the wrong recording's
+layout, with no indication that happened. Two fixes, and it is a product
+decision, not a mechanical one:
+   - **(a) Track focus, not load order** — same `@FocusedValue` plumbing as
+     above. Minimal, matches how the other single-instance utility windows
+     already relate to "the app," but the editor's content changes underneath
+     you as you click between windows.
+   - **(b) Make the editor per-recording**, opened from that recording's own
+     window rather than the Window menu globally. More consistent, more work,
+     and raises the same "which window does this belong to" question the
+     editor was trying to avoid by being global in the first place.
+
+**5. The close → quit flow needs a per-window rule, not an app-wide one.**
+0.1.7 built: close a recording (confirm if unsaved work exists) → window
+survives as an empty drop target → closing *that* quits the app
+(`applicationShouldTerminateAfterLastWindowClosed`). Correct for exactly one
+window, where "empty" and "nothing left to do" are the same state. With N
+windows, "empty window, but a sibling window still has a recording open" has
+no rule yet. Likely answer: an empty window with siblings still open just
+closes outright (no confirmation needed — nothing to discard) rather than
+requiring the two-step close-then-quit dance, which exists only to give a
+*last* window a landing state instead of vanishing.
+`applicationShouldTerminateAfterLastWindowClosed` itself needs no change —
+"last window closed" already means what it says regardless of how many
+windows existed a moment before.
+
+### Audited and fine — no change needed
+
+Checked because they are `.shared` singletons and looked at first with
+suspicion; none of them assume one active recording:
+
+- **`ProcessingDefaults.shared`** — genuinely global, UserDefaults-backed
+  *preferences* (default filter cutoffs, default ICA method, …), read once
+  when a view model is constructed to seed its starting values. Not runtime
+  state that depends on which recording is showing.
+- **`FigureExportBasket.shared`** — already documented as session-wide.
+  Two-plus recording windows feeding one basket is not just harmless, it is
+  plausibly the actual motivating use case for wanting two windows at all —
+  building a comparison figure from two different subjects' data.
+- **`DebugLog.shared`** — one log for the app's own behavior, correctly
+  global regardless of window count.
+- **`ProcessingQueue`** — already a member of `RecordingStore`, not a
+  singleton at all. Already per-recording.
+- **SwiftData `.modelContainer(for: UserMarker.self)`** — attached at the
+  scene level. With `WindowGroup` this is shared across all window instances
+  automatically, which is correct: one marker database, already filtered
+  per-recording via `@Query` inside `WaveformMarkerContainer`.
+- **`GradientCPUBackend.shared`/`GradientMetalBackend.shared`/
+  `LocalTemplateMetalBackend.shared`** — compute backends, stateless between
+  calls. Safe to share, same as any other shared engine object.
+
+### A significantly attractive option: batch gets its own dedicated window
+
+Raised as a hypothetical partway through the original scoping pass, and
+worth building in as the actual recommendation rather than a footnote — it
+resolves what was otherwise the single least-obvious, most open-ended piece
+of the whole plan: whether windowed batch claims a manual window, refuses to
+run with several open, or something else. This makes that question not need
+an answer.
+
+**The idea:** instead of windowed batch meaning "drive whichever window
+happens to be `recording`'s owner through a queue of files," give it a
+fourth single-instance utility window — `Window("Batch", id: "batch")`,
+opened from the Window menu, exactly like Debug Log, Channel Sets, and Figure
+Export already are. Batch processing stops being a *mode* an ordinary
+recording window can enter, and becomes its own place entirely. This is a
+fourth instance of a pattern already proven three times over in this
+codebase, not a novel design.
+
+**Why it is more than a relabeling.** Windowed batch only exists because some
+steps (ICA component removal, gradient review) cannot be resolved headlessly
+and need a human to look at the real interactive UI. That review UI is not
+separate from ordinary editing — `ReplayController`'s pause/resume state
+(`.awaitingReview`/`.awaitingDecision`) is `@State` living directly inside
+`WaveformView`, gating the exact same sheets and panels a manual user
+touches. So a batch window needs the *same* UI a recording window needs; the
+difference is only what drives `recording` — a person picking files, versus
+`BatchController.currentIndex` advancing through a queue. Today both live in
+the same place: `ContentView`'s `.onChange(of: batch.currentIndex) { idx in
+recording = MFFRecording(...) }` sits right next to manual open/close, in the
+view every ordinary window would become an instance of under `WindowGroup`.
+Splitting batch out moves that whole branch into the batch window's own
+content instead — simplifying the *manual*-window code path too, not just
+the multi-window story: `ContentView` stops needing to know batch exists at
+all.
+
+Concretely this removes or shrinks three things:
+- **Open question "does batch claim a window?" stops being a question.**
+  Batch always has exactly one window, structurally, identified by its own
+  scene id rather than by focus. Nothing left to arbitrate.
+- **The `@FocusedValue` work only has to cover manual windows.** Batch's own
+  commands (Stop Batch, its progress display) belong to the batch window
+  specifically and never need to ask "which window is this for."
+- **`ContentView` sheds a whole branch of state it doesn't conceptually
+  own.**
+
+What it adds, small but new: `ChannelSetStore` gets a third contributor
+(manual window A, manual window B, and now the batch window all set
+`activeSensorLayout` on load) — the fix above is unchanged but the batch
+window needs to participate in whichever is chosen. And a genuinely new
+question: what happens if the batch window is closed mid-run? No equivalent
+case exists today, since the only window there is *is* the batch. Options:
+disable closing while a batch is active (matches "Stop Batch" already being
+the deliberate way out); or closing prompts to stop the batch first, same
+shape as the existing discard-confirmation on a manual window. Small, but
+worth deciding on purpose.
+
+**Net assessment: worth doing.** It turns the plan's one open-ended,
+product-judgment item into a mechanical one, reuses a pattern already proven
+three times over, and simplifies the manual-window code path as a side
+effect rather than merely avoiding making it worse.
+
+### Suggested order, if this goes ahead
+
+1. `Window` → `WindowGroup`, `recording` moved into `ContentView`'s own
+   `@State`. Get a second window opening and independently loading a
+   *different* file working end to end before anything else — proof that
+   "most of EVA is already scoped correctly" holds under a real second
+   window, not just under code reading.
+2. **Batch's own window**, alongside step 1, not after — it removes the
+   `batch.currentIndex` branch from `ContentView` entirely, so building it
+   early means step 1's manual-window code never has to carry batch-swapping
+   logic it would only lose again later.
+3. `@FocusedValue` plumbing for File commands on manual windows. Test with
+   two windows open, confirming ⌘W / Close File / Open Recording each act on
+   the right one. Narrower than originally scoped, now that batch has its own
+   window and its own commands.
+4. Window-frame autosave naming fix, for every window type including batch.
+5. `ChannelSetStore` decision (focus-tracking vs. per-window editor),
+   covering all three window sources (two-plus manual, one batch).
+6. Close/quit-flow adjustment for N manual windows, plus the close-mid-batch
+   decision for the batch window.
+7. **Forking to a new window** (above) — the actual motivating feature,
+   buildable once steps 1–3 exist. This is why the plan is worth doing now
+   rather than staying speculative.
+
+With batch given its own window, nothing in this list is open-ended the way
+step 6 used to be — every remaining item has a known shape.
+
+### Open questions specific to multi-window
+
+- **Can the same file be open twice?** Nothing prevents it once `WindowGroup`
+  allows a second window — "Open Recording…" would just create a second
+  `MFFRecording` pointed at the same package, independent of forking (which
+  explicitly wants this, on purpose, for one file). Two windows opened
+  separately on the same file could silently diverge with no indication
+  they are related. Decide whether to detect and warn, or allow it freely.
+- **Does "Open Recording…" always create a new window, or reuse an empty
+  one if the frontmost window has no recording?** Standard Mac document-app
+  behavior favors the latter.
+- **Cross-window comparison beyond fork** — resolved above for the visual
+  case (windows). Whether the tree-only, single-window rail view of A/B
+  should still exist *in addition to* the windowed version, or whether
+  forking supersedes it, is still open.
 
 ---
 

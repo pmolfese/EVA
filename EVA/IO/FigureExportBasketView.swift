@@ -18,6 +18,9 @@ import SwiftUI
 
 struct FigureExportBasketView: View {
     @State private var basket = FigureExportBasket.shared
+    @State private var showsIndividualExport = false
+    @State private var individualExportPrefix = ""
+    @State private var individualExportFormat: FigureFormat = .pdf
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,8 +33,15 @@ struct FigureExportBasketView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
-                    ForEach(basket.items) { item in
+                    ForEach(Array(basket.items.enumerated()), id: \.element.id) { index, item in
                         HStack(spacing: 12) {
+                            // Same number `exportIndividually` names the file
+                            // after, so what's written on disk matches what's
+                            // shown here.
+                            Text("\(index + 1)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 18, alignment: .trailing)
                             if let thumbnail = item.thumbnailImage {
                                 Image(nsImage: thumbnail)
                                     .resizable()
@@ -85,6 +95,14 @@ struct FigureExportBasketView: View {
                 }
                 .disabled(basket.items.isEmpty)
 
+                Button("Export Individually…") {
+                    showsIndividualExport = true
+                }
+                .disabled(basket.items.isEmpty)
+                .popover(isPresented: $showsIndividualExport, arrowEdge: .bottom) {
+                    individualExportPopover
+                }
+
                 Button("Export Contact Sheet…") {
                     basket.exportContactSheet()
                 }
@@ -94,5 +112,54 @@ struct FigureExportBasketView: View {
             .padding(12)
         }
         .frame(minWidth: 480, minHeight: 400)
+        // Prefix persists across the window opening and closing — a habitual
+        // "compare figures" file naming convention shouldn't need retyping
+        // every session, and there is nothing recording-specific about it to
+        // reset when the basket is cleared.
+        .onAppear {
+            if individualExportPrefix.isEmpty { individualExportPrefix = "EVA-Figure" }
+        }
+    }
+
+    @ViewBuilder
+    private var individualExportPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Export Individually").font(.headline)
+
+            LabeledContent("Prefix") {
+                TextField("EVA-Figure", text: $individualExportPrefix)
+                    .frame(width: 180)
+            }
+            Picker("Format", selection: $individualExportFormat) {
+                Text("PDF").tag(FigureFormat.pdf)
+                Text("PNG").tag(FigureFormat.png)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 180)
+
+            Text(exportPreviewText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Choose Folder…") {
+                basket.exportIndividually(prefix: individualExportPrefix, format: individualExportFormat)
+                showsIndividualExport = false
+            }
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(14)
+        .frame(width: 240)
+    }
+
+    /// Shows the first and last filename this run would produce, so a typo'd
+    /// prefix or an unexpected count is visible before the folder picker
+    /// opens rather than after files already exist on disk.
+    private var exportPreviewText: String {
+        let names = FigureExportBasket.filenames(
+            prefix: individualExportPrefix, count: basket.items.count, format: individualExportFormat
+        )
+        guard let first = names.first else { return "" }
+        guard let last = names.last, names.count > 1 else { return first }
+        return "\(first) … \(last)"
     }
 }
