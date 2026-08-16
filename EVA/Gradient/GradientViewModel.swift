@@ -785,9 +785,9 @@ final class GradientViewModel {
                     + "volumes \(listed)\(censored.count > 20 ? ", …" : ""))"
                 )
             }
-            correctedSignal = signal.replacingData(result.0)
+            correctedSignal = signal.replacingSamples(result.0)
             if let pnsInput, let correctedPNSData = result.1 {
-                correctedPNSSignal = pnsInput.replacingData(correctedPNSData, signalTypeSuffix: "MRI")
+                correctedPNSSignal = pnsInput.replacingSamples(correctedPNSData, signalTypeSuffix: "MRI")
             } else {
                 correctedPNSSignal = nil
             }

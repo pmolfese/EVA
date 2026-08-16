@@ -49,6 +49,7 @@ nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable 
         case baseline
         case average
         case combine
+        case combineBadChannelPolicy
         case split
     }
 
@@ -87,7 +88,13 @@ extension EVAProcessingStep {
     var replayInteraction: ReplayInteraction {
         guard replayable else { return .skip }
         switch operation {
-        case .filter, .thresholdArtifactDetection, .segment, .waveletReduce: return .auto
+        // `.reference`/`.baseline` carry portable settings (reference type,
+        // baseline window), not a subject-specific result the way ICA
+        // component choice or a drawn artifact template is — same category
+        // as filter/threshold/segment/wavelet, not the `.skip` default
+        // (2026-08-15, confirmed against a batch run misclassifying both).
+        case .filter, .thresholdArtifactDetection, .segment, .waveletReduce,
+             .reference, .baseline: return .auto
         case .mriGradientCorrection: return .review
         case .icaClean, .artifactClean: return .decision
         default: return .skip

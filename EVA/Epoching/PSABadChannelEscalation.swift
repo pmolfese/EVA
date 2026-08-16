@@ -138,7 +138,7 @@ enum PSABadChannelEscalation {
                     epochedData[result.target] = series
                 }
             }
-            outcome.patchedEpochedSignal = epochedSignal.replacingData(epochedData)
+            outcome.patchedEpochedSignal = epochedSignal.replacingSamples(epochedData)
         } else if epochedSignal != nil {
             // Stale or mismatched epoched layout — safer to invalidate.
             outcome.requiresEpochInvalidation = true

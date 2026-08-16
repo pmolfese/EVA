@@ -78,6 +78,15 @@ final class ChannelSetStore {
     /// Channel labels from the focused recording, used only for display in
     /// the channel set editor. Channel sets remain stored by zero-based index.
     var activeChannelNames: [String]? = nil
+    /// Whether the focused recording came from an `.mff` package, vs. some
+    /// other reader (BrainVision, etc.). Gates `ProcessingDefaults.
+    /// autoSaveNewNetGeometriesFromNonMFF` in `ChannelSetEditorView` — a
+    /// non-MFF file's geometry is more often reconstructed/approximate than
+    /// the vendor's own file, so auto-saving it needs a separate opt-in.
+    /// Defaults true so an unset value (nothing loaded yet) doesn't itself
+    /// block anything; the gate only has teeth once a real, non-MFF
+    /// recording is focused.
+    var activeIsMFFSource: Bool = true
 
     /// User-saved net geometries — see the file header. Sorted by name for
     /// display; storage order doesn't otherwise matter.

@@ -45,6 +45,7 @@ nonisolated enum HistoryStepSummary {
         case .baseline: return "baseline"
         case .average: return "average"
         case .combine: return "combine"
+        case .combineBadChannelPolicy: return "combine bad channels"
         case .split: return "split"
         case .reference: return "Reference"
         case .bcgDetection: return "BCG detection"
@@ -137,7 +138,7 @@ nonisolated enum HistoryStepSummary {
         case .baseline:
             break // No parameters — the title alone ("baseline") says it all.
 
-        case .average, .combine, .split:
+        case .average, .combine, .combineBadChannelPolicy, .split:
             break
         }
 

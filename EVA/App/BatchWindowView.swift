@@ -24,25 +24,47 @@
 //  `recording`: `BatchController.currentIndex` advancing through a queue,
 //  instead of a person opening a file.
 //
-//  `batch` is this window's own `@State`, not shared with any recording
-//  window — see `ContentView`'s note on its own placeholder `BatchController`
-//  for why every window needs *a* controller in its environment, and why
-//  only this one is ever actually driven.
+//  `batch` is owned by `EVAApp`, not this view, and injected at the `Window`
+//  scene's own definition — see the doc comment on `EVAApp.batchController`
+//  for why (a sheet shown on this view's first appearance would not reliably
+//  see an `.environment(_:)` attached inside the body instead). Still not
+//  shared with any recording window — see `ContentView`'s note on its own
+//  placeholder `BatchController` for why every window needs *a* controller in
+//  its environment, and why only this one is ever actually driven.
 //
 
+import AppKit
 import SwiftData
 import SwiftUI
 
 struct BatchWindowView: View {
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow) private var openWindow
+    @Environment(BatchController.self) private var batch
 
-    @State private var batch = BatchController()
     @State private var recording: MFFRecording?
     /// Starts true: an idle batch window's whole purpose is showing this
     /// sheet, the same way `ContentView.launchScreen` is just what an empty
     /// recording window shows.
+    ///
+    /// That initial value only fires once, though — `Window` (unlike
+    /// `WindowGroup`) is a singleton scene whose SwiftUI `@State` survives
+    /// the window being closed and reopened, it doesn't get torn down and
+    /// recreated. Cancel sets this to `false` before closing the window
+    /// (see below), and without the `onAppear` reset that `false` was still
+    /// sitting there the next time the window opened: no sheet, just the
+    /// idle placeholder, with no way back to the setup sheet short of
+    /// relaunching EVA (2026-08-15).
     @State private var showsBatchSetup = true
     @State private var batchSummary: BatchController.BatchSummary?
+    /// Snapshot of `batch.jobs` taken the moment a run finishes (2026-08-16,
+    /// "have it stay open and list the files that are processed"). `jobs` is
+    /// a value-type array, so this copy survives `start`/`startHeadless`
+    /// reassigning `batch.jobs` for the *next* run — without it, starting a
+    /// second batch would silently rewrite the list out from under whatever
+    /// was still showing the first run's results. Session-only by design, the
+    /// same as `batch` itself: nothing here is meant to survive a relaunch.
+    @State private var completedJobs: [BatchController.BatchJob] = []
 
     var body: some View {
         Group {
@@ -51,18 +73,47 @@ struct BatchWindowView: View {
                     .id(recording.id)
             } else if batch.isActive, batch.isHeadlessRun {
                 headlessProgress
+            } else if !completedJobs.isEmpty {
+                resultsView
             } else {
                 idlePlaceholder
             }
         }
-        .environment(batch)
+        .onAppear {
+            // Only re-arm the setup sheet for a genuinely idle reopen — no
+            // completed run sitting in `completedJobs` to show instead. Both
+            // `batch` and this view's own `@State` (`completedJobs` included)
+            // survive the window closing and reopening within the same EVA
+            // run — `Window` is a singleton scene, not torn down and rebuilt
+            // like `WindowGroup` — so a finished batch's results are already
+            // there to find on reopen (2026-08-16, "could it live as long as
+            // the current run of EVA?"). The unconditional version of this
+            // check (2026-08-15, fixing Cancel leaving the window stuck on
+            // the idle placeholder) would otherwise pop the setup sheet right
+            // back on top of those results every time.
+            if !batch.isActive, completedJobs.isEmpty { showsBatchSetup = true }
+        }
         .sheet(isPresented: $showsBatchSetup) {
             BatchSetupSheet(
                 // Nothing to leave behind in an idle batch window — Cancel
                 // closes the window itself rather than dismissing the sheet
                 // onto an empty background, matching "this window's only job
                 // is running a batch."
-                onCancel: { dismissWindow(id: EVAApp.batchWindowID) },
+                //
+                // Dismissing the sheet and closing the window in the same
+                // tick doesn't work: `dismissWindow(id:)` called while this
+                // sheet is still presented races the sheet's own dismissal
+                // and is silently dropped, so Cancel visibly did nothing
+                // (2026-08-15). Flipping `showsBatchSetup` off first lets the
+                // sheet actually dismiss; queuing `dismissWindow` on the next
+                // run-loop tick (`DispatchQueue.main.async`, not a real
+                // delay) closes the window only once that's done.
+                onCancel: {
+                    showsBatchSetup = false
+                    DispatchQueue.main.async {
+                        dismissWindow(id: EVAApp.batchWindowID)
+                    }
+                },
                 onStart: { showsBatchSetup = false }
             )
         }
@@ -76,21 +127,16 @@ struct BatchWindowView: View {
             recording = MFFRecording(packageURL: url) // fresh UUID → .id() rebuilds
         }
         .onChange(of: batch.summary) { _, summary in
-            if let summary { batchSummary = summary }
-        }
-        .alert("Batch complete", isPresented: Binding(
-            get: { batchSummary != nil },
-            set: { if !$0 { batchSummary = nil } }
-        )) {
-            Button("OK") {
-                batchSummary = nil
-                // Ready for another run rather than left showing the last
-                // job's file with nothing to do next.
-                showsBatchSetup = true
-            }
-        } message: {
-            if let s = batchSummary {
-                Text(batchSummaryMessage(s))
+            // Was an `.alert` (2026-08-15) — replaced (2026-08-16) because an
+            // alert's "OK" is a dead end: acknowledging it was the only way
+            // to make it go away, which meant giving up looking at the just-
+            // finished file list. `resultsView` is what a completed batch
+            // shows now instead; the alert's summary text becomes its
+            // header, and `completedJobs` is the thing that actually keeps
+            // it on screen rather than a transient dialog.
+            if let summary {
+                batchSummary = summary
+                completedJobs = batch.jobs
             }
         }
         // Closing mid-batch cancels it — decided explicitly (2026-08-15)
@@ -126,6 +172,93 @@ struct BatchWindowView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    /// What a finished batch leaves on screen — every job from the run that
+    /// just finished, each with a way to act on its output, rather than a
+    /// one-shot summary dialog that only a "New Batch" click could get past.
+    private var resultsView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let s = batchSummary {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Batch complete").font(.headline)
+                    Text(batchSummaryMessage(s))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(20)
+                Divider()
+            }
+            List(completedJobs) { job in
+                batchResultRow(job)
+            }
+            .listStyle(.inset)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Divider()
+            HStack {
+                Spacer()
+                Button("New Batch") { showsBatchSetup = true }
+                    .padding(12)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func batchResultRow(_ job: BatchController.BatchJob) -> some View {
+        HStack(spacing: 10) {
+            statusIcon(job.status)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(job.name).font(.callout).lineLimit(1).truncationMode(.middle)
+                if case .failed(let message) = job.status {
+                    Text(message).font(.caption).foregroundStyle(.red).lineLimit(2)
+                } else if job.status == .needsInput {
+                    Text("Needs a decision step — rerun through a windowed batch.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if job.status == .skipped {
+                    Text("Skipped").font(.caption).foregroundStyle(.secondary)
+                } else if let outputURL = job.outputURL {
+                    Text(outputURL.lastPathComponent)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 12)
+            if let outputURL = job.outputURL {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .help("Show in Finder")
+
+                Button {
+                    PendingWindowOpens.shared.push([outputURL])
+                    openWindow(id: "main")
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                }
+                .buttonStyle(.borderless)
+                .help("Open in EVA")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func statusIcon(_ status: BatchController.JobStatus) -> some View {
+        let (name, color): (String, Color) = {
+            switch status {
+            case .done: return ("checkmark.circle.fill", .green)
+            case .failed: return ("xmark.circle.fill", .red)
+            case .needsInput: return ("hand.raised.fill", .orange)
+            case .skipped: return ("arrow.uturn.forward.circle.fill", .secondary)
+            case .pending, .processing: return ("circle.dotted", .secondary)
+            }
+        }()
+        return Image(systemName: name).foregroundStyle(color)
     }
 
     /// Progress for a headless (windowless-per-file) batch run — there's no

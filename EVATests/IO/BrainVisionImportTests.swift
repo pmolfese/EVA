@@ -120,6 +120,83 @@ final class BrainVisionImportTests: XCTestCase {
         XCTAssertNil(geometry.positions[5])
     }
 
+    func testDeclaredMissingMarkerFileIsRejected() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-brainvision-missing-marker-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let headerURL = folder.appendingPathComponent("sample.vhdr")
+        try minimalHeader(markerFile: "missing.vmrk").write(to: headerURL, atomically: true, encoding: .utf8)
+        try int16Data([1, 2]).write(to: folder.appendingPathComponent("sample.eeg"))
+
+        XCTAssertThrowsError(try SignalImportReader.load(from: headerURL)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("missing.vmrk"))
+        }
+    }
+
+    func testMalformedMarkerRowIsRejected() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-brainvision-malformed-marker-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let headerURL = folder.appendingPathComponent("sample.vhdr")
+        try minimalHeader(markerFile: "sample.vmrk").write(to: headerURL, atomically: true, encoding: .utf8)
+        try """
+        BrainVision Data Exchange Marker File Version 1.0
+        [Marker Infos]
+        Mk1=Stimulus
+        """.write(
+            to: folder.appendingPathComponent("sample.vmrk"), atomically: true, encoding: .utf8
+        )
+        try int16Data([1, 2]).write(to: folder.appendingPathComponent("sample.eeg"))
+
+        XCTAssertThrowsError(try SignalImportReader.load(from: headerURL)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("fewer than three fields"))
+        }
+    }
+
+    func testPartialBinarySampleFrameIsRejected() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-brainvision-partial-frame-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let headerURL = folder.appendingPathComponent("sample.vhdr")
+        let header = minimalHeader(markerFile: "sample.vmrk")
+            .replacingOccurrences(of: "NumberOfChannels=1", with: "NumberOfChannels=2")
+            .replacingOccurrences(of: "Ch1=Fz,,1,µV", with: "Ch1=Fz,,1,µV\nCh2=Cz,,1,µV")
+        try header.write(to: headerURL, atomically: true, encoding: .utf8)
+        try "[Marker Infos]\n".write(
+            to: folder.appendingPathComponent("sample.vmrk"), atomically: true, encoding: .utf8
+        )
+        var bytes = int16Data([1, 2])
+        bytes.append(0)
+        try bytes.write(to: folder.appendingPathComponent("sample.eeg"))
+
+        XCTAssertThrowsError(try SignalImportReader.load(from: headerURL)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("partial sample frame"))
+        }
+    }
+
+    private func minimalHeader(markerFile: String) -> String {
+        """
+        BrainVision Data Exchange Header File Version 1.0
+
+        [Common Infos]
+        DataFile=sample.eeg
+        MarkerFile=\(markerFile)
+        DataFormat=BINARY
+        DataOrientation=MULTIPLEXED
+        NumberOfChannels=1
+        SamplingInterval=1000
+
+        [Binary Infos]
+        BinaryFormat=INT_16
+
+        [Channel Infos]
+        Ch1=Fz,,1,µV
+        """
+    }
+
     private func int16Data(_ values: [Int16]) -> Data {
         var data = Data()
         for value in values {

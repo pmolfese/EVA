@@ -49,6 +49,8 @@ final class ProcessingDefaults {
         static let waveletUsesGPU = "waveletUsesGPU"
         static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
         static let autoRunSegmentHealthAfterSegmentation = "autoRunSegmentHealthAfterSegmentation"
+        static let autoSaveNewNetGeometries = "autoSaveNewNetGeometries"
+        static let autoSaveNewNetGeometriesFromNonMFF = "autoSaveNewNetGeometriesFromNonMFF"
     }
 
     private enum Defaults {
@@ -71,6 +73,8 @@ final class ProcessingDefaults {
         static let waveletUsesGPU = true
         static let interpolatedHealthFromNeighbors = true
         static let autoRunSegmentHealthAfterSegmentation = true
+        static let autoSaveNewNetGeometries = false
+        static let autoSaveNewNetGeometriesFromNonMFF = false
     }
 
     // MARK: Filter defaults
@@ -249,6 +253,26 @@ final class ProcessingDefaults {
         set { UserDefaults.standard.set(newValue, forKey: Keys.autoRunSegmentHealthAfterSegmentation) }
     }
 
+    // MARK: Net-geometry catalog defaults
+    /// When on, `ChannelSetEditorView`'s "save this net" banner (see
+    /// `ChannelSetStore`'s header) saves automatically under the recording's
+    /// own reported net name instead of waiting for a click — off by default
+    /// since it's a silent write to the shared catalog the first time any new
+    /// net name is seen (2026-08-16, "auto save for new nets").
+    var autoSaveNewNetGeometries: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.autoSaveNewNetGeometries) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.autoSaveNewNetGeometries) }
+    }
+    /// Gates `autoSaveNewNetGeometries` to MFF-sourced recordings only, unless
+    /// this is also on. Non-MFF geometry (BrainVision, etc.) is more likely to
+    /// be reconstructed or approximate rather than the vendor's own file, so
+    /// auto-saving it into the shared catalog needed a second, explicit opt-in
+    /// rather than being covered by the first toggle.
+    var autoSaveNewNetGeometriesFromNonMFF: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.autoSaveNewNetGeometriesFromNonMFF) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.autoSaveNewNetGeometriesFromNonMFF) }
+    }
+
     /// Legacy single-blob key from before the per-key UserDefaults refactor.
     private static let legacyKey = "ProcessingDefaults.v1"
 
@@ -272,6 +296,8 @@ final class ProcessingDefaults {
             Keys.ocularMovementThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularMovementThresholdConfig),
             Keys.interpolatedHealthFromNeighbors: Defaults.interpolatedHealthFromNeighbors,
             Keys.autoRunSegmentHealthAfterSegmentation: Defaults.autoRunSegmentHealthAfterSegmentation,
+            Keys.autoSaveNewNetGeometries: Defaults.autoSaveNewNetGeometries,
+            Keys.autoSaveNewNetGeometriesFromNonMFF: Defaults.autoSaveNewNetGeometriesFromNonMFF,
         ])
         migrateLegacyBlobIfNeeded()
         migrateOcularTopologyDefaultsIfNeeded()
@@ -327,6 +353,8 @@ final class ProcessingDefaults {
         ocularMovementThresholdConfig = Defaults.ocularMovementThresholdConfig
         interpolatedHealthFromNeighbors = Defaults.interpolatedHealthFromNeighbors
         autoRunSegmentHealthAfterSegmentation = Defaults.autoRunSegmentHealthAfterSegmentation
+        autoSaveNewNetGeometries = Defaults.autoSaveNewNetGeometries
+        autoSaveNewNetGeometriesFromNonMFF = Defaults.autoSaveNewNetGeometriesFromNonMFF
     }
 
     private func ocularThresholdConfig(

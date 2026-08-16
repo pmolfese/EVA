@@ -110,23 +110,24 @@ nonisolated struct MFFSignalData: Sendable {
         self.positiveUpFlags = positiveUpFlags
     }
 
-    /// Returns a copy with the sample data replaced, preserving all metadata.
-    /// Optionally annotates the signal type to record the transform applied.
-    func replacingData(
+    /// Replaces samples on the same timeline. Shape changes are programming
+    /// errors because the preserved events and epoch metadata would become stale.
+    func replacingSamples(
         _ newData: [[Float]],
-        samplingRate newSamplingRate: Double? = nil,
         signalTypeSuffix: String? = nil
     ) -> MFFSignalData {
-        let resolvedSamplingRate = newSamplingRate ?? samplingRate
-        let resolvedDuration = newSamplingRate == nil
-            ? duration
-            : (resolvedSamplingRate > 0 ? Double(newData.first?.count ?? 0) / resolvedSamplingRate : duration)
+        precondition(newData.count == numberOfChannels, "replacingSamples requires the same channel count")
+        let oldSampleCount = data.first?.count ?? 0
+        precondition(
+            newData.allSatisfy { $0.count == oldSampleCount },
+            "replacingSamples requires the same sample count"
+        )
         return MFFSignalData(
             signalURL: signalURL,
             signalType: signalTypeSuffix.map { "\(signalType) \($0)" } ?? signalType,
             numberOfChannels: numberOfChannels,
-            samplingRate: resolvedSamplingRate,
-            duration: resolvedDuration,
+            samplingRate: samplingRate,
+            duration: duration,
             recordingStartTime: recordingStartTime,
             events: events,
             data: newData,
@@ -135,6 +136,45 @@ nonisolated struct MFFSignalData: Sendable {
             isSegmented: isSegmented,
             isAveraged: isAveraged,
             isGrandAverage: isGrandAverage,
+            impedancesKOhm: impedancesKOhm,
+            positiveUpFlags: positiveUpFlags
+        )
+    }
+
+    /// Builds a new timeline while retaining only source/channel metadata. Every
+    /// time-dependent field must be supplied explicitly by the caller.
+    func reconstructingTimeline(
+        data newData: [[Float]],
+        samplingRate newSamplingRate: Double? = nil,
+        events newEvents: [MFFEvent],
+        epochSegments newEpochSegments: [EpochSegment],
+        isSegmented newIsSegmented: Bool,
+        isAveraged newIsAveraged: Bool,
+        isGrandAverage newIsGrandAverage: Bool,
+        signalTypeSuffix: String? = nil
+    ) -> MFFSignalData {
+        precondition(newData.count == numberOfChannels, "timeline reconstruction requires the same channel count")
+        let sampleCount = newData.first?.count ?? 0
+        precondition(newData.allSatisfy { $0.count == sampleCount }, "timeline reconstruction requires rectangular data")
+        precondition(newEpochSegments.allSatisfy {
+            $0.startSample >= 0 && $0.endSample >= $0.startSample && $0.endSample < sampleCount
+        }, "timeline reconstruction received out-of-bounds epoch segments")
+        let resolvedRate = newSamplingRate ?? samplingRate
+        precondition(resolvedRate.isFinite && resolvedRate > 0, "timeline reconstruction requires a valid sampling rate")
+        return MFFSignalData(
+            signalURL: signalURL,
+            signalType: signalTypeSuffix.map { "\(signalType) \($0)" } ?? signalType,
+            numberOfChannels: numberOfChannels,
+            samplingRate: resolvedRate,
+            duration: Double(sampleCount) / resolvedRate,
+            recordingStartTime: recordingStartTime,
+            events: newEvents,
+            data: newData,
+            channelNames: channelNames,
+            epochSegments: newEpochSegments,
+            isSegmented: newIsSegmented,
+            isAveraged: newIsAveraged,
+            isGrandAverage: newIsGrandAverage,
             impedancesKOhm: impedancesKOhm,
             positiveUpFlags: positiveUpFlags
         )

@@ -158,11 +158,10 @@ struct LocalTemplateArtifactCompatibilityTests {
         let cleanEnergy = eventEnergy(clean, centers: centers, windowSamples: windowSamples)
         let inputEnergy = eventEnergy(channel.map(Double.init), centers: centers, windowSamples: windowSamples)
 
-        // Dirty-room note: the old local wAAR path can amplify this synthetic
-        // energy metric because its regression coefficient uses the target
-        // epoch energy in the denominator. The clean-room implementation uses
-        // the conventional template-denominator least-squares coefficient.
-        #expect(oldEnergy > inputEnergy)
+        // Both paths now use the conventional template-denominator
+        // least-squares coefficient, so neither should preserve the historical
+        // amplification bug on scaled events.
+        #expect(oldEnergy < inputEnergy)
         #expect(cleanEnergy < inputEnergy)
     }
 

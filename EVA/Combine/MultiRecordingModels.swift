@@ -229,6 +229,7 @@ enum CompatibilityFlag: Sendable, Hashable {
     case samplingRateMismatch(Double, expected: Double)
     case epochLengthMismatch(Int, expected: Int)
     case categoryUnmatched(String)
+    case channelIdentityUnresolved(ChannelMappingFailure)
     case notSegmented
 
     var message: String {
@@ -237,7 +238,69 @@ enum CompatibilityFlag: Sendable, Hashable {
         case .samplingRateMismatch(let r, let e): return "Sampling rate \(Int(r)) ≠ \(Int(e)) Hz"
         case .epochLengthMismatch(let n, let e):  return "Epoch length \(n) ≠ \(e) samples"
         case .categoryUnmatched(let name):        return "Category “\(name)” has no match"
+        case .channelIdentityUnresolved(let failure): return failure.message
         case .notSegmented:                       return "Not segmented / averaged — no epochs to combine"
+        }
+    }
+}
+
+nonisolated struct ChannelLayoutSignature: Sendable, Equatable, Hashable {
+    let namesInOrder: [String]
+
+    init(channelNames: [String]?, expectedCount: Int) {
+        guard let channelNames, channelNames.count == expectedCount else {
+            namesInOrder = []
+            return
+        }
+        namesInOrder = channelNames.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    var duplicateNames: Set<String> {
+        var seen = Set<String>()
+        var duplicates = Set<String>()
+        for name in namesInOrder where !name.isEmpty {
+            if !seen.insert(name).inserted { duplicates.insert(name) }
+        }
+        return duplicates
+    }
+
+    var hasUniqueNames: Bool {
+        !namesInOrder.isEmpty
+            && namesInOrder.allSatisfy { !$0.isEmpty }
+            && duplicateNames.isEmpty
+    }
+}
+
+nonisolated enum ChannelMappingFailure: Sendable, Equatable, Hashable {
+    case missingNames
+    case duplicateNames(Set<String>)
+    case setMismatch(missing: Set<String>, extra: Set<String>)
+
+    var message: String {
+        switch self {
+        case .missingNames:
+            return "Channel identity unavailable — names are missing"
+        case .duplicateNames(let names):
+            return "Duplicate channel names: \(names.sorted().joined(separator: ", "))"
+        case .setMismatch(let missing, let extra):
+            var parts: [String] = []
+            if !missing.isEmpty { parts.append("missing \(missing.sorted().joined(separator: ", "))") }
+            if !extra.isEmpty { parts.append("extra \(extra.sorted().joined(separator: ", "))") }
+            return "Channel sets differ — \(parts.joined(separator: "; "))"
+        }
+    }
+}
+
+nonisolated enum ChannelMappingResult: Sendable, Equatable {
+    case identity
+    /// `sourceIndexByReferenceIndex[referenceIndex] == sourceIndex`.
+    case remapped(sourceIndexByReferenceIndex: [Int])
+    case unresolved(ChannelMappingFailure)
+
+    var isResolved: Bool {
+        switch self {
+        case .identity, .remapped: return true
+        case .unresolved: return false
         }
     }
 }
@@ -248,6 +311,7 @@ nonisolated struct RecordingSummary: Identifiable, Sendable {
     let url: URL
     let fileName: String
     let netName: String
+    var channelLayout = ChannelLayoutSignature(channelNames: nil, expectedCount: 0)
     let channelCount: Int
     let samplingRate: Double
     let epochLengthSamples: Int

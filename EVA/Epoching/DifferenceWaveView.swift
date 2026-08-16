@@ -125,7 +125,7 @@ extension WaveformView {
             diffChannels.append(diff)
         }
 
-        let diffSignal = signal.replacingData(diffChannels, signalTypeSuffix: "diff")
+        let diffSignal = signal.replacingSamples(diffChannels, signalTypeSuffix: "diff")
         let offset = min(max(segmentA.stimulusOffsetSamples, 0), length - 1)
         let diffSegment = EpochSegment(
             startSample: 0,

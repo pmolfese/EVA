@@ -208,7 +208,7 @@ nonisolated enum ICAArtifactDetector {
         progress?(0.02)
         let decimation = Downsampler.factor(sourceRate: signal.samplingRate, targetRate: configuration.downsampleRate)
         let analysisSamplingRate = Downsampler.effectiveRate(sourceRate: signal.samplingRate, factor: decimation)
-        let downsampled = signal.data.map { Downsampler.strided($0, by: decimation).map(Double.init) }
+        let downsampled = signal.data.map { Downsampler.windowedSincDecimated($0, by: decimation).map(Double.init) }
         let prepared = configuration.averageReference ? averageReferenced(downsampled) : downsampled
         guard let sampleCount = prepared.first?.count, sampleCount > 2 else {
             throw ICAError.emptySignal

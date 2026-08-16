@@ -436,8 +436,8 @@ nonisolated enum WaveletReducer {
         }
 
         return WaveletReductionResult(
-            cleaned: signal.replacingData(cleanedData, signalTypeSuffix: "Wavelet Reduced"),
-            artifact: signal.replacingData(artifactData, signalTypeSuffix: "Wavelet Artifact"),
+            cleaned: signal.replacingSamples(cleanedData, signalTypeSuffix: "Wavelet Reduced"),
+            artifact: signal.replacingSamples(artifactData, signalTypeSuffix: "Wavelet Artifact"),
             perChannel: perChannel,
             varianceRetainedPercent: globalOriginalVariance > 1e-12
                 ? globalCleanedVariance / globalOriginalVariance * 100
@@ -708,8 +708,8 @@ nonisolated enum WaveletReducer {
 
         func assembled() -> WaveletReductionResult {
             WaveletReductionResult(
-                cleaned: signal.replacingData(cleanedData, signalTypeSuffix: "Wavelet Reduced"),
-                artifact: signal.replacingData(artifactData, signalTypeSuffix: "Wavelet Artifact"),
+                cleaned: signal.replacingSamples(cleanedData, signalTypeSuffix: "Wavelet Reduced"),
+                artifact: signal.replacingSamples(artifactData, signalTypeSuffix: "Wavelet Artifact"),
                 perChannel: perChannel,
                 varianceRetainedPercent: globalOriginalVariance > 1e-12
                     ? globalCleanedVariance / globalOriginalVariance * 100
@@ -1148,7 +1148,7 @@ nonisolated enum WaveletReducer {
 
     private static func correlation(_ lhs: [Double], _ rhs: [Double]) -> Double {
         let count = min(lhs.count, rhs.count)
-        guard count > 1 else { return 1 }
+        guard count > 1 else { return 0 }
         let lhsMean = lhs.prefix(count).reduce(0, +) / Double(count)
         let rhsMean = rhs.prefix(count).reduce(0, +) / Double(count)
         var numerator = 0.0, lhsEnergy = 0.0, rhsEnergy = 0.0

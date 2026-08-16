@@ -152,9 +152,33 @@ struct ChannelSetEditorView: View {
             .padding(10)
             .background(.regularMaterial)
             .overlay(alignment: .bottom) { Divider() }
-            .onAppear { saveNetNameEntry = layout.name }
-            .onChange(of: layout.name) { _, new in saveNetNameEntry = new }
+            .onAppear {
+                saveNetNameEntry = layout.name
+                maybeAutoSaveNet(layout)
+            }
+            .onChange(of: layout.name) { _, new in
+                saveNetNameEntry = new
+                maybeAutoSaveNet(layout)
+            }
         }
+    }
+
+    /// `Preferences ▸ Channel Sets ▸ "Auto-save nets I haven't seen before"`
+    /// (2026-08-16) — saves under the recording's own reported name instead
+    /// of waiting on the banner's "Save" click. Gated to MFF-sourced
+    /// recordings unless the second preference is also on; see
+    /// `ChannelSetStore.activeIsMFFSource`'s doc comment for why. Setting
+    /// `dismissedNetPrompt` here (not just saving) is what keeps the banner
+    /// itself from ever actually appearing — its guard already checks
+    /// `store.geometry(named:) == nil`, which becomes false the instant this
+    /// saves.
+    private func maybeAutoSaveNet(_ layout: SensorLayout) {
+        let defaults = ProcessingDefaults.shared
+        guard defaults.autoSaveNewNetGeometries else { return }
+        guard store.activeIsMFFSource || defaults.autoSaveNewNetGeometriesFromNonMFF else { return }
+        guard store.geometry(named: layout.name) == nil else { return }
+        store.saveGeometry(name: layout.name, positions: layout.positions)
+        dismissedNetPrompt = layout.name
     }
 
     // MARK: - Toolbar
@@ -711,6 +735,22 @@ private struct ManageNetGeometriesSheet: View {
         store.knownGeometries.sorted { $0.name < $1.name }
     }
 
+    /// Net names that are still "known" (still offered by the filter and the
+    /// "+" picker, via `ChannelSetStore.knownNetNames`) purely because a
+    /// channel set is still tagged with them — not because there's a saved
+    /// geometry to manage here. `deleteGeometry` deliberately leaves those
+    /// tags alone (see its doc comment), which used to mean a name someone
+    /// just deleted looked like it had simply vanished from this sheet while
+    /// still showing up in the filter, with no way back in from here
+    /// (2026-08-16, manual test finding: "I can't re-add it since the list
+    /// is empty"). Listed separately, read-only, so it's clear these aren't
+    /// missing rows — there's nothing to rename or delete, only a real
+    /// recording's own geometry to save under the same name again.
+    private var tagOnlyNetNames: [String] {
+        let geometryNames = Set(store.knownGeometries.map(\.name))
+        return store.knownNetNames.filter { !geometryNames.contains($0) }.sorted()
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -723,7 +763,7 @@ private struct ManageNetGeometriesSheet: View {
 
             Divider()
 
-            if sortedGeometries.isEmpty {
+            if sortedGeometries.isEmpty, tagOnlyNetNames.isEmpty {
                 ContentUnavailableView(
                     "No Saved Nets",
                     systemImage: "antenna.radiowaves.left.and.right.slash",
@@ -732,8 +772,32 @@ private struct ManageNetGeometriesSheet: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
-                    ForEach(sortedGeometries) { geometry in
-                        row(for: geometry)
+                    if !sortedGeometries.isEmpty {
+                        Section {
+                            ForEach(sortedGeometries) { geometry in
+                                row(for: geometry)
+                            }
+                        }
+                    }
+                    if !tagOnlyNetNames.isEmpty {
+                        Section {
+                            ForEach(tagOnlyNetNames, id: \.self) { name in
+                                HStack {
+                                    Text(name)
+                                    Spacer()
+                                    Text("No saved geometry")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        } header: {
+                            Text("Used by channel sets, no geometry saved")
+                        } footer: {
+                            Text("Open a recording with this net and type this exact name into the Channel Sets editor's banner to attach geometry again.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

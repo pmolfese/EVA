@@ -103,7 +103,7 @@ extension WaveformView {
                     .labelsHidden()
                     .frame(width: 100)
                     .disabled(filter.highPassCutoff == nil || highPassIsFIR)
-                    .help("High-pass rolloff slope (IIR only). 12 dB/oct (2-pole) is gentler and produces less ringing near the cutoff; 24 dB/oct (4-pole) is steeper. Both are applied zero-phase (forward+backward pass).")
+                    .help("High-pass rolloff slope (IIR only), reported as the effective slope after zero-phase (forward+backward) filtering. 24 dB/oct (2-pole design) is gentler and produces less ringing near the cutoff; 48 dB/oct (4-pole design) is steeper.")
                 }
             }
 
@@ -128,7 +128,7 @@ extension WaveformView {
                     .labelsHidden()
                     .frame(width: 100)
                     .disabled(filter.lowPassCutoff == nil || lowPassIsFIR)
-                    .help("Low-pass rolloff slope (IIR only). 24 dB/oct is a common choice for BCG preprocessing; 48 dB/oct gives a sharper brick-wall rolloff at the cost of more ringing. Both are zero-phase.")
+                    .help("Low-pass rolloff slope (IIR only), reported as the effective slope after zero-phase (forward+backward) filtering. 48 dB/oct is a common choice for BCG preprocessing; 96 dB/oct gives a sharper brick-wall rolloff at the cost of more ringing.")
                 }
             }
 
@@ -512,6 +512,9 @@ extension WaveformView {
         case .success(let out):
             filter.statusMessage = "Processed + exported \(out.lastPathComponent)."
             filter.statusIsError = false
+            if batch.isActive, batch.matches(recording: recording) {
+                batch.recordOutput(out)
+            }
         case .failure(let error):
             filter.statusMessage = "Export failed: \(error.localizedDescription)"
             filter.statusIsError = true

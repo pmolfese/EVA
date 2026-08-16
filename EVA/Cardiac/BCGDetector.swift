@@ -542,18 +542,33 @@ nonisolated enum BCGDetector {
 
     // MARK: - Shared internals
 
+    /// Global field power: spatial standard deviation across channels at each
+    /// sample, i.e. `sqrt(mean(x^2) - mean(x)^2)` after removing the
+    /// instantaneous cross-channel mean (average reference).
     static func computeGFP(channels: [[Float]]) -> [Float] {
         guard let first = channels.first else { return [] }
         let n = first.count
+        let nCh = channels.count
+        var sum1 = [Float](repeating: 0, count: n)
         var sum2 = [Float](repeating: 0, count: n)
         for ch in channels {
+            vDSP.add(ch, sum1, result: &sum1)
             vDSP.add(multiplication: (ch, ch), sum2, result: &sum2)
         }
-        var invCh = 1.0 / Float(channels.count)
-        vDSP_vsmul(sum2, 1, &invCh, &sum2, 1, vDSP_Length(n))
+        var invCh = 1.0 / Float(nCh)
+        var mean1 = [Float](repeating: 0, count: n)
+        vDSP_vsmul(sum1, 1, &invCh, &mean1, 1, vDSP_Length(n))
+        var mean2 = [Float](repeating: 0, count: n)
+        vDSP_vsmul(sum2, 1, &invCh, &mean2, 1, vDSP_Length(n))
+        var mean1Squared = [Float](repeating: 0, count: n)
+        vDSP_vsq(mean1, 1, &mean1Squared, 1, vDSP_Length(n))
+        var variance = [Float](repeating: 0, count: n)
+        vDSP_vsub(mean1Squared, 1, mean2, 1, &variance, 1, vDSP_Length(n))
+        var zero: Float = 0
+        vDSP_vthr(variance, 1, &zero, &variance, 1, vDSP_Length(n))
         var len = Int32(n)
-        vvsqrtf(&sum2, sum2, &len)
-        return sum2
+        vvsqrtf(&variance, variance, &len)
+        return variance
     }
 
     /// Non-maximum suppression peak finder.
@@ -594,7 +609,17 @@ nonisolated enum BCGDetector {
     // MARK: - Eigenvector computation
 
     /// Returns the top `k` eigenvectors of the exemplar covariance matrix,
-    /// computed via deflated power iteration (orthogonal deflation after each PC).
+    /// largest eigenvalue first, via LAPACK's exact symmetric eigensolver
+    /// (`ssyev_`, the same routine `applyWhitening` below uses).
+    ///
+    /// An earlier version used deflated power iteration seeded from the
+    /// all-ones vector. That fails whenever the target eigenvector is
+    /// orthogonal to the seed — which zero-sum dipolar spatial patterns
+    /// commonly are — and no small fixed set of seeds can rule that out for
+    /// every possible pattern (e.g. `[1, 1, -1, -1]` is orthogonal to both
+    /// the all-ones and alternating-sign seeds). An exact eigendecomposition
+    /// has no seed to be unlucky with, and `nCh` is small enough (tens of
+    /// channels) that the full solve is cheap.
     private static func topEigenvectors(exemplar: [[Float]], k: Int) -> [[Float]] {
         let nCh = exemplar.count
         guard nCh > 0, let firstCh = exemplar.first, firstCh.count > 0, k >= 1 else {
@@ -602,6 +627,7 @@ nonisolated enum BCGDetector {
         }
         let nT   = firstCh.count
         let flat = exemplar.flatMap { $0 }   // row-major (nCh × nT)
+        let wanted = min(k, nCh)
 
         // Symmetric covariance C = flat * flat^T / nT (upper triangle).
         var cov = [Float](repeating: 0, count: nCh * nCh)
@@ -615,40 +641,33 @@ nonisolated enum BCGDetector {
             for j in (i+1) ..< nCh { cov[j * nCh + i] = cov[i * nCh + j] }
         }
 
+        var jobz: Int8 = Int8(UInt8(ascii: "V"))
+        var uplo: Int8 = Int8(UInt8(ascii: "U"))
+        var n32   = Int32(nCh)
+        var lda   = Int32(nCh)
+        var eigenvalues = [Float](repeating: 0, count: nCh)
+        var lwork = Int32(3 * nCh + 64)
+        var work  = [Float](repeating: 0, count: Int(lwork))
+        var info  = Int32(0)
+        ssyev_(&jobz, &uplo, &n32, &cov, &lda, &eigenvalues, &work, &lwork, &info)
+        guard info == 0 else {
+            // Degenerate fallback: the standard basis, so callers still get
+            // `k` orthonormal (if arbitrary) directions rather than crashing.
+            return (0..<wanted).map { index in
+                var v = [Float](repeating: 0, count: nCh)
+                v[index] = 1
+                return v
+            }
+        }
+
+        // ssyev_ (Fortran column-major) returns eigenvectors as its columns; viewed
+        // from Swift (row-major) those columns become rows: cov[i, :] = eigenvector i.
+        // Eigenvalues come back ascending, so the largest are the last rows.
         var eigvecs = [[Float]]()
-        eigvecs.reserveCapacity(k)
-        var workCov = cov   // deflated copy
-
-        for _ in 0 ..< k {
-            var v  = [Float](repeating: 1.0 / sqrt(Float(nCh)), count: nCh)
-            var Cv = [Float](repeating: 0, count: nCh)
-            for _ in 0 ..< 120 {
-                cblas_sgemv(CblasRowMajor, CblasNoTrans,
-                            Int32(nCh), Int32(nCh),
-                            1.0, workCov, Int32(nCh),
-                            v, 1, 0.0, &Cv, 1)
-                var norm: Float = 0
-                vDSP_svesq(Cv, 1, &norm, vDSP_Length(nCh))
-                norm = sqrt(norm)
-                if norm < 1e-12 { break }
-                var invN = 1.0 / norm
-                vDSP_vsmul(Cv, 1, &invN, &v, 1, vDSP_Length(nCh))
-            }
-            eigvecs.append(v)
-
-            // Deflate: workCov -= lambda * v * v^T   (lambda = v^T C v)
-            cblas_sgemv(CblasRowMajor, CblasNoTrans,
-                        Int32(nCh), Int32(nCh),
-                        1.0, workCov, Int32(nCh),
-                        v, 1, 0.0, &Cv, 1)
-            var lambda: Float = 0
-            vDSP_dotpr(v, 1, Cv, 1, &lambda, vDSP_Length(nCh))
-            let negLambda = -lambda
-            cblas_ssyr(CblasRowMajor, CblasUpper,
-                       Int32(nCh), negLambda, v, 1, &workCov, Int32(nCh))
-            for i in 0 ..< nCh {
-                for j in (i+1) ..< nCh { workCov[j * nCh + i] = workCov[i * nCh + j] }
-            }
+        eigvecs.reserveCapacity(wanted)
+        for offset in stride(from: nCh - 1, through: nCh - wanted, by: -1) {
+            let base = offset * nCh
+            eigvecs.append(Array(cov[base..<(base + nCh)]))
         }
         return eigvecs
     }

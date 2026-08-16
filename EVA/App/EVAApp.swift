@@ -29,6 +29,19 @@ struct EVAApp: App {
     @State private var segmentGoodnessSettings = SegmentGoodnessSettings()
     @State private var processingDefaults = ProcessingDefaults.shared
     @State private var isCheckingForUpdates = false
+    /// Owned here, not inside `BatchWindowView`, so it can be injected at the
+    /// `Window` scene's own definition below rather than from inside that
+    /// view's body. `BatchWindowView` shows its setup sheet on first
+    /// appearance (`showsBatchSetup` starts `true`), and a `Window` scene's
+    /// sheet presented at initial appearance does not reliably see an
+    /// `.environment(_:)` attached inside the body rather than at the scene
+    /// root — every other value the Batch window needs (`goodnessSettings`
+    /// etc.) already lived at the scene root for this reason; `batch` was the
+    /// one exception, and was the actual cause of the ⇧⌘B / Window→Batch
+    /// crash (2026-08-15): "No Observable object of type BatchController
+    /// found," not the earlier missing-`.environment()`/`.modelContainer`
+    /// bugs, which were real but did not explain this one.
+    @State private var batchController = BatchController()
 
     var body: some Scene {
         // `WindowGroup`, not `Window` — REWIND.md "EVA as a multi-window app"
@@ -118,7 +131,6 @@ struct EVAApp: App {
                 // already live. Batch behaves exactly like those now (its
                 // own dedicated window), so this is where it belongs.
                 OpenBatchWindowButton()
-                    .keyboardShortcut("b", modifiers: [.command, .shift])
             }
 
             CommandGroup(replacing: .help) {
@@ -159,6 +171,7 @@ struct EVAApp: App {
                 .environment(goodnessSettings)
                 .environment(segmentGoodnessSettings)
                 .environment(processingDefaults)
+                .environment(batchController)
         }
         .modelContainer(for: UserMarker.self)
         .defaultSize(Self.defaultWindowSize)
@@ -256,6 +269,21 @@ private struct OpenBatchWindowButton: View {
         Button("Batch Process...") {
             openWindow(id: EVAApp.batchWindowID)
         }
+        // Attached here, directly on the `Button`, not chained onto this
+        // wrapper struct from the call site — a real first bug (2026-08-15):
+        // `OpenDebugLogButton`/`OpenFigureExportButton` both do it this way
+        // and their shortcuts work; this one didn't and was the only one
+        // applying it externally.
+        //
+        // ⇧⌘P, not ⇧⌘B: ⇧⌘B was still dead after the fix above, because
+        // `ChannelModel.swift`'s `ViewCommands` — always registered, not
+        // scoped to a recording window — already claims ⇧⌘B for "Show
+        // Butterfly" in the PSA view. Two global commands sharing a shortcut
+        // silently means only one fires (whichever is declared first); this
+        // button's `.disabled` state never entered into it. Moved rather
+        // than took the conflict away from Butterfly, since that one was
+        // already working and this one wasn't.
+        .keyboardShortcut("p", modifiers: [.command, .shift])
     }
 }
 

@@ -68,14 +68,17 @@ enum FilterPrecision: String, CaseIterable, Identifiable, Codable, Sendable {
 }
 
 /// Rolloff slope expressed as dB per octave. Each step is one additional
-/// Butterworth biquad stage (two poles). With zero-phase (filtfilt) the
-/// effective slope is the same as the design slope because filtfilt is used
-/// to cancel phase shift, and we report the *design* order here to match the
-/// convention used by BrainVision Analyzer, EEGLAB, and similar tools.
+/// Butterworth biquad stage (two poles) in the one-pass design. Filtering is
+/// always applied zero-phase (filtfilt), which squares the magnitude
+/// response and therefore *doubles* the actual dB/octave attenuation
+/// relative to a single forward pass. The `rawValue` stores the one-pass
+/// design slope (used to derive `designPoles`); `label` reports the true,
+/// user-facing effective slope actually delivered by the filter.
 ///
-/// Mapping: 12 dB/oct = 2-pole design (1st-order section + filtfilt),
-///          24 dB/oct = 4-pole design (1 biquad), 36 = 6-pole (1 biquad + 1st-order),
-///          48 = 8-pole (2 biquads). All are applied zero-phase.
+/// Mapping: rawValue 12 dB/oct = 2-pole design (1st-order section + filtfilt)
+///          -> effective 24 dB/oct; rawValue 24 = 4-pole design (1 biquad)
+///          -> effective 48 dB/oct; rawValue 36 = 6-pole -> effective 72;
+///          rawValue 48 = 8-pole (2 biquads) -> effective 96.
 enum FilterSlope: Int, CaseIterable, Identifiable, Codable, Sendable {
     case dB12 = 12
     case dB24 = 24
@@ -84,7 +87,8 @@ enum FilterSlope: Int, CaseIterable, Identifiable, Codable, Sendable {
 
     nonisolated var id: Int { rawValue }
 
-    nonisolated var label: String { "\(rawValue) dB/oct" }
+    /// True effective slope after zero-phase (filtfilt) doubling.
+    nonisolated var label: String { "\(rawValue * 2) dB/oct" }
 
     /// Number of poles in the one-sided design (before filtfilt doubling).
     nonisolated var designPoles: Int { rawValue / 6 }

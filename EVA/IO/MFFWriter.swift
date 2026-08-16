@@ -530,13 +530,18 @@ nonisolated enum MFFWriter {
         var body = ""
         for event in events {
             let beginTime = mffDateString(recordStart.addingTimeInterval(event.beginTimeSeconds))
+            let durationMicroseconds = Int(((event.durationSeconds ?? 0) * 1_000_000).rounded())
+            let labelXML = event.label.map { "    <label>\(xmlEscape($0))</label>\n" } ?? ""
+            let keysXML = event.cell.map {
+                "    <keys>\n      <key>\n        <keyCode>cell</keyCode>\n        <data dataType=\"string\">\(xmlEscape($0))</data>\n      </key>\n    </keys>\n"
+            } ?? ""
             body += """
   <event>
     <beginTime>\(xmlEscape(beginTime))</beginTime>
-    <duration>0</duration>
+    <duration>\(durationMicroseconds)</duration>
     <code>\(xmlEscape(event.code))</code>
-    <description>\(xmlEscape(event.description))</description>
-  </event>
+\(labelXML)    <description>\(xmlEscape(event.description ?? ""))</description>
+\(keysXML)  </event>
 """
         }
         let xml = """
@@ -743,7 +748,17 @@ nonisolated enum MFFWriter {
     ) -> [ExportEvent] {
         if kind == .continuous {
             return signal.events.map {
-                ExportEvent(code: $0.code, beginTimeSeconds: $0.beginTimeSeconds, description: $0.sourceFile)
+                // `sourceFile` describes where EVA imported the event from; MFF
+                // has no dedicated field for that provenance, so do not overwrite
+                // the event's real semantic description with it.
+                ExportEvent(
+                    code: $0.code,
+                    beginTimeSeconds: $0.beginTimeSeconds,
+                    durationSeconds: $0.durationSeconds,
+                    label: $0.label,
+                    description: $0.eventDescription,
+                    cell: $0.cell
+                )
             }
         }
 
@@ -758,7 +773,14 @@ nonisolated enum MFFWriter {
             } else {
                 description = "Source \(block.sourceCode) at \(String(format: "%.6f", block.sourceTimeSeconds)) s"
             }
-            output.append(ExportEvent(code: block.category, beginTimeSeconds: eventTime, description: description))
+            output.append(ExportEvent(
+                code: block.category,
+                beginTimeSeconds: eventTime,
+                durationSeconds: nil,
+                label: nil,
+                description: description,
+                cell: nil
+            ))
             cursor += block.sampleCount
         }
         return output
@@ -822,5 +844,8 @@ private nonisolated struct ExportBlock: Sendable {
 private nonisolated struct ExportEvent: Sendable {
     let code: String
     let beginTimeSeconds: Double
-    let description: String
+    let durationSeconds: Double?
+    let label: String?
+    let description: String?
+    let cell: String?
 }

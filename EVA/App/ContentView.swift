@@ -344,8 +344,8 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             Text("Drop two or more .mff recordings together to combine or average them")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+                .font(.callout)
+                .foregroundStyle(.secondary)
 
             if let openError {
                 Text(openError)

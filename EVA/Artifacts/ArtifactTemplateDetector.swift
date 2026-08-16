@@ -820,28 +820,31 @@ nonisolated enum ArtifactTemplateDetector {
         }
         if let start = activeStart, let end = lastAbove { runs.append(start...end) }
 
-        // Filter by min/max duration.
-        let minD = max(Int((configuration.continuousMinDurationSeconds * decimatedRate).rounded()), 1)
-        let maxD = configuration.continuousMaxDurationSeconds > 0
-            ? max(Int((configuration.continuousMaxDurationSeconds * decimatedRate).rounded()), minD)
-            : Int.max
-        let filtered = runs.filter {
-            let length = $0.upperBound - $0.lowerBound + 1
-            return length >= minD && length <= maxD
-        }
-
-        // Bridge runs within the merge gap into one — the extend/discard
+        // Bridge runs within the merge gap into one first — the extend/discard
         // question from waveform matching doesn't apply here: a contiguous
         // run is already a single measured span by construction, so there's
-        // no "best of several overlapping hits" to choose between.
+        // no "best of several overlapping hits" to choose between. Merging
+        // before the duration filter lets a brief sub-threshold dip that
+        // splits one artifact into short fragments still combine into a
+        // single valid-duration event.
         let mergeGapD = max(Int((configuration.mergeWindowSeconds * decimatedRate).rounded()), 1)
         var merged: [ClosedRange<Int>] = []
-        for run in filtered {
+        for run in runs {
             if let last = merged.last, run.lowerBound - last.upperBound <= mergeGapD {
                 merged[merged.count - 1] = last.lowerBound...run.upperBound
             } else {
                 merged.append(run)
             }
+        }
+
+        // Filter by min/max duration.
+        let minD = max(Int((configuration.continuousMinDurationSeconds * decimatedRate).rounded()), 1)
+        let maxD = configuration.continuousMaxDurationSeconds > 0
+            ? max(Int((configuration.continuousMaxDurationSeconds * decimatedRate).rounded()), minD)
+            : Int.max
+        merged = merged.filter {
+            let length = $0.upperBound - $0.lowerBound + 1
+            return length >= minD && length <= maxD
         }
 
         let events = merged.enumerated().map { index, run -> MFFEvent in
@@ -1412,7 +1415,7 @@ nonisolated enum ArtifactTemplateDetector {
         let templateLength = templateEnd - templateStart
         guard templateLength >= 3 else { return [] }
 
-        let downsampledChannels = channelIndices.map { Downsampler.strided(signal.data[$0], by: decimation) }
+        let downsampledChannels = channelIndices.map { Downsampler.windowedSincDecimated(signal.data[$0], by: decimation) }
         guard let downsampledCount = downsampledChannels.first?.count,
               downsampledCount >= templateLength else {
             return []
@@ -1642,10 +1645,16 @@ nonisolated enum ArtifactTemplateDetector {
             lastAccepted = sample
         }
 
-        if candidates.count < 12 {
-            let fallbackStride = max(templateLength / 4, 1)
-            candidates = Array(stride(from: 0, through: sampleCount - templateLength, by: fallbackStride))
-        }
+        // Always union the peak-based candidates with a dense grid scan —
+        // gating the grid scan on a low peak count let an unrelated
+        // high-amplitude signal (>=12 peaks) suppress evaluation of a
+        // lower-amplitude but highly correlated match entirely. The stride is
+        // templateLength/8 (not /4): correlation falls off quickly away from
+        // the true alignment, so a coarser grid can still step over a valid
+        // low-amplitude match between two grid points.
+        let fallbackStride = max(templateLength / 8, 1)
+        let gridCandidates = stride(from: 0, through: sampleCount - templateLength, by: fallbackStride)
+        candidates.append(contentsOf: gridCandidates)
 
         return Array(Set(candidates)).sorted()
     }

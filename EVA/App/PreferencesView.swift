@@ -483,6 +483,18 @@ private struct ProcessingDefaultsView: View {
             }
 
             Section {
+                Toggle("Auto-save nets I haven't seen before", isOn: $defaults.autoSaveNewNetGeometries)
+                Toggle("Auto-save nets from non-MFF files too", isOn: $defaults.autoSaveNewNetGeometriesFromNonMFF)
+                    .disabled(!defaults.autoSaveNewNetGeometries)
+            } header: {
+                Text("Channel Sets")
+            } footer: {
+                Text("When on, the Channel Sets editor's \"save this net\" prompt saves automatically under the recording's own reported net name instead of waiting for a click. Restricted to MFF recordings unless the second toggle is also on — non-MFF geometry is more often reconstructed or approximate than the vendor's own file.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 HStack {
                     Spacer()
                     Button("Restore Defaults") { defaults.restoreDefaults() }

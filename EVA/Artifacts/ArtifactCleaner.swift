@@ -1200,13 +1200,12 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
-    /// Least-squares scalar fit of `template ≈ k · y`: `k = dot(y, template) / dot(y, y)`.
-    /// Matches `amri_eeg_gac.m`/`amri_eeg_cbc.m`'s AAR/MAR/wAAR fit direction.
+    /// Least-squares scalar fit of `y ≈ k · template`: `k = dot(y, template) / dot(template, template)`.
     private static func localRegressionCoefficient(y: [Float], template: [Float]) -> Float {
         var denom: Float = 0
         var numer: Float = 0
         for i in y.indices {
-            denom += y[i] * y[i]
+            denom += template[i] * template[i]
             numer += y[i] * template[i]
         }
         guard denom > 1e-12 else { return 0 }

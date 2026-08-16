@@ -111,8 +111,21 @@ nonisolated enum EyeArtifactThresholdDetector {
 
         let samplesPerMs = Float(samplingRate / 1000.0)
 
-        var intervals: [ClosedRange<Int>] = []
+        // Bridge raw runs within the merge gap first, so two short fragments
+        // separated by a brief below-threshold dip are evaluated as one
+        // combined event rather than being discarded individually by the
+        // duration/peak/kinematic checks below.
+        var mergedRuns: [ClosedRange<Int>] = []
         for run in runs {
+            if let last = mergedRuns.last, run.lowerBound - last.upperBound <= mergeGapSamples {
+                mergedRuns[mergedRuns.count - 1] = last.lowerBound...run.upperBound
+            } else {
+                mergedRuns.append(run)
+            }
+        }
+
+        var intervals: [ClosedRange<Int>] = []
+        for run in mergedRuns {
             let length = run.upperBound - run.lowerBound + 1
             guard length >= minimumSamples, length <= maximumSamples else { continue }
 
@@ -135,16 +148,7 @@ nonisolated enum EyeArtifactThresholdDetector {
                    acceleration < config.accelerationThresholdMicrovoltsPerMillisecondSquared { continue }
             }
 
-            if let last = intervals.last, run.lowerBound - last.upperBound <= mergeGapSamples {
-                let merged = last.lowerBound...run.upperBound
-                if merged.count <= maximumSamples {
-                    intervals[intervals.count - 1] = merged
-                } else {
-                    intervals.append(run)
-                }
-            } else {
-                intervals.append(run)
-            }
+            intervals.append(run)
         }
 
         return intervals.enumerated().map { index, interval in

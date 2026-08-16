@@ -710,9 +710,14 @@ nonisolated enum EEGAnalysisEngine {
         var sumPyy = 0.0
         var crossRe = 0.0
         var crossIm = 0.0
-        var plvRe = 0.0
-        var plvIm = 0.0
-        var plvCount = 0
+        // PLV is accumulated per frequency bin (summed only across windows,
+        // never across bins) because phase difference varies with frequency
+        // for any fixed time delay; summing raw phase vectors across bins
+        // before taking one magnitude would let genuine phase locking at
+        // different frequencies cancel out.
+        var plvBinRe: [Double] = []
+        var plvBinIm: [Double] = []
+        var plvBinCounts: [Int] = []
         var absImagCross = 0.0
         var ampA: [Double] = []
         var ampB: [Double] = []
@@ -744,9 +749,14 @@ nonisolated enum EEGAnalysisEngine {
                 windowAmpB += pyy
                 let magnitude = sqrt(re * re + im * im)
                 if magnitude > 1e-12 {
-                    plvRe += re / magnitude
-                    plvIm += im / magnitude
-                    plvCount += 1
+                    if plvBinRe.count <= bin {
+                        plvBinRe.append(contentsOf: repeatElement(0, count: bin - plvBinRe.count + 1))
+                        plvBinIm.append(contentsOf: repeatElement(0, count: bin - plvBinIm.count + 1))
+                        plvBinCounts.append(contentsOf: repeatElement(0, count: bin - plvBinCounts.count + 1))
+                    }
+                    plvBinRe[bin] += re / magnitude
+                    plvBinIm[bin] += im / magnitude
+                    plvBinCounts[bin] += 1
                 }
             }
             ampA.append(sqrt(max(windowAmpA, 0)))
@@ -764,9 +774,14 @@ nonisolated enum EEGAnalysisEngine {
             case .imaginaryCoherence:
                 value = abs(crossIm) / denom
             case .phaseLockingValue:
-                value = plvCount > 0
-                    ? sqrt(plvRe * plvRe + plvIm * plvIm) / Double(plvCount)
-                    : 0
+                var bandPLV = 0.0
+                var contributingBins = 0
+                for bin in plvBinRe.indices where plvBinCounts[bin] > 0 {
+                    let re = plvBinRe[bin], im = plvBinIm[bin]
+                    bandPLV += sqrt(re * re + im * im) / Double(plvBinCounts[bin])
+                    contributingBins += 1
+                }
+                value = contributingBins > 0 ? bandPLV / Double(contributingBins) : 0
             case .weightedPhaseLagIndex:
                 value = absImagCross > 1e-12 ? abs(crossIm) / absImagCross : 0
             case .amplitudeEnvelopeCorrelation:

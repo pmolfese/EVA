@@ -931,6 +931,7 @@ struct WaveformView: View {
     func publishChannelSetContext() {
         ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
         ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
+        ChannelSetStore.shared.activeIsMFFSource = recording.packageURL.pathExtension.lowercased() == "mff"
     }
 
     /// Applies a fork's captured state on top of ordinary load-time seeding —
@@ -2441,7 +2442,7 @@ struct WaveformView: View {
         }
         var newData = epoched.data
         newData[index] = series
-        epoching.epochedSignal = epoched.replacingData(newData)
+        epoching.epochedSignal = epoched.replacingSamples(newData)
         return true
     }
 

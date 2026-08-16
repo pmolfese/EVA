@@ -31,9 +31,10 @@ struct BCGDetectorTests {
     }
 
 
-    /// Builds channels carrying a shared periodic "cardiac" pulse train (a narrow bump
-    /// repeated every `periodSamples`) plus per-channel pseudo-random noise, mimicking a
-    /// BCG artifact that is spatially consistent but temporally sparse.
+    /// Builds channels carrying a spatially varying periodic "cardiac" pulse train
+    /// (a narrow bump repeated every `periodSamples`) plus per-channel pseudo-random
+    /// noise, mimicking a BCG artifact with a stable scalp field that survives the
+    /// instantaneous average-reference subtraction used by true GFP.
     private func periodicPulseChannels(
         channelCount: Int,
         sampleCount: Int,
@@ -50,9 +51,10 @@ struct BCGDetectorTests {
             }
         }
         for c in 0..<channelCount {
+            let spatialWeight = Float(c + 1) / Float(channelCount)
             for start in positions {
                 for k in 0..<pulseWidth where start + k < sampleCount {
-                    data[c][start + k] += pulse[k]
+                    data[c][start + k] += spatialWeight * pulse[k]
                 }
             }
         }
@@ -84,6 +86,14 @@ struct BCGDetectorTests {
         let flat: [[Float]] = (0..<4).map { _ in [Float](repeating: 0, count: 2000) }
         let times = await BCGDetector.periodicityEvents(channels: flat, samplingRate: 250)
         #expect(times.isEmpty)
+    }
+
+    @Test func globalFieldPowerRejectsIdenticalCommonModeSignal() {
+        let shared: [Float] = [1, -2, 4, 8, -3]
+        let gfp = BCGDetector.computeGFP(channels: [shared, shared, shared, shared])
+
+        #expect(gfp.count == shared.count)
+        #expect(gfp.allSatisfy { abs($0) < 1e-5 })
     }
 
     @Test func periodicityEventsHandlesEmptyInput() async {

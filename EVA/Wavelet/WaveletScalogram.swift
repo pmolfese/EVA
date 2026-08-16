@@ -64,7 +64,7 @@ nonisolated enum WaveletScalogram {
 
         let windowSamples = Array(channel[paddedStart...paddedEnd])
         let decimation = max(Int((Double(windowSamples.count) / Double(max(maximumAnalysisSamples, 32))).rounded(.up)), 1)
-        let analyzed = decimation > 1 ? Downsampler.strided(windowSamples, by: decimation) : windowSamples
+        let analyzed = decimation > 1 ? Downsampler.windowedSincDecimated(windowSamples, by: decimation) : windowSamples
         guard analyzed.count > 8 else { return nil }
         let effectiveRate = signal.samplingRate / Double(decimation)
 

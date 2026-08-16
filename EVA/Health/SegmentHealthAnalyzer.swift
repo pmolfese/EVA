@@ -340,6 +340,7 @@ nonisolated enum SegmentHealthAnalyzer {
         var differenceCount = 0
 
         for sample in stride(from: 0, to: sampleCount, by: sampleStride) {
+            var sampleSum = 0.0
             var sampleSquares = 0.0
             var sampleFiniteCount = 0
             for channelIndex in channels {
@@ -359,6 +360,7 @@ nonisolated enum SegmentHealthAnalyzer {
 
                 sumSquares += value * value
                 finiteCount += 1
+                sampleSum += value
                 sampleSquares += value * value
                 sampleFiniteCount += 1
 
@@ -371,7 +373,12 @@ nonisolated enum SegmentHealthAnalyzer {
             }
 
             if sampleFiniteCount > 0 {
-                gfpValues.append(sqrt(sampleSquares / Double(sampleFiniteCount)))
+                // GFP is the spatial standard deviation, i.e. mean(x^2) - mean(x)^2
+                // after removing the instantaneous cross-channel mean.
+                let n = Double(sampleFiniteCount)
+                let mean = sampleSum / n
+                let variance = max(sampleSquares / n - mean * mean, 0)
+                gfpValues.append(sqrt(variance))
             }
         }
 
@@ -434,6 +441,7 @@ nonisolated enum SegmentHealthAnalyzer {
         var flatlineCount = 0
 
         for sample in stride(from: start, through: end, by: sampleStride) {
+            var sampleSum = 0.0
             var sampleSquares = 0.0
             var sampleFiniteCount = 0
 
@@ -459,6 +467,7 @@ nonisolated enum SegmentHealthAnalyzer {
 
                 finiteCount += 1
                 sumSquares += value * value
+                sampleSum += value
                 sampleSquares += value * value
                 sampleFiniteCount += 1
 
@@ -483,7 +492,12 @@ nonisolated enum SegmentHealthAnalyzer {
             }
 
             if sampleFiniteCount > 0 {
-                gfpValues.append(sqrt(sampleSquares / Double(sampleFiniteCount)))
+                // GFP is the spatial standard deviation, i.e. mean(x^2) - mean(x)^2
+                // after removing the instantaneous cross-channel mean.
+                let n = Double(sampleFiniteCount)
+                let mean = sampleSum / n
+                let variance = max(sampleSquares / n - mean * mean, 0)
+                gfpValues.append(sqrt(variance))
             }
         }
 

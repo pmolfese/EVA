@@ -57,7 +57,7 @@ nonisolated struct ChannelInterpolationSnapshot: Sendable {
             }
         }
 
-        return signal.replacingData(data)
+        return signal.replacingSamples(data)
     }
 }
 

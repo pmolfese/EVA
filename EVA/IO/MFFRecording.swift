@@ -73,6 +73,19 @@ final class MFFRecording: Identifiable {
     private(set) var loadStatusMessage = "Preparing to read recording"
     private(set) var loadDetailMessage: String?
 
+    /// Where a channel was plotted before `moveEEGChannelToPhysio` sent it to
+    /// Physio, keyed by its stable name rather than index — index shifts on
+    /// every move, name doesn't. `movePhysioChannelToEEG` was appending the
+    /// returning channel's data back onto the EEG signal but never restoring
+    /// its `sensorLayout`/`electrodeGeometry` entry, so a channel moved back
+    /// stayed permanently stuck in the editor's "No plotted location" bucket
+    /// — and repeated round trips could put two different channels' data
+    /// under one fallback-generated display name ("Ch 241" appearing twice),
+    /// since the fallback in `channelName(at:in:fallbackPrefix:)` names by
+    /// current index, not identity (2026-08-16, manual test finding).
+    @ObservationIgnored private var physioOriginPositions: [String: SensorPosition] = [:]
+    @ObservationIgnored private var physioOriginGeometry: [String: SIMD3<Double>] = [:]
+
     @ObservationIgnored private var activeLoadRequestID = UUID()
     @ObservationIgnored private var loadTask: Task<LoadResult, Never>?
     @ObservationIgnored private var isClosed = false
@@ -188,6 +201,13 @@ final class MFFRecording: Identifiable {
         let movedSamples = currentSignal.data[index]
         let movedName = channelName(at: index, in: currentSignal, fallbackPrefix: "Ch")
 
+        if let position = sensorLayout?.positions.first(where: { $0.channelIndex == index }) {
+            physioOriginPositions[movedName] = position
+        }
+        if let geometryPosition = electrodeGeometry?.positions[index] {
+            physioOriginGeometry[movedName] = geometryPosition
+        }
+
         if let currentPNS = pnsSignal,
            !canAppend(samples: movedSamples, samplingRate: currentSignal.samplingRate, to: currentPNS) {
             throw ChannelRoleEditError.incompatiblePhysioTiming
@@ -297,6 +317,25 @@ final class MFFRecording: Identifiable {
 
         signal = updatedSignal
         pnsSignal = updatedPNS
+
+        // Restore whatever plotted position this channel had before it was
+        // moved to Physio, if any — see `physioOriginPositions`'s doc
+        // comment. The new index is always the last one: nothing before it
+        // shifted, since this only ever appends.
+        let newIndex = updatedSignal.numberOfChannels - 1
+        if let origin = physioOriginPositions[movedName] {
+            let restored = SensorPosition(channelIndex: newIndex, x: origin.x, y: origin.y)
+            sensorLayout = SensorLayout(
+                name: sensorLayout?.name ?? "",
+                positions: (sensorLayout?.positions ?? []) + [restored]
+            )
+        }
+        if let origin = physioOriginGeometry[movedName] {
+            var positions = electrodeGeometry?.positions ?? [:]
+            positions[newIndex] = origin
+            electrodeGeometry = ElectrodeGeometry(name: electrodeGeometry?.name ?? "", positions: positions)
+        }
+
         return movedName
     }
 

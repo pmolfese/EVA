@@ -83,7 +83,8 @@ nonisolated enum GradientOBS {
         var picked: [Int] = []
         picked.reserveCapacity(limit)
         for slot in 0..<limit {
-            let index = Int((Double(slot) * Double(candidates.count - 1) / Double(limit - 1)).rounded())
+            let step = limit > 1 ? Double(candidates.count - 1) / Double(limit - 1) : 0
+            let index = Int((Double(slot) * step).rounded())
             let candidate = candidates[min(index, candidates.count - 1)]
             if picked.last != candidate { picked.append(candidate) }
         }

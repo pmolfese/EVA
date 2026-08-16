@@ -51,11 +51,11 @@ struct ArtifactTemplateDetectorTests {
 
     /// Verifies `waveformStretchRange` actually does something: an artifact
     /// whose duration differs from the exemplar (simulating natural
-    /// beat-to-beat/blink-to-blink duration variability) should be missed at
-    /// stretch = 0 but recovered once the search is allowed to compress or
-    /// stretch candidate windows before scoring — i.e. it picks whichever
-    /// stretch factor *maximizes* the match score, rather than only ever
-    /// testing the exemplar's exact width.
+    /// beat-to-beat/blink-to-blink duration variability) can still correlate
+    /// with the fixed-width exemplar, but enabling stretch should recover its
+    /// wider duration — i.e. the detector picks whichever stretch factor
+    /// *maximizes* the match score, rather than only ever testing the
+    /// exemplar's exact width.
     @Test func stretchRecoversArtifactOfDifferentDuration() {
         let exemplarWidth = 50 // 0.2 s
         let stretchedWidth = 65 // +30% longer than the exemplar
@@ -81,7 +81,7 @@ struct ArtifactTemplateDetectorTests {
         var noStretch = config(exemplar: exemplarRange)
         noStretch.waveformStretchRange = 0
         let resultNoStretch = ArtifactTemplateDetector.detect(in: signal, configuration: noStretch)
-        let foundStretchedNoStretch = resultNoStretch.selectedEvents.contains {
+        let fixedWidthEvent = resultNoStretch.selectedEvents.first {
             abs($0.beginTimeSeconds - Double(stretchedPosition + stretchedWidth / 2) / samplingRate) < 0.05
         }
 
@@ -92,8 +92,14 @@ struct ArtifactTemplateDetectorTests {
             abs($0.beginTimeSeconds - Double(stretchedPosition + stretchedWidth / 2) / samplingRate) < 0.05
         }
 
-        #expect(!foundStretchedNoStretch, "stretch=0 should not match a 30%-longer artifact at this threshold")
+        #expect(fixedWidthEvent != nil, "the dense scan should find the correlated fixed-width portion")
         #expect(stretchedEvent != nil, "stretch=0.3 should recover the 30%-longer artifact")
+
+        if let fixedWidthEvent, let duration = fixedWidthEvent.durationSeconds {
+            let matchedSamples = duration * samplingRate
+            #expect(abs(matchedSamples - Double(exemplarWidth)) < 0.5,
+                    "stretch=0 should report the exemplar width, got \(matchedSamples) samples")
+        }
 
         // The recovered event's matched duration should reflect the wider
         // (stretched) window that scored best, not the exemplar's own width —

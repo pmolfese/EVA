@@ -119,7 +119,7 @@ nonisolated enum WaveletDenoiser {
 
         // If the band is essentially noise, fall back to the universal threshold.
         let energy = normalized.reduce(0, +)
-        let sparsityBound = 1.0 + (log2(n).rounded() * pow(log2(n), 1.5)) / n
+        let sparsityBound = pow(log2(n), 1.5) / n.squareRoot()
         if (energy - n) / n < sparsityBound {
             return sigma * universal
         }

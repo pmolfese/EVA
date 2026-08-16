@@ -33,6 +33,7 @@ nonisolated enum ReplayStepDisplay {
         case .baseline: return "Baseline Correction"
         case .average: return "Average"
         case .combine: return "Combine"
+        case .combineBadChannelPolicy: return "Combine Bad-channel Policy"
         case .split: return "Split"
         case .reference: return "Reference"
         case .bcgDetection: return "BCG Detection"

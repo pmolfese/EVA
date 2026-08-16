@@ -1323,11 +1323,37 @@ extension WaveformView {
             let outputRate = downsampleFactor > 1 && !upsampleToOriginalHz && correctedData.first?.count != sourceData.first?.count
                 ? downsampleEffectiveRate
                 : sr
-            bcg.correctedSignal = signal.replacingData(
-                correctedData,
-                samplingRate: outputRate,
-                signalTypeSuffix: "CWL"
-            )
+            if outputRate == sr, correctedData.first?.count == signal.data.first?.count {
+                bcg.correctedSignal = signal.replacingSamples(correctedData, signalTypeSuffix: "CWL")
+            } else {
+                let ratio = outputRate / sr
+                let segments = signal.epochSegments.compactMap { segment -> EpochSegment? in
+                    let start = Int((Double(segment.startSample) * ratio).rounded())
+                    let endExclusive = Int((Double(segment.endSample + 1) * ratio).rounded())
+                    guard endExclusive > start else { return nil }
+                    return EpochSegment(
+                        startSample: start,
+                        endSample: endExclusive - 1,
+                        stimulusOffsetSamples: Int((Double(segment.stimulusOffsetSamples) * ratio).rounded()),
+                        category: segment.category,
+                        sourceCode: segment.sourceCode,
+                        sourceTimeSeconds: segment.sourceTimeSeconds,
+                        colorIndex: segment.colorIndex,
+                        contributingEpochCount: segment.contributingEpochCount,
+                        subject: segment.subject
+                    )
+                }
+                bcg.correctedSignal = signal.reconstructingTimeline(
+                    data: correctedData,
+                    samplingRate: outputRate,
+                    events: signal.events,
+                    epochSegments: segments,
+                    isSegmented: signal.isSegmented,
+                    isAveraged: signal.isAveraged,
+                    isGrandAverage: signal.isGrandAverage,
+                    signalTypeSuffix: "CWL"
+                )
+            }
             bcg.progress = 1
             let algorithmSummary = " \(cwlAlgorithm.label)."
             let downsampleSummary: String

@@ -476,7 +476,7 @@ final class FilterViewModel {
 
                 updateFinalizingProgress(averageReference: averageReference)
 
-                output = signal.replacingData(result.0)
+                output = signal.replacingSamples(result.0)
                 if let pnsInput, let filteredPNSData = result.1 {
                     pnsOutput = MFFSignalData(
                         signalURL: pnsInput.signalURL,
