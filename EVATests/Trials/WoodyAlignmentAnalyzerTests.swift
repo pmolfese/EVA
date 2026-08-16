@@ -160,4 +160,32 @@ struct WoodyAlignmentAnalyzerTests {
         )
         #expect(mismatched == nil)
     }
+
+    @Test func paddedEdgesDoNotAttenuateAlignedAverage() throws {
+        let shifts = [-24, 0, 24]
+        let inputs = shifts.enumerated().map { index, shift -> WoodyAlignmentAnalyzer.TrialInput in
+            var samples = gaussian(center: stimulusOffsetSamples + 70 + shift)
+            for sample in samples.indices { samples[sample] += 5 }
+            return WoodyAlignmentAnalyzer.TrialInput(
+                sourceTimeSeconds: Double(index),
+                stimulusOffsetSamples: stimulusOffsetSamples,
+                samples: samples
+            )
+        }
+        let result = try #require(WoodyAlignmentAnalyzer.align(
+            trials: inputs,
+            samplingRate: samplingRate,
+            windowStartMs: 20,
+            windowEndMs: 130,
+            maxLagMs: 40,
+            maxIterations: 8,
+            convergenceToleranceSamples: 0
+        ))
+        let edgeIndices = result.alignedSampleCounts.indices.filter {
+            result.alignedSampleCounts[$0] < inputs.count && result.alignedSampleCounts[$0] > 0
+        }
+        #expect(!edgeIndices.isEmpty)
+        #expect(edgeIndices.allSatisfy { abs(Double(result.alignedAverage[$0]) - 5) < 0.01 })
+        #expect(Set(result.shifts.map(\.correlationSampleCount)).count == 1)
+    }
 }

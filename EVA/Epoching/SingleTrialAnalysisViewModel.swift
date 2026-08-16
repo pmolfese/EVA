@@ -102,8 +102,9 @@ final class SingleTrialAnalysisViewModel {
     var rideStimulusWindowEndMs = 100.0
     var rideCentralWindowStartMs = 200.0
     var rideCentralWindowEndMs = 500.0
-    var rideResponseWindowStartMs = 300.0
-    var rideResponseWindowEndMs = 700.0
+    // R is relative to the response marker; S and C are stimulus-relative.
+    var rideResponseWindowStartMs = -300.0
+    var rideResponseWindowEndMs = 300.0
     var rideStimulusLatencySource = RIDEAnalyzer.LatencySource.stimulusLocked
     var rideCentralLatencySource = RIDEAnalyzer.LatencySource.estimated
     var rideResponseLatencySource = RIDEAnalyzer.LatencySource.fixed

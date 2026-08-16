@@ -173,10 +173,13 @@ struct SingleTrialAnalysisSheet: View {
             ))
         }
         if viewModel.rideIncludesResponseComponent {
+            let responseAnchor = viewModel.rideResponseLatencySource == .stimulusLocked
+                ? 0
+                : viewModel.rideDefaultResponseLatencyMs
             windows.append(RIDEComponentWindowSelection(
                 component: .response,
-                startMs: viewModel.rideResponseWindowStartMs,
-                endMs: viewModel.rideResponseWindowEndMs
+                startMs: viewModel.rideResponseWindowStartMs + responseAnchor,
+                endMs: viewModel.rideResponseWindowEndMs + responseAnchor
             ))
         }
         return windows
@@ -1072,7 +1075,7 @@ struct SingleTrialAnalysisSheet: View {
                             }
                         }
                     }
-                    Text("Drag each labeled component window on the butterfly trace. C estimation uses its own window; S and R windows define the component ranges used during decomposition.")
+                    Text("S and C windows are stimulus-relative. R is response-relative and is drawn at the configured response marker. A true RIDE R cluster requires a response marker for every trial; one fixed marker cannot capture reaction-time variability.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1671,6 +1674,15 @@ struct SingleTrialAnalysisSheet: View {
                     Text("Iterations: \(last.iteration)")
                         .font(.caption.monospacedDigit())
                 }
+                Text("Median: \(String(format: "%.1f", result.medianShiftMs)) ms")
+                    .font(.caption.monospacedDigit())
+                Text("MAD: \(String(format: "%.1f", result.shiftMADMs)) ms")
+                    .font(.caption.monospacedDigit())
+                if result.lagLimitHitCount > 0 {
+                    Text("\(result.lagLimitHitCount) at limit")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
 
             labeledChart("Original vs Woody-Aligned Averages") {
@@ -1862,6 +1874,8 @@ struct SingleTrialAnalysisSheet: View {
             TableColumn("Shift (ms)", value: \.latencyShiftMs) { Text(String(format: "%.1f", $0.latencyShiftMs)) }.width(86)
             TableColumn("Shift (samples)", value: \.latencyShiftSamples) { Text("\($0.latencyShiftSamples)") }.width(108)
             TableColumn("r", value: \.correlation) { Text(String(format: "%.3f", $0.correlation)) }.width(64)
+            TableColumn("N") { Text("\($0.correlationSampleCount)") }.width(48)
+            TableColumn("Limit") { Text($0.reachedLagLimit ? "Yes" : "") }.width(52)
         }
     }
 
@@ -1912,10 +1926,19 @@ struct SingleTrialAnalysisSheet: View {
                             .font(.caption.monospacedDigit())
                     }
                 }
+                Text("Explained: \(String(format: "%.1f", result.explainedVariance * 100))%")
+                    .font(.caption.monospacedDigit())
+                Text("Residual RMS: \(String(format: "%.3f", result.residualRMS))")
+                    .font(.caption.monospacedDigit())
             }
-            Text("S is stimulus-locked at 0 ms for every trial; C and optional R are the components with trial-specific latency estimates.")
+            Text("C latency is the template's dominant deflection plus each trial's estimated adjustment. R is response-locked only when genuine per-trial response markers are supplied.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            ForEach(result.warnings, id: \.self) { warning in
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
 
             labeledChart("Original vs RIDE-Aligned Averages") {
                 alignedAverageAndButterflyRow(
@@ -2083,8 +2106,11 @@ struct SingleTrialAnalysisSheet: View {
             viewModel.windowStartMs = orderedStart
             viewModel.windowEndMs = orderedEnd
         case .response:
-            viewModel.rideResponseWindowStartMs = orderedStart
-            viewModel.rideResponseWindowEndMs = orderedEnd
+            let responseAnchor = viewModel.rideResponseLatencySource == .stimulusLocked
+                ? 0
+                : viewModel.rideDefaultResponseLatencyMs
+            viewModel.rideResponseWindowStartMs = orderedStart - responseAnchor
+            viewModel.rideResponseWindowEndMs = orderedEnd - responseAnchor
         }
     }
 
@@ -2263,18 +2289,21 @@ struct SingleTrialAnalysisSheet: View {
         Table(sortedRIDELatencies(result), sortOrder: $rideSortOrder) {
             TableColumn("#", value: \.trialIndex) { Text("\($0.trialIndex + 1)") }.width(42)
             TableColumn("Time (s)", value: \.sourceTimeSeconds) { Text(String(format: "%.1f", $0.sourceTimeSeconds)) }.width(74)
-            TableColumn("S lock (ms)") { _ in
-                Text(viewModel.rideIncludesStimulusComponent ? "0.0" : "—")
+            TableColumn("S lock (ms)") { row in
+                Text(row.stimulusLatencyMs.map { String(format: "%.1f", $0) } ?? "—")
             }.width(86)
-            TableColumn("S lock (samples)") { _ in
-                Text(viewModel.rideIncludesStimulusComponent ? "0" : "—")
+            TableColumn("S lock (samples)") { row in
+                Text(row.stimulusLatencySamples.map(String.init) ?? "—")
             }.width(110)
-            TableColumn("C shift (ms)") { row in
+            TableColumn("C latency (ms)") { row in
+                Text(row.centralMarkerLatencyMs.map { String(format: "%.1f", $0) } ?? "—")
+            }.width(102)
+            TableColumn("C adjustment (ms)") { row in
                 Text(row.centralLatencyShiftMs.map { String(format: "%.1f", $0) } ?? "—")
-            }.width(94)
-            TableColumn("C shift (samples)") { row in
-                Text(row.centralLatencyShiftSamples.map(String.init) ?? "—")
             }.width(116)
+            TableColumn("C adjustment (samples)") { row in
+                Text(row.centralLatencyShiftSamples.map(String.init) ?? "—")
+            }.width(144)
             TableColumn("C r") { row in
                 Text(row.centralCorrelation.map { String(format: "%.3f", $0) } ?? "—")
             }.width(64)
@@ -2363,14 +2392,16 @@ struct SingleTrialAnalysisSheet: View {
 
     private func exportWoodyShifts() {
         guard let result = viewModel.woodyResult else { return }
-        var lines = ["Trial\tTimeSeconds\tLatencyShiftMs\tLatencyShiftSamples\tCorrelation"]
+        var lines = ["Trial\tTimeSeconds\tLatencyShiftMs\tLatencyShiftSamples\tCorrelation\tCorrelationSamples\tAtLagLimit"]
         for row in result.shifts {
             lines.append([
                 "\(row.trialIndex + 1)",
                 String(format: "%.3f", row.sourceTimeSeconds),
                 String(format: "%.4f", row.latencyShiftMs),
                 "\(row.latencyShiftSamples)",
-                String(format: "%.6f", row.correlation)
+                String(format: "%.6f", row.correlation),
+                "\(row.correlationSampleCount)",
+                row.reachedLagLimit ? "true" : "false"
             ].joined(separator: "\t"))
         }
         let text = lines.joined(separator: "\n") + "\n"
@@ -2387,14 +2418,16 @@ struct SingleTrialAnalysisSheet: View {
 
     private func exportRIDELatencies() {
         guard let result = viewModel.rideResult else { return }
-        var lines = ["Trial\tTimeSeconds\tStimulusLockMs\tStimulusLockSamples\tCentralShiftMs\tCentralShiftSamples\tCentralCorrelation\tResponseLatencyMs\tResponseLatencySamples"]
+        var lines = ["Trial\tTimeSeconds\tStimulusLockMs\tStimulusLockSamples\tCentralLatencyMs\tCentralLatencySamples\tCentralAdjustmentMs\tCentralAdjustmentSamples\tCentralCorrelation\tResponseLatencyMs\tResponseLatencySamples"]
         for row in result.trialLatencies {
             let trialNumber = String(row.trialIndex + 1)
             let timeSeconds = String(format: "%.3f", row.sourceTimeSeconds)
-            let stimulusLockMs = viewModel.rideIncludesStimulusComponent ? "0.0000" : ""
-            let stimulusLockSamples = viewModel.rideIncludesStimulusComponent ? "0" : ""
+            let stimulusLockMs = row.stimulusLatencyMs.map { String(format: "%.4f", $0) } ?? ""
+            let stimulusLockSamples = row.stimulusLatencySamples.map(String.init) ?? ""
             let centralShiftMs = row.centralLatencyShiftMs.map { String(format: "%.4f", $0) } ?? ""
             let centralShiftSamples = row.centralLatencyShiftSamples.map(String.init) ?? ""
+            let centralLatencyMs = row.centralMarkerLatencyMs.map { String(format: "%.4f", $0) } ?? ""
+            let centralLatencySamples = row.centralMarkerLatencySamples.map(String.init) ?? ""
             let centralCorrelation = row.centralCorrelation.map { String(format: "%.6f", $0) } ?? ""
             let responseLatencyMs = row.responseLatencyMs.map { String(format: "%.4f", $0) } ?? ""
             let responseLatencySamples = row.responseLatencySamples.map(String.init) ?? ""
@@ -2403,6 +2436,8 @@ struct SingleTrialAnalysisSheet: View {
                 timeSeconds,
                 stimulusLockMs,
                 stimulusLockSamples,
+                centralLatencyMs,
+                centralLatencySamples,
                 centralShiftMs,
                 centralShiftSamples,
                 centralCorrelation,
