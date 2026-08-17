@@ -21,7 +21,7 @@ struct ClusterPermutationFAnalyzerTests {
         )
         let maybeResult = try ClusterPermutationFAnalyzer.analyze(
             input: input,
-            configuration: .init(permutationCount: 9, clusterThreshold: 1, seed: 1)
+            configuration: .init(permutationCount: 9, threshold: .statistic(1), seed: 1)
         )
         let result = try #require(maybeResult)
         #expect(abs(result.observedStatistics[0] - 16) < 1e-12)
@@ -59,7 +59,7 @@ struct ClusterPermutationFAnalyzerTests {
         )
         let configuration = ClusterPermutationFAnalyzer.Configuration(
             permutationCount: 499,
-            clusterThreshold: 5,
+            threshold: .statistic(5),
             seed: 42
         )
 
@@ -91,7 +91,7 @@ struct ClusterPermutationFAnalyzerTests {
         )
         let configuration = ClusterPermutationFAnalyzer.Configuration(
             permutationCount: 99,
-            clusterThreshold: 3,
+            threshold: .statistic(3),
             seed: 7
         )
 

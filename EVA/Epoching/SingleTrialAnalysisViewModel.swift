@@ -151,6 +151,21 @@ final class SingleTrialAnalysisViewModel {
     var clusterThreshold = 2.0
     var clusterFThreshold = 4.0
     var clusterAlpha = 0.05
+    /// Cluster-forming threshold entered as an uncorrected p rather than as a
+    /// raw statistic. On by default: a fixed |t| means a different p at every
+    /// trial count, so the raw form is only comparable within one analysis.
+    var clusterUsesProbabilityThreshold = true
+    var clusterThresholdProbability = 0.05
+    var clusterInference = ClusterInferenceMode.clusterMass
+    var clusterTFCE = TFCEParameters.default
+    /// Treats the conditions as measurements of the same units rather than as
+    /// unrelated trials. Off by default because ordinary single-subject epochs
+    /// have no pairing to exploit.
+    var clusterRepeatedMeasures = false
+    var clusterAdjacency = ClusterAdjacencyConfiguration.default
+    /// Set once per recording from the montage's own sensor spacing, so the
+    /// default neighborhood is not a constant that suits only dense nets.
+    var clusterAdjacencyDistanceInitialized = false
     var clusterShowsStandardError = true
     /// Analyze every Nth sample. Explicit because it changes the temporal
     /// lattice on which clusters are formed, not merely the plot resolution.
@@ -216,6 +231,7 @@ final class SingleTrialAnalysisViewModel {
         clusterConditionB = nil
         clusterFConditions = []
         clusterOutput = nil
+        clusterAdjacencyDistanceInitialized = false
         statusMessage = nil
         isRunning = false
         runProgress = nil

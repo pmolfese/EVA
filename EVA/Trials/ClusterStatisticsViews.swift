@@ -39,8 +39,12 @@ struct ClusterStatisticsPane: View {
         let windowStartMs: Double
         let windowEndMs: Double
         let permutationCount: Int
-        let threshold: Double
+        let threshold: ClusterFormingThreshold
         let sampleStride: Int
+        let inference: ClusterInferenceMode
+        let tfce: TFCEParameters
+        let adjacency: ClusterAdjacencyConfiguration
+        let repeatedMeasures: Bool
     }
 
     private var invalidationSignature: InvalidationSignature {
@@ -58,8 +62,12 @@ struct ClusterStatisticsPane: View {
             windowStartMs: viewModel.clusterWindowStartMs,
             windowEndMs: viewModel.clusterWindowEndMs,
             permutationCount: viewModel.clusterPermutationCount,
-            threshold: activeClusterThreshold,
-            sampleStride: viewModel.clusterSampleStride
+            threshold: activeThresholdSpecification,
+            sampleStride: viewModel.clusterSampleStride,
+            inference: viewModel.clusterInference,
+            tfce: viewModel.clusterTFCE,
+            adjacency: viewModel.clusterAdjacency,
+            repeatedMeasures: viewModel.clusterRepeatedMeasures
         )
     }
 
@@ -70,9 +78,15 @@ struct ClusterStatisticsPane: View {
               selectedConditionNames.allSatisfy({ condition in
                   rawSegments.filter { $0.category == condition }.count >= 2
               }) else { return false }
-        return viewModel.clusterWindowEndMs > viewModel.clusterWindowStartMs
+        guard viewModel.clusterAdjacency.isValid else { return false }
+        if viewModel.clusterInference == .tfce, !viewModel.clusterTFCE.isValid { return false }
+        let thresholdOK = viewModel.clusterInference == .tfce
+            || (viewModel.clusterUsesProbabilityThreshold
+                ? viewModel.clusterThresholdProbability > 0 && viewModel.clusterThresholdProbability < 1
+                : activeClusterThreshold > 0)
+        return thresholdOK
+            && viewModel.clusterWindowEndMs > viewModel.clusterWindowStartMs
             && viewModel.clusterPermutationCount > 0
-            && activeClusterThreshold > 0
             && viewModel.clusterSampleStride > 0
     }
 
@@ -100,6 +114,64 @@ struct ClusterStatisticsPane: View {
                 }
             }
         )
+    }
+
+    /// The threshold as the analyzer will receive it. Under TFCE the value is
+    /// unused, but keeping it in the invalidation signature is harmless and
+    /// avoids a second code path.
+    private var activeThresholdSpecification: ClusterFormingThreshold {
+        viewModel.clusterUsesProbabilityThreshold
+            ? .probability(viewModel.clusterThresholdProbability)
+            : .statistic(activeClusterThreshold)
+    }
+
+    /// The critical statistic a probability threshold resolves to, for the
+    /// live readout beside the field. Nil until enough conditions are chosen
+    /// to know the degrees of freedom.
+    private var previewedCriticalValue: Double? {
+        guard viewModel.clusterUsesProbabilityThreshold,
+              viewModel.clusterInference == .clusterMass,
+              let degrees = previewedDegreesOfFreedom else { return nil }
+        switch viewModel.clusterStatistic {
+        case .t:
+            return ClusterStatisticsDistributions.criticalT(
+                twoTailedAlpha: viewModel.clusterThresholdProbability,
+                degreesOfFreedom: degrees.denominator
+            )
+        case .f:
+            guard let numerator = degrees.numerator else { return nil }
+            return ClusterStatisticsDistributions.criticalF(
+                alpha: viewModel.clusterThresholdProbability,
+                numeratorDegreesOfFreedom: numerator,
+                denominatorDegreesOfFreedom: degrees.denominator
+            )
+        }
+    }
+
+    /// Degrees of freedom the run will have, derived from the currently chosen
+    /// conditions and design so the threshold readout is correct before the run.
+    private var previewedDegreesOfFreedom: (numerator: Double?, denominator: Double)? {
+        let counts = selectedConditionNames.map { condition in
+            rawSegments.filter { $0.category == condition }.count
+        }
+        guard counts.count >= (viewModel.clusterStatistic == .t ? 2 : 3),
+              counts.allSatisfy({ $0 >= 2 }) else { return nil }
+
+        switch (viewModel.clusterStatistic, viewModel.clusterRepeatedMeasures) {
+        case (.t, false):
+            return (nil, Double(counts.reduce(0, +) - 2))
+        case (.t, true):
+            // Paired units are limited by the smaller condition.
+            let units = counts.min() ?? 0
+            guard units > 1 else { return nil }
+            return (nil, Double(units - 1))
+        case (.f, false):
+            return (Double(counts.count - 1), Double(counts.reduce(0, +) - counts.count))
+        case (.f, true):
+            let units = counts.min() ?? 0
+            guard units > 1 else { return nil }
+            return (Double(counts.count - 1), Double((counts.count - 1) * (units - 1)))
+        }
     }
 
     private var availableWindowMs: ClosedRange<Double>? {
@@ -144,6 +216,7 @@ struct ClusterStatisticsPane: View {
         .onAppear {
             seedConditionsIfNeeded()
             seedFConditionsIfNeeded()
+            seedAdjacencyDistanceIfNeeded()
             clampWindowToAvailableEpochs()
             if let output = viewModel.clusterOutput,
                output.dataRevision != rawSignal?.dataRevision {
@@ -164,9 +237,7 @@ struct ClusterStatisticsPane: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Spatiotemporal Cluster Permutation Test")
                         .font(.headline)
-                    Text(viewModel.clusterStatistic == .t
-                        ? "Independent single trials · two-sided t · maximum cluster-mass correction"
-                        : "Independent single trials · one-way omnibus F · maximum cluster-mass correction")
+                    Text(designSubtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -206,6 +277,8 @@ struct ClusterStatisticsPane: View {
                 Spacer()
             }
 
+            designAndAdjacencyRow
+
             HStack(alignment: .bottom, spacing: 14) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Permutations").font(.caption2).foregroundStyle(.secondary)
@@ -219,11 +292,11 @@ struct ClusterStatisticsPane: View {
                     .disabled(viewModel.isRunning)
                 }
 
-                numericField(
-                    viewModel.clusterStatistic == .t ? "Cluster |t|" : "Cluster F",
-                    value: activeThresholdBinding,
-                    width: 66
-                )
+                if viewModel.clusterInference == .clusterMass {
+                    thresholdControl
+                } else {
+                    tfceControls
+                }
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Cluster α").font(.caption2).foregroundStyle(.secondary)
@@ -282,6 +355,15 @@ struct ClusterStatisticsPane: View {
                 if sensorLayout == nil {
                     Label("No layout: temporal clusters only", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
+                } else if let summary = previewedAdjacencySummary {
+                    Label(
+                        String(format: "%.1f neighbors per sensor", summary.meanNeighborCount),
+                        systemImage: summary.isDegenerate || summary.isOverConnected
+                            ? "exclamationmark.triangle"
+                            : "point.3.connected.trianglepath.dotted"
+                    )
+                    .foregroundStyle(summary.isDegenerate || summary.isOverConnected ? Color.orange : .secondary)
+                    .help(adjacencyHelpText(summary))
                 }
                 if let availableWindowMs {
                     Label(
@@ -293,7 +375,15 @@ struct ClusterStatisticsPane: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            Text("Corrected p-values apply to whole clusters. Their member sensors and time samples should not be interpreted as independently significant or as precise spatial/temporal boundaries.")
+            if let caution = plannedPairingMode?.caution {
+                Label(caution, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            Text(viewModel.clusterInference == .tfce
+                 ? "TFCE corrects each channel × time point against the permutation distribution of the largest enhanced score. Points listed together below are a readability grouping, not the inference unit."
+                 : "Corrected p-values apply to whole clusters. Their member sensors and time samples should not be interpreted as independently significant or as precise spatial/temporal boundaries.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
             if viewModel.clusterStatistic == .f {
@@ -304,6 +394,251 @@ struct ClusterStatisticsPane: View {
         }
         .padding(14)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    // MARK: - Design, inference and adjacency controls
+
+    private var designSubtitle: String {
+        let unit = viewModel.clusterRepeatedMeasures ? "Matched units" : "Independent single trials"
+        let statistic = viewModel.clusterStatistic == .t
+            ? (viewModel.clusterRepeatedMeasures ? "paired two-sided t" : "two-sided t")
+            : (viewModel.clusterRepeatedMeasures ? "repeated-measures omnibus F" : "one-way omnibus F")
+        let correction = viewModel.clusterInference == .tfce
+            ? "threshold-free cluster enhancement"
+            : "maximum cluster-mass correction"
+        return "\(unit) · \(statistic) · \(correction)"
+    }
+
+    private var designAndAdjacencyRow: some View {
+        HStack(alignment: .bottom, spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Design").font(.caption2).foregroundStyle(.secondary)
+                Picker("", selection: $viewModel.clusterRepeatedMeasures) {
+                    Text("Independent").tag(false)
+                    Text(viewModel.clusterStatistic == .t ? "Paired" : "Repeated measures").tag(true)
+                }
+                .labelsHidden()
+                .frame(width: 160)
+                .disabled(viewModel.isRunning)
+                .help(viewModel.clusterStatistic == .t
+                      ? ClusterPermutationAnalyzer.Design.repeatedMeasures.explanation
+                      : ClusterPermutationFAnalyzer.Design.repeatedMeasures.explanation)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Correction").font(.caption2).foregroundStyle(.secondary)
+                Picker("", selection: $viewModel.clusterInference) {
+                    ForEach(ClusterInferenceMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 132)
+                .disabled(viewModel.isRunning)
+                .help(viewModel.clusterInference.explanation)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Sensor neighbors").font(.caption2).foregroundStyle(.secondary)
+                Picker("", selection: $viewModel.clusterAdjacency.method) {
+                    ForEach(ClusterAdjacencyMethod.allCases) { method in
+                        Text(method.rawValue).tag(method)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 132)
+                .disabled(viewModel.isRunning || sensorLayout == nil)
+                .help(viewModel.clusterAdjacency.method.explanation)
+            }
+
+            switch viewModel.clusterAdjacency.method {
+            case .distance:
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Radius").font(.caption2).foregroundStyle(.secondary)
+                    TextField(
+                        "",
+                        value: $viewModel.clusterAdjacency.distance,
+                        format: .number.precision(.fractionLength(2))
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 62)
+                    .disabled(viewModel.isRunning || sensorLayout == nil)
+                    .help("Fraction of the head radius. Sensors closer than this are neighbors.")
+                }
+            case .nearestNeighbors:
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("K").font(.caption2).foregroundStyle(.secondary)
+                    Stepper(
+                        "\(viewModel.clusterAdjacency.neighborCount)",
+                        value: $viewModel.clusterAdjacency.neighborCount,
+                        in: 1...32
+                    )
+                    .frame(width: 74)
+                    .disabled(viewModel.isRunning || sensorLayout == nil)
+                }
+            case .temporalOnly:
+                EmptyView()
+            }
+
+            Spacer()
+        }
+    }
+
+    private var thresholdControl: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text(viewModel.clusterUsesProbabilityThreshold
+                     ? "Cluster-forming p"
+                     : (viewModel.clusterStatistic == .t ? "Cluster |t|" : "Cluster F"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Button {
+                    toggleThresholdMode()
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .disabled(viewModel.isRunning)
+                .help(viewModel.clusterUsesProbabilityThreshold
+                      ? "Switch to entering the raw statistic."
+                      : "Switch to entering an uncorrected p-value, converted to the critical statistic for this design's degrees of freedom.")
+            }
+            HStack(spacing: 5) {
+                if viewModel.clusterUsesProbabilityThreshold {
+                    TextField(
+                        "",
+                        value: $viewModel.clusterThresholdProbability,
+                        format: .number.precision(.fractionLength(3))
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 66)
+                    .disabled(viewModel.isRunning)
+                    if let critical = previewedCriticalValue {
+                        Text("= \(viewModel.clusterStatistic == .t ? "|t|" : "F") \(String(format: "%.2f", critical))")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    TextField("", value: activeThresholdBinding, format: .number.precision(.fractionLength(1)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 66)
+                        .disabled(viewModel.isRunning)
+                }
+            }
+        }
+    }
+
+    private var tfceControls: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("TFCE E").font(.caption2).foregroundStyle(.secondary)
+                TextField(
+                    "",
+                    value: $viewModel.clusterTFCE.extentExponent,
+                    format: .number.precision(.fractionLength(2))
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 56)
+                .disabled(viewModel.isRunning)
+                .help("Extent exponent. 0.5 is the Smith & Nichols default.")
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("TFCE H").font(.caption2).foregroundStyle(.secondary)
+                TextField(
+                    "",
+                    value: $viewModel.clusterTFCE.heightExponent,
+                    format: .number.precision(.fractionLength(2))
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 56)
+                .disabled(viewModel.isRunning)
+                .help("Height exponent. 2.0 is the Smith & Nichols default.")
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Steps").font(.caption2).foregroundStyle(.secondary)
+                Stepper("\(viewModel.clusterTFCE.stepCount)", value: $viewModel.clusterTFCE.stepCount, in: 2...500, step: 10)
+                    .frame(width: 84)
+                    .disabled(viewModel.isRunning)
+                    .help("Integration steps between zero and the statistic maximum.")
+            }
+        }
+    }
+
+    private func toggleThresholdMode() {
+        // Carry the current threshold across so the switch does not silently
+        // change what the run will do.
+        if viewModel.clusterUsesProbabilityThreshold {
+            if let critical = previewedCriticalValue {
+                activeThresholdBinding.wrappedValue = (critical * 100).rounded() / 100
+            }
+            viewModel.clusterUsesProbabilityThreshold = false
+        } else {
+            if let degrees = previewedDegreesOfFreedom {
+                let probability: Double? = switch viewModel.clusterStatistic {
+                case .t:
+                    ClusterStatisticsDistributions.twoTailedTProbability(
+                        activeClusterThreshold,
+                        degreesOfFreedom: degrees.denominator
+                    )
+                case .f:
+                    degrees.numerator.map { numerator in
+                        ClusterStatisticsDistributions.upperTailFProbability(
+                            activeClusterThreshold,
+                            numeratorDegreesOfFreedom: numerator,
+                            denominatorDegreesOfFreedom: degrees.denominator
+                        )
+                    }
+                }
+                if let probability, probability > 0, probability < 1 {
+                    viewModel.clusterThresholdProbability = (probability * 1_000).rounded() / 1_000
+                }
+            }
+            viewModel.clusterUsesProbabilityThreshold = true
+        }
+    }
+
+    /// The adjacency the current settings would build, for the live neighbor
+    /// readout. Cheap enough to recompute — it is O(channels²) once per redraw
+    /// on at most a few hundred sensors.
+    private var previewedAdjacencySummary: ClusterAdjacencySummary? {
+        guard let sensorLayout, let rawSignal else { return nil }
+        let layoutChannels = Set(sensorLayout.positions.map(\.channelIndex))
+        let channels = rawSignal.data.indices.filter {
+            layoutChannels.contains($0) && !badChannels.contains($0)
+        }
+        guard !channels.isEmpty else { return nil }
+        return ClusterSpatialAdjacency.summarize(
+            ClusterSpatialAdjacency.build(
+                channelIndices: channels,
+                layout: sensorLayout,
+                configuration: viewModel.clusterAdjacency
+            )
+        )
+    }
+
+    private func adjacencyHelpText(_ summary: ClusterAdjacencySummary) -> String {
+        var parts = [
+            "Range \(summary.minimumNeighborCount)–\(summary.maximumNeighborCount) neighbors, \(summary.componentCount) connected group\(summary.componentCount == 1 ? "" : "s").",
+        ]
+        if summary.isolatedChannelCount > 0 {
+            parts.append("\(summary.isolatedChannelCount) sensor\(summary.isolatedChannelCount == 1 ? "" : "s") have no neighbors and can only form temporal clusters. Increase the radius or K.")
+        }
+        if summary.isOverConnected {
+            parts.append("Neighborhoods this large tend to merge distinct effects into one uninterpretable cluster.")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// How the run would match units, so the caution appears before the run
+    /// rather than only in its results.
+    private var plannedPairingMode: ClusterPairingMode? {
+        guard viewModel.clusterRepeatedMeasures else { return nil }
+        let selected = Set(selectedConditionNames)
+        let segments = rawSegments.filter { selected.contains($0.category) }
+        guard !segments.isEmpty else { return nil }
+        return segments.allSatisfy { $0.subject?.isEmpty == false } ? .subject : .trialOrder
     }
 
     private func conditionPicker(_ title: String, selection: Binding<String?>) -> some View {
@@ -373,13 +708,19 @@ struct ClusterStatisticsPane: View {
                 Text("\(significant.count) cluster\(significant.count == 1 ? "" : "s") at p ≤ \(formatP(viewModel.clusterAlpha))")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(significant.isEmpty ? .secondary : Color.accentColor)
-                Text("\(output.analysis.permutationCount) permutations · \(output.analysis.statistic == .t ? "|t|" : "F") ≥ \(String(format: "%.1f", output.analysis.clusterThreshold))\(degreesOfFreedomText(output.analysis))")
+                Text(methodSummary(output))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
-                if !output.usedSpatialAdjacency {
+                if output.adjacencySummary.meanNeighborCount == 0 {
                     Label("temporal-only adjacency", systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
+                }
+                if let mode = output.analysis.pairingMode {
+                    Label(mode.label, systemImage: mode == .subject ? "person.2" : "arrow.left.arrow.right")
+                        .font(.caption)
+                        .foregroundStyle(mode == .subject ? .secondary : Color.orange)
+                        .help(mode.caution ?? "One observation per subject per condition.")
                 }
                 Spacer()
             }
@@ -592,6 +933,39 @@ struct ClusterStatisticsPane: View {
             .joined(separator: analysis.statistic == .t ? " vs " : " · ")
     }
 
+    /// One line recording exactly how the reported p-values were produced, so
+    /// a figure exported from this pane can be described in a methods section.
+    private func methodSummary(_ output: ClusterStatisticsOutput) -> String {
+        let analysis = output.analysis
+        var parts = ["\(analysis.permutationCount) permutations"]
+        switch analysis.inference {
+        case .clusterMass:
+            let symbol = analysis.statistic == .t ? "|t|" : "F"
+            var threshold = "\(symbol) ≥ \(String(format: "%.2f", analysis.resolvedThreshold ?? 0))"
+            if case .probability(let alpha) = analysis.thresholdSpecification {
+                threshold += " (p \(formatP(alpha)))"
+            }
+            parts.append(threshold)
+        case .tfce:
+            parts.append("TFCE E=\(String(format: "%.2g", analysis.tfce.extentExponent)) H=\(String(format: "%.2g", analysis.tfce.heightExponent)) · \(analysis.tfce.stepCount) steps")
+        }
+        parts.append(adjacencyDescription(output))
+        let degrees = degreesOfFreedomText(analysis)
+        if !degrees.isEmpty { parts.append(String(degrees.dropFirst(3))) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func adjacencyDescription(_ output: ClusterStatisticsOutput) -> String {
+        switch output.adjacencyConfiguration.method {
+        case .temporalOnly:
+            return "no spatial adjacency"
+        case .distance:
+            return "neighbors < \(String(format: "%.2f", output.adjacencyConfiguration.distance)) r (\(String(format: "%.1f", output.adjacencySummary.meanNeighborCount)) mean)"
+        case .nearestNeighbors:
+            return "\(output.adjacencyConfiguration.neighborCount)-nearest neighbors (\(String(format: "%.1f", output.adjacencySummary.meanNeighborCount)) mean)"
+        }
+    }
+
     private func degreesOfFreedomText(_ analysis: ClusterStatisticsAnalysis) -> String {
         if let numerator = analysis.numeratorDegreesOfFreedom,
            let denominator = analysis.denominatorDegreesOfFreedom {
@@ -630,6 +1004,25 @@ struct ClusterStatisticsPane: View {
             }
             viewModel.clusterFConditions = selected
         }
+    }
+
+    /// Derives the starting neighbor radius from this montage's own sensor
+    /// spacing. A constant default would be far too small for a 32-channel cap
+    /// and far too large for a 256-channel net.
+    private func seedAdjacencyDistanceIfNeeded() {
+        guard !viewModel.clusterAdjacencyDistanceInitialized,
+              let sensorLayout, let rawSignal else { return }
+        let layoutChannels = Set(sensorLayout.positions.map(\.channelIndex))
+        let channels = rawSignal.data.indices.filter {
+            layoutChannels.contains($0) && !badChannels.contains($0)
+        }
+        if let suggested = ClusterSpatialAdjacency.suggestedDistance(
+            channelIndices: channels,
+            layout: sensorLayout
+        ) {
+            viewModel.clusterAdjacency.distance = suggested
+        }
+        viewModel.clusterAdjacencyDistanceInitialized = true
     }
 
     private func invalidateResult() {
@@ -675,7 +1068,13 @@ struct ClusterStatisticsPane: View {
             windowEndMs: viewModel.clusterWindowEndMs,
             sampleStride: viewModel.clusterSampleStride,
             permutationCount: viewModel.clusterPermutationCount,
-            clusterThreshold: activeClusterThreshold,
+            threshold: activeThresholdSpecification,
+            inference: viewModel.clusterInference,
+            tfce: viewModel.clusterTFCE,
+            adjacency: sensorLayout == nil
+                ? ClusterAdjacencyConfiguration(method: .temporalOnly)
+                : viewModel.clusterAdjacency,
+            repeatedMeasures: viewModel.clusterRepeatedMeasures,
             seed: viewModel.clusterStatistic == .t ? 0xE7A_C1A5_7E57 : 0xE7A_F1A5_7E57
         )
         let (progressContinuation, progressTask) = ProgressBridge.make { (update: SingleTrialRunProgress) in

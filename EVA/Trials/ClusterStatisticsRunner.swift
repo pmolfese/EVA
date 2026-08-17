@@ -2,6 +2,13 @@
 //  ClusterStatisticsRunner.swift
 //  EVA
 //
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
 //  Prepares EVA's retained pre-average epochs for cluster permutation testing.
 //  Average reference and baseline correction are applied per trial here because
 //  those linear operations are applied only after averaging in the PSA path.
@@ -14,6 +21,36 @@ nonisolated enum ClusterStatisticKind: String, CaseIterable, Identifiable, Senda
     case f = "Multi-condition F"
 
     var id: String { rawValue }
+}
+
+/// How observations in different conditions are matched into a unit for
+/// within-subject designs. Reported back to the UI because the two are not
+/// equally defensible and the user must see which one applied.
+nonisolated enum ClusterPairingMode: Sendable, Equatable {
+    /// One observation per subject per condition, matched by subject id. This
+    /// is the statistically meaningful pairing and is available whenever the
+    /// epochs came from a grand average over combined recordings.
+    case subject
+    /// Nth retained trial of one condition matched to the Nth of the other, in
+    /// acquisition order. Only defensible when the paradigm genuinely pairs
+    /// trials — alternating or yoked presentation — and misleading otherwise.
+    case trialOrder
+
+    var label: String {
+        switch self {
+        case .subject: return "Paired by subject"
+        case .trialOrder: return "Paired by trial order"
+        }
+    }
+
+    var caution: String? {
+        switch self {
+        case .subject:
+            return nil
+        case .trialOrder:
+            return "Trials are matched by acquisition order because these epochs carry no subject identity. This is only meaningful if your paradigm pairs trials by position; otherwise use the independent design."
+        }
+    }
 }
 
 nonisolated struct ClusterStatisticsJob: Sendable {
@@ -29,7 +66,11 @@ nonisolated struct ClusterStatisticsJob: Sendable {
     let windowEndMs: Double
     let sampleStride: Int
     let permutationCount: Int
-    let clusterThreshold: Double
+    let threshold: ClusterFormingThreshold
+    let inference: ClusterInferenceMode
+    let tfce: TFCEParameters
+    let adjacency: ClusterAdjacencyConfiguration
+    let repeatedMeasures: Bool
     let seed: UInt64
 }
 
@@ -37,14 +78,24 @@ nonisolated struct ClusterStatisticsAnalysis: Sendable {
     let statistic: ClusterStatisticKind
     let conditionNames: [String]
     let conditionCounts: [Int]
+    let repeatedMeasures: Bool
+    let pairingMode: ClusterPairingMode?
+    let unitCount: Int?
     let numeratorDegreesOfFreedom: Int?
     let denominatorDegreesOfFreedom: Int?
     let channelCount: Int
     let sampleCount: Int
     let observedStatistics: [Double]
-    let clusters: [ClusterPermutationAnalyzer.Cluster]
+    let observedTFCEScores: [Double]?
+    let pointPValues: [Double]?
+    let clusters: [SpatiotemporalCluster]
     let permutationCount: Int
-    let clusterThreshold: Double
+    let inference: ClusterInferenceMode
+    let tfce: TFCEParameters
+    /// The statistic value clusters were formed at, after resolving a
+    /// probability threshold. Nil under TFCE.
+    let resolvedThreshold: Double?
+    let thresholdSpecification: ClusterFormingThreshold
 }
 
 nonisolated struct ClusterStatisticsOutput: Sendable {
@@ -59,7 +110,8 @@ nonisolated struct ClusterStatisticsOutput: Sendable {
     let samplingRate: Double
     /// Corrected cluster id -> category -> across-trial ROI waveform summary.
     let clusterWaveforms: [Int: [String: ClusterWaveformSummary]]
-    let usedSpatialAdjacency: Bool
+    let adjacencySummary: ClusterAdjacencySummary
+    let adjacencyConfiguration: ClusterAdjacencyConfiguration
 }
 
 nonisolated struct ClusterWaveformSummary: Sendable, Equatable {
@@ -85,10 +137,13 @@ nonisolated enum ClusterStatisticsRunner {
             progress.yield(.init(fraction: 0.02, title: "Cluster Statistics", detail: "Preparing single trials…"))
             let prepared = try prepare(job: job)
             if Task.isCancelled { return .cancelled }
+            let workerText = "\(min(evaMaxWorkers, job.permutationCount)) CPU workers"
             progress.yield(.init(
                 fraction: 0.10,
                 title: "Cluster Statistics",
-                detail: "Permuting condition labels on \(min(evaMaxWorkers, job.permutationCount)) CPU workers…"
+                detail: job.inference == .tfce
+                    ? "Integrating cluster extent on \(workerText)…"
+                    : "Permuting condition labels on \(workerText)…"
             ))
             let progressHandler: @Sendable (Double) -> Void = { fraction in
                 progress.yield(.init(
@@ -97,6 +152,7 @@ nonisolated enum ClusterStatisticsRunner {
                     detail: "Permutation \(max(Int((fraction * Double(job.permutationCount)).rounded()), 1)) of \(job.permutationCount) · \(min(evaMaxWorkers, job.permutationCount)) workers"
                 ))
             }
+
             let analysis: ClusterStatisticsAnalysis
             switch job.statistic {
             case .t:
@@ -107,11 +163,14 @@ nonisolated enum ClusterStatisticsRunner {
                         conditionB: .init(name: prepared.conditions[1].name, trials: prepared.conditions[1].trials),
                         channelCount: prepared.channelIndices.count,
                         sampleCount: prepared.relativeSampleOffsets.count,
-                        spatialAdjacency: prepared.spatialAdjacency
+                        spatialAdjacency: prepared.spatialAdjacency,
+                        design: job.repeatedMeasures ? .repeatedMeasures : .independent
                     ),
                     configuration: .init(
                         permutationCount: job.permutationCount,
-                        clusterThreshold: job.clusterThreshold,
+                        threshold: job.threshold,
+                        inference: job.inference,
+                        tfce: job.tfce,
                         seed: job.seed
                     ),
                     progress: progressHandler
@@ -121,14 +180,22 @@ nonisolated enum ClusterStatisticsRunner {
                     statistic: .t,
                     conditionNames: [result.conditionA, result.conditionB],
                     conditionCounts: [result.conditionACount, result.conditionBCount],
+                    repeatedMeasures: result.design == .repeatedMeasures,
+                    pairingMode: result.design == .repeatedMeasures ? prepared.pairingMode : nil,
+                    unitCount: result.pairCount,
                     numeratorDegreesOfFreedom: nil,
-                    denominatorDegreesOfFreedom: result.conditionACount + result.conditionBCount - 2,
+                    denominatorDegreesOfFreedom: Int(result.degreesOfFreedom),
                     channelCount: result.channelCount,
                     sampleCount: result.sampleCount,
                     observedStatistics: result.observedStatistics,
+                    observedTFCEScores: result.observedTFCEScores,
+                    pointPValues: result.pointPValues,
                     clusters: result.clusters,
                     permutationCount: result.configuration.permutationCount,
-                    clusterThreshold: result.configuration.clusterThreshold
+                    inference: result.configuration.inference,
+                    tfce: result.configuration.tfce,
+                    resolvedThreshold: result.resolvedThreshold,
+                    thresholdSpecification: result.configuration.threshold
                 )
             case .f:
                 let result = try ClusterPermutationFAnalyzer.analyze(
@@ -136,11 +203,14 @@ nonisolated enum ClusterStatisticsRunner {
                         conditions: prepared.conditions.map { .init(name: $0.name, trials: $0.trials) },
                         channelCount: prepared.channelIndices.count,
                         sampleCount: prepared.relativeSampleOffsets.count,
-                        spatialAdjacency: prepared.spatialAdjacency
+                        spatialAdjacency: prepared.spatialAdjacency,
+                        design: job.repeatedMeasures ? .repeatedMeasures : .independent
                     ),
                     configuration: .init(
                         permutationCount: job.permutationCount,
-                        clusterThreshold: job.clusterThreshold,
+                        threshold: job.threshold,
+                        inference: job.inference,
+                        tfce: job.tfce,
                         seed: job.seed
                     ),
                     progress: progressHandler
@@ -150,16 +220,25 @@ nonisolated enum ClusterStatisticsRunner {
                     statistic: .f,
                     conditionNames: result.conditionNames,
                     conditionCounts: result.conditionCounts,
+                    repeatedMeasures: result.design == .repeatedMeasures,
+                    pairingMode: result.design == .repeatedMeasures ? prepared.pairingMode : nil,
+                    unitCount: result.unitCount,
                     numeratorDegreesOfFreedom: result.numeratorDegreesOfFreedom,
                     denominatorDegreesOfFreedom: result.denominatorDegreesOfFreedom,
                     channelCount: result.channelCount,
                     sampleCount: result.sampleCount,
                     observedStatistics: result.observedStatistics,
+                    observedTFCEScores: result.observedTFCEScores,
+                    pointPValues: result.pointPValues,
                     clusters: result.clusters,
                     permutationCount: result.configuration.permutationCount,
-                    clusterThreshold: result.configuration.clusterThreshold
+                    inference: result.configuration.inference,
+                    tfce: result.configuration.tfce,
+                    resolvedThreshold: result.resolvedThreshold,
+                    thresholdSpecification: result.configuration.threshold
                 )
             }
+
             progress.yield(.init(fraction: 0.99, title: "Cluster Statistics", detail: "Summarizing condition means…"))
             let clusterWaveforms = waveformSummaries(analysis: analysis, conditions: prepared.conditions)
             progress.yield(.init(fraction: 1, title: "Cluster Statistics", detail: "Ready to inspect."))
@@ -171,7 +250,8 @@ nonisolated enum ClusterStatisticsRunner {
                     relativeSampleOffsets: prepared.relativeSampleOffsets,
                     samplingRate: job.signal.samplingRate,
                     clusterWaveforms: clusterWaveforms,
-                    usedSpatialAdjacency: prepared.usedSpatialAdjacency
+                    adjacencySummary: ClusterSpatialAdjacency.summarize(prepared.spatialAdjacency),
+                    adjacencyConfiguration: job.adjacency
                 ),
                 errorMessage: nil
             )
@@ -186,12 +266,14 @@ nonisolated enum ClusterStatisticsRunner {
         }
     }
 
+    // MARK: - Preparation
+
     private struct PreparedData {
         let conditions: [PreparedCondition]
         let channelIndices: [Int]
         let relativeSampleOffsets: [Int]
         let spatialAdjacency: [[Int]]
-        let usedSpatialAdjacency: Bool
+        let pairingMode: ClusterPairingMode?
     }
 
     private struct PreparedCondition {
@@ -206,6 +288,9 @@ nonisolated enum ClusterStatisticsRunner {
         case overlappingConditions
         case insufficientTrials(String, Int)
         case noChannels
+        case invalidAdjacency
+        case noSharedSubjects(Int)
+        case unbalancedPairing
 
         var message: String {
             switch self {
@@ -221,6 +306,12 @@ nonisolated enum ClusterStatisticsRunner {
                 return "\(category) has \(count) usable trial\(count == 1 ? "" : "s"); at least two are required."
             case .noChannels:
                 return "No good EEG channels with usable samples are available."
+            case .invalidAdjacency:
+                return "Choose a valid sensor neighborhood: a positive distance, or between 1 and 32 nearest neighbors."
+            case .noSharedSubjects(let count):
+                return "A within-subject design needs at least two subjects present in every selected condition; only \(count) qualify."
+            case .unbalancedPairing:
+                return "A within-subject design needs the same number of matched units in every condition."
             }
         }
     }
@@ -228,8 +319,8 @@ nonisolated enum ClusterStatisticsRunner {
     private static func prepare(job: ClusterStatisticsJob) throws -> PreparedData {
         guard job.signal.samplingRate > 0,
               job.permutationCount > 0,
-              job.clusterThreshold > 0,
               job.windowEndMs > job.windowStartMs else { throw PreparationError.invalidWindow }
+        guard job.adjacency.isValid else { throw PreparationError.invalidAdjacency }
 
         let requiredConditionCount = job.statistic == .t ? 2 : 3
         let conditionNames = job.conditionNames.reduce(into: [String]()) { names, name in
@@ -246,7 +337,7 @@ nonisolated enum ClusterStatisticsRunner {
 
         // PSA category groups deliberately duplicate a source event into every
         // category it belongs to. Such a trial cannot occur in more than one
-        // cell of an independent label-permutation design.
+        // cell of a label-permutation design, paired or not.
         var seenSourceTrials = Set<Int64>()
         for (_, segments) in segmentsByCondition {
             let keys = Set(segments.map(sourceTrialKey))
@@ -279,41 +370,138 @@ nonisolated enum ClusterStatisticsRunner {
         let channels = candidateChannels.filter { !job.badChannels.contains($0) }
         guard !channels.isEmpty else { throw PreparationError.noChannels }
 
-        let adjacency = spatialAdjacency(channelIndices: channels, layout: job.sensorLayout)
+        let adjacency = ClusterSpatialAdjacency.build(
+            channelIndices: channels,
+            layout: job.sensorLayout,
+            configuration: job.adjacency
+        )
         let featureCount = channels.count * relativeOffsets.count
         let referenceChannels = job.signal.data.indices.filter { !job.badChannels.contains($0) }
 
-        func preparedTrials(_ segments: [EpochSegment]) -> [[Double]] {
-            var trials: [[Double]] = []
-            trials.reserveCapacity(segments.count)
-            for segment in segments {
-                if Task.isCancelled { break }
-                guard let trial = prepareTrial(
-                    segment: segment,
-                    signal: job.signal,
-                    channelIndices: channels,
-                    referenceChannels: referenceChannels,
-                    relativeSampleOffsets: relativeOffsets,
-                    averageReference: job.averageReference,
-                    baselineCorrected: job.baselineCorrected
-                ), trial.count == featureCount else { continue }
-                trials.append(trial)
-            }
-            return trials
+        func trial(for segment: EpochSegment) -> [Double]? {
+            guard let values = prepareTrial(
+                segment: segment,
+                signal: job.signal,
+                channelIndices: channels,
+                referenceChannels: referenceChannels,
+                relativeSampleOffsets: relativeOffsets,
+                averageReference: job.averageReference,
+                baselineCorrected: job.baselineCorrected
+            ), values.count == featureCount else { return nil }
+            return values
         }
 
-        let preparedConditions = try segmentsByCondition.map { name, segments -> PreparedCondition in
-            let trials = preparedTrials(segments)
-            guard trials.count >= 2 else { throw PreparationError.insufficientTrials(name, trials.count) }
-            return PreparedCondition(name: name, trials: trials)
+        let preparedConditions: [PreparedCondition]
+        let pairingMode: ClusterPairingMode?
+        if job.repeatedMeasures {
+            let paired = try pairedConditions(
+                segmentsByCondition: segmentsByCondition,
+                featureCount: featureCount,
+                trial: trial
+            )
+            preparedConditions = paired.conditions
+            pairingMode = paired.mode
+        } else {
+            preparedConditions = try segmentsByCondition.map { name, segments -> PreparedCondition in
+                var trials: [[Double]] = []
+                trials.reserveCapacity(segments.count)
+                for segment in segments {
+                    if Task.isCancelled { break }
+                    if let values = trial(for: segment) { trials.append(values) }
+                }
+                guard trials.count >= 2 else { throw PreparationError.insufficientTrials(name, trials.count) }
+                return PreparedCondition(name: name, trials: trials)
+            }
+            pairingMode = nil
         }
+
         return PreparedData(
             conditions: preparedConditions,
             channelIndices: channels,
             relativeSampleOffsets: relativeOffsets,
             spatialAdjacency: adjacency,
-            usedSpatialAdjacency: adjacency.contains { !$0.isEmpty }
+            pairingMode: pairingMode
         )
+    }
+
+    /// Builds matched units for a within-subject design.
+    ///
+    /// Subject identity is used whenever every selected segment carries one —
+    /// the case for grand averages over combined recordings — and each subject
+    /// contributes the mean of its trials in a condition, which is the standard
+    /// within-subject aggregation. Failing that, trials are matched by
+    /// acquisition order, which the caller surfaces as a caution.
+    private static func pairedConditions(
+        segmentsByCondition: [(String, [EpochSegment])],
+        featureCount: Int,
+        trial: (EpochSegment) -> [Double]?
+    ) throws -> (conditions: [PreparedCondition], mode: ClusterPairingMode) {
+        let allSegments = segmentsByCondition.flatMap { $0.1 }
+        let hasSubjects = !allSegments.isEmpty && allSegments.allSatisfy { ($0.subject?.isEmpty == false) }
+
+        if hasSubjects {
+            // subject -> condition index -> accumulated trials
+            var perCondition: [[String: [[Double]]]] = Array(
+                repeating: [:],
+                count: segmentsByCondition.count
+            )
+            for (index, entry) in segmentsByCondition.enumerated() {
+                for segment in entry.1 {
+                    if Task.isCancelled { break }
+                    guard let subject = segment.subject, let values = trial(segment) else { continue }
+                    perCondition[index][subject, default: []].append(values)
+                }
+            }
+            let shared = perCondition
+                .map { Set($0.keys) }
+                .reduce(into: Set<String>?.none) { result, keys in
+                    result = result.map { $0.intersection(keys) } ?? keys
+                } ?? []
+            let units = shared.sorted()
+            guard units.count >= 2 else { throw PreparationError.noSharedSubjects(units.count) }
+
+            let conditions = segmentsByCondition.enumerated().map { index, entry in
+                PreparedCondition(
+                    name: entry.0,
+                    trials: units.map { subject in
+                        mean(of: perCondition[index][subject] ?? [], featureCount: featureCount)
+                    }
+                )
+            }
+            return (conditions, .subject)
+        }
+
+        // Acquisition-order matching. Truncating to the shortest condition is
+        // the only way to keep units aligned; the UI reports the discard.
+        var ordered: [(String, [[Double]])] = []
+        for (name, segments) in segmentsByCondition {
+            var trials: [[Double]] = []
+            for segment in segments.sorted(by: { $0.sourceTimeSeconds < $1.sourceTimeSeconds }) {
+                if Task.isCancelled { break }
+                if let values = trial(segment) { trials.append(values) }
+            }
+            ordered.append((name, trials))
+        }
+        guard let unitCount = ordered.map({ $0.1.count }).min(), unitCount >= 2 else {
+            let smallest = ordered.min { $0.1.count < $1.1.count }
+            throw PreparationError.insufficientTrials(smallest?.0 ?? "A condition", smallest?.1.count ?? 0)
+        }
+        let conditions = ordered.map { PreparedCondition(name: $0.0, trials: Array($0.1.prefix(unitCount))) }
+        guard Set(conditions.map { $0.trials.count }).count == 1 else {
+            throw PreparationError.unbalancedPairing
+        }
+        return (conditions, .trialOrder)
+    }
+
+    private static func mean(of trials: [[Double]], featureCount: Int) -> [Double] {
+        guard !trials.isEmpty else { return [Double](repeating: 0, count: featureCount) }
+        var sums = [Double](repeating: 0, count: featureCount)
+        for values in trials {
+            ClusterPermutationAnalyzer.add(values, to: &sums)
+        }
+        let count = Double(trials.count)
+        for index in sums.indices { sums[index] /= count }
+        return sums
     }
 
     private static func prepareTrial(
@@ -475,36 +663,12 @@ nonisolated enum ClusterStatisticsRunner {
         return ClusterWaveformSummary(mean: means, standardError: standardErrors)
     }
 
-    /// Symmetric four-nearest-neighbor graph in EVA's normalized 2D sensor
-    /// projection. This gives imported montages the same spatial-clustering
-    /// capability as MFF layouts without requiring format-specific templates.
-    private static func spatialAdjacency(channelIndices: [Int], layout: SensorLayout?) -> [[Int]] {
-        guard let layout else { return Array(repeating: [], count: channelIndices.count) }
-        let positions = Dictionary(uniqueKeysWithValues: layout.positions.map { ($0.channelIndex, $0) })
-        var adjacency = Array(repeating: Set<Int>(), count: channelIndices.count)
-        for (local, channel) in channelIndices.enumerated() {
-            guard let position = positions[channel] else { continue }
-            let nearest = channelIndices.enumerated().compactMap { otherLocal, otherChannel -> (Int, Double)? in
-                guard otherLocal != local, let other = positions[otherChannel] else { return nil }
-                let dx = position.x - other.x
-                let dy = position.y - other.y
-                return (otherLocal, dx * dx + dy * dy)
-            }
-            .sorted { $0.1 < $1.1 }
-            .prefix(4)
-            for (neighbor, _) in nearest {
-                adjacency[local].insert(neighbor)
-                adjacency[neighbor].insert(local)
-            }
-        }
-        return adjacency.map { $0.sorted() }
-    }
-
     private static func message(for error: ClusterPermutationAnalyzer.AnalysisError) -> String {
         switch error {
         case .invalidDimensions: return "The retained trial matrices do not have compatible dimensions."
         case .insufficientTrials: return "Each condition needs at least two usable trials."
         case .invalidConfiguration: return "Choose a positive cluster threshold and permutation count."
+        case .unbalancedPairs: return "A paired design needs the same number of matched units in both conditions."
         }
     }
 
@@ -514,6 +678,7 @@ nonisolated enum ClusterStatisticsRunner {
         case .insufficientConditions: return "Choose at least three conditions for the omnibus F-test."
         case .insufficientTrials: return "Each condition needs at least two usable trials."
         case .invalidConfiguration: return "Choose a positive F-cluster threshold and permutation count."
+        case .unbalancedUnits: return "A repeated-measures design needs the same number of matched units in every condition."
         }
     }
 }
