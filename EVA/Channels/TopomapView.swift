@@ -44,6 +44,9 @@ struct TopomapView: View {
     /// Overrides both `colorRange` and `fixedScale`.
     let zScaling: TopomapZScaling?
     let unitLabel: String
+    /// Uses a zero-to-maximum sequential scale for intrinsically non-negative
+    /// quantities such as omnibus F statistics.
+    let usesPositiveSequentialScale: Bool
     let showsHeader: Bool
     /// When false, the net-layout name is omitted from the header (the latency is
     /// still shown) — used for exported figures.
@@ -57,6 +60,9 @@ struct TopomapView: View {
     /// Called when the user clicks a channel on the map (nearest electrode
     /// within the hit-test radius). Nil disables tap handling entirely.
     let onTapChannel: ((Int) -> Void)?
+    /// Optional emphasis ring, used by cluster-statistics maps to identify the
+    /// sensors that participate in the selected corrected cluster.
+    let highlightedChannels: Set<Int>
 
     @State private var hoveredChannel: Int?
 
@@ -68,13 +74,15 @@ struct TopomapView: View {
         colorRange: ClosedRange<Double>? = nil,
         zScaling: TopomapZScaling? = nil,
         unitLabel: String = "µV",
+        usesPositiveSequentialScale: Bool = false,
         showsHeader: Bool = true,
         showsLayoutName: Bool = true,
         colorBarPlacement: TopomapColorBarPlacement = .bottom,
         minimumMapHeight: CGFloat = 260,
         contentPadding: CGFloat = 16,
         channelName: ((Int) -> String)? = nil,
-        onTapChannel: ((Int) -> Void)? = nil
+        onTapChannel: ((Int) -> Void)? = nil,
+        highlightedChannels: Set<Int> = []
     ) {
         self.layout = layout
         self.values = values
@@ -83,10 +91,12 @@ struct TopomapView: View {
         self.colorRange = colorRange
         self.zScaling = zScaling
         self.unitLabel = unitLabel
+        self.usesPositiveSequentialScale = usesPositiveSequentialScale
         self.showsHeader = showsHeader
         self.showsLayoutName = showsLayoutName
         self.channelName = channelName
         self.onTapChannel = onTapChannel
+        self.highlightedChannels = highlightedChannels
         self.colorBarPlacement = colorBarPlacement
         self.minimumMapHeight = minimumMapHeight
         self.contentPadding = contentPadding
@@ -193,7 +203,7 @@ struct TopomapView: View {
                 Text(name)
                     .font(.caption.weight(.semibold))
                 if let v = value(for: sensor) {
-                    Text(String(format: "%.1f µV", v))
+                    Text("\(String(format: "%.1f", v)) \(unitLabel)")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -213,6 +223,9 @@ struct TopomapView: View {
     /// tighter limit saturates that color faster. With `zScaling`, the map is
     /// linear and centered on the mean (white = mean, ±1 = ±sigma·sd).
     private func normalized(_ value: Double) -> Double {
+        if usesPositiveSequentialScale {
+            return Swift.max(Swift.min(value / scale, 1), 0)
+        }
         if let z = zScaling, z.sd > 0, z.sigma > 0 {
             return Swift.max(Swift.min((value - z.mean) / (z.sigma * z.sd), 1), -1)
         }
@@ -284,8 +297,18 @@ struct TopomapView: View {
 
         drawNoseAndEars(in: &context, center: center, radius: radius)
 
-        // Electrode markers.
-        for (point, _) in points {
+        // Electrode markers. Cluster members receive a high-contrast ring;
+        // ordinary topomaps pass the default empty set and remain unchanged.
+        for sensor in sensors {
+            let point = CGPoint(
+                x: center.x + CGFloat(sensor.x) * radius,
+                y: center.y - CGFloat(sensor.y) * radius
+            )
+            if highlightedChannels.contains(sensor.channelIndex) {
+                let ring = CGRect(x: point.x - 4.5, y: point.y - 4.5, width: 9, height: 9)
+                context.fill(Path(ellipseIn: ring), with: .color(.yellow.opacity(0.95)))
+                context.stroke(Path(ellipseIn: ring), with: .color(.black.opacity(0.85)), lineWidth: 1.2)
+            }
             let dot = CGRect(x: point.x - 1.6, y: point.y - 1.6, width: 3.2, height: 3.2)
             context.fill(Path(ellipseIn: dot), with: .color(.black.opacity(0.55)))
         }
@@ -377,6 +400,9 @@ struct TopomapView: View {
     /// giving the SD-equivalent µV value at each end (mean ± sigma·sd) so the
     /// colorbar still reads in physical units even while scaled by SD.
     private var barLabels: (low: String, high: String, unit: String, lowMicrovolts: String?, highMicrovolts: String?) {
+        if usesPositiveSequentialScale {
+            return ("0.0", String(format: "%.1f", scale), unitLabel, nil, nil)
+        }
         if let z = zScaling {
             let span = z.sigma * z.sd
             return (
@@ -406,7 +432,9 @@ struct TopomapView: View {
             }
 
             LinearGradient(
-                colors: stride(from: -1.0, through: 1.0, by: 0.1).map { divergingColor(forNormalized: $0) },
+                colors: usesPositiveSequentialScale
+                    ? stride(from: 0.0, through: 1.0, by: 0.1).map { divergingColor(forNormalized: $0) }
+                    : stride(from: -1.0, through: 1.0, by: 0.1).map { divergingColor(forNormalized: $0) },
                 startPoint: .leading,
                 endPoint: .trailing
             )
@@ -441,7 +469,9 @@ struct TopomapView: View {
             }
 
             LinearGradient(
-                colors: stride(from: 1.0, through: -1.0, by: -0.1).map { divergingColor(forNormalized: $0) },
+                colors: usesPositiveSequentialScale
+                    ? stride(from: 1.0, through: 0.0, by: -0.1).map { divergingColor(forNormalized: $0) }
+                    : stride(from: 1.0, through: -1.0, by: -0.1).map { divergingColor(forNormalized: $0) },
                 startPoint: .top,
                 endPoint: .bottom
             )

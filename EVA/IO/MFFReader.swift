@@ -757,6 +757,8 @@ nonisolated final class MFFReader {
         }
 
         var names = Array(repeating: "", count: expectedCount)
+        // Sensor numbers the layout enumerates for signal channels, labelled or not.
+        var numberedChannels = Set<Int>()
         for sensor in descendants(named: "sensor", in: root) {
             let children = (sensor.children ?? []).compactMap { $0 as? XMLElement }
             let number = children
@@ -772,14 +774,29 @@ nonisolated final class MFFReader {
                 .stringValue?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
-            guard (type == nil || type == 0),
+            // Type 0 is a recording electrode and type 1 the reference (VREF/Cz);
+            // both occupy a signal channel. Higher types are fiducials/COM and
+            // are not in the signal.
+            guard (type == nil || type == 0 || type == 1),
                   let number,
-                  (1...expectedCount).contains(number),
-                  let name,
-                  !name.isEmpty else {
+                  (1...expectedCount).contains(number) else {
                 continue
             }
-            names[number - 1] = name
+            numberedChannels.insert(number)
+            if let name, !name.isEmpty {
+                names[number - 1] = name
+            }
+        }
+
+        // EGI HydroCel layouts identify electrodes by number and leave <name>
+        // blank (only the reference, VREF, is labelled). When the layout still
+        // enumerates every signal channel the identity is well defined, so fill
+        // the blanks with the conventional E{n} labels — combining runs of the
+        // same net depends on names being present and comparable.
+        if numberedChannels.count == expectedCount {
+            return names.enumerated().map { index, name in
+                name.isEmpty ? "E\(index + 1)" : name
+            }
         }
 
         guard names.contains(where: { !$0.isEmpty }) else {

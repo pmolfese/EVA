@@ -32,6 +32,7 @@ enum SingleTrialAnalysisMode: String, CaseIterable, Identifiable {
     case woody = "Woody Alignment"
     case ride = "RIDE"
     case cwtRidge = "CWT Ridge"
+    case clusterStatistics = "Cluster Statistics"
 
     var id: String { rawValue }
 }
@@ -139,6 +140,23 @@ final class SingleTrialAnalysisViewModel {
     var cwtRunsAllCategories = false
     var showsCWTAlignedOverlay = true
 
+    // MARK: Cluster-statistics parameters
+    var clusterStatistic = ClusterStatisticKind.t
+    var clusterConditionA: String?
+    var clusterConditionB: String?
+    var clusterFConditions: Set<String> = []
+    var clusterWindowStartMs = -100.0
+    var clusterWindowEndMs = 800.0
+    var clusterPermutationCount = 1_000
+    var clusterThreshold = 2.0
+    var clusterFThreshold = 4.0
+    var clusterAlpha = 0.05
+    var clusterShowsStandardError = true
+    /// Analyze every Nth sample. Explicit because it changes the temporal
+    /// lattice on which clusters are formed, not merely the plot resolution.
+    var clusterSampleStride = 2
+    var clusterOutput: ClusterStatisticsOutput?
+
     // MARK: Result / run state
     var result: SingleTrialAnalyzer.Result?
     var woodyResult: WoodyAlignmentAnalyzer.Result?
@@ -194,6 +212,10 @@ final class SingleTrialAnalysisViewModel {
         cwtResultCategory = nil
         cwtResultChannelIndices = []
         cwtResultsByCategory = [:]
+        clusterConditionA = nil
+        clusterConditionB = nil
+        clusterFConditions = []
+        clusterOutput = nil
         statusMessage = nil
         isRunning = false
         runProgress = nil

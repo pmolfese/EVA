@@ -42,6 +42,7 @@ extension WaveformView {
             rawSignal: segmentedEpochSignal,
             rawSegments: segmentedEpochSegments,
             categories: overlayAvailableCategories(),
+            sensorLayout: recording.sensorLayout,
             channelSets: ChannelSetStore.shared.allSets,
             hiddenChannels: channels.hidden,
             amplitudeScale: Binding(
@@ -80,6 +81,7 @@ struct SingleTrialAnalysisSheet: View {
     let rawSignal: MFFSignalData?
     let rawSegments: [EpochSegment]
     let categories: [String]
+    let sensorLayout: SensorLayout?
     let channelSets: [ChannelSet]
     let hiddenChannels: Set<Int>
     @Binding var amplitudeScale: Double
@@ -193,28 +195,44 @@ struct SingleTrialAnalysisSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     modeControls
-                    selectionControls
-                    scaleControls
-                    trialInspectorRow
-                    parameterControls
-                    runBar
+                    if viewModel.analysisMode == .clusterStatistics {
+                        ClusterStatisticsPane(
+                            viewModel: viewModel,
+                            rawSignal: rawSignal,
+                            rawSegments: rawSegments,
+                            categories: categories,
+                            sensorLayout: sensorLayout,
+                            averageReference: averageReference,
+                            baselineCorrected: baselineCorrected,
+                            badChannels: badChannels,
+                            channelName: channelName,
+                            categoryColor: categoryColor,
+                            displayCategory: displayCategory
+                        )
+                    } else {
+                        selectionControls
+                        scaleControls
+                        trialInspectorRow
+                        parameterControls
+                        runBar
 
-                    if viewModel.analysisMode == .measurements, let result = viewModel.result {
-                        Divider()
-                        resultsSection(result)
-                    } else if viewModel.analysisMode == .woody, let result = currentWoodyResult {
-                        Divider()
-                        woodyResultsSection(result)
-                    } else if viewModel.analysisMode == .ride, let result = currentRIDEResult {
-                        Divider()
-                        rideResultsSection(result)
-                    } else if viewModel.analysisMode == .cwtRidge, let result = currentCWTResult {
-                        Divider()
-                        cwtResultsSection(result)
-                    } else if let statusMessage = viewModel.statusMessage {
-                        Text(statusMessage)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        if viewModel.analysisMode == .measurements, let result = viewModel.result {
+                            Divider()
+                            resultsSection(result)
+                        } else if viewModel.analysisMode == .woody, let result = currentWoodyResult {
+                            Divider()
+                            woodyResultsSection(result)
+                        } else if viewModel.analysisMode == .ride, let result = currentRIDEResult {
+                            Divider()
+                            rideResultsSection(result)
+                        } else if viewModel.analysisMode == .cwtRidge, let result = currentCWTResult {
+                            Divider()
+                            cwtResultsSection(result)
+                        } else if let statusMessage = viewModel.statusMessage {
+                            Text(statusMessage)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 .padding(18)
@@ -259,15 +277,16 @@ struct SingleTrialAnalysisSheet: View {
     // MARK: - Header / footer
 
     private var showsFooter: Bool {
-        viewModel.result != nil || viewModel.woodyResult != nil || viewModel.rideResult != nil || onClose != nil
+        viewModel.result != nil || viewModel.woodyResult != nil || viewModel.rideResult != nil
+            || onClose != nil
     }
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Single Trial Analysis")
+                Text("Trials & Statistics")
                     .font(.title3.weight(.semibold))
-                Text("Measure trial values or estimate latency shifts with Woody alignment")
+                Text("Measure, align, and compare retained single trials")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -321,7 +340,7 @@ struct SingleTrialAnalysisSheet: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 360)
+            .frame(maxWidth: 620)
 
             Button {
                 showsMethodHelp = true
@@ -380,6 +399,15 @@ struct SingleTrialAnalysisSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Cluster Statistics")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Compares segmentation categories across channels and time using either a two-condition t-test or a one-way omnibus F-test. Both permute independent trial labels and control family-wise error with the maximum spatiotemporal cluster mass.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 Divider()
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -391,6 +419,7 @@ struct SingleTrialAnalysisSheet: View {
                     Text("• Du, Kibbe & Lin (2006). Bioinformatics 22(17):2059–2065 (CWT peak detection).")
                     Text("• Sakoe & Chiba (1978). IEEE TASSP 26(1):43–49 (DTW).")
                     Text("• Ramsay & Silverman (2005). Functional Data Analysis, 2nd ed. (curve registration).")
+                    Text("• Maris & Oostenveld (2007). J. Neurosci. Methods 164(1):177–190 (cluster permutation).")
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -652,7 +681,7 @@ struct SingleTrialAnalysisSheet: View {
     @ViewBuilder
     private var alignmentInspectorControls: some View {
         switch viewModel.analysisMode {
-        case .measurements:
+        case .measurements, .clusterStatistics:
             EmptyView()
         case .cwtRidge:
             EmptyView()
@@ -905,6 +934,8 @@ struct SingleTrialAnalysisSheet: View {
     private var parameterControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             switch viewModel.analysisMode {
+            case .clusterStatistics:
+                EmptyView()
             case .measurements:
                 HStack(spacing: 20) {
                     labeledField("Adaptive ± ms", value: $viewModel.adaptiveHalfWidthMs, width: 70)
@@ -1158,6 +1189,7 @@ struct SingleTrialAnalysisSheet: View {
         case .woody: "Run Woody Alignment"
         case .ride: "Run RIDE"
         case .cwtRidge: "Run CWT Ridge"
+        case .clusterStatistics: "Run Cluster Statistics"
         }
     }
 
@@ -1171,6 +1203,8 @@ struct SingleTrialAnalysisSheet: View {
             runRIDE()
         case .cwtRidge:
             runCWTRidge()
+        case .clusterStatistics:
+            break
         }
     }
 

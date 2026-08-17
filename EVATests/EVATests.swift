@@ -485,6 +485,18 @@ struct EVATests {
         #expect(abs(aEvent.beginTimeSeconds - 0.001) < 1e-9)
     }
 
+    @Test func mffReaderSynthesizesEGIChannelNamesWhenLayoutLabelsAreBlank() throws {
+        // HydroCel layouts number every electrode but leave <name> blank, except
+        // the reference (type 1). Without synthesized E{n} labels the channel
+        // identity is unknown and combining two runs of the same net fails.
+        let signal = try MFFReader().loadSignal(from: Fixtures.url("example_2.mff"))
+        let names = try #require(signal.channelNames)
+        #expect(names.count == signal.numberOfChannels)
+        #expect(names.first == "E1")
+        #expect(names.last == "VREF")
+        #expect(Set(names).count == names.count)
+    }
+
     @Test func mffReaderTreatsSingleFullSpanCategoryAsContinuous() throws {
         // One category whose single segment spans the whole recording (no
         // averaging) must not be flagged as segmented.
