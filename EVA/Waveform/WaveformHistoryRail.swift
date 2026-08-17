@@ -122,7 +122,16 @@ extension WaveformView {
     @discardableResult
     func navigateHistory(to id: EVAHistoryNodeID) -> Bool {
         let historyModel = recordingStore.processingHistory
-        guard let snapshot = historyModel.beginNavigation(to: id) else { return false }
+        guard let snapshot = historyModel.beginNavigation(to: id) else {
+            // `beginNavigation` moved the pointer and set `isNavigating` even
+            // when it found no snapshot to return. Leaving it set would wedge
+            // `recordProcessingHistory` off for the rest of the session (it
+            // guards on `!isNavigating`), so the refuse path has to clear it
+            // too — it was previously only cleared by the `defer` below, which
+            // never armed because the guard returned first (2026-08-16).
+            historyModel.endNavigation()
+            return false
+        }
         defer { historyModel.endNavigation() }
 
         PipelineSnapshotting.restore(
@@ -144,7 +153,7 @@ extension WaveformView {
     /// totally, because an absent step cannot say it is absent — leaving one set
     /// makes the observer re-derive a script that still contains the step and
     /// walk the pointer off the node just clicked. See `ReplaySettingsRestore`.
-    private func restoreStageSettings(along path: [EVAHistoryNode]) {
+    func restoreStageSettings(along path: [EVAHistoryNode]) {
         let lights = ReplaySettingsRestore.settings(for: path.compactMap(\.step))
         detectsEyeBlinkArtifacts = lights.detectsBlinks
         detectsEyeMovementArtifacts = lights.detectsMovements
@@ -170,12 +179,163 @@ extension WaveformView {
 
     func stepHistoryBack() {
         guard let target = recordingStore.processingHistory.stepBackTarget else { return }
-        navigateHistory(to: target)
+        requestNavigation(to: target)
     }
 
     func stepHistoryForward() {
         guard let target = recordingStore.processingHistory.stepForwardTarget else { return }
-        navigateHistory(to: target)
+        requestNavigation(to: target)
+    }
+
+    // MARK: - Navigation with re-derivation fallback
+
+    /// The single entry point the rail (click, step back/forward) routes
+    /// through. Instant when the node still has a cached snapshot; otherwise
+    /// re-derives it from its own step path — see `reDeriveHistory`.
+    ///
+    /// This is what makes navigation work on large recordings at all. A
+    /// snapshot of one 257-channel signal is hundreds of MB and a full node's
+    /// worth is multiple GB, so the byte budget (`RecordingHistoryModel`)
+    /// evicts everything but the current node almost immediately and every
+    /// other node became unclickable — the reported regression (2026-08-16).
+    /// `REWIND.md` always named re-derivation as the answer for an evicted
+    /// node ("the steps are all there"); this is it.
+    func requestNavigation(to id: EVAHistoryNodeID) {
+        if recordingStore.processingHistory.hasSnapshot(for: id) {
+            navigateHistory(to: id)
+            return
+        }
+        Task { await reDeriveHistory(to: id) }
+    }
+
+    /// Rebuilds an evicted node's pipeline state by replaying its step path
+    /// from the raw recording, then navigates to it.
+    ///
+    /// Derived in a **throwaway** set of view models (a fresh `RecordingStore`
+    /// and VM set, exactly as `HeadlessBatchProcessor` does), not the live
+    /// ones, for one reason: a re-derivation that can only get partway must
+    /// not leave the window's real display in a half-rebuilt state. Only a
+    /// derivation that completes is committed — captured as a `PipelineSnapshot`,
+    /// filed under the node so the next visit is instant, and restored into
+    /// the live view models. A partial one changes nothing and says why.
+    ///
+    /// Faithfulness over reach: a path containing a step this cannot reproduce
+    /// exactly — BCG (subject-specific, no re-derive path), ICA or artifact
+    /// cleaning whose payload sidecar isn't on disk, or an explicit channel
+    /// interpolation (`ProcessingCore` doesn't apply one) — is refused up
+    /// front rather than silently re-derived without that step, which would
+    /// serve a plausible-looking wrong signal. Those nodes stay reachable
+    /// only while their snapshot is still cached.
+    @MainActor
+    func reDeriveHistory(to id: EVAHistoryNodeID) async {
+        let model = recordingStore.processingHistory
+        guard model.history.node(id) != nil, let rawSignal = recording.signal else { return }
+        let path = model.history.path(to: id)
+        let steps = path.compactMap(\.step)
+
+        let icaPayload = ICAReplayPayload.read(fromPackage: recording.packageURL)
+        let artifactPayload = ArtifactReplayPayload.read(fromPackage: recording.packageURL)
+        if let blocker = firstNonReDerivableStep(
+            in: steps, icaPayload: icaPayload, artifactPayload: artifactPayload
+        ) {
+            channelStatusMessage = "Can't rebuild this step (\(ReplayStepDisplay.label(for: blocker))) from disk — it stays reachable only while its data is still cached."
+            channelStatusIsError = true
+            return
+        }
+
+        isReDerivingHistory = true
+        defer { isReDerivingHistory = false }
+
+        let throwStore = RecordingStore()
+        let throwFilter = FilterViewModel(store: throwStore)
+        let throwGradient = GradientViewModel(store: throwStore)
+        let throwICA = ICAViewModel(store: throwStore)
+        let throwArtifact = ArtifactViewModel(store: throwStore)
+        let throwEpoching = EpochingViewModel(store: throwStore)
+        let throwWavelet = WaveletReductionViewModel(store: throwStore)
+        let throwTemplate = ArtifactTemplateViewModel(store: throwStore)
+        let throwSegHealth = SegmentHealthViewModel(store: throwStore)
+        let throwBCG = BCGDetectionViewModel(store: throwStore)
+
+        let core = ProcessingCore(
+            store: throwStore,
+            filter: throwFilter,
+            gradient: throwGradient,
+            ica: throwICA,
+            artifactVM: throwArtifact,
+            epoching: throwEpoching,
+            wavelet: throwWavelet,
+            template: throwTemplate,
+            segHealth: throwSegHealth,
+            electrodePositions: recording.electrodeGeometry?.positions ?? [:]
+        )
+
+        let result = await core.applyAutoSteps(
+            EVAProcessingScript(steps: steps),
+            to: rawSignal,
+            pnsSignal: recording.pnsSignal,
+            icaPayload: icaPayload,
+            artifactPayload: artifactPayload
+        )
+
+        guard result.remainingSteps.isEmpty else {
+            // Something in the path stopped the walk after the pre-check passed
+            // — a compatibility mismatch against this signal, most likely.
+            // Nothing was touched in the live window, so there's nothing to
+            // undo; just say so.
+            channelStatusMessage = "Couldn't fully rebuild this point in the history."
+            channelStatusIsError = true
+            return
+        }
+
+        let snapshot = PipelineSnapshotting.capture(
+            store: throwStore, gradient: throwGradient, bcg: throwBCG, ica: throwICA,
+            filter: throwFilter, wavelet: throwWavelet, artifactVM: throwArtifact,
+            template: throwTemplate, epoching: throwEpoching
+        )
+
+        // Commit: move the pointer, file the freshly-derived snapshot under it
+        // (so the next visit is instant), and restore it into the live models —
+        // the same restore path an ordinary cached navigation takes.
+        // `beginNavigation` returns nil here (no snapshot cached yet); it's
+        // called for its side effects — moving the pointer and setting
+        // `isNavigating`, which `storeSnapshot` needs so it files under `id`.
+        _ = model.beginNavigation(to: id)
+        model.storeSnapshot(snapshot)
+        PipelineSnapshotting.restore(
+            snapshot,
+            store: recordingStore, gradient: gradient, bcg: bcg, ica: ica,
+            filter: filter, wavelet: wavelet, artifactVM: artifactVM, template: template,
+            segHealth: segHealth, epoching: epoching
+        )
+        restoreStageSettings(along: model.history.currentPath)
+        model.endNavigation()
+        channelStatusMessage = "Rebuilt and moved to \(model.history.current.displayLabel)."
+        channelStatusIsError = false
+    }
+
+    /// The first step in `steps` that `reDeriveHistory` cannot reproduce
+    /// exactly, or `nil` if the whole path is re-derivable. See that method
+    /// for why each is excluded.
+    private func firstNonReDerivableStep(
+        in steps: [EVAProcessingStep],
+        icaPayload: ICAReplayPayload?,
+        artifactPayload: ArtifactReplayPayload?
+    ) -> EVAProcessingStep.Operation? {
+        for step in steps {
+            switch step.operation {
+            case .filter, .reference, .baseline, .segment, .waveletReduce,
+                 .thresholdArtifactDetection, .mriGradientCorrection, .markBad:
+                continue
+            case .icaClean where icaPayload != nil:
+                continue
+            case .artifactClean where artifactPayload != nil:
+                continue
+            default:
+                return step.operation
+            }
+        }
+        return nil
     }
 
     /// "Fork to New Window" — REWIND.md "Forking to a new window". Opens a
@@ -199,6 +359,36 @@ extension WaveformView {
             channels: recordingStore.channels.copy()
         ))
         openWindow(id: "main")
+    }
+
+    /// Fork from a specific node rather than wherever the pointer currently
+    /// is — the history rail's per-row "Fork to New Window" context menu
+    /// (2026-08-16). Navigates to `id` first (re-deriving it if its snapshot
+    /// was evicted, same as an ordinary click), forks from there, then — only
+    /// if `id` wasn't already current — returns this window to whatever was
+    /// showing before, so right-clicking a past node doesn't leave this
+    /// window's own view sitting on it.
+    func forkNode(_ id: EVAHistoryNodeID) {
+        let previousCurrent = recordingStore.processingHistory.history.currentID
+
+        func forkAndReturn() {
+            forkToNewWindow()
+            if previousCurrent != id {
+                requestNavigation(to: previousCurrent)
+            }
+        }
+
+        if recordingStore.processingHistory.hasSnapshot(for: id) {
+            guard navigateHistory(to: id) else { return }
+            forkAndReturn()
+        } else {
+            Task {
+                await reDeriveHistory(to: id)
+                // Only fork if the re-derivation actually landed on the node.
+                guard recordingStore.processingHistory.history.currentID == id else { return }
+                forkAndReturn()
+            }
+        }
     }
 
     /// Subject-specific identity for the steps whose portable parameters do not

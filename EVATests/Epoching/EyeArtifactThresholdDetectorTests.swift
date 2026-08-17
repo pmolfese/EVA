@@ -160,6 +160,28 @@ struct EyeArtifactThresholdDetectorTests {
         #expect(abs((events.first?.beginTimeSeconds ?? 0) - Double(130) / samplingRate) < 1e-9)
     }
 
+    @Test func mergeChainDoesNotEraseEventsByExceedingMaximumDuration() {
+        let channelCount = 129
+        let sampleCount = 1_500
+        let samplingRate = 250.0
+        var channels = (0..<channelCount).map { _ in [Float](repeating: 0, count: sampleCount) }
+        // Five individually valid 120 ms deflections separated by 120 ms gaps.
+        // Every gap is mergeable, but the full chain is longer than the 1 s
+        // event cap. Detection must split the chain instead of rejecting it all.
+        for start in [100, 160, 220, 280, 340] {
+            for sample in start..<(start + 30) { channels[7][sample] = 220 }
+        }
+
+        let events = EyeArtifactThresholdDetector.detect(
+            kind: .blink,
+            channels: channels,
+            samplingRate: samplingRate,
+            duration: Double(sampleCount) / samplingRate
+        )
+
+        #expect(events.count == 2)
+    }
+
     @Test func ignoresBriefSubThresholdDurationBlips() {
         let channelCount = 129
         let sampleCount = 1000

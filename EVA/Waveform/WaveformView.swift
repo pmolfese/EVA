@@ -529,6 +529,11 @@ struct WaveformView: View {
     @State var isExportingMFF = false
     @State var mffExportStatusMessage: String?
     @State var recordingSessionID = UUID()
+    /// True while `reDeriveHistory` is rebuilding an evicted node's pipeline
+    /// state from its steps — drives the "Rebuilding…" overlay so a slow
+    /// re-derivation on a large recording reads as work in progress rather
+    /// than a frozen click.
+    @State var isReDerivingHistory = false
     @State var waveletExplorerTask: Task<Void, Never>?
     @State var topographyTask: Task<Void, Never>?
     @State var artifactTemplateTask: Task<Void, Never>?
@@ -946,6 +951,20 @@ struct WaveformView: View {
     /// `PipelineSnapshotting.restore` is the exact call ordinary history
     /// navigation already uses — a fork is "restore this snapshot," just into
     /// a freshly-constructed set of view models instead of this window's own.
+    ///
+    /// Also replays `restoreStageSettings(along:)` — the other half of what
+    /// ordinary `navigateHistory(to:)` does, and the piece missing here until
+    /// 2026-08-16. Without it, every stage's view-model *parameters* (ICA
+    /// component count, filter cutoffs, …) were left at fresh construction
+    /// defaults rather than the forked node's own recorded values, because
+    /// `PipelineSnapshotting.restore` only ever restores stage *outputs* by
+    /// design (see its own header). A forked window's ICA panel then showed
+    /// `ProcessingDefaults.icaComponentCount` (20) instead of whatever the
+    /// forked node actually used (10, in the manual test that caught this) —
+    /// and content-addressing means re-deriving with the *wrong* parameters
+    /// doesn't land back on the existing node, it forks a genuinely new one,
+    /// which is what the reported "duplicate steps" (an extra ICA + filter
+    /// node appended after the fork point) actually were.
     private func applyForkSeed() {
         guard let forkSeed else { return }
         recordingStore.processingHistory.seedFork(forkSeed.historySeed)
@@ -956,6 +975,7 @@ struct WaveformView: View {
             filter: filter, wavelet: wavelet, artifactVM: artifactVM, template: template,
             segHealth: segHealth, epoching: epoching
         )
+        restoreStageSettings(along: recordingStore.processingHistory.history.currentPath)
     }
 
     /// Seeds the history rail with what `eva.xml` says already happened to this
@@ -1337,6 +1357,7 @@ struct WaveformView: View {
             )
         }
         .overlay(alignment: .top) { replayBanner() }
+        .overlay(alignment: .top) { reDerivingBanner }
         .onChange(of: artifactVM.detectionMethod) { _, method in
             if method == .ica {
                 DispatchQueue.main.async {
@@ -2089,10 +2110,11 @@ struct WaveformView: View {
                 canStepForward: recordingStore.processingHistory.canStepForward,
                 tab: binding(recordingStore.status, \.statusPopoverTab),
                 onClearStatusHistory: { statusHistory.removeAll() },
-                onSelectNode: { navigateHistory(to: EVAHistoryNodeID(hex: $0)) },
+                onSelectNode: { requestNavigation(to: EVAHistoryNodeID(hex: $0)) },
                 onStepBack: { stepHistoryBack() },
                 onStepForward: { stepHistoryForward() },
-                onFork: { forkToNewWindow() }
+                onFork: { forkToNewWindow() },
+                onForkNode: { forkNode(EVAHistoryNodeID(hex: $0)) }
             )
         }
     }
@@ -2571,6 +2593,25 @@ struct WaveformView: View {
     /// artifact detections, epochs, interpolations) so the view falls back to the
     /// original recording — without needing to close and reopen the file.
     /// Analysis parameters (cutoffs, ICA settings, template names) are preserved.
+    /// Shown while `reDeriveHistory` rebuilds an evicted node — a slow
+    /// re-derivation on a large recording should read as work, not a hang.
+    @ViewBuilder
+    var reDerivingBanner: some View {
+        if isReDerivingHistory {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Rebuilding this point in the history…")
+                    .font(.callout)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(.separator))
+            .padding(.top, 8)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
     func resetToOriginalData() {
         // Derived signals.
         filter.output = nil

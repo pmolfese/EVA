@@ -51,6 +51,13 @@ struct HistoryRailNodeList: View, Equatable {
     let nodes: [HistoryRailNode]
     /// Navigate to a node. Value-typed id, so the list holds no tree reference.
     var onSelect: ((String) -> Void)?
+    /// Fork a new window from this specific node, rather than from wherever
+    /// the pointer currently is — a per-row context menu, added 2026-08-16
+    /// alongside the existing "wherever the pointer is" toolbar button
+    /// (`HistoryTabView.onFork`). Both call the same underlying operation;
+    /// this one just navigates there first. `nil` disables the menu entirely
+    /// (e.g. in render-only contexts like `ImageRenderer` snapshots).
+    var onFork: ((String) -> Void)?
 
     static func == (lhs: HistoryRailNodeList, rhs: HistoryRailNodeList) -> Bool {
         lhs.nodes == rhs.nodes
@@ -65,14 +72,19 @@ struct HistoryRailNodeList: View, Equatable {
                     isLast: index == nodes.count - 1
                 )
                 .equatable()
+                .modifier(HistoryRailForkContextMenu(node: node, onFork: onFork))
 
                 if let onSelect, !node.isCurrent {
+                    // Non-instant nodes are no longer disabled: clicking one
+                    // re-derives it from its steps (see
+                    // `WaveformHistoryRail.requestNavigation`), so the only
+                    // difference is speed, surfaced in the help text rather
+                    // than by refusing the click (2026-08-16).
                     Button { onSelect(node.id) } label: { row }
                         .buttonStyle(.plain)
-                        .disabled(!node.isInstant)
                         .help(node.isInstant
                               ? "Go to this point in the processing history"
-                              : "This step's signal is no longer in memory, so it cannot be restored yet.")
+                              : "Rebuild and go to this point — its signal was freed to save memory, so this recomputes it.")
                 } else {
                     row
                 }
@@ -80,6 +92,29 @@ struct HistoryRailNodeList: View, Equatable {
         }
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Offered for any node once `onFork` is wired — forking a node whose
+/// snapshot was evicted re-derives it first (see
+/// `WaveformHistoryRail.forkNode`), same as clicking it does, so there's no
+/// longer a reason to hide the menu on non-instant nodes.
+private struct HistoryRailForkContextMenu: ViewModifier {
+    let node: HistoryRailNode
+    let onFork: ((String) -> Void)?
+
+    func body(content: Content) -> some View {
+        if let onFork {
+            content.contextMenu {
+                Button {
+                    onFork(node.id)
+                } label: {
+                    Label("Fork to New Window", systemImage: "macwindow.badge.plus")
+                }
+            }
+        } else {
+            content
+        }
     }
 }
 

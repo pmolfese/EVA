@@ -67,6 +67,7 @@ struct ProcessingStatusPopoverView: View {
     let onStepBack: () -> Void
     let onStepForward: () -> Void
     let onFork: () -> Void
+    let onForkNode: (String) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -89,7 +90,8 @@ struct ProcessingStatusPopoverView: View {
                         onSelectNode: onSelectNode,
                         onStepBack: onStepBack,
                         onStepForward: onStepForward,
-                        onFork: onFork
+                        onFork: onFork,
+                        onForkNode: onForkNode
                     )
                 }
             }
@@ -317,17 +319,21 @@ struct HistoryTabView: View {
     let onSelectNode: (String) -> Void
     let onStepBack: () -> Void
     let onStepForward: () -> Void
-    /// "Fork to New Window" — REWIND.md "Forking to a new window". Sits next
-    /// to the transport controls rather than in a per-row menu: forking
-    /// forks *wherever the pointer currently is*, the same node stepping
-    /// back/forward already operates on, not an arbitrary row you might
-    /// right-click.
+    /// "Fork to New Window" from the footer — REWIND.md "Forking to a new
+    /// window". Forks *wherever the pointer currently is*, the same node
+    /// stepping back/forward already operates on.
     let onFork: () -> Void
+    /// Fork from a specific row instead, via its context menu — added
+    /// 2026-08-16 alongside the footer button rather than replacing it, so
+    /// "fork from here" is reachable both as "the node I'm looking at right
+    /// now" (footer) and "that other node up there" (right-click) without
+    /// first clicking to navigate there.
+    let onForkNode: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
-                HistoryRailNodeList(nodes: nodes, onSelect: onSelectNode)
+                HistoryRailNodeList(nodes: nodes, onSelect: onSelectNode, onFork: onForkNode)
                     .equatable()
             }
             Divider()

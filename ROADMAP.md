@@ -68,6 +68,73 @@ user-visible symptoms (main-thread hangs).
 
 ---
 
+## Idea: average reference and baseline correction as their own steps (2026-08-16, not started)
+
+Raised during REWIND fork testing: *"pull average reference out of the
+filtering step and add it as a separate 'function' that would get called (if
+asked) by the averaging step. Baseline correction would be similar."*
+
+**The problem today.** Neither operation is independently undoable. Average
+reference is `FilterViewModel.averageReference`, a toggle applied *inside* one
+atomic filter run (`EEGSignalFilter.averageReferenceInPlace`, called from
+`FilterViewModel`'s own apply path right after the frequency filter). Baseline
+correction is `EpochingViewModel.baselineCorrected`, folded into the segment
+step the same way. Both only become their own `EVAProcessingStep` — `.reference`
+/ `.baseline` — at **export time** (`MFFExportFlowViews.swift`), as
+provenance-only entries synthesized from the toggles. Nothing about them exists
+as a real node in the *live* history tree during a session: you cannot undo
+just the reference without re-running the whole filter, and the history rail
+cannot show "filter" and "reference" as two things that happened, only one.
+
+**The shape of the fix.** Two genuinely separate pieces:
+
+1. **A standalone function**, not a method wedged into `FilterViewModel`:
+   something like `Rereferencing.averageReference(_ signal: MFFSignalData,
+   excluding bad: Set<Int>) -> MFFSignalData` — `EEGSignalFilter.averageReferenceInPlace`
+   already exists and is close to this; the work is exposing it as a
+   independently-callable stage rather than a step embedded in
+   `FilterViewModel.apply()`. Same idea for baseline correction, currently
+   embedded in whatever `EpochingViewModel`'s segment/average path calls.
+2. **A real history node.** When reference/baseline is turned on, `record()`
+   a `.reference`/`.baseline` step chained *after* whatever produced its
+   input (filter, or segment), the same way `icaClean` already chains after
+   `filter` — content-addressed, independently navigable, independently
+   evictable/re-derivable, and separately undo/redo-able from the step that
+   fed it.
+
+**"Called (if asked) by the averaging step"** — i.e. this isn't meant to run
+eagerly the moment the toggle flips; it is invoked *by* whatever consumes it
+(the averaging/epoching stage asks for a re-referenced signal when it needs
+one), matching the existing `filter.averageReference` /
+`epoching.averageReference` split, which already lets continuous and epoched
+data be referenced independently. The refactor should preserve that split as
+two call sites into one shared function, not collapse it into one.
+
+**What this is not:** a change to what gets *exported* — `.reference`/`.baseline`
+already exist as `EVAProcessingStep.Operation` cases and already round-trip
+through `eva.xml` and batch replay (see "Channel Sets"-adjacent
+`replayInteraction` fix, 2026-08-16, which made both `.auto` for batch). This
+is specifically about making them real, undoable nodes in the *live* session
+tree, not about the on-disk format.
+
+**Open questions before starting:**
+- Does `EVAHistoryNodeID` hashing already handle a step whose *input* signal
+  can come from either a continuous or epoched path cleanly, or does
+  content-addressing need a third disambiguator the way ICA needed a payload
+  digest?
+- `ReplaySettingsRestore`'s "lights" (`continuousReference`/`epochReference`/
+  `baselineCorrection`) already model per-path reference/baseline as derived
+  flags for replay — check whether that machinery can be reused directly for
+  the live-tree version, or whether it was built assuming these stay bundled.
+- Whether every existing snapshot/eviction assumption (`PipelineSnapshot`'s
+  stage-output fields) needs a new field per new stage, matching how
+  `icaSignal`/`filterOutput`/etc. are each their own field today.
+
+Not scoped or estimated further than this — flagged here so it isn't lost,
+not because it's next in line.
+
+---
+
 ## Idea: Figure Composer (Phase 1 landed 2026-08-14, Phase 2 not started)
 
 A print-dialog-style window for assembling publication figures from several

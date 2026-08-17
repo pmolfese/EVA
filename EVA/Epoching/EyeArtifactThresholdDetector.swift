@@ -118,7 +118,15 @@ nonisolated enum EyeArtifactThresholdDetector {
         var mergedRuns: [ClosedRange<Int>] = []
         for run in runs {
             if let last = mergedRuns.last, run.lowerBound - last.upperBound <= mergeGapSamples {
-                mergedRuns[mergedRuns.count - 1] = last.lowerBound...run.upperBound
+                let merged = last.lowerBound...run.upperBound
+                let mergedLength = merged.upperBound - merged.lowerBound + 1
+                if mergedLength <= maximumSamples {
+                    mergedRuns[mergedRuns.count - 1] = merged
+                } else {
+                    // A chain of nearby artifacts must not become one
+                    // overlong run that is subsequently discarded in full.
+                    mergedRuns.append(run)
+                }
             } else {
                 mergedRuns.append(run)
             }
