@@ -207,7 +207,10 @@ tool invented.
   dB/dt. Use `--gradient-template` to substitute a measured one.
 - The *shape* of the BCG waveform — four Gaussian lobes putting the dominant
   negative deflection ~120 ms after the R wave.
-- The synthetic ECG and its P-QRS-T morphology.
+- The synthetic ECG, whose morphology follows McSharry et al. (2003), the
+  standard synthetic-ECG model, since the paper does not specify one.
+- Heart-rate variability and the respiration model. The paper's cardiac timing
+  has no beat-to-beat variability; `--hrv 0` restores it exactly.
 - Per-band amplitudes of the seven EEG sources (roughly 1/f; the paper fit theirs
   to one subject and does not print them).
 - The anti-alias model: the artifact is band-limited at 0.9 × output Nyquist

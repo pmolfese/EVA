@@ -106,7 +106,7 @@ not is unaffected.
 
 | Channel | Present when | What it is |
 | --- | --- | --- |
-| `ECG` | default (`--no-ecg` to omit) | Synthetic P-QRS-T at the true beat times, ~1 mV, with slow baseline wander. Lets R-wave detection be exercised rather than bypassed. |
+| `ECG` | default (`--no-ecg` to omit) | Synthetic P-QRS-T at the true beat times, ~1 mV. Morphology follows McSharry et al. (2003), the standard synthetic-ECG model. Lets R-wave detection be exercised rather than bypassed. |
 | `Motion` | default (`--no-motion-sensor` to omit) | A modelled motion sensor: the mean BCG seen through a saturating sigmoid, as the paper models a piezo sensor. Deliberately *not* a linear copy of the artifact. |
 | `VEOG`, `HEOG` | when ocular artifacts are on | The EOG pair, which sees the ocular artifact far larger than any scalp electrode. |
 
@@ -167,6 +167,8 @@ not is unaffected.
 | `--qrs-jitter <ms>` | `25` | SD of the error in *detected* beat timing. The single most discriminating parameter in the model. |
 | `--heart-rate-min <bpm>` | `65` | |
 | `--heart-rate-max <bpm>` | `85` | Rate wanders between the two on a one-minute cycle. |
+| `--hrv <fraction>` | `0.04` | Beat-to-beat heart-rate variability as a fraction of RR. `0` restores the paper's exact metronomic timing. |
+| `--respiration <hz>` | `0.25` | Breathing rate (15/min). Drives sinus arrhythmia, ECG amplitude modulation and baseline wander. |
 
 ### EEG
 
@@ -295,6 +297,40 @@ like):
 | `--bad-channels` | `7:noisy,15:drift` — F8 and Pz on the default montage |
 
 ---
+
+### The ECG model
+
+The complex follows the standard synthetic-ECG model:
+
+> McSharry PE, Clifford GD, Tarassenko L, Smith LA (2003). *A dynamical model for
+> generating synthetic electrocardiogram signals.* IEEE Trans Biomed Eng
+> 50(3):289-294.
+
+P, Q, R, S and T sit at that model's published angles and widths, with amplitude
+ratios derived from integrating its z-dynamics. Three things are added on top,
+each because leaving it out is what makes a synthetic ECG look drawn rather than
+recorded:
+
+- **The QT interval scales with rate but the QRS does not.** In a literal
+  angular model everything compresses as RR shortens; a real QRS stays at
+  80-100 ms across the physiological range. P and T are scaled as √RR, after
+  Bazett; the QRS is left alone.
+- **The T wave is asymmetric**, rising more slowly than it falls.
+- **Beat-to-beat variability.** Heart-rate variability (`--hrv`) combines
+  respiratory sinus arrhythmia at the breathing rate, Mayer waves near 0.1 Hz,
+  and a little uncorrelated noise, in the proportions a real tachogram shows.
+  R amplitude also breathes by a few percent, because respiration moves the heart
+  in the chest.
+
+Without HRV the RR interval walks smoothly and monotonically from beat to beat,
+which no living heart does. The default of 4% puts the RR standard deviation at
+around 5-6% of the mean, inside the 3-8% a resting adult shows.
+
+!!! note "HRV is EVA's addition, not the paper's"
+    The paper's cardiac timing is a smooth 60 s sine with no beat-to-beat
+    variability. `--hrv 0` restores it exactly, which is the setting to use when
+    reproducing their figures. HRV changes beat *times*, so it affects the BCG as
+    well as the ECG.
 
 ## Montage and electrode positions
 
@@ -487,7 +523,10 @@ fresh 15% draw equally; 15 ms SD channel latency; 25 ms SD QRS detection jitter;
 the sigmoid motion-sensor nonlinearity at gain 0.1; and the SNR metric with its
 evaluation bands.
 
-**EVA's own.** The *shape* of the gradient waveform (built as the time derivative
+**EVA's own.** Heart-rate variability and the respiration model (`--hrv 0`
+restores the paper's timing); the ECG morphology, which follows McSharry et al.
+(2003) rather than the paper, which does not specify one; the *shape* of the
+gradient waveform (built as the time derivative
 of a modelled slice-select trapezoid plus EPI readout train, since induced EMF
 goes as dB/dt — use `--gradient-template` to substitute a measured one); the
 shape of the BCG waveform; the synthetic ECG and its morphology; the per-band
