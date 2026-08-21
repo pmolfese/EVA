@@ -26,6 +26,7 @@ completed and the historical engines were deleted.
 | `fastr-audit-log.md` | What happened and why, including the 2026-08-09 validation and its limits. |
 | `fastr-gpu-port-plan.md` | The GPU port plan, with the measured profile and the parity argument. |
 | `amri-functional-spec.md` | The AMRI-style local-template specification. |
+| `simulation-forward-model.md` | Derivation record for `Tools/EVASimulate`, the ground-truth simulation harness the correction methods are measured against. |
 | `dirty-vs-clean-comparison.md` | Dirty-room audit note comparing the old and new implementations. Validation material, not implementation guidance. |
 
 `docs/dirty-room/` holds dirty-room notes that quote reference-toolbox internals.

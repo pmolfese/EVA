@@ -35,6 +35,40 @@ nonisolated enum EVAGeneralPreferences {
     static let defaultSensitivityKey = "waveformDefaultMicrovoltsPerMillimeter"
     static let defaultSweepKey = "waveformDefaultMillimetersPerSecond"
 
+    /// Whether a trace may travel past its row into the neighbouring rows.
+    ///
+    /// Off means off: zero headroom, clipped exactly at the row edge. The
+    /// toggle governs one quantity only — the trace canvas's height, via
+    /// `traceOverflowHeightKey` — so turning it off cannot leave a raised
+    /// headroom behind.
+    ///
+    /// It deliberately does *not* also relocate row chrome. Chrome lives
+    /// beneath the whole stack unconditionally, because a row that paints its
+    /// own background covers what the row above bled into it, making overflow
+    /// visible upward and invisible downward purely by sibling paint order.
+    static let traceOverflowEnabledKey = "waveformTraceOverflowEnabled"
+
+    /// Overflow headroom in points, one side, when `traceOverflowEnabledKey`
+    /// is on. Presented as a multiple of full scale — see
+    /// `WaveformScaleUnits.overflowMultiplier(forHeadroom:)`.
+    static let traceOverflowHeightKey = "waveformTraceOverflowHeight"
+
+    /// Whether to mark excursions that left the drawable area anyway.
+    /// Deliberately independent of the overflow toggle: there is always *some*
+    /// ceiling, so knowing you hit it matters just as much when overflow is off
+    /// — arguably more, since more gets clipped.
+    static let traceClipIndicatorsKey = "waveformTraceClipIndicators"
+
+    /// Starting headroom once overflow is switched on: 28 pt, which is 1.8×
+    /// full scale and the amount rows quietly drew with before this preference
+    /// existed. Turning the toggle on therefore lands somewhere familiar.
+    static let defaultTraceOverflowHeight: Double = 28
+
+    /// Slider bounds, in multiples of a full-scale excursion. The floor is 1×
+    /// — no headroom — so the slider can also express "clip at the row edge"
+    /// without reaching for the toggle.
+    static let traceOverflowMultiplierBounds: ClosedRange<Double> = 1.0...5.0
+
     /// EVA's historical defaults (`amplitudeScale` 100, `timeScale` 1 at
     /// 1000 Hz), expressed in the new units so nothing moves for anyone who
     /// never opens the panel.
@@ -187,6 +221,19 @@ private struct GeneralPreferencesView: View {
     private var defaultSensitivity = EVAGeneralPreferences.defaultSensitivity
     @AppStorage(EVAGeneralPreferences.defaultSweepKey)
     private var defaultSweep = EVAGeneralPreferences.defaultSweep
+    @AppStorage(EVAGeneralPreferences.traceOverflowEnabledKey) private var allowsTraceOverflow = false
+    @AppStorage(EVAGeneralPreferences.traceOverflowHeightKey)
+    private var traceOverflowHeight = EVAGeneralPreferences.defaultTraceOverflowHeight
+    @AppStorage(EVAGeneralPreferences.traceClipIndicatorsKey) private var showsTraceClipIndicators = false
+
+    /// The slider works in multiples of full scale; the stored value is points
+    /// of headroom, because that is what the renderer needs.
+    private var traceOverflowMultiplier: Binding<Double> {
+        Binding(
+            get: { Double(WaveformScaleUnits.overflowMultiplier(forHeadroom: CGFloat(traceOverflowHeight))) },
+            set: { traceOverflowHeight = Double(WaveformScaleUnits.headroom(forOverflowMultiplier: CGFloat($0))) }
+        )
+    }
 
     var body: some View {
         let markerStyle = WaveformTimeMarkerStyle.decoded(from: waveformTimeMarkerStyleData)
@@ -238,6 +285,34 @@ private struct GeneralPreferencesView: View {
                      + "holds across files at different sampling rates. Millimetres are "
                      + "nominal — 72 points per inch — because EVA does not measure your "
                      + "display. Clinical review is 7 µV/mm at 30 mm/s.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Let traces overflow into neighboring rows", isOn: $allowsTraceOverflow)
+                HStack {
+                    Text("Headroom")
+                    Slider(
+                        value: traceOverflowMultiplier,
+                        in: EVAGeneralPreferences.traceOverflowMultiplierBounds
+                    )
+                    Text("\(WaveformScaleUnits.format(traceOverflowMultiplier.wrappedValue))× full scale")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 118, alignment: .trailing)
+                }
+                .disabled(!allowsTraceOverflow)
+                Toggle("Mark clipped excursions", isOn: $showsTraceClipIndicators)
+            } header: {
+                Text("Trace Overflow")
+            } footer: {
+                Text("Off clips each trace at its row edge. On lets a trace travel into "
+                     + "the neighboring rows, by the headroom below — 1.8× is what rows "
+                     + "drew with before this setting existed. Overflow reads the same "
+                     + "upward and downward, and more headroom costs fill rate on dense "
+                     + "recordings. Clip marks are independent: there is always a "
+                     + "ceiling, and they show where a trace hit it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

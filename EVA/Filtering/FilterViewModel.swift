@@ -72,6 +72,12 @@ final class FilterViewModel {
     /// `.fir` is linear-phase FIR; `.auto` is the Net Station hybrid (IIR
     /// high-pass below the crossover, FIR elsewhere). Applied to both edges.
     var filterFamily = FilterFamily.iir
+    var iirDesign = IIRDesign.butterworth
+    var ellipticPassbandRippleDB = EEGSignalFilter.defaultEllipticPassbandRippleDB
+    var ellipticStopbandAttenuationDB = EEGSignalFilter.defaultEllipticStopbandAttenuationDB
+    var firWindow = FIRWindow.hamming
+    var firKaiserAttenuationDB = EEGSignalFilter.defaultKaiserAttenuationDB
+    var firApplication = FIRApplication.zeroPhase
     /// Crossover (Hz) below which an `.auto` high-pass stays IIR.
     var firCrossoverHz = EEGSignalFilter.defaultFIRCrossoverHz
     /// Explicit FIR transition-band width (Hz); nil = auto (fraction of cutoff).
@@ -177,14 +183,16 @@ final class FilterViewModel {
     /// Human-readable design label for the active family and cutoffs. `.auto`
     /// resolves per edge, so a mixed hybrid reads e.g. "FIR (IIR HP)".
     private func methodLabel(highPass: Double?, lowPass: Double?) -> String {
+        let iirName = iirDesign.label
+        let firName = "\(firWindow.label) FIR\(firApplication == .zeroPhase ? "" : firApplication == .forward ? " forward" : " single-pass")"
         switch filterFamily {
         case .iir:
-            return "Butterworth"
+            return iirName
         case .fir:
-            return "FIR"
+            return firName
         case .auto:
             let hpIsIIR = highPass.map { $0 < firCrossoverHz } ?? false
-            return hpIsIIR ? "FIR (IIR HP)" : "FIR"
+            return hpIsIIR ? "\(firName) (\(iirName) HP)" : firName
         }
     }
 
@@ -257,6 +265,12 @@ final class FilterViewModel {
         // so eva.xml and the log_ file state the filter style unambiguously. This
         // makes new files differ from pre-FIR eva.xml, which is intended.
         params["filterFamily"] = filterFamily.rawValue
+        params["iirDesign"] = iirDesign.rawValue
+        params["ellipticPassbandRippleDB"] = String(format: "%.3g", ellipticPassbandRippleDB)
+        params["ellipticStopbandAttenuationDB"] = String(format: "%.3g", ellipticStopbandAttenuationDB)
+        params["firWindow"] = firWindow.rawValue
+        params["firKaiserAttenuationDB"] = String(format: "%.3g", firKaiserAttenuationDB)
+        params["firApplication"] = firApplication.rawValue
         if filterFamily == .auto {
             params["firCrossoverHz"] = String(format: "%.3g", firCrossoverHz)
         }
@@ -303,6 +317,15 @@ final class FilterViewModel {
         // historical files reproduce byte-identically regardless of the user's
         // new-work default preference.
         filterFamily = p["filterFamily"].flatMap(FilterFamily.init(rawValue:)) ?? .iir
+        iirDesign = p["iirDesign"].flatMap(IIRDesign.init(rawValue:)) ?? .butterworth
+        ellipticPassbandRippleDB = p["ellipticPassbandRippleDB"].flatMap(Double.init)
+            ?? EEGSignalFilter.defaultEllipticPassbandRippleDB
+        ellipticStopbandAttenuationDB = p["ellipticStopbandAttenuationDB"].flatMap(Double.init)
+            ?? EEGSignalFilter.defaultEllipticStopbandAttenuationDB
+        firWindow = p["firWindow"].flatMap(FIRWindow.init(rawValue:)) ?? .hamming
+        firKaiserAttenuationDB = p["firKaiserAttenuationDB"].flatMap(Double.init)
+            ?? EEGSignalFilter.defaultKaiserAttenuationDB
+        firApplication = p["firApplication"].flatMap(FIRApplication.init(rawValue:)) ?? .zeroPhase
         firCrossoverHz = p["firCrossoverHz"].flatMap(Double.init) ?? EEGSignalFilter.defaultFIRCrossoverHz
         firTransitionHz = p["firTransitionHz"].flatMap(Double.init)
         notchUsesFIR = p["notchUsesFIR"] == "true"
@@ -369,6 +392,12 @@ final class FilterViewModel {
         let highPassSlope = self.highPassSlope
         let lowPassSlope = self.lowPassSlope
         let filterFamily = self.filterFamily
+        let iirDesign = self.iirDesign
+        let ellipticPassbandRippleDB = self.ellipticPassbandRippleDB
+        let ellipticStopbandAttenuationDB = self.ellipticStopbandAttenuationDB
+        let firWindow = self.firWindow
+        let firKaiserAttenuationDB = self.firKaiserAttenuationDB
+        let firApplication = self.firApplication
         let firCrossoverHz = self.firCrossoverHz
         let firTransitionHz = self.firTransitionHz
         let notchUsesFIR = self.notchUsesFIR
@@ -413,6 +442,12 @@ final class FilterViewModel {
                         highPassSlope: highPassSlope,
                         lowPassSlope: lowPassSlope,
                         filterFamily: filterFamily,
+                        iirDesign: iirDesign,
+                        ellipticPassbandRippleDB: ellipticPassbandRippleDB,
+                        ellipticStopbandAttenuationDB: ellipticStopbandAttenuationDB,
+                        firWindow: firWindow,
+                        firKaiserAttenuationDB: firKaiserAttenuationDB,
+                        firApplication: firApplication,
                         firCrossoverHz: firCrossoverHz,
                         firTransitionHz: firTransitionHz,
                         lineNoiseMode: lineNoiseMode,
@@ -438,7 +473,17 @@ final class FilterViewModel {
                             highCutoff: lowPassCutoff,
                             highPassSlope: highPassSlope,
                             lowPassSlope: lowPassSlope,
+                            filterFamily: filterFamily,
+                            iirDesign: iirDesign,
+                            ellipticPassbandRippleDB: ellipticPassbandRippleDB,
+                            ellipticStopbandAttenuationDB: ellipticStopbandAttenuationDB,
+                            firWindow: firWindow,
+                            firKaiserAttenuationDB: firKaiserAttenuationDB,
+                            firApplication: firApplication,
+                            firCrossoverHz: firCrossoverHz,
+                            firTransitionHz: firTransitionHz,
                             lineNoiseMode: lineNoiseMode,
+                            notchUsesFIR: notchUsesFIR,
                             notchFrequency: lineNoiseFrequency,
                             lineNoiseHarmonics: lineNoiseHarmonics,
                             lineNoiseWindowSeconds: lineNoiseWindowSeconds,
@@ -634,6 +679,12 @@ final class FilterViewModel {
         highPassSlope: FilterSlope = .dB24,
         lowPassSlope: FilterSlope = .dB24,
         filterFamily: FilterFamily = .iir,
+        iirDesign: IIRDesign = .butterworth,
+        ellipticPassbandRippleDB: Double = EEGSignalFilter.defaultEllipticPassbandRippleDB,
+        ellipticStopbandAttenuationDB: Double = EEGSignalFilter.defaultEllipticStopbandAttenuationDB,
+        firWindow: FIRWindow = .hamming,
+        firKaiserAttenuationDB: Double = EEGSignalFilter.defaultKaiserAttenuationDB,
+        firApplication: FIRApplication = .zeroPhase,
         firCrossoverHz: Double = EEGSignalFilter.defaultFIRCrossoverHz,
         firTransitionHz: Double? = nil,
         lineNoiseMode: FilterLineNoiseMode,
@@ -660,6 +711,12 @@ final class FilterViewModel {
             lowPassSlope: lowPassSlope,
             highPassFamily: filterFamily,
             lowPassFamily: filterFamily,
+            iirDesign: iirDesign,
+            ellipticPassbandRippleDB: ellipticPassbandRippleDB,
+            ellipticStopbandAttenuationDB: ellipticStopbandAttenuationDB,
+            firWindow: firWindow,
+            firKaiserAttenuationDB: firKaiserAttenuationDB,
+            firApplication: firApplication,
             firCrossoverHz: firCrossoverHz,
             firTransitionHz: firTransitionHz,
             notch60HzEnabled: notchEnabled,

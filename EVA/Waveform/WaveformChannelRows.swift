@@ -48,7 +48,12 @@ struct WaveformChannelRow: View, Equatable {
     let visibleRange: ClosedRange<CGFloat>
     let plotWidth: CGFloat
     let rowHeight: CGFloat
+    /// Points of headroom above and below the row that the trace may travel
+    /// into before the canvas clips it. Zero clips exactly at the row edge.
     let overflowHeight: CGFloat
+    /// Mark excursions that left the drawable area — see
+    /// `EVAGeneralPreferences.traceClipIndicatorsKey`.
+    let showsClipIndicators: Bool
     let color: Color
     let usesPixelAdaptiveRendering: Bool
     let showsTimeMarkers: Bool
@@ -72,6 +77,7 @@ struct WaveformChannelRow: View, Equatable {
             && lhs.plotWidth == rhs.plotWidth
             && lhs.rowHeight == rhs.rowHeight
             && lhs.overflowHeight == rhs.overflowHeight
+            && lhs.showsClipIndicators == rhs.showsClipIndicators
             && lhs.color == rhs.color
             && lhs.usesPixelAdaptiveRendering == rhs.usesPixelAdaptiveRendering
             && lhs.showsTimeMarkers == rhs.showsTimeMarkers
@@ -92,19 +98,20 @@ struct WaveformChannelRow: View, Equatable {
             color: color,
             usesPixelAdaptiveRendering: usesPixelAdaptiveRendering,
             showsTimeMarkers: showsTimeMarkers,
-            timeMarkerStyle: timeMarkerStyle
+            timeMarkerStyle: timeMarkerStyle,
+            showsClipIndicators: showsClipIndicators
         )
+        // Trace only — no background, no border. Row chrome is drawn once for
+        // the whole stack by `WaveformView.channelRowBackdrop`, beneath every
+        // trace.
+        //
+        // Not a style choice: a row that paints its own opaque background
+        // paints it *over* whatever the row above bled downward into it, so
+        // self-drawn chrome makes overflow visible upward and invisible
+        // downward — and only by accident of sibling paint order, since every
+        // row carries the same `zIndex`. One shared layer underneath removes
+        // both the asymmetry and the dependence on ordering.
         .frame(width: plotWidth, height: rowHeight + (overflowHeight * 2))
-        .background {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .frame(width: plotWidth, height: rowHeight)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
-                .frame(width: plotWidth, height: rowHeight)
-        }
         .frame(width: plotWidth, height: rowHeight)
         .contentShape(Rectangle())
         .contextMenu {

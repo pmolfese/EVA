@@ -87,6 +87,47 @@ struct FilterViewModelTests {
     }
 
     @MainActor
+    @Test func filterDesignAndApplicationSettingsRoundTrip() {
+        let vm = FilterViewModel(store: RecordingStore())
+        vm.filterFamily = .auto
+        vm.iirDesign = .elliptic
+        vm.ellipticPassbandRippleDB = 0.25
+        vm.ellipticStopbandAttenuationDB = 72
+        vm.firWindow = .kaiser
+        vm.firKaiserAttenuationDB = 80
+        vm.firApplication = .forward
+
+        let params = vm.parameters
+        #expect(params["iirDesign"] == "elliptic")
+        #expect(params["ellipticPassbandRippleDB"] == "0.25")
+        #expect(params["ellipticStopbandAttenuationDB"] == "72")
+        #expect(params["firWindow"] == "kaiser")
+        #expect(params["firKaiserAttenuationDB"] == "80")
+        #expect(params["firApplication"] == "forward")
+
+        let restored = FilterViewModel(store: RecordingStore())
+        restored.apply(parameters: params)
+        #expect(restored.iirDesign == .elliptic)
+        #expect(restored.ellipticPassbandRippleDB == 0.25)
+        #expect(restored.ellipticStopbandAttenuationDB == 72)
+        #expect(restored.firWindow == .kaiser)
+        #expect(restored.firKaiserAttenuationDB == 80)
+        #expect(restored.firApplication == .forward)
+    }
+
+    @MainActor
+    @Test func missingDesignSettingsReplayHistoricalBehavior() {
+        let vm = FilterViewModel(store: RecordingStore())
+        vm.iirDesign = .elliptic
+        vm.firWindow = .kaiser
+        vm.firApplication = .forward
+        vm.apply(parameters: ["filterFamily": "fir", "highPassHz": "1", "lowPassHz": "30"])
+        #expect(vm.iirDesign == .butterworth)
+        #expect(vm.firWindow == .hamming)
+        #expect(vm.firApplication == .zeroPhase)
+    }
+
+    @MainActor
     @Test func missingFilterFamilyDefaultsToIIROnReplay() {
         // A pre-FIR eva.xml has no filterFamily key; it must deserialize to IIR
         // regardless of the user's new-work default preference.

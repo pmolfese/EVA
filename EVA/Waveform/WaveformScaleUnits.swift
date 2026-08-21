@@ -71,6 +71,32 @@ nonisolated enum WaveformScaleUnits {
     /// readout must use.
     static let channelRowFraction: CGFloat = 0.5
 
+    /// Height of one channel row in the main waveform stack.
+    ///
+    /// Lives here rather than staying private to `WaveformView` because the
+    /// trace-overflow preference has to express its headroom as a multiple of
+    /// full scale ("1.8×"), and full scale is `channelRowHeight *
+    /// channelRowFraction`. A second copy of `70` in the preferences panel
+    /// would silently start lying the day this one moved.
+    static let channelRowHeight: CGFloat = 70
+
+    /// Points from a row's midline to a full-scale trace peak: the denominator
+    /// of the overflow multiplier.
+    static var fullScaleHalfHeight: CGFloat { channelRowHeight * channelRowFraction }
+
+    /// Overflow headroom (points, one side) expressed as a multiple of a
+    /// full-scale excursion — the unit the preference slider reads out in,
+    /// because "63 pt" means nothing to the eye and "1.8×" does.
+    static func overflowMultiplier(forHeadroom headroom: CGFloat) -> CGFloat {
+        guard fullScaleHalfHeight > 0 else { return 1 }
+        return (fullScaleHalfHeight + max(headroom, 0)) / fullScaleHalfHeight
+    }
+
+    /// Inverse of `overflowMultiplier(forHeadroom:)`.
+    static func headroom(forOverflowMultiplier multiplier: CGFloat) -> CGFloat {
+        max(multiplier - 1, 0) * fullScaleHalfHeight
+    }
+
     /// The same fraction for the **panel** plots — butterfly, overlaid category,
     /// single-trial. Slightly under a half so full-scale traces do not butt
     /// against the panel edges.

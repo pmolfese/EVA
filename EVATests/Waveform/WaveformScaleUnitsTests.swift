@@ -159,6 +159,42 @@ struct WaveformScaleUnitsTests {
         #expect(WaveformScaleUnits.format(.infinity) == "—")
     }
 
+    // MARK: - Trace overflow headroom
+
+    /// The preference slider reads out in multiples of full scale, so the
+    /// conversion has to agree with the geometry the renderer actually uses:
+    /// full scale is `channelRowHeight * channelRowFraction` from the midline.
+    @Test("Overflow headroom converts to a multiple of a full-scale excursion")
+    func overflowMultiplierMatchesRowGeometry() {
+        let fullScale = WaveformScaleUnits.channelRowHeight * WaveformScaleUnits.channelRowFraction
+        #expect(fullScale == 35)
+
+        // No headroom is exactly full scale.
+        #expect(WaveformScaleUnits.overflowMultiplier(forHeadroom: 0) == 1)
+        // The historical 28 pt of bleed is the documented ~1.8×.
+        #expect(abs(WaveformScaleUnits.overflowMultiplier(forHeadroom: 28) - 1.8) < 1e-9)
+        // One extra full excursion of headroom doubles the reach.
+        #expect(WaveformScaleUnits.overflowMultiplier(forHeadroom: fullScale) == 2)
+    }
+
+    @Test("Overflow multiplier and headroom are inverses")
+    func overflowMultiplierRoundTrips() {
+        for multiplier in [1.0, 1.8, 2.5, 5.0] as [CGFloat] {
+            let headroom = WaveformScaleUnits.headroom(forOverflowMultiplier: multiplier)
+            let back = WaveformScaleUnits.overflowMultiplier(forHeadroom: headroom)
+            #expect(abs(back - multiplier) < 1e-9)
+        }
+    }
+
+    @Test("Degenerate overflow inputs clamp rather than going negative")
+    func overflowDegenerateInputsClamp() {
+        // A multiplier below 1× means no headroom, not negative headroom —
+        // a negative would make the canvas shorter than its own row.
+        #expect(WaveformScaleUnits.headroom(forOverflowMultiplier: 0.5) == 0)
+        #expect(WaveformScaleUnits.headroom(forOverflowMultiplier: -3) == 0)
+        #expect(WaveformScaleUnits.overflowMultiplier(forHeadroom: -10) == 1)
+    }
+
     // MARK: - Figure captions
 
     /// Panel plots use `traceRowFraction`, not the main waveform's half, so a

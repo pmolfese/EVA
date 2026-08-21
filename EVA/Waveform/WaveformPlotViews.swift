@@ -306,6 +306,11 @@ struct WaveformPlot: View {
     var usesPixelAdaptiveRendering = true
     var showsTimeMarkers = false
     var timeMarkerStyle = WaveformTimeMarkerStyle.defaultValue
+    /// Draw an edge bar wherever the trace left the drawable area, so a
+    /// clipped excursion is visible as *something* rather than as a flat
+    /// stretch that looks like real data. See
+    /// `EVAGeneralPreferences.traceClipIndicatorsKey`.
+    var showsClipIndicators = false
 
     var body: some View {
         Canvas { context, size in
@@ -327,6 +332,8 @@ struct WaveformPlot: View {
                 )
             }
 
+            var clipTally = ClipTally(height: size.height, isEnabled: showsClipIndicators)
+
             if usesPixelAdaptiveRendering, xScale < 1 {
                 drawPixelAdaptiveTrace(
                     in: &context,
@@ -334,7 +341,8 @@ struct WaveformPlot: View {
                     xScale: xScale,
                     sampleStride: safeSampleStride,
                     midY: midY,
-                    pointsPerMicrovolt: pointsPerMicrovolt
+                    pointsPerMicrovolt: pointsPerMicrovolt,
+                    clipTally: &clipTally
                 )
             } else {
                 drawSamplePath(
@@ -342,10 +350,85 @@ struct WaveformPlot: View {
                     xScale: xScale,
                     sampleStride: safeSampleStride,
                     midY: midY,
-                    pointsPerMicrovolt: pointsPerMicrovolt
+                    pointsPerMicrovolt: pointsPerMicrovolt,
+                    clipTally: &clipTally
                 )
             }
+
+            drawClipIndicators(in: &context, size: size, tally: clipTally)
         }
+    }
+
+    /// Accumulates the x spans where the trace left the canvas, merging
+    /// adjacent hits so one excursion produces one mark instead of one per
+    /// pixel column. Both draw paths advance monotonically in x, so a span can
+    /// be extended in place and closed when the gap exceeds `mergeGap`.
+    ///
+    /// Disabled tallies short-circuit every call, keeping the indicator feature
+    /// off the hot path entirely when the preference is off.
+    fileprivate struct ClipTally {
+        let height: CGFloat
+        let isEnabled: Bool
+        var above: [ClosedRange<CGFloat>] = []
+        var below: [ClosedRange<CGFloat>] = []
+
+        /// Points of x separation that end a span. Small enough that two
+        /// genuinely separate excursions stay separate, large enough that the
+        /// one-sample gaps inside a single excursion do not fragment it.
+        private static let mergeGap: CGFloat = 3
+
+        mutating func record(x: CGFloat, y: CGFloat) {
+            guard isEnabled else { return }
+            if y < 0 {
+                Self.append(x: x, to: &above)
+            } else if y > height {
+                Self.append(x: x, to: &below)
+            }
+        }
+
+        /// Records a vertical segment, for the pixel-adaptive path where one
+        /// column carries a min/max pair rather than a single point.
+        mutating func record(x: CGFloat, minY: CGFloat, maxY: CGFloat) {
+            guard isEnabled else { return }
+            record(x: x, y: minY)
+            record(x: x, y: maxY)
+        }
+
+        private static func append(x: CGFloat, to spans: inout [ClosedRange<CGFloat>]) {
+            if let last = spans.last, x - last.upperBound <= mergeGap {
+                spans[spans.count - 1] = last.lowerBound...max(last.upperBound, x)
+            } else {
+                spans.append(x...x)
+            }
+        }
+
+        var isEmpty: Bool { above.isEmpty && below.isEmpty }
+    }
+
+    /// Strokes a short bar hugging the edge the trace exited through, spanning
+    /// the x range where it was outside. A bar rather than a caret per column:
+    /// it reads as one event, and it lands exactly where the data went missing.
+    private func drawClipIndicators(in context: inout GraphicsContext, size: CGSize, tally: ClipTally) {
+        guard tally.isEnabled, !tally.isEmpty else { return }
+
+        let inset: CGFloat = 1.25
+        let lineWidth: CGFloat = 2.5
+        // Minimum drawn length, so a single-column clip is still visible.
+        let minimumLength: CGFloat = 3
+
+        func stroke(_ spans: [ClosedRange<CGFloat>], atY y: CGFloat) {
+            var path = Path()
+            for span in spans {
+                let start = span.lowerBound
+                let end = max(span.upperBound, start + minimumLength)
+                path.move(to: CGPoint(x: start, y: y))
+                path.addLine(to: CGPoint(x: end, y: y))
+            }
+            context.stroke(path, with: .color(.orange), lineWidth: lineWidth)
+        }
+
+        stroke(tally.above, atY: inset)
+        stroke(tally.below, atY: size.height - inset)
     }
 
     private func drawSamplePath(
@@ -353,7 +436,8 @@ struct WaveformPlot: View {
         xScale: CGFloat,
         sampleStride: Int,
         midY: CGFloat,
-        pointsPerMicrovolt: CGFloat
+        pointsPerMicrovolt: CGFloat,
+        clipTally: inout ClipTally
     ) {
         let safeXScale = max(xScale, 0.001)
         let lowerVisibleIndex = max(Int(floor(visibleRange.lowerBound / safeXScale)) - 2, 0)
@@ -365,21 +449,17 @@ struct WaveformPlot: View {
 
         var path = Path()
         let firstPlottedIndex = firstSampleIndex / sampleStride
-        path.move(
-            to: CGPoint(
-                x: CGFloat(firstPlottedIndex) * xScale,
-                y: yPosition(for: samples[firstSampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
-            )
-        )
+        let firstX = CGFloat(firstPlottedIndex) * xScale
+        let firstY = yPosition(for: samples[firstSampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
+        path.move(to: CGPoint(x: firstX, y: firstY))
+        clipTally.record(x: firstX, y: firstY)
 
         for sampleIndex in stride(from: firstSampleIndex + sampleStride, through: lastSampleIndex, by: sampleStride) {
             let plottedIndex = sampleIndex / sampleStride
-            path.addLine(
-                to: CGPoint(
-                    x: CGFloat(plottedIndex) * xScale,
-                    y: yPosition(for: samples[sampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
-                )
-            )
+            let x = CGFloat(plottedIndex) * xScale
+            let y = yPosition(for: samples[sampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
+            path.addLine(to: CGPoint(x: x, y: y))
+            clipTally.record(x: x, y: y)
         }
 
         context.stroke(path, with: .color(color), lineWidth: 1)
@@ -391,7 +471,8 @@ struct WaveformPlot: View {
         xScale: CGFloat,
         sampleStride: Int,
         midY: CGFloat,
-        pointsPerMicrovolt: CGFloat
+        pointsPerMicrovolt: CGFloat,
+        clipTally: inout ClipTally
     ) {
         let safeXScale = max(xScale, 0.001)
         let lastPlottedIndex = max((samples.count - 1) / sampleStride, 0)
@@ -438,6 +519,7 @@ struct WaveformPlot: View {
             let maxY = yPosition(for: maxValue, midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
             envelope.move(to: CGPoint(x: x, y: min(minY, maxY)))
             envelope.addLine(to: CGPoint(x: x, y: max(minY, maxY)))
+            clipTally.record(x: x, minY: min(minY, maxY), maxY: max(minY, maxY))
         }
 
         context.stroke(envelope, with: .color(color), lineWidth: 1)

@@ -217,6 +217,10 @@ struct WaveformView: View {
     @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkersAcrossTracesKey) var showsTimeMarkersAcrossTraces = false
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkerStyleKey) var waveformTimeMarkerStyleData = WaveformTimeMarkerStyle.defaultData
+    @AppStorage(EVAGeneralPreferences.traceOverflowEnabledKey) var allowsTraceOverflow = false
+    @AppStorage(EVAGeneralPreferences.traceOverflowHeightKey)
+    var traceOverflowHeightPreference = EVAGeneralPreferences.defaultTraceOverflowHeight
+    @AppStorage(EVAGeneralPreferences.traceClipIndicatorsKey) var showsTraceClipIndicators = false
 
     @State var recordingStore = RecordingStore()
     var amplitudeScale: Double {
@@ -555,8 +559,17 @@ struct WaveformView: View {
     /// fixed stride of 5 samples at 1000 Hz displayed about 200 plotted points/s.
     private let referenceDisplaySampleRate = 1_000.0
     private let referenceDisplaySampleStride = 5
-    let channelRowHeight: CGFloat = 70
-    let channelOverflowHeight: CGFloat = 28
+    let channelRowHeight = WaveformScaleUnits.channelRowHeight
+    /// Headroom a trace may travel past its row before the canvas clips it.
+    ///
+    /// The *only* thing the overflow preference changes. Row chrome lives in
+    /// `channelRowBackdrop` either way, so switching the preference moves one
+    /// variable rather than two — off is off, and turning it off cannot leave
+    /// a previously-raised headroom behind, because the canvas is sized from
+    /// this and nothing else.
+    var channelOverflowHeight: CGFloat {
+        allowsTraceOverflow ? max(CGFloat(traceOverflowHeightPreference), 0) : 0
+    }
     private let eventTrackHeight: CGFloat = 64
     let rowSpacing: CGFloat = 12
     let labelColumnWidth: CGFloat = 120
@@ -2214,6 +2227,14 @@ struct WaveformView: View {
                             ForEach(channelIndices(in: signal), id: \.self) { index in
                                 waveformRow(index: index, channel: signal.data[index], plotWidth: plotWidth, signal: signal)
                             }
+                        }
+                        // With overflow on, row chrome is drawn here — one layer
+                        // beneath every trace — instead of by each row. That is
+                        // the whole point: a row's own opaque background sits
+                        // above the row before it, so self-drawn chrome covers
+                        // exactly the downward bleed we are trying to reveal.
+                        .background(alignment: .topLeading) {
+                            channelRowBackdrop(for: signal, plotWidth: plotWidth)
                         }
                         // Each overlay is its own independent layer so that the
                         // selection band growing during a drag cannot relayout or

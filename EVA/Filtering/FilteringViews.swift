@@ -27,6 +27,8 @@ extension WaveformView {
         let highPassIsFIR = filter.filterFamily == .fir
             || (filter.filterFamily == .auto && (filter.highPassCutoff ?? 0) >= filter.firCrossoverHz)
         let lowPassIsFIR = filter.filterFamily != .iir
+        let hasIIREdge = filter.filterFamily != .fir
+        let hasFIREdge = filter.filterFamily != .iir
 
         return VStack(alignment: .leading, spacing: 14) {
             Text("Filter")
@@ -37,9 +39,9 @@ extension WaveformView {
                     Text("Filter Type")
                         .font(.caption.weight(.semibold))
                     InfoPopoverButton(title: "Filter Types", message: """
-                        IIR — zero-phase Butterworth (the classic EEG filter). Cheap, and works down to very low high-pass cutoffs.
+                        IIR — zero-phase recursive filtering. Choose a smooth Butterworth response or a steeper elliptic response with controlled passband ripple and stopband attenuation.
 
-                        FIR — linear-phase finite impulse response. Constant group delay across frequency, but needs a longer kernel (more computation) for low cutoffs.
+                        FIR — linear-phase finite impulse response with a Hamming or Kaiser window. Apply it forward+backward, once with delay compensation, or causally forward-only.
 
                         Auto — Net Station-style hybrid: IIR high-pass below the crossover (where an FIR kernel would be impractically long) and FIR everywhere else.
                         """)
@@ -52,6 +54,91 @@ extension WaveformView {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+
+                if hasIIREdge {
+                    HStack {
+                        Text("IIR Design")
+                            .font(.caption)
+                        Spacer()
+                        Picker("IIR Design", selection: $filter.iirDesign) {
+                            ForEach(IIRDesign.allCases) { design in
+                                Text(design.label).tag(design)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 150)
+                    }
+
+                    if filter.iirDesign == .elliptic {
+                        HStack {
+                            Text("Design ripple")
+                                .font(.caption)
+                            TextField("dB", value: $filter.ellipticPassbandRippleDB,
+                                      format: .number.precision(.fractionLength(2)))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 58)
+                            Text("dB")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("Stopband")
+                                .font(.caption)
+                            TextField("dB", value: $filter.ellipticStopbandAttenuationDB,
+                                      format: .number.precision(.fractionLength(0)))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 58)
+                            Text("dB")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .help("One-pass elliptic design specifications. Forward+backward application doubles both values in dB and gives zero phase.")
+                    }
+                }
+
+                if hasFIREdge {
+                    HStack {
+                        Text("FIR Window")
+                            .font(.caption)
+                        Spacer()
+                        Picker("FIR Window", selection: $filter.firWindow) {
+                            ForEach(FIRWindow.allCases) { window in
+                                Text(window.label).tag(window)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 150)
+                    }
+
+                    if filter.firWindow == .kaiser {
+                        HStack {
+                            Text("Kaiser attenuation")
+                                .font(.caption)
+                            Spacer()
+                            TextField("dB", value: $filter.firKaiserAttenuationDB,
+                                      format: .number.precision(.fractionLength(0)))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 64)
+                            Text("dB")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .help("Requested stopband attenuation used to derive Kaiser beta and the automatic tap count.")
+                    }
+
+                    HStack {
+                        Text("FIR Application")
+                            .font(.caption)
+                        Spacer()
+                        Picker("FIR Application", selection: $filter.firApplication) {
+                            ForEach(FIRApplication.allCases) { application in
+                                Text(application.label).tag(application)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 235)
+                    }
+                    .help("Two pass is zero-phase and squares the magnitude response. Delay-compensated is one pass with its fixed linear-phase delay removed. Forward-only is causal and retains the group delay.")
+                }
 
                 if filter.filterFamily != .iir {
                     HStack {
@@ -97,7 +184,7 @@ extension WaveformView {
                         .labelsHidden()
                     Picker("HP Slope", selection: $filter.highPassSlope) {
                         ForEach(FilterSlope.allCases) { slope in
-                            Text(slope.label).tag(slope)
+                            Text(filter.iirDesign == .elliptic ? "Order \(slope.designPoles)" : slope.label).tag(slope)
                         }
                     }
                     .labelsHidden()
@@ -122,7 +209,7 @@ extension WaveformView {
                         .labelsHidden()
                     Picker("LP Slope", selection: $filter.lowPassSlope) {
                         ForEach(FilterSlope.allCases) { slope in
-                            Text(slope.label).tag(slope)
+                            Text(filter.iirDesign == .elliptic ? "Order \(slope.designPoles)" : slope.label).tag(slope)
                         }
                     }
                     .labelsHidden()
@@ -268,7 +355,7 @@ extension WaveformView {
             }
         }
         .padding(16)
-        .frame(width: 330)
+        .frame(width: 390)
     }
 
     func applyBandpassFilter(to signal: MFFSignalData) {

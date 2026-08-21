@@ -208,6 +208,7 @@ extension WaveformView {
             plotWidth: plotWidth,
             rowHeight: channelRowHeight,
             overflowHeight: channelOverflowHeight,
+            showsClipIndicators: showsTraceClipIndicators,
             color: channelColor(index),
             usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering,
             showsTimeMarkers: showsTimeMarkersAcrossTraces,
@@ -218,6 +219,34 @@ extension WaveformView {
             onMoveToPhysio: { moveEEGChannelToPhysio(index: index, in: signal) }
         )
         .equatable()
+    }
+
+    /// Row backgrounds and borders for the whole channel stack, drawn as one
+    /// layer beneath every trace.
+    ///
+    /// Always drawn, whatever the overflow preference says — that is the point.
+    /// If chrome moved between here and the rows when the preference changed,
+    /// the toggle would swap two things at once, and the occlusion it swapped
+    /// would depend on sibling paint order rather than on anything declared.
+    /// Keeping chrome here unconditionally leaves the preference exactly one
+    /// job: how tall the trace canvas is.
+    ///
+    /// Geometry is not computed: this mirrors the content stack's `VStack`
+    /// spacing and row height exactly, so the two lay out identically by
+    /// construction rather than by a formula that could drift from it.
+    func channelRowBackdrop(for signal: MFFSignalData, plotWidth: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: rowSpacing) {
+            ForEach(channelIndices(in: signal), id: \.self) { _ in
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .frame(width: plotWidth, height: channelRowHeight)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+                    }
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
