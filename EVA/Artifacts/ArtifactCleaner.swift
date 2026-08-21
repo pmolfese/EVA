@@ -184,6 +184,19 @@ enum ArtifactOBSStrategy: String, CaseIterable, Identifiable, Codable, Sendable 
             return "Fits a PCA basis over channel-by-time event windows instead of one independent basis per channel."
         }
     }
+
+    /// Published citation for this strategy's underlying method, in APA
+    /// format, or `nil` when the variant is an EVA-specific refinement of OBS
+    /// with no separate published reference of its own — those still build on
+    /// `.standard`'s citation, which the help popover always shows.
+    nonisolated var reference: String? {
+        switch self {
+        case .standard:
+            return "Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. NeuroImage, 28(3), 720–737. https://doi.org/10.1016/j.neuroimage.2005.06.067"
+        case .topographyGated, .topographyAligned, .topographyWeighted, .virtualChannel, .clustered, .spatiotemporal:
+            return nil
+        }
+    }
 }
 
 struct DefinedArtifact: Identifiable, Sendable, Codable {

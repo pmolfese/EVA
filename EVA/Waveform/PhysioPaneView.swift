@@ -33,7 +33,7 @@
 
 import SwiftUI
 
-struct PhysioPaneView<ChannelMenu: View, RowMenu: View>: View {
+struct PhysioPaneView<ChannelMenu: View, RowMenu: View, TrackOverlay: View>: View {
     let signal: MFFSignalData
     let physio: PhysioDisplayModel
     /// Resolved display name per channel index (rename-aware).
@@ -53,6 +53,10 @@ struct PhysioPaneView<ChannelMenu: View, RowMenu: View>: View {
     @ViewBuilder let channelMenu: (Int, String) -> ChannelMenu
     /// Transparent per-row hit targets carrying the same menu over the track.
     @ViewBuilder let trackMenuOverlay: () -> RowMenu
+    /// Selection/artifact/cursor highlight bands, in the same content-space x
+    /// coordinates as the EEG pane's overlays, so a tapped event highlights
+    /// through the physio traces too.
+    @ViewBuilder let trackHighlightOverlay: () -> TrackOverlay
 
     private func name(_ index: Int) -> String {
         displayNames.indices.contains(index) ? displayNames[index] : "PNS \(index + 1)"
@@ -82,6 +86,25 @@ struct PhysioPaneView<ChannelMenu: View, RowMenu: View>: View {
                         timeMarkerStyle: timeMarkerStyle,
                         names: displayNames
                     )
+                    // The highlight bands size themselves with
+                    // `.frame(maxHeight: .infinity)`, so they must ride as an
+                    // `.overlay` on the track — as a ZStack *sibling* they
+                    // propose an unbounded height and the pane grows to eat
+                    // every spare point the EEG stack would have had.
+                    //
+                    // `-contentOffset` converts the bands' content-space x
+                    // (0 == first sample, which is what the EEG stack uses,
+                    // since its overlays live *inside* the horizontal
+                    // ScrollView) into this track's viewport space, where
+                    // x == 0 is the left edge of the visible window. Without
+                    // it the band lands correctly only at scroll offset 0 and
+                    // drifts by exactly the scroll distance everywhere else.
+                    .overlay(alignment: .topLeading) {
+                        trackHighlightOverlay()
+                            .offset(x: -contentOffset)
+                            .allowsHitTesting(false)
+                    }
+                    .clipped()
                     .padding(.top, 16)   // align below the "Physio" header
 
                     trackMenuOverlay()

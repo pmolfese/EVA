@@ -1304,4 +1304,47 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
             return "Carbon-wire-loop (CWL) correction: no detection step. Each EEG channel is regressed against the selected CWL reference channels at a small range of time lags and the fit is subtracted, in a sliding window that adapts to slowly drifting coupling. Requires CWL leads imported as PNS channels."
         }
     }
+
+    /// Compact author-year form of `reference`, for the inline description
+    /// under the method picker where a full citation would swamp the summary.
+    /// `nil` where the method is a heuristic with no specific source paper.
+    nonisolated var referenceShort: String? {
+        switch self {
+        case .periodicity:      return "GFP: Lehmann & Skrandies (1980)"
+        case .spatialPCA:       return "PCA basis: Niazy et al. (2005)"
+        case .cardiacPowerMap:  return nil
+        case .virtualECGPCA:    return "Niazy et al. (2005); Pan & Tompkins (1985)"
+        case .panTompkinsProxy: return "Pan & Tompkins (1985)"
+        case .qrsLocking:       return "Allen et al. (1998)"
+        case .cwlRegression:    return "Masterton et al. (2007)"
+        }
+    }
+
+    /// Full APA citation(s) for the method this detector builds on, for the
+    /// help popover. These name the source of the *technique* being applied —
+    /// EVA's detectors are original Swift implementations, and several methods
+    /// combine or adapt a published approach rather than reproduce it exactly.
+    /// `nil` where the method is a heuristic with no specific source paper.
+    nonisolated var reference: String? {
+        switch self {
+        case .periodicity:
+            return "Lehmann, D., & Skrandies, W. (1980). Reference-free identification of components of checkerboard-evoked multichannel potential fields. Electroencephalography and Clinical Neurophysiology, 48(6), 609–621. https://doi.org/10.1016/0013-4694(80)90419-8"
+        case .spatialPCA:
+            return "Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. NeuroImage, 28(3), 720–737. https://doi.org/10.1016/j.neuroimage.2005.06.067"
+        case .cardiacPowerMap:
+            return nil
+        case .virtualECGPCA:
+            return "Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. NeuroImage, 28(3), 720–737. https://doi.org/10.1016/j.neuroimage.2005.06.067\n\nPan, J., & Tompkins, W. J. (1985). A real-time QRS detection algorithm. IEEE Transactions on Biomedical Engineering, BME-32(3), 230–236. https://doi.org/10.1109/TBME.1985.325532"
+        case .panTompkinsProxy:
+            return "Pan, J., & Tompkins, W. J. (1985). A real-time QRS detection algorithm. IEEE Transactions on Biomedical Engineering, BME-32(3), 230–236. https://doi.org/10.1109/TBME.1985.325532"
+        case .qrsLocking:
+            return "Allen, P. J., Polizzi, G., Krakow, K., Fish, D. R., & Lemieux, L. (1998). Identification of EEG events in the MR scanner: The problem of pulse artifact and a method for its subtraction. NeuroImage, 8(3), 229–239. https://doi.org/10.1006/nimg.1998.0361"
+        case .cwlRegression:
+            return "Masterton, R. A. J., Abbott, D. F., Fleming, S. W., & Jackson, G. D. (2007). Measurement and reduction of motion and ballistocardiogram artefacts from simultaneous EEG and fMRI recordings. NeuroImage, 37(1), 202–211. https://doi.org/10.1016/j.neuroimage.2007.02.060"
+        }
+    }
+
+    /// Cited once in the help popover as shared background: the paper that
+    /// established the BCG/pulse artifact problem these methods all address.
+    nonisolated static let backgroundReference = "Allen, P. J., Polizzi, G., Krakow, K., Fish, D. R., & Lemieux, L. (1998). Identification of EEG events in the MR scanner: The problem of pulse artifact and a method for its subtraction. NeuroImage, 8(3), 229–239. https://doi.org/10.1006/nimg.1998.0361"
 }

@@ -63,6 +63,83 @@ private struct BCGHelpButton: View {
     }
 }
 
+/// All BCG identification methods at a glance, with their sources — the tab
+/// strip only ever shows one method's description at a time, so this is the
+/// one place to compare them side by side before picking.
+private struct BCGMethodOverviewHelpButton: View {
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented = true
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Compare all BCG detection methods")
+        .accessibilityLabel("Compare all BCG detection methods")
+        .popover(isPresented: $isPresented, arrowEdge: .trailing) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("BCG Detection Methods")
+                        .font(.headline)
+
+                    Text("The ballistocardiogram is the heartbeat-driven pulse wave contaminating EEG, most severely inside the scanner. Each method below finds it by a different signature; all but CWL produce beat events you then correct with a cleaning method.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    ForEach(BCGDetectionMethod.allCases) { method in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(method.tabLabel)
+                                    .font(.caption.weight(.semibold))
+                                if method.isDirectCorrection {
+                                    Text("corrects directly — no detection step")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text(method.summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let reference = method.reference {
+                                Text(reference)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("Heuristic — no specific source paper.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Text("Background")
+                        .font(.caption.weight(.semibold))
+                    Text(BCGDetectionMethod.backgroundReference)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Detectors are original Swift implementations. Citations name the source of the technique applied; several methods adapt or combine a published approach rather than reproduce it exactly.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .frame(width: 360, alignment: .leading)
+            }
+            .frame(maxHeight: 460)
+        }
+    }
+}
+
 extension WaveformView {
     // MARK: - BCG Detection sheet
 
@@ -71,8 +148,11 @@ extension WaveformView {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             VStack(alignment: .leading, spacing: 4) {
-                Text("BCG Detection")
-                    .font(.headline)
+                HStack(spacing: 4) {
+                    Text("BCG Detection")
+                        .font(.headline)
+                    BCGMethodOverviewHelpButton()
+                }
                 Text("Ballistocardiogram artifacts are caused by the heartbeat-driven pulse wave. Choose a method below — each exploits a different signature of BCG.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -94,13 +174,23 @@ extension WaveformView {
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
 
-            // Method description
-            Text(bcg.method.summary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 12)
+            // Method description, plus the source of the technique it applies.
+            VStack(alignment: .leading, spacing: 4) {
+                Text(bcg.method.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let source = bcg.method.referenceShort {
+                    Text("Source: \(source)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
 
             Divider()
 

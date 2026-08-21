@@ -2269,7 +2269,7 @@ struct WaveformView: View {
             // bar, it stays put while the EEG channels scroll vertically.
             if showsPhysioChannels,
                let pns = displayedPhysioSignal(), !pns.data.isEmpty {
-                physioPane(pns, eegSamplingRate: signal.samplingRate)
+                physioPane(pns, eegSignal: signal)
             }
 
             if isOptionKeyPressed || selectedSampleRange != nil || isShowingEpochs {

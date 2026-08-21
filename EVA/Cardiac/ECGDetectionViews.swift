@@ -231,6 +231,7 @@ extension WaveformView {
             HStack {
                 Text("Algorithm Comparison")
                     .font(.caption.weight(.semibold))
+                ECGAlgorithmHelpButton()
                 Spacer()
                 if ecg.isEstimating {
                     ProgressView()
@@ -446,5 +447,64 @@ extension WaveformView {
         }
 
         return sources
+    }
+}
+
+/// Explains every `ECGDetectionAlgorithm` option in one popover, next to the
+/// "Algorithm Comparison" header. Each entry carries the algorithm's summary
+/// plus, where one exists, the published paper it implements.
+struct ECGAlgorithmHelpButton: View {
+    @State private var showsHelp = false
+
+    var body: some View {
+        Button {
+            showsHelp.toggle()
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Explain the QRS detection algorithms")
+        .popover(isPresented: $showsHelp, arrowEdge: .trailing) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("QRS Detection Algorithms")
+                        .font(.headline)
+
+                    Text("Each algorithm runs independently over the same selected channels; the table shows how many QRS complexes each one finds and the implied heart rate, so you can pick whichever agrees best with the recording. Detected peaks become artifact events.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    ForEach(ECGDetectionAlgorithm.allCases) { algorithm in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(algorithm.displayName)
+                                .font(.caption.weight(.semibold))
+                            Text(algorithm.summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let reference = algorithm.reference {
+                                Text(reference)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Text("Detectors are original Swift implementations of the cited algorithms; \"Simple\" is generic peak picking with no separate published reference.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .frame(width: 360, alignment: .leading)
+            }
+            .frame(maxHeight: 440)
+        }
     }
 }

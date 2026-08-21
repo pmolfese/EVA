@@ -156,8 +156,9 @@ extension WaveformView {
         }
     }
 
-    func physioPane(_ pns: MFFSignalData, eegSamplingRate: Double) -> some View {
-        let rowHeight: CGFloat = 36
+    func physioPane(_ pns: MFFSignalData, eegSignal: MFFSignalData) -> some View {
+        let eegSamplingRate = eegSignal.samplingRate
+        let rowHeight: CGFloat = 54  // 50% taller than EEG's 36pt default row
         let names = pns.channelNames
             ?? (0..<pns.numberOfChannels).map { "PNS \($0 + 1)" }
         let displayNames = (0..<pns.numberOfChannels).map { physioChannelName(index: $0, names: names) }
@@ -179,14 +180,22 @@ extension WaveformView {
             showsTimeMarkers: showsTimeMarkersAcrossTraces,
             timeMarkerStyle: waveformTimeMarkerStyle,
             channelMenu: { index, name in
-                physioChannelContextMenu(index: index, name: name)
+                physioChannelContextMenu(index: index, name: name, signal: pns)
             },
             trackMenuOverlay: {
                 physioContextMenuOverlay(
                     channelCount: pns.numberOfChannels,
                     names: names,
-                    rowHeight: rowHeight
+                    rowHeight: rowHeight,
+                    signal: pns
                 )
+            },
+            trackHighlightOverlay: {
+                ZStack(alignment: .topLeading) {
+                    selectionOverlay(for: eegSignal)
+                    artifactHighlightOverlay(for: eegSignal)
+                    cursorOverlay(for: eegSignal)
+                }
             }
         )
         .task(id: physioRangeTaskID(for: pns)) {
@@ -294,7 +303,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
-    func physioChannelContextMenu(index: Int, name: String) -> some View {
+    func physioChannelContextMenu(index: Int, name: String, signal: MFFSignalData) -> some View {
         let realPhysioCount = recording.pnsSignal?.numberOfChannels ?? 0
         let currentScale = physioScaleFactor(for: index)
         let isMaxScaled = physioMaxScaledChannels.contains(index)
@@ -349,9 +358,26 @@ extension WaveformView {
             setPhysioScaleToMax(for: index)
         }
         .disabled(isMaxScaled)
+
+        Divider()
+
+        Menu("Export Channel") {
+            Button("Export as JSON…") {
+                exportChannelAsJSON(index: index, signal: signal)
+            }
+            Button("Export as JSON with Events…") {
+                exportChannelAsJSON(index: index, signal: signal, includeEvents: true)
+            }
+            Button("Export as 1D…") {
+                exportChannelAs1D(index: index, signal: signal)
+            }
+            Button("Export as 1D with Events…") {
+                exportChannelAs1D(index: index, signal: signal, includeEvents: true)
+            }
+        }
     }
 
-    func physioContextMenuOverlay(channelCount: Int, names: [String], rowHeight: CGFloat) -> some View {
+    func physioContextMenuOverlay(channelCount: Int, names: [String], rowHeight: CGFloat, signal: MFFSignalData) -> some View {
         VStack(spacing: 0) {
             ForEach(0..<channelCount, id: \.self) { index in
                 let name = physioChannelName(index: index, names: names)
@@ -359,7 +385,7 @@ extension WaveformView {
                     .frame(height: rowHeight)
                     .contentShape(Rectangle())
                     .contextMenu {
-                        physioChannelContextMenu(index: index, name: name)
+                        physioChannelContextMenu(index: index, name: name, signal: signal)
                     }
             }
         }

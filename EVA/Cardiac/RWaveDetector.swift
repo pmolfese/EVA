@@ -89,6 +89,28 @@ enum ECGDetectionAlgorithm: String, CaseIterable, Identifiable, Sendable {
             return "Pulse-oximeter (PPG) systolic peak picking on the smoothed, baseline-corrected pulse waveform."
         }
     }
+
+    /// Published reference for the algorithm this detector implements, in APA
+    /// format. `nil` for the two detectors that are generic signal-processing
+    /// approaches rather than implementations of a specific named paper.
+    nonisolated var reference: String? {
+        switch self {
+        case .simple:
+            return nil
+        case .panTompkins:
+            return "Pan, J., & Tompkins, W. J. (1985). A real-time QRS detection algorithm. IEEE Transactions on Biomedical Engineering, BME-32(3), 230–236. https://doi.org/10.1109/TBME.1985.325532"
+        case .hamilton:
+            return "Hamilton, P. (2002). Open source ECG analysis. Computers in Cardiology, 29, 101–104. https://doi.org/10.1109/CIC.2002.1166717"
+        case .wfdb:
+            return "Goldberger, A. L., Amaral, L. A. N., Glass, L., Hausdorff, J. M., Ivanov, P. Ch., Mark, R. G., Mietus, J. E., Moody, G. B., Peng, C.-K., & Stanley, H. E. (2000). PhysioBank, PhysioToolkit, and PhysioNet: Components of a new research resource for complex physiologic signals. Circulation, 101(23), e215–e220. https://doi.org/10.1161/01.CIR.101.23.e215"
+        case .wavelet:
+            return "Martínez, J. P., Almeida, R., Olmos, S., Rocha, A. P., & Laguna, P. (2004). A wavelet-based ECG delineator: Evaluation on standard databases. IEEE Transactions on Biomedical Engineering, 51(4), 570–581. https://doi.org/10.1109/TBME.2003.821031"
+        case .christov:
+            return "Christov, I. I. (2004). Real time electrocardiogram QRS detection using combined adaptive threshold. BioMedical Engineering OnLine, 3, 28. https://doi.org/10.1186/1475-925X-3-28"
+        case .pulse:
+            return "Elgendi, M. (2012). On the analysis of fingertip photoplethysmogram signals. Current Cardiology Reviews, 8(1), 14–25. https://doi.org/10.2174/157340312801215782"
+        }
+    }
 }
 
 enum ECGDetectionPolarity: String, CaseIterable, Identifiable, Sendable {
