@@ -162,6 +162,19 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// itself is injected at the true beat times.
     var qrsDetectionJitterSDSeconds: Double = 0.025
 
+    /// Beat-to-beat heart-rate variability, as a fraction of the RR interval.
+    ///
+    /// The paper's cardiac model has none: heart rate is a smooth 60 s sine, so
+    /// RR walks monotonically and the ECG looks drawn rather than recorded.
+    /// A resting adult's RR standard deviation is 3-8% of the mean, which is
+    /// where the default sits. `--hrv 0` restores the paper's exact timing for
+    /// benchmark comparability.
+    var heartRateVariability: Double = 0.04
+
+    /// Respiration rate, in Hz. Drives respiratory sinus arrhythmia, ECG
+    /// amplitude modulation and baseline wander. 0.25 Hz is 15 breaths/min.
+    var respirationHz: Double = 0.25
+
     /// Duration of one modelled BCG waveform.
     var bcgWaveformSeconds: Double = 0.6
 

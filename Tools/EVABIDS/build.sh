@@ -19,6 +19,8 @@ swiftc -O \
   "$ROOT/EVA/Epoching/EpochModel.swift" \
   "$ROOT/EVA/IO/EGISensorXMLParser.swift" \
   "$ROOT/EVA/IO/MFFReader.swift" \
+  "$ROOT/EVA/IO/MFFFileType.swift" \
+  "$ROOT/EVA/Pipeline/EVAProcessingScript.swift" \
   "$ROOT/EVA/IO/MFFWriter.swift" \
   "$ROOT/EVA/Channels/SensorLayout.swift" \
   "$ROOT/EVA/Channels/ElectrodeGeometry.swift" \

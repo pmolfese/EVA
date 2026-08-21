@@ -52,6 +52,9 @@ nonisolated struct BCGInjection: Sendable {
     /// Across-channel mean BCG, kept so the motion-sensor channel can be
     /// derived from it.
     var meanWaveform: [Double]
+    /// RR interval following each beat, in seconds. The ECG needs it to scale
+    /// each complex to its own beat.
+    var rrIntervalsSeconds: [Double]
 }
 
 nonisolated enum BCGArtifactModel {
@@ -63,7 +66,7 @@ nonisolated enum BCGArtifactModel {
     ) -> BCGInjection {
         let template = waveformTemplate(config: config)
 
-        let beats = beatTimes(config: config)
+        let (beats, intervals) = beatTimes(config: config, source: &source)
         let amplitudes = beatAmplitudes(count: beats.count, config: config, source: &source)
 
         var scales = [Double](repeating: 0, count: config.channelCount)
@@ -107,7 +110,8 @@ nonisolated enum BCGArtifactModel {
             beatAmplitudesMicrovolts: amplitudes,
             channelScales: scales,
             channelLatenciesSeconds: latencies,
-            meanWaveform: mean
+            meanWaveform: mean,
+            rrIntervalsSeconds: intervals
         )
     }
 
@@ -115,19 +119,42 @@ nonisolated enum BCGArtifactModel {
     /// minute using a sine wave of one minute period." Beat times accumulate the
     /// instantaneous RR interval rather than being placed on a fixed grid, so
     /// the rate really does drift.
-    static func beatTimes(config: SimulationConfig) -> [Double] {
+    static func beatTimes(
+        config: SimulationConfig,
+        source: inout GaussianSource
+    ) -> (times: [Double], intervals: [Double]) {
         let mid = (config.heartRateMaxBPM + config.heartRateMinBPM) / 2
         let half = (config.heartRateMaxBPM - config.heartRateMinBPM) / 2
         let omega = 2 * Double.pi / max(config.heartRateCycleSeconds, 1e-9)
 
         var times: [Double] = []
+        var intervals: [Double] = []
         var t = 0.5
         while t < config.durationSeconds {
             times.append(t)
             let bpm = mid + half * sin(omega * t)
-            t += 60 / max(bpm, 1)
+            var interval = 60 / max(bpm, 1)
+
+            // Heart-rate variability. Without it the RR interval walks smoothly
+            // and monotonically from one beat to the next, which no living heart
+            // does — it is the single clearest tell that a trace was generated.
+            //
+            // Three components, in the proportions a real tachogram shows:
+            // respiratory sinus arrhythmia at the breathing rate (the largest),
+            // Mayer waves near 0.1 Hz from baroreflex control, and a little
+            // uncorrelated beat-to-beat noise.
+            if config.heartRateVariability > 0 {
+                let rsa = sin(2 * Double.pi * config.respirationHz * t)
+                let mayer = 0.5 * sin(2 * Double.pi * 0.1 * t + 0.7)
+                let noise = 0.35 * source.gaussian()
+                interval *= 1 + config.heartRateVariability * (rsa + mayer + noise)
+            }
+
+            interval = max(0.3, interval)
+            intervals.append(interval)
+            t += interval
         }
-        return times
+        return (times, intervals)
     }
 
     /// Paper: each beat's amplitude "[takes] into account equally the amplitude
@@ -190,46 +217,83 @@ nonisolated enum BCGArtifactModel {
     // MARK: - Auxiliary reference channels
 
     /// A synthetic ECG at the true beat times, so R-wave detection is exercised
-    /// rather than bypassed. Amplitude is ~1 mV, the usual scale for a scalp-lead
-    /// ECG recorded through an EEG amplifier.
-    static func ecgChannel(beats: [Double], config: SimulationConfig) -> [Double] {
+    /// rather than bypassed.
+    ///
+    /// Morphology follows the standard synthetic-ECG model:
+    ///
+    ///   McSharry PE, Clifford GD, Tarassenko L, Smith LA (2003). A dynamical
+    ///   model for generating synthetic electrocardiogram signals. IEEE Trans
+    ///   Biomed Eng 50(3):289-294.
+    ///
+    /// That model places P, Q, R, S and T as Gaussians at fixed *angles* around
+    /// a limit cycle — -70, -15, 0, 15 and 100 degrees — with widths of 0.25,
+    /// 0.1, 0.1, 0.1 and 0.4 radians. Integrating their z-dynamics analytically
+    /// makes each wave's height proportional to `a·b²`, which is where the
+    /// amplitude ratios below come from. The waveform is evaluated directly in
+    /// time rather than by integrating their ODE; the shape is the same and a
+    /// per-beat template is what the injector wants.
+    ///
+    /// Two departures from a literal reading of the angular model, both
+    /// deliberate:
+    ///
+    /// * **The QRS does not scale with heart rate.** In the pure angular model
+    ///   every wave compresses as RR shortens, but a real QRS is nearly constant
+    ///   at 80-100 ms across the physiological range. Only the P and T waves are
+    ///   scaled here, as √RR after Bazett — so the QT interval shortens with
+    ///   rate the way a real one does, and the QRS does not.
+    /// * **The T wave is asymmetric**, rising more slowly than it falls. A
+    ///   symmetric T is the detail that most makes a synthetic ECG look drawn
+    ///   rather than recorded.
+    static func ecgChannel(
+        beats: [Double],
+        rrIntervals: [Double],
+        config: SimulationConfig,
+        source: inout GaussianSource
+    ) -> [Double] {
         var channel = [Double](repeating: 0, count: config.sampleCount)
         let rate = config.artifactRate
+        let referenceRR = 0.8   // 75 bpm, where the published angles were set
 
-        // Lobes are defined relative to the R peak, and the window is sized to
-        // contain all of them with margin: 5 sigma in front of the P wave and
-        // past the T wave. Sizing it any tighter truncates a Gaussian mid-slope,
-        // and since every beat reuses this template, that truncation becomes a
-        // step discontinuity repeating at the heart rate — small in amplitude,
-        // but broadband, obvious once filtered, and wrong.
-        let lobes: [(offset: Double, sigma: Double, amplitude: Double)] = [
-            (-0.160, 0.020, 0.15),   // P
-            (-0.020, 0.006, -0.10),  // Q
-            (0.000, 0.008, 1.00),    // R
-            (0.020, 0.008, -0.25),   // S
-            (0.220, 0.040, 0.30)     // T
-        ]
-        let leadIn = 0.28
-        let tailOut = 0.42
-        let count = max(8, Int(((leadIn + tailOut) * rate).rounded()))
-        var beatWaveform = [Double](repeating: 0, count: count)
-        for index in 0..<count {
-            let t = Double(index) / rate - leadIn
-            var value = 0.0
-            for lobe in lobes {
-                let z = (t - lobe.offset) / lobe.sigma
-                value += lobe.amplitude * exp(-0.5 * z * z)
+        for (index, beat) in beats.enumerated() {
+            let rr = index < rrIntervals.count ? rrIntervals[index] : referenceRR
+            // Bazett: the QT interval scales with the square root of RR.
+            let stretch = (rr / referenceRR).squareRoot()
+
+            let leadIn = 0.32 * stretch
+            let tailOut = 0.46 * stretch
+            let count = max(8, Int(((leadIn + tailOut) * rate).rounded()))
+            var waveform = [Double](repeating: 0, count: count)
+
+            for i in 0..<count {
+                let t = Double(i) / rate - leadIn
+                var value = 0.0
+
+                // P wave — scales with rate, asymmetry negligible.
+                value += 0.25 * gaussian(t, centre: -0.156 * stretch, sigma: 0.032 * stretch)
+                // QRS — fixed width regardless of rate.
+                value += -0.167 * gaussian(t, centre: -0.033, sigma: 0.0127)
+                value += 1.000 * gaussian(t, centre: 0, sigma: 0.0127)
+                value += -0.250 * gaussian(t, centre: 0.033, sigma: 0.0127)
+                // T wave — scales with rate, and rises more slowly than it falls.
+                let tCentre = 0.222 * stretch
+                let tSigma = (t < tCentre ? 0.058 : 0.040) * stretch
+                value += 0.400 * gaussian(t, centre: tCentre, sigma: tSigma)
+
+                waveform[i] = value
             }
-            beatWaveform[index] = value
-        }
-        let template = HighRateTemplate(samples: beatWaveform, rate: rate, leadInSeconds: leadIn)
 
-        for beat in beats {
+            // Respiration moves the heart in the chest, so R amplitude breathes
+            // by a few percent. Without it every complex is a pixel-identical
+            // stamp of every other one, which reads as synthetic immediately.
+            let respiration = 1 + 0.06 * sin(2 * Double.pi * config.respirationHz * beat)
+            let jitter = 1 + 0.02 * source.gaussian()
+
+            let template = HighRateTemplate(samples: waveform, rate: rate, leadInSeconds: leadIn)
             template.add(
                 into: &channel,
                 outputRate: config.samplingRate,
                 eventSeconds: beat,
-                scale: config.ecgAmplitudeMicrovolts
+                scale: config.ecgAmplitudeMicrovolts * respiration * jitter
             )
         }
 
@@ -241,9 +305,14 @@ nonisolated enum BCGArtifactModel {
         for index in channel.indices {
             let t = Double(index) / config.samplingRate
             channel[index] += wanderAmplitude
-                * (sin(2 * Double.pi * 0.23 * t) + 0.5 * sin(2 * Double.pi * 0.07 * t + 1.1))
+                * (sin(2 * Double.pi * config.respirationHz * t) + 0.5 * sin(2 * Double.pi * 0.07 * t + 1.1))
         }
         return channel
+    }
+
+    private static func gaussian(_ t: Double, centre: Double, sigma: Double) -> Double {
+        let z = (t - centre) / sigma
+        return exp(-0.5 * z * z)
     }
 
     /// A modelled motion sensor, per the paper's Kalman-filtering section: the

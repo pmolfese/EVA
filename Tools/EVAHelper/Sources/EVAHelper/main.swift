@@ -99,8 +99,8 @@ struct Options {
     var downsampleRate: Double?
     var overwrite = false
     var verbose = false
-    var windowBefore = GradientRemover.Window.default.before
-    var windowAfter = GradientRemover.Window.default.after
+    var windowBefore = 4
+    var windowAfter = 4
     var useOriginalCWL = false
     var originalCWLDelaySeconds = 0.021
     var originalCWLTaperFactor = 1
@@ -125,8 +125,8 @@ struct Options {
         var downsampleRate: Double?
         var overwrite = false
         var verbose = false
-        var windowBefore = GradientRemover.Window.default.before
-        var windowAfter = GradientRemover.Window.default.after
+        var windowBefore = 4
+        var windowAfter = 4
         var useOriginalCWL = false
         var originalCWLDelaySeconds = 0.021
         var originalCWLTaperFactor = 1
@@ -473,21 +473,21 @@ func run() throws {
     }
     writeStdoutLine("Using TR event code \(displayCode(trCode)) (\(trSamples.count) events).")
 
-    let window = GradientRemover.Window(before: options.windowBefore, after: options.windowAfter)
+    var aasConfig = GradientAAS.Config.evaLocal
+    aasConfig.templateWindow = .localNeighbors(before: options.windowBefore, after: options.windowAfter)
 
     verboseLog?("AAS CPU: correcting all \(signal.numberOfChannels) EEG channels")
     progress.update(0.20, "Applying AAS MRI correction to EEG")
-    let aasEEG = try GradientRemover.correct(
+    let aasEEGResult = try GradientAAS.correct(
         channels: signal.data,
-        trSamples: trSamples,
-        window: window,
-        reducer: .weightedMean,
-        fit: .subtract
+        volumeTriggers: trSamples,
+        config: aasConfig,
+        samplingRate: signal.samplingRate
     ) { fraction in
         progress.update(0.20 + 0.24 * fraction, "Applying AAS MRI correction to EEG")
     }
     var currentSignal = signal.copying(
-        data: aasEEG,
+        data: aasEEGResult.channels,
         samplingRate: signal.samplingRate,
         signalTypeSuffix: "AAS"
     )
@@ -495,17 +495,16 @@ func run() throws {
     let pnsTRSamples = trMarkers(in: signal, code: trCode, samplingRate: pnsSignal.samplingRate)
     verboseLog?("AAS CPU: correcting \(pnsSignal.numberOfChannels) PNS/reference channels")
     progress.update(0.44, "Applying AAS MRI correction to PNS")
-    let aasPNS = try GradientRemover.correct(
+    let aasPNSResult = try GradientAAS.correct(
         channels: pnsSignal.data,
-        trSamples: pnsTRSamples,
-        window: window,
-        reducer: .weightedMean,
-        fit: .subtract
+        volumeTriggers: pnsTRSamples,
+        config: aasConfig,
+        samplingRate: pnsSignal.samplingRate
     ) { fraction in
         progress.update(0.44 + 0.10 * fraction, "Applying AAS MRI correction to PNS")
     }
     var currentPNS = pnsSignal.copying(
-        data: aasPNS,
+        data: aasPNSResult.channels,
         samplingRate: pnsSignal.samplingRate,
         signalTypeSuffix: "AAS"
     )

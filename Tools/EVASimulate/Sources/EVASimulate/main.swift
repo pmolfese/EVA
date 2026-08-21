@@ -129,6 +129,12 @@ func usage() -> String {
         --qrs-jitter <ms>           SD of detected-beat timing error (default 25).
         --heart-rate-min <bpm>      Default 65.
         --heart-rate-max <bpm>      Default 85.
+        --hrv <fraction>            Beat-to-beat heart-rate variability as a
+                                    fraction of RR (default 0.04). 0 restores
+                                    the paper's exact metronomic timing.
+        --respiration <hz>          Breathing rate (default 0.25 = 15/min).
+                                    Drives sinus arrhythmia, ECG amplitude
+                                    modulation and baseline wander.
 
       EEG
         --alpha-low <uv>            Eyes-open alpha amplitude (default 10).
@@ -211,6 +217,7 @@ let generateOptions: Set<String> = [
     "no-gradient", "tr", "slices", "gradient-amplitude", "gradient-amplitude-min",
     "clock-offset", "slow-modulation", "gradient-template", "gradient-template-rate",
     "no-bcg", "bcg-amplitude", "qrs-jitter", "heart-rate-min", "heart-rate-max",
+    "hrv", "respiration",
     "alpha-low", "alpha-high", "eeg-std", "spatial-model", "spatial-smoothing",
     "artifact-oversample", "artifact-anti-alias", "no-ecg", "no-motion-sensor",
     "prefix", "pre-scan", "post-scan",
@@ -302,6 +309,8 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("qrs-jitter") { config.qrsDetectionJitterSDSeconds = value / 1000 }
     if let value = try arguments.double("heart-rate-min") { config.heartRateMinBPM = value }
     if let value = try arguments.double("heart-rate-max") { config.heartRateMaxBPM = value }
+    if let value = try arguments.double("hrv") { config.heartRateVariability = value }
+    if let value = try arguments.double("respiration") { config.respirationHz = value }
 
     if let value = try arguments.double("alpha-low") { config.alphaLowMicrovolts = value }
     if let value = try arguments.double("alpha-high") { config.alphaHighMicrovolts = value }
@@ -433,7 +442,12 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
     var motion: [Double]?
     if let bcg {
         if config.includeECG {
-            ecg = BCGArtifactModel.ecgChannel(beats: bcg.trueBeatSeconds, config: config)
+            ecg = BCGArtifactModel.ecgChannel(
+                beats: bcg.trueBeatSeconds,
+                rrIntervals: bcg.rrIntervalsSeconds,
+                config: config,
+                source: &source
+            )
         }
         if config.includeMotionSensor {
             motion = BCGArtifactModel.motionSensorChannel(
