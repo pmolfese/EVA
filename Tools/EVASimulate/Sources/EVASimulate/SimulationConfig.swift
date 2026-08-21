@@ -83,6 +83,20 @@ nonisolated struct SimulationConfig: Codable, Sendable {
 
     var gradientEnabled: Bool = true
 
+    /// Quiet time before the scanner starts and after it stops, in seconds.
+    ///
+    /// The gradient artifact is absent in these windows; the ballistocardiogram
+    /// is not. That asymmetry is physical, not a convenience: the BCG comes from
+    /// pulsatile motion inside the *static* B0 field, which is on the whole time
+    /// the subject is in the bore, while the imaging artifact only exists while
+    /// gradients are switching. A recording that starts before the sequence does
+    /// therefore shows clean-looking EEG that is already contaminated by the
+    /// cardiac artifact — which is exactly the thing worth showing a class, and
+    /// exactly the thing that makes "just look at the trace" a bad way to judge
+    /// a correction.
+    var preScanSeconds: Double = 0
+    var postScanSeconds: Double = 0
+
     /// Paper's GE-EPI sequence: TR = 3 s, 41 adjacent slices.
     var repetitionTimeSeconds: Double = 3.0
     var slicesPerVolume: Int = 41
@@ -156,6 +170,9 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// Write a synthetic ECG as a PNS channel, so R-wave detection can be
     /// exercised end to end rather than being handed the answer.
     var includeECG: Bool = true
+    /// R-peak amplitude of the synthetic ECG. ~1 mV is the usual scale for a
+    /// scalp-lead ECG through an EEG amplifier.
+    var ecgAmplitudeMicrovolts: Double = 1000
 
     /// Write a synthetic motion-sensor channel as PNS. Paper §"Kalman Adaptive
     /// Filtering": the sensor sees the BCG through a saturating nonlinearity,
@@ -166,14 +183,64 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     var includeMotionSensor: Bool = true
     var motionSensorSigmoidGain: Double = 0.1
 
+    // MARK: Ocular artifacts
+
+    /// Blinks per minute; 0 disables them. Off by default — the paper's
+    /// simulations were explicitly free of ocular artifacts, and turning them on
+    /// would silently change every benchmark number. A resting adult blinks
+    /// somewhere around 12-20 times a minute.
+    var blinksPerMinute: Double = 0
+    /// Peak blink amplitude at the frontal pole, in µV. Real blinks run
+    /// 50-200 µV at Fp1/Fp2 — far larger than the EEG they sit on, which is the
+    /// whole pedagogical point.
+    var blinkAmplitudeMicrovolts: Double = 100
+    /// Window the blink waveform is modelled over. Long enough that the decay
+    /// has finished before the window closes.
+    var blinkDurationSeconds: Double = 0.6
+
+    /// Saccades per minute; 0 disables eye movements.
+    var saccadesPerMinute: Double = 0
+    /// Scalp amplitude at full gaze deflection, in µV.
+    var eyeMovementAmplitudeMicrovolts: Double = 40
+    /// How long the eyes take to reach the new position. Real saccades are
+    /// 30-80 ms depending on how far they travel.
+    var saccadeTransitionSeconds: Double = 0.04
+
+    // MARK: Recording defects
+
+    /// Channels deliberately made bad, keyed by 1-based channel number.
+    var badChannels: [Int: ChannelDefect] = [:]
+
+    /// Record a per-electrode impedance measurement in the file, the way a real
+    /// EGI system does. On by default: a recording without one is the unusual
+    /// case, and EVA's health scoring simply skips impedance when it is absent.
+    var includeImpedance: Bool = true
+    /// Typical impedance of a *healthy* electrode, in kΩ. Values scatter around
+    /// this; bad channels get values appropriate to their defect instead.
+    var impedanceTypicalKOhm: Double = 12
+
+    /// Mains frequency, in Hz; 0 disables line noise. Off by default for the
+    /// same reason ocular artifacts are — but it is the single most useful thing
+    /// to switch on for a filtering demo, since a notch filter has nothing to
+    /// show without it.
+    var lineNoiseHz: Double = 0
+    var lineNoiseAmplitudeMicrovolts: Double = 8
+
+    // MARK: Spatial model
+
+    var spatialModel: SpatialModel = .circular
+
     static let `default` = SimulationConfig()
 
     var sampleCount: Int {
         max(1, Int((durationSeconds * samplingRate).rounded()))
     }
 
+    /// Volumes that fit inside the scanning window, i.e. the recording minus
+    /// the quiet lead-in and lead-out.
     var volumeCount: Int {
-        max(1, Int(durationSeconds / repetitionTimeSeconds))
+        let scanning = durationSeconds - max(0, preScanSeconds) - max(0, postScanSeconds)
+        return max(0, Int(scanning / repetitionTimeSeconds))
     }
 
     var sliceIntervalSeconds: Double {
@@ -208,4 +275,45 @@ nonisolated struct EEGBand: Codable, Sendable {
         EEGBand(name: "gamma-low", lowHz: 30, highHz: 45, amplitudeMicrovolts: 1.2),
         EEGBand(name: "gamma-high", lowHz: 55, highHz: 70, amplitudeMicrovolts: 0.8)
     ]
+}
+
+
+/// How EEG channels are made spatially correlated.
+nonisolated enum SpatialModel: String, Codable, Sendable, CaseIterable {
+    /// The paper's model: smooth across adjacent channel *indices*, wrapping
+    /// around. Keeps benchmark numbers comparable with the published ones.
+    case circular
+    /// Smooth by actual distance between electrodes on the scalp. Not the
+    /// paper's model, but the one that makes a topographic map look like a
+    /// topographic map — prefer it for demos and for anything that tests a
+    /// method's use of topography.
+    case geometric
+}
+
+/// A way for one channel to be bad. Each is something that really happens to
+/// an electrode, and each defeats a different naive analysis — which is what
+/// makes them worth teaching with.
+nonisolated enum ChannelDefect: String, Codable, Sendable, CaseIterable {
+    /// Dead or shorted: almost no signal at all.
+    case flat
+    /// High-impedance contact: broadband noise swamping the EEG.
+    case noisy
+    /// Drifting baseline from a slowly failing contact — survives a notch
+    /// filter, defeats amplitude thresholds, fixed by a high-pass.
+    case drift
+    /// Intermittent electrode pops: sudden steps that decay back.
+    case pop
+    /// Heavy mains pickup on one channel only, which is what makes it a good
+    /// demonstration that a notch filter is a per-channel decision.
+    case line
+
+    var summary: String {
+        switch self {
+        case .flat: return "dead/shorted — near-zero signal"
+        case .noisy: return "high impedance — broadband noise"
+        case .drift: return "failing contact — large slow drift"
+        case .pop: return "intermittent electrode pops"
+        case .line: return "heavy mains pickup"
+        }
+    }
 }

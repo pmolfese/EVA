@@ -476,11 +476,11 @@ private struct ProcessingDefaultsView: View {
                     get: { FilterFamily(rawValue: defaults.filterDefaultFamily) ?? .iir },
                     set: { defaults.filterDefaultFamily = $0.rawValue }
                 )) {
-                    Text("IIR (Butterworth)").tag(FilterFamily.iir)
-                    Text("FIR Hybrid (Net Station)").tag(FilterFamily.auto)
-                    Text("FIR (linear phase)").tag(FilterFamily.fir)
+                    Text("IIR").tag(FilterFamily.iir)
+                    Text("Auto").tag(FilterFamily.auto)
+                    Text("FIR").tag(FilterFamily.fir)
                 }
-                .help("Filter family used for NEW filtering. FIR Hybrid uses IIR for the high-pass below the crossover and linear-phase FIR elsewhere, like EGI Net Station. Replaying an existing eva.xml always reproduces its original method.")
+                .help("Filter family used for NEW filtering. The Filter popover selects the IIR design, FIR window, and FIR application. Auto uses IIR for a high-pass below the crossover and FIR elsewhere. Replaying an existing eva.xml always reproduces its recorded method.")
             }
 
             Section("ICA") {

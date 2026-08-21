@@ -52,6 +52,22 @@ nonisolated struct SimulationTruth: Codable, Sendable {
     var bcgDetectedBeatSeconds: [Double]
     var bcgChannelScales: [Double]
     var bcgChannelLatenciesSeconds: [Double]
+    var montageName: String
+    var channelNames: [String]
+    /// 1-based channel number -> the defect applied to it.
+    var badChannels: [String: String]
+    var blinkSeconds: [Double]
+    var saccadeSeconds: [Double]
+    /// Per-channel weight of the blink and horizontal-gaze topographies, so a
+    /// demo can check that a recovered component really matches the one that
+    /// was injected.
+    var blinkTopography: [Double]
+    var horizontalEyeTopography: [Double]
+    /// Per-channel electrode impedance in kΩ, empty when none was recorded.
+    var impedancesKOhm: [Double]
+    /// When the scanner was actually running, in seconds.
+    var scanStartSeconds: Double
+    var scanEndSeconds: Double
 }
 
 nonisolated enum SimulationWriter {
@@ -60,6 +76,46 @@ nonisolated enum SimulationWriter {
     /// produce byte-identical packages, and a recording time that moves would
     /// break that for no benefit.
     static let recordingStart = Date(timeIntervalSince1970: 1_755_000_000)
+
+    /// Snaps an event time to the nearest whole millisecond — the finest grid
+    /// the file format actually preserves.
+    ///
+    /// MFF stores event times as an absolute ISO-8601 datetime, and `MFFWriter`
+    /// formats them with `DateFormatter` using a six-digit fractional-seconds
+    /// pattern. `DateFormatter` only resolves milliseconds: the last three
+    /// digits it emits are always zeros. A time of 134.019775 s is written as
+    /// "…14.020000", so what comes back on read is not what went in. The
+    /// limitation affects every EVA export carrying events, not just simulated
+    /// ones — see TODO_Aug21.md.
+    static func writableEventTime(_ seconds: Double) -> Double {
+        (seconds * 1000).rounded() / 1000
+    }
+
+    /// Which sample EVA will recover from a written event time.
+    static func recoveredSample(_ seconds: Double, samplingRate: Double) -> Int {
+        Int((writableEventTime(seconds) * samplingRate).rounded())
+    }
+
+    /// Places a run of periodic markers on the millisecond grid.
+    ///
+    /// Deliberately simple: round each onset to the nearest millisecond and
+    /// write it. The recovered train then carries an occasional interval two
+    /// samples off the median, which EVA's gradient stage rejects — see the note
+    /// on `writableEventTime` for why, and TODO_Aug21.md for the fix.
+    ///
+    /// Three cleverer schemes were tried here and all of them made things worse
+    /// or no better, which is worth recording so they are not tried again:
+    /// repairing violations one at a time walks the error down the train;
+    /// fitting each marker to its ideal position independently still leaves
+    /// pairs two samples apart, because one marker can land 0.9 samples low
+    /// while its neighbour lands 0.9 high; and constraining the interval while
+    /// walking the train produces occasional large excursions when neither
+    /// permitted interval is reachable. None of them can succeed, because a
+    /// 0.977 ms sample grid is not representable on a 1 ms one — the fix has to
+    /// be in the writer's precision, not here.
+    static func periodicMarkerTimes(onsets: [Double], samplingRate: Double) -> [Double] {
+        onsets.map(writableEventTime)
+    }
 
     static func channelNames(count: Int) -> [String] {
         (1...max(1, count)).map { "E\($0)" }
@@ -90,6 +146,7 @@ nonisolated enum SimulationWriter {
     static func events(
         gradient: GradientInjection?,
         bcg: BCGInjection?,
+        ocular: OcularInjection?,
         config: SimulationConfig
     ) -> [MFFEvent] {
         var events: [MFFEvent] = []
@@ -101,13 +158,17 @@ nonisolated enum SimulationWriter {
             // the exact continuous onset instead would hand the correction a
             // precision no real recording has, and would hide the very residual
             // the clock-offset model exists to produce.
-            for (index, onset) in gradient.quantizedVolumeOnsetsSeconds.enumerated() {
+            let trTimes = periodicMarkerTimes(
+                onsets: gradient.quantizedVolumeOnsetsSeconds,
+                samplingRate: config.samplingRate
+            )
+            for (index, time) in trTimes.enumerated() {
                 events.append(MFFEvent(
                     id: "sim-trev-\(index)",
                     code: "TREV",
                     label: "Volume \(index + 1)",
-                    beginTimeSeconds: onset,
-                    rawBeginTime: String(format: "%.6f", onset),
+                    beginTimeSeconds: time,
+                    rawBeginTime: String(format: "%.6f", time),
                     sourceFile: "EVASimulate"
                 ))
             }
@@ -121,8 +182,8 @@ nonisolated enum SimulationWriter {
                     label: "Detected beat",
                     eventDescription: "QRS as an automatic detector would report it, "
                         + "jittered by \(Int(config.qrsDetectionJitterSDSeconds * 1000)) ms SD",
-                    beginTimeSeconds: beat,
-                    rawBeginTime: String(format: "%.6f", beat),
+                    beginTimeSeconds: writableEventTime(beat),
+                    rawBeginTime: String(format: "%.6f", writableEventTime(beat)),
                     sourceFile: "EVASimulate"
                 ))
             }
@@ -132,9 +193,36 @@ nonisolated enum SimulationWriter {
                     code: "QRSt",
                     label: "True beat",
                     eventDescription: "Ground-truth beat time; the artifact was injected here",
-                    beginTimeSeconds: beat,
-                    rawBeginTime: String(format: "%.6f", beat),
+                    beginTimeSeconds: writableEventTime(beat),
+                    rawBeginTime: String(format: "%.6f", writableEventTime(beat)),
                     sourceFile: "EVASimulate"
+                ))
+            }
+        }
+
+        if let ocular {
+            for (index, time) in ocular.blinkSeconds.enumerated() {
+                let aligned = writableEventTime(time)
+                events.append(MFFEvent(
+                    id: "sim-blink-\(index)",
+                    code: "blnk",
+                    label: "Blink",
+                    beginTimeSeconds: aligned,
+                    rawBeginTime: String(format: "%.6f", aligned),
+                    sourceFile: "EVASimulate",
+                    durationSeconds: config.blinkDurationSeconds
+                ))
+            }
+            for (index, time) in ocular.saccadeSeconds.enumerated() {
+                let aligned = writableEventTime(time)
+                events.append(MFFEvent(
+                    id: "sim-saccade-\(index)",
+                    code: "eyem",
+                    label: "Eye movement",
+                    beginTimeSeconds: aligned,
+                    rawBeginTime: String(format: "%.6f", aligned),
+                    sourceFile: "EVASimulate",
+                    durationSeconds: config.saccadeTransitionSeconds
                 ))
             }
         }
@@ -145,6 +233,8 @@ nonisolated enum SimulationWriter {
     static func pnsSignal(
         ecg: [Double]?,
         motion: [Double]?,
+        veog: [Double]?,
+        heog: [Double]?,
         config: SimulationConfig,
         packageURL: URL
     ) -> MFFSignalData? {
@@ -157,6 +247,18 @@ nonisolated enum SimulationWriter {
         if let motion {
             channels.append(motion)
             names.append("Motion")
+        }
+        // The EOG pair goes out as PNS rather than as extra EEG channels
+        // because that is where a real recording puts it, and because it keeps
+        // the EEG channel count equal to the montage — which the layout files,
+        // and everything that reads them, depend on.
+        if let veog {
+            channels.append(veog)
+            names.append("VEOG")
+        }
+        if let heog {
+            channels.append(heog)
+            names.append("HEOG")
         }
         guard !channels.isEmpty else { return nil }
 

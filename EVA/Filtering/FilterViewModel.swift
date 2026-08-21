@@ -20,6 +20,23 @@
 
 import SwiftUI
 
+enum FilterApproximationPreset: String, CaseIterable, Identifiable, Sendable {
+    case eeglab
+    case erplab
+    case mnePython
+    case egiNetStation
+
+    nonisolated var id: String { rawValue }
+    nonisolated var label: String {
+        switch self {
+        case .eeglab: return "EEGLAB"
+        case .erplab: return "ERPLAB"
+        case .mnePython: return "MNE-Python"
+        case .egiNetStation: return "EGI Net Station"
+        }
+    }
+}
+
 private enum FilterViewModelError: LocalizedError {
     case invalidCutoff(field: String, value: String)
     case noFilterOperation
@@ -69,8 +86,9 @@ final class FilterViewModel {
     var highPassSlope = FilterSlope.dB24
     var lowPassSlope = FilterSlope.dB24
     /// Filter implementation family. `.iir` reproduces the historical behavior;
-    /// `.fir` is linear-phase FIR; `.auto` is the Net Station hybrid (IIR
-    /// high-pass below the crossover, FIR elsewhere). Applied to both edges.
+    /// `.fir` is linear-phase FIR with a separately selected application;
+    /// `.auto` is the Net Station-style hybrid (IIR high-pass below the
+    /// crossover, FIR elsewhere). Applied to both edges.
     var filterFamily = FilterFamily.iir
     var iirDesign = IIRDesign.butterworth
     var ellipticPassbandRippleDB = EEGSignalFilter.defaultEllipticPassbandRippleDB
@@ -80,11 +98,12 @@ final class FilterViewModel {
     var firApplication = FIRApplication.zeroPhase
     /// Crossover (Hz) below which an `.auto` high-pass stays IIR.
     var firCrossoverHz = EEGSignalFilter.defaultFIRCrossoverHz
+    var firCrossoverRule = AutoCrossoverRule.below
     /// Explicit FIR transition-band width (Hz); nil = auto (fraction of cutoff).
     var firTransitionHz: Double?
-    /// When on (and the FIR family is selected), the line-noise notch is applied
-    /// as a linear-phase FIR band-stop instead of the default zero-phase IIR
-    /// biquad. FIR is markedly more expensive; default off.
+    /// When on, the line-noise notch is applied as a linear-phase FIR band-stop
+    /// instead of the default zero-phase IIR biquad. This is independent of the
+    /// passband family; FIR is markedly more expensive, so it defaults off.
     var notchUsesFIR = false
     var lineNoiseMode = FilterLineNoiseMode.off
     var lineNoiseFrequency = 60.0
@@ -147,10 +166,10 @@ final class FilterViewModel {
 
     var activeLineNoiseMode: FilterLineNoiseMode { lineNoiseMode }
 
-    /// The notch is applied as FIR only when it is active, the toggle is on, and
-    /// the FIR family is selected — otherwise it stays a zero-phase IIR biquad.
+    /// Notch implementation is independent of the passband family so changing
+    /// a package approximation cannot silently change an existing notch.
     var notchIsFIREffective: Bool {
-        lineNoiseMode == .notch && notchUsesFIR && filterFamily == .fir
+        lineNoiseMode == .notch && notchUsesFIR
     }
 
     /// Compatibility bridge for older call sites and serialized parameters that
@@ -180,6 +199,39 @@ final class FilterViewModel {
         }
     }
 
+    /// Applies package-style filter mechanics without changing the user's
+    /// passband, line-noise/notch, referencing, PNS, or precision settings.
+    func applyApproximation(_ preset: FilterApproximationPreset) {
+        switch preset {
+        case .eeglab:
+            filterFamily = .fir
+            firWindow = .hamming
+            firApplication = .delayCompensated
+            firTransitionHz = nil
+        case .erplab:
+            filterFamily = .iir
+            iirDesign = .butterworth
+            highPassSlope = .dB24
+            lowPassSlope = .dB24
+        case .mnePython:
+            filterFamily = .fir
+            firWindow = .hamming
+            firApplication = .delayCompensated
+            firTransitionHz = nil
+        case .egiNetStation:
+            filterFamily = .auto
+            iirDesign = .elliptic
+            ellipticPassbandRippleDB = EEGSignalFilter.defaultEllipticPassbandRippleDB
+            ellipticStopbandAttenuationDB = EEGSignalFilter.defaultEllipticStopbandAttenuationDB
+            firWindow = .kaiser
+            firKaiserAttenuationDB = EEGSignalFilter.defaultKaiserAttenuationDB
+            firApplication = .forward
+            firCrossoverHz = 1
+            firCrossoverRule = .through
+            firTransitionHz = nil
+        }
+    }
+
     /// Human-readable design label for the active family and cutoffs. `.auto`
     /// resolves per edge, so a mixed hybrid reads e.g. "FIR (IIR HP)".
     private func methodLabel(highPass: Double?, lowPass: Double?) -> String {
@@ -191,7 +243,12 @@ final class FilterViewModel {
         case .fir:
             return firName
         case .auto:
-            let hpIsIIR = highPass.map { $0 < firCrossoverHz } ?? false
+            let hpIsIIR = highPass.map {
+                EEGSignalFilter.resolvedFamily(
+                    .auto, edge: .highPass, cutoff: $0,
+                    crossoverHz: firCrossoverHz, crossoverRule: firCrossoverRule
+                ) == .iir
+            } ?? false
             return hpIsIIR ? "\(firName) (\(iirName) HP)" : firName
         }
     }
@@ -219,7 +276,7 @@ final class FilterViewModel {
         case .off:
             return nil
         case .notch:
-            if notchUsesFIR, filterFamily == .fir {
+            if notchUsesFIR {
                 let harmonics = lineNoiseHarmonics > 1 ? " x\(lineNoiseHarmonics)" : ""
                 return "FIR \(String(format: "%.1f", lineNoiseFrequency)) Hz notch\(harmonics)"
             }
@@ -273,6 +330,7 @@ final class FilterViewModel {
         params["firApplication"] = firApplication.rawValue
         if filterFamily == .auto {
             params["firCrossoverHz"] = String(format: "%.3g", firCrossoverHz)
+            params["firCrossoverRule"] = firCrossoverRule.rawValue
         }
         if filterFamily != .iir, let firTransitionHz {
             params["firTransitionHz"] = String(format: "%.3g", firTransitionHz)
@@ -327,6 +385,7 @@ final class FilterViewModel {
             ?? EEGSignalFilter.defaultKaiserAttenuationDB
         firApplication = p["firApplication"].flatMap(FIRApplication.init(rawValue:)) ?? .zeroPhase
         firCrossoverHz = p["firCrossoverHz"].flatMap(Double.init) ?? EEGSignalFilter.defaultFIRCrossoverHz
+        firCrossoverRule = p["firCrossoverRule"].flatMap(AutoCrossoverRule.init(rawValue:)) ?? .below
         firTransitionHz = p["firTransitionHz"].flatMap(Double.init)
         notchUsesFIR = p["notchUsesFIR"] == "true"
         let serializedMode = p["lineNoiseMode"].flatMap(FilterLineNoiseMode.init(rawValue:))
@@ -399,6 +458,7 @@ final class FilterViewModel {
         let firKaiserAttenuationDB = self.firKaiserAttenuationDB
         let firApplication = self.firApplication
         let firCrossoverHz = self.firCrossoverHz
+        let firCrossoverRule = self.firCrossoverRule
         let firTransitionHz = self.firTransitionHz
         let notchUsesFIR = self.notchUsesFIR
         let lineNoiseMode = activeLineNoiseMode
@@ -449,6 +509,7 @@ final class FilterViewModel {
                         firKaiserAttenuationDB: firKaiserAttenuationDB,
                         firApplication: firApplication,
                         firCrossoverHz: firCrossoverHz,
+                        firCrossoverRule: firCrossoverRule,
                         firTransitionHz: firTransitionHz,
                         lineNoiseMode: lineNoiseMode,
                         notchUsesFIR: notchUsesFIR,
@@ -481,6 +542,7 @@ final class FilterViewModel {
                             firKaiserAttenuationDB: firKaiserAttenuationDB,
                             firApplication: firApplication,
                             firCrossoverHz: firCrossoverHz,
+                            firCrossoverRule: firCrossoverRule,
                             firTransitionHz: firTransitionHz,
                             lineNoiseMode: lineNoiseMode,
                             notchUsesFIR: notchUsesFIR,
@@ -686,6 +748,7 @@ final class FilterViewModel {
         firKaiserAttenuationDB: Double = EEGSignalFilter.defaultKaiserAttenuationDB,
         firApplication: FIRApplication = .zeroPhase,
         firCrossoverHz: Double = EEGSignalFilter.defaultFIRCrossoverHz,
+        firCrossoverRule: AutoCrossoverRule = .below,
         firTransitionHz: Double? = nil,
         lineNoiseMode: FilterLineNoiseMode,
         notchUsesFIR: Bool = false,
@@ -699,9 +762,8 @@ final class FilterViewModel {
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> [[Float]] {
         let notchEnabled = lineNoiseMode == .notch
-        // The notch is applied as FIR only when the toggle is on and the FIR
-        // family is selected; otherwise it is a single zero-phase IIR biquad.
-        let notchIsFIR = notchEnabled && notchUsesFIR && filterFamily == .fir
+        // Notch design is intentionally independent of the passband family.
+        let notchIsFIR = notchEnabled && notchUsesFIR
         var bandPassed = try await EEGSignalFilter.bandPass(
             channels: sourceData,
             samplingRate: samplingRate,
@@ -718,6 +780,7 @@ final class FilterViewModel {
             firKaiserAttenuationDB: firKaiserAttenuationDB,
             firApplication: firApplication,
             firCrossoverHz: firCrossoverHz,
+            firCrossoverRule: firCrossoverRule,
             firTransitionHz: firTransitionHz,
             notch60HzEnabled: notchEnabled,
             notchFrequency: notchFrequency,

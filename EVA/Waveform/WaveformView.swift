@@ -1692,8 +1692,12 @@ struct WaveformView: View {
                 if epoching.epochedSignal != nil {
                     Divider()
                     Button("Undo Segmentation", role: .destructive) {
-                        clearEpochs()
+                        undoSegmentation()
                     }
+                    .disabled(!canUndoSegmentation)
+                    .help(canUndoSegmentation
+                          ? "Return to the state the epochs were built from. The segmented branch stays in History."
+                          : "These epochs came with the file, so there is no earlier state in this session to return to.")
                 }
             } label: {
                 ToolbarIcon(

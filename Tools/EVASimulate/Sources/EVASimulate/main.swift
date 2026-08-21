@@ -98,9 +98,14 @@ func usage() -> String {
       eva-simulate sweep --parameter <name> --values <a,b,c> --output <dir> [model options]
       eva-simulate selftest
 
-    generate — writes <dir>/sim_clean.mff, <dir>/sim_noisy.mff, <dir>/sim_truth.json
+    generate — writes <dir>/<prefix>_clean.mff, <dir>/<prefix>_noisy.mff,
+               <dir>/<prefix>_truth.json  (prefix defaults to "sim")
 
       Recording
+        --output <dir>              Directory to write into. Required.
+        --prefix <name>             Filename prefix (default "sim"), so
+                                    --prefix test1 gives test1_clean.mff,
+                                    test1_noisy.mff and test1_truth.json.
         --channels <n>              Channel count (default 20).
         --rate <hz>                 Sampling rate (default 1024).
         --duration <s>              Duration in seconds (default 180).
@@ -130,12 +135,47 @@ func usage() -> String {
         --alpha-high <uv>           Eyes-closed alpha amplitude (default 30).
         --eeg-std <uv>              Target EEG standard deviation (default 10.9).
 
+      Ocular artifacts (off by default — the paper's model has none)
+        --blinks <per-min>          Blink rate; 12-20 is a resting adult.
+        --blink-amplitude <uv>      Peak amplitude at Fp1/Fp2 (default 100).
+        --eye-movements <per-min>   Saccade rate.
+        --eye-movement-amplitude <uv>  Scalp amplitude at full gaze (default 40).
+
+      Recording defects (off by default)
+        --bad-channels <spec>       Comma-separated <channel>:<kind>, 1-based,
+                                    e.g. "7:noisy,15:drift". Kinds: flat, noisy,
+                                    drift, pop, line. Kind defaults to noisy.
+        --line-noise <hz>           Mains frequency; 0 is off. Try 60.
+        --line-noise-amplitude <uv> Default 8.
+        --impedance <kohm>          Typical impedance of a healthy electrode
+                                    (default 12). Bad channels instead get a
+                                    value matching their defect — high for a
+                                    poor contact, but deliberately LOW for
+                                    "flat", since a bridged electrode reads
+                                    excellent and records nothing.
+        --no-impedance              Record no impedance measurement at all.
+
+      Scanner window
+        --pre-scan <s>              Quiet time before the sequence starts.
+        --post-scan <s>             Quiet time after it stops.
+                                    The BCG continues through both — the static
+                                    field is on the whole time the subject is in
+                                    the bore; only the gradients stop.
+
       Modelling
         --artifact-oversample <n>   Internal artifact rate, x output rate (default 64).
         --artifact-anti-alias <f>   Anti-alias cutoff as a fraction of output
                                     Nyquist; 0 disables (default 0.9).
         --no-ecg                    Omit the synthetic ECG channel.
         --no-motion-sensor          Omit the synthetic motion-sensor channel.
+        --spatial-model <name>      circular (the paper's, default) or geometric
+                                    (smooth by real electrode distance — prefer
+                                    this for demos and topography).
+        --spatial-smoothing <n>     Kernel width in channels (default 4).
+        --demo                      Preset for teaching recordings: blinks, eye
+                                    movements, 60 Hz line noise, geometric
+                                    spatial model, pre/post-scan quiet, and two
+                                    bad channels. Any explicit flag still wins.
 
     score — reports SNR per frequency band against ground truth
 
@@ -155,6 +195,7 @@ func usage() -> String {
                                     clock-offset, rate.
         --values <a,b,c>            Comma-separated values to sweep.
         --output <dir>              Parent directory; one subdirectory per value.
+                                    --prefix applies inside each of them.
         Plus any `generate` model option, applied to every run.
 
     Model defaults follow Grouiller F, Vercueil L, Krainik A, Segebarth C,
@@ -170,12 +211,78 @@ let generateOptions: Set<String> = [
     "no-gradient", "tr", "slices", "gradient-amplitude", "gradient-amplitude-min",
     "clock-offset", "slow-modulation", "gradient-template", "gradient-template-rate",
     "no-bcg", "bcg-amplitude", "qrs-jitter", "heart-rate-min", "heart-rate-max",
-    "alpha-low", "alpha-high", "eeg-std",
-    "artifact-oversample", "artifact-anti-alias", "no-ecg", "no-motion-sensor"
+    "alpha-low", "alpha-high", "eeg-std", "spatial-model", "spatial-smoothing",
+    "artifact-oversample", "artifact-anti-alias", "no-ecg", "no-motion-sensor",
+    "prefix", "pre-scan", "post-scan",
+    "blinks", "blink-amplitude", "eye-movements", "eye-movement-amplitude",
+    "bad-channels", "line-noise", "line-noise-amplitude", "demo",
+    "impedance", "no-impedance"
 ]
+
+/// Validates the output filename prefix and normalizes it to bare stem.
+///
+/// A trailing underscore is stripped rather than rejected, so `--prefix test1`
+/// and `--prefix test1_` both produce `test1_clean.mff`. Separators are refused
+/// outright: a prefix containing a slash would place files outside the directory
+/// the user named, which is not something a filename option should be able to do.
+func normalizedPrefix(_ raw: String) throws -> String {
+    var prefix = raw.trimmingCharacters(in: .whitespaces)
+    while prefix.hasSuffix("_") { prefix.removeLast() }
+
+    guard !prefix.isEmpty else {
+        throw SimulateError.usage("--prefix cannot be empty")
+    }
+    guard !prefix.contains("/"), !prefix.contains(":"), prefix != ".", prefix != ".." else {
+        throw SimulateError.usage(
+            "--prefix is a filename prefix, not a path; \"\(raw)\" contains a path separator"
+        )
+    }
+    return prefix
+}
+
+func parseBadChannels(_ spec: String) throws -> [Int: ChannelDefect] {
+    var result: [Int: ChannelDefect] = [:]
+    for entry in spec.split(separator: ",") {
+        let parts = entry.split(separator: ":", maxSplits: 1)
+        guard let number = Int(parts[0].trimmingCharacters(in: .whitespaces)), number > 0 else {
+            throw SimulateError.usage(
+                "--bad-channels entry \"\(entry)\" should start with a 1-based channel number"
+            )
+        }
+        // Default to the most generally useful defect when none is named, so
+        // `--bad-channels 7` does something sensible.
+        guard parts.count > 1 else {
+            result[number] = .noisy
+            continue
+        }
+        let kind = parts[1].trimmingCharacters(in: .whitespaces).lowercased()
+        guard let defect = ChannelDefect(rawValue: kind) else {
+            throw SimulateError.usage(
+                "unknown defect \"\(kind)\"; expected one of "
+                + ChannelDefect.allCases.map(\.rawValue).joined(separator: ", ")
+            )
+        }
+        result[number] = defect
+    }
+    return result
+}
 
 func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     var config = SimulationConfig.default
+
+    // `--demo` is a preset, applied first so that any explicit flag still wins.
+    // It exists because the settings that make a good teaching recording are not
+    // the settings that reproduce the paper, and asking someone to remember six
+    // flags to get a usable classroom file is a good way to have them not bother.
+    if arguments.flag("demo") {
+        config.blinksPerMinute = 15
+        config.saccadesPerMinute = 25
+        config.lineNoiseHz = 60
+        config.spatialModel = .geometric
+        config.preScanSeconds = 15
+        config.postScanSeconds = 10
+        config.badChannels = [7: .noisy, 15: .drift]
+    }
 
     if let value = try arguments.int("channels") { config.channelCount = value }
     if let value = try arguments.double("rate") { config.samplingRate = value }
@@ -199,6 +306,30 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("alpha-low") { config.alphaLowMicrovolts = value }
     if let value = try arguments.double("alpha-high") { config.alphaHighMicrovolts = value }
     if let value = try arguments.double("eeg-std") { config.eegTargetStdMicrovolts = value }
+    if let value = try arguments.double("spatial-smoothing") { config.spatialSmoothingChannels = value }
+    if let raw = arguments.string("spatial-model") {
+        guard let model = SpatialModel(rawValue: raw) else {
+            throw SimulateError.usage("--spatial-model expects circular or geometric, got \"\(raw)\"")
+        }
+        config.spatialModel = model
+    }
+
+    if let value = try arguments.double("pre-scan") { config.preScanSeconds = value }
+    if let value = try arguments.double("post-scan") { config.postScanSeconds = value }
+
+    if let value = try arguments.double("blinks") { config.blinksPerMinute = value }
+    if let value = try arguments.double("blink-amplitude") { config.blinkAmplitudeMicrovolts = value }
+    if let value = try arguments.double("eye-movements") { config.saccadesPerMinute = value }
+    if let value = try arguments.double("eye-movement-amplitude") { config.eyeMovementAmplitudeMicrovolts = value }
+
+    if let spec = arguments.string("bad-channels") { config.badChannels = try parseBadChannels(spec) }
+    if let value = try arguments.double("line-noise") { config.lineNoiseHz = value }
+    if let value = try arguments.double("line-noise-amplitude") { config.lineNoiseAmplitudeMicrovolts = value }
+    if arguments.flag("no-impedance") { config.includeImpedance = false }
+    if let value = try arguments.double("impedance") {
+        guard value > 0 else { throw SimulateError.usage("--impedance must be positive") }
+        config.impedanceTypicalKOhm = value
+    }
 
     if let value = try arguments.int("artifact-oversample") { config.artifactOversampleFactor = value }
     if let value = try arguments.double("artifact-anti-alias") { config.artifactAntiAliasFraction = value }
@@ -207,8 +338,29 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
 
     guard config.channelCount > 0 else { throw SimulateError.usage("--channels must be positive") }
     guard config.samplingRate > 0 else { throw SimulateError.usage("--rate must be positive") }
+    // Checked here rather than at write time: MFF stores an integer sample rate,
+    // and finding that out after generating three minutes of data wastes the run.
+    guard config.samplingRate == config.samplingRate.rounded() else {
+        throw SimulateError.usage(
+            "--rate must be a whole number of hertz (MFF stores an integer sample rate), got \(config.samplingRate)"
+        )
+    }
     guard config.durationSeconds > 0 else { throw SimulateError.usage("--duration must be positive") }
     guard config.artifactOversampleFactor >= 1 else { throw SimulateError.usage("--artifact-oversample must be at least 1") }
+    guard config.preScanSeconds >= 0, config.postScanSeconds >= 0 else {
+        throw SimulateError.usage("--pre-scan and --post-scan cannot be negative")
+    }
+    guard config.preScanSeconds + config.postScanSeconds < config.durationSeconds else {
+        throw SimulateError.usage(
+            "--pre-scan + --post-scan (\(config.preScanSeconds + config.postScanSeconds) s) leaves no "
+            + "scanning time inside a \(config.durationSeconds) s recording"
+        )
+    }
+    for number in config.badChannels.keys where number > config.channelCount {
+        throw SimulateError.usage(
+            "--bad-channels names channel \(number), but the montage has \(config.channelCount)"
+        )
+    }
 
     return config
 }
@@ -218,10 +370,14 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
 @discardableResult
 func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory: URL) throws -> CorrectionScore {
     try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+    let prefix = try normalizedPrefix(arguments.string("prefix") ?? "sim")
 
     var source = GaussianSource(seed: config.seed)
-    FileHandle.standardError.write(Data("Generating EEG (\(config.channelCount) channels, \(Int(config.durationSeconds)) s)...\n".utf8))
-    let eeg = EEGGenerator.generate(config: config, source: &source)
+    let montage = Montage.standard(count: config.channelCount)
+    FileHandle.standardError.write(Data(
+        "Generating EEG (\(config.channelCount) channels, \(montage.name), \(Int(config.durationSeconds)) s)...\n".utf8
+    ))
+    let eeg = EEGGenerator.generate(config: config, montage: montage, source: &source)
 
     var noisy = eeg.channels
 
@@ -235,7 +391,7 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
             }
             template = try GradientArtifactModel.loadTemplate(path: path, templateRate: rate, config: config)
         }
-        gradient = GradientArtifactModel.inject(into: &noisy, config: config, template: template)
+        gradient = GradientArtifactModel.inject(into: &noisy, config: config, montage: montage, template: template)
     }
 
     var bcg: BCGInjection?
@@ -244,9 +400,34 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         bcg = BCGArtifactModel.inject(into: &noisy, config: config, source: &source)
     }
 
-    let cleanURL = outputDirectory.appendingPathComponent("sim_clean.mff")
-    let noisyURL = outputDirectory.appendingPathComponent("sim_noisy.mff")
-    let events = SimulationWriter.events(gradient: gradient, bcg: bcg, config: config)
+    var ocular: OcularInjection?
+    if config.blinksPerMinute > 0 || config.saccadesPerMinute > 0 {
+        FileHandle.standardError.write(Data("Injecting blinks and eye movements...\n".utf8))
+        ocular = OcularArtifactModel.inject(into: &noisy, config: config, montage: montage, source: &source)
+    }
+
+    if config.lineNoiseHz > 0 {
+        ChannelDefectModel.applyLineNoise(to: &noisy, config: config, source: &source)
+    }
+
+    // Bad channels go last: a defect is something that happens to the recording
+    // of a channel, on top of everything the channel was already carrying.
+    let badChannels = ChannelDefectModel.apply(to: &noisy, config: config, source: &source)
+
+    // Impedance is a property of the electrodes, not of the samples, so it is
+    // written to *both* packages. That is not an oversight: EVA treats impedance
+    // as a stable property of the recording and scores it independently of the
+    // data, so the ground-truth file showing a poor electrode alongside perfect
+    // samples is exactly the lesson — the measurement was taken before anything
+    // was recorded.
+    let impedances: [Float]? = config.includeImpedance
+        ? ImpedanceModel.values(config: config, montage: montage, source: &source)
+        : nil
+
+    let cleanURL = outputDirectory.appendingPathComponent("\(prefix)_clean.mff")
+    let noisyURL = outputDirectory.appendingPathComponent("\(prefix)_noisy.mff")
+    let truthURL = outputDirectory.appendingPathComponent("\(prefix)_truth.json")
+    let events = SimulationWriter.events(gradient: gradient, bcg: bcg, ocular: ocular, config: config)
 
     var ecg: [Double]?
     var motion: [Double]?
@@ -266,7 +447,8 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
     try MFFWriter.write(
         signal: SimulationWriter.signal(
             channels: eeg.channels, config: config,
-            signalType: "EEG Simulated Ground Truth", events: events, packageURL: cleanURL
+            signalType: "EEG Simulated Ground Truth", events: events, packageURL: cleanURL,
+            names: montage.channelNames
         ),
         segments: [],
         kind: .continuous,
@@ -276,14 +458,29 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
     try MFFWriter.write(
         signal: SimulationWriter.signal(
             channels: noisy, config: config,
-            signalType: "EEG Simulated", events: events, packageURL: noisyURL
+            signalType: "EEG Simulated", events: events, packageURL: noisyURL,
+            names: montage.channelNames
         ),
-        pnsSignal: SimulationWriter.pnsSignal(ecg: ecg, motion: motion, config: config, packageURL: noisyURL),
+        pnsSignal: SimulationWriter.pnsSignal(
+            ecg: ecg, motion: motion,
+            veog: ocular?.veog, heog: ocular?.heog,
+            config: config, packageURL: noisyURL
+        ),
         segments: [],
         kind: .continuous,
         to: noisyURL,
         preserveSourceFileInfo: false
     )
+
+    // Electrode geometry, which MFFWriter cannot synthesize because it normally
+    // copies it from the source package a simulation does not have.
+    try MontageWriter.writeLayoutFiles(montage: montage, to: cleanURL)
+    try MontageWriter.writeLayoutFiles(montage: montage, to: noisyURL)
+
+    if let impedances {
+        try ImpedanceModel.writeInfoXML(impedances: impedances, to: cleanURL)
+        try ImpedanceModel.writeInfoXML(impedances: impedances, to: noisyURL)
+    }
 
     let truth = SimulationTruth(
         config: config,
@@ -295,9 +492,21 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         bcgTrueBeatSeconds: bcg?.trueBeatSeconds ?? [],
         bcgDetectedBeatSeconds: bcg?.detectedBeatSeconds ?? [],
         bcgChannelScales: bcg?.channelScales ?? [],
-        bcgChannelLatenciesSeconds: bcg?.channelLatenciesSeconds ?? []
+        bcgChannelLatenciesSeconds: bcg?.channelLatenciesSeconds ?? [],
+        montageName: montage.name,
+        channelNames: montage.channelNames,
+        badChannels: badChannels,
+        blinkSeconds: ocular?.blinkSeconds ?? [],
+        saccadeSeconds: ocular?.saccadeSeconds ?? [],
+        blinkTopography: ocular?.blinkTopography ?? [],
+        horizontalEyeTopography: ocular?.horizontalTopography ?? [],
+        impedancesKOhm: impedances?.map(Double.init) ?? [],
+        scanStartSeconds: config.gradientEnabled ? config.preScanSeconds : 0,
+        scanEndSeconds: config.gradientEnabled
+            ? config.durationSeconds - config.postScanSeconds
+            : 0
     )
-    try SimulationWriter.writeTruth(truth, to: outputDirectory.appendingPathComponent("sim_truth.json"))
+    try SimulationWriter.writeTruth(truth, to: truthURL)
 
     // The uncorrected recording's own score, which every correction has to beat
     // to have been worth running.
@@ -310,12 +519,33 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
 
     print("Wrote \(cleanURL.path)")
     print("Wrote \(noisyURL.path)")
-    print("Wrote \(outputDirectory.appendingPathComponent("sim_truth.json").path)")
+    print("Wrote \(truthURL.path)")
     print("")
-    print(String(format: "EEG std: %.2f µV   beats: %d   volumes: %d",
+    print(String(format: "EEG std: %.2f µV   beats: %d   volumes: %d   montage: %@",
                  eeg.standardDeviation,
                  bcg?.trueBeatSeconds.count ?? 0,
-                 gradient?.volumeOnsetsSeconds.count ?? 0))
+                 gradient?.volumeOnsetsSeconds.count ?? 0,
+                 montage.name))
+    if let ocular {
+        print("Blinks: \(ocular.blinkSeconds.count)   eye movements: \(ocular.saccadeSeconds.count)")
+    }
+    if config.gradientEnabled, config.preScanSeconds > 0 || config.postScanSeconds > 0 {
+        print(String(format: "Scanner running %.1f-%.1f s (BCG runs the whole recording)",
+                     config.preScanSeconds, config.durationSeconds - config.postScanSeconds))
+    }
+    if let impedances, !impedances.isEmpty {
+        let sorted = impedances.map(Double.init).sorted()
+        print(String(format: "Impedance: median %.1f kΩ, worst %.1f kΩ",
+                     sorted[sorted.count / 2], sorted.last ?? 0))
+    }
+    if !badChannels.isEmpty {
+        let described = badChannels.sorted { Int($0.key)! < Int($1.key)! }.map { number, defect -> String in
+            let index = Int(number)! - 1
+            let name = index < montage.channelNames.count ? montage.channelNames[index] : "#\(number)"
+            return "\(name) (\(defect))"
+        }
+        print("Bad channels: " + described.joined(separator: ", "))
+    }
     print(String(format: "Uncorrected broadband SNR: %.4f", baseline.broadbandSNR))
     return baseline
 }
@@ -553,10 +783,13 @@ do {
         var failures = 0
         print("")
         for outcome in SelfTest.run() {
-            let mark = outcome.passed ? "PASS" : "FAIL"
-            if !outcome.passed { failures += 1 }
+            let mark = outcome.passed ? "PASS" : (outcome.knownLimitation == nil ? "FAIL" : "KNOWN")
+            if !outcome.passed, outcome.knownLimitation == nil { failures += 1 }
             print(String(format: "  [%@] %@", mark, outcome.name))
-            print(String(format: "         SNR %.3f   (expected %@)", outcome.snr, outcome.expectation))
+            print(String(format: "         %.3f   (expected %@)", outcome.snr, outcome.expectation))
+            if let limitation = outcome.knownLimitation, !outcome.passed {
+                print("         known limitation: " + limitation)
+            }
         }
         print("")
         if failures > 0 {

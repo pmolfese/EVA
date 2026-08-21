@@ -37,6 +37,9 @@ Writes three things into `~/sim`:
 | `sim_noisy.mff` | The same EEG plus gradient and BCG artifacts, with TREV volume markers, jittered QRS markers, and synthetic ECG / motion-sensor PNS channels. |
 | `sim_truth.json` | Everything the recordings cannot carry: the seed, the *true* beat times as opposed to the detected ones, per-channel artifact amplitudes and latencies, and the alpha block design. |
 
+`--prefix test1` renames all three to `test1_clean.mff`, `test1_noisy.mff` and
+`test1_truth.json`, so several recordings can share one directory.
+
 Open `sim_noisy.mff` in EVA, correct it however you like, export the result, and
 score it:
 
@@ -96,6 +99,76 @@ strongly negative dB is a method quietly deleting your signal.
 | `--rate <hz>` | The paper found 1-2 kHz sufficient for everything except ICA, which wanted 4 kHz. |
 | `--clock-offset <us-per-s>` | Set to 0 to model an EEG amplifier synchronized to the scanner clock. |
 | `--gradient-template <path>` | Use a template measured on your own scanner instead of the synthetic waveform. Strongly preferred for anything you intend to publish. |
+| `--impedance <kohm>` | Typical impedance of a healthy electrode (default 12). Bad channels get a value matching their defect — high for a poor contact, but deliberately *low* for `flat`, because a bridged electrode reads excellent and records nothing. |
+| `--prefix <name>` | Name the output files something other than `sim_*`, so a directory can hold more than one recording. |
+
+## For class demos
+
+The paper's defaults make a *benchmark*, not a teaching recording: no blinks, no
+mains hum, no bad electrodes, and the scanner running from the first sample. One
+flag turns on the lot:
+
+```sh
+Tools/EVASimulate/.build/eva-simulate generate --output ~/Desktop/demo --demo
+```
+
+That is shorthand for 15 blinks/min, 25 eye movements/min, 60 Hz line noise, the
+geometric spatial model, 15 s of quiet before the scanner starts and 10 s after
+it stops, and two deliberately bad channels. Any explicit flag still overrides
+it, so `--demo --line-noise 50` does what it looks like.
+
+The recording that comes out supports most of the obvious lecture beats:
+
+| To show | Look at |
+| --- | --- |
+| Raw vs. filtered | The whole trace: mains hum on every channel, drift on Pz, gradient artifact from 15 s. |
+| What a blink looks like | `blnk` markers; Fp1/Fp2 versus Cz. The topography is frontal-maximal and reverses slightly at the back. |
+| Blinks vs. eye movements | `eyem` markers. Blinks are transients; eye movements are *steps* that hold until the eyes move again, with opposite polarity at F7 and F8 — because the potential follows gaze position, not gaze velocity. |
+| Why we keep an EOG | The VEOG/HEOG PNS channels see the same artifact far larger than any scalp electrode. |
+| Bad channel detection | F8 (noisy) and Pz (drift) against their neighbours. Easiest to see in the pre-scan window or after gradient correction. |
+| Impedance is not data quality | Health scoring with `--bad-channels "3:flat,7:noisy"`: the noisy channel reads 100+ kΩ, the bridged one reads under 3 kΩ and scores perfect while recording nothing. |
+| Why notch filtering is per channel | Add `--bad-channels "3:line"` — one channel with heavy mains pickup and the rest clean. |
+| The scanner turning on | 15 s in. Before that the EEG looks clean but is already carrying the BCG, because the static field never switches off — only the gradients stop. |
+| Ground truth | `sim_clean.mff` is the same EEG with none of it. Overlay them. |
+
+Some smaller recipes:
+
+```sh
+# Just blinks on clean EEG — nothing else to distract from them.
+eva-simulate generate --output ~/blinks --no-gradient --no-bcg --blinks 18 --duration 60
+
+# One bad channel of each kind, to compare how they look.
+eva-simulate generate --output ~/bad --no-gradient \
+  --bad-channels "3:flat,7:noisy,11:drift,15:pop,19:line" --line-noise 60
+
+# Filtering practice: mains hum and drift, no MR artifacts at all.
+eva-simulate generate --output ~/filtering --no-gradient --no-bcg \
+  --line-noise 60 --blinks 15 --duration 120
+```
+
+### Channels and layout
+
+Channels are a real 10-20 montage — Fp1, Fp2, F7 … Oz, O2 at 20 channels — and
+both `sensorLayout.xml` and `coordinates.xml` are written, so channel selection
+by name, topographic maps, and spherical-spline interpolation all work. Below 20
+channels the set is subsampled across the head rather than truncated (truncating
+a front-to-back ordering would hand back an all-frontal montage); above 41 it
+falls back to a spiral, which is named "Spiral (synthetic)" so nobody mistakes it
+for a real montage.
+
+Positions are the 10-20 construction for the midline and outer ring, and
+eyeballed to a few degrees for the intermediate and 10-10 sites. Fine for
+simulating where a blink is large and for drawing a recognizable head map; not a
+digitized montage.
+
+### A caveat about the gradient artifact
+
+Its amplitude varies strongly across the head by design — the paper varies it
+from 0 to 7000 µV peak-to-peak between channels — and here it scales with arc
+angle from the vertex, so Cz sees the least and the temporal sites the most.
+During scanning that swamps everything else, including a deliberately bad
+channel. Inspect bad channels in the pre-scan window, after gradient correction,
+or with `--no-gradient`.
 
 ## What comes from the paper and what does not
 
@@ -122,6 +195,11 @@ tool invented.
 - `SNR = std(EEG) / std(EEG - EEG_corrected)`, and the evaluation bands.
 
 **EVA's own, not the paper's:**
+
+- Everything under "For class demos" above: blinks, eye movements, bad channels,
+  mains noise, the electrode montage, and the pre/post-scan windows. All are off
+  by default, so the benchmark numbers are unaffected by their existence.
+- Gradient amplitude scaling with electrode position rather than channel index.
 
 - The *shape* of the gradient waveform. The paper used a template measured on
   their 3T Bruker; this builds one as the time derivative of a modelled
@@ -177,15 +255,34 @@ Any method scoring meaningfully above that ceiling is doing something smarter
 than a global average — and any method well below it on locked-clock data has a
 problem. `selftest` pins this.
 
+## A known limitation of the file format
+
+`eva-simulate selftest` reports one check as KNOWN rather than PASS: TR marker
+spacing. MFF stores event times as a datetime, and `MFFWriter` formats them with
+`DateFormatter`, which resolves only milliseconds — at 1024 Hz a sample is
+0.977 ms, so marker sample indices cannot survive the round trip and come back
+displaced by up to half a millisecond. EVA's gradient stage tolerates one sample
+of deviation from the median and refuses to correct beyond it, so a generated
+recording can be rejected with "TRs are not evenly spaced".
+
+This is a writer limitation rather than a modelling one, it affects any EVA
+export carrying events, and it cannot be worked around from this side — a
+0.977 ms grid is not representable on a 1 ms one. The diagnosis and the verified
+fix are in `TODO_Aug21.md`. Meanwhile `--clock-offset 0` produces markers that
+pass, at the cost of an unrealistically stationary gradient artifact.
+
 ## Self-test
 
 ```sh
 Tools/EVASimulate/.build/eva-simulate selftest
 ```
 
-Three checks, each on the model rather than on any EVA code: that locked clocks
-put template subtraction exactly on the sqrt(N) ceiling; that the paper's
-152 µs/s drift pushes it far below that; and that QRS jitter penalizes correction
-which relies on beat timing. Run it after touching anything in the model — a
+Ten checks, each on the model rather than on any EVA code: that locked clocks put
+template subtraction exactly on the sqrt(N) ceiling; that the paper's 152 µs/s
+drift pushes it far below that; that QRS jitter penalizes correction which relies
+on beat timing; that every injected waveform starts and ends at baseline rather
+than injecting a step at each event; that the scanner window is respected while
+the BCG carries on through it; and that a blink is frontally maximal. Run it
+after touching anything in the model — a
 harness that silently stops reproducing the phenomenon it exists to study is
 worse than no harness, because everything it emits still looks like evidence.

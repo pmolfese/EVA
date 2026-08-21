@@ -54,6 +54,13 @@ nav:
       - Processing Concepts: reference/processing-concepts.md
       - Troubleshooting: reference/troubleshooting.md
       - Glossary: reference/glossary.md
+  - Command-Line Tools:
+      - Tools Overview: tools/index.md
+      - EVA Simulate: tools/eva-simulate.md
+      - EVA BIDS: tools/eva-bids.md
+      - EVA Helper: tools/eva-helper.md
+      - MFF Timing Tool: tools/mff-timing-tool.md
+      - Maintenance Scripts: tools/maintenance-scripts.md
   - Contributor Notes:
       - Writing With An LLM: contributor-guide/llm-docs-workflow.md
       - Documentation Maintenance: contributor-guide/documentation-maintenance.md

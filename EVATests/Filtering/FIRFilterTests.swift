@@ -154,6 +154,13 @@ struct FIRFilterTests {
         #expect(EEGSignalFilter.resolvedFamily(
             .auto, edge: .highPass, cutoff: 2.0,
             crossoverHz: EEGSignalFilter.defaultFIRCrossoverHz) == .fir)
+        // Historical EVA excludes the exact boundary; Net Station includes it.
+        #expect(EEGSignalFilter.resolvedFamily(
+            .auto, edge: .highPass, cutoff: 1.0,
+            crossoverHz: 1.0, crossoverRule: .below) == .fir)
+        #expect(EEGSignalFilter.resolvedFamily(
+            .auto, edge: .highPass, cutoff: 1.0,
+            crossoverHz: 1.0, crossoverRule: .through) == .iir)
         // Low-pass is always FIR under auto.
         #expect(EEGSignalFilter.resolvedFamily(
             .auto, edge: .lowPass, cutoff: 30,

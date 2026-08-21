@@ -276,7 +276,7 @@ extension WaveformView {
             selectedChannelIndices: artifactTemplateSelectedChannels(in: signal),
             comparisonChannelIndices: Array(signal.data.indices),
             exemplarRange: range,
-            matchThreshold: template.threshold,
+            matchThreshold: min(max(template.threshold, 0.30), 0.98),
             windowSizeSeconds: max(template.windowSeconds, 0.01),
             downsampleRate: min(max(template.downsampleRate, 20), signal.samplingRate),
             mergeWindowSeconds: max(template.mergeWindowSeconds, 0.01),

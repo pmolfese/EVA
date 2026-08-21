@@ -158,7 +158,7 @@ extension WaveformView {
 
                         EEGLAB's convention is FIR: `pop_eegfiltnew` designs a linear-phase FIR and the EEGLAB ICA guidance assumes it. MNE-Python likewise defaults to FIR for its `filter()` used ahead of ICA.
 
-                        EVA applies every filter zero-phase (forward + backward, `filtfilt`), so the usual reason to prefer FIR — constant group delay — does not apply here: neither family shifts the data in time. What differs is the transition band and passband ripple.
+                        ICA fit filters use EVA's historical zero-phase application (forward + backward, `filtfilt`), so neither family shifts the ICA fit copy in time. The Filter popover separately offers one-pass and causal FIR application modes for the recording filter.
 
                         Practical guidance:
 

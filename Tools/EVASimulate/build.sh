@@ -24,7 +24,11 @@ swiftc -O \
   -framework Accelerate \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationConfig.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SignalSynthesis.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/Montage.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/EEGGenerator.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/OcularArtifactModel.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/ChannelDefectModel.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/ImpedanceModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/GradientArtifactModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/BCGArtifactModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SNRMetrics.swift" \

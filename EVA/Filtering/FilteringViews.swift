@@ -24,11 +24,17 @@ extension WaveformView {
 
         // Which edges are FIR under the current family, so the IIR-only slope
         // pickers can be disabled where they don't apply.
-        let highPassIsFIR = filter.filterFamily == .fir
-            || (filter.filterFamily == .auto && (filter.highPassCutoff ?? 0) >= filter.firCrossoverHz)
+        let highPassIsFIR = (filter.highPassCutoff.map {
+            EEGSignalFilter.resolvedFamily(
+                filter.filterFamily, edge: .highPass, cutoff: $0,
+                crossoverHz: filter.firCrossoverHz,
+                crossoverRule: filter.firCrossoverRule
+            ) == .fir
+        }) ?? (filter.filterFamily == .fir)
         let lowPassIsFIR = filter.filterFamily != .iir
         let hasIIREdge = filter.filterFamily != .fir
         let hasFIREdge = filter.filterFamily != .iir
+            || (lineNoiseMode == .notch && filter.notchUsesFIR)
 
         return VStack(alignment: .leading, spacing: 14) {
             Text("Filter")
@@ -43,17 +49,32 @@ extension WaveformView {
 
                         FIR — linear-phase finite impulse response with a Hamming or Kaiser window. Apply it forward+backward, once with delay compensation, or causally forward-only.
 
-                        Auto — Net Station-style hybrid: IIR high-pass below the crossover (where an FIR kernel would be impractically long) and FIR everywhere else.
+                        Auto — Net Station-style hybrid: IIR high-pass on the selected side of the crossover (where an FIR kernel would be impractically long) and FIR everywhere else.
                         """)
                     Spacer()
                 }
-                Picker("Filter Type", selection: $filter.filterFamily) {
-                    ForEach(FilterFamily.allCases) { family in
-                        Text(family.label).tag(family)
+                HStack(spacing: 8) {
+                    Picker("Filter Type", selection: $filter.filterFamily) {
+                        ForEach(FilterFamily.allCases) { family in
+                            Text(family.label).tag(family)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    Menu {
+                        ForEach(FilterApproximationPreset.allCases) { preset in
+                            Button(preset.label) {
+                                filter.applyApproximation(preset)
+                            }
+                        }
+                    } label: {
+                        Text("Approximate…")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Configure filter mechanics like another EEG package. Passband cutoffs and line-noise/notch settings are preserved.")
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
 
                 if hasIIREdge {
                     HStack {
@@ -140,11 +161,18 @@ extension WaveformView {
                     .help("Two pass is zero-phase and squares the magnitude response. Delay-compensated is one pass with its fixed linear-phase delay removed. Forward-only is causal and retains the group delay.")
                 }
 
-                if filter.filterFamily != .iir {
+                if hasFIREdge {
                     HStack {
                         if filter.filterFamily == .auto {
-                            Text("IIR HP below")
+                            Text("IIR HP")
                                 .font(.caption)
+                            Picker("Crossover rule", selection: $filter.firCrossoverRule) {
+                                ForEach(AutoCrossoverRule.allCases) { rule in
+                                    Text(rule.label).tag(rule)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 86)
                             TextField("Hz", value: $filter.firCrossoverHz, format: .number.precision(.fractionLength(2)))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 60)
@@ -235,17 +263,17 @@ extension WaveformView {
                     }
                 }
 
-                // FIR notch is only meaningful when the FIR family is selected;
-                // it is off by default because it is far more expensive than the
+                // Notch design remains independent of the passband preset. FIR
+                // is off by default because it is much more expensive than the
                 // single IIR biquad.
-                if lineNoiseMode == .notch, filter.filterFamily == .fir {
+                if lineNoiseMode == .notch {
                     HStack(spacing: 4) {
                         Toggle("Apply notch as FIR", isOn: $filter.notchUsesFIR)
                             .font(.caption)
                         InfoPopoverButton(title: "FIR Notch", message: """
                             Applies the line-noise notch as a linear-phase FIR band-stop instead of the default IIR biquad.
 
-                            This is computationally expensive: a narrow FIR notch needs hundreds to thousands of taps and runs a full zero-phase (forward+backward) convolution per channel.
+                            This is computationally expensive: a narrow FIR notch needs hundreds to thousands of taps and uses the FIR application selected above.
 
                             Prefer the IIR notch unless you specifically need linear phase or an all-FIR chain.
                             """)

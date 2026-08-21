@@ -85,14 +85,14 @@ nonisolated enum BCGArtifactModel {
                 template.add(
                     into: &channels[channel],
                     outputRate: config.samplingRate,
-                    startSeconds: beat + latencies[channel],
+                    eventSeconds: beat + latencies[channel],
                     scale: amplitude * scales[channel]
                 )
             }
             template.add(
                 into: &mean,
                 outputRate: config.samplingRate,
-                startSeconds: beat,
+                eventSeconds: beat,
                 scale: amplitude
             )
         }
@@ -160,7 +160,11 @@ nonisolated enum BCGArtifactModel {
     /// the whole disturbance inside ~600 ms, which is where a real BCG lives.
     static func waveformTemplate(config: SimulationConfig) -> HighRateTemplate {
         let rate = config.artifactRate
-        let count = max(8, Int((config.bcgWaveformSeconds * rate).rounded()))
+        // The first lobe is centred 30 ms after the beat with a 20 ms width, so
+        // the window has to open ~4 sigma before that or the waveform starts
+        // partway up its own leading edge and every beat injects a step.
+        let leadIn = 0.06
+        let count = max(8, Int(((config.bcgWaveformSeconds + leadIn) * rate).rounded()))
         var waveform = [Double](repeating: 0, count: count)
 
         let lobes: [(center: Double, sigma: Double, amplitude: Double)] = [
@@ -170,7 +174,7 @@ nonisolated enum BCGArtifactModel {
             (0.380, 0.060, -0.35)
         ]
         for index in 0..<count {
-            let t = Double(index) / rate
+            let t = Double(index) / rate - leadIn
             var value = 0.0
             for lobe in lobes {
                 let z = (t - lobe.center) / lobe.sigma
@@ -180,7 +184,7 @@ nonisolated enum BCGArtifactModel {
         }
 
         GradientArtifactModel.normalizeToUnitPeakToPeak(&waveform)
-        return HighRateTemplate(samples: waveform, rate: rate)
+        return HighRateTemplate(samples: waveform, rate: rate, leadInSeconds: leadIn)
     }
 
     // MARK: - Auxiliary reference channels
@@ -191,37 +195,53 @@ nonisolated enum BCGArtifactModel {
     static func ecgChannel(beats: [Double], config: SimulationConfig) -> [Double] {
         var channel = [Double](repeating: 0, count: config.sampleCount)
         let rate = config.artifactRate
-        let count = max(8, Int((0.6 * rate).rounded()))
-        var beatWaveform = [Double](repeating: 0, count: count)
 
-        // P, Q, R, S, T — offsets relative to the start of the modelled complex,
-        // whose R peak sits 0.2 s in so the P wave has room to precede it.
-        let lobes: [(center: Double, sigma: Double, amplitude: Double)] = [
-            (0.040, 0.020, 0.15),
-            (0.180, 0.006, -0.10),
-            (0.200, 0.008, 1.00),
-            (0.220, 0.008, -0.25),
-            (0.420, 0.040, 0.30)
+        // Lobes are defined relative to the R peak, and the window is sized to
+        // contain all of them with margin: 5 sigma in front of the P wave and
+        // past the T wave. Sizing it any tighter truncates a Gaussian mid-slope,
+        // and since every beat reuses this template, that truncation becomes a
+        // step discontinuity repeating at the heart rate — small in amplitude,
+        // but broadband, obvious once filtered, and wrong.
+        let lobes: [(offset: Double, sigma: Double, amplitude: Double)] = [
+            (-0.160, 0.020, 0.15),   // P
+            (-0.020, 0.006, -0.10),  // Q
+            (0.000, 0.008, 1.00),    // R
+            (0.020, 0.008, -0.25),   // S
+            (0.220, 0.040, 0.30)     // T
         ]
+        let leadIn = 0.28
+        let tailOut = 0.42
+        let count = max(8, Int(((leadIn + tailOut) * rate).rounded()))
+        var beatWaveform = [Double](repeating: 0, count: count)
         for index in 0..<count {
-            let t = Double(index) / rate
+            let t = Double(index) / rate - leadIn
             var value = 0.0
             for lobe in lobes {
-                let z = (t - lobe.center) / lobe.sigma
+                let z = (t - lobe.offset) / lobe.sigma
                 value += lobe.amplitude * exp(-0.5 * z * z)
             }
             beatWaveform[index] = value
         }
-        let template = HighRateTemplate(samples: beatWaveform, rate: rate)
+        let template = HighRateTemplate(samples: beatWaveform, rate: rate, leadInSeconds: leadIn)
 
         for beat in beats {
-            // Shift back by the 0.2 s lead-in so the R peak lands on the beat.
             template.add(
                 into: &channel,
                 outputRate: config.samplingRate,
-                startSeconds: beat - 0.2,
-                scale: 1000
+                eventSeconds: beat,
+                scale: config.ecgAmplitudeMicrovolts
             )
+        }
+
+        // Slow baseline wander, as respiration and electrode drift produce. A
+        // dead-flat isoelectric line between beats reads as synthetic at a
+        // glance, and a class demo of high-pass filtering needs something for
+        // the filter to actually remove.
+        let wanderAmplitude = config.ecgAmplitudeMicrovolts * 0.03
+        for index in channel.indices {
+            let t = Double(index) / config.samplingRate
+            channel[index] += wanderAmplitude
+                * (sin(2 * Double.pi * 0.23 * t) + 0.5 * sin(2 * Double.pi * 0.07 * t + 1.1))
         }
         return channel
     }

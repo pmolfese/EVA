@@ -52,6 +52,7 @@ nonisolated enum GradientArtifactModel {
     static func inject(
         into channels: inout [[Double]],
         config: SimulationConfig,
+        montage: Montage,
         template externalTemplate: HighRateTemplate?
     ) -> GradientInjection {
         let template = externalTemplate ?? syntheticTemplate(config: config)
@@ -65,7 +66,10 @@ nonisolated enum GradientArtifactModel {
         var quantizedOnsets: [Double] = []
         var sliceOnsets: [Double] = []
 
-        let amplitudes = channelAmplitudes(config: config)
+        let amplitudes = channelAmplitudes(config: config, montage: montage)
+
+        let scanStart = max(0, config.preScanSeconds)
+        let scanEnd = max(scanStart, config.durationSeconds - max(0, config.postScanSeconds))
 
         for volume in 0..<config.volumeCount {
             // The scanner's clock says the volume starts here; the EEG's clock,
@@ -73,8 +77,11 @@ nonisolated enum GradientArtifactModel {
             // with every volume. That accumulating disagreement is the whole
             // point — it is what stops successive artifacts from landing on the
             // same sub-sample phase.
-            let onset = Double(volume) * config.repetitionTimeSeconds * drift
-            guard onset < config.durationSeconds else { break }
+            let onset = scanStart + Double(volume) * config.repetitionTimeSeconds * drift
+            // A volume that would run past the end of scanning is not acquired
+            // at all — the sequence stops between volumes, not mid-readout.
+            guard onset + config.repetitionTimeSeconds <= scanEnd || volume == 0,
+                  onset < scanEnd else { break }
             volumeOnsets.append(onset)
             quantizedOnsets.append(
                 (onset * config.samplingRate).rounded(.down) / config.samplingRate
@@ -82,7 +89,7 @@ nonisolated enum GradientArtifactModel {
 
             for slice in 0..<config.slicesPerVolume {
                 let sliceOnset = onset + Double(slice) * sliceInterval * drift
-                guard sliceOnset < config.durationSeconds else { break }
+                guard sliceOnset < scanEnd, sliceOnset < config.durationSeconds else { break }
                 sliceOnsets.append(sliceOnset)
 
                 let modulation = 1 + config.slowModulationFraction * sin(modulationOmega * sliceOnset)
@@ -90,7 +97,7 @@ nonisolated enum GradientArtifactModel {
                     antiAliased.add(
                         into: &channels[channel],
                         outputRate: config.samplingRate,
-                        startSeconds: sliceOnset,
+                        eventSeconds: sliceOnset,
                         scale: amplitudes[channel] * modulation
                     )
                 }
@@ -108,12 +115,37 @@ nonisolated enum GradientArtifactModel {
     /// Paper: artifact amplitude varies between channels, "from 0 up to
     /// 7000 µV peak-to-peak, to model observed differences in experimental
     /// data". Spread linearly across the montage.
-    static func channelAmplitudes(config: SimulationConfig) -> [Double] {
+    static func channelAmplitudes(config: SimulationConfig, montage: Montage) -> [Double] {
         let count = max(1, config.channelCount)
         guard count > 1 else { return [config.gradientAmplitudeMaxMicrovolts] }
         let span = config.gradientAmplitudeMaxMicrovolts - config.gradientAmplitudeMinMicrovolts
-        return (0..<count).map { index in
-            config.gradientAmplitudeMinMicrovolts + span * Double(index) / Double(count - 1)
+
+        // Amplitude follows electrode *position*, not channel number.
+        //
+        // Spreading it linearly across the channel index — which is what this
+        // did before there was a montage — turns into "the artifact grows
+        // steadily from Fp1 to O2" once the channels are a real 10-20 set, since
+        // the montage is ordered front to back. That is not a property of any
+        // scanner, and with a 14x range across the head it buries everything
+        // else: a deliberately broken channel becomes invisible next to its
+        // neighbours' artifact.
+        //
+        // The induced voltage depends on the area of the loop formed by the lead
+        // and the head, so peripheral electrodes with longer leads pick up more
+        // than ones near the vertex. Scaling with arc angle from the vertex
+        // captures that, and leaves the variation uncorrelated with channel
+        // order.
+        guard montage.electrodes.count >= count else {
+            return (0..<count).map { index in
+                config.gradientAmplitudeMinMicrovolts + span * Double(index) / Double(count - 1)
+            }
+        }
+        let thetas = montage.electrodes.prefix(count).map(\.thetaDegrees)
+        let minimum = thetas.min() ?? 0
+        let maximum = thetas.max() ?? 90
+        let range = max(1e-9, maximum - minimum)
+        return thetas.map { theta in
+            config.gradientAmplitudeMinMicrovolts + span * (theta - minimum) / range
         }
     }
 
@@ -139,7 +171,11 @@ nonisolated enum GradientArtifactModel {
         // 7000` has to mean 7000 µV peak-to-peak in the file, since that is what
         // the paper's figure is measuring.
         normalizeToUnitPeakToPeak(&filtered)
-        return HighRateTemplate(samples: filtered, rate: template.rate)
+        return HighRateTemplate(
+            samples: filtered,
+            rate: template.rate,
+            leadInSeconds: template.leadInSeconds
+        )
     }
 
     // MARK: - Synthetic waveform
@@ -148,7 +184,13 @@ nonisolated enum GradientArtifactModel {
     /// followed by an EPI readout train, normalized to unit peak-to-peak.
     static func syntheticTemplate(config: SimulationConfig) -> HighRateTemplate {
         let rate = config.artifactRate
-        let count = max(8, Int((config.sliceArtifactSeconds * rate).rounded()))
+        // A millisecond of quiet before the slice begins. Partly so the window
+        // opens at a true baseline — the normalization below reads the baseline
+        // off the ends, and cannot do that if the waveform is already ramping at
+        // sample zero — and partly because it is what a real artifact epoch
+        // looks like, the trigger arriving just before the gradients move.
+        let leadIn = 0.001
+        let count = max(8, Int(((config.sliceArtifactSeconds + leadIn) * rate).rounded()))
         var gradient = [Double](repeating: 0, count: count)
 
         let ramp = config.gradientRampSeconds
@@ -157,7 +199,7 @@ nonisolated enum GradientArtifactModel {
         addTrapezoid(
             into: &gradient,
             rate: rate,
-            startSeconds: 0,
+            startSeconds: leadIn,
             rampSeconds: ramp * 2,
             plateauSeconds: 0.001,
             amplitude: 1.0
@@ -166,8 +208,8 @@ nonisolated enum GradientArtifactModel {
         // Readout: alternating trapezoids at the readout frequency, filling most
         // of the slice's artifact window.
         let halfPeriod = 1 / (2 * max(config.gradientReadoutHz, 1))
-        let readoutStart = 0.004
-        let readoutEnd = config.sliceArtifactSeconds * 0.95
+        let readoutStart = leadIn + 0.004
+        let readoutEnd = leadIn + config.sliceArtifactSeconds * 0.95
         var t = readoutStart
         var polarity = 1.0
         while t + halfPeriod < readoutEnd {
@@ -190,7 +232,7 @@ nonisolated enum GradientArtifactModel {
         }
 
         normalizeToUnitPeakToPeak(&waveform)
-        return HighRateTemplate(samples: waveform, rate: rate)
+        return HighRateTemplate(samples: waveform, rate: rate, leadInSeconds: leadIn)
     }
 
     private static func addTrapezoid(
@@ -222,12 +264,31 @@ nonisolated enum GradientArtifactModel {
         }
     }
 
+    /// Scales a waveform to unit peak-to-peak while keeping its *baseline* at
+    /// zero.
+    ///
+    /// The baseline is taken from the ends of the window, not from the mean of
+    /// the whole waveform. Centering on the mean is the obvious thing to write
+    /// and it is wrong here: a waveform that sits at zero except for a few lobes
+    /// has a non-zero mean, so subtracting it pushes the quiet parts of the
+    /// template *off* zero. Every event then injects a small step that lasts as
+    /// long as the template — a square wave at the heart rate, in the BCG's
+    /// case, at about 5% of the artifact amplitude.
+    ///
+    /// Using the edges instead removes a genuine DC offset from a measured
+    /// template (which is worth removing) without inventing one in a synthetic
+    /// template that was already correct.
     static func normalizeToUnitPeakToPeak(_ x: inout [Double]) {
         guard let minimum = x.min(), let maximum = x.max() else { return }
         let span = maximum - minimum
         guard span > 1e-12 else { return }
-        let mean = x.reduce(0, +) / Double(x.count)
-        for i in x.indices { x[i] = (x[i] - mean) / span }
+
+        let edgeCount = max(1, x.count / 100)
+        let leading = x.prefix(edgeCount).reduce(0, +) / Double(edgeCount)
+        let trailing = x.suffix(edgeCount).reduce(0, +) / Double(edgeCount)
+        let baseline = (leading + trailing) / 2
+
+        for i in x.indices { x[i] = (x[i] - baseline) / span }
     }
 
     // MARK: - Measured templates

@@ -96,14 +96,13 @@ enum FilterSlope: Int, CaseIterable, Identifiable, Codable, Sendable {
 
 /// Filter implementation family for a given cutoff edge.
 ///
-/// - `iir`: zero-phase Butterworth (the historical behavior). Cheap and works
-///   down to arbitrarily low high-pass cutoffs.
-/// - `fir`: zero-phase linear-phase FIR (`filtfilt` over a symmetric kernel).
-///   Constant group delay across frequency, at the cost of a long kernel for
-///   low cutoffs.
-/// - `auto`: the Net Station (EGI) strategy — use IIR for a high-pass below the
-///   crossover (where an FIR kernel would be impractically long) and FIR for
-///   everything else. See `resolvedFamily(forEdge:cutoff:crossoverHz:)`.
+/// - `iir`: zero-phase recursive filtering. Butterworth is the historical
+///   design; elliptic is available for a steeper transition.
+/// - `fir`: linear-phase FIR with a selectable window and application. A causal
+///   forward pass retains constant group delay; the other modes remove it.
+/// - `auto`: the Net Station (EGI) strategy — use IIR on the low-frequency side
+///   of the crossover (where an FIR kernel would be impractically long) and FIR
+///   elsewhere. See `resolvedFamily(forEdge:cutoff:crossoverHz:)`.
 enum FilterFamily: String, CaseIterable, Identifiable, Codable, Sendable {
     case iir
     case fir
@@ -167,6 +166,22 @@ enum FIRApplication: String, CaseIterable, Identifiable, Codable, Sendable {
 /// Which cutoff edge a family is being resolved for.
 enum FilterEdge: Sendable { case highPass, lowPass }
 
+/// Whether the Auto family's IIR side stops before the crossover or includes
+/// it. Historical EVA behavior is `.below`; Net Station uses `.through` at its
+/// 1-Hz boundary.
+enum AutoCrossoverRule: String, CaseIterable, Identifiable, Codable, Sendable {
+    case below
+    case through
+
+    nonisolated var id: String { rawValue }
+    nonisolated var label: String {
+        switch self {
+        case .below: return "below"
+        case .through: return "at or below"
+        }
+    }
+}
+
 struct EEGSignalFilter {
     /// Default crossover (Hz) below which an `.auto` high-pass stays IIR.
     nonisolated static let defaultFIRCrossoverHz = 1.0
@@ -177,22 +192,29 @@ struct EEGSignalFilter {
     nonisolated static let defaultEllipticStopbandAttenuationDB = 60.0
     nonisolated static let defaultKaiserAttenuationDB = 60.0
 
-    /// Resolves `.auto` to a concrete `.iir` / `.fir` for one edge. IIR wins for
-    /// a high-pass below `crossoverHz`; FIR is used otherwise.
+    /// Resolves `.auto` to a concrete `.iir` / `.fir` for one edge using the
+    /// selected crossover boundary rule.
     nonisolated static func resolvedFamily(
         _ family: FilterFamily,
         edge: FilterEdge,
         cutoff: Double,
-        crossoverHz: Double
+        crossoverHz: Double,
+        crossoverRule: AutoCrossoverRule = .below
     ) -> FilterFamily {
         switch family {
         case .iir, .fir:
             return family
         case .auto:
-            if edge == .highPass, cutoff < crossoverHz {
-                return .iir
+            switch edge {
+            case .highPass:
+                let usesIIR = switch crossoverRule {
+                case .below: cutoff < crossoverHz
+                case .through: cutoff <= crossoverHz
+                }
+                return usesIIR ? .iir : .fir
+            case .lowPass:
+                return .fir
             }
-            return .fir
         }
     }
 
@@ -212,6 +234,7 @@ struct EEGSignalFilter {
         firKaiserAttenuationDB: Double = defaultKaiserAttenuationDB,
         firApplication: FIRApplication = .zeroPhase,
         firCrossoverHz: Double = defaultFIRCrossoverHz,
+        firCrossoverRule: AutoCrossoverRule = .below,
         firTransitionHz: Double? = nil,
         notch60HzEnabled: Bool = false,
         notchFrequency: Double = 60,
@@ -244,7 +267,10 @@ struct EEGSignalFilter {
         var highPassStages: [BiquadCoefficients] = []
         var highPassFIRKernel: [Double] = []
         if let lowCutoff {
-            switch resolvedFamily(highPassFamily, edge: .highPass, cutoff: lowCutoff, crossoverHz: firCrossoverHz) {
+            switch resolvedFamily(
+                highPassFamily, edge: .highPass, cutoff: lowCutoff,
+                crossoverHz: firCrossoverHz, crossoverRule: firCrossoverRule
+            ) {
             case .fir:
                 highPassFIRKernel = firKernel(
                     cutoff: lowCutoff, samplingRate: samplingRate, edge: .highPass,
@@ -263,7 +289,10 @@ struct EEGSignalFilter {
         var lowPassStages: [BiquadCoefficients] = []
         var lowPassFIRKernel: [Double] = []
         if let highCutoff {
-            switch resolvedFamily(lowPassFamily, edge: .lowPass, cutoff: highCutoff, crossoverHz: firCrossoverHz) {
+            switch resolvedFamily(
+                lowPassFamily, edge: .lowPass, cutoff: highCutoff,
+                crossoverHz: firCrossoverHz, crossoverRule: firCrossoverRule
+            ) {
             case .fir:
                 lowPassFIRKernel = firKernel(
                     cutoff: highCutoff, samplingRate: samplingRate, edge: .lowPass,
@@ -318,6 +347,11 @@ struct EEGSignalFilter {
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
         nonisolated(unsafe) var firstError: Error?
+        let designedHighPassStages = highPassStages
+        let designedLowPassStages = lowPassStages
+        let designedHighPassFIRKernel = highPassFIRKernel
+        let designedLowPassFIRKernel = lowPassFIRKernel
+        let designedNotchFIRKernel = notchFIRKernel
 
         var filteredChannels = Array(repeating: [Float](), count: channels.count)
         filteredChannels.withUnsafeMutableBufferPointer { out in
@@ -336,13 +370,13 @@ struct EEGSignalFilter {
                         channelIndex: index,
                         requestedPrecision: precision,
                         automaticPrecision: automaticPrecision,
-                        highPassStages: highPassStages,
-                        lowPassStages: lowPassStages,
-                        highPassFIRKernel: highPassFIRKernel,
-                        lowPassFIRKernel: lowPassFIRKernel,
+                        highPassStages: designedHighPassStages,
+                        lowPassStages: designedLowPassStages,
+                        highPassFIRKernel: designedHighPassFIRKernel,
+                        lowPassFIRKernel: designedLowPassFIRKernel,
                         notchFilter: notchFilter,
                         notchEnabled: iirNotchEnabled,
-                        notchFIRKernel: notchFIRKernel,
+                        notchFIRKernel: designedNotchFIRKernel,
                         firApplication: firApplication,
                         paddingCount: paddingCount
                     )
@@ -591,8 +625,8 @@ struct EEGSignalFilter {
         for stage in lowPassStages {
             result = zeroPhaseFilter(result, coefficients: stage, precision: precision, paddingCount: paddingCount)
         }
-        // Linear-phase FIR edges are applied zero-phase in Double, then written
-        // back to Float. `filtfiltFIR` handles its own reflection padding.
+        // Linear-phase FIR edges use the selected application in Double, then
+        // are written back to Float. Each application owns its edge handling.
         if !highPassFIRKernel.isEmpty {
             result = applyFIRKernel(highPassFIRKernel, to: result, application: firApplication)
         }
@@ -610,10 +644,9 @@ struct EEGSignalFilter {
         return result
     }
 
-    /// Applies a symmetric (linear-phase) FIR kernel zero-phase to a Float
-    /// channel, bridging through Double for the `DSP.filtfiltFIR` core. The
-    /// Float↔Double conversions go through Accelerate (vDSP) rather than scalar
-    /// `map`, so the whole per-channel path stays vectorized.
+    /// Applies a symmetric (linear-phase) FIR kernel to a Float channel using
+    /// the selected phase/application mode. Float↔Double conversions go through
+    /// Accelerate (vDSP) rather than scalar `map`.
     private nonisolated static func applyFIRKernel(
         _ kernel: [Double],
         to samples: [Float],
@@ -668,8 +701,8 @@ struct EEGSignalFilter {
         return taps
     }
 
-    /// Designs a zero-phase-ready linear-phase FIR kernel (odd length, Type-I)
-    /// for one edge using the windowed-sinc (Hamming) method.
+    /// Designs a linear-phase FIR kernel (odd length, Type-I) for one edge using
+    /// the selected windowed-sinc method.
     ///
     /// Windowed-sinc is O(taps) to design, unlike a least-squares (`firls`)
     /// solve, which builds and factors a dense (taps/2)³ system on a single
@@ -1070,7 +1103,11 @@ private struct BiquadCoefficients {
         case .butterworth:
             return butterworth(cutoff: cutoff, samplingRate: samplingRate, poles: poles, type: type)
         case .elliptic:
-            let edge: EllipticFilterDesign.Edge = type == .lowPass ? .lowPass : .highPass
+            let edge: EllipticFilterDesign.Edge
+            switch type {
+            case .lowPass: edge = .lowPass
+            case .highPass: edge = .highPass
+            }
             return EllipticFilterDesign.sections(
                 cutoff: cutoff,
                 samplingRate: samplingRate,

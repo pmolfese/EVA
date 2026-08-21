@@ -14,7 +14,7 @@ import Foundation
 /// low-pass and high-pass edges. Keeping the output as second-order sections
 /// avoids the numerical conditioning problems of a single high-order transfer
 /// function.
-enum EllipticFilterDesign {
+nonisolated enum EllipticFilterDesign {
     struct Section: Sendable {
         var b0: Double
         var b1: Double
@@ -246,7 +246,7 @@ enum EllipticFilterDesign {
     }
 }
 
-private struct Complex: Sendable {
+private nonisolated struct Complex: Sendable {
     var real: Double
     var imaginary: Double
 

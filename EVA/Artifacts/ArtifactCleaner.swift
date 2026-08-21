@@ -64,12 +64,13 @@ enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable 
     /// hits closer than that are almost certainly the same beat detected
     /// twice. This errs on the generous side (240 BPM) instead of a typical
     /// resting rate, to avoid ever swallowing a genuine second beat during
-    /// tachycardia. Ocular/Other have no such floor, so they keep a
-    /// conservative generic default.
+    /// tachycardia. Ocular artifacts use a slightly wider window so dense
+    /// waveform scans collapse multiple nearby hits from the same blink.
+    /// Other artifacts keep the conservative generic default.
     var defaultMergeWindowSeconds: Double {
         switch self {
         case .bcg, .ecg: return 0.25
-        case .ocular: return 0.20
+        case .ocular: return 0.35
         case .other: return 0.25
         }
     }

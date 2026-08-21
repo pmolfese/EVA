@@ -2029,16 +2029,6 @@ extension WaveformView {
         }
     }
 
-    func clearEpochs() {
-        // Task handles stay with the view — cancelling one is lifecycle, not
-        // domain state, so it does not belong in the shared toggle.
-        snrTask?.cancel()
-        snrTask = nil
-        PipelineStageToggles.clearEpochs(
-            epoching: epoching, segHealth: segHealth, store: recordingStore
-        )
-    }
-
     func epochCategorySummaries() -> [EpochCategorySummary] {
         let grouped = Dictionary(grouping: epoching.epochSegments, by: \.category)
         return grouped.map { category, segments in

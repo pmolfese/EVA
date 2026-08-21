@@ -127,35 +127,4 @@ enum PipelineStageToggles {
         return true
     }
 
-    /// Undo Segmentation: drops the epochs and everything derived from them.
-    ///
-    /// The epoch teardown itself delegates to `PipelineInvalidation`, which is
-    /// the fix for a real drift this extraction exposed. The old inline version
-    /// re-listed ~14 of the same assignments by hand and had already fallen out
-    /// of step — it never cleared `showsOverlaidCategories`, which every other
-    /// epoch invalidation does. Latent rather than visible (the panel is also
-    /// gated on `isAveraged`), but it meant re-segmenting after an undo could
-    /// bring back a panel the user had not asked for. Exactly the hazard
-    /// `PipelineInvalidation` was extracted to remove, reappearing because this
-    /// one copy lived on the view where the shared definition could not reach it.
-    ///
-    /// The caller keeps ownership of the SNR `Task` handle: task handles are view
-    /// lifecycle, not domain state, and cancelling one is not this function's job.
-    static func clearEpochs(
-        epoching: EpochingViewModel,
-        segHealth: SegmentHealthViewModel,
-        store: RecordingStore
-    ) {
-        PipelineInvalidation.epochsAndDerived(
-            epoching: epoching, segHealth: segHealth, selection: store.selection
-        )
-        // Beyond the shared cascade: undoing segmentation also abandons the SNR
-        // results, the chosen conditions, and the scroll position, none of which
-        // an ordinary signal change touches.
-        epoching.isComputingAverageSNR = false
-        epoching.averageSNRByCategory = [:]
-        epoching.statusMessage = nil
-        store.events.selectedEventCodes.removeAll()
-        store.horizontalScrollPosition.scrollTo(x: 0)
-    }
 }

@@ -154,8 +154,45 @@ nonisolated enum SpectralNoise {
 nonisolated struct HighRateTemplate {
     let samples: [Double]
     let rate: Double
+    /// How far into the waveform the event it belongs to actually occurs — the
+    /// R peak of an ECG complex, say, which needs room in front of it for the P
+    /// wave.
+    ///
+    /// A template has to start and end at zero. If a lobe is still non-zero
+    /// where the window ends, every event injects a step discontinuity at that
+    /// edge, which shows up as a square edge repeating at the event rate and
+    /// smears broadband energy through the spectrum. Carrying the lead-in here,
+    /// rather than making each caller subtract it, is what keeps the window big
+    /// enough to contain the whole waveform without shifting where it lands.
+    let leadInSeconds: Double
+
+    init(samples: [Double], rate: Double, leadInSeconds: Double = 0) {
+        self.samples = samples
+        self.rate = rate
+        self.leadInSeconds = leadInSeconds
+    }
 
     var durationSeconds: Double { Double(samples.count) / rate }
+
+    /// Largest absolute value at either end, as a fraction of the peak. A
+    /// well-formed template is ~0 here; `SelfTest` fails the build over it.
+    var edgeDiscontinuity: Double {
+        guard let peak = samples.map(abs).max(), peak > 0,
+              let first = samples.first, let last = samples.last else { return 0 }
+        return max(abs(first), abs(last)) / peak
+    }
+
+    /// Adds this template so that its `leadInSeconds` mark lands on
+    /// `eventSeconds` — i.e. the event lands where the waveform says it does,
+    /// regardless of how much room the window reserves in front of it.
+    func add(
+        into buffer: inout [Double],
+        outputRate: Double,
+        eventSeconds: Double,
+        scale: Double
+    ) {
+        add(into: &buffer, outputRate: outputRate, startSeconds: eventSeconds - leadInSeconds, scale: scale)
+    }
 
     /// Adds this template into `buffer` (sampled at `outputRate`), starting at
     /// continuous time `startSeconds`, scaled by `scale`.

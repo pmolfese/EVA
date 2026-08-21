@@ -125,11 +125,11 @@ extension WaveformView {
         template.definedArtifactID = nil
         template.type = .ocular
         applyDefaultArtifactTemplateIdentity(for: template.type)
-        template.channelScope = .clickedChannel
+        template.channelScope = .ocularChannels
         template.customChannels = "\(clickedChannel + 1)"
-        template.windowSeconds = max(Double(range.upperBound - range.lowerBound + 1) / signal.samplingRate, 0.02)
+        template.windowSeconds = max(Double(range.upperBound - range.lowerBound + 1) / signal.samplingRate, 0.50)
         template.downsampleRate = min(250, signal.samplingRate)
-        template.threshold = 0.70
+        template.threshold = 0.85
         template.mergeWindowSeconds = template.type.defaultMergeWindowSeconds
         template.mergeBehavior = template.type.defaultMergeBehavior
         template.waveformStretchRange = 0
@@ -369,15 +369,9 @@ extension WaveformView {
             GridRow {
                 ArtifactTemplateFieldLabel(
                     title: "Threshold",
-                    help: "Minimum normalized cross-correlation required to count a match. 70% is a permissive starting point; higher values find fewer, more template-like events."
+                    help: "Minimum normalized cross-correlation required to count a match. New ocular templates start at 0.85; raise it to find fewer, more template-like events. Enter a value from 0.30 to 0.98."
                 )
-                HStack {
-                    Slider(value: $template.threshold, in: 0.30...0.98, step: 0.01)
-                    Text("\(Int((template.threshold * 100).rounded()))%")
-                        .font(.caption.monospacedDigit())
-                        .frame(width: 40, alignment: .trailing)
-                }
-                .frame(width: 180)
+                artifactThresholdControl
 
                 ArtifactTemplateFieldLabel(
                     title: "Polarity",
@@ -569,15 +563,9 @@ extension WaveformView {
 
                     ArtifactTemplateFieldLabel(
                         title: "Threshold",
-                        help: "Minimum spatial correlation required to count a scalp-map match."
+                        help: "Minimum spatial correlation required to count a scalp-map match. Enter a value from 0.30 to 0.98."
                     )
-                    HStack {
-                        Slider(value: $template.threshold, in: 0.30...0.98, step: 0.01)
-                        Text("\(Int((template.threshold * 100).rounded()))%")
-                            .font(.caption.monospacedDigit())
-                            .frame(width: 40, alignment: .trailing)
-                    }
-                    .frame(width: 180)
+                    artifactThresholdControl
                 }
 
                 if template.topographyMode == .trajectory {
@@ -688,6 +676,29 @@ extension WaveformView {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    var artifactThresholdControl: some View {
+        HStack(spacing: 8) {
+            Slider(value: artifactThresholdBinding, in: 0.30...0.98, step: 0.01)
+            TextField(
+                "0.85",
+                value: artifactThresholdBinding,
+                format: .number.precision(.fractionLength(2))
+            )
+            .textFieldStyle(.roundedBorder)
+            .multilineTextAlignment(.trailing)
+            .frame(width: 58)
+            .help("Normalized correlation threshold (0.30–0.98).")
+        }
+        .frame(width: 180)
+    }
+
+    var artifactThresholdBinding: Binding<Double> {
+        Binding(
+            get: { min(max(template.threshold, 0.30), 0.98) },
+            set: { template.threshold = min(max($0, 0.30), 0.98) }
+        )
     }
 
     var artifactDefinitionCloseTitle: String {

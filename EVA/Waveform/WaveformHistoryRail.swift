@@ -177,6 +177,77 @@ extension WaveformView {
         }
     }
 
+    // MARK: - Undo Segmentation
+
+    /// The node "Undo Segmentation" moves to: the parent of the first `segment`
+    /// node on the current path, backing up past the `reference` and `baseline`
+    /// steps segmentation emits *ahead* of it (see `currentProcessingScript()`
+    /// — epoch referencing and baseline correction are settings the upcoming
+    /// `segment` consumes, so they are part of the same build and undoing the
+    /// build has to leave them behind too).
+    ///
+    /// `nil` when there is nothing to undo, or when the target cannot honestly
+    /// be reached — see `canUndoSegmentation`.
+    ///
+    /// ## Why undo is navigation and not a teardown
+    ///
+    /// It used to call `PipelineStageToggles.clearEpochs` and let the
+    /// chain-signature observer notice, which produced the opposite of undo.
+    /// `record()` re-derives the script from the live view models and `adopt`s
+    /// it, and the post-teardown script is **not** a prefix of the pre-teardown
+    /// one: PSA's escalation promotes persistently-bad channels to globally bad
+    /// and interpolates them (`EpochingViewModel.escalate`), the teardown does
+    /// not put `store.channels` back, and `ChannelDecisionSteps.inserted` puts
+    /// `markBad`/`interpolateChannels` immediately *before* the first `segment`.
+    /// So the chain forked at `markBad`, `apply` minted a fresh node, and the
+    /// pointer landed on a new tip — undo visibly moving *forward* in the rail,
+    /// leaving one junk branch (with its own snapshot) behind per undo.
+    ///
+    /// Navigating instead is what `EVAHistory`'s header asks for in as many
+    /// words: an undo-shaped action is `stepBack()`, never an appended inverse.
+    /// It also fixes a quieter half of the same bug — restoring the target
+    /// node's snapshot puts the pre-segmentation bad-channel and interpolation
+    /// state back, which the teardown silently left escalated, so undoing
+    /// segmentation no longer leaves you with channels marked bad *by* the
+    /// segmentation you just undid.
+    var undoSegmentationTarget: EVAHistoryNodeID? {
+        let model = recordingStore.processingHistory
+        let path = model.history.currentPath
+        guard let target = EVAHistory.segmentationBuildParent(along: path),
+              let index = path.firstIndex(where: { $0.id == target.id })
+        else { return nil }
+
+        // A node the file arrived with cannot be reached: the steps in
+        // `onDiskPrefix` produced the bytes *before* this session opened them,
+        // so there is no snapshot for any of them but the tip, and re-deriving
+        // is not available either — `reDeriveHistory` replays from
+        // `recording.signal`, which for an already-processed file is the
+        // prefix's *output*, not its input. Refusing is the honest answer; the
+        // menu says so rather than silently doing something else.
+        if !model.onDiskPrefix.isEmpty,
+           index <= model.onDiskPrefix.count,
+           !model.hasSnapshot(for: target.id) {
+            return nil
+        }
+        return target.id
+    }
+
+    var canUndoSegmentation: Bool { undoSegmentationTarget != nil }
+
+    /// Undo Segmentation: navigate to the node the segmentation was built from.
+    ///
+    /// The segment branch is left intact, so stepping forward again is a real
+    /// round trip rather than a rebuild.
+    func undoSegmentation() {
+        guard let target = undoSegmentationTarget else { return }
+        // Task handles are view lifecycle, not domain state — the restore has
+        // no way to cancel an SNR pass still running against the epochs we are
+        // navigating away from.
+        snrTask?.cancel()
+        snrTask = nil
+        requestNavigation(to: target)
+    }
+
     func stepHistoryBack() {
         guard let target = recordingStore.processingHistory.stepBackTarget else { return }
         requestNavigation(to: target)

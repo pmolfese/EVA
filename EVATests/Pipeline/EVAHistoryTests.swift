@@ -427,4 +427,64 @@ struct EVAHistoryTests {
         history.navigate(to: history.rootID)
         #expect(history.currentScript.steps.isEmpty)
     }
+
+    // MARK: - Undo Segmentation target
+
+    /// Undo lands on the node the epochs were built *from*, not on the epoch
+    /// `reference`/`baseline` steps that segmentation emits ahead of `segment`.
+    /// Those are settings the same PSA build consumes, so a pointer resting on
+    /// one describes a state no action ever produced.
+    @Test func segmentationBuildParentSkipsTheStepsFoldedIntoTheBuild() {
+        var history = EVAHistory(recordingKey: "r")
+        history.apply(filterStep())
+        let buildParent = history.currentID
+        history.apply(step(.reference, ["scheme": "average", "domain": "epoch"]))
+        history.apply(step(.baseline))
+        history.apply(step(.segment, ["preMs": "-100"]))
+
+        let target = EVAHistory.segmentationBuildParent(along: history.currentPath)
+        #expect(target?.id == buildParent)
+        #expect(target?.step?.operation == .filter)
+    }
+
+    @Test func segmentationBuildParentIsTheParentWhenNothingIsFoldedIn() {
+        var history = EVAHistory(recordingKey: "r")
+        history.apply(filterStep())
+        let buildParent = history.currentID
+        history.apply(step(.segment))
+
+        #expect(EVAHistory.segmentationBuildParent(along: history.currentPath)?.id == buildParent)
+    }
+
+    /// Segmenting an otherwise-untouched recording undoes to `raw`.
+    @Test func segmentationBuildParentCanBeTheRoot() {
+        var history = EVAHistory(recordingKey: "r")
+        let root = history.rootID
+        history.apply(step(.baseline))
+        history.apply(step(.segment))
+
+        #expect(EVAHistory.segmentationBuildParent(along: history.currentPath)?.id == root)
+    }
+
+    @Test func segmentationBuildParentIsNilWithoutASegment() {
+        var history = EVAHistory(recordingKey: "r")
+        history.apply(filterStep())
+        #expect(EVAHistory.segmentationBuildParent(along: history.currentPath) == nil)
+    }
+
+    /// The channel decisions PSA escalation makes sit *before* `segment`
+    /// (`ChannelDecisionSteps.inserted`), and they are exactly what the old
+    /// teardown-based undo left stranded. Undo must land on them, not behind
+    /// them: they describe the signal at the target node.
+    @Test func segmentationBuildParentKeepsChannelDecisions() {
+        var history = EVAHistory(recordingKey: "r")
+        history.apply(filterStep())
+        history.apply(step(.markBad, ["channels": "12,44"]))
+        let buildParent = history.currentID
+        history.apply(step(.segment))
+
+        let target = EVAHistory.segmentationBuildParent(along: history.currentPath)
+        #expect(target?.id == buildParent)
+        #expect(target?.step?.operation == .markBad)
+    }
 }

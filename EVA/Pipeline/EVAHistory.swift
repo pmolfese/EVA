@@ -210,6 +210,34 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
         return script
     }
 
+    /// The node a segmentation was built *from*: the parent of the first
+    /// `segment` node on `path`, backing up past the `reference` and `baseline`
+    /// steps that segmentation emits ahead of it.
+    ///
+    /// Those two are not separate stages the user can be returned to. Epoch
+    /// referencing happens inside the PSA fold and baseline correction is a flag
+    /// the same build folds in, so `currentProcessingScript()` emits both as
+    /// settings the upcoming `segment` consumes — landing on one of them would
+    /// be a state no single action ever produced. Undo has to clear the whole
+    /// build, which is what backing up past them does.
+    ///
+    /// `nil` when `path` contains no `segment`. Pure and static so the rule is
+    /// testable without a view; reachability of the result (snapshot present,
+    /// or re-derivable) is the caller's problem — see
+    /// `WaveformView.undoSegmentationTarget`.
+    static func segmentationBuildParent(along path: [EVAHistoryNode]) -> EVAHistoryNode? {
+        guard let segmentIndex = path.firstIndex(where: { $0.step?.operation == .segment })
+        else { return nil }
+
+        var index = segmentIndex - 1
+        while index > 0, let operation = path[index].step?.operation,
+              operation == .reference || operation == .baseline {
+            index -= 1
+        }
+        guard index >= 0 else { return nil }
+        return path[index]
+    }
+
     func isAncestor(_ candidate: EVAHistoryNodeID, of id: EVAHistoryNodeID) -> Bool {
         var cursor = nodesByID[id]?.parent
         while let currentCursor = cursor {

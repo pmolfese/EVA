@@ -76,14 +76,17 @@ struct FilterViewModelTests {
         let vm = FilterViewModel(store: RecordingStore())
         vm.filterFamily = .auto
         vm.firCrossoverHz = 1.5
+        vm.firCrossoverRule = .through
         let params = vm.parameters
         #expect(params["filterFamily"] == "auto")
         #expect(params["firCrossoverHz"] == "1.5")
+        #expect(params["firCrossoverRule"] == "through")
 
         let restored = FilterViewModel(store: RecordingStore())
         restored.apply(parameters: params)
         #expect(restored.filterFamily == .auto)
         #expect(restored.firCrossoverHz == 1.5)
+        #expect(restored.firCrossoverRule == .through)
     }
 
     @MainActor
@@ -125,6 +128,67 @@ struct FilterViewModelTests {
         #expect(vm.iirDesign == .butterworth)
         #expect(vm.firWindow == .hamming)
         #expect(vm.firApplication == .zeroPhase)
+        #expect(vm.firCrossoverRule == .below)
+    }
+
+    @MainActor
+    @Test func approximationPresetsConfigureOnlyFilterMechanics() {
+        let vm = FilterViewModel(store: RecordingStore())
+        vm.highPassCutoffText = "0.375"
+        vm.lowPassCutoffText = "42.5"
+        vm.lineNoiseMode = .notch
+        vm.notchUsesFIR = true
+        vm.lineNoiseFrequency = 50
+        vm.lineNoiseHarmonics = 3
+        vm.lineNoiseWindowSeconds = 7.5
+        vm.lineNoiseStrength = 0.65
+        vm.averageReference = true
+        vm.filterPNS = false
+        vm.precision = .double
+
+        for preset in FilterApproximationPreset.allCases {
+            vm.applyApproximation(preset)
+            #expect(vm.highPassCutoffText == "0.375")
+            #expect(vm.lowPassCutoffText == "42.5")
+            #expect(vm.lineNoiseMode == .notch)
+            #expect(vm.notchUsesFIR)
+            #expect(vm.notchIsFIREffective)
+            #expect(vm.lineNoiseFrequency == 50)
+            #expect(vm.lineNoiseHarmonics == 3)
+            #expect(vm.lineNoiseWindowSeconds == 7.5)
+            #expect(vm.lineNoiseStrength == 0.65)
+            #expect(vm.averageReference)
+            #expect(vm.filterPNS == false)
+            #expect(vm.precision == .double)
+        }
+    }
+
+    @MainActor
+    @Test func approximationPresetMappings() {
+        let vm = FilterViewModel(store: RecordingStore())
+
+        for preset in [FilterApproximationPreset.eeglab, .mnePython] {
+            vm.applyApproximation(preset)
+            #expect(vm.filterFamily == .fir)
+            #expect(vm.firWindow == .hamming)
+            #expect(vm.firApplication == .delayCompensated)
+            #expect(vm.firTransitionHz == nil)
+        }
+
+        vm.applyApproximation(.erplab)
+        #expect(vm.filterFamily == .iir)
+        #expect(vm.iirDesign == .butterworth)
+        #expect(vm.highPassSlope == .dB24)
+        #expect(vm.lowPassSlope == .dB24)
+
+        vm.applyApproximation(.egiNetStation)
+        #expect(vm.filterFamily == .auto)
+        #expect(vm.iirDesign == .elliptic)
+        #expect(vm.firWindow == .kaiser)
+        #expect(vm.firApplication == .forward)
+        #expect(vm.firCrossoverHz == 1)
+        #expect(vm.firCrossoverRule == .through)
+        #expect(vm.firTransitionHz == nil)
     }
 
     @MainActor
@@ -139,15 +203,15 @@ struct FilterViewModelTests {
 
     @MainActor
     @Test func notchStyleIsLabeledAndRoundTrips() {
-        // IIR notch: notchUsesFIR is recorded as false so the style is explicit.
+        // FIR notch remains FIR even when the passband family is IIR.
         let iir = FilterViewModel(store: RecordingStore())
         iir.lineNoiseMode = .notch
-        iir.notchUsesFIR = true // ignored: IIR family selected
+        iir.notchUsesFIR = true
         iir.filterFamily = .iir
-        #expect(iir.notchIsFIREffective == false)
-        #expect(iir.parameters["notchUsesFIR"] == "false")
+        #expect(iir.notchIsFIREffective == true)
+        #expect(iir.parameters["notchUsesFIR"] == "true")
 
-        // FIR notch requires the FIR family AND the toggle.
+        // FIR passband plus FIR notch also round-trips.
         let fir = FilterViewModel(store: RecordingStore())
         fir.lineNoiseMode = .notch
         fir.filterFamily = .fir

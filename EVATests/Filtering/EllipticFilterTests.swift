@@ -40,13 +40,16 @@ struct EllipticFilterTests {
         #expect(inBandRatio > 0.9)
         #expect(driftRatio < 0.05)
         #expect(highRatio < 0.05)
-        #expect(filtered.flatMap { $0 }.allSatisfy(\.isFinite))
+        #expect(filtered.flatMap { $0 }.allSatisfy { $0.isFinite })
     }
 
     @Test func ellipticSectionsAreStableAndFinite() {
-        for edge in [EllipticFilterDesign.Edge.lowPass, .highPass] {
+        for (edge, cutoff) in [
+            (EllipticFilterDesign.Edge.lowPass, 40.0),
+            (EllipticFilterDesign.Edge.highPass, 1.0),
+        ] {
             let sections = EllipticFilterDesign.sections(
-                cutoff: edge == .lowPass ? 40 : 1,
+                cutoff: cutoff,
                 samplingRate: samplingRate,
                 order: 8,
                 edge: edge,
@@ -55,7 +58,7 @@ struct EllipticFilterTests {
             )
             #expect(sections.count == 4)
             for section in sections {
-                #expect([section.b0, section.b1, section.b2, section.a1, section.a2].allSatisfy(\.isFinite))
+                #expect([section.b0, section.b1, section.b2, section.a1, section.a2].allSatisfy { $0.isFinite })
                 // For a conjugate pole pair, a2 is the squared pole radius.
                 #expect(section.a2 > 0 && section.a2 < 1)
             }

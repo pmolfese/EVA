@@ -37,7 +37,11 @@ nonisolated struct GeneratedEEG: Sendable {
 
 nonisolated enum EEGGenerator {
 
-    static func generate(config: SimulationConfig, source: inout GaussianSource) -> GeneratedEEG {
+    static func generate(
+        config: SimulationConfig,
+        montage: Montage,
+        source: inout GaussianSource
+    ) -> GeneratedEEG {
         let sampleCount = config.sampleCount
         let alphaEnvelope = alphaEnvelope(config: config)
 
@@ -70,7 +74,16 @@ nonisolated enum EEGGenerator {
             channels[channel] = mixture
         }
 
-        applyCircularSpatialSmoothing(&channels, sigmaChannels: config.spatialSmoothingChannels)
+        switch config.spatialModel {
+        case .circular:
+            applyCircularSpatialSmoothing(&channels, sigmaChannels: config.spatialSmoothingChannels)
+        case .geometric:
+            applyGeometricSpatialSmoothing(
+                &channels,
+                positions: montage.positions,
+                sigmaChannels: config.spatialSmoothingChannels
+            )
+        }
 
         // One global scale, not one per channel: per-channel normalization would
         // flatten the spatial structure the smoothing just created.
@@ -137,6 +150,62 @@ nonisolated enum EEGGenerator {
                 for i in 0..<sampleCount {
                     smoothed[c][i] += weight * source[i]
                 }
+            }
+        }
+        channels = smoothed
+    }
+
+    /// Distance-based smoothing on the actual montage.
+    ///
+    /// The kernel width is quoted in "channels" like the paper's, and converted
+    /// to an angle by asking how far apart neighbouring electrodes actually are
+    /// — so `--spatial-smoothing 4` means roughly the same amount of smoothing
+    /// under either model rather than silently meaning something new.
+    static func applyGeometricSpatialSmoothing(
+        _ channels: inout [[Double]],
+        positions: [(x: Double, y: Double, z: Double)],
+        sigmaChannels: Double
+    ) {
+        let count = channels.count
+        guard count > 1, sigmaChannels > 0, positions.count >= count else { return }
+        let sampleCount = channels[0].count
+
+        func angle(_ a: Int, _ b: Int) -> Double {
+            let dot = positions[a].x * positions[b].x
+                + positions[a].y * positions[b].y
+                + positions[a].z * positions[b].z
+            return acos(max(-1, min(1, dot)))
+        }
+
+        // Median nearest-neighbour separation, as the "one channel" unit.
+        var separations: [Double] = []
+        for a in 0..<count {
+            var nearest = Double.greatestFiniteMagnitude
+            for b in 0..<count where b != a { nearest = min(nearest, angle(a, b)) }
+            if nearest.isFinite { separations.append(nearest) }
+        }
+        guard !separations.isEmpty else { return }
+        separations.sort()
+        let sigma = separations[separations.count / 2] * sigmaChannels
+
+        var smoothed = [[Double]](
+            repeating: [Double](repeating: 0, count: sampleCount),
+            count: count
+        )
+        for a in 0..<count {
+            var weights = [Double](repeating: 0, count: count)
+            var total = 0.0
+            for b in 0..<count {
+                let z = angle(a, b) / sigma
+                weights[b] = exp(-0.5 * z * z)
+                total += weights[b]
+            }
+            guard total > 0 else { continue }
+            for b in 0..<count {
+                let weight = weights[b] / total
+                guard weight > 1e-6 else { continue }
+                let source = channels[b]
+                for i in 0..<sampleCount { smoothed[a][i] += weight * source[i] }
             }
         }
         channels = smoothed

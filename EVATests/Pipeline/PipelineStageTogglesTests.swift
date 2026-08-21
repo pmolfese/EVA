@@ -259,42 +259,4 @@ struct PipelineStageTogglesTests {
         #expect(BCGDetectionViewModel(store: store).definedArtifactID != bcg.definedArtifactID,
                 "two detectors must not collide on one artifact")
     }
-
-    // MARK: - Undo Segmentation
-
-    @Test func clearEpochsDropsEpochsAndEverythingDerived() {
-        let f = Fixture()
-        f.seedDownstreamState()
-        f.epoching.averageSNRByCategory = ["LC++": SNRMetrics()]
-        f.epoching.isComputingAverageSNR = true
-        f.epoching.statusMessage = "4 categories averaged"
-        f.store.events.selectedEventCodes = ["LC++", "RC++"]
-
-        PipelineStageToggles.clearEpochs(
-            epoching: f.epoching, segHealth: f.segHealth, store: f.store
-        )
-
-        #expect(f.downstreamIsClear)
-        #expect(f.epoching.averageSNRByCategory.isEmpty)
-        #expect(!f.epoching.isComputingAverageSNR)
-        #expect(f.epoching.statusMessage == nil)
-        #expect(f.store.events.selectedEventCodes.isEmpty,
-                "undoing segmentation abandons the chosen conditions too")
-    }
-
-    /// The drift this extraction exposed: the old inline `clearEpochs` re-listed
-    /// the epoch teardown by hand and had fallen out of step with the shared
-    /// cascade — it never cleared `showsOverlaidCategories`. Latent, because the
-    /// panel is also gated on `isAveraged`, but re-segmenting after an undo could
-    /// bring back a panel the user had not asked for.
-    @Test func clearEpochsClearsTheOverlaidCategoriesFlag() {
-        let f = Fixture()
-        f.epoching.showsOverlaidCategories = true
-
-        PipelineStageToggles.clearEpochs(
-            epoching: f.epoching, segHealth: f.segHealth, store: f.store
-        )
-
-        #expect(!f.epoching.showsOverlaidCategories)
-    }
 }
