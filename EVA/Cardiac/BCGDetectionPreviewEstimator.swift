@@ -39,7 +39,8 @@ nonisolated enum BCGDetectionPreviewEstimator {
         duration: TimeInterval,
         exemplarRange: ClosedRange<Int>?,
         qrsTimes: [Double],
-        configuration: BCGDetectionPreviewConfiguration
+        configuration: BCGDetectionPreviewConfiguration,
+        hemisphericChannels: (right: [[Float]], left: [[Float]])? = nil
     ) async -> [Double]? {
         switch method {
         case .periodicity:
@@ -69,6 +70,19 @@ nonisolated enum BCGDetectionPreviewEstimator {
                 samplingRate: samplingRate,
                 minHz: configuration.powerMinHz,
                 maxHz: configuration.powerMaxHz,
+                thresholdSD: configuration.thresholdSD
+            )
+
+        case .hemisphericTopography:
+            guard let hemisphericChannels,
+                  !hemisphericChannels.right.isEmpty, !hemisphericChannels.left.isEmpty
+            else { return nil }
+            return await BCGDetector.hemisphericTopographyEvents(
+                rightChannels: hemisphericChannels.right,
+                leftChannels: hemisphericChannels.left,
+                samplingRate: samplingRate,
+                minHR: configuration.minHR,
+                maxHR: configuration.maxHR,
                 thresholdSD: configuration.thresholdSD
             )
 

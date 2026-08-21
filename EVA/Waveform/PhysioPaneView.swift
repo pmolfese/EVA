@@ -58,13 +58,24 @@ struct PhysioPaneView<ChannelMenu: View, RowMenu: View, TrackOverlay: View>: Vie
     /// through the physio traces too.
     @ViewBuilder let trackHighlightOverlay: () -> TrackOverlay
 
+    /// Per-channel row height stays draggable within this range so a slip of
+    /// the resize handle can't collapse the pane to nothing or blow it up
+    /// past what's useful.
+    static var rowHeightBounds: ClosedRange<CGFloat> { 24...140 }
+
+    /// Set for the duration of an active resize drag to the row height the
+    /// drag started from, so `DragGesture.translation` (cumulative from
+    /// gesture start) can be applied against a fixed baseline rather than
+    /// drifting frame-to-frame.
+    @State private var dragStartRowHeight: CGFloat?
+
     private func name(_ index: Int) -> String {
         displayNames.indices.contains(index) ? displayNames[index] : "PNS \(index + 1)"
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            Divider()
+            resizeHandle
             HStack(alignment: .top, spacing: 12) {
                 labelColumn
                     .frame(width: labelColumnWidth, alignment: .topLeading)
@@ -105,10 +116,8 @@ struct PhysioPaneView<ChannelMenu: View, RowMenu: View, TrackOverlay: View>: Vie
                             .allowsHitTesting(false)
                     }
                     .clipped()
-                    .padding(.top, 16)   // align below the "Physio" header
 
                     trackMenuOverlay()
-                        .padding(.top, 16)
                 }
             }
             .padding(.horizontal, 20)
@@ -117,13 +126,47 @@ struct PhysioPaneView<ChannelMenu: View, RowMenu: View, TrackOverlay: View>: Vie
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    /// Thin draggable strip pinned at the top of the pane. Vertical drag
+    /// translation is divided across the channel count so the whole pane
+    /// grows/shrinks by roughly the dragged distance, with each row's share
+    /// resizing in step — "drag the panel taller and each channel gets more
+    /// room" rather than a fixed per-row nudge that would need one drag per
+    /// channel to feel proportional.
+    private var resizeHandle: some View {
+        ZStack {
+            Divider()
+            Capsule()
+                .fill(Color.secondary.opacity(0.35))
+                .frame(width: 36, height: 4)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 9)
+        .contentShape(Rectangle())
+        .pointerStyle(.rowResize)
+        .gesture(
+            // `.global`, not `.local`: this handle sits on the edge that the
+            // drag is resizing, so it moves as the pane grows. In a local
+            // space that movement changes the pointer's measured position
+            // without the pointer having moved, feeding the resize back into
+            // its own input — the drag wobbles and fights itself. The global
+            // space is fixed to the window, so translation reflects only real
+            // pointer movement.
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    let baseline = dragStartRowHeight ?? physio.rowHeight
+                    if dragStartRowHeight == nil { dragStartRowHeight = baseline }
+                    let channelCount = max(signal.numberOfChannels, 1)
+                    let delta = -value.translation.height / CGFloat(channelCount)
+                    physio.rowHeight = min(max(baseline + delta, Self.rowHeightBounds.lowerBound),
+                                            Self.rowHeightBounds.upperBound)
+                }
+                .onEnded { _ in dragStartRowHeight = nil }
+        )
+        .help("Drag to resize physio channel rows.")
+    }
+
     private var labelColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Physio")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(height: 16, alignment: .leading)
-
             ForEach(0..<signal.numberOfChannels, id: \.self) { index in
                 let name = name(index)
                 HStack(spacing: 5) {

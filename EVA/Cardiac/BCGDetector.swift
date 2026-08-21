@@ -9,13 +9,15 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Four independent approaches to detecting ballistocardiogram (BCG) artifact events
+//  Five independent approaches to detecting ballistocardiogram (BCG) artifact events
 //  in simultaneous EEG/fMRI. Each method exploits a different signature of BCG:
 //
-//  1. GFP Periodicity   — BCG repeats at the cardiac rate; bandpass + GFP peak-find.
-//  2. Spatial PCA       — BCG dominates the top spatial PCs of an exemplar window.
-//  3. Cardiac Power Map — channels loaded with cardiac-band power drive a weighted GFP.
-//  4. QRS Locking       — BCG lags the R-wave by a fixed mechanical delay (~300 ms).
+//  1. GFP Periodicity      — BCG repeats at the cardiac rate; bandpass + GFP peak-find.
+//  2. Spatial PCA          — BCG dominates the top spatial PCs of an exemplar window.
+//  3. Cardiac Power Map    — channels loaded with cardiac-band power drive a weighted GFP.
+//  4. QRS Locking          — BCG lags the R-wave by a fixed mechanical delay (~300 ms).
+//  5. Hemispheric Topography — BCG has a strong, opposite-polarity field over left vs.
+//     right anterior-temporal/facial electrodes; peak-detect their difference trace.
 //
 //  Spatial PCA improvements implemented here:
 //   • Multi-component subspace (top N eigenvectors, RSS-combined score)
@@ -23,8 +25,8 @@
 //   • Spatial whitening (suppresses dominant non-BCG directions before PCA)
 //   • Respiratory-envelope adaptive normalization (5-10 s window, tracks ~0.2 Hz modulation)
 //
-//  The spatial-PCA detector is an original Swift implementation in the spirit of
-//  PCA / optimal-basis-set (OBS) BCG modeling; no upstream code was copied.
+//  The spatial-PCA and hemispheric-topography detectors are original Swift
+//  implementations in the spirit of the cited techniques; no upstream code was copied.
 //
 //  References:
 //    * Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith,
@@ -36,6 +38,10 @@
 //      event-related potentials recorded simultaneously with 3-T fMRI:
 //      Removal of the ballistocardiogram artefact. NeuroImage, 34(2), 587-597.
 //      https://doi.org/10.1016/j.neuroimage.2006.09.031
+//    * Iannotti, G. R., Pittau, F., Michel, C. M., Vulliemoz, S., & Grouiller, F.
+//      (2015). Pulse artifact detection in simultaneous EEG-fMRI recording based
+//      on EEG map topography. Brain Topography, 28(1), 21-32.
+//      https://doi.org/10.1007/s10548-014-0409-z
 //
 
 import Accelerate
@@ -438,6 +444,45 @@ nonisolated enum BCGDetector {
             .filter { $0 >= 0 && $0 < recordingDuration }
     }
 
+    // MARK: - Method 5: Hemispheric Topography
+
+    /// Detects BCG peaks from the characteristic left/right polarity reversal of the
+    /// scalp pulse-artifact topography over anterior-temporal/facial electrodes
+    /// (Iannotti et al. 2015): estimate the artifact as `BCG(t) = mean(right) −
+    /// mean(left)` across two hemisphere channel groups, then peak-detect the
+    /// magnitude of that single trace. Requires no ECG and is cheap to compute; it
+    /// depends on the right/left groups actually straddling the asymmetric field
+    /// (temporal/facial coverage with clear inter-hemispheric voltage gradient).
+    static func hemisphericTopographyEvents(
+        rightChannels: [[Float]],
+        leftChannels: [[Float]],
+        samplingRate: Double,
+        minHR: Double = 40,
+        maxHR: Double = 120,
+        thresholdSD: Double = 2.5
+    ) async -> [Double] {
+        guard !rightChannels.isEmpty, !leftChannels.isEmpty,
+              let n = rightChannels.first?.count, n > Int(samplingRate * 4),
+              leftChannels.first?.count == n,
+              samplingRate > 0
+        else { return [] }
+
+        let muR = channelMean(rightChannels)
+        let muL = channelMean(leftChannels)
+        guard muR.count == n, muL.count == n else { return [] }
+
+        var diff = [Float](repeating: 0, count: n)
+        vDSP_vsub(muL, 1, muR, 1, &diff, 1, vDSP_Length(n))   // right − left
+
+        let absDiff    = vDSP.absolute(diff)
+        let smoothW    = max(1, Int(samplingRate * 0.05))
+        let smoothed   = boxCarSmooth(absDiff, window: smoothW)
+        let maxHz      = max(maxHR / 60.0, 0.1)
+        let minSpacing = Int(samplingRate / maxHz * 0.6)
+        return findPeaks(in: smoothed, samplingRate: samplingRate,
+                         thresholdSD: thresholdSD, minSpacingSamples: max(minSpacing, 1))
+    }
+
     // MARK: - Virtual ECG (PCA across the proxy channel group)
 
     /// Collapses a BCG-proxy channel group into a single "virtual ECG" trace:
@@ -569,6 +614,20 @@ nonisolated enum BCGDetector {
         var len = Int32(n)
         vvsqrtf(&variance, variance, &len)
         return variance
+    }
+
+    /// Per-sample average across a channel group.
+    static func channelMean(_ channels: [[Float]]) -> [Float] {
+        guard let first = channels.first, !first.isEmpty else { return [] }
+        let n = first.count
+        var sum = [Float](repeating: 0, count: n)
+        for ch in channels where ch.count == n {
+            vDSP.add(ch, sum, result: &sum)
+        }
+        var scale = 1.0 / Float(channels.count)
+        var mean = [Float](repeating: 0, count: n)
+        vDSP_vsmul(sum, 1, &scale, &mean, 1, vDSP_Length(n))
+        return mean
     }
 
     /// Non-maximum suppression peak finder.

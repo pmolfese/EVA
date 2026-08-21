@@ -138,6 +138,38 @@ struct BCGDetectorTests {
         #expect(Double(hits) / Double(times.count) > 0.8, "most detections should align with planted pulses")
     }
 
+    @Test func hemisphericTopographyEventsFindsRepeatingPulses() async {
+        let samplingRate = 250.0
+        // Right channels carry a positive pulse train, left channels the mirrored
+        // (negative) pulse — the polarity-reversed topography the method looks for.
+        let (right, expected) = periodicPulseChannels(
+            channelCount: 4, sampleCount: 6000, periodSamples: 250
+        )
+        let left: [[Float]] = right.map { ch in ch.map { -$0 } }
+
+        let times = await BCGDetector.hemisphericTopographyEvents(
+            rightChannels: right, leftChannels: left, samplingRate: samplingRate
+        )
+
+        #expect(!times.isEmpty)
+        // Every expected pulse should be recovered by some detection (within 60 ms);
+        // unfiltered noise on the difference trace can also trip a handful of extra
+        // detections between pulses, so this checks recall rather than a 1:1 match.
+        let expectedSeconds = expected.map { $0 / samplingRate }
+        var recovered = 0
+        for e in expectedSeconds {
+            if times.contains(where: { abs($0 - e) < 0.06 }) { recovered += 1 }
+        }
+        #expect(Double(recovered) / Double(expectedSeconds.count) > 0.8, "most planted pulses should be recovered")
+    }
+
+    @Test func hemisphericTopographyEventsEmptyOnMismatchedInput() async {
+        let times = await BCGDetector.hemisphericTopographyEvents(
+            rightChannels: [], leftChannels: [[0, 1, 2]], samplingRate: 250
+        )
+        #expect(times.isEmpty)
+    }
+
     @Test func qrsLockingEventsShiftsAndClipsToRecordingDuration() {
         let qrsTimes = [0.1, 1.0, 5.0, 9.95]
         let shifted = BCGDetector.qrsLockingEvents(

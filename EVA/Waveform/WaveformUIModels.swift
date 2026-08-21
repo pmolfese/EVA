@@ -99,6 +99,9 @@ final class PhysioDisplayModel {
     /// Shown by default when present; pinned below the EEG channels and synced
     /// to the EEG time axis.
     var showsPhysioChannels = true
+    /// Per-channel trace row height, user-adjustable via the pane's resize
+    /// handle (see `PhysioPaneView.resizeHandle`). Session-only, not persisted.
+    var rowHeight: CGFloat = 54
     var ranges: [ClosedRange<Float>] = []
     var scaleFactors: [Int: Double] = [:]
     var maxScaledChannels = Set<Int>()

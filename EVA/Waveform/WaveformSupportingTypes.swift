@@ -1259,6 +1259,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
     case periodicity    = "periodicity"
     case spatialPCA     = "spatialPCA"
     case cardiacPowerMap = "cardiacPowerMap"
+    case hemisphericTopography = "hemisphericTopography"
     case virtualECGPCA  = "virtualECGPCA"
     case panTompkinsProxy = "panTompkinsProxy"
     case qrsLocking     = "qrsLocking"
@@ -1279,6 +1280,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
         case .periodicity:      return "Periodicity"
         case .spatialPCA:       return "Spatial PCA"
         case .cardiacPowerMap:  return "Power Map"
+        case .hemisphericTopography: return "L/R Topography"
         case .virtualECGPCA:    return "Virtual ECG"
         case .panTompkinsProxy: return "Pan-Tompkins"
         case .qrsLocking:       return "QRS Lock"
@@ -1294,6 +1296,8 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
             return "Derive the dominant spatial map of BCG from a highlighted exemplar window (or the first 30 s), project the full recording onto it, and detect peaks. Works even when beat morphology varies."
         case .cardiacPowerMap:
             return "Identify which channels carry the most cardiac-band energy, compute a power-weighted time series, and detect peaks. Good when BCG is focal to a subset of electrodes."
+        case .hemisphericTopography:
+            return "Exploits the characteristic left/right polarity reversal of the pulse artifact over anterior-temporal/facial electrodes: estimate BCG as the difference between right- and left-hemisphere channel-group averages, then detect peaks of that single trace. No ECG required. Select Right and Left channel sets below."
         case .virtualECGPCA:
             return "Collapse the BCG-channel group to a single \u{201C}virtual ECG\u{201D} by taking the first principal component across those channels, then run Pan-Tompkins QRS detection on it. Averages out channel-specific noise — generalizes FMRIB/OBS's best-channel step to a channel group. Select a BCG channel set below."
         case .panTompkinsProxy:
@@ -1313,6 +1317,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
         case .periodicity:      return "GFP: Lehmann & Skrandies (1980)"
         case .spatialPCA:       return "PCA basis: Niazy et al. (2005)"
         case .cardiacPowerMap:  return nil
+        case .hemisphericTopography: return "Iannotti et al. (2015)"
         case .virtualECGPCA:    return "Niazy et al. (2005); Pan & Tompkins (1985)"
         case .panTompkinsProxy: return "Pan & Tompkins (1985)"
         case .qrsLocking:       return "Allen et al. (1998)"
@@ -1333,6 +1338,8 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
             return "Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. NeuroImage, 28(3), 720–737. https://doi.org/10.1016/j.neuroimage.2005.06.067"
         case .cardiacPowerMap:
             return nil
+        case .hemisphericTopography:
+            return "Iannotti, G. R., Pittau, F., Michel, C. M., Vulliemoz, S., & Grouiller, F. (2015). Pulse artifact detection in simultaneous EEG–fMRI recording based on EEG map topography. Brain Topography, 28(1), 21–32. https://doi.org/10.1007/s10548-014-0409-z"
         case .virtualECGPCA:
             return "Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. NeuroImage, 28(3), 720–737. https://doi.org/10.1016/j.neuroimage.2005.06.067\n\nPan, J., & Tompkins, W. J. (1985). A real-time QRS detection algorithm. IEEE Transactions on Biomedical Engineering, BME-32(3), 230–236. https://doi.org/10.1109/TBME.1985.325532"
         case .panTompkinsProxy:

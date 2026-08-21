@@ -75,6 +75,10 @@ final class BCGDetectionViewModel {
     // MARK: Channel restriction
     var channelSetID: ChannelSet.ID?
 
+    // MARK: Hemispheric topography (right/left channel groups — see BCGDetectionMethod.hemisphericTopography)
+    var rightChannelSetID: ChannelSet.ID?
+    var leftChannelSetID: ChannelSet.ID?
+
     // MARK: CWL regression (direct-correction method — see BCGDetectionMethod.cwlRegression)
     var selectedCWLChannels = Set<Int>()
     var cwlUseEVAFastCWR = false
@@ -147,6 +151,12 @@ final class BCGDetectionViewModel {
         ]
         if let channelSetID {
             params["channelSetID"] = channelSetID.uuidString
+        }
+        if let rightChannelSetID {
+            params["rightChannelSetID"] = rightChannelSetID.uuidString
+        }
+        if let leftChannelSetID {
+            params["leftChannelSetID"] = leftChannelSetID.uuidString
         }
         if let kept = refinedKeptCount {
             params["refinedKeptCount"] = "\(kept)"

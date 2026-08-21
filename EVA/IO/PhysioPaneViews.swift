@@ -158,7 +158,9 @@ extension WaveformView {
 
     func physioPane(_ pns: MFFSignalData, eegSignal: MFFSignalData) -> some View {
         let eegSamplingRate = eegSignal.samplingRate
-        let rowHeight: CGFloat = 54  // 50% taller than EEG's 36pt default row
+        // User-adjustable via the pane's resize handle; defaults 50% taller
+        // than EEG's 36pt default row.
+        let rowHeight = recordingStore.physio.rowHeight
         let names = pns.channelNames
             ?? (0..<pns.numberOfChannels).map { "PNS \($0 + 1)" }
         let displayNames = (0..<pns.numberOfChannels).map { physioChannelName(index: $0, names: names) }

@@ -203,8 +203,10 @@ extension WaveformView {
 
                     bcgMethodOptions(for: signal, selection: selection)
 
-                    // Channel restriction — applies to the GFP-based methods.
-                    if bcg.method != .qrsLocking && bcg.method != .cwlRegression {
+                    // Channel restriction — applies to the GFP-based methods. Hemispheric
+                    // topography has its own Right/Left pickers in bcgMethodOptions instead.
+                    if bcg.method != .qrsLocking && bcg.method != .cwlRegression
+                        && bcg.method != .hemisphericTopography {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 4) {
                                 Text("BCG Channels")
@@ -506,6 +508,7 @@ extension WaveformView {
         switch method {
         case .cwlRegression: return "N/A"
         case .qrsLocking: return "ECG needed"
+        case .hemisphericTopography: return "L/R sets needed"
         default: return "—"
         }
     }
@@ -524,6 +527,8 @@ extension WaveformView {
             "\(signal.data.first?.count ?? 0)",
             "\(signal.samplingRate)",
             bcg.channelSetID?.uuidString ?? "all",
+            bcg.rightChannelSetID?.uuidString ?? "no-right",
+            bcg.leftChannelSetID?.uuidString ?? "no-left",
             selection.map { "\($0.lowerBound)-\($0.upperBound)" } ?? "no-selection",
             String(format: "%.4f", bcg.thresholdSD),
             String(format: "%.4f", bcg.minHR),
@@ -578,6 +583,7 @@ extension WaveformView {
             .map(\.beginTimeSeconds)
         let samplingRate = signal.samplingRate
         let duration = signal.duration
+        let hemisphericChannels = hemisphericPreviewChannels(for: signal)
 
         bcg.isEstimating = true
         bcg.algorithmResults = [:]
@@ -594,7 +600,8 @@ extension WaveformView {
                         duration: duration,
                         exemplarRange: selection,
                         qrsTimes: qrsTimes,
-                        configuration: configuration
+                        configuration: configuration,
+                        hemisphericChannels: hemisphericChannels
                     ) else { return (method, nil) }
                     return (method, BCGDetectionPreviewEstimator.result(from: times))
                 }
@@ -610,6 +617,24 @@ extension WaveformView {
               requestID == bcgDetectionPreviewRequestID(for: signal, selection: selection) else { return }
         bcg.isEstimating = false
         bcg.algorithmResults = results
+    }
+
+    /// Resolves the right/left channel-set selections against the current recording,
+    /// for the hemispheric-topography method (see `BCGDetector.hemisphericTopographyEvents`).
+    /// `nil` when either side is unset or has no channels in range.
+    func hemisphericPreviewChannels(for signal: MFFSignalData) -> (right: [[Float]], left: [[Float]])? {
+        func channels(for id: ChannelSet.ID?) -> [[Float]]? {
+            guard let id,
+                  let set = ChannelSetStore.shared.allSets.first(where: { $0.id == id })
+            else { return nil }
+            let indices = set.channelIndices.filter { signal.data.indices.contains($0) }
+            guard !indices.isEmpty else { return nil }
+            return indices.map { signal.data[$0] }
+        }
+        guard let right = channels(for: bcg.rightChannelSetID),
+              let left = channels(for: bcg.leftChannelSetID)
+        else { return nil }
+        return (right, left)
     }
 
     @ViewBuilder
@@ -760,6 +785,70 @@ extension WaveformView {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Slider(value: $bcg.powerMaxHz, in: 0.8...3.0, step: 0.05)
+                }
+            }
+
+        case .hemisphericTopography:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Right / left channel groups")
+                    .font(.caption.weight(.semibold))
+                if bcg.rightChannelSetID != nil, bcg.leftChannelSetID != nil {
+                    Label("BCG estimated as the difference of the right- and left-set averages.", systemImage: "checkmark.circle")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Label("Pick both a Right and a Left channel set — anterior-temporal/facial electrodes with the clearest inter-hemispheric contrast work best.", systemImage: "exclamationmark.triangle")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 4) {
+                    Text("Right set")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    BCGHelpButton(
+                        title: "Right set",
+                        explanation: "Channel set averaged to estimate the right-hemisphere side of the pulse-artifact topography (μR). Pick anterior-temporal/facial electrodes on the right."
+                    )
+                    ChannelSetPickerView(
+                        label: "Right Channel Set",
+                        selectedSetID: $bcg.rightChannelSetID,
+                        channelCount: signal.numberOfChannels
+                    )
+                }
+                HStack(spacing: 4) {
+                    Text("Left set")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    BCGHelpButton(
+                        title: "Left set",
+                        explanation: "Channel set averaged to estimate the left-hemisphere side of the pulse-artifact topography (μL). Pick anterior-temporal/facial electrodes on the left."
+                    )
+                    ChannelSetPickerView(
+                        label: "Left Channel Set",
+                        selectedSetID: $bcg.leftChannelSetID,
+                        channelCount: signal.numberOfChannels
+                    )
+                }
+
+                Divider()
+
+                Text("Expected heart rate")
+                    .font(.caption.weight(.semibold))
+                HStack {
+                    BCGParameterLabel(
+                        title: "Max HR",
+                        explanation: "The fastest plausible heart rate. It sets the minimum spacing between detections, rejecting implausibly close duplicate peaks."
+                    )
+                    TextField("BPM", value: $bcg.maxHR, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("BPM")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(value: $bcg.maxHR, in: 60...180, step: 1)
                 }
             }
 
@@ -1078,6 +1167,7 @@ extension WaveformView {
         let qrsTimes = artifactVM.events
             .filter { $0.code == RWaveDetector.eventCode }
             .map(\.beginTimeSeconds)
+        let hemisphericChannels = hemisphericPreviewChannels(for: signal)
 
         // With NonisolatedNonsendingByDefault, merely awaiting a nonisolated
         // detector does not guarantee that its CPU work leaves MainActor. Run
@@ -1091,7 +1181,8 @@ extension WaveformView {
                 duration: duration,
                 exemplarRange: selection,
                 qrsTimes: qrsTimes,
-                configuration: configuration
+                configuration: configuration,
+                hemisphericChannels: hemisphericChannels
             ) ?? []
         }
         let times = await withTaskCancellationHandler(
