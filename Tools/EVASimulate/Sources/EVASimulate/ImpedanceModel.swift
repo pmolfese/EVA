@@ -37,6 +37,8 @@ import Foundation
 
 nonisolated enum ImpedanceModel {
 
+    private static let boltzmannJoulesPerKelvin = 1.380649e-23
+
     /// Plausible impedance, in kΩ, for a channel carrying `defect` (or nil for a
     /// healthy one). Ranges are stated against EVA's default health bands.
     static func range(for defect: ChannelDefect?) -> ClosedRange<Double> {
@@ -74,8 +76,20 @@ nonisolated enum ImpedanceModel {
             let channelNumber = index + 1
             let defect = config.badChannels[channelNumber]
 
+            // A true electrolyte bridge is a low-resistance path even when the
+            // two channels are not otherwise labelled as defective.
+            let isBridged = config.bridgedChannelPairs?.contains {
+                $0.firstChannel == channelNumber || $0.secondChannel == channelNumber
+            } ?? false
+
             if let defect {
                 let span = range(for: defect)
+                let position = min(max(source.uniform(), 0), 1)
+                return Float(span.lowerBound + position * (span.upperBound - span.lowerBound))
+            }
+
+            if isBridged {
+                let span = range(for: .flat)
                 let position = min(max(source.uniform(), 0), 1)
                 return Float(span.lowerBound + position * (span.upperBound - span.lowerBound))
             }
@@ -93,6 +107,64 @@ nonisolated enum ImpedanceModel {
             let scattered = typical * exp(0.35 * source.gaussian())
             return Float(min(max(scattered, 0.4 * typical), 2.5 * typical))
         }
+    }
+
+    /// Johnson-Nyquist voltage noise over the sampled bandwidth, in µV RMS.
+    /// R is the measured contact impedance and B is Nyquist. This deliberately
+    /// models only the contact's white thermal term; biological and amplifier
+    /// noise remain separate components of the simulator.
+    static func thermalNoiseRMSMicrovolts(
+        impedanceKOhm: Double,
+        samplingRate: Double,
+        temperatureKelvin: Double
+    ) -> Double {
+        let resistanceOhms = max(0, impedanceKOhm) * 1_000
+        let bandwidthHz = max(0, samplingRate) / 2
+        let volts = sqrt(4 * boltzmannJoulesPerKelvin * temperatureKelvin
+            * resistanceOhms * bandwidthHz)
+        return volts * 1_000_000
+    }
+
+    /// Adds independent white contact noise and returns the analytic RMS used
+    /// for each channel. A dedicated seed stream makes the result independent
+    /// of neural source count and every other artifact family.
+    static func applyThermalNoise(
+        to channels: inout [[Double]],
+        impedances: [Float],
+        config: SimulationConfig,
+        source: inout GaussianSource
+    ) -> [Double] {
+        guard let model = config.impedanceNoise else {
+            return [Double](repeating: 0, count: channels.count)
+        }
+        var rms = [Double](repeating: 0, count: channels.count)
+        for channel in channels.indices {
+            guard channel < impedances.count else { continue }
+            let amplitude = thermalNoiseRMSMicrovolts(
+                impedanceKOhm: Double(impedances[channel]),
+                samplingRate: config.samplingRate,
+                temperatureKelvin: model.temperatureKelvin
+            )
+            rms[channel] = amplitude
+            for sample in channels[channel].indices {
+                channels[channel][sample] += amplitude * source.gaussian()
+            }
+        }
+        return rms
+    }
+
+    /// Relative capacitive mains pickup for an electrode. The exponent is an
+    /// explicit phenomenological assumption; clamping prevents a pathological
+    /// contact from making the synthetic recording numerically useless.
+    static func lineNoiseScale(
+        impedanceKOhm: Double,
+        config: SimulationConfig
+    ) -> Double {
+        guard let model = config.impedanceNoise else { return 1 }
+        let reference = max(model.referenceImpedanceKOhm ?? 12, 1e-12)
+        let raw = pow(max(impedanceKOhm, 0) / reference,
+                      model.lineNoiseImpedanceExponent)
+        return min(max(raw, 0.05), model.maximumLineNoiseScale)
     }
 
     /// Rewrites `info1.xml` inside an already-written MFF package to carry an

@@ -37,6 +37,7 @@ nonisolated enum ChannelDefectModel {
     static func apply(
         to channels: inout [[Double]],
         config: SimulationConfig,
+        impedances: [Float]? = nil,
         source: inout GaussianSource
     ) -> [String: String] {
         var applied: [String: String] = [:]
@@ -97,7 +98,9 @@ nonisolated enum ChannelDefectModel {
                     applied["\(number)"] = "line (inactive — needs --line-noise)"
                     continue
                 }
-                let amplitude = 12 * config.lineNoiseAmplitudeMicrovolts
+                let scale = impedances.flatMap { index < $0.count ? Double($0[index]) : nil }
+                    .map { ImpedanceModel.lineNoiseScale(impedanceKOhm: $0, config: config) } ?? 1
+                let amplitude = 12 * config.lineNoiseAmplitudeMicrovolts * scale
                 for i in channels[index].indices {
                     let t = Double(i) / config.samplingRate
                     channels[index][i] += amplitude * sin(2 * Double.pi * config.lineNoiseHz * t)
@@ -118,14 +121,27 @@ nonisolated enum ChannelDefectModel {
     static func applyLineNoise(
         to channels: inout [[Double]],
         config: SimulationConfig,
+        impedances: [Float]? = nil,
         source: inout GaussianSource
-    ) {
-        guard config.lineNoiseHz > 0, config.lineNoiseAmplitudeMicrovolts > 0 else { return }
+    ) -> [Double] {
+        var gains = [Double](repeating: 0, count: channels.count)
+        guard config.lineNoiseHz > 0, config.lineNoiseAmplitudeMicrovolts > 0 else { return gains }
 
         for channel in channels.indices {
             // Each electrode picks up its own amount, as lead dress and
             // impedance vary around the head.
-            let gain = config.lineNoiseAmplitudeMicrovolts * (0.6 + 0.8 * source.uniform())
+            let contactScale = impedances.flatMap {
+                channel < $0.count ? Double($0[channel]) : nil
+            }.map {
+                ImpedanceModel.lineNoiseScale(impedanceKOhm: $0, config: config)
+            } ?? 1
+            // Lead dress still matters, but impedance is the dominant source of
+            // between-channel variation when coupling is enabled.
+            let dress = config.impedanceNoise == nil
+                ? (0.6 + 0.8 * source.uniform())
+                : (0.9 + 0.2 * source.uniform())
+            let gain = config.lineNoiseAmplitudeMicrovolts * contactScale * dress
+            gains[channel] = gain
             let phase = 2 * Double.pi * source.uniform()
             for i in channels[channel].indices {
                 let t = Double(i) / config.samplingRate
@@ -134,5 +150,6 @@ nonisolated enum ChannelDefectModel {
                     + 0.25 * gain * sin(2 * Double.pi * 3 * config.lineNoiseHz * t + phase)
             }
         }
+        return gains
     }
 }

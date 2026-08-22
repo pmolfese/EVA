@@ -2,8 +2,8 @@
 
 `eva-simulate` generates synthetic EEG recordings with **known ground truth**,
 contaminated by modelled MR gradient and cardiac artifacts — and optionally by
-blinks, eye movements, mains hum and broken electrodes. It also scores a
-corrected recording against that ground truth, band by band.
+blinks, eye movements, muscle bursts, mains hum and broken electrodes. It also
+scores a corrected recording against that ground truth, band by band.
 
 Two audiences, one program:
 
@@ -20,6 +20,10 @@ The model reproduces the forward model in:
 > *A comparative study of different artefact removal algorithms for EEG signals
 > acquired during functional MRI.* NeuroImage 38(1):124-37.
 
+The operational default is 1000 Hz so each sample aligns exactly with the
+current MFF writer's millisecond event timestamps. The published model used
+1024 Hz; use `--rate 1024` or `scenarios/paper-default.json` to reproduce it.
+
 ---
 
 ## Building and running
@@ -31,12 +35,16 @@ sh Tools/EVASimulate/build.sh
 The binary lands at `Tools/EVASimulate/.build/eva-simulate`. Every example below
 assumes you are at the repository root; substitute the full path if not.
 
-Four subcommands:
+Eight subcommands:
 
 | Subcommand | What it does |
 | --- | --- |
 | `generate` | Write one ground-truth/contaminated recording pair. |
 | `score` | Compare a corrected recording against ground truth. |
+| `score-sources` | Score recovered dipole locations and source waveforms. |
+| `score-events` | Score event detection and timing. |
+| `score-erp` | Score recovered ERP amplitude and latency. |
+| `score-pac` | Score recovered PAC strength and preferred phase. |
 | `sweep` | Run `generate` once per value of a swept parameter. |
 | `selftest` | Check that the model still reproduces the phenomena it claims to. |
 
@@ -97,6 +105,9 @@ topographic maps and spherical-spline interpolation all work in EVA.
 | `QRSt` | The **true** beat time, where the artifact was actually injected. Ground truth; do not correct with it unless you are deliberately measuring the best case. |
 | `blnk` | Blink onset (only when `--blinks` is on). |
 | `eyem` | Eye movement onset (only when `--eye-movements` is on). |
+| `emg` | Muscle-burst onset and duration (only when EMG is enabled). |
+| `chew`, `swal` | Chewing-episode and swallowing onset/duration. |
+| `move`, `swet` | Cable-movement and sweat-drift onset/duration. |
 
 The separation between `QRSd` and `QRSt` is the point of the cardiac model. A
 method that leans on beat timing sees a mis-registered template; one that does
@@ -117,7 +128,9 @@ not is unaffected.
 | `config` | Every model parameter used, including ones with no command-line flag. |
 | `cleanStandardDeviation` | Pooled standard deviation of the ground-truth EEG, in µV. The denominator of every SNR. |
 | `channelNames`, `montageName` | The montage that was used. |
+| `recordingReference`, `referenceApplicationStage` | The single sensor-space reference and its position before physical recording defects. |
 | `alphaEnvelope1Hz` | The eyes-open/eyes-closed alpha envelope, decimated to 1 Hz, for correlating recovered alpha power against the block design. |
+| `neuralNonstationarity` | Opt-in alpha-burst events, per-band 1 Hz amplitude envelopes, microstate episodes/maps/carrier provenance, and PAC parameters. |
 | `gradientVolumeOnsetsSeconds` | Continuous volume onsets, before quantization to the sample grid. |
 | `gradientQuantizedVolumeOnsetsSeconds` | The same onsets as a recorded trigger carries them. |
 | `gradientChannelAmplitudesMicrovolts` | Per-channel artifact amplitude. |
@@ -125,9 +138,19 @@ not is unaffected.
 | `bcgChannelScales`, `bcgChannelLatenciesSeconds` | Per-channel BCG polarity/scale and arrival latency. |
 | `blinkSeconds`, `saccadeSeconds` | Ocular event times. |
 | `blinkTopography`, `horizontalEyeTopography` | Per-channel weights of the injected ocular components, so a recovered ICA component can be checked against the one that went in. |
+| `emgBursts` | Muscle-burst onset, duration, source region, and realized RMS amplitude. |
+| `emgLeftTemporalisTopography`, `emgRightTemporalisTopography`, `emgPosteriorNeckTopography` | Normalized per-channel weights for the three EMG source regions. |
+| `chewingEpisodes`, `swallowingEpisodes`, `cableMovementEpisodes`, `sweatEpisodes` | Exact onset, duration, amplitude, affected channels, and event-specific topography where applicable. |
+| `bridgedChannelPairs`, `badReferenceRMSMicrovolts`, `clippedSampleCounts` | Truth for the non-additive recording defects. |
 | `badChannels` | 1-based channel number to defect kind. |
 | `impedancesKOhm` | Per-channel electrode impedance, empty when `--no-impedance` was used. |
+| `simulatedImpedancesKOhm` | Latent contact impedance used by the noise model, retained even without ICAL export. |
+| `impedanceThermalNoiseRMSMicrovolts` | Analytic Johnson-noise RMS injected per channel. |
+| `impedanceLineNoiseGainsMicrovolts` | Realized per-channel mains fundamental gain before slow wander. |
 | `scanStartSeconds`, `scanEndSeconds` | When the scanner was actually running. |
+| `sourceSpace` | Dipole mode only: shell geometry/conductivity, source positions/orientations/bands/seeds/moments, common calibration, and both free- and fixed-orientation gain matrices. |
+| `erpTrials` | Per-trial ERP peaks, component-window end, and previous/next/any overlap flags. |
+| `erpRandomSeeds` | Independent seeds for latency, amplitude, condition order, onset jitter, and omission. |
 
 ---
 
@@ -140,7 +163,7 @@ not is unaffected.
 | `--output <dir>` | *required* | Created if missing. Existing packages with the same prefix are replaced. |
 | `--prefix <name>` | `sim` | Filename prefix for all three outputs. A trailing underscore is optional — `test1` and `test1_` behave the same. Must be a bare name, not a path. |
 | `--channels <n>` | `20` | See [Montage](#montage-and-electrode-positions) for what the montage does at other counts. |
-| `--rate <hz>` | `1024` | Must be a positive integer rate; MFF cannot store a fractional one. |
+| `--rate <hz>` | `1000` | Must be a positive integer rate; MFF cannot store a fractional one. Use `1024` for the paper's rate. |
 | `--duration <s>` | `180` | |
 | `--seed <n>` | `20260821` | The same seed produces byte-identical output. |
 
@@ -177,6 +200,111 @@ not is unaffected.
 | `--alpha-low <uv>` | `10` | Eyes-open alpha amplitude. |
 | `--alpha-high <uv>` | `30` | Eyes-closed alpha amplitude. Alternates every 20 s. |
 | `--eeg-std <uv>` | `10.9` | Target standard deviation of the generated EEG. The paper's value, which is what makes SNRs comparable with theirs. |
+| `--eeg-model <name>` | `grouiller` | `grouiller` preserves the paper's channel-smoothing model; `dipole` generates explicit neural sources through a concentric-sphere lead field. |
+| `--reference <name>` | `average` | `average` or `infinity`; applied once to every additive sensor-space layer before recording defects. |
+| `--sources <n>` | `7` | Number of true neural sources in dipole mode. Sources beyond seven cycle through the frequency bands again. |
+| `--source-depth <fraction>` | `0.85` | Source radius divided by the innermost brain-shell radius. Must lie strictly between 0 and 1. |
+| `--source-orientations <pattern>` | `mixed` | `radial`, `tangential`, `mixed`, or deterministic oblique `free` orientations. |
+| `--lead-field-terms <n>` | `100` | Terms in the spherical-harmonic series. |
+
+### Neural non-stationarity
+
+Off by default to preserve the paper-compatible stationary path.
+`--with-nonstationarity` enables all four controlled mechanisms; specifying any
+numeric mechanism option also enables the layer.
+
+| Option | Enabled default | Notes |
+| --- | --- | --- |
+| `--alpha-bursts <per-min>` | `12` | Smooth spindle-like alpha bursts with a low inter-burst background. |
+| `--alpha-burst-duration <s>` | `1` | Mean duration; realized durations have 0.25 s SD. |
+| `--spectral-variation <sd>` | `0.35` | Stationary SD of each independent log-amplitude OU process. |
+| `--spectral-timescale <s>` | `12` | OU correlation time constant. |
+| `--microstates <n>` | `4` | Number of distinct switching sensor maps. |
+| `--microstate-dwell <ms>` | `100` | Mean dwell, constrained to 40–250 ms with 10 ms transitions. |
+| `--microstate-amplitude <uv>` | `4` | RMS of the added 2–20 Hz carrier before common EEG calibration. |
+| `--pac <strength>` | `0.7` | Cosine modulation depth, from 0 through 0.99. |
+| `--pac-low <hz>` | `6` | Phase-providing oscillator frequency. |
+| `--pac-band <name>` | `gamma-low` | Amplitude-modulated configured EEG band. |
+| `--pac-phase <deg>` | `0` | Known preferred phase. |
+
+Use `--no-alpha-bursts`, `--no-spectral-dynamics`, `--no-microstates`, or
+`--no-pac` for ablations. `--no-nonstationarity` disables the complete layer.
+Truth records every realized event and map, the one-Hz envelopes, stochastic
+carrier provenance, and exact PAC coupling. In dipole mode, microstates are an
+explicit sensor-space component after dipole projection and are therefore not
+present in `_sources.mff`.
+
+PAC tools can emit `{"strength":...,"preferredPhaseRadians":...}` and run:
+
+```bash
+eva-simulate score-pac \
+  --truth ~/nonstationary/sim_truth.json \
+  --estimated ~/nonstationary/recovered_pac.json
+```
+
+The report gives signed strength error and shortest circular phase error.
+
+#### Dipole model
+
+Dipole mode uses an analytic concentric-sphere forward solution with no runtime
+dependency. The default preset is brain/skull/scalp at 72/79/85 mm and
+0.33/0.0042/0.33 S/m. The API supports arbitrary shells so a CSF-inclusive or
+imported model does not require a new source interface.
+
+Source positions form a deterministic, prefix-stable sequence: increasing
+`--sources` preserves all earlier locations, orientations, bands and seeds.
+With `--source-correlation`, S002 is assigned S001's configured band before the
+exact correlation is imposed, so waveform mixing cannot silently invalidate its
+band label. Without correlation, normal round-robin band assignment remains.
+The sidecar records the `channels × (3 × sources)` free-orientation gain matrix
+and the `channels × sources` matrix after orientation projection, both in
+µV/(nA·m). Columns use the declared recording reference. Full-rate source signals are
+regenerable from their individual seeds and the configuration; a common recorded
+factor calibrates them to `--eeg-std`.
+
+Before generation, the simulator recomputes the free-orientation operator at
+`--lead-field-terms` and twice that count. It reports the largest L2-relative
+column change and warns when it exceeds `1e-4` (0.01%), identifying the worst
+source and orientation axis. Increase `--lead-field-terms` until the warning
+clears. The 100-term default passes the self-tested classic-three-shell range
+from 0.01 through 0.999999 of the brain radius.
+
+The sweep command accepts `--parameter sources` with positive integer values,
+which makes undercomplete and overcomplete ICA scenarios reproducible without
+changing the artifact draws.
+
+Only neural EEG uses this lead field. BCG, gradients and electrode defects are
+not neural dipoles. Ocular sources will require an eye-aware volume conductor.
+
+### Recording reference
+
+The `average` default applies one reference after neural EEG, ERPs, scanner and
+physiological artifacts, thermal contact noise, and mains pickup have been
+combined. Bad-reference corruption, channel defects, bridges, and clipping are
+then applied as physical recording failures that may break the nominal
+reference. `--reference infinity` skips the re-reference. Both the convention
+and application stage are explicit in `sim_truth.json`. The reviewed
+`paper-default.json` scenario selects `infinity` to preserve the legacy paper
+reproduction exactly.
+
+### ERP random streams and overlap
+
+ERP latency, amplitude, condition order, onset jitter, and omission each have a
+separate deterministic seed recorded under `erpRandomSeeds`. A one-factor or
+trial-count sweep therefore does not consume unrelated factors' draws.
+
+Every `erpTrials` entry records `componentWindowEndSeconds` plus directional
+`overlapsPreviousTrial`, `overlapsNextTrial`, and `overlapsAnotherTrial` flags.
+Overlap is permitted because it is realistic, but it makes isolated
+sensor-space peak truth ambiguous. Score the clean subset with:
+
+```bash
+eva-simulate score-erp \
+  --truth sim_truth.json \
+  --estimated recovered_trials.json \
+  --level trial \
+  --exclude-overlap
+```
 
 ### Ocular artifacts
 
@@ -191,6 +319,43 @@ number.
 | `--eye-movements <per-min>` | `0` | Saccade rate. |
 | `--eye-movement-amplitude <uv>` | `40` | Scalp amplitude at full gaze deflection. |
 
+### Muscle artifact
+
+EMG is off by default. `--with-emg` enables an 8-burst/minute model; specifying
+any EMG parameter also enables it. `--no-emg` disables a loaded scenario.
+
+| Option | Enabled default | Notes |
+| --- | --- | --- |
+| `--emg <per-min>` | `8` | Mean burst rate. Intervals are stochastic with a refractory floor. |
+| `--emg-amplitude <uv>` | `50` | RMS carrier amplitude at the strongest electrode during an average plateau. |
+| `--emg-duration <s>` | `0.75` | Mean duration; realized bursts vary from 0.6x to 1.4x. |
+| `--emg-low <hz>` | `20` | Broadband carrier low edge. |
+| `--emg-high <hz>` | `200` | High edge; must remain below Nyquist. |
+
+Bursts independently select left temporalis, right temporalis, or posterior neck
+and project most strongly near F7, F8, or Oz. Smooth attack and release edges
+avoid introducing artificial step transients. Exact burst truth and topographies
+are written to the sidecar, and `score-events --type emg` scores onset detection.
+Sweeps accept `--parameter emg-rate` and `--parameter emg-amplitude`.
+
+### Additional artifact families
+
+| Artifact | Enable with | Default model |
+| --- | --- | --- |
+| Chewing | `--chewing <episodes/min>` | 100 µV, 4 s rhythmic temporalis episodes at 1.5 Hz. |
+| Swallowing | `--swallowing <events/min>` | 120 µV, 1 s double-lobed posterior-neck bursts. |
+| Cable movement | `--cable-movement <events/min>` | 150 µV, 3 s broad correlated sway at 0.8 Hz. |
+| Sweat | `--sweat <episodes/min>` | 100 µV, 15 s drift on one channel. |
+| True bridge | `--bridge 3:4,8:9` | Each named pair is replaced by its shared mean signal. |
+| Bad reference | `--bad-reference <uv>` | Common 0.2-30 Hz contamination at the requested RMS. |
+| Saturation | `--clip <uv>` | Symmetric hard rails, applied after every additive artifact and bridge. |
+
+Amplitude and duration controls use `--chewing-amplitude`,
+`--swallowing-duration`, `--cable-amplitude`, and `--sweat-duration`;
+`--sweat-channels` controls locality. Matching `--no-*` flags clear scenario
+values. Episodic truth is available through `score-events --type chewing`,
+`swallowing`, `movement`, or `sweat`.
+
 ### Recording defects
 
 | Option | Default | Notes |
@@ -200,6 +365,9 @@ number.
 | `--line-noise-amplitude <uv>` | `8` | Per-channel pickup varies around this, with slowly wandering amplitude so a fixed notch cannot cancel it perfectly. |
 | `--impedance <kohm>` | `12` | Typical impedance of a *healthy* electrode. Channels scatter lognormally around it. |
 | `--no-impedance` | off | Record no impedance measurement at all. |
+| `--no-impedance-noise` | coupling on | Disable impedance-driven thermal noise and mains scaling. |
+| `--electrode-temperature <K>` | `298.15` | Temperature used by the Johnson-Nyquist noise equation. |
+| `--impedance-line-exponent <x>` | `1` | Exponent relating contact impedance to mains gain, from 0 to 2. |
 
 Defect kinds:
 
@@ -232,12 +400,27 @@ a value matching their defect:
 | `pop` | 75-130 kΩ | poor | Intermittent contact. |
 | `line` | 60-100 kΩ | fair to poor | Mains pickup rides on high impedance. |
 
+The operational model uses these same values to generate the samples. Contact
+thermal noise has RMS `sqrt(4 k T R B)`, with `B` equal to Nyquist, so its RMS
+rises with the square root of impedance. When `--line-noise` is enabled, pickup
+scales approximately linearly against a fixed 12 kΩ reference by default, with a small seeded
+lead-dress variation. The exact latent impedances, analytic thermal RMS values,
+and realized mains gains are written to the truth sidecar.
+
+`--no-impedance` removes the ICAL measurement from both MFF packages but does
+not change the latent electrode or its noise. Use `--no-impedance-noise` to
+restore the earlier measurement-only model; the paper-default scenario does so
+because Grouiller et al. did not specify this coupling. An impedance sweep is
+available as `sweep --parameter impedance --values 5,12,40,100`.
+The thermal calculation treats the recorded impedance magnitude as an effective
+resistance; real electrode-skin impedance is complex and frequency-dependent.
+
 !!! tip "The `flat` case is the one worth teaching"
     Impedance is a useful screen, not a proxy for data quality. It catches the
     electrode that is barely connected and misses the two that are connected to
     *each other*. A bridged channel scores a perfect 1.0 on impedance while
-    recording nothing usable — which is exactly what the `flat` defect produces
-    here, deliberately. A student who has seen that once will remember it.
+    recording nothing usable. Both the `flat` defect and explicit `--bridge`
+    pairs produce this low-impedance exception deliberately.
 
 Impedance is written to **both** packages, including the clean one. That is not
 an oversight: EVA treats impedance as a stable property of the recording, scored
@@ -276,7 +459,7 @@ can achieve.
 | `--artifact-anti-alias <f>` | `0.9` | Anti-alias cutoff as a fraction of output Nyquist, standing in for the amplifier's own filter. `0` disables it, modelling an amplifier whose anti-aliasing is inadequate for gradient-rate content. |
 | `--no-ecg` | off | Omit the synthetic ECG channel. |
 | `--no-motion-sensor` | off | Omit the synthetic motion-sensor channel. |
-| `--spatial-model <name>` | `circular` | `circular` is the paper's model (smooth across adjacent channel indices, wrapping). `geometric` smooths by real electrode distance — prefer it for demos and for anything that tests a method's use of topography. |
+| `--spatial-model <name>` | `circular` | Grouiller model only. `circular` is the paper's model (smooth across adjacent channel indices, wrapping). `geometric` smooths by real electrode distance. Dipole mode uses its lead field instead. |
 | `--spatial-smoothing <n>` | `4` | Kernel width in channels. Means approximately the same amount of smoothing under either spatial model. |
 | `--demo` | off | Preset described below. |
 
@@ -290,6 +473,7 @@ like):
 | --- | --- |
 | `--blinks` | 15 |
 | `--eye-movements` | 25 |
+| `--with-emg` | 8 bursts/min |
 | `--line-noise` | 60 |
 | `--spatial-model` | geometric |
 | `--pre-scan` | 15 |
@@ -471,6 +655,7 @@ With `--demo`:
 | What a blink looks like | `blnk` markers; Fp1/Fp2 against Cz. Frontal-maximal, with a slight reversal posteriorly. |
 | Blinks versus eye movements | `eyem` markers. Blinks are transients; eye movements are **steps** that hold until the eyes move again, with opposite polarity at F7 and F8 — because the scalp potential follows gaze *position*, not gaze velocity. |
 | Why we keep an EOG | The VEOG/HEOG channels see the same artifact far larger than any scalp electrode. |
+| Muscle versus neural gamma | `emg` markers; compare F7/F8 and Oz with Cz. Muscle is broadband, bursty, and spatially local. |
 | Bad channel detection | F8 (noisy) and Pz (drift) against their neighbours. |
 | Impedance vs. data quality | Health scoring on a recording made with `--bad-channels "3:flat,7:noisy"`: one channel scores poor on impedance and looks bad; the other scores *perfect* on impedance and is flat. |
 | Why notch filtering is per channel | Add `--bad-channels "3:line"` — one contaminated channel, the rest clean. |
@@ -482,6 +667,9 @@ Smaller, more focused recordings:
 ```bash
 # Just blinks on clean EEG — nothing else to distract from them.
 eva-simulate generate --output ~/blinks --no-gradient --no-bcg --blinks 18 --duration 60
+
+# Bursty temporalis and posterior-neck EMG on otherwise clean EEG.
+eva-simulate generate --output ~/emg --no-gradient --no-bcg --emg 12 --duration 120
 
 # One bad channel of each kind, side by side.
 eva-simulate generate --output ~/bad --no-gradient \
@@ -532,9 +720,16 @@ goes as dB/dt — use `--gradient-template` to substitute a measured one); the
 shape of the BCG waveform; the synthetic ECG and its morphology; the per-band
 amplitudes of the seven EEG sources; the anti-alias model; gradient amplitude
 scaling with electrode position rather than channel index; and everything under
-ocular artifacts, recording defects, the montage and the scanner window — all of
-which are off by default, so the benchmark numbers are unaffected by their
-existence.
+ocular and orofacial artifacts, cable movement, sweat, true bridging,
+bad-reference contamination, clipping, recording defects, the montage and the
+scanner window — all of which are off by default, so the benchmark numbers are
+unaffected by their existence.
+
+The opt-in non-stationarity layer is also EVA's: lognormal alpha-burst renewal,
+sin² spindle envelopes, independent per-band log-amplitude OU processes,
+generated microstate maps and dwell times, and cosine phase-amplitude gain.
+These are controlled validation laws, not fitted physiological claims; all
+realized truth is retained so results can be stratified by the actual draws.
 
 ---
 
@@ -542,38 +737,50 @@ existence.
 
 Stated plainly, because a harness whose limits are unstated gets over-trusted.
 
-- **The modelled EEG is stationary; real EEG is not.** The paper names this as
-  the likely reason ICA performed far better in their simulations than on their
-  experimental data. Treat any ICA result from this harness with suspicion and do
-  not conclude anything about ICA from simulation alone.
+- **The paper-compatible default EEG is stationary.** Use
+  `--with-nonstationarity` for ICA/PAC experiments and sweep its controls; one
+  phenomenological stochastic model still cannot establish population realism.
+- **Microstates are generated sensor-space maps.** In dipole mode they are an
+  additional known component, not an intracranial source in `_sources.mff`, and
+  they do not reproduce subject-specific canonical microstate classes.
 - **The default spatial model is circular, not anatomical.** Methods that exploit
   real topography — EVA's topography-gated, -aligned and -weighted OBS strategies
   — are being handed a spatial structure no montage produces. Use
-  `--spatial-model geometric`, and evaluate those methods on real data too.
-- **The BCG is a fixed waveform with varying amplitude and latency**, not the
-  genuinely varying morphology of a real one. This flatters template-based
-  methods somewhat.
+  `--eeg-model dipole` for a spherical volume conductor, and evaluate those
+  methods on real data too; a sphere is still not individual anatomy.
+- **The default BCG is a fixed waveform with varying amplitude and latency**,
+  not the genuinely varying morphology of a real one, and its topography is a
+  function of channel *index* rather than electrode position — which makes the
+  whole artifact rank one. This flatters template-based methods considerably:
+  against a rank-one artifact, an OBS that removes four components cannot fail.
+  `--bcg-model generators` replaces it with four physically placed generators
+  (spatial rank 4, real topographies, beat-to-beat morphology variation) and is
+  what anything turning on BCG topography or component count should use. The
+  channel-index model remains the default so the published benchmark reproduces
+  unchanged.
 - **One template shape for all channels.** Real gradient artifacts differ in
   shape, not only in scale, across the montage.
-- **No muscular artifact, no electrode drift beyond the `drift` defect, no
-  movement artifact.**
+- **The muscle models use fixed source regions and controlled carrier
+  families.** EMG, chewing, and swallowing do not model subject-specific muscle
+  anatomy, motor-unit recruitment, or individual volume conduction.
 
-### A known limitation of the file format
+### Event-time precision
 
-`selftest` reports one check as `KNOWN` rather than `PASS`: TR marker spacing.
+MFF stores event times as absolute ISO-8601 datetimes, and event positions
+survive a write/read round trip at **microsecond** precision, at any sampling
+rate.
 
-MFF stores event times as a datetime, and EVA's writer formats them with
-`DateFormatter`, which resolves only **milliseconds**. At 1024 Hz a sample is
-0.977 ms, so marker sample indices cannot survive the write/read round trip and
-come back displaced by up to half a millisecond. EVA's gradient stage tolerates
-one sample of deviation from the median TR interval and refuses to correct beyond
-it, so a generated recording can be rejected with *"TRs are not evenly spaced"*.
+This was not always the case, and it is worth knowing if you are reading older
+output. Both halves of the round trip used to quantize to 1 ms: `DateFormatter`
+carries millisecond internal precision no matter how many fractional digits are
+requested, and `ISO8601DateFormatter`'s fractional-seconds parsing truncates past
+three digits. At 1024 Hz a sample is 0.977 ms, so markers could move by half a
+sample and a generated recording was sometimes rejected with *"TRs are not
+evenly spaced"*. Rates whose sample period is a whole millisecond — including the
+1000 Hz operational default — were never affected.
 
-This is a writer limitation rather than a modelling one — it affects any EVA
-export carrying events — and it cannot be worked around from the simulator's
-side, because a 0.977 ms grid is not representable on a 1 ms one. Until it is
-fixed, `--clock-offset 0` produces markers that always pass, at the cost of an
-unrealistically stationary gradient artifact.
+Both sides are now fixed, and `scenarios/paper-default.json` runs at the paper's
+1024 Hz with every marker recovering its exact sample index.
 
 ---
 
@@ -583,7 +790,7 @@ unrealistically stationary gradient artifact.
 Tools/EVASimulate/.build/eva-simulate selftest
 ```
 
-Thirteen checks on the *model* rather than on any EVA code. Run it after changing
+Sixty passing outcomes on the *model* rather than on any EVA code. Run it after changing
 anything in the model: a harness that silently stops reproducing the phenomenon
 it exists to study is worse than no harness, because everything it emits still
 looks like evidence.
@@ -594,18 +801,39 @@ looks like evidence.
 | Drifting clocks fall far below it | The paper's 152 µs/s drift takes the same subtraction to ~0.06. |
 | QRS jitter penalizes timing-dependent correction | Subtraction at the jittered beat times scores below subtraction at the true ones. |
 | Templates start and end at baseline (×3) | A template still non-zero where its window closes injects a step discontinuity at *every* event — a square edge repeating at the heart rate or blink rate. Checked for the BCG, blink and gradient waveforms. |
-| TR markers stay within EVA's tolerance | Currently `KNOWN`; see above. |
+| TR markers stay within EVA's tolerance | The 1000 Hz default preserves the intentionally drifting trigger train through the millisecond timestamp round trip. |
 | No gradient artifact before the scanner starts | |
 | BCG continues through the pre-scan window | |
 | Blink topography is frontally maximal | Peaks at Fp1/Fp2 and vanishes at the vertex. |
+| EMG truth and markers are deterministic | The same seed reproduces every burst sample and duration marker. |
+| EMG is bursty and broadband | Samples are zero outside truth windows and 20-200 Hz power dominates 1-15 Hz. |
+| EMG topographies are localized | Left/right temporalis peak laterally and posterior-neck activity peaks near Oz. |
+| Chewing/swallowing truth is deterministic | Samples, durations, and distinct event codes repeat exactly. |
+| Cable movement versus sweat | Movement is broad; sweat changes exactly its recorded local channels. |
+| True bridging | A requested pair becomes sample-identical at its shared mean. |
+| Bad reference | Every channel receives the exact same common contamination. |
+| Saturation | Only out-of-range samples hit symmetric rails and counts match. |
 | Impedance tracks the defect (×3) | Healthy electrodes stay inside the good band; poor-contact defects read high; and a bridged electrode still reads **low** despite recording nothing. |
+| Impedance drives recording noise (×3) | Johnson RMS follows √R and disables cleanly; mains pickup rises with R; explicit bridges retain deceptively low impedance. |
+| Centered dipole matches a closed form | A central dipole in one homogeneous insulated sphere matches `3 p·r̂ / (4πσR²)`, including physical units. |
+| Shell and rotation invariants (×2) | Equal-conductivity boundaries disappear, and jointly rotating a source and every sensor preserves the field. |
+| Lead-field reference and orientation (×3) | Average-referenced fixed and free `x/y/z` columns sum to zero, and reversing a dipole reverses every potential. |
+| Source catalog and artifact isolation (×2) | Adding sources preserves existing source metadata and cannot change the BCG realization. |
+| Dipole amplitude and determinism (×2) | Projection reaches `--eeg-std`, and repeated generation is sample-identical. |
+| Lead-field convergence | The 100→200-term change stays below 0.01% across eccentricities; an under-resolved 10-term case is rejected. |
+| Correlated-source band identity | Mixed S001/S002 waveforms share one declared configured band. |
+| One recording reference | Average reference produces zero channel mean at the additive boundary; infinity leaves native voltages unchanged. |
+| ERP stream isolation and overlap (×2) | Trial-count changes preserve unrelated factor draws; dense component windows receive directional overlap flags. |
+| Non-stationarity is deterministic and opt-in | The stationary default remains unchanged; samples and complete truth repeat for one seed. |
+| Alpha bursts and slow spectra (×2) | Burst counts/quiet intervals and continuously correlated per-band envelopes satisfy their controls. |
+| Microstates and PAC (×2) | Distinct 40–250 ms map episodes switch without immediate repeats, and gamma amplitude peaks at the recorded phase. |
 
 Two facts worth carrying away from those checks:
 
 - **Naive AAS has a ceiling of √N.** Any method scoring meaningfully above it is
   doing something smarter than a global average; any method well below it on
   locked-clock data has a problem.
-- **Slice spacing is usually not a whole number of samples.** At 1024 Hz with
+- **Slice spacing is usually not a whole number of samples.** In the 1024 Hz paper scenario with
   TR 3 s and 41 slices, one slice is 74.93 samples, so slice artifacts never
   repeat their sub-sample phase even with clocks perfectly locked. That is why
   IAR and FASTR interpolate to ~10 kHz before attempting slice-level alignment.
@@ -615,10 +843,12 @@ Two facts worth carrying away from those checks:
 ## Reproducibility
 
 Two runs of the same seed produce byte-identical packages and sidecars. All
-randomness comes from a seeded SplitMix64 generator, the recording timestamp is
-fixed rather than taken from the clock, and JSON is written with sorted keys. A
-benchmark that moved between runs could not support a claim about which method is
-better.
+randomness comes from seeded SplitMix64 generators, the recording timestamp is
+fixed rather than taken from the clock, and JSON is written with sorted keys.
+Dipole mode derives stable named streams for each neural source and artifact
+family, so changing source count does not change BCG, ocular, defect, impedance,
+or contact-noise draws. A benchmark that moved between runs could not support a claim about which
+method is better.
 
-Runtime for the defaults (20 channels, 180 s, 1024 Hz) is about 6 seconds,
+Runtime for the defaults (20 channels, 180 s, 1000 Hz) is about 6 seconds,
 producing about 30 MB.

@@ -529,7 +529,10 @@ nonisolated enum MFFWriter {
         let recordStart = signal.recordingStartTime ?? Date()
         var body = ""
         for event in events {
-            let beginTime = mffDateString(recordStart.addingTimeInterval(event.beginTimeSeconds))
+            let beginTime = mffDateString(
+                origin: recordStart,
+                offsetNanoseconds: event.offsetNanoseconds(sampleRate: sampleRate)
+            )
             let durationMicroseconds = Int(((event.durationSeconds ?? 0) * 1_000_000).rounded())
             let labelXML = event.label.map { "    <label>\(xmlEscape($0))</label>\n" } ?? ""
             let keysXML = event.cell.map {
@@ -776,6 +779,7 @@ nonisolated enum MFFWriter {
             output.append(ExportEvent(
                 code: block.category,
                 beginTimeSeconds: eventTime,
+                beginSample: eventSample,
                 durationSeconds: nil,
                 label: nil,
                 description: description,
@@ -805,19 +809,142 @@ nonisolated enum MFFWriter {
             .replacingOccurrences(of: "'", with: "&apos;")
     }
 
-    private static func mffDateString(_ date: Date) -> String {
-        // EGI MFF `recordTime` must use microsecond (6-digit) fractional seconds
-        // and a NUMERIC timezone offset. ISO8601DateFormatter only emits 3-digit
-        // milliseconds and a "Z" suffix for UTC, which fails strict readers —
-        // notably MNE's regex (mne/io/egi/egimff.py) requires
-        //   \.\d{6}(?:\d{3})?[+-]\d{2}:\d{2}
-        // so ".129Z" is rejected. Use a fixed POSIX formatter with 6 fractional
-        // digits and the "xxx" offset token (always numeric, e.g. +00:00/-04:00).
+    static func mffDateString(_ date: Date) -> String {
+        MFFTimestamp(date).string()
+    }
+
+    /// Absolute timestamp for an event `offsetNanoseconds` after `origin`.
+    /// The offset is applied in integer nanoseconds rather than by
+    /// `Date.addingTimeInterval`, so an event's sample position is not rounded
+    /// twice before it reaches the string.
+    static func mffDateString(origin: Date, offsetNanoseconds: Int64) -> String {
+        MFFTimestamp(origin).adding(nanoseconds: offsetNanoseconds).string()
+    }
+
+    /// Nanoseconds from the start of the recording to `sample`, by integer
+    /// arithmetic. At 1024 Hz a sample is 976562.5 ns, so this rounds by at most
+    /// half a nanosecond — against the 976562 ns it must resolve, that is nine
+    /// orders of magnitude of headroom.
+    static func eventOffsetNanoseconds(sample: Int, sampleRate: Int) -> Int64 {
+        guard sampleRate > 0 else { return 0 }
+        let rate = Int64(sampleRate)
+        let numerator = Int64(sample) * 1_000_000_000
+        return (numerator + rate / 2) / rate
+    }
+
+    static func eventOffsetNanoseconds(seconds: Double) -> Int64 {
+        let whole = seconds.rounded(.down)
+        let fraction = seconds - whole
+        return Int64(whole) * 1_000_000_000 + Int64((fraction * 1_000_000_000).rounded())
+    }
+}
+
+/// An absolute instant as integer seconds plus integer nanoseconds since 1970.
+///
+/// MFF event times are absolute ISO-8601 datetimes, and a reader recovers the
+/// sample index as `round((beginTime - recordTime) * sfreq)`. Every step of that
+/// therefore has to preserve sub-millisecond precision, and `DateFormatter` does
+/// not: it carries millisecond internal precision and zero-fills any further
+/// digits, so a `.SSSSSS` format string emits microsecond-*looking* output that
+/// is still quantized to 1 ms.
+///
+/// At 1024 Hz a sample is 976.5625 µs, so millisecond quantization displaces an
+/// event by up to ±0.51 samples — enough for two adjacent TR markers to round
+/// trip 1.02 samples apart and trip EVA's own one-sample spacing tolerance. That
+/// is the intermittent "TRs are not evenly spaced" rejection. `Date` itself is
+/// not the limit; as a `Double` of seconds since 2001 it resolves to about
+/// 0.12 µs at present-day epochs.
+///
+/// So the fractional digits are formatted from integer arithmetic here, and
+/// `DateFormatter` is only ever handed a whole-second instant, which it renders
+/// exactly. The instant is snapped to a whole microsecond on construction so
+/// that `recordTime` and every event quantize identically and the reader's
+/// subtraction stays exact.
+nonisolated struct MFFTimestamp: Sendable, Equatable {
+    /// Whole seconds since 1970. Always the floor, so `nanoseconds` is positive
+    /// even for instants before the epoch.
+    private(set) var seconds: Int64
+    /// 0 ..< 1_000_000_000, always a whole number of microseconds.
+    private(set) var nanoseconds: Int64
+
+    private static let nanosecondsPerSecond: Int64 = 1_000_000_000
+    private static let nanosecondsPerMicrosecond: Int64 = 1_000
+
+    init(_ date: Date) {
+        // Split before scaling. One `timeIntervalSince1970 * 1e9` would need 19
+        // significant digits at current epochs and Double carries about 16.
+        let interval = date.timeIntervalSince1970
+        let whole = interval.rounded(.down)
+        let fraction = interval - whole
+        self.init(
+            seconds: Int64(whole),
+            nanoseconds: Int64((fraction * Double(Self.nanosecondsPerSecond)).rounded())
+        )
+    }
+
+    init(seconds: Int64, nanoseconds: Int64) {
+        // Normalize into [0, 1e9) *before* snapping. Swift's integer division
+        // truncates toward zero, so rounding a negative remainder to the nearest
+        // microsecond would be biased; carrying first means the value being
+        // snapped is always positive and the arithmetic is unambiguous.
+        var carriedSeconds = seconds + nanoseconds / Self.nanosecondsPerSecond
+        var remainder = nanoseconds % Self.nanosecondsPerSecond
+        if remainder < 0 {
+            remainder += Self.nanosecondsPerSecond
+            carriedSeconds -= 1
+        }
+
+        // Snap to whole microseconds: the emitted string carries six fractional
+        // digits, and quantizing here rather than at print time keeps every
+        // timestamp in a package on one grid, so the reader's
+        // `beginTime - recordTime` subtraction does not inherit two roundings.
+        remainder = ((remainder + Self.nanosecondsPerMicrosecond / 2)
+            / Self.nanosecondsPerMicrosecond) * Self.nanosecondsPerMicrosecond
+        if remainder >= Self.nanosecondsPerSecond {
+            remainder -= Self.nanosecondsPerSecond
+            carriedSeconds += 1
+        }
+
+        self.seconds = carriedSeconds
+        self.nanoseconds = remainder
+    }
+
+    func adding(nanoseconds offset: Int64) -> MFFTimestamp {
+        MFFTimestamp(seconds: seconds, nanoseconds: nanoseconds + offset)
+    }
+
+    /// `yyyy-MM-ddTHH:mm:ss.ffffff±HH:MM`.
+    ///
+    /// Six fractional digits and a numeric offset are both required by strict
+    /// readers — MNE's regex (`mne/io/egi/egimff.py`) is
+    /// `\.\d{6}(?:\d{3})?[+-]\d{2}:\d{2}`, so `ISO8601DateFormatter`'s 3-digit
+    /// `.129Z` is rejected. Nine digits would also be accepted but buy nothing:
+    /// the microsecond residual is already 0.0005 samples at 1024 Hz.
+    func string() -> String {
+        let wholeSecondDate = Date(timeIntervalSince1970: Double(seconds))
+        let microseconds = nanoseconds / Self.nanosecondsPerMicrosecond
+        return String(
+            format: "%@.%06d%@",
+            Self.calendarFormatter.string(from: wholeSecondDate),
+            Int(microseconds),
+            Self.offsetFormatter.string(from: wholeSecondDate)
+        )
+    }
+
+    private static let calendarFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSxxx"
-        return formatter.string(from: date)
-    }
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        return formatter
+    }()
+
+    private static let offsetFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        // "xxx" is always numeric (+00:00, -04:00); "Z" for UTC would be rejected.
+        formatter.dateFormat = "xxx"
+        return formatter
+    }()
 }
 
 private nonisolated struct ExportBlock: Sendable {
@@ -844,8 +971,19 @@ private nonisolated struct ExportBlock: Sendable {
 private nonisolated struct ExportEvent: Sendable {
     let code: String
     let beginTimeSeconds: Double
+    /// The exact sample this event sits on, when the caller knows it. Preferred
+    /// over `beginTimeSeconds` so a position that began life as an integer
+    /// sample index is not rounded through a `Double` on its way to the string.
+    var beginSample: Int? = nil
     let durationSeconds: Double?
     let label: String?
     let description: String?
     let cell: String?
+
+    func offsetNanoseconds(sampleRate: Int) -> Int64 {
+        if let beginSample {
+            return MFFWriter.eventOffsetNanoseconds(sample: beginSample, sampleRate: sampleRate)
+        }
+        return MFFWriter.eventOffsetNanoseconds(seconds: beginTimeSeconds)
+    }
 }

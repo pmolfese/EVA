@@ -43,6 +43,21 @@ nonisolated struct BandScore: Codable, Sendable {
     var cleanRMS: Double
     /// Band-limited RMS of what the correction got wrong, in µV.
     var residualRMS: Double
+    /// Zero-lag correlation of the clean and corrected band-limited signals.
+    var correlation: Double
+    /// RMS dB error between corrected and clean Welch spectra inside the band.
+    var spectralDistortionDbRMS: Double
+}
+
+nonisolated struct ChannelScore: Codable, Sendable {
+    var name: String
+    var snr: Double
+    var rmseMicrovolts: Double
+    var correlation: Double
+    var cleanStandardDeviation: Double
+    var residualStandardDeviation: Double
+    var spectralDistortionDbRMS: Double
+    var bands: [BandScore]
 }
 
 nonisolated struct CorrectionScore: Codable, Sendable {
@@ -51,7 +66,12 @@ nonisolated struct CorrectionScore: Codable, Sendable {
     var broadbandSNR: Double
     var cleanStandardDeviation: Double
     var residualStandardDeviation: Double
+    /// Absolute error, including any DC bias that standard deviation omits.
+    var broadbandRMSEMicrovolts: Double
+    var broadbandCorrelation: Double
+    var spectralDistortionDbRMS: Double
     var bands: [BandScore]
+    var channels: [ChannelScore]
 }
 
 nonisolated enum SNRMetrics {
@@ -69,6 +89,7 @@ nonisolated enum SNRMetrics {
         clean: [[Double]],
         corrected: [[Double]],
         samplingRate: Double,
+        channelNames: [String]? = nil,
         bands: [(name: String, low: Double, high: Double)] = defaultBands,
         segmentLength: Int = 4096
     ) -> CorrectionScore {
@@ -88,39 +109,44 @@ nonisolated enum SNRMetrics {
         let cleanStd = EEGGenerator.pooledStandardDeviation(clean)
         let residualStd = EEGGenerator.pooledStandardDeviation(residual)
 
+        let spectra = clean.indices.map {
+            pairedSpectrum(clean[$0], corrected[$0], samplingRate: samplingRate,
+                           segmentLength: segmentLength)
+        }
+        var channelBands = [[BandScore]](repeating: [], count: clean.count)
         var bandScores: [BandScore] = []
         for band in bands {
-            var cleanPower = 0.0
-            var residualPower = 0.0
-            var correctedPower = 0.0
-            for channel in clean.indices {
-                cleanPower += bandPower(
-                    clean[channel], samplingRate: samplingRate,
-                    lowHz: band.low, highHz: band.high, segmentLength: segmentLength
-                )
-                residualPower += bandPower(
-                    residual[channel], samplingRate: samplingRate,
-                    lowHz: band.low, highHz: band.high, segmentLength: segmentLength
-                )
-                correctedPower += bandPower(
-                    corrected[channel], samplingRate: samplingRate,
-                    lowHz: band.low, highHz: band.high, segmentLength: segmentLength
-                )
+            for channel in spectra.indices {
+                channelBands[channel].append(makeBandScore(
+                    name: band.name, low: band.low, high: band.high,
+                    spectra: [spectra[channel]]
+                ))
             }
-            let channelCount = Double(max(1, clean.count))
-            cleanPower /= channelCount
-            residualPower /= channelCount
-            correctedPower /= channelCount
-
-            bandScores.append(BandScore(
-                name: band.name,
-                lowHz: band.low,
-                highHz: band.high,
-                snr: residualPower > 0 ? (cleanPower / residualPower).squareRoot() : .infinity,
-                powerRatioDb: cleanPower > 0 ? 10 * log10(max(correctedPower, 1e-30) / cleanPower) : 0,
-                cleanRMS: cleanPower.squareRoot(),
-                residualRMS: residualPower.squareRoot()
+            bandScores.append(makeBandScore(
+                name: band.name, low: band.low, high: band.high, spectra: spectra
             ))
+        }
+
+        let resolvedNames = channelNames?.count == clean.count
+            ? channelNames!
+            : clean.indices.map { "E\($0 + 1)" }
+        let channels = clean.indices.map { index -> ChannelScore in
+            let channelResidual = residual[index]
+            let channelCleanStd = standardDeviation(clean[index])
+            let channelResidualStd = standardDeviation(channelResidual)
+            return ChannelScore(
+                name: resolvedNames[index],
+                snr: channelResidualStd > 0 ? channelCleanStd / channelResidualStd : .infinity,
+                rmseMicrovolts: rmse(clean[index], corrected[index]),
+                correlation: pearson(clean[index], corrected[index]),
+                cleanStandardDeviation: channelCleanStd,
+                residualStandardDeviation: channelResidualStd,
+                spectralDistortionDbRMS: spectralDistortion(
+                    spectra: [spectra[index]], low: 0,
+                    high: min(70, samplingRate / 2)
+                ),
+                bands: channelBands[index]
+            )
         }
 
         return CorrectionScore(
@@ -128,8 +154,218 @@ nonisolated enum SNRMetrics {
             broadbandSNR: residualStd > 0 ? cleanStd / residualStd : .infinity,
             cleanStandardDeviation: cleanStd,
             residualStandardDeviation: residualStd,
-            bands: bandScores
+            broadbandRMSEMicrovolts: pooledRMSE(clean, corrected),
+            broadbandCorrelation: pooledCorrelation(clean, corrected),
+            spectralDistortionDbRMS: spectralDistortion(
+                spectra: spectra, low: 0, high: min(70, samplingRate / 2)
+            ),
+            bands: bandScores,
+            channels: channels
         )
+    }
+
+    private struct PairedSpectrum {
+        var binHz: Double
+        var clean: [Double]
+        var corrected: [Double]
+        var residual: [Double]
+        var cross: [Double]
+    }
+
+    private static func makeBandScore(
+        name: String, low: Double, high: Double, spectra: [PairedSpectrum]
+    ) -> BandScore {
+        guard let first = spectra.first else {
+            return BandScore(name: name, lowHz: low, highHz: high, snr: 0,
+                             powerRatioDb: 0, cleanRMS: 0, residualRMS: 0,
+                             correlation: 0, spectralDistortionDbRMS: 0)
+        }
+        let firstBin = max(0, Int(ceil(low / first.binHz)))
+        let lastBin = min(first.clean.count - 1, Int(floor(high / first.binHz)))
+        guard lastBin >= firstBin else {
+            return BandScore(name: name, lowHz: low, highHz: high, snr: 0,
+                             powerRatioDb: 0, cleanRMS: 0, residualRMS: 0,
+                             correlation: 0, spectralDistortionDbRMS: 0)
+        }
+        var cleanPower = 0.0
+        var correctedPower = 0.0
+        var residualPower = 0.0
+        var crossPower = 0.0
+        for spectrum in spectra {
+            for bin in firstBin...lastBin {
+                cleanPower += spectrum.clean[bin]
+                correctedPower += spectrum.corrected[bin]
+                residualPower += spectrum.residual[bin]
+                crossPower += spectrum.cross[bin]
+            }
+        }
+        let divisor = Double(max(1, spectra.count))
+        cleanPower /= divisor
+        correctedPower /= divisor
+        residualPower /= divisor
+        crossPower /= divisor
+        let denominator = (cleanPower * correctedPower).squareRoot()
+        return BandScore(
+            name: name, lowHz: low, highHz: high,
+            snr: residualPower > 0 ? (cleanPower / residualPower).squareRoot() : .infinity,
+            powerRatioDb: cleanPower > 0
+                ? 10 * log10(max(correctedPower, 1e-30) / cleanPower) : 0,
+            cleanRMS: cleanPower.squareRoot(),
+            residualRMS: residualPower.squareRoot(),
+            correlation: denominator > 1e-30 ? crossPower / denominator : 0,
+            spectralDistortionDbRMS: spectralDistortion(
+                spectra: spectra, low: low, high: high
+            )
+        )
+    }
+
+    private static func pairedSpectrum(
+        _ clean: [Double], _ corrected: [Double], samplingRate: Double,
+        segmentLength: Int
+    ) -> PairedSpectrum {
+        let count = min(clean.count, corrected.count)
+        let n = welchLength(sampleCount: count, requested: segmentLength)
+        let bins = max(1, n / 2 + 1)
+        var result = PairedSpectrum(
+            binHz: samplingRate / Double(n), clean: [Double](repeating: 0, count: bins),
+            corrected: [Double](repeating: 0, count: bins),
+            residual: [Double](repeating: 0, count: bins),
+            cross: [Double](repeating: 0, count: bins)
+        )
+        guard count >= n, n >= 8 else { return result }
+        var window = [Double](repeating: 0, count: n)
+        var windowPower = 0.0
+        for i in 0..<n {
+            window[i] = 0.5 * (1 - cos(2 * Double.pi * Double(i) / Double(n - 1)))
+            windowPower += window[i] * window[i]
+        }
+        windowPower /= Double(n)
+        let scale = Double(n) * Double(n) * windowPower
+        var segments = 0
+        var start = 0
+        while start + n <= count {
+            let cleanMean = clean[start..<(start + n)].reduce(0, +) / Double(n)
+            let correctedMean = corrected[start..<(start + n)].reduce(0, +) / Double(n)
+            var xr = [Double](repeating: 0, count: n)
+            var xi = [Double](repeating: 0, count: n)
+            var yr = [Double](repeating: 0, count: n)
+            var yi = [Double](repeating: 0, count: n)
+            for i in 0..<n {
+                xr[i] = (clean[start + i] - cleanMean) * window[i]
+                yr[i] = (corrected[start + i] - correctedMean) * window[i]
+            }
+            DSP.fft(re: &xr, im: &xi, inverse: false)
+            DSP.fft(re: &yr, im: &yi, inverse: false)
+            for bin in 0..<bins {
+                let weight = (bin == 0 || bin == n / 2) ? 1.0 : 2.0
+                let px = weight * (xr[bin] * xr[bin] + xi[bin] * xi[bin]) / scale
+                let py = weight * (yr[bin] * yr[bin] + yi[bin] * yi[bin]) / scale
+                let cross = weight * (xr[bin] * yr[bin] + xi[bin] * yi[bin]) / scale
+                result.clean[bin] += px
+                result.corrected[bin] += py
+                result.residual[bin] += max(0, px + py - 2 * cross)
+                result.cross[bin] += cross
+            }
+            segments += 1
+            start += n / 2
+        }
+        if segments > 0 {
+            for bin in 0..<bins {
+                result.clean[bin] /= Double(segments)
+                result.corrected[bin] /= Double(segments)
+                result.residual[bin] /= Double(segments)
+                result.cross[bin] /= Double(segments)
+            }
+        }
+        return result
+    }
+
+    private static func spectralDistortion(
+        spectra: [PairedSpectrum], low: Double, high: Double
+    ) -> Double {
+        guard let first = spectra.first else { return 0 }
+        let firstBin = max(0, Int(ceil(low / first.binHz)))
+        let lastBin = min(first.clean.count - 1, Int(floor(high / first.binHz)))
+        guard lastBin >= firstBin else { return 0 }
+        var cleanPSD = [Double](repeating: 0, count: lastBin - firstBin + 1)
+        var correctedPSD = cleanPSD
+        for spectrum in spectra {
+            for bin in firstBin...lastBin {
+                cleanPSD[bin - firstBin] += spectrum.clean[bin]
+                correctedPSD[bin - firstBin] += spectrum.corrected[bin]
+            }
+        }
+        // Use one global reference floor rather than a per-band floor. In a
+        // notch/dropout band both spectra can be at floating-point dust; their
+        // dB ratio is then numerically enormous but scientifically meaningless.
+        let globalPeak = spectra.flatMap(\.clean).max() ?? 0
+        let floorPower = max(globalPeak * 1e-10 * Double(max(1, spectra.count)), 1e-30)
+        var squares = 0.0
+        for index in cleanPSD.indices {
+            let difference = 10 * log10(max(correctedPSD[index], floorPower)
+                / max(cleanPSD[index], floorPower))
+            squares += difference * difference
+        }
+        return (squares / Double(cleanPSD.count)).squareRoot()
+    }
+
+    private static func standardDeviation(_ values: [Double]) -> Double {
+        guard values.count > 1 else { return 0 }
+        let mean = values.reduce(0, +) / Double(values.count)
+        return (values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) }
+                / Double(values.count)).squareRoot()
+    }
+
+    private static func rmse(_ lhs: [Double], _ rhs: [Double]) -> Double {
+        let count = min(lhs.count, rhs.count)
+        guard count > 0 else { return 0 }
+        var squares = 0.0
+        for index in 0..<count { squares += pow(lhs[index] - rhs[index], 2) }
+        return (squares / Double(count)).squareRoot()
+    }
+
+    private static func pearson(_ lhs: [Double], _ rhs: [Double]) -> Double {
+        DipoleEEGGenerator.pearson(lhs, rhs)
+    }
+
+    private static func pooledRMSE(_ lhs: [[Double]], _ rhs: [[Double]]) -> Double {
+        var squares = 0.0
+        var count = 0
+        for channel in lhs.indices {
+            let n = min(lhs[channel].count, rhs[channel].count)
+            for index in 0..<n { squares += pow(lhs[channel][index] - rhs[channel][index], 2) }
+            count += n
+        }
+        return count > 0 ? (squares / Double(count)).squareRoot() : 0
+    }
+
+    private static func pooledCorrelation(_ lhs: [[Double]], _ rhs: [[Double]]) -> Double {
+        var numerator = 0.0
+        var leftSquares = 0.0
+        var rightSquares = 0.0
+        for channel in lhs.indices {
+            let count = min(lhs[channel].count, rhs[channel].count)
+            guard count > 1 else { continue }
+            let leftMean = lhs[channel].prefix(count).reduce(0, +) / Double(count)
+            let rightMean = rhs[channel].prefix(count).reduce(0, +) / Double(count)
+            for index in 0..<count {
+                let left = lhs[channel][index] - leftMean
+                let right = rhs[channel][index] - rightMean
+                numerator += left * right
+                leftSquares += left * left
+                rightSquares += right * right
+            }
+        }
+        let denominator = (leftSquares * rightSquares).squareRoot()
+        return denominator > 1e-30 ? numerator / denominator : 0
+    }
+
+    private static func welchLength(sampleCount: Int, requested: Int) -> Int {
+        let limit = min(sampleCount, max(8, requested))
+        guard limit >= 8 else { return max(2, limit) }
+        var length = 8
+        while length <= limit / 2 { length *= 2 }
+        return length
     }
 
     /// Mean-square power of `x` within a band, from a Welch periodogram.
@@ -146,7 +382,7 @@ nonisolated enum SNRMetrics {
         highHz: Double,
         segmentLength: Int
     ) -> Double {
-        let n = min(SpectralNoise.nextPowerOfTwo(segmentLength), SpectralNoise.nextPowerOfTwo(max(x.count, 2)))
+        let n = welchLength(sampleCount: x.count, requested: segmentLength)
         guard x.count >= n, n >= 8 else { return 0 }
 
         var window = [Double](repeating: 0, count: n)

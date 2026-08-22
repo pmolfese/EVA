@@ -103,8 +103,8 @@ nonisolated enum SelfTest {
             var noisy = eeg.channels
             let injection = GradientArtifactModel.inject(into: &noisy, config: config, montage: montage, template: nil)
 
-            // Volume epochs, not slice epochs. At 1024 Hz a TR of 3 s is exactly
-            // 3072 samples, but one slice of 41 is 74.93 samples — so slice
+            // Volume epochs, not slice epochs. At 1000 Hz a TR of 3 s is exactly
+            // 3000 samples, but one slice of 41 is 73.17 samples — so slice
             // onsets never repeat their sub-sample phase even with the clocks
             // perfectly locked. That is a real property of real acquisitions,
             // and it is why IAR and FASTR interpolate up to ~10 kHz before doing
@@ -175,7 +175,10 @@ nonisolated enum SelfTest {
             source: &bcgSource
         )
         var bcgNoisy = bcgEEG.channels
-        let bcgInjection = BCGArtifactModel.inject(into: &bcgNoisy, config: bcgConfig, source: &bcgSource)
+        let bcgInjection = BCGArtifactModel.inject(
+            into: &bcgNoisy, config: bcgConfig,
+            montage: Montage.standard(count: bcgConfig.channelCount), source: &bcgSource
+        )
 
         let beatEpoch = Int((bcgConfig.bcgWaveformSeconds * bcgConfig.samplingRate).rounded(.down))
         let atTrueBeats = averageArtifactSubtraction(
@@ -231,40 +234,52 @@ nonisolated enum SelfTest {
         // TR markers have to survive the round trip through MFF's microsecond
         // datetime format without picking up spurious sample jitter: EVA
         // tolerates one sample of deviation and refuses to correct beyond it.
-        var trConfig = SimulationConfig.default
-        trConfig.channelCount = 2
-        // Long enough, and at a TR whose drift accumulates fast enough, to hit
-        // the marginal cases: a shorter run passed while the written file still
-        // carried a stray two-sample interval.
-        trConfig.durationSeconds = 300
-        trConfig.repetitionTimeSeconds = 2
-        trConfig.slicesPerVolume = 20
-        var trSource = GaussianSource(seed: trConfig.seed)
-        var trChannels = EEGGenerator.generate(
-            config: trConfig,
-            montage: Montage.standard(count: trConfig.channelCount),
-            source: &trSource
-        ).channels
-        let trInjection = GradientArtifactModel.inject(into: &trChannels, config: trConfig, montage: Montage.standard(count: trConfig.channelCount), template: nil)
-        let trEvents = SimulationWriter.events(
-            gradient: trInjection, bcg: nil, ocular: nil, config: trConfig
-        ).filter { $0.code == "TREV" }
-        let trSamples = trEvents
-            .map { Int(($0.beginTimeSeconds * trConfig.samplingRate).rounded()) }
-            .sorted()
-        let intervals = zip(trSamples, trSamples.dropFirst()).map { $1 - $0 }
-        let median = intervals.isEmpty ? 0 : intervals.sorted()[intervals.count / 2]
-        let deviation = intervals.map { abs($0 - median) }.max() ?? 0
+        // 1024 Hz is the case that used to fail: a sample is 976.5625 µs, so
+        // while MFF event times were millisecond-quantized a marker could move
+        // half a sample and an interval could land two samples off the median.
+        // Roadmap 4.9 fixed the writer and reader, so every rate is now expected
+        // to hold — and the rates whose sample period is a whole millisecond
+        // (1000, 500) cannot detect a regression, which is why the paper's
+        // 1024 Hz and the awkward 2048 Hz are pinned here explicitly.
+        var worstTRDeviation = 0
+        var trRatesPassed = true
+        for rate in [1000.0, 1024.0, 500.0, 2048.0] {
+            var trConfig = SimulationConfig.default
+            trConfig.channelCount = 2
+            trConfig.samplingRate = rate
+            // Long enough, and at a TR whose drift accumulates fast enough, to
+            // show that the intentional sample-grid alternation remains within
+            // EVA's one-sample tolerance after the MFF timestamp round trip.
+            trConfig.durationSeconds = 300
+            trConfig.repetitionTimeSeconds = 2
+            trConfig.slicesPerVolume = 20
+            var trSource = GaussianSource(seed: trConfig.seed)
+            var trChannels = EEGGenerator.generate(
+                config: trConfig,
+                montage: Montage.standard(count: trConfig.channelCount),
+                source: &trSource
+            ).channels
+            let trInjection = GradientArtifactModel.inject(
+                into: &trChannels, config: trConfig,
+                montage: Montage.standard(count: trConfig.channelCount), template: nil
+            )
+            let trEvents = SimulationWriter.events(
+                gradient: trInjection, bcg: nil, ocular: nil, erp: nil, config: trConfig
+            ).filter { $0.code == "TREV" }
+            let trSamples = trEvents
+                .map { SimulationWriter.recoveredSample($0.beginTimeSeconds, samplingRate: rate) }
+                .sorted()
+            let intervals = zip(trSamples, trSamples.dropFirst()).map { $1 - $0 }
+            let median = intervals.isEmpty ? 0 : intervals.sorted()[intervals.count / 2]
+            let deviation = intervals.map { abs($0 - median) }.max() ?? 0
+            worstTRDeviation = max(worstTRDeviation, deviation)
+            trRatesPassed = trRatesPassed && deviation <= 1 && !intervals.isEmpty
+        }
         outcomes.append(Outcome(
-            name: "TR markers stay within EVA's one-sample spacing tolerance",
-            snr: Double(deviation),
-            passed: deviation <= 1,
-            expectation: "max deviation from the median interval <= 1 sample",
-            knownLimitation: deviation <= 1 ? nil :
-                "MFFWriter formats event times with DateFormatter, which resolves only "
-                + "milliseconds, so a 0.977 ms sample grid cannot survive the round trip. "
-                + "EVA's gradient stage then reports 'TRs are not evenly spaced'. Fix is in "
-                + "TODO_Aug21.md; --clock-offset 0 avoids it meanwhile."
+            name: "TR markers stay within EVA's one-sample spacing tolerance at every rate",
+            snr: Double(worstTRDeviation),
+            passed: trRatesPassed && SimulationConfig.default.samplingRate == 1000,
+            expectation: "max interval deviation <= 1 sample at 500/1000/1024/2048 Hz"
         ))
 
         // The scanner window has to be respected: no gradient artifact before it
@@ -299,7 +314,10 @@ nonisolated enum SelfTest {
 
         var bcgWindowNoisy = windowEEG.channels
         var bcgWindowSource = GaussianSource(seed: windowConfig.seed &+ 1)
-        _ = BCGArtifactModel.inject(into: &bcgWindowNoisy, config: windowConfig, source: &bcgWindowSource)
+        _ = BCGArtifactModel.inject(
+            into: &bcgWindowNoisy, config: windowConfig,
+            montage: Montage.standard(count: windowConfig.channelCount), source: &bcgWindowSource
+        )
         var quietBCG = 0.0
         for channel in bcgWindowNoisy.indices {
             for i in 0..<quietEnd {
@@ -366,6 +384,1611 @@ nonisolated enum SelfTest {
             passed: impedances[2] < 5,
             expectation: "the flat channel under 5 kOhm — impedance screening misses this one"
         ))
+
+        // Roadmap 2.2: contact noise follows Johnson-Nyquist's sqrt(R)
+        // relationship, and switching the model off exactly restores the old
+        // measurement-only behaviour.
+        let lowThermal = ImpedanceModel.thermalNoiseRMSMicrovolts(
+            impedanceKOhm: 10, samplingRate: 1_000, temperatureKelvin: 298.15
+        )
+        let highThermal = ImpedanceModel.thermalNoiseRMSMicrovolts(
+            impedanceKOhm: 160, samplingRate: 1_000, temperatureKelvin: 298.15
+        )
+        var disabledConfig = SimulationConfig.default
+        disabledConfig.channelCount = 2
+        disabledConfig.durationSeconds = 1
+        disabledConfig.impedanceNoise = nil
+        var disabledChannels = [[Double]](
+            repeating: [Double](repeating: 0, count: disabledConfig.sampleCount), count: 2
+        )
+        var disabledSource = GaussianSource(seed: disabledConfig.seed)
+        let disabledRMS = ImpedanceModel.applyThermalNoise(
+            to: &disabledChannels, impedances: [10, 160],
+            config: disabledConfig, source: &disabledSource
+        )
+        outcomes.append(Outcome(
+            name: "Thermal contact noise follows sqrt(impedance) and can be disabled",
+            snr: highThermal / lowThermal,
+            passed: abs(highThermal / lowThermal - 4) < 1e-12
+                && disabledRMS == [0, 0]
+                && disabledChannels.allSatisfy { $0.allSatisfy { $0 == 0 } },
+            expectation: "16x resistance gives 4x Johnson RMS; disabled coupling adds exactly nothing"
+        ))
+
+        var coupledConfig = SimulationConfig.default
+        coupledConfig.channelCount = 3
+        coupledConfig.durationSeconds = 2
+        coupledConfig.lineNoiseHz = 60
+        var coupledChannels = [[Double]](
+            repeating: [Double](repeating: 0, count: coupledConfig.sampleCount), count: 3
+        )
+        var coupledSource = GaussianSource(seed: SimulationSeedStreams.lineNoise(base: coupledConfig.seed))
+        let coupledGains = ChannelDefectModel.applyLineNoise(
+            to: &coupledChannels, config: coupledConfig,
+            impedances: [3, 12, 120], source: &coupledSource
+        )
+        outcomes.append(Outcome(
+            name: "Mains pickup rises predictably with contact impedance",
+            snr: coupledGains[2] / coupledGains[1],
+            passed: coupledGains[0] < 0.4 * coupledGains[1]
+                && coupledGains[2] > 8 * coupledGains[1],
+            expectation: "3/12/120 kOhm contacts produce strongly ordered mains gains"
+        ))
+
+        var bridgeConfig = SimulationConfig.default
+        bridgeConfig.channelCount = 3
+        bridgeConfig.bridgedChannelPairs = [ChannelBridge(firstChannel: 1, secondChannel: 2)]
+        var bridgeSource = GaussianSource(seed: SimulationSeedStreams.impedance(base: bridgeConfig.seed))
+        let bridgeImpedances = ImpedanceModel.values(
+            config: bridgeConfig, montage: Montage.standard(count: 3), source: &bridgeSource
+        ).map(Double.init)
+        outcomes.append(Outcome(
+            name: "True electrode bridges retain deceptively low impedance",
+            snr: max(bridgeImpedances[0], bridgeImpedances[1]),
+            passed: bridgeImpedances[0] < 3 && bridgeImpedances[1] < 3
+                && bridgeImpedances[2] > 3,
+            expectation: "both bridged contacts read under 3 kOhm while an unbridged contact does not"
+        ))
+
+        // A dipole at the center of a homogeneous insulated sphere has the
+        // closed-form surface potential 3 p·r̂ / (4πσR²). This checks the series
+        // normalization and the V/(A·m) -> µV/(nA·m) unit conversion without
+        // using the multilayer recurrence as its own oracle.
+        do {
+            let homogeneous = SphericalHeadModel(
+                name: "homogeneous test sphere",
+                centerMeters: .zero,
+                shells: [
+                    HeadShell(name: "conductor", radiusMeters: 0.085,
+                              conductivitySiemensPerMeter: 0.33)
+                ]
+            )
+            let centered = SimulatedSource(
+                id: "center", positionMeters: .zero,
+                orientation: Vector3D(x: 0, y: 0, z: 1),
+                bandName: "test", seed: 0, rmsMomentNanoampereMeters: 1
+            )
+            let montage = Montage.standard(count: 20)
+            let field = try SphericalForwardModel.leadField(
+                head: homogeneous, montage: montage, sources: [centered],
+                reference: .infinity, terms: 8
+            )
+            let cz = montage.channelNames.firstIndex(of: "Cz") ?? 0
+            let measured = field.matrixMicrovoltsPerNanoampereMeter[cz][0]
+            let expected = 1e-3 * 3 / (4 * Double.pi * 0.33 * 0.085 * 0.085)
+            let relativeError = abs(measured - expected) / expected
+            outcomes.append(Outcome(
+                name: "Centered dipole matches the homogeneous-sphere closed form",
+                snr: relativeError,
+                passed: relativeError < 1e-12,
+                expectation: "relative error below 1e-12"
+            ))
+
+            let equalConductivityLayers = SphericalHeadModel(
+                name: "equal-conductivity layers",
+                centerMeters: .zero,
+                shells: [
+                    HeadShell(name: "inner", radiusMeters: 0.072,
+                              conductivitySiemensPerMeter: 0.33),
+                    HeadShell(name: "middle", radiusMeters: 0.079,
+                              conductivitySiemensPerMeter: 0.33),
+                    HeadShell(name: "outer", radiusMeters: 0.085,
+                              conductivitySiemensPerMeter: 0.33)
+                ]
+            )
+            let offCenter = SimulatedSource(
+                id: "off-center",
+                positionMeters: Vector3D(x: 0.018, y: -0.011, z: 0.041),
+                orientation: Vector3D(x: 0.3, y: 0.4, z: 0.5).normalized(),
+                bandName: "test", seed: 0, rmsMomentNanoampereMeters: 1
+            )
+            let singleField = try SphericalForwardModel.leadField(
+                head: homogeneous, montage: montage, sources: [offCenter],
+                reference: .infinity, terms: 100
+            )
+            let layeredField = try SphericalForwardModel.leadField(
+                head: equalConductivityLayers, montage: montage, sources: [offCenter],
+                reference: .infinity, terms: 100
+            )
+            var equalityError = 0.0
+            var equalityPeak = 0.0
+            for channel in montage.electrodes.indices {
+                let single = singleField.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                let layered = layeredField.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                equalityError = max(equalityError, abs(single - layered))
+                equalityPeak = max(equalityPeak, abs(single))
+            }
+            let equalityRelativeError = equalityError / max(equalityPeak, 1e-30)
+            outcomes.append(Outcome(
+                name: "Equal-conductivity shell boundaries disappear",
+                snr: equalityRelativeError,
+                passed: equalityRelativeError < 1e-12,
+                expectation: "three equal-conductivity layers match one homogeneous sphere"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "Centered dipole matches the homogeneous-sphere closed form",
+                snr: .infinity, passed: false,
+                expectation: "a valid finite lead field (\(error.localizedDescription))"
+            ))
+        }
+
+        do {
+            var sourceConfig = SimulationConfig.default
+            sourceConfig.channelCount = 20
+            sourceConfig.dipoleSourceCount = 7
+            let montage = Montage.standard(count: sourceConfig.channelCount)
+            let sources = DipoleEEGGenerator.makeSources(config: sourceConfig)
+
+            func convergence(fraction: Double, terms: Int) throws -> LeadFieldConvergenceReport {
+                var config = sourceConfig
+                config.dipoleSourceCount = 1
+                config.dipoleSourceRadiusFraction = fraction
+                return try SphericalForwardModel.convergenceReport(
+                    head: config.sphericalHeadModel,
+                    montage: montage,
+                    sources: DipoleEEGGenerator.makeSources(config: config),
+                    reference: config.effectiveRecordingReference,
+                    terms: terms
+                )
+            }
+
+            var worstConvergenceChange = 0.0
+            var convergencePassed = true
+            for fraction in [0.01, 0.25, 0.50, 0.75, 0.85, 0.95, 0.999_999] {
+                let report = try convergence(fraction: fraction, terms: sourceConfig.leadFieldTerms)
+                worstConvergenceChange = max(
+                    worstConvergenceChange, report.maximumRelativeColumnChange
+                )
+                convergencePassed = convergencePassed && report.converged
+            }
+
+            // A negative control that only asserts "an under-resolved field is
+            // rejected" is weak: at 10 terms even the default 0.85 depth changes
+            // by 0.026, so the assertion would still pass if the metric were
+            // broken in a direction that always returns large values. Pin the
+            // metric's *shape* instead — truncation error has to fall
+            // monotonically as terms are added, at a deep eccentricity where
+            // there is real error to watch shrink.
+            let truncationSeries = try [10, 25, 50, 100].map {
+                try convergence(fraction: 0.99, terms: $0).maximumRelativeColumnChange
+            }
+            let monotoneDecrease = zip(truncationSeries, truncationSeries.dropFirst())
+                .allSatisfy { $0 > $1 }
+            let underResolved = try convergence(fraction: 0.99, terms: 10)
+            outcomes.append(Outcome(
+                name: "Lead-field series convergence is checked across source eccentricity",
+                snr: worstConvergenceChange,
+                passed: convergencePassed
+                    && worstConvergenceChange <= SphericalForwardModel.defaultConvergenceTolerance
+                    && !underResolved.converged
+                    && monotoneDecrease,
+                expectation: "100→200 terms changes every tested depth below 1e-4; truncation error "
+                    + "falls monotonically over 10/25/50/100 terms; a 10-term field is rejected"
+            ))
+
+            let averageField = try SphericalForwardModel.leadField(
+                head: sourceConfig.sphericalHeadModel, montage: montage,
+                sources: sources, reference: .average, terms: sourceConfig.leadFieldTerms
+            )
+            var worstColumnMean = 0.0
+            for source in sources.indices {
+                let mean = averageField.matrixMicrovoltsPerNanoampereMeter.reduce(0.0) {
+                    $0 + $1[source]
+                } / Double(sourceConfig.channelCount)
+                worstColumnMean = max(worstColumnMean, abs(mean))
+            }
+            outcomes.append(Outcome(
+                name: "Average-referenced lead-field columns have zero mean",
+                snr: worstColumnMean,
+                passed: worstColumnMean < 1e-14,
+                expectation: "worst absolute column mean below 1e-14 µV/(nA·m)"
+            ))
+
+            var worstFreeColumnMean = 0.0
+            for column in 0..<(3 * sources.count) {
+                let mean = averageField.freeOrientationMatrixMicrovoltsPerNanoampereMeter.reduce(0.0) {
+                    $0 + $1[column]
+                } / Double(sourceConfig.channelCount)
+                worstFreeColumnMean = max(worstFreeColumnMean, abs(mean))
+            }
+            outcomes.append(Outcome(
+                name: "Free-orientation lead field is retained and average-referenced",
+                snr: worstFreeColumnMean,
+                passed: averageField.freeOrientationMatrixMicrovoltsPerNanoampereMeter.first?.count
+                    == 3 * sources.count && worstFreeColumnMean < 1e-14,
+                expectation: "x/y/z columns for every source, each with mean below 1e-14"
+            ))
+
+            var reversedSources = sources
+            reversedSources[0].orientation = -reversedSources[0].orientation
+            let reversedField = try SphericalForwardModel.leadField(
+                head: sourceConfig.sphericalHeadModel, montage: montage,
+                sources: [reversedSources[0]], reference: .infinity,
+                terms: sourceConfig.leadFieldTerms
+            )
+            let originalField = try SphericalForwardModel.leadField(
+                head: sourceConfig.sphericalHeadModel, montage: montage,
+                sources: [sources[0]], reference: .infinity,
+                terms: sourceConfig.leadFieldTerms
+            )
+            var reversalError = 0.0
+            for channel in 0..<sourceConfig.channelCount {
+                reversalError = max(
+                    reversalError,
+                    abs(originalField.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                        + reversedField.matrixMicrovoltsPerNanoampereMeter[channel][0])
+                )
+            }
+            outcomes.append(Outcome(
+                name: "Reversing dipole orientation reverses every sensor potential",
+                snr: reversalError,
+                passed: reversalError < 1e-12,
+                expectation: "peak sign-reversal error below 1e-12 µV/(nA·m)"
+            ))
+
+            let quarterTurn: (Vector3D) -> Vector3D = {
+                Vector3D(x: $0.y, y: -$0.x, z: $0.z)
+            }
+            var rotatedSource = sources[0]
+            rotatedSource.positionMeters = quarterTurn(rotatedSource.positionMeters)
+            rotatedSource.orientation = quarterTurn(rotatedSource.orientation)
+            let rotatedMontage = Montage(
+                name: "rotated test montage",
+                electrodes: montage.electrodes.map {
+                    Electrode(name: $0.name, thetaDegrees: $0.thetaDegrees,
+                              phiDegrees: $0.phiDegrees + 90)
+                }
+            )
+            let rotatedField = try SphericalForwardModel.leadField(
+                head: sourceConfig.sphericalHeadModel, montage: rotatedMontage,
+                sources: [rotatedSource], reference: .infinity,
+                terms: sourceConfig.leadFieldTerms
+            )
+            var rotationError = 0.0
+            for channel in 0..<sourceConfig.channelCount {
+                rotationError = max(
+                    rotationError,
+                    abs(originalField.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                        - rotatedField.matrixMicrovoltsPerNanoampereMeter[channel][0])
+                )
+            }
+            outcomes.append(Outcome(
+                name: "Rotating the source and sensors together preserves the field",
+                snr: rotationError,
+                passed: rotationError < 1e-12,
+                expectation: "peak spherical-rotation error below 1e-12 µV/(nA·m)"
+            ))
+
+            var largerConfig = sourceConfig
+            largerConfig.dipoleSourceCount = 11
+            let largerSources = DipoleEEGGenerator.makeSources(config: largerConfig)
+            let prefixStable = zip(sources, largerSources).allSatisfy { $0 == $1 }
+            outcomes.append(Outcome(
+                name: "Adding dipoles preserves the existing source catalog",
+                snr: prefixStable ? 0 : 1,
+                passed: prefixStable,
+                expectation: "positions, orientations, bands and seeds for sources 1-7 unchanged"
+            ))
+
+            var artifactConfigA = sourceConfig
+            artifactConfigA.samplingRate = 256
+            artifactConfigA.durationSeconds = 6
+            artifactConfigA.gradientEnabled = false
+            artifactConfigA.channelCount = 4
+            var artifactConfigB = artifactConfigA
+            artifactConfigB.dipoleSourceCount = 19
+            var noisyA = [[Double]](
+                repeating: [Double](repeating: 0, count: artifactConfigA.sampleCount), count: 4
+            )
+            var noisyB = noisyA
+            var randomA = GaussianSource(seed: SimulationSeedStreams.bcg(base: artifactConfigA.seed))
+            var randomB = GaussianSource(seed: SimulationSeedStreams.bcg(base: artifactConfigB.seed))
+            let injectionA = BCGArtifactModel.inject(
+                into: &noisyA, config: artifactConfigA,
+                montage: Montage.standard(count: artifactConfigA.channelCount), source: &randomA
+            )
+            let injectionB = BCGArtifactModel.inject(
+                into: &noisyB, config: artifactConfigB,
+                montage: Montage.standard(count: artifactConfigB.channelCount), source: &randomB
+            )
+            let artifactStable = noisyA == noisyB
+                && injectionA.trueBeatSeconds == injectionB.trueBeatSeconds
+                && injectionA.detectedBeatSeconds == injectionB.detectedBeatSeconds
+                && injectionA.channelScales == injectionB.channelScales
+                && injectionA.channelLatenciesSeconds == injectionB.channelLatenciesSeconds
+            outcomes.append(Outcome(
+                name: "Neural source-count changes do not change the BCG realization",
+                snr: artifactStable ? 0 : 1,
+                passed: artifactStable,
+                expectation: "identical cardiac timing, parameters and samples"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "Dipole lead-field invariants",
+                snr: .infinity, passed: false,
+                expectation: "valid lead fields (\(error.localizedDescription))"
+            ))
+        }
+
+        do {
+            var dipoleConfig = SimulationConfig.default
+            dipoleConfig.eegGenerationModel = .dipole
+            dipoleConfig.channelCount = 20
+            dipoleConfig.samplingRate = 256
+            dipoleConfig.durationSeconds = 2
+            dipoleConfig.dipoleSourceCount = 7
+            let montage = Montage.standard(count: dipoleConfig.channelCount)
+            let first = try DipoleEEGGenerator.generate(config: dipoleConfig, montage: montage)
+            let second = try DipoleEEGGenerator.generate(config: dipoleConfig, montage: montage)
+            let deviation = abs(first.standardDeviation - dipoleConfig.eegTargetStdMicrovolts)
+            outcomes.append(Outcome(
+                name: "Dipole projection reaches the requested sensor-space amplitude",
+                snr: deviation,
+                passed: deviation < 1e-10,
+                expectation: "pooled standard-deviation error below 1e-10 µV"
+            ))
+            outcomes.append(Outcome(
+                name: "Dipole generation is sample-for-sample deterministic",
+                snr: first.channels == second.channels ? 0 : 1,
+                passed: first.channels == second.channels,
+                expectation: "two runs with the same seed are identical"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "Dipole generation smoke test",
+                snr: .infinity, passed: false,
+                expectation: "successful generation (\(error.localizedDescription))"
+            ))
+        }
+
+        do {
+            var scenarioConfig = SimulationConfig.default
+            scenarioConfig.eegGenerationModel = .dipole
+            scenarioConfig.channelCount = 20
+            scenarioConfig.samplingRate = 256
+            scenarioConfig.durationSeconds = 3
+            scenarioConfig.dipoleSourceCount = 4
+            scenarioConfig.dipoleSourceCorrelation = 0.8
+            scenarioConfig.dipoleNearPairSeparationDegrees = 1
+            scenarioConfig.dipoleMotionDegrees = 15
+            let montage = Montage.standard(count: scenarioConfig.channelCount)
+            let generated = try DipoleEEGGenerator.generate(
+                config: scenarioConfig, montage: montage
+            )
+            guard let sourceSpace = generated.sourceSpace else {
+                throw SimulateError.io("dipole generator returned no source truth")
+            }
+
+            let imposedCorrelation = sourceSpace.sourceCorrelationMatrix[0][1]
+            outcomes.append(Outcome(
+                name: "Correlated-pair scenario imposes the requested Pearson r",
+                snr: abs(imposedCorrelation - 0.8),
+                passed: abs(imposedCorrelation - 0.8) < 1e-12,
+                expectation: "absolute error below 1e-12 for r = 0.8"
+            ))
+
+            // Imposing a correlation mixes S001's timecourse into S002. While
+            // the pair sat in different bands that quietly destroyed S002's band
+            // identity — and the per-band scoring in SNRMetrics goes on assuming
+            // it holds. The pair now shares one band, and this checks the
+            // *spectrum* rather than the label, so relabelling without changing
+            // the signal cannot pass it.
+            let correlatedBand = DipoleEEGGenerator.band(
+                forSourceIndex: 0, config: scenarioConfig
+            )
+            let secondSource = sourceSpace.timecoursesNanoampereMeters[1]
+            let inBandPower = SNRMetrics.bandPower(
+                secondSource, samplingRate: scenarioConfig.samplingRate,
+                lowHz: correlatedBand.lowHz, highHz: correlatedBand.highHz,
+                segmentLength: 256
+            )
+            let totalPower = SNRMetrics.bandPower(
+                secondSource, samplingRate: scenarioConfig.samplingRate,
+                lowHz: 0, highHz: scenarioConfig.samplingRate / 2,
+                segmentLength: 256
+            )
+            let inBandFraction = totalPower > 0 ? inBandPower / totalPower : 0
+            outcomes.append(Outcome(
+                name: "A correlated pair shares one band instead of smearing across two",
+                snr: inBandFraction,
+                passed: sourceSpace.sources[1].bandName == correlatedBand.name
+                    && inBandFraction > 0.9
+                    && (sourceSpace.sources[1].scenarioRole ?? "").contains("shares one spectrum"),
+                expectation: "S002 keeps over 90% of its power inside S001's band and says so in its role"
+            ))
+
+            var independentConfig = scenarioConfig
+            independentConfig.dipoleSourceCorrelation = 0
+            let independentSources = DipoleEEGGenerator.makeSources(config: independentConfig)
+            let pairSharesBand = sourceSpace.sources[0].bandName
+                == sourceSpace.sources[1].bandName
+            outcomes.append(Outcome(
+                name: "Correlated sources retain a truthful within-band identity",
+                snr: pairSharesBand ? 0 : 1,
+                passed: pairSharesBand
+                    && sourceSpace.sources[0].bandName == scenarioConfig.eegBands[0].name
+                    && independentSources[0].bandName != independentSources[1].bandName
+                    && sourceSpace.sources[1].scenarioRole?.contains("band matched") == true,
+                expectation: "S001/S002 share one declared band only when their waveforms are mixed"
+            ))
+
+            let topographicCorrelation = sourceSpace.topographicCorrelationMatrix[0][1]
+            let sourceDistance = (
+                sourceSpace.sources[0].positionMeters - sourceSpace.sources[1].positionMeters
+            ).norm
+            outcomes.append(Outcome(
+                name: "Near-degenerate sources are distinct but topographically confusable",
+                snr: topographicCorrelation,
+                passed: sourceDistance > 0 && abs(topographicCorrelation) > 0.999,
+                expectation: "distinct 1° locations with |topographic r| above 0.999"
+            ))
+
+            let motion = sourceSpace.motions.first
+            let startGains = sourceSpace.leadField.matrixMicrovoltsPerNanoampereMeter.map { $0[0] }
+            let endGains = motion?.endLeadField.matrixMicrovoltsPerNanoampereMeter.map { $0[0] } ?? []
+            let gainChange = zip(startGains, endGains).map { abs($0 - $1) }.max() ?? 0
+            outcomes.append(Outcome(
+                name: "Moving-source scenario records a changed endpoint operator",
+                snr: gainChange,
+                passed: sourceSpace.motions.count == 1 && gainChange > 1e-6,
+                expectation: "one motion record and a non-trivial lead-field change"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "Difficult source-space scenarios",
+                snr: .infinity, passed: false,
+                expectation: "successful correlated, near-pair and moving-source generation (\(error.localizedDescription))"
+            ))
+        }
+
+        let ocularMontage = Montage.standard(count: 20)
+        let ocular = OcularDipoleModel.topographies(
+            montage: ocularMontage,
+            head: SimulationConfig.default.sphericalHeadModel
+        )
+        let fp1 = ocularMontage.channelNames.firstIndex(of: "Fp1") ?? 0
+        let fp2 = ocularMontage.channelNames.firstIndex(of: "Fp2") ?? 0
+        let f7 = ocularMontage.channelNames.firstIndex(of: "F7") ?? 0
+        let f8 = ocularMontage.channelNames.firstIndex(of: "F8") ?? 0
+        let frontalBlink = min(ocular.blink[fp1], ocular.blink[fp2])
+        let horizontalOpposition = ocular.horizontal[f7] * ocular.horizontal[f8]
+        outcomes.append(Outcome(
+            name: "Ocular dipoles produce frontal blink and opposed horizontal EOG fields",
+            snr: frontalBlink,
+            passed: ocular.dipoles.count == 2 && frontalBlink > 0.8 && horizontalOpposition < 0,
+            expectation: "two eye dipoles, Fp1/Fp2 blink above 0.8, F7/F8 opposite signs"
+        ))
+
+        let locationTruth = [
+            SimulatedSource(
+                id: "A", positionMeters: Vector3D(x: 0.01, y: 0, z: 0),
+                orientation: Vector3D(x: 1, y: 0, z: 0), bandName: "test",
+                seed: 1, rmsMomentNanoampereMeters: 1
+            ),
+            SimulatedSource(
+                id: "B", positionMeters: Vector3D(x: 0, y: 0.02, z: 0),
+                orientation: Vector3D(x: 0, y: 1, z: 0), bandName: "test",
+                seed: 2, rmsMomentNanoampereMeters: 1
+            )
+        ]
+        let locationEstimate = [
+            EstimatedSource(
+                id: "component-2", positionMeters: locationTruth[1].positionMeters,
+                orientation: -locationTruth[1].orientation
+            ),
+            EstimatedSource(
+                id: "component-1", positionMeters: locationTruth[0].positionMeters,
+                orientation: locationTruth[0].orientation
+            )
+        ]
+        let locationScore = SourceMetrics.locationScore(
+            truth: locationTruth, estimated: locationEstimate
+        )
+        outcomes.append(Outcome(
+            name: "Source-location scoring is permutation and polarity invariant",
+            snr: locationScore.maximumDistanceMillimeters,
+            passed: locationScore.maximumDistanceMillimeters < 1e-12
+                && (locationScore.meanOrientationErrorDegrees ?? .infinity) < 1e-12,
+            expectation: "optimal assignment gives 0 mm and 0° axial error"
+        ))
+
+        let trueSignals = [
+            [0.0, 1, 0, -1, 0, 1],
+            [1.0, 1, -1, -1, 1, -1]
+        ]
+        let recoveryScore = SourceMetrics.recoveryScore(
+            trueIDs: ["A", "B"],
+            trueSignals: trueSignals,
+            recoveredNames: ["component-B", "component-A"],
+            recoveredSignals: [trueSignals[1].map { -$0 }, trueSignals[0]]
+        )
+        outcomes.append(Outcome(
+            name: "Source-waveform scoring is permutation and polarity invariant",
+            snr: recoveryScore.minimumAbsoluteCorrelation,
+            passed: abs(recoveryScore.minimumAbsoluteCorrelation - 1) < 1e-12,
+            expectation: "minimum matched |r| equals 1"
+        ))
+
+        do {
+            let scenarioDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("eva-simulate-scenario-\(UUID().uuidString)")
+            let scenarioURL = scenarioDirectory.appendingPathComponent("round-trip.json")
+            defer { try? FileManager.default.removeItem(at: scenarioDirectory) }
+
+            var scenarioConfig = SimulationConfig.default
+            scenarioConfig.channelCount = 13
+            scenarioConfig.durationSeconds = 11
+            scenarioConfig.seed = 123_456
+            scenarioConfig.gradientEnabled = true
+            scenarioConfig.bcgEnabled = false
+            scenarioConfig.includeECG = false
+            scenarioConfig.badChannels = [3: .pop]
+            scenarioConfig.emg = EMGConfig()
+            scenarioConfig.chewing = ChewingConfig()
+            scenarioConfig.swallowing = SwallowingConfig()
+            scenarioConfig.cableMovement = CableMovementConfig()
+            scenarioConfig.sweat = SweatConfig()
+            scenarioConfig.bridgedChannelPairs = [ChannelBridge(firstChannel: 1, secondChannel: 2)]
+            scenarioConfig.badReference = BadReferenceConfig()
+            scenarioConfig.clippingThresholdMicrovolts = 250
+            try SimulationScenarioFile.write(
+                config: scenarioConfig,
+                to: scenarioURL,
+                name: "round-trip",
+                description: "Self-test scenario"
+            )
+            let loaded = try SimulationScenarioFile.load(from: scenarioURL)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let roundTripExact = try encoder.encode(scenarioConfig) == encoder.encode(loaded.config)
+            outcomes.append(Outcome(
+                name: "Scenario files round-trip the complete configuration",
+                snr: roundTripExact ? 0 : 1,
+                passed: roundTripExact
+                    && loaded.schemaVersion == SimulationScenario.currentSchemaVersion
+                    && loaded.name == "round-trip",
+                expectation: "schema, metadata, nested model values and seed survive exactly"
+            ))
+
+            let overridden = try makeConfig(Arguments([
+                "--config", scenarioURL.path,
+                "--duration", "7",
+                "--seed", "42",
+                "--no-gradient",
+                "--with-bcg",
+                "--with-ecg",
+                "--no-emg",
+                "--no-chewing",
+                "--no-swallowing",
+                "--no-cable-movement",
+                "--no-sweat",
+                "--no-bridges",
+                "--no-bad-reference",
+                "--no-clipping"
+            ]))
+            let precedenceCorrect = overridden.durationSeconds == 7
+                && overridden.seed == 42
+                && !overridden.gradientEnabled
+                && overridden.bcgEnabled
+                && overridden.includeECG
+                && overridden.emg == nil
+                && overridden.chewing == nil
+                && overridden.swallowing == nil
+                && overridden.cableMovement == nil
+                && overridden.sweat == nil
+                && overridden.bridgedChannelPairs == nil
+                && overridden.badReference == nil
+                && overridden.clippingThresholdMicrovolts == nil
+                && overridden.channelCount == 13
+                && overridden.badChannels == [3: .pop]
+            outcomes.append(Outcome(
+                name: "Explicit flags override a loaded scenario without erasing other values",
+                snr: precedenceCorrect ? 0 : 1,
+                passed: precedenceCorrect,
+                expectation: "defaults < scenario < explicit flags, including boolean re-enabling"
+            ))
+
+            let futureURL = scenarioDirectory.appendingPathComponent("future-schema.json")
+            let future = SimulationScenario(
+                schemaVersion: SimulationScenario.currentSchemaVersion + 1,
+                name: "future",
+                description: "unsupported schema self-test",
+                config: scenarioConfig
+            )
+            try encoder.encode(future).write(to: futureURL)
+            var rejectedFutureSchema = false
+            do {
+                _ = try SimulationScenarioFile.load(from: futureURL)
+            } catch {
+                rejectedFutureSchema = true
+            }
+            outcomes.append(Outcome(
+                name: "Scenario loading rejects unsupported schema versions",
+                snr: rejectedFutureSchema ? 0 : 1,
+                passed: rejectedFutureSchema,
+                expectation: "future schemas fail loudly instead of being misread"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "Scenario file reproducibility",
+                snr: .infinity, passed: false,
+                expectation: "successful round trip and override (\(error.localizedDescription))"
+            ))
+        }
+
+        let metricRate = 256.0
+        let metricClean = (0..<1024).map {
+            sin(2 * Double.pi * 10 * Double($0) / metricRate)
+                + 0.25 * sin(2 * Double.pi * 3 * Double($0) / metricRate)
+        }
+        let perfectMetric = SNRMetrics.score(
+            label: "perfect", clean: [metricClean], corrected: [metricClean],
+            samplingRate: metricRate, channelNames: ["Cz"]
+        )
+        let perfectRichMetrics = perfectMetric.broadbandRMSEMicrovolts < 1e-12
+            && abs(perfectMetric.broadbandCorrelation - 1) < 1e-12
+            && perfectMetric.spectralDistortionDbRMS < 1e-12
+            && perfectMetric.channels.count == 1
+            && perfectMetric.bands.allSatisfy { $0.residualRMS < 1e-12 }
+            && abs((perfectMetric.bands.first { $0.name == "8-12" }?.correlation ?? 0) - 1) < 1e-9
+        outcomes.append(Outcome(
+            name: "Rich waveform metrics recognize a perfect reconstruction",
+            snr: perfectMetric.broadbandRMSEMicrovolts,
+            passed: perfectRichMetrics,
+            expectation: "zero RMSE/distortion, unit correlation, and per-channel detail"
+        ))
+
+        let biasedMetric = SNRMetrics.score(
+            label: "biased", clean: [metricClean],
+            corrected: [metricClean.map { $0 + 2 }],
+            samplingRate: metricRate
+        )
+        outcomes.append(Outcome(
+            name: "RMSE exposes a DC error that standard-deviation SNR misses",
+            snr: biasedMetric.broadbandRMSEMicrovolts,
+            passed: abs(biasedMetric.broadbandRMSEMicrovolts - 2) < 1e-12
+                && biasedMetric.broadbandSNR.isInfinite
+                && abs(biasedMetric.broadbandCorrelation - 1) < 1e-12,
+            expectation: "2 µV RMSE despite infinite legacy SNR and correlation 1"
+        ))
+
+        let detectionMetric = DetectionMetrics.score(
+            eventType: "test",
+            truth: [1, 2, 3],
+            detected: [
+                DetectedEvent(timeSeconds: 1.01, score: 0.9),
+                DetectedEvent(timeSeconds: 2.02, score: 0.8),
+                DetectedEvent(timeSeconds: 4.0, score: 0.1)
+            ],
+            durationSeconds: 5,
+            toleranceSeconds: 0.05
+        )
+        let crowdedDetectionMetric = DetectionMetrics.score(
+            eventType: "crowded", truth: [0, 0.1],
+            detected: [DetectedEvent(timeSeconds: 0.06), DetectedEvent(timeSeconds: 0.14)],
+            durationSeconds: 1, toleranceSeconds: 0.07
+        )
+        outcomes.append(Outcome(
+            name: "Event scoring uses one-to-one tolerance matching",
+            snr: detectionMetric.f1,
+            passed: detectionMetric.truePositives == 2
+                && detectionMetric.falsePositives == 1
+                && detectionMetric.falseNegatives == 1
+                && abs(detectionMetric.meanAbsoluteTimingErrorMilliseconds - 15) < 1e-9
+                && detectionMetric.rocAUC != nil
+                && crowdedDetectionMetric.truePositives == 2,
+            expectation: "maximum-cardinality matching, 15 ms timing MAE, and a confidence ROC"
+        ))
+
+        let erpMetric = ERPMetrics.score(
+            truth: [
+                ERPComponent(id: "P1", peakLatencySeconds: 0.1, peakAmplitudeMicrovolts: 5),
+                ERPComponent(id: "N1", peakLatencySeconds: 0.2, peakAmplitudeMicrovolts: -3)
+            ],
+            estimated: [
+                ERPComponent(id: "N1", peakLatencySeconds: 0.18, peakAmplitudeMicrovolts: -4),
+                ERPComponent(id: "P1", peakLatencySeconds: 0.11, peakAmplitudeMicrovolts: 6)
+            ]
+        )
+        outcomes.append(Outcome(
+            name: "ERP metrics report signed bias, MAE, and RMSE by component id",
+            snr: erpMetric.latencyMAEMilliseconds,
+            passed: erpMetric.matchedCount == 2
+                && abs(erpMetric.amplitudeBiasMicrovolts) < 1e-12
+                && abs(erpMetric.amplitudeMAEMicrovolts - 1) < 1e-12
+                && abs(erpMetric.latencyBiasMilliseconds + 5) < 1e-9
+                && abs(erpMetric.latencyMAEMilliseconds - 15) < 1e-9,
+            expectation: "order-independent amplitude and latency recovery statistics"
+        ))
+
+        do {
+            var erpConfig = SimulationConfig.default
+            erpConfig.channelCount = 20
+            erpConfig.samplingRate = 128
+            erpConfig.durationSeconds = 45
+            var design = ERPConfig()
+            design.trialCount = 20
+            design.startSeconds = 1
+            design.interStimulusIntervalSeconds = 2
+            design.interStimulusJitterSeconds = 0.1
+            design.targetFraction = 0.25
+            design.latencyJitterSDSeconds = 0.03
+            design.amplitudeJitterFraction = 0.15
+            design.latencyAmplitudeCorrelation = 0.6
+            design.omissionRate = 0
+            erpConfig.erp = design
+            let montage = Montage.standard(count: erpConfig.channelCount)
+            var firstChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: erpConfig.sampleCount),
+                count: erpConfig.channelCount
+            )
+            var secondChannels = firstChannels
+            let first = try ERPGenerator.inject(
+                into: &firstChannels, config: erpConfig, montage: montage
+            )!
+            let second = try ERPGenerator.inject(
+                into: &secondChannels, config: erpConfig, montage: montage
+            )!
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let truthStable = try encoder.encode(first.trials) == encoder.encode(second.trials)
+                && encoder.encode(first.components) == encoder.encode(second.components)
+            let targetCount = first.trials.filter { $0.condition == "target" }.count
+            let events = SimulationWriter.events(
+                gradient: nil, bcg: nil, ocular: nil, erp: first, config: erpConfig
+            )
+            outcomes.append(Outcome(
+                name: "ERP trials, averages, topography and markers are deterministic",
+                snr: firstChannels == secondChannels ? 0 : 1,
+                passed: firstChannels == secondChannels && truthStable
+                    && first.trials.count == 20 && targetCount == 5
+                    && first.components.count == 2 && events.count == 20
+                    && events.filter { $0.code == "targ" }.count == 5,
+                expectation: "repeatable 20-trial design with exact target count and MFF markers"
+            ))
+
+            let topographicMean = first.topography.reduce(0, +) / Double(first.topography.count)
+            let topographicPeak = first.topography.map(abs).max() ?? 0
+            outcomes.append(Outcome(
+                name: "ERP variability and dipole topography hit their controls",
+                snr: first.realizedLatencyAmplitudeCorrelation,
+                passed: abs(first.realizedLatencyAmplitudeCorrelation - 0.6) < 1e-12
+                    && abs(topographicMean) < 1e-12
+                    && abs(topographicPeak - 1) < 1e-12,
+                expectation: "exact r=0.6 variability and normalized average-referenced dipole field"
+            ))
+
+            var prefixDesign = design
+            prefixDesign.trialCount = 20
+            prefixDesign.standardAmplitudeRatio = 1
+            prefixDesign.latencyAmplitudeCorrelation = 0
+            prefixDesign.omissionRate = 0
+            var prefixConfig = erpConfig
+            prefixConfig.durationSeconds = 55
+            prefixConfig.erp = prefixDesign
+            var extendedDesign = prefixDesign
+            extendedDesign.trialCount = 24
+            var extendedConfig = prefixConfig
+            extendedConfig.erp = extendedDesign
+            var prefixChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: prefixConfig.sampleCount),
+                count: prefixConfig.channelCount
+            )
+            var extendedChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: extendedConfig.sampleCount),
+                count: extendedConfig.channelCount
+            )
+            let prefix = try ERPGenerator.inject(
+                into: &prefixChannels, config: prefixConfig, montage: montage
+            )!
+            let extended = try ERPGenerator.inject(
+                into: &extendedChannels, config: extendedConfig, montage: montage
+            )!
+            let factorPrefixesStable = zip(prefix.trials, extended.trials).allSatisfy {
+                $0.0.onsetSeconds == $0.1.onsetSeconds
+                    && $0.0.peakLatencySeconds == $0.1.peakLatencySeconds
+                    && $0.0.peakAmplitudeMicrovolts == $0.1.peakAmplitudeMicrovolts
+                    && $0.0.omitted == $0.1.omitted
+            }
+            let seedValues = [
+                prefix.randomSeeds.latency, prefix.randomSeeds.amplitude,
+                prefix.randomSeeds.conditionOrder, prefix.randomSeeds.onsetJitter,
+                prefix.randomSeeds.omission
+            ]
+            outcomes.append(Outcome(
+                name: "ERP design factors use independent prefix-stable random streams",
+                snr: factorPrefixesStable ? 0 : 1,
+                passed: factorPrefixesStable && prefix.randomSeeds == extended.randomSeeds
+                    && Set(seedValues).count == seedValues.count,
+                expectation: "changing trial count does not reroll existing latency, amplitude, onset, or omission draws"
+            ))
+
+            var overlapDesign = design
+            overlapDesign.trialCount = 5
+            overlapDesign.interStimulusIntervalSeconds = 0.4
+            overlapDesign.interStimulusJitterSeconds = 0
+            overlapDesign.latencyAmplitudeCorrelation = 0
+            overlapDesign.omissionRate = 0
+            erpConfig.erp = overlapDesign
+            var overlapChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: erpConfig.sampleCount),
+                count: erpConfig.channelCount
+            )
+            let overlap = try ERPGenerator.inject(
+                into: &overlapChannels, config: erpConfig, montage: montage
+            )!
+            let flagsAreDirectional = overlap.trials.first?.overlapsPreviousTrial == false
+                && overlap.trials.first?.overlapsNextTrial == true
+                && overlap.trials.last?.overlapsPreviousTrial == true
+                && overlap.trials.last?.overlapsNextTrial == false
+            outcomes.append(Outcome(
+                name: "ERP truth declares overlapping component windows per trial",
+                snr: Double(overlap.trials.filter { $0.overlapsAnotherTrial == true }.count),
+                passed: overlap.trials.allSatisfy { $0.overlapsAnotherTrial == true }
+                    && overlap.trials.allSatisfy {
+                        ($0.componentWindowEndSeconds ?? 0) > $0.onsetSeconds
+                    }
+                    && flagsAreDirectional
+                    && first.trials.allSatisfy { $0.overlapsAnotherTrial == false },
+                expectation: "dense trials are flagged with directional overlap; separated trials remain scoreable"
+            ))
+
+            design.trialCount = 5
+            design.omissionRate = 1
+            erpConfig.erp = design
+            var omittedChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: erpConfig.sampleCount),
+                count: erpConfig.channelCount
+            )
+            let omitted = try ERPGenerator.inject(
+                into: &omittedChannels, config: erpConfig, montage: montage
+            )!
+            outcomes.append(Outcome(
+                name: "ERP omissions retain stimulus markers but inject no response",
+                snr: omitted.trials.filter(\.omitted).count == 5 ? 0 : 1,
+                passed: omitted.trials.allSatisfy(\.omitted)
+                    && omittedChannels.allSatisfy { $0.allSatisfy { $0 == 0 } },
+                expectation: "five true omissions, five events, and zero evoked samples"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "ERP trial simulation",
+                snr: .infinity, passed: false,
+                expectation: "deterministic source-projected trial generation (\(error.localizedDescription))"
+            ))
+        }
+
+        do {
+            var allConfig = SimulationConfig.default
+            allConfig.channelCount = 20
+            allConfig.samplingRate = 250
+            allConfig.durationSeconds = 12
+            allConfig.neuralNonstationarity = NeuralNonstationarityConfig()
+            let montage = Montage.standard(count: allConfig.channelCount)
+            var firstSource = GaussianSource(seed: allConfig.seed)
+            var secondSource = GaussianSource(seed: allConfig.seed)
+            let first = EEGGenerator.generate(config: allConfig, montage: montage, source: &firstSource)
+            let second = EEGGenerator.generate(config: allConfig, montage: montage, source: &secondSource)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let truthStable = try encoder.encode(first.neuralNonstationarity)
+                == encoder.encode(second.neuralNonstationarity)
+            outcomes.append(Outcome(
+                name: "Neural non-stationarity and its truth are deterministic",
+                snr: first.channels == second.channels ? 0 : 1,
+                passed: SimulationConfig.default.neuralNonstationarity == nil
+                    && first.channels == second.channels && truthStable
+                    && first.neuralNonstationarity != nil,
+                expectation: "stationary default; opt-in samples and complete truth repeat for one seed"
+            ))
+
+            var alphaConfig = allConfig
+            var alphaOnly = NeuralNonstationarityConfig()
+            alphaOnly.spectralDynamics = nil
+            alphaOnly.microstates = nil
+            alphaOnly.phaseAmplitudeCoupling = nil
+            alphaConfig.durationSeconds = 60
+            alphaConfig.neuralNonstationarity = alphaOnly
+            let alphaPlan = NonstationaryEEGModel.makePlan(
+                config: alphaConfig, montage: montage
+            )!
+            let traditional = EEGGenerator.alphaEnvelope(config: alphaConfig)
+            let relative = zip(alphaPlan.alphaEnvelope, traditional).map {
+                $0.1 > 0 ? $0.0 / $0.1 : 0
+            }
+            let quietFraction = Double(relative.filter { $0 < 0.06 }.count)
+                / Double(relative.count)
+            outcomes.append(Outcome(
+                name: "Alpha is organized into discrete spindle-like bursts",
+                snr: Double(alphaPlan.alphaBursts.count),
+                passed: alphaPlan.alphaBursts.count >= 8
+                    && alphaPlan.alphaBursts.count <= 16
+                    && quietFraction > 0.55
+                    && (relative.max() ?? 0) > 0.99,
+                expectation: "about 12 bursts/min, smooth full peaks, and >55% quiet background"
+            ))
+
+            var spectraConfig = allConfig
+            spectraConfig.durationSeconds = 60
+            var spectraOnly = NeuralNonstationarityConfig()
+            spectraOnly.alphaBursts = nil
+            spectraOnly.microstates = nil
+            spectraOnly.phaseAmplitudeCoupling = nil
+            spectraConfig.neuralNonstationarity = spectraOnly
+            let spectraPlan = NonstationaryEEGModel.makePlan(
+                config: spectraConfig, montage: montage
+            )!
+            let thetaEnvelope = spectraPlan.bandEnvelopes1Hz["theta"] ?? []
+            let lagCorrelation = thetaEnvelope.count > 2
+                ? DipoleEEGGenerator.pearson(
+                    Array(thetaEnvelope.dropLast()), Array(thetaEnvelope.dropFirst())
+                ) : 0
+            let dynamicRange = (thetaEnvelope.max() ?? 0) / max(thetaEnvelope.min() ?? 1, 1e-12)
+            outcomes.append(Outcome(
+                name: "Band amplitudes follow slow stochastic dynamics",
+                snr: lagCorrelation,
+                passed: spectraPlan.bandEnvelopes1Hz.count == allConfig.eegBands.count
+                    && dynamicRange > 1.2 && lagCorrelation > 0.5,
+                expectation: "one envelope per band, non-trivial range, and strong adjacent-second continuity"
+            ))
+
+            var statesConfig = allConfig
+            statesConfig.durationSeconds = 10
+            var statesOnly = NeuralNonstationarityConfig()
+            statesOnly.alphaBursts = nil
+            statesOnly.spectralDynamics = nil
+            statesOnly.phaseAmplitudeCoupling = nil
+            statesConfig.neuralNonstationarity = statesOnly
+            let statesPlan = NonstationaryEEGModel.makePlan(
+                config: statesConfig, montage: montage
+            )!
+            let episodes = statesPlan.microstateEpisodes
+            let internalEpisodes = episodes.dropLast()
+            let noImmediateRepeats = zip(episodes, episodes.dropFirst()).allSatisfy {
+                $0.0.stateIndex != $0.1.stateIndex
+            }
+            var worstMapCorrelation = 0.0
+            for left in statesPlan.microstateTopographies.indices {
+                for right in statesPlan.microstateTopographies.indices where right > left {
+                    worstMapCorrelation = max(worstMapCorrelation, abs(
+                        DipoleEEGGenerator.pearson(
+                            statesPlan.microstateTopographies[left],
+                            statesPlan.microstateTopographies[right]
+                        )
+                    ))
+                }
+            }
+            outcomes.append(Outcome(
+                name: "Microstates switch among distinct piecewise-stationary maps",
+                snr: worstMapCorrelation,
+                passed: Set(episodes.map(\.stateIndex)).count == 4
+                    && noImmediateRepeats
+                    && internalEpisodes.allSatisfy {
+                        $0.durationSeconds >= 0.04 && $0.durationSeconds <= 0.25
+                    }
+                    && worstMapCorrelation < 0.95,
+                expectation: "four distinct maps, 40-250 ms dwells, and no immediate state repeats"
+            ))
+
+            var pacConfig = allConfig
+            pacConfig.durationSeconds = 30
+            pacConfig.eegGenerationModel = .dipole
+            pacConfig.dipoleSourceCount = 7
+            var pacOnly = NeuralNonstationarityConfig()
+            pacOnly.alphaBursts = nil
+            pacOnly.spectralDynamics = nil
+            pacOnly.microstates = nil
+            pacConfig.neuralNonstationarity = pacOnly
+            let pacEEG = try DipoleEEGGenerator.generate(config: pacConfig, montage: montage)
+            let pacTruth = pacEEG.neuralNonstationarity!.phaseAmplitudeCoupling!
+            let targetIndex = pacEEG.sourceSpace!.sources.firstIndex {
+                $0.bandName == pacTruth.targetBandName
+            }!
+            let target = pacEEG.sourceSpace!.timecoursesNanoampereMeters[targetIndex]
+            var preferredSum = 0.0
+            var preferredCount = 0
+            var oppositeSum = 0.0
+            var oppositeCount = 0
+            for sample in target.indices {
+                let phase = pacTruth.initialPhaseRadians + 2 * Double.pi
+                    * pacTruth.phaseFrequencyHz * Double(sample) / pacConfig.samplingRate
+                    - pacTruth.preferredPhaseRadians
+                let cosine = cos(phase)
+                if cosine > 0.9 { preferredSum += abs(target[sample]); preferredCount += 1 }
+                if cosine < -0.9 { oppositeSum += abs(target[sample]); oppositeCount += 1 }
+            }
+            let realizedRatio = (preferredSum / Double(max(preferredCount, 1)))
+                / max(oppositeSum / Double(max(oppositeCount, 1)), 1e-30)
+            outcomes.append(Outcome(
+                name: "Phase-amplitude coupling peaks at the recorded preferred phase",
+                snr: realizedRatio,
+                passed: pacTruth.phaseCarrierBandName == "theta"
+                    && pacTruth.targetBandName == "gamma-low"
+                    && abs(pacTruth.preferredToOppositeGainRatio - 5.6666666667) < 1e-8
+                    && realizedRatio > 4,
+                expectation: "theta phase truth and >4x gamma amplitude at preferred versus opposite phase"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "Neural non-stationarity",
+                snr: .infinity, passed: false,
+                expectation: "deterministic bursts, spectra, microstates, and PAC (\(error.localizedDescription))"
+            ))
+        }
+
+        do {
+            var emgConfig = SimulationConfig.default
+            emgConfig.channelCount = 20
+            emgConfig.durationSeconds = 20
+            emgConfig.gradientEnabled = false
+            emgConfig.bcgEnabled = false
+            var model = EMGConfig()
+            model.burstsPerMinute = 30
+            emgConfig.emg = model
+            let montage = Montage.standard(count: emgConfig.channelCount)
+            var firstChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: emgConfig.sampleCount),
+                count: emgConfig.channelCount
+            )
+            var secondChannels = firstChannels
+            var firstSource = GaussianSource(seed: SimulationSeedStreams.emg(base: emgConfig.seed))
+            var secondSource = GaussianSource(seed: SimulationSeedStreams.emg(base: emgConfig.seed))
+            let first = EMGArtifactModel.inject(
+                into: &firstChannels, config: emgConfig, montage: montage, source: &firstSource
+            )!
+            let second = EMGArtifactModel.inject(
+                into: &secondChannels, config: emgConfig, montage: montage, source: &secondSource
+            )!
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let truthStable = try encoder.encode(first.bursts) == encoder.encode(second.bursts)
+            let events = SimulationWriter.events(
+                gradient: nil, bcg: nil, ocular: nil, erp: nil,
+                emg: first, config: emgConfig
+            )
+            outcomes.append(Outcome(
+                name: "EMG bursts, truth, and markers are deterministic",
+                snr: firstChannels == secondChannels ? 0 : 1,
+                passed: SimulationConfig.default.emg == nil
+                    && !first.bursts.isEmpty
+                    && firstChannels == secondChannels && truthStable
+                    && events.count == first.bursts.count
+                    && events.allSatisfy { $0.code == "emg" && ($0.durationSeconds ?? 0) > 0 },
+                expectation: "off by default; repeatable burst samples and one duration marker per truth event"
+            ))
+
+            var active = [Bool](repeating: false, count: emgConfig.sampleCount)
+            for burst in first.bursts {
+                let start = max(0, Int((burst.onsetSeconds * emgConfig.samplingRate).rounded()))
+                let length = max(2, Int((burst.durationSeconds * emgConfig.samplingRate).rounded()))
+                for index in start..<min(active.count, start + length) { active[index] = true }
+            }
+            let outsideIsQuiet = firstChannels.allSatisfy { channel in
+                channel.indices.allSatisfy { active[$0] || channel[$0] == 0 }
+            }
+            let f7 = montage.channelNames.firstIndex(of: "F7")!
+            let lowPower = SNRMetrics.bandPower(
+                firstChannels[f7], samplingRate: emgConfig.samplingRate,
+                lowHz: 1, highHz: 15, segmentLength: 2048
+            )
+            let musclePower = SNRMetrics.bandPower(
+                firstChannels[f7], samplingRate: emgConfig.samplingRate,
+                lowHz: model.lowHz, highHz: model.highHz, segmentLength: 2048
+            )
+            let powerRatio = musclePower / max(lowPower, 1e-30)
+            outcomes.append(Outcome(
+                name: "EMG is bursty and broadband above 20 Hz",
+                snr: powerRatio,
+                passed: outsideIsQuiet && musclePower > 0 && powerRatio > 10,
+                expectation: "zero outside truth windows and >10x as much 20-200 Hz as 1-15 Hz power"
+            ))
+
+            let f8 = montage.channelNames.firstIndex(of: "F8")!
+            let cz = montage.channelNames.firstIndex(of: "Cz")!
+            let oz = montage.channelNames.firstIndex(of: "Oz")!
+            let fz = montage.channelNames.firstIndex(of: "Fz")!
+            let localized = first.leftTemporalisTopography[f7] > first.leftTemporalisTopography[f8]
+                && first.leftTemporalisTopography[f7] > first.leftTemporalisTopography[cz]
+                && first.rightTemporalisTopography[f8] > first.rightTemporalisTopography[f7]
+                && first.rightTemporalisTopography[f8] > first.rightTemporalisTopography[cz]
+                && first.posteriorNeckTopography[oz] > first.posteriorNeckTopography[fz]
+                && first.posteriorNeckTopography[oz] > first.posteriorNeckTopography[cz]
+            outcomes.append(Outcome(
+                name: "EMG topographies localize to temporalis and posterior neck",
+                snr: localized ? 0 : 1,
+                passed: localized,
+                expectation: "F7/F8 lateralized temporal maxima and Oz-weighted neck activity"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "EMG artifact simulation",
+                snr: .infinity, passed: false,
+                expectation: "deterministic localized broadband bursts (\(error.localizedDescription))"
+            ))
+        }
+
+        do {
+            var config = SimulationConfig.default
+            config.channelCount = 20
+            config.durationSeconds = 20
+            var chewing = ChewingConfig()
+            chewing.episodesPerMinute = 20
+            var swallowing = SwallowingConfig()
+            swallowing.eventsPerMinute = 20
+            config.chewing = chewing
+            config.swallowing = swallowing
+            let montage = Montage.standard(count: config.channelCount)
+            var firstChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: config.sampleCount),
+                count: config.channelCount
+            )
+            var secondChannels = firstChannels
+            let first = AdditionalArtifactModel.injectAdditive(
+                into: &firstChannels, config: config, montage: montage
+            )
+            let second = AdditionalArtifactModel.injectAdditive(
+                into: &secondChannels, config: config, montage: montage
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let truthStable = try encoder.encode(first.chewingEpisodes)
+                == encoder.encode(second.chewingEpisodes)
+                && encoder.encode(first.swallowingEpisodes)
+                == encoder.encode(second.swallowingEpisodes)
+            let events = SimulationWriter.events(
+                gradient: nil, bcg: nil, ocular: nil, erp: nil,
+                additional: first, config: config
+            )
+            let expectedEvents = first.chewingEpisodes.count + first.swallowingEpisodes.count
+            outcomes.append(Outcome(
+                name: "Chewing and swallowing are deterministic stereotyped bursts",
+                snr: firstChannels == secondChannels ? 0 : 1,
+                passed: !first.chewingEpisodes.isEmpty && !first.swallowingEpisodes.isEmpty
+                    && firstChannels == secondChannels && truthStable
+                    && events.count == expectedEvents
+                    && events.allSatisfy { $0.code == "chew" || $0.code == "swal" },
+                expectation: "repeatable orofacial samples, truth, duration markers, and distinct event codes"
+            ))
+
+            var movementConfig = SimulationConfig.default
+            movementConfig.channelCount = 20
+            movementConfig.durationSeconds = 15
+            var movement = CableMovementConfig()
+            movement.eventsPerMinute = 20
+            movementConfig.cableMovement = movement
+            var movementChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: movementConfig.sampleCount),
+                count: movementConfig.channelCount
+            )
+            let movementTruth = AdditionalArtifactModel.injectAdditive(
+                into: &movementChannels, config: movementConfig,
+                montage: Montage.standard(count: movementConfig.channelCount)
+            )
+            let broad = !movementTruth.cableMovementEpisodes.isEmpty
+                && movementTruth.cableMovementEpisodes.allSatisfy {
+                    ($0.topography?.min() ?? 0) >= 0.24
+                        && abs(($0.topography?.max() ?? 0) - 1) < 1e-12
+                }
+
+            var sweatConfig = SimulationConfig.default
+            sweatConfig.channelCount = 20
+            sweatConfig.durationSeconds = 15
+            var sweat = SweatConfig()
+            sweat.episodesPerMinute = 20
+            sweat.durationSeconds = 3
+            sweat.affectedChannelCount = 1
+            sweatConfig.sweat = sweat
+            var sweatChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: sweatConfig.sampleCount),
+                count: sweatConfig.channelCount
+            )
+            let sweatTruth = AdditionalArtifactModel.injectAdditive(
+                into: &sweatChannels, config: sweatConfig,
+                montage: Montage.standard(count: sweatConfig.channelCount)
+            )
+            let truthChannels = Set(sweatTruth.sweatEpisodes.flatMap(\.affectedChannels))
+            let changedChannels = Set(sweatChannels.indices.compactMap { index in
+                sweatChannels[index].contains(where: { $0 != 0 }) ? index + 1 : nil
+            })
+            outcomes.append(Outcome(
+                name: "Cable movement is broad while sweat drift stays local",
+                snr: Double(changedChannels.count),
+                passed: broad && !sweatTruth.sweatEpisodes.isEmpty
+                    && sweatTruth.sweatEpisodes.allSatisfy { $0.affectedChannels.count == 1 }
+                    && changedChannels == truthChannels,
+                expectation: "movement weights every channel; sweat changes exactly its recorded channels"
+            ))
+
+            // ---------------------------------------------------------------
+            // Roadmap 5.1: the BCG as physical generators.
+            // ---------------------------------------------------------------
+
+            var generatorConfig = SimulationConfig.default
+            generatorConfig.channelCount = 20
+            generatorConfig.samplingRate = 256
+            generatorConfig.durationSeconds = 20
+            generatorConfig.bcgSpatialModel = .generators
+            let generatorMontage = Montage.standard(count: generatorConfig.channelCount)
+
+            // The direct test of the 4.1 defect. Reverse the electrode order so
+            // channel *indices* change while the set of *positions* does not.
+            //
+            // A topography computed from the channel number is unmoved by that;
+            // one computed from geometry follows the electrode. Asserting both
+            // halves is the point — showing only that the new model changes
+            // would not establish that the old one was index-bound.
+            var reversedMontage = generatorMontage
+            reversedMontage.electrodes.reverse()
+
+            func bcgWeights(model: BCGSpatialModel, montage: Montage) -> [Double] {
+                var config = generatorConfig
+                config.bcgSpatialModel = model
+                var channels = [[Double]](
+                    repeating: [Double](repeating: 0, count: config.sampleCount),
+                    count: config.channelCount
+                )
+                var stream = GaussianSource(seed: SimulationSeedStreams.bcg(base: config.seed))
+                return BCGArtifactModel.inject(
+                    into: &channels, config: config, montage: montage, source: &stream
+                ).channelScales
+            }
+
+            let legacyForward = bcgWeights(model: .channelIndex, montage: generatorMontage)
+            let legacyReversed = bcgWeights(model: .channelIndex, montage: reversedMontage)
+            let generatorForward = bcgWeights(model: .generators, montage: generatorMontage)
+            let generatorReversed = bcgWeights(model: .generators, montage: reversedMontage)
+
+            let legacyDrift = zip(legacyForward, legacyReversed)
+                .map { abs($0 - $1) }.max() ?? 0
+            outcomes.append(Outcome(
+                name: "The channel-index BCG ignores electrode geometry entirely",
+                snr: legacyDrift,
+                passed: legacyDrift < 1e-12,
+                expectation: "reversing the montage leaves every channel weight identical, "
+                    + "which is the defect roadmap 4.1 describes"
+            ))
+
+            // Compare the generator topographies themselves rather than the
+            // composite's per-channel summary. `channelScales` is a signed
+            // peak-to-peak magnitude, and the composite happens to be nearly
+            // symmetric under a front-to-back reversal, so it is too lossy to
+            // demonstrate the property.
+            let forwardSet = BCGGeneratorModel.makeGenerators(
+                config: generatorConfig, montage: generatorMontage, beatCount: 4
+            )
+            let reversedSet = BCGGeneratorModel.makeGenerators(
+                config: generatorConfig, montage: reversedMontage, beatCount: 4
+            )
+            var worstPermutedError = 0.0
+            var flattestTopographySpread = Double.infinity
+            for (forward, reversed) in zip(forwardSet.generators, reversedSet.generators) {
+                let error = zip(forward.topography, reversed.topography.reversed())
+                    .map { abs($0 - $1) }.max() ?? 0
+                worstPermutedError = max(worstPermutedError, error)
+                let spread = (forward.topography.max() ?? 0) - (forward.topography.min() ?? 0)
+                flattestTopographySpread = min(flattestTopographySpread, spread)
+            }
+            outcomes.append(Outcome(
+                name: "The generator BCG topography follows the electrode",
+                snr: worstPermutedError,
+                // The spread clause matters: a uniform topography would also be
+                // unchanged by permutation, and would pass the first clause for
+                // entirely the wrong reason.
+                passed: worstPermutedError < 1e-9 && flattestTopographySpread > 0.3,
+                expectation: "every generator's weights permute with the montage to within 1e-9, "
+                    + "and none of them is flat"
+            ))
+
+            // Roadmap 4.2: rank. Rusiniak et al. report 4-8 components per
+            // subject; FMRIB's OBS removes 4 by default. A rank-one artifact
+            // makes OBS-4 trivially near-optimal and PCA-S, ICA-S and OBS
+            // indistinguishable, so this number decides whether the surrogate
+            // comparison in 5.2 can say anything at all.
+            var rankChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: generatorConfig.sampleCount),
+                count: generatorConfig.channelCount
+            )
+            var rankStream = GaussianSource(
+                seed: SimulationSeedStreams.bcg(base: generatorConfig.seed)
+            )
+            let rankInjection = BCGArtifactModel.inject(
+                into: &rankChannels, config: generatorConfig,
+                montage: generatorMontage, source: &rankStream
+            )
+            let generatorSet = rankInjection.generatorSet
+            let legacyRank = BCGGeneratorModel.normalizedSingularValues(
+                topographies: [legacyForward]
+            ).filter { $0 > 0.01 }.count
+            let smallestGeneratorValue = generatorSet?.normalizedSingularValues.last ?? 0
+            outcomes.append(Outcome(
+                name: "The generator BCG has real spatial rank; the channel-index model has one",
+                snr: Double(generatorSet?.spatialRank ?? 0),
+                passed: generatorSet?.spatialRank == 4
+                    && legacyRank == 1
+                    // Not merely non-zero: a fourth component at 1e-6 would
+                    // count toward the rank while being invisible to any method.
+                    && smallestGeneratorValue > 0.05,
+                expectation: "rank 4 with the smallest singular value above 5% of the largest, "
+                    + "against rank 1 for the channel-index model"
+            ))
+
+            // Morphology, not just amplitude. Two beats are compared after
+            // normalizing each to unit peak, so a pure amplitude difference
+            // cannot produce a low correlation. The zero-jitter arm is the
+            // control: without it, a low correlation could just as well mean the
+            // extraction window was misaligned.
+            func beatShape(
+                _ channels: [[Double]], beats: [Double], index: Int, config: SimulationConfig
+            ) -> [Double] {
+                let start = Int(((beats[index] + 0.02) * config.samplingRate).rounded())
+                let length = Int((0.45 * config.samplingRate).rounded())
+                guard start >= 0, start + length < config.sampleCount else { return [] }
+                var window = Array(channels[0][start..<(start + length)])
+                let peak = window.map(abs).max() ?? 0
+                if peak > 1e-15 { for i in window.indices { window[i] /= peak } }
+                return window
+            }
+
+            var fixedConfig = generatorConfig
+            fixedConfig.bcgMorphologyJitterFraction = 0
+            fixedConfig.heartRateMinBPM = 60
+            fixedConfig.heartRateMaxBPM = 60
+            fixedConfig.heartRateVariability = 0
+            fixedConfig.bcgAmplitudeJitterFraction = 0
+            var fixedChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: fixedConfig.sampleCount),
+                count: fixedConfig.channelCount
+            )
+            var fixedStream = GaussianSource(seed: SimulationSeedStreams.bcg(base: fixedConfig.seed))
+            let fixedInjection = BCGArtifactModel.inject(
+                into: &fixedChannels, config: fixedConfig,
+                montage: generatorMontage, source: &fixedStream
+            )
+            var variedConfig = fixedConfig
+            variedConfig.bcgMorphologyJitterFraction = 0.35
+            var variedChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: variedConfig.sampleCount),
+                count: variedConfig.channelCount
+            )
+            var variedStream = GaussianSource(
+                seed: SimulationSeedStreams.bcg(base: variedConfig.seed)
+            )
+            let variedInjection = BCGArtifactModel.inject(
+                into: &variedChannels, config: variedConfig,
+                montage: generatorMontage, source: &variedStream
+            )
+            let fixedShapeCorrelation = DipoleEEGGenerator.pearson(
+                beatShape(fixedChannels, beats: fixedInjection.trueBeatSeconds,
+                          index: 1, config: fixedConfig),
+                beatShape(fixedChannels, beats: fixedInjection.trueBeatSeconds,
+                          index: 6, config: fixedConfig)
+            )
+            let variedShapeCorrelation = DipoleEEGGenerator.pearson(
+                beatShape(variedChannels, beats: variedInjection.trueBeatSeconds,
+                          index: 1, config: variedConfig),
+                beatShape(variedChannels, beats: variedInjection.trueBeatSeconds,
+                          index: 6, config: variedConfig)
+            )
+            outcomes.append(Outcome(
+                name: "Beat-to-beat BCG morphology varies in shape, not only amplitude",
+                snr: variedShapeCorrelation,
+                passed: fixedShapeCorrelation > 0.999 && variedShapeCorrelation < 0.99,
+                expectation: "amplitude-normalized beats correlate above 0.999 with jitter off "
+                    + "and below 0.99 with it on"
+            ))
+
+            // Both motional EMF and the Hall separation are linear in B0.
+            func peakToPeak(_ config: SimulationConfig) -> Double {
+                var channels = [[Double]](
+                    repeating: [Double](repeating: 0, count: config.sampleCount),
+                    count: config.channelCount
+                )
+                var stream = GaussianSource(seed: SimulationSeedStreams.bcg(base: config.seed))
+                _ = BCGArtifactModel.inject(
+                    into: &channels, config: config, montage: generatorMontage, source: &stream
+                )
+                return channels.map { ($0.max() ?? 0) - ($0.min() ?? 0) }.max() ?? 0
+            }
+            var lowFieldConfig = generatorConfig
+            lowFieldConfig.bcgFieldStrengthTesla = 1.5
+            var highFieldConfig = generatorConfig
+            highFieldConfig.bcgFieldStrengthTesla = 7.0
+            let lowFieldPeak = peakToPeak(lowFieldConfig)
+            let highFieldPeak = peakToPeak(highFieldConfig)
+            let fieldRatio = lowFieldPeak > 1e-12 ? highFieldPeak / lowFieldPeak : 0
+            outcomes.append(Outcome(
+                name: "BCG amplitude scales linearly with static field strength",
+                snr: fieldRatio,
+                passed: abs(fieldRatio - 7.0 / 1.5) < 1e-6,
+                expectation: "7 T over 1.5 T gives a peak-to-peak ratio of exactly 4.667"
+            ))
+
+            // The paper benchmark must not have moved, and — the part that is
+            // easy to get wrong — a scenario file written before these settings
+            // existed must still load. Swift's synthesized `Decodable` does not
+            // fall back to a property's default when a key is absent, and every
+            // scenario carries the complete configuration, so a non-optional
+            // addition here would break every file a user already has.
+            var legacyScenarioJSON = try JSONSerialization.jsonObject(
+                with: try JSONEncoder().encode(SimulationConfig.default)
+            ) as? [String: Any] ?? [:]
+            let addedKeys = [
+                "bcgSpatialModel", "bcgFieldStrengthTesla", "bcgMorphologyJitterFraction"
+            ]
+            for key in addedKeys { legacyScenarioJSON.removeValue(forKey: key) }
+            let decodedLegacy = try JSONDecoder().decode(
+                SimulationConfig.self,
+                from: try JSONSerialization.data(withJSONObject: legacyScenarioJSON)
+            )
+            outcomes.append(Outcome(
+                name: "The channel-index BCG is the default and pre-5.1 scenarios still load",
+                snr: Double(addedKeys.count),
+                passed: SimulationConfig.default.effectiveBCGSpatialModel == .channelIndex
+                    && decodedLegacy.effectiveBCGSpatialModel == .channelIndex
+                    && decodedLegacy.effectiveBCGFieldStrengthTesla == 3.0
+                    && decodedLegacy.effectiveBCGMorphologyJitterFraction == 0.20,
+                expectation: "generators are opt-in, and a configuration missing all three new "
+                    + "keys decodes to the pre-5.1 behaviour"
+            ))
+
+            var bridged = [[1.0, 2, 3], [3.0, 4, 5], [7.0, 8, 9]]
+            let pairs = [ChannelBridge(firstChannel: 1, secondChannel: 2)]
+            _ = AdditionalArtifactModel.applyBridging(to: &bridged, pairs: pairs)
+            outcomes.append(Outcome(
+                name: "True electrode bridging makes a channel pair share one signal",
+                snr: bridged[0] == bridged[1] ? 0 : 1,
+                passed: bridged[0] == [2, 3, 4] && bridged[1] == bridged[0]
+                    && bridged[2] == [7, 8, 9],
+                expectation: "the requested pair is sample-identical at its mean; other channels are unchanged"
+            ))
+
+            var additiveMixture = [
+                [3.0, -2, 7, 5],
+                [1.0, 8, -4, 2],
+                [-6.0, 3, 9, -1]
+            ]
+            let unreferred = additiveMixture
+            EEGReferencing.apply(.average, to: &additiveMixture)
+            var infinityReferenced = unreferred
+            EEGReferencing.apply(.infinity, to: &infinityReferenced)
+            let referenceResidual = EEGReferencing.maximumAbsoluteMean(additiveMixture)
+            var generatedReferenceConfig = SimulationConfig.default
+            generatedReferenceConfig.channelCount = 20
+            generatedReferenceConfig.samplingRate = 128
+            generatedReferenceConfig.durationSeconds = 2
+            var generatedReferenceSource = GaussianSource(seed: generatedReferenceConfig.seed)
+            let generatedReferenceEEG = EEGGenerator.generate(
+                config: generatedReferenceConfig,
+                montage: Montage.standard(count: generatedReferenceConfig.channelCount),
+                source: &generatedReferenceSource
+            )
+            outcomes.append(Outcome(
+                name: "One recording reference is enforced at the additive boundary",
+                snr: referenceResidual,
+                passed: referenceResidual < 1e-12 && infinityReferenced == unreferred
+                    && EEGReferencing.maximumAbsoluteMean(generatedReferenceEEG.channels) < 1e-12
+                    && abs(generatedReferenceEEG.standardDeviation
+                        - generatedReferenceConfig.eegTargetStdMicrovolts) < 1e-10,
+                expectation: "average reference preserves target EEG scale and zero channel mean; infinity is unchanged"
+            ))
+
+            // The claim of roadmap 4.6 is about the *complete* mixture, not the
+            // neural layer alone: the BCG, ocular and muscle layers used to be
+            // injected in no particular reference at all. Build one recording
+            // carrying all of them and check the boundary actually lands.
+            //
+            // The infinity arm is the part that makes this a test. Without it,
+            // "the channel mean is zero" could pass simply because every layer
+            // happened to be constructed zero-mean, and the referencing step
+            // could be doing nothing whatsoever.
+            var compositeConfig = SimulationConfig.default
+            compositeConfig.channelCount = 20
+            compositeConfig.samplingRate = 128
+            compositeConfig.durationSeconds = 6
+            compositeConfig.blinksPerMinute = 20
+            compositeConfig.saccadesPerMinute = 10
+            compositeConfig.emg = EMGConfig()
+            let compositeMontage = Montage.standard(count: compositeConfig.channelCount)
+
+            func buildComposite(reference: EEGReference) -> [[Double]] {
+                var config = compositeConfig
+                config.recordingReference = reference
+                var neural = GaussianSource(seed: config.seed)
+                var channels = EEGGenerator.generate(
+                    config: config, montage: compositeMontage, source: &neural
+                ).channels
+                _ = GradientArtifactModel.inject(
+                    into: &channels, config: config, montage: compositeMontage, template: nil
+                )
+                var bcgStream = GaussianSource(seed: SimulationSeedStreams.bcg(base: config.seed))
+                _ = BCGArtifactModel.inject(
+                    into: &channels, config: config, montage: compositeMontage, source: &bcgStream
+                )
+                var ocularStream = GaussianSource(seed: SimulationSeedStreams.ocular(base: config.seed))
+                _ = OcularArtifactModel.inject(
+                    into: &channels, config: config, montage: compositeMontage, source: &ocularStream
+                )
+                var emgStream = GaussianSource(seed: SimulationSeedStreams.emg(base: config.seed))
+                _ = EMGArtifactModel.inject(
+                    into: &channels, config: config, montage: compositeMontage, source: &emgStream
+                )
+                EEGReferencing.apply(reference, to: &channels)
+                return channels
+            }
+
+            let averagedComposite = buildComposite(reference: .average)
+            let infinityComposite = buildComposite(reference: .infinity)
+            let compositeResidual = EEGReferencing.maximumAbsoluteMean(averagedComposite)
+            let infinityCommonMode = EEGReferencing.maximumAbsoluteMean(infinityComposite)
+            outcomes.append(Outcome(
+                name: "Every artifact layer meets one reference in the complete mixture",
+                snr: compositeResidual,
+                passed: compositeResidual < 1e-9
+                    && infinityCommonMode > 1,
+                expectation: "EEG+gradient+BCG+ocular+EMG average-reference to zero mean, "
+                    + "while the same mixture at infinity keeps a common mode above 1 µV"
+            ))
+
+            var referenceConfig = SimulationConfig.default
+            referenceConfig.channelCount = 3
+            referenceConfig.durationSeconds = 4
+            var reference = BadReferenceConfig()
+            reference.amplitudeMicrovolts = 25
+            referenceConfig.badReference = reference
+            var referenced = [[Double]](
+                repeating: [Double](repeating: 0, count: referenceConfig.sampleCount), count: 3
+            )
+            let referenceTruth = AdditionalArtifactModel.injectAdditive(
+                into: &referenced, config: referenceConfig,
+                montage: Montage.standard(count: referenceConfig.channelCount)
+            )
+            outcomes.append(Outcome(
+                name: "A bad reference contaminates every channel identically",
+                snr: referenceTruth.badReferenceRMSMicrovolts ?? 0,
+                passed: referenced[0] == referenced[1] && referenced[1] == referenced[2]
+                    && abs((referenceTruth.badReferenceRMSMicrovolts ?? 0) - 25) < 1e-9,
+                expectation: "sample-identical common contamination at the requested 25 µV RMS"
+            ))
+
+            var clipped = [[-100.0, -40, 0, 40, 100], [1, 2, 3, 4, 5]]
+            let counts = AdditionalArtifactModel.applyClipping(
+                to: &clipped, thresholdMicrovolts: 40
+            )
+            outcomes.append(Outcome(
+                name: "Amplifier saturation applies hard symmetric rails",
+                snr: Double(counts.reduce(0, +)),
+                passed: clipped[0] == [-40, -40, 0, 40, 40]
+                    && clipped[1] == [1, 2, 3, 4, 5] && counts == [2, 0],
+                expectation: "only out-of-range samples clamp to ±40 µV and are counted per channel"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "Additional artifact families",
+                snr: .infinity, passed: false,
+                expectation: "deterministic physiology and recording defects (\(error.localizedDescription))"
+            ))
+        }
 
         return outcomes
     }

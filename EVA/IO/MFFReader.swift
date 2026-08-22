@@ -1588,26 +1588,50 @@ nonisolated final class MFFReader {
     }
 
     private func parseMFFDate(_ value: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: value) {
-            return date
-        }
+        // Both fractional-second parsers Foundation offers stop at milliseconds:
+        // ISO8601DateFormatter's `.withFractionalSeconds` truncates further
+        // digits, and DateFormatter carries millisecond internal precision. At
+        // 1024 Hz a sample is 976.5625 µs, so millisecond truncation on the read
+        // side alone is enough to displace an event by half a sample and trip
+        // EVA's TR-spacing check — the writer's precision cannot rescue it.
+        //
+        // So split the fraction off, parse only the whole-second instant with
+        // Foundation, and add the fraction back as a Double. `Date` resolves to
+        // about 0.12 µs at present-day epochs, which is 1e-4 samples at 1024 Hz.
+        let (withoutFraction, fractionalSeconds) = Self.splitFractionalSeconds(value)
+        guard let whole = parseWholeSecondMFFDate(withoutFraction) else { return nil }
+        return fractionalSeconds == 0 ? whole : whole.addingTimeInterval(fractionalSeconds)
+    }
 
+    /// Removes `.ffffff` from an ISO-8601 string, returning the remainder and
+    /// the fraction it carried. Digit count is not assumed: MFF files in the
+    /// wild use three, six, and nine.
+    static func splitFractionalSeconds(_ value: String) -> (String, TimeInterval) {
+        guard let dot = value.firstIndex(of: ".") else { return (value, 0) }
+        var digits = ""
+        var index = value.index(after: dot)
+        while index < value.endIndex, value[index].isNumber {
+            digits.append(value[index])
+            index = value.index(after: index)
+        }
+        guard !digits.isEmpty, let scaled = Double(digits) else { return (value, 0) }
+        let fraction = scaled / pow(10, Double(digits.count))
+        return (String(value[value.startIndex..<dot]) + String(value[index...]), fraction)
+    }
+
+    private func parseWholeSecondMFFDate(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         if let date = formatter.date(from: value) {
             return date
         }
 
-        if value.count > 6 {
-            let normalized = String(value.dropLast(3)) + String(value.suffix(2))
-            let fallback = DateFormatter()
-            fallback.locale = Locale(identifier: "en_US_POSIX")
-            fallback.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ"
-            return fallback.date(from: normalized)
-        }
-
-        return nil
+        // A numeric offset without the colon (`-0400`), which ISO8601DateFormatter
+        // rejects. The old code reached this branch by length; match the shape.
+        let fallback = DateFormatter()
+        fallback.locale = Locale(identifier: "en_US_POSIX")
+        fallback.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+        return fallback.date(from: value)
     }
 }
 

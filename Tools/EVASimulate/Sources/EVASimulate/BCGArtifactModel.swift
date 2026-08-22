@@ -55,6 +55,9 @@ nonisolated struct BCGInjection: Sendable {
     /// RR interval following each beat, in seconds. The ECG needs it to scale
     /// each complex to its own beat.
     var rrIntervalsSeconds: [Double]
+    /// Present only under `.generators`. Carries each physical generator's
+    /// topography, delay and per-beat weights, plus the realized spatial rank.
+    var generatorSet: BCGGeneratorSet? = nil
 }
 
 nonisolated enum BCGArtifactModel {
@@ -62,12 +65,37 @@ nonisolated enum BCGArtifactModel {
     static func inject(
         into channels: inout [[Double]],
         config: SimulationConfig,
+        montage: Montage,
+        source: inout GaussianSource
+    ) -> BCGInjection {
+        let (beats, intervals) = beatTimes(config: config, source: &source)
+        let amplitudes = beatAmplitudes(count: beats.count, config: config, source: &source)
+
+        switch config.effectiveBCGSpatialModel {
+        case .channelIndex:
+            return injectChannelIndex(
+                into: &channels, config: config, beats: beats,
+                intervals: intervals, amplitudes: amplitudes, source: &source
+            )
+        case .generators:
+            return injectGenerators(
+                into: &channels, config: config, montage: montage, beats: beats,
+                intervals: intervals, amplitudes: amplitudes, source: &source
+            )
+        }
+    }
+
+    /// The original weighting. Kept verbatim, including its draw order, so the
+    /// published benchmark reproduces byte-for-byte.
+    private static func injectChannelIndex(
+        into channels: inout [[Double]],
+        config: SimulationConfig,
+        beats: [Double],
+        intervals: [Double],
+        amplitudes: [Double],
         source: inout GaussianSource
     ) -> BCGInjection {
         let template = waveformTemplate(config: config)
-
-        let (beats, intervals) = beatTimes(config: config, source: &source)
-        let amplitudes = beatAmplitudes(count: beats.count, config: config, source: &source)
 
         var scales = [Double](repeating: 0, count: config.channelCount)
         var latencies = [Double](repeating: 0, count: config.channelCount)
@@ -76,6 +104,10 @@ nonisolated enum BCGArtifactModel {
             // an inverted BCG the way a real montage does. Spatial structure is
             // what PCA- and ICA-based methods key on, so a model that gave every
             // channel the same sign would flatter them.
+            //
+            // It is nonetheless a function of channel *index*, not position, and
+            // the whole artifact is rank one. `.generators` is the model to use
+            // for anything that turns on either fact.
             let phase = 2 * Double.pi * Double(channel) / Double(max(1, config.channelCount))
             scales[channel] = (0.35 + 0.65 * cos(phase)) * (1 + 0.1 * source.gaussian())
             latencies[channel] = config.bcgChannelLatencySDSeconds * source.gaussian()
@@ -100,19 +132,153 @@ nonisolated enum BCGArtifactModel {
             )
         }
 
-        let detected = beats.map { beat in
-            max(0, beat + config.qrsDetectionJitterSDSeconds * source.gaussian())
-        }
-
         return BCGInjection(
             trueBeatSeconds: beats,
-            detectedBeatSeconds: detected,
+            detectedBeatSeconds: detectedBeats(beats, config: config, source: &source),
             beatAmplitudesMicrovolts: amplitudes,
             channelScales: scales,
             channelLatenciesSeconds: latencies,
             meanWaveform: mean,
             rrIntervalsSeconds: intervals
         )
+    }
+
+    /// Four physical generators, each with its own topography, delay, waveform
+    /// and independently varying per-beat weight. See `BCGGeneratorModel`.
+    private static func injectGenerators(
+        into channels: inout [[Double]],
+        config: SimulationConfig,
+        montage: Montage,
+        beats: [Double],
+        intervals: [Double],
+        amplitudes: [Double],
+        source: inout GaussianSource
+    ) -> BCGInjection {
+        let set = BCGGeneratorModel.makeGenerators(
+            config: config, montage: montage, beatCount: beats.count
+        )
+        let fieldScale = BCGGeneratorModel.fieldStrengthScale(config)
+
+        // Per-channel arrival latency is still drawn, and from the same place in
+        // the stream as the legacy path, because it models a different thing
+        // from the generator delays: those are when each *physical event*
+        // happens, this is residual phase spread across the montage.
+        var latencies = [Double](repeating: 0, count: config.channelCount)
+        for channel in 0..<config.channelCount {
+            latencies[channel] = config.bcgChannelLatencySDSeconds * source.gaussian()
+        }
+
+        let templates = set.generators.map {
+            generatorTemplate(config: config, delay: $0.delaySeconds, width: $0.widthSeconds)
+        }
+
+        // Build the composite into a scratch buffer first so it can be scaled to
+        // the requested peak-to-peak amplitude. Writing straight into `channels`
+        // would mean measuring the artifact on top of whatever was already there.
+        var artifact = [[Double]](
+            repeating: [Double](repeating: 0, count: config.sampleCount),
+            count: config.channelCount
+        )
+        var mean = [Double](repeating: 0, count: config.sampleCount)
+
+        for (beatIndex, beat) in beats.enumerated() {
+            let beatAmplitude = amplitudes[beatIndex]
+            for (generatorIndex, generator) in set.generators.enumerated() {
+                let weight = beatIndex < generator.beatWeights.count
+                    ? generator.beatWeights[beatIndex] : 1
+                let share = generator.relativeAmplitude * weight
+                for channel in artifact.indices {
+                    let gain = channel < generator.topography.count
+                        ? generator.topography[channel] : 0
+                    guard gain != 0 else { continue }
+                    templates[generatorIndex].add(
+                        into: &artifact[channel],
+                        outputRate: config.samplingRate,
+                        eventSeconds: beat + latencies[channel],
+                        scale: beatAmplitude * share * gain
+                    )
+                }
+                templates[generatorIndex].add(
+                    into: &mean,
+                    outputRate: config.samplingRate,
+                    eventSeconds: beat,
+                    scale: beatAmplitude * share
+                )
+            }
+        }
+
+        // `bcgAmplitudeMicrovolts` means the same thing under both models: the
+        // peak-to-peak amplitude of the strongest channel. Normalizing the
+        // composite preserves that contract while letting the generators' own
+        // relative amplitudes decide the shape.
+        let peakToPeak = artifact.map { channel -> Double in
+            guard let low = channel.min(), let high = channel.max() else { return 0 }
+            return high - low
+        }.max() ?? 0
+        let calibration = peakToPeak > 1e-12
+            ? fieldScale * config.bcgAmplitudeMicrovolts / peakToPeak
+            : fieldScale
+        for channel in artifact.indices {
+            for sample in artifact[channel].indices {
+                channels[channel][sample] += calibration * artifact[channel][sample]
+            }
+        }
+        for sample in mean.indices { mean[sample] *= calibration }
+
+        // The reported per-channel scale is the realized composite weight, so
+        // the truth sidecar answers the same question under both models.
+        let channelScales = artifact.map { channel -> Double in
+            guard let low = channel.min(), let high = channel.max(), peakToPeak > 1e-12 else {
+                return 0
+            }
+            let extreme = abs(high) >= abs(low) ? high : low
+            return (extreme >= 0 ? 1 : -1) * (high - low) / peakToPeak
+        }
+
+        return BCGInjection(
+            trueBeatSeconds: beats,
+            detectedBeatSeconds: detectedBeats(beats, config: config, source: &source),
+            beatAmplitudesMicrovolts: amplitudes,
+            channelScales: channelScales,
+            channelLatenciesSeconds: latencies,
+            meanWaveform: mean,
+            rrIntervalsSeconds: intervals,
+            generatorSet: set
+        )
+    }
+
+    /// QRS times as an automatic detector would report them. Drawn last under
+    /// both models so the two paths consume the stream in the same order.
+    private static func detectedBeats(
+        _ beats: [Double], config: SimulationConfig, source: inout GaussianSource
+    ) -> [Double] {
+        beats.map { beat in
+            max(0, beat + config.qrsDetectionJitterSDSeconds * source.gaussian())
+        }
+    }
+
+    /// One generator's beat-locked waveform: a biphasic pulse centred on the
+    /// generator's delay. Deliberately simple — the composite's morphology comes
+    /// from summing four of these at different delays with independently varying
+    /// weights, not from any one of them being elaborate.
+    private static func generatorTemplate(
+        config: SimulationConfig, delay: Double, width: Double
+    ) -> HighRateTemplate {
+        let rate = config.artifactRate
+        let leadIn = 0.05
+        let span = delay + 6 * width + leadIn
+        let count = max(8, Int((span * rate).rounded()))
+        var waveform = [Double](repeating: 0, count: count)
+        for index in 0..<count {
+            let t = Double(index) / rate - leadIn
+            let z = (t - delay) / width
+            let positive = exp(-0.5 * z * z)
+            let trailing = (t - delay - 1.6 * width) / (1.3 * width)
+            let negative = exp(-0.5 * trailing * trailing)
+            waveform[index] = positive - 0.45 * negative
+        }
+        GradientArtifactModel.normalizeToUnitPeakToPeak(&waveform)
+        return HighRateTemplate(samples: waveform, rate: rate, leadInSeconds: leadIn)
     }
 
     /// Paper: "the heart rate was modulated smoothly between 65 and 85 beats per

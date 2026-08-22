@@ -47,6 +47,7 @@ nonisolated struct OcularInjection: Sendable {
     var blinkTopography: [Double]
     var horizontalTopography: [Double]
     var verticalTopography: [Double]
+    var dipoles: [OcularDipoleTruth]
 }
 
 nonisolated enum OcularArtifactModel {
@@ -68,12 +69,28 @@ nonisolated enum OcularArtifactModel {
         let sampleCount = config.sampleCount
         let positions = montage.positions
 
-        let blinkTopography = blinkTopography(positions: positions)
-        let horizontalTopography = horizontalTopography(positions: positions)
-
-        // Vertical eye movement shares the blink's topography — same dipole,
-        // same projection — so it is not modelled separately.
-        let verticalTopography = blinkTopography
+        let blinkTopography: [Double]
+        let horizontalTopography: [Double]
+        let verticalTopography: [Double]
+        let dipoles: [OcularDipoleTruth]
+        switch config.ocularSpatialModel {
+        case .heuristic:
+            blinkTopography = Self.blinkTopography(positions: positions)
+            horizontalTopography = Self.horizontalTopography(positions: positions)
+            // Vertical eye movement shares the blink's topography — same dipole,
+            // same projection — so it is not modelled separately.
+            verticalTopography = blinkTopography
+            dipoles = []
+        case .dipole:
+            let projected = OcularDipoleModel.topographies(
+                montage: montage, head: config.sphericalHeadModel,
+                reference: config.effectiveRecordingReference
+            )
+            blinkTopography = projected.blink
+            horizontalTopography = projected.horizontal
+            verticalTopography = projected.vertical
+            dipoles = projected.dipoles
+        }
 
         var blinkSignal = [Double](repeating: 0, count: sampleCount)
         var blinkTimes: [Double] = []
@@ -175,7 +192,8 @@ nonisolated enum OcularArtifactModel {
             heog: heog,
             blinkTopography: blinkTopography,
             horizontalTopography: horizontalTopography,
-            verticalTopography: verticalTopography
+            verticalTopography: verticalTopography,
+            dipoles: dipoles
         )
     }
 

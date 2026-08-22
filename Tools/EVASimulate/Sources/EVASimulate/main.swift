@@ -19,8 +19,12 @@
 //  of the brain signal with it". Simulated data with known ground truth can.
 //
 //    generate  — write a ground-truth recording and its contaminated twin
-//    score     — compare a corrected recording against the ground truth
-//    sweep     — generate a series varying one parameter, for a full curve
+//    score         — compare a corrected recording against the ground truth
+//    score-sources — score inverse locations and recovered source waveforms
+//    score-events  — score event detection and timing against true events
+//    score-erp     — score recovered ERP peak amplitude and latency
+//    score-pac     — score recovered phase-amplitude coupling parameters
+//    sweep         — generate a series varying one parameter, for a full curve
 //
 
 import Foundation
@@ -93,25 +97,35 @@ nonisolated struct Arguments {
 func usage() -> String {
     """
     Usage:
-      eva-simulate generate --output <dir> [model options]
+      eva-simulate generate [--output <dir>] [--write-config <json>] [model options]
       eva-simulate score --truth <clean.mff> --corrected <file.mff> [options]
+      eva-simulate score-sources --truth <truth.json> [source options]
+      eva-simulate score-events --truth <truth.json> --detected <json-or-mff> --type <event>
+      eva-simulate score-erp --truth <components.json> --estimated <components.json>
+      eva-simulate score-pac --truth <truth.json> --estimated <pac.json>
       eva-simulate sweep --parameter <name> --values <a,b,c> --output <dir> [model options]
       eva-simulate selftest
 
     generate — writes <dir>/<prefix>_clean.mff, <dir>/<prefix>_noisy.mff,
-               <dir>/<prefix>_truth.json  (prefix defaults to "sim")
+               <dir>/<prefix>_truth.json  (prefix defaults to "sim"), or writes
+               only a resolved scenario when --write-config is used alone
 
       Recording
+        --config <json>             Load a versioned scenario file. Explicit
+                                    model flags override the loaded values.
+        --write-config <json>       Save the final resolved scenario. Without
+                                    --output, save it and exit without simulating.
         --output <dir>              Directory to write into. Required.
         --prefix <name>             Filename prefix (default "sim"), so
                                     --prefix test1 gives test1_clean.mff,
                                     test1_noisy.mff and test1_truth.json.
         --channels <n>              Channel count (default 20).
-        --rate <hz>                 Sampling rate (default 1024).
+        --rate <hz>                 Sampling rate (default 1000; paper used 1024).
         --duration <s>              Duration in seconds (default 180).
         --seed <n>                  Seed; same seed gives the same recording.
 
       Gradient artifact
+        --with-gradient             Enable gradients if a scenario disables them.
         --no-gradient               Omit the imaging artifact entirely.
         --tr <s>                    Repetition time (default 3.0).
         --slices <n>                Slices per volume (default 41).
@@ -122,10 +136,19 @@ func usage() -> String {
         --gradient-template <path>  Use a measured slice template (one sample per
                                     line) instead of the synthetic waveform.
         --gradient-template-rate <hz>  Rate that template was sampled at.
+        --no-gradient-template      Return a loaded scenario to the synthetic template.
 
       Ballistocardiogram
+        --with-bcg                  Enable BCG if a scenario disables it.
         --no-bcg                    Omit the cardiac artifact entirely.
         --bcg-amplitude <uv>        Mean peak-to-peak amplitude (default 100).
+    --bcg-model <name>          channelIndex (default, reproduces the paper) or
+                                generators. channelIndex weights each channel by
+                                its INDEX and is rank one; generators places four
+                                physical sources with real topographies.
+    --bcg-field-strength <T>    Static field for the generator model (default 3).
+    --bcg-morphology-jitter <f> Per-generator beat-to-beat weight SD (default
+                                0.20). Zero fixes the composite morphology.
         --qrs-jitter <ms>           SD of detected-beat timing error (default 25).
         --heart-rate-min <bpm>      Default 65.
         --heart-rate-max <bpm>      Default 85.
@@ -140,12 +163,96 @@ func usage() -> String {
         --alpha-low <uv>            Eyes-open alpha amplitude (default 10).
         --alpha-high <uv>           Eyes-closed alpha amplitude (default 30).
         --eeg-std <uv>              Target EEG standard deviation (default 10.9).
+        --eeg-model <name>          grouiller (paper default) or dipole.
+        --reference <name>          average (default) or infinity; applies to
+                                    every additive sensor-space layer.
+        --sources <n>               Neural dipoles in dipole mode (default 7).
+        --source-depth <fraction>   Source radius / brain radius (default 0.85).
+        --source-orientations <p>   radial, tangential, mixed, or free (default mixed).
+        --lead-field-terms <n>      Spherical-harmonic terms (default 100).
+        --source-correlation <r>    Correlate S001/S002 at Pearson r (-0.99...0.99).
+        --near-source-separation <deg>  Put S002 this many degrees from S001.
+        --source-motion <deg>       Rotate S001 by this angle during the run.
+        --source-motion-start <f>   Motion start as recording fraction (default 0.45).
+        --source-motion-transition <f>  Transition duration fraction (default 0.10).
+        --write-sources             Also write <prefix>_sources.mff ground truth.
+
+      Neural non-stationarity (off by default)
+        --with-nonstationarity      Enable bursts, spectral dynamics, microstates, and PAC.
+        --no-nonstationarity        Restore the stationary paper model.
+        --alpha-bursts <per-min>    Alpha spindle rate (default 12).
+        --alpha-burst-duration <s>  Mean spindle duration (default 1).
+        --no-alpha-bursts           Keep continuous block-modulated alpha.
+        --spectral-variation <sd>   Slow log-amplitude SD (default 0.35).
+        --spectral-timescale <s>    OU time constant (default 12).
+        --no-spectral-dynamics      Disable slow band-amplitude evolution.
+        --microstates <n>           Number of switching scalp maps (default 4).
+        --microstate-dwell <ms>     Mean map dwell time (default 100).
+        --microstate-amplitude <uv> Broadband map-carrier RMS (default 4).
+        --no-microstates            Disable topographic switching.
+        --pac <strength>            Phase-amplitude modulation depth (0...0.99).
+        --pac-low <hz>              Phase oscillator frequency (default 6).
+        --pac-band <name>           Modulated EEG band (default gamma-low).
+        --pac-phase <deg>           Preferred phase (default 0 degrees).
+        --no-pac                    Disable phase-amplitude coupling.
+
+      Event-related potentials (off by default)
+        --with-erp                  Enable the default 80-trial oddball design.
+        --no-erp                    Disable ERPs loaded from a scenario.
+        --erp-trials <n>            Number of standard/target trials.
+        --erp-isi <s>               Inter-stimulus interval (default 1.5).
+        --erp-isi-jitter <s>        Uniform onset jitter (default ±0.2).
+        --erp-target-fraction <f>   Target-trial fraction (default 0.2).
+        --erp-latency <ms>          Nominal component peak (default 300).
+        --erp-latency-jitter <ms>   Trial latency SD (default 30).
+        --erp-latency-skew <x>      Signed non-Gaussian latency skew (default 0).
+        --erp-amplitude <uv>        Target peak at strongest sensor (default 8).
+        --erp-standard-ratio <f>    Standard/target amplitude ratio (default 0.5).
+        --erp-amplitude-jitter <f>  Trial amplitude SD fraction (default 0.2).
+        --erp-latency-amplitude-correlation <r>  Correlated trial variability.
+        --erp-omission-rate <f>     Fraction of stimulus events with no response.
+        --erp-waveform <name>       gaussian or biphasic.
+        --erp-width <ms>            Analytic component width (default 60).
+        --erp-template <path>       Measured waveform, one sample per line.
+        --erp-template-rate <hz>    Sampling rate of the measured ERP waveform.
 
       Ocular artifacts (off by default — the paper's model has none)
         --blinks <per-min>          Blink rate; 12-20 is a resting adult.
         --blink-amplitude <uv>      Peak amplitude at Fp1/Fp2 (default 100).
         --eye-movements <per-min>   Saccade rate.
         --eye-movement-amplitude <uv>  Scalp amplitude at full gaze (default 40).
+        --ocular-model <name>       heuristic (default) or homogeneous dipole.
+
+      Muscle artifact (off by default)
+        --with-emg                  Enable bursty temporalis/neck EMG defaults.
+        --no-emg                    Disable EMG loaded from a scenario.
+        --emg <bursts-per-min>      Mean burst rate (default 8 when enabled).
+        --emg-amplitude <uv>        RMS at the strongest electrode (default 50).
+        --emg-duration <s>          Mean burst duration (default 0.75).
+        --emg-low <hz>              Carrier low edge (default 20).
+        --emg-high <hz>             Carrier high edge (default 200).
+
+      Additional artifacts (off by default)
+        --chewing <episodes/min>    Rhythmic temporalis episodes.
+        --chewing-amplitude <uv>    Default 100 RMS.
+        --chewing-duration <s>      Default 4.
+        --chewing-cycle <hz>        Jaw cycle rate (default 1.5).
+        --swallowing <events/min>   Stereotyped posterior-neck bursts.
+        --swallowing-amplitude <uv> Default 120 RMS.
+        --swallowing-duration <s>   Default 1.
+        --cable-movement <events/min>  Broad low-frequency cable sway.
+        --cable-amplitude <uv>      Default 150.
+        --cable-duration <s>        Default 3.
+        --sweat <episodes/min>      Very-low-frequency local drift.
+        --sweat-amplitude <uv>      Default 100.
+        --sweat-duration <s>        Default 15.
+        --sweat-channels <n>        Channels per episode (default 1).
+        --bridge <a:b,...>          Make channel pairs share their averaged signal.
+        --bad-reference <uv>        Common 0.2-30 Hz reference contamination.
+        --clip <uv>                 Apply symmetric hard amplifier rails.
+        --no-chewing/--no-swallowing/--no-cable-movement/--no-sweat
+        --no-bridges/--no-bad-reference/--no-clipping
+                                    Disable the corresponding scenario artifact.
 
       Recording defects (off by default)
         --bad-channels <spec>       Comma-separated <channel>:<kind>, 1-based,
@@ -159,7 +266,13 @@ func usage() -> String {
                                     poor contact, but deliberately LOW for
                                     "flat", since a bridged electrode reads
                                     excellent and records nothing.
+        --with-impedance            Enable measurements if a scenario disables them.
         --no-impedance              Record no impedance measurement at all.
+        --with-impedance-noise      Couple contact impedance to thermal/mains noise.
+        --no-impedance-noise        Restore decorative, measurement-only impedance.
+        --electrode-temperature <K> Johnson-noise temperature (default 298.15 K).
+        --impedance-line-exponent <x>
+                                    Mains scaling exponent (default 1, linear).
 
       Scanner window
         --pre-scan <s>              Quiet time before the sequence starts.
@@ -173,17 +286,20 @@ func usage() -> String {
         --artifact-anti-alias <f>   Anti-alias cutoff as a fraction of output
                                     Nyquist; 0 disables (default 0.9).
         --no-ecg                    Omit the synthetic ECG channel.
+        --with-ecg                  Enable ECG if a scenario disables it.
         --no-motion-sensor          Omit the synthetic motion-sensor channel.
+        --with-motion-sensor        Enable it if a scenario disables it.
         --spatial-model <name>      circular (the paper's, default) or geometric
                                     (smooth by real electrode distance — prefer
-                                    this for demos and topography).
+                                    this for demos and topography). Grouiller
+                                    model only; dipole mode uses its lead field.
         --spatial-smoothing <n>     Kernel width in channels (default 4).
         --demo                      Preset for teaching recordings: blinks, eye
                                     movements, 60 Hz line noise, geometric
                                     spatial model, pre/post-scan quiet, and two
                                     bad channels. Any explicit flag still wins.
 
-    score — reports SNR per frequency band against ground truth
+    score — reports waveform, spectral, band, and channel fidelity against truth
 
         --truth <clean.mff>         Ground-truth recording from `generate`. Required.
         --corrected <file.mff>      The recording after correction. Required.
@@ -194,11 +310,50 @@ func usage() -> String {
         --csv <path>                Also write the per-band table as CSV.
         --json <path>               Also write the full result as JSON.
 
+    score-sources — score inverse locations and/or recovered source signals
+
+        --truth <truth.json>        Dipole simulation truth sidecar. Required.
+        --estimated <json>          Estimated source locations. JSON object with
+                                    a `sources` array; each item has
+                                    `positionMeters` and optional `id` and
+                                    `orientation` (x/y/z objects).
+        --recovered <mff>           Recovered ICA/source signals as MFF channels.
+                                    Assignment is sign- and order-invariant.
+        --pad-seconds <s>           Ignore this much at each signal end (default 0).
+        --json <path>               Write machine-readable location/recovery scores.
+
+    score-events — score artifact/event detection against simulation truth
+
+        --truth <truth.json>        Simulation truth sidecar. Required.
+        --detected <json-or-mff>    JSON events or an MFF carrying detected markers.
+        --type <name>               gradient, bcg, blink, saccade, emg, chewing,
+                                    swallowing, movement, or sweat.
+        --event-code <code>         Override the corresponding MFF marker code.
+        --tolerance-ms <ms>         Maximum one-to-one timing error.
+        --json <path>               Write the full score and optional ROC curve.
+
+    score-erp — score recovered ERP peak amplitude and latency
+
+        --truth <json>              True component set or array.
+        --estimated <json>          Recovered component set or array, matched by id.
+        --level <name>              average (default) or non-omitted trial truth.
+        --exclude-overlap           With --level trial, score only trials whose
+                                    component windows do not overlap another.
+        --json <path>               Write machine-readable bias/MAE/RMSE metrics.
+
+    score-pac — score recovered phase-amplitude coupling parameters
+
+        --truth <truth.json>        Simulation truth sidecar with PAC enabled.
+        --estimated <json>          Object with `strength` and
+                                    `preferredPhaseRadians`.
+        --json <path>               Write strength and circular-phase errors.
+
     sweep — one `generate` per value of a swept parameter
 
         --parameter <name>          One of: qrs-jitter, bcg-amplitude,
                                     gradient-amplitude, slow-modulation,
-                                    clock-offset, rate.
+                                    clock-offset, rate, impedance, sources,
+                                    emg-rate, emg-amplitude.
         --values <a,b,c>            Comma-separated values to sweep.
         --output <dir>              Parent directory; one subdirectory per value.
                                     --prefix applies inside each of them.
@@ -213,15 +368,38 @@ func usage() -> String {
 // MARK: - Config assembly
 
 let generateOptions: Set<String> = [
-    "output", "channels", "rate", "duration", "seed",
-    "no-gradient", "tr", "slices", "gradient-amplitude", "gradient-amplitude-min",
+    "config", "write-config", "output", "channels", "rate", "duration", "seed",
+    "with-gradient", "no-gradient", "tr", "slices", "gradient-amplitude", "gradient-amplitude-min",
     "clock-offset", "slow-modulation", "gradient-template", "gradient-template-rate",
-    "no-bcg", "bcg-amplitude", "qrs-jitter", "heart-rate-min", "heart-rate-max",
+    "no-gradient-template", "with-bcg", "no-bcg", "bcg-amplitude", "bcg-model", "bcg-field-strength",
+    "bcg-morphology-jitter", "qrs-jitter", "heart-rate-min", "heart-rate-max",
     "hrv", "respiration",
-    "alpha-low", "alpha-high", "eeg-std", "spatial-model", "spatial-smoothing",
-    "artifact-oversample", "artifact-anti-alias", "no-ecg", "no-motion-sensor",
+    "alpha-low", "alpha-high", "eeg-std", "eeg-model", "sources", "source-depth",
+    "source-orientations", "lead-field-terms", "source-correlation", "reference",
+    "near-source-separation", "source-motion", "source-motion-start",
+    "source-motion-transition", "write-sources", "spatial-model", "spatial-smoothing",
+    "with-nonstationarity", "no-nonstationarity", "alpha-bursts",
+    "alpha-burst-duration", "no-alpha-bursts", "spectral-variation",
+    "spectral-timescale", "no-spectral-dynamics", "microstates",
+    "microstate-dwell", "microstate-amplitude", "no-microstates",
+    "pac", "pac-low", "pac-band", "pac-phase", "no-pac",
+    "with-erp", "no-erp", "erp-trials", "erp-isi", "erp-isi-jitter",
+    "erp-target-fraction", "erp-latency", "erp-latency-jitter", "erp-latency-skew",
+    "erp-amplitude", "erp-standard-ratio", "erp-amplitude-jitter",
+    "erp-latency-amplitude-correlation", "erp-omission-rate", "erp-waveform",
+    "erp-width", "erp-template", "erp-template-rate",
+    "artifact-oversample", "artifact-anti-alias", "with-ecg", "no-ecg",
+    "with-motion-sensor", "no-motion-sensor", "with-impedance",
+    "with-impedance-noise", "no-impedance-noise", "electrode-temperature",
+    "impedance-line-exponent",
     "prefix", "pre-scan", "post-scan",
-    "blinks", "blink-amplitude", "eye-movements", "eye-movement-amplitude",
+    "blinks", "blink-amplitude", "eye-movements", "eye-movement-amplitude", "ocular-model",
+    "with-emg", "no-emg", "emg", "emg-amplitude", "emg-duration", "emg-low", "emg-high",
+    "chewing", "chewing-amplitude", "chewing-duration", "chewing-cycle", "no-chewing",
+    "swallowing", "swallowing-amplitude", "swallowing-duration", "no-swallowing",
+    "cable-movement", "cable-amplitude", "cable-duration", "no-cable-movement",
+    "sweat", "sweat-amplitude", "sweat-duration", "sweat-channels", "no-sweat",
+    "bridge", "no-bridges", "bad-reference", "no-bad-reference", "clip", "no-clipping",
     "bad-channels", "line-noise", "line-noise-amplitude", "demo",
     "impedance", "no-impedance"
 ]
@@ -274,16 +452,43 @@ func parseBadChannels(_ spec: String) throws -> [Int: ChannelDefect] {
     return result
 }
 
-func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
-    var config = SimulationConfig.default
+func parseChannelBridges(_ spec: String) throws -> [ChannelBridge] {
+    try spec.split(separator: ",").map { entry in
+        let parts = entry.split(separator: ":", maxSplits: 1)
+        guard parts.count == 2,
+              let first = Int(parts[0].trimmingCharacters(in: .whitespaces)),
+              let second = Int(parts[1].trimmingCharacters(in: .whitespaces)),
+              first > 0, second > 0, first != second else {
+            throw SimulateError.usage(
+                "--bridge entry \"\(entry)\" must be two distinct 1-based channels, e.g. 3:4"
+            )
+        }
+        return ChannelBridge(firstChannel: first, secondChannel: second)
+    }
+}
 
-    // `--demo` is a preset, applied first so that any explicit flag still wins.
+func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
+    var config: SimulationConfig
+    if let path = arguments.string("config") {
+        guard !arguments.flag("config") else {
+            throw SimulateError.usage("--config needs a JSON file path")
+        }
+        config = try SimulationScenarioFile.load(
+            from: URL(fileURLWithPath: path)
+        ).config
+    } else {
+        config = SimulationConfig.default
+    }
+
+    // `--demo` is a preset, applied after a scenario but before individual
+    // flags, so every explicit model flag remains the final authority.
     // It exists because the settings that make a good teaching recording are not
     // the settings that reproduce the paper, and asking someone to remember six
     // flags to get a usable classroom file is a good way to have them not bother.
     if arguments.flag("demo") {
         config.blinksPerMinute = 15
         config.saccadesPerMinute = 25
+        config.emg = EMGConfig()
         config.lineNoiseHz = 60
         config.spatialModel = .geometric
         config.preScanSeconds = 15
@@ -296,6 +501,7 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("duration") { config.durationSeconds = value }
     if let value = try arguments.uint64("seed") { config.seed = value }
 
+    if arguments.flag("with-gradient") { config.gradientEnabled = true }
     if arguments.flag("no-gradient") { config.gradientEnabled = false }
     if let value = try arguments.double("tr") { config.repetitionTimeSeconds = value }
     if let value = try arguments.int("slices") { config.slicesPerVolume = value }
@@ -303,9 +509,42 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("gradient-amplitude-min") { config.gradientAmplitudeMinMicrovolts = value }
     if let value = try arguments.double("clock-offset") { config.clockOffsetMicrosecondsPerSecond = value }
     if let value = try arguments.double("slow-modulation") { config.slowModulationFraction = value }
+    if arguments.flag("no-gradient-template") {
+        config.gradientTemplatePath = nil
+        config.gradientTemplateRateHz = nil
+    }
+    if let path = arguments.string("gradient-template") {
+        // Resolve command-line asset paths now so a simultaneously written
+        // scenario reproduces this run even if that JSON is saved elsewhere.
+        config.gradientTemplatePath = URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+    if let value = try arguments.double("gradient-template-rate") {
+        config.gradientTemplateRateHz = value
+    }
 
+    if arguments.flag("with-bcg") { config.bcgEnabled = true }
     if arguments.flag("no-bcg") { config.bcgEnabled = false }
     if let value = try arguments.double("bcg-amplitude") { config.bcgAmplitudeMicrovolts = value }
+    if let raw = arguments.string("bcg-model") {
+        guard let model = BCGSpatialModel(rawValue: raw) else {
+            throw SimulateError.usage(
+                "unknown --bcg-model '\(raw)'; expected channelIndex or generators"
+            )
+        }
+        config.bcgSpatialModel = model
+    }
+    if let value = try arguments.double("bcg-field-strength") {
+        guard value > 0 else {
+            throw SimulateError.usage("--bcg-field-strength must be positive")
+        }
+        config.bcgFieldStrengthTesla = value
+    }
+    if let value = try arguments.double("bcg-morphology-jitter") {
+        guard value >= 0 else {
+            throw SimulateError.usage("--bcg-morphology-jitter cannot be negative")
+        }
+        config.bcgMorphologyJitterFraction = value
+    }
     if let value = try arguments.double("qrs-jitter") { config.qrsDetectionJitterSDSeconds = value / 1000 }
     if let value = try arguments.double("heart-rate-min") { config.heartRateMinBPM = value }
     if let value = try arguments.double("heart-rate-max") { config.heartRateMaxBPM = value }
@@ -315,12 +554,116 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("alpha-low") { config.alphaLowMicrovolts = value }
     if let value = try arguments.double("alpha-high") { config.alphaHighMicrovolts = value }
     if let value = try arguments.double("eeg-std") { config.eegTargetStdMicrovolts = value }
+    if let raw = arguments.string("reference") {
+        guard let reference = EEGReference(rawValue: raw) else {
+            throw SimulateError.usage("--reference expects average or infinity, got \"\(raw)\"")
+        }
+        config.recordingReference = reference
+    }
+    if let raw = arguments.string("eeg-model") {
+        guard let model = EEGGenerationModel(rawValue: raw) else {
+            throw SimulateError.usage("--eeg-model expects grouiller or dipole, got \"\(raw)\"")
+        }
+        config.eegGenerationModel = model
+    }
+    if let value = try arguments.int("sources") { config.dipoleSourceCount = value }
+    if let value = try arguments.double("source-depth") { config.dipoleSourceRadiusFraction = value }
+    if let raw = arguments.string("source-orientations") {
+        guard let pattern = DipoleOrientationPattern(rawValue: raw) else {
+            throw SimulateError.usage(
+                "--source-orientations expects radial, tangential, mixed, or free, got \"\(raw)\""
+            )
+        }
+        config.dipoleOrientationPattern = pattern
+    }
+    if let value = try arguments.int("lead-field-terms") { config.leadFieldTerms = value }
+    if let value = try arguments.double("source-correlation") {
+        config.dipoleSourceCorrelation = value
+    }
+    if let value = try arguments.double("near-source-separation") {
+        config.dipoleNearPairSeparationDegrees = value
+    }
+    if let value = try arguments.double("source-motion") { config.dipoleMotionDegrees = value }
+    if let value = try arguments.double("source-motion-start") {
+        config.dipoleMotionStartFraction = value
+    }
+    if let value = try arguments.double("source-motion-transition") {
+        config.dipoleMotionTransitionFraction = value
+    }
     if let value = try arguments.double("spatial-smoothing") { config.spatialSmoothingChannels = value }
     if let raw = arguments.string("spatial-model") {
         guard let model = SpatialModel(rawValue: raw) else {
             throw SimulateError.usage("--spatial-model expects circular or geometric, got \"\(raw)\"")
         }
         config.spatialModel = model
+    }
+
+    var nonstationarity = config.neuralNonstationarity ?? NeuralNonstationarityConfig()
+    var nonstationarityChanged = arguments.flag("with-nonstationarity")
+
+    var alphaBursts = nonstationarity.alphaBursts ?? AlphaBurstConfig()
+    var alphaBurstsChanged = false
+    if let value = try arguments.double("alpha-bursts") {
+        alphaBursts.burstsPerMinute = value; alphaBurstsChanged = true
+    }
+    if let value = try arguments.double("alpha-burst-duration") {
+        alphaBursts.meanDurationSeconds = value; alphaBurstsChanged = true
+    }
+    if arguments.flag("no-alpha-bursts") {
+        nonstationarity.alphaBursts = nil; nonstationarityChanged = true
+    } else if alphaBurstsChanged {
+        nonstationarity.alphaBursts = alphaBursts; nonstationarityChanged = true
+    }
+
+    var spectra = nonstationarity.spectralDynamics ?? SpectralDynamicsConfig()
+    var spectraChanged = false
+    if let value = try arguments.double("spectral-variation") {
+        spectra.logAmplitudeSD = value; spectraChanged = true
+    }
+    if let value = try arguments.double("spectral-timescale") {
+        spectra.timeConstantSeconds = value; spectraChanged = true
+    }
+    if arguments.flag("no-spectral-dynamics") {
+        nonstationarity.spectralDynamics = nil; nonstationarityChanged = true
+    } else if spectraChanged {
+        nonstationarity.spectralDynamics = spectra; nonstationarityChanged = true
+    }
+
+    var microstates = nonstationarity.microstates ?? MicrostateConfig()
+    var microstatesChanged = false
+    if let value = try arguments.int("microstates") {
+        microstates.stateCount = value; microstatesChanged = true
+    }
+    if let value = try arguments.double("microstate-dwell") {
+        microstates.meanDwellSeconds = value / 1_000; microstatesChanged = true
+    }
+    if let value = try arguments.double("microstate-amplitude") {
+        microstates.amplitudeMicrovolts = value; microstatesChanged = true
+    }
+    if arguments.flag("no-microstates") {
+        nonstationarity.microstates = nil; nonstationarityChanged = true
+    } else if microstatesChanged {
+        nonstationarity.microstates = microstates; nonstationarityChanged = true
+    }
+
+    var pac = nonstationarity.phaseAmplitudeCoupling ?? PhaseAmplitudeCouplingConfig()
+    var pacChanged = false
+    if let value = try arguments.double("pac") { pac.strength = value; pacChanged = true }
+    if let value = try arguments.double("pac-low") { pac.phaseFrequencyHz = value; pacChanged = true }
+    if let value = arguments.string("pac-band") { pac.targetBandName = value; pacChanged = true }
+    if let value = try arguments.double("pac-phase") {
+        pac.preferredPhaseRadians = value * Double.pi / 180; pacChanged = true
+    }
+    if arguments.flag("no-pac") {
+        nonstationarity.phaseAmplitudeCoupling = nil; nonstationarityChanged = true
+    } else if pacChanged {
+        nonstationarity.phaseAmplitudeCoupling = pac; nonstationarityChanged = true
+    }
+
+    if arguments.flag("no-nonstationarity") {
+        config.neuralNonstationarity = nil
+    } else if nonstationarityChanged {
+        config.neuralNonstationarity = nonstationarity
     }
 
     if let value = try arguments.double("pre-scan") { config.preScanSeconds = value }
@@ -330,19 +673,157 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("blink-amplitude") { config.blinkAmplitudeMicrovolts = value }
     if let value = try arguments.double("eye-movements") { config.saccadesPerMinute = value }
     if let value = try arguments.double("eye-movement-amplitude") { config.eyeMovementAmplitudeMicrovolts = value }
+    if let raw = arguments.string("ocular-model") {
+        guard let model = OcularSpatialModel(rawValue: raw) else {
+            throw SimulateError.usage("--ocular-model expects heuristic or dipole, got \"\(raw)\"")
+        }
+        config.ocularSpatialModel = model
+    }
+
+    var emg = config.emg ?? EMGConfig()
+    var emgChanged = arguments.flag("with-emg")
+    if let value = try arguments.double("emg") {
+        emg.burstsPerMinute = value
+        emgChanged = true
+    }
+    if let value = try arguments.double("emg-amplitude") {
+        emg.amplitudeMicrovolts = value
+        emgChanged = true
+    }
+    if let value = try arguments.double("emg-duration") {
+        emg.burstDurationSeconds = value
+        emgChanged = true
+    }
+    if let value = try arguments.double("emg-low") {
+        emg.lowHz = value
+        emgChanged = true
+    }
+    if let value = try arguments.double("emg-high") {
+        emg.highHz = value
+        emgChanged = true
+    }
+    if arguments.flag("no-emg") {
+        config.emg = nil
+    } else if emgChanged {
+        config.emg = emg
+    }
+
+    var chewing = config.chewing ?? ChewingConfig()
+    var chewingChanged = false
+    if let value = try arguments.double("chewing") { chewing.episodesPerMinute = value; chewingChanged = true }
+    if let value = try arguments.double("chewing-amplitude") { chewing.amplitudeMicrovolts = value; chewingChanged = true }
+    if let value = try arguments.double("chewing-duration") { chewing.durationSeconds = value; chewingChanged = true }
+    if let value = try arguments.double("chewing-cycle") { chewing.cycleHz = value; chewingChanged = true }
+    if arguments.flag("no-chewing") { config.chewing = nil }
+    else if chewingChanged { config.chewing = chewing }
+
+    var swallowing = config.swallowing ?? SwallowingConfig()
+    var swallowingChanged = false
+    if let value = try arguments.double("swallowing") { swallowing.eventsPerMinute = value; swallowingChanged = true }
+    if let value = try arguments.double("swallowing-amplitude") { swallowing.amplitudeMicrovolts = value; swallowingChanged = true }
+    if let value = try arguments.double("swallowing-duration") { swallowing.durationSeconds = value; swallowingChanged = true }
+    if arguments.flag("no-swallowing") { config.swallowing = nil }
+    else if swallowingChanged { config.swallowing = swallowing }
+
+    var cable = config.cableMovement ?? CableMovementConfig()
+    var cableChanged = false
+    if let value = try arguments.double("cable-movement") { cable.eventsPerMinute = value; cableChanged = true }
+    if let value = try arguments.double("cable-amplitude") { cable.amplitudeMicrovolts = value; cableChanged = true }
+    if let value = try arguments.double("cable-duration") { cable.durationSeconds = value; cableChanged = true }
+    if arguments.flag("no-cable-movement") { config.cableMovement = nil }
+    else if cableChanged { config.cableMovement = cable }
+
+    var sweat = config.sweat ?? SweatConfig()
+    var sweatChanged = false
+    if let value = try arguments.double("sweat") { sweat.episodesPerMinute = value; sweatChanged = true }
+    if let value = try arguments.double("sweat-amplitude") { sweat.amplitudeMicrovolts = value; sweatChanged = true }
+    if let value = try arguments.double("sweat-duration") { sweat.durationSeconds = value; sweatChanged = true }
+    if let value = try arguments.int("sweat-channels") { sweat.affectedChannelCount = value; sweatChanged = true }
+    if arguments.flag("no-sweat") { config.sweat = nil }
+    else if sweatChanged { config.sweat = sweat }
+
+    if arguments.flag("no-bridges") { config.bridgedChannelPairs = nil }
+    else if let spec = arguments.string("bridge") {
+        config.bridgedChannelPairs = try parseChannelBridges(spec)
+    }
+    if arguments.flag("no-bad-reference") { config.badReference = nil }
+    else if let value = try arguments.double("bad-reference") {
+        var reference = config.badReference ?? BadReferenceConfig()
+        reference.amplitudeMicrovolts = value
+        config.badReference = reference
+    }
+    if arguments.flag("no-clipping") { config.clippingThresholdMicrovolts = nil }
+    else if let value = try arguments.double("clip") {
+        config.clippingThresholdMicrovolts = value
+    }
+
+    var erp = config.erp ?? ERPConfig()
+    var erpChanged = arguments.flag("with-erp")
+    if let value = try arguments.int("erp-trials") { erp.trialCount = value; erpChanged = true }
+    if let value = try arguments.double("erp-isi") { erp.interStimulusIntervalSeconds = value; erpChanged = true }
+    if let value = try arguments.double("erp-isi-jitter") { erp.interStimulusJitterSeconds = value; erpChanged = true }
+    if let value = try arguments.double("erp-target-fraction") { erp.targetFraction = value; erpChanged = true }
+    if let value = try arguments.double("erp-latency") { erp.peakLatencySeconds = value / 1000; erpChanged = true }
+    if let value = try arguments.double("erp-latency-jitter") { erp.latencyJitterSDSeconds = value / 1000; erpChanged = true }
+    if let value = try arguments.double("erp-latency-skew") { erp.latencySkew = value; erpChanged = true }
+    if let value = try arguments.double("erp-amplitude") { erp.targetAmplitudeMicrovolts = value; erpChanged = true }
+    if let value = try arguments.double("erp-standard-ratio") { erp.standardAmplitudeRatio = value; erpChanged = true }
+    if let value = try arguments.double("erp-amplitude-jitter") { erp.amplitudeJitterFraction = value; erpChanged = true }
+    if let value = try arguments.double("erp-latency-amplitude-correlation") {
+        erp.latencyAmplitudeCorrelation = value; erpChanged = true
+    }
+    if let value = try arguments.double("erp-omission-rate") { erp.omissionRate = value; erpChanged = true }
+    if let raw = arguments.string("erp-waveform") {
+        guard let waveform = ERPWaveformKind(rawValue: raw), waveform != .measured else {
+            throw SimulateError.usage("--erp-waveform expects gaussian or biphasic")
+        }
+        erp.waveform = waveform; erpChanged = true
+    }
+    if let value = try arguments.double("erp-width") { erp.widthSeconds = value / 1000; erpChanged = true }
+    if let path = arguments.string("erp-template") {
+        erp.measuredTemplatePath = URL(fileURLWithPath: path).standardizedFileURL.path
+        erp.waveform = .measured
+        erpChanged = true
+    }
+    if let value = try arguments.double("erp-template-rate") {
+        erp.measuredTemplateRateHz = value; erpChanged = true
+    }
+    if arguments.flag("no-erp") {
+        config.erp = nil
+    } else if erpChanged {
+        config.erp = erp
+    }
 
     if let spec = arguments.string("bad-channels") { config.badChannels = try parseBadChannels(spec) }
     if let value = try arguments.double("line-noise") { config.lineNoiseHz = value }
     if let value = try arguments.double("line-noise-amplitude") { config.lineNoiseAmplitudeMicrovolts = value }
+    if arguments.flag("with-impedance") { config.includeImpedance = true }
     if arguments.flag("no-impedance") { config.includeImpedance = false }
     if let value = try arguments.double("impedance") {
         guard value > 0 else { throw SimulateError.usage("--impedance must be positive") }
+        config.includeImpedance = true
         config.impedanceTypicalKOhm = value
+    }
+    if arguments.flag("with-impedance-noise") {
+        config.impedanceNoise = config.impedanceNoise ?? ImpedanceNoiseConfig()
+    }
+    if arguments.flag("no-impedance-noise") { config.impedanceNoise = nil }
+    if let value = try arguments.double("electrode-temperature") {
+        var model = config.impedanceNoise ?? ImpedanceNoiseConfig()
+        model.temperatureKelvin = value
+        config.impedanceNoise = model
+    }
+    if let value = try arguments.double("impedance-line-exponent") {
+        var model = config.impedanceNoise ?? ImpedanceNoiseConfig()
+        model.lineNoiseImpedanceExponent = value
+        config.impedanceNoise = model
     }
 
     if let value = try arguments.int("artifact-oversample") { config.artifactOversampleFactor = value }
     if let value = try arguments.double("artifact-anti-alias") { config.artifactAntiAliasFraction = value }
+    if arguments.flag("with-ecg") { config.includeECG = true }
     if arguments.flag("no-ecg") { config.includeECG = false }
+    if arguments.flag("with-motion-sensor") { config.includeMotionSensor = true }
     if arguments.flag("no-motion-sensor") { config.includeMotionSensor = false }
 
     guard config.channelCount > 0 else { throw SimulateError.usage("--channels must be positive") }
@@ -355,6 +836,231 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
         )
     }
     guard config.durationSeconds > 0 else { throw SimulateError.usage("--duration must be positive") }
+    if let model = config.impedanceNoise {
+        guard model.temperatureKelvin > 0 else {
+            throw SimulateError.usage("--electrode-temperature must be positive")
+        }
+        guard model.lineNoiseImpedanceExponent >= 0,
+              model.lineNoiseImpedanceExponent <= 2 else {
+            throw SimulateError.usage("--impedance-line-exponent must be between 0 and 2")
+        }
+        guard model.maximumLineNoiseScale >= 1 else {
+            throw SimulateError.usage("impedance maximumLineNoiseScale must be at least 1")
+        }
+        guard (model.referenceImpedanceKOhm ?? 12) > 0 else {
+            throw SimulateError.usage("impedance referenceImpedanceKOhm must be positive")
+        }
+    }
+    if config.gradientTemplatePath != nil {
+        guard let rate = config.gradientTemplateRateHz, rate > 0 else {
+            throw SimulateError.usage(
+                "a measured gradient template needs a positive --gradient-template-rate"
+            )
+        }
+    } else if config.gradientTemplateRateHz != nil {
+        throw SimulateError.usage(
+            "--gradient-template-rate needs --gradient-template (or a template in the loaded scenario)"
+        )
+    }
+    guard !config.eegBands.isEmpty else { throw SimulateError.usage("EEG needs at least one frequency band") }
+    guard config.dipoleSourceCount > 0 else { throw SimulateError.usage("--sources must be positive") }
+    guard config.dipoleSourceRadiusFraction > 0, config.dipoleSourceRadiusFraction < 1 else {
+        throw SimulateError.usage("--source-depth must be greater than 0 and less than 1")
+    }
+    guard config.leadFieldTerms >= 1 else { throw SimulateError.usage("--lead-field-terms must be positive") }
+    guard abs(config.dipoleSourceCorrelation) <= 0.99 else {
+        throw SimulateError.usage("--source-correlation must be between -0.99 and 0.99")
+    }
+    if abs(config.dipoleSourceCorrelation) > 0, config.dipoleSourceCount < 2 {
+        throw SimulateError.usage("--source-correlation needs at least two sources")
+    }
+    guard config.dipoleNearPairSeparationDegrees >= 0,
+          config.dipoleNearPairSeparationDegrees < 45 else {
+        throw SimulateError.usage("--near-source-separation must be from 0 up to (but not including) 45 degrees")
+    }
+    if config.dipoleNearPairSeparationDegrees > 0, config.dipoleSourceCount < 2 {
+        throw SimulateError.usage("--near-source-separation needs at least two sources")
+    }
+    guard config.dipoleMotionDegrees >= 0, config.dipoleMotionDegrees < 180 else {
+        throw SimulateError.usage("--source-motion must be from 0 up to (but not including) 180 degrees")
+    }
+    guard config.dipoleMotionStartFraction >= 0, config.dipoleMotionStartFraction < 1 else {
+        throw SimulateError.usage("--source-motion-start must be at least 0 and below 1")
+    }
+    guard config.dipoleMotionTransitionFraction >= 0,
+          config.dipoleMotionStartFraction + config.dipoleMotionTransitionFraction <= 1 else {
+        throw SimulateError.usage("source motion must finish within the recording")
+    }
+    if let error = config.sphericalHeadModel.validationError() {
+        throw SimulateError.usage("invalid spherical head model: \(error)")
+    }
+    if let model = config.neuralNonstationarity {
+        if let bursts = model.alphaBursts {
+            guard bursts.burstsPerMinute > 0, bursts.meanDurationSeconds > 0,
+                  bursts.durationSDSeconds >= 0,
+                  (0...1).contains(bursts.backgroundFraction) else {
+                throw SimulateError.usage(
+                    "alpha-burst rate/duration must be positive, duration SD non-negative, and background 0...1"
+                )
+            }
+            guard config.eegBands.contains(where: \.isAlpha) else {
+                throw SimulateError.usage("alpha bursts require an EEG band with nil amplitudeMicrovolts")
+            }
+        }
+        if let spectra = model.spectralDynamics {
+            guard spectra.logAmplitudeSD > 0, spectra.timeConstantSeconds > 0,
+                  spectra.updateIntervalSeconds > 0 else {
+                throw SimulateError.usage("spectral variation, timescale, and update interval must be positive")
+            }
+        }
+        if let microstates = model.microstates {
+            guard microstates.stateCount >= 2, microstates.meanDwellSeconds > 0,
+                  microstates.minimumDwellSeconds > 0,
+                  microstates.maximumDwellSeconds >= microstates.meanDwellSeconds,
+                  microstates.meanDwellSeconds >= microstates.minimumDwellSeconds,
+                  microstates.transitionSeconds >= 0,
+                  microstates.transitionSeconds <= microstates.minimumDwellSeconds,
+                  microstates.amplitudeMicrovolts > 0 else {
+                throw SimulateError.usage("microstates need >=2 states, ordered positive dwell bounds, and positive amplitude")
+            }
+            guard microstates.carrierLowHz >= 0,
+                  microstates.carrierHighHz > microstates.carrierLowHz,
+                  microstates.carrierHighHz < config.samplingRate / 2 else {
+                throw SimulateError.usage("microstate carrier band must be ordered and below Nyquist")
+            }
+        }
+        if let pac = model.phaseAmplitudeCoupling {
+            guard pac.strength >= 0, pac.strength <= 0.99,
+                  pac.phaseFrequencyHz > 0, pac.phaseCarrierFraction >= 0 else {
+                throw SimulateError.usage("PAC strength must be 0...0.99; phase frequency positive; carrier non-negative")
+            }
+            guard config.eegBands.contains(where: {
+                $0.lowHz <= pac.phaseFrequencyHz && pac.phaseFrequencyHz < $0.highHz
+            }) else {
+                throw SimulateError.usage("--pac-low must fall inside one configured EEG band")
+            }
+            guard let target = config.eegBands.first(where: { $0.name == pac.targetBandName }) else {
+                throw SimulateError.usage("--pac-band must name a configured EEG band")
+            }
+            guard target.lowHz > pac.phaseFrequencyHz else {
+                throw SimulateError.usage("--pac-band must be above the phase frequency")
+            }
+        }
+    }
+    if let erp = config.erp {
+        guard erp.trialCount > 0 else { throw SimulateError.usage("--erp-trials must be positive") }
+        guard erp.startSeconds >= erp.interStimulusJitterSeconds,
+              erp.interStimulusIntervalSeconds > 0,
+              erp.interStimulusJitterSeconds >= 0,
+              2 * erp.interStimulusJitterSeconds < erp.interStimulusIntervalSeconds else {
+            throw SimulateError.usage(
+                "ERP start must cover onset jitter; ISI must exceed twice its jitter"
+            )
+        }
+        guard (0...1).contains(erp.targetFraction), (0...1).contains(erp.omissionRate) else {
+            throw SimulateError.usage("ERP target fraction and omission rate must be from 0 to 1")
+        }
+        guard erp.peakLatencySeconds > 0, erp.latencyJitterSDSeconds >= 0,
+              erp.widthSeconds > 0 else {
+            throw SimulateError.usage("ERP latency/width must be positive and latency jitter non-negative")
+        }
+        guard erp.targetAmplitudeMicrovolts != 0, erp.standardAmplitudeRatio >= 0,
+              erp.amplitudeJitterFraction >= 0 else {
+            throw SimulateError.usage("ERP amplitude must be non-zero; ratio/jitter must be non-negative")
+        }
+        guard abs(erp.latencyAmplitudeCorrelation) <= 0.99 else {
+            throw SimulateError.usage("ERP latency-amplitude correlation must be between -0.99 and 0.99")
+        }
+        let lastOnset = erp.startSeconds + Double(erp.trialCount - 1)
+            * erp.interStimulusIntervalSeconds + erp.interStimulusJitterSeconds
+        guard lastOnset < config.durationSeconds else {
+            throw SimulateError.usage("ERP trial schedule does not fit inside the recording")
+        }
+        if erp.waveform == .measured {
+            guard erp.measuredTemplatePath != nil,
+                  let rate = erp.measuredTemplateRateHz, rate > 0 else {
+                throw SimulateError.usage("a measured ERP template needs --erp-template-rate")
+            }
+        }
+    }
+    if let emg = config.emg {
+        guard emg.burstsPerMinute > 0 else {
+            throw SimulateError.usage("--emg must be positive; use --no-emg to disable it")
+        }
+        guard emg.amplitudeMicrovolts > 0, emg.burstDurationSeconds > 0 else {
+            throw SimulateError.usage("EMG amplitude and duration must be positive")
+        }
+        guard emg.lowHz >= 0, emg.highHz > emg.lowHz else {
+            throw SimulateError.usage("EMG high frequency must be greater than its non-negative low frequency")
+        }
+        guard emg.highHz < config.samplingRate / 2 else {
+            throw SimulateError.usage(
+                "--emg-high must be below Nyquist (\(config.samplingRate / 2) Hz at this sample rate)"
+            )
+        }
+    }
+    if let chewing = config.chewing {
+        guard chewing.episodesPerMinute > 0, chewing.amplitudeMicrovolts > 0,
+              chewing.durationSeconds > 0, chewing.cycleHz > 0 else {
+            throw SimulateError.usage("chewing rate, amplitude, duration, and cycle must be positive")
+        }
+        guard chewing.lowHz >= 0, chewing.highHz > chewing.lowHz,
+              chewing.highHz < config.samplingRate / 2 else {
+            throw SimulateError.usage("chewing carrier band must be ordered and below Nyquist")
+        }
+    }
+    if let swallowing = config.swallowing {
+        guard swallowing.eventsPerMinute > 0, swallowing.amplitudeMicrovolts > 0,
+              swallowing.durationSeconds > 0 else {
+            throw SimulateError.usage("swallowing rate, amplitude, and duration must be positive")
+        }
+        guard swallowing.lowHz >= 0, swallowing.highHz > swallowing.lowHz,
+              swallowing.highHz < config.samplingRate / 2 else {
+            throw SimulateError.usage("swallowing carrier band must be ordered and below Nyquist")
+        }
+    }
+    if let cable = config.cableMovement {
+        guard cable.eventsPerMinute > 0, cable.amplitudeMicrovolts > 0,
+              cable.durationSeconds > 0, cable.oscillationHz > 0 else {
+            throw SimulateError.usage("cable-movement rate, amplitude, duration, and frequency must be positive")
+        }
+    }
+    if let sweat = config.sweat {
+        guard sweat.episodesPerMinute > 0, sweat.amplitudeMicrovolts > 0,
+              sweat.durationSeconds > 0 else {
+            throw SimulateError.usage("sweat rate, amplitude, and duration must be positive")
+        }
+        guard sweat.affectedChannelCount > 0,
+              sweat.affectedChannelCount <= config.channelCount else {
+            throw SimulateError.usage("--sweat-channels must be between 1 and the EEG channel count")
+        }
+    }
+    if let pairs = config.bridgedChannelPairs {
+        var used: Set<Int> = []
+        for pair in pairs {
+            guard pair.firstChannel > 0, pair.secondChannel > 0,
+                  pair.firstChannel <= config.channelCount,
+                  pair.secondChannel <= config.channelCount,
+                  pair.firstChannel != pair.secondChannel else {
+                throw SimulateError.usage("bridged channel pairs must name distinct channels in the montage")
+            }
+            guard !used.contains(pair.firstChannel), !used.contains(pair.secondChannel) else {
+                throw SimulateError.usage("a channel may appear in only one --bridge pair")
+            }
+            used.insert(pair.firstChannel)
+            used.insert(pair.secondChannel)
+        }
+    }
+    if let reference = config.badReference {
+        guard reference.amplitudeMicrovolts > 0, reference.lowHz >= 0,
+              reference.highHz > reference.lowHz,
+              reference.highHz < config.samplingRate / 2 else {
+            throw SimulateError.usage("bad-reference amplitude/band must be positive, ordered, and below Nyquist")
+        }
+    }
+    if let threshold = config.clippingThresholdMicrovolts, threshold <= 0 {
+        throw SimulateError.usage("--clip must be positive")
+    }
     guard config.artifactOversampleFactor >= 1 else { throw SimulateError.usage("--artifact-oversample must be at least 1") }
     guard config.preScanSeconds >= 0, config.postScanSeconds >= 0 else {
         throw SimulateError.usage("--pre-scan and --post-scan cannot be negative")
@@ -371,6 +1077,12 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
         )
     }
 
+    // Canonicalize legacy scenarios that only carry `dipoleReference`. New
+    // resolved scenarios then state the recording-wide convention explicitly.
+    if config.recordingReference == nil {
+        config.recordingReference = config.dipoleReference
+    }
+
     return config
 }
 
@@ -381,47 +1093,185 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
     try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
     let prefix = try normalizedPrefix(arguments.string("prefix") ?? "sim")
 
-    var source = GaussianSource(seed: config.seed)
+    // Preserve the legacy single stream exactly. Dipole mode deliberately uses
+    // independent domains so changing source count cannot change an artifact.
+    var legacySource = GaussianSource(seed: config.seed)
     let montage = Montage.standard(count: config.channelCount)
+    var leadFieldConvergence: LeadFieldConvergenceReport?
+    // One check covers every lead field this run builds — the ERP's (its source
+    // comes from `makeSources`, same radius fraction) and the moving-source
+    // endpoint's (rotation preserves radius) — because **every source shares one
+    // eccentricity**, and truncation error depends on r/R. The ocular model uses
+    // a closed form and no series at all.
+    //
+    // Roadmap 4.3 ends that assumption: an explicitly placed ERP dipole can sit
+    // deeper than the ongoing sources, and this check would silently stop
+    // covering it. When 4.3 lands, move the check inside
+    // `SphericalForwardModel.leadField` as an opt-in parameter so it travels
+    // with every call site instead of being computed once here.
+    if config.eegGenerationModel == .dipole {
+        let sources = DipoleEEGGenerator.makeSources(config: config)
+        let report = try SphericalForwardModel.convergenceReport(
+            head: config.sphericalHeadModel,
+            montage: montage,
+            sources: sources,
+            reference: config.effectiveRecordingReference,
+            terms: config.leadFieldTerms
+        )
+        leadFieldConvergence = report
+        if !report.converged {
+            let source = report.worstSourceID ?? "unknown source"
+            let axis = report.worstOrientationAxis ?? "?"
+            let warning = String(
+                format: "WARNING: lead field changes by %.4g between %d and %d terms "
+                    + "(%@ %@ axis; tolerance %.4g). Increase --lead-field-terms.\n",
+                report.maximumRelativeColumnChange, report.terms,
+                report.comparisonTerms, source, axis, report.tolerance
+            )
+            FileHandle.standardError.write(Data(warning.utf8))
+        }
+    }
     FileHandle.standardError.write(Data(
         "Generating EEG (\(config.channelCount) channels, \(montage.name), \(Int(config.durationSeconds)) s)...\n".utf8
     ))
-    let eeg = EEGGenerator.generate(config: config, montage: montage, source: &source)
+    var eeg: GeneratedEEG
+    switch config.eegGenerationModel {
+    case .grouiller:
+        eeg = EEGGenerator.generate(config: config, montage: montage, source: &legacySource)
+    case .dipole:
+        eeg = try DipoleEEGGenerator.generate(config: config, montage: montage)
+    }
+
+    let erp = try ERPGenerator.inject(into: &eeg.channels, config: config, montage: montage)
 
     var noisy = eeg.channels
+
+    // Coupled impedance must exist before sample noise is generated. It is a
+    // latent electrode property even when --no-impedance suppresses the ICAL
+    // measurement in the MFF package.
+    let coupledImpedances: [Float]?
+    var thermalNoiseRMSMicrovolts = [Double](repeating: 0, count: config.channelCount)
+    if config.impedanceNoise != nil {
+        var impedanceSource = GaussianSource(seed: SimulationSeedStreams.impedance(base: config.seed))
+        let realizedImpedances = ImpedanceModel.values(
+            config: config, montage: montage, source: &impedanceSource
+        )
+        coupledImpedances = realizedImpedances
+        var noiseSource = GaussianSource(seed: SimulationSeedStreams.impedanceNoise(base: config.seed))
+        thermalNoiseRMSMicrovolts = ImpedanceModel.applyThermalNoise(
+            to: &noisy, impedances: realizedImpedances, config: config, source: &noiseSource
+        )
+    } else {
+        coupledImpedances = nil
+    }
 
     var gradient: GradientInjection?
     if config.gradientEnabled {
         FileHandle.standardError.write(Data("Injecting gradient artifact...\n".utf8))
         var template: HighRateTemplate?
-        if let path = arguments.string("gradient-template") {
-            guard let rate = try arguments.double("gradient-template-rate") else {
-                throw SimulateError.usage("--gradient-template also needs --gradient-template-rate")
-            }
+        if let path = config.gradientTemplatePath,
+           let rate = config.gradientTemplateRateHz {
             template = try GradientArtifactModel.loadTemplate(path: path, templateRate: rate, config: config)
         }
         gradient = GradientArtifactModel.inject(into: &noisy, config: config, montage: montage, template: template)
     }
 
     var bcg: BCGInjection?
+    var isolatedBCGSource = GaussianSource(seed: SimulationSeedStreams.bcg(base: config.seed))
     if config.bcgEnabled {
         FileHandle.standardError.write(Data("Injecting ballistocardiogram...\n".utf8))
-        bcg = BCGArtifactModel.inject(into: &noisy, config: config, source: &source)
+        if config.eegGenerationModel == .grouiller {
+            bcg = BCGArtifactModel.inject(
+                into: &noisy, config: config, montage: montage, source: &legacySource
+            )
+        } else {
+            bcg = BCGArtifactModel.inject(
+                into: &noisy, config: config, montage: montage, source: &isolatedBCGSource
+            )
+        }
     }
 
     var ocular: OcularInjection?
+    var isolatedOcularSource = GaussianSource(seed: SimulationSeedStreams.ocular(base: config.seed))
     if config.blinksPerMinute > 0 || config.saccadesPerMinute > 0 {
         FileHandle.standardError.write(Data("Injecting blinks and eye movements...\n".utf8))
-        ocular = OcularArtifactModel.inject(into: &noisy, config: config, montage: montage, source: &source)
+        if config.eegGenerationModel == .grouiller {
+            ocular = OcularArtifactModel.inject(
+                into: &noisy, config: config, montage: montage, source: &legacySource
+            )
+        } else {
+            ocular = OcularArtifactModel.inject(
+                into: &noisy, config: config, montage: montage, source: &isolatedOcularSource
+            )
+        }
     }
 
-    if config.lineNoiseHz > 0 {
-        ChannelDefectModel.applyLineNoise(to: &noisy, config: config, source: &source)
+    var emg: EMGInjection?
+    if config.emg != nil {
+        FileHandle.standardError.write(Data("Injecting muscle artifact...\n".utf8))
+        var random = GaussianSource(seed: SimulationSeedStreams.emg(base: config.seed))
+        emg = EMGArtifactModel.inject(
+            into: &noisy, config: config, montage: montage, source: &random
+        )
     }
+
+    if config.chewing != nil || config.swallowing != nil || config.cableMovement != nil
+        || config.sweat != nil || config.badReference != nil {
+        FileHandle.standardError.write(Data("Injecting additional recording artifacts...\n".utf8))
+    }
+    var additional = AdditionalArtifactModel.injectAdditive(
+        into: &noisy, config: config, montage: montage, includeBadReference: false
+    )
+
+    var lineNoiseGainsMicrovolts = [Double](repeating: 0, count: config.channelCount)
+    if config.lineNoiseHz > 0 {
+        if config.eegGenerationModel == .grouiller, coupledImpedances == nil {
+            lineNoiseGainsMicrovolts = ChannelDefectModel.applyLineNoise(
+                to: &noisy, config: config, source: &legacySource
+            )
+        } else {
+            var random = GaussianSource(seed: SimulationSeedStreams.lineNoise(base: config.seed))
+            lineNoiseGainsMicrovolts = ChannelDefectModel.applyLineNoise(
+                to: &noisy, config: config, impedances: coupledImpedances, source: &random
+            )
+        }
+    }
+
+    // All additive neural, physiological, scanner, contact-noise, and mains
+    // layers meet at this boundary and receive one declared reference. Physical
+    // recording defects are applied below because they can legitimately break
+    // the nominal reference after it was established.
+    EEGReferencing.apply(config.effectiveRecordingReference, to: &eeg.channels)
+    EEGReferencing.apply(config.effectiveRecordingReference, to: &noisy)
+    eeg.standardDeviation = EEGGenerator.pooledStandardDeviation(eeg.channels)
+    additional.badReferenceRMSMicrovolts = AdditionalArtifactModel.injectBadReference(
+        into: &noisy, config: config
+    )
 
     // Bad channels go last: a defect is something that happens to the recording
     // of a channel, on top of everything the channel was already carrying.
-    let badChannels = ChannelDefectModel.apply(to: &noisy, config: config, source: &source)
+    let badChannels: [String: String]
+    if config.eegGenerationModel == .grouiller {
+        badChannels = ChannelDefectModel.apply(
+            to: &noisy, config: config, impedances: coupledImpedances, source: &legacySource
+        )
+    } else {
+        var random = GaussianSource(seed: SimulationSeedStreams.defects(base: config.seed))
+        badChannels = ChannelDefectModel.apply(
+            to: &noisy, config: config, impedances: coupledImpedances, source: &random
+        )
+    }
+
+    if let pairs = config.bridgedChannelPairs {
+        additional.bridgedChannelPairs = AdditionalArtifactModel.applyBridging(
+            to: &noisy, pairs: pairs
+        )
+    }
+    if let threshold = config.clippingThresholdMicrovolts {
+        additional.clippedSampleCounts = AdditionalArtifactModel.applyClipping(
+            to: &noisy, thresholdMicrovolts: threshold
+        )
+    }
 
     // Impedance is a property of the electrodes, not of the samples, so it is
     // written to *both* packages. That is not an oversight: EVA treats impedance
@@ -429,25 +1279,42 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
     // data, so the ground-truth file showing a poor electrode alongside perfect
     // samples is exactly the lesson — the measurement was taken before anything
     // was recorded.
-    let impedances: [Float]? = config.includeImpedance
-        ? ImpedanceModel.values(config: config, montage: montage, source: &source)
-        : nil
+    let impedances: [Float]?
+    if !config.includeImpedance {
+        impedances = nil
+    } else if let coupledImpedances {
+        impedances = coupledImpedances
+    } else if config.eegGenerationModel == .grouiller {
+        impedances = ImpedanceModel.values(config: config, montage: montage, source: &legacySource)
+    } else {
+        var random = GaussianSource(seed: SimulationSeedStreams.impedance(base: config.seed))
+        impedances = ImpedanceModel.values(config: config, montage: montage, source: &random)
+    }
 
     let cleanURL = outputDirectory.appendingPathComponent("\(prefix)_clean.mff")
     let noisyURL = outputDirectory.appendingPathComponent("\(prefix)_noisy.mff")
     let truthURL = outputDirectory.appendingPathComponent("\(prefix)_truth.json")
-    let events = SimulationWriter.events(gradient: gradient, bcg: bcg, ocular: ocular, config: config)
+    let sourcesURL = outputDirectory.appendingPathComponent("\(prefix)_sources.mff")
+    let events = SimulationWriter.events(
+        gradient: gradient, bcg: bcg, ocular: ocular, erp: erp, emg: emg,
+        additional: additional, config: config
+    )
 
     var ecg: [Double]?
     var motion: [Double]?
     if let bcg {
         if config.includeECG {
-            ecg = BCGArtifactModel.ecgChannel(
-                beats: bcg.trueBeatSeconds,
-                rrIntervals: bcg.rrIntervalsSeconds,
-                config: config,
-                source: &source
-            )
+            if config.eegGenerationModel == .grouiller {
+                ecg = BCGArtifactModel.ecgChannel(
+                    beats: bcg.trueBeatSeconds, rrIntervals: bcg.rrIntervalsSeconds,
+                    config: config, source: &legacySource
+                )
+            } else {
+                ecg = BCGArtifactModel.ecgChannel(
+                    beats: bcg.trueBeatSeconds, rrIntervals: bcg.rrIntervalsSeconds,
+                    config: config, source: &isolatedBCGSource
+                )
+            }
         }
         if config.includeMotionSensor {
             motion = BCGArtifactModel.motionSensorChannel(
@@ -469,6 +1336,26 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         to: cleanURL,
         preserveSourceFileInfo: false
     )
+
+    if arguments.flag("write-sources") {
+        guard let sourceSpace = eeg.sourceSpace else {
+            throw SimulateError.usage("--write-sources requires --eeg-model dipole")
+        }
+        try MFFWriter.write(
+            signal: SimulationWriter.signal(
+                channels: sourceSpace.timecoursesNanoampereMeters,
+                config: config,
+                signalType: "Simulated Source Ground Truth (nA m)",
+                events: [],
+                packageURL: sourcesURL,
+                names: sourceSpace.sources.map(\.id)
+            ),
+            segments: [],
+            kind: .continuous,
+            to: sourcesURL,
+            preserveSourceFileInfo: false
+        )
+    }
     try MFFWriter.write(
         signal: SimulationWriter.signal(
             channels: noisy, config: config,
@@ -500,6 +1387,7 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         config: config,
         cleanStandardDeviation: eeg.standardDeviation,
         alphaEnvelope1Hz: SimulationWriter.decimateToOneHz(eeg.alphaEnvelope, samplingRate: config.samplingRate),
+        neuralNonstationarity: eeg.neuralNonstationarity,
         gradientVolumeOnsetsSeconds: gradient?.volumeOnsetsSeconds ?? [],
         gradientQuantizedVolumeOnsetsSeconds: gradient?.quantizedVolumeOnsetsSeconds ?? [],
         gradientChannelAmplitudesMicrovolts: gradient?.channelAmplitudesMicrovolts ?? [],
@@ -507,18 +1395,63 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         bcgDetectedBeatSeconds: bcg?.detectedBeatSeconds ?? [],
         bcgChannelScales: bcg?.channelScales ?? [],
         bcgChannelLatenciesSeconds: bcg?.channelLatenciesSeconds ?? [],
+        bcgSpatialModel: bcg == nil ? nil : config.effectiveBCGSpatialModel.rawValue,
+        bcgGenerators: bcg?.generatorSet?.generators,
+        bcgNormalizedSingularValues: bcg?.generatorSet?.normalizedSingularValues,
+        bcgSpatialRank: bcg?.generatorSet?.spatialRank,
+        bcgFieldStrengthTesla: bcg?.generatorSet?.fieldStrengthTesla,
         montageName: montage.name,
         channelNames: montage.channelNames,
+        recordingReference: config.effectiveRecordingReference,
+        referenceApplicationStage: "after additive signal layers, before recording defects",
         badChannels: badChannels,
         blinkSeconds: ocular?.blinkSeconds ?? [],
         saccadeSeconds: ocular?.saccadeSeconds ?? [],
         blinkTopography: ocular?.blinkTopography ?? [],
         horizontalEyeTopography: ocular?.horizontalTopography ?? [],
+        emgBursts: emg?.bursts,
+        emgLeftTemporalisTopography: emg?.leftTemporalisTopography,
+        emgRightTemporalisTopography: emg?.rightTemporalisTopography,
+        emgPosteriorNeckTopography: emg?.posteriorNeckTopography,
+        chewingEpisodes: additional.chewingEpisodes,
+        swallowingEpisodes: additional.swallowingEpisodes,
+        cableMovementEpisodes: additional.cableMovementEpisodes,
+        sweatEpisodes: additional.sweatEpisodes,
+        chewingTopography: additional.chewingTopography,
+        swallowingTopography: additional.swallowingTopography,
+        badReferenceRMSMicrovolts: additional.badReferenceRMSMicrovolts,
+        bridgedChannelPairs: additional.bridgedChannelPairs,
+        clippedSampleCounts: additional.clippedSampleCounts,
         impedancesKOhm: impedances?.map(Double.init) ?? [],
+        simulatedImpedancesKOhm: coupledImpedances?.map(Double.init),
+        impedanceThermalNoiseRMSMicrovolts: config.impedanceNoise == nil
+            ? nil : thermalNoiseRMSMicrovolts,
+        impedanceLineNoiseGainsMicrovolts: config.impedanceNoise == nil
+            ? nil : lineNoiseGainsMicrovolts,
         scanStartSeconds: config.gradientEnabled ? config.preScanSeconds : 0,
         scanEndSeconds: config.gradientEnabled
             ? config.durationSeconds - config.postScanSeconds
-            : 0
+            : 0,
+        sourceSpace: eeg.sourceSpace.map {
+            SourceSpaceTruth(
+                model: "concentric-sphere dipole lead field",
+                headModel: $0.headModel,
+                sources: $0.sources,
+                leadField: $0.leadField,
+                calibrationFactor: $0.calibrationFactor,
+                sourceCorrelationMatrix: $0.sourceCorrelationMatrix,
+                topographicCorrelationMatrix: $0.topographicCorrelationMatrix,
+                motions: $0.motions
+            )
+        },
+        ocularDipoles: ocular?.dipoles ?? [],
+        erpComponents: erp?.components,
+        erpTrials: erp?.trials,
+        erpSource: erp?.source,
+        erpTopography: erp?.topography,
+        erpWaveformDescription: erp?.waveformDescription,
+        erpRealizedLatencyAmplitudeCorrelation: erp?.realizedLatencyAmplitudeCorrelation,
+        erpRandomSeeds: erp?.randomSeeds
     )
     try SimulationWriter.writeTruth(truth, to: truthURL)
 
@@ -534,14 +1467,60 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
     print("Wrote \(cleanURL.path)")
     print("Wrote \(noisyURL.path)")
     print("Wrote \(truthURL.path)")
+    if arguments.flag("write-sources") { print("Wrote \(sourcesURL.path)") }
     print("")
     print(String(format: "EEG std: %.2f µV   beats: %d   volumes: %d   montage: %@",
                  eeg.standardDeviation,
                  bcg?.trueBeatSeconds.count ?? 0,
                  gradient?.volumeOnsetsSeconds.count ?? 0,
                  montage.name))
+    print("Recording reference: \(config.effectiveRecordingReference.rawValue) (before recording defects)")
+    if let set = bcg?.generatorSet {
+        let values = set.normalizedSingularValues.prefix(5)
+            .map { String(format: "%.3f", $0) }
+            .joined(separator: " ")
+        print("BCG: \(set.generators.count) physical generators at "
+            + String(format: "%.1f T", set.fieldStrengthTesla)
+            + "   spatial rank \(set.spatialRank)   singular values \(values)")
+    }
+    if let sourceSpace = eeg.sourceSpace {
+        print("Neural sources: \(sourceSpace.sources.count)   head model: \(sourceSpace.headModel.name)")
+        if let report = leadFieldConvergence {
+            print(String(format: "Lead-field convergence: %.3g max relative change (%d → %d terms)%@",
+                         report.maximumRelativeColumnChange, report.terms,
+                         report.comparisonTerms, report.converged ? "" : "  WARNING"))
+        }
+    }
+    if let truth = eeg.neuralNonstationarity {
+        print("Non-stationary EEG: \(truth.alphaBursts.count) alpha bursts, "
+            + "\(truth.microstateEpisodes.count) microstates, "
+            + "\(truth.bandAmplitudeEnvelopes1Hz.count) dynamic bands, "
+            + (truth.phaseAmplitudeCoupling == nil ? "PAC off" : "PAC on"))
+    }
     if let ocular {
         print("Blinks: \(ocular.blinkSeconds.count)   eye movements: \(ocular.saccadeSeconds.count)")
+    }
+    if let emg {
+        print("EMG bursts: \(emg.bursts.count)")
+    }
+    let addedEpisodes = additional.chewingEpisodes.count
+        + additional.swallowingEpisodes.count
+        + additional.cableMovementEpisodes.count
+        + additional.sweatEpisodes.count
+    if addedEpisodes > 0 {
+        print("Additional artifact episodes: \(addedEpisodes)")
+    }
+    if !additional.bridgedChannelPairs.isEmpty {
+        print("Bridged channel pairs: \(additional.bridgedChannelPairs.count)")
+    }
+    let clipped = additional.clippedSampleCounts.reduce(0, +)
+    if clipped > 0 { print("Clipped samples: \(clipped)") }
+    if let erp {
+        let targets = erp.trials.filter { $0.condition == "target" }.count
+        let omitted = erp.trials.filter(\.omitted).count
+        let overlapping = erp.trials.filter { $0.overlapsAnotherTrial == true }.count
+        print("ERP trials: \(erp.trials.count) (\(targets) targets, \(omitted) omitted responses, "
+            + "\(overlapping) overlapping windows)")
     }
     if config.gradientEnabled, config.preScanSeconds > 0 || config.postScanSeconds > 0 {
         print(String(format: "Scanner running %.1f-%.1f s (BCG runs the whole recording)",
@@ -551,6 +1530,10 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         let sorted = impedances.map(Double.init).sorted()
         print(String(format: "Impedance: median %.1f kΩ, worst %.1f kΩ",
                      sorted[sorted.count / 2], sorted.last ?? 0))
+    }
+    if config.impedanceNoise != nil {
+        let medianThermal = thermalNoiseRMSMicrovolts.sorted()[thermalNoiseRMSMicrovolts.count / 2]
+        print(String(format: "Impedance-coupled contact noise: median %.3f µV RMS", medianThermal))
     }
     if !badChannels.isEmpty {
         let described = badChannels.sorted { Int($0.key)! < Int($1.key)! }.map { number, defect -> String in
@@ -566,7 +1549,8 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
 
 // MARK: - score
 
-func loadChannels(_ path: String, padSeconds: Double) throws -> (channels: [[Double]], rate: Double) {
+func loadChannels(_ path: String, padSeconds: Double) throws
+    -> (channels: [[Double]], rate: Double, names: [String]?) {
     let url = URL(fileURLWithPath: path)
     let signal = try MFFReader().loadSignal(from: url)
     let pad = max(0, Int((padSeconds * signal.samplingRate).rounded()))
@@ -575,7 +1559,7 @@ func loadChannels(_ path: String, padSeconds: Double) throws -> (channels: [[Dou
         guard usable > 0 else { return channel.map(Double.init) }
         return channel[pad..<(pad + usable)].map(Double.init)
     }
-    return (channels, signal.samplingRate)
+    return (channels, signal.samplingRate, signal.channelNames)
 }
 
 /// Left-pads in Swift rather than via `%-8s`, which needs a C string whose
@@ -590,22 +1574,26 @@ func formatted(_ score: CorrectionScore, baseline: CorrectionScore?) -> String {
     lines.append(String(format: "%@: broadband SNR %.4f  (clean std %.2f µV, residual std %.2f µV)",
                         score.label, score.broadbandSNR,
                         score.cleanStandardDeviation, score.residualStandardDeviation))
+    lines.append(String(format: "  RMSE %.3f µV   correlation %.4f   spectral distortion %.3f dB RMS",
+                        score.broadbandRMSEMicrovolts, score.broadbandCorrelation,
+                        score.spectralDistortionDbRMS))
     if let baseline {
         lines.append(String(format: "uncorrected: broadband SNR %.4f", baseline.broadbandSNR))
     }
     lines.append("")
 
     if baseline == nil {
-        lines.append("  band      SNR    power dB   clean RMS   resid RMS")
-        lines.append("  ---------------------------------------------------")
+        lines.append("  band      SNR     corr    RMSE   PSD dB RMS  power dB")
+        lines.append("  --------------------------------------------------------")
         for band in score.bands {
             lines.append("  " + padded(band.name, to: 8)
-                + String(format: " %6.2f  %+8.2f  %9.3f  %10.3f",
-                         band.snr, band.powerRatioDb, band.cleanRMS, band.residualRMS))
+                + String(format: " %6.2f  %7.3f  %6.3f  %10.3f  %+8.2f",
+                         band.snr, band.correlation, band.residualRMS,
+                         band.spectralDistortionDbRMS, band.powerRatioDb))
         }
     } else {
-        lines.append("  band      SNR    uncorr    gain   power dB")
-        lines.append("  ------------------------------------------")
+        lines.append("  band      SNR    uncorr    gain    corr    RMSE  PSD dB RMS")
+        lines.append("  --------------------------------------------------------------")
         for (index, band) in score.bands.enumerated() {
             let uncorrected = index < baseline!.bands.count ? baseline!.bands[index].snr : .nan
             // The number that matters: a correction that leaves a band worse
@@ -613,37 +1601,77 @@ func formatted(_ score: CorrectionScore, baseline: CorrectionScore?) -> String {
             // finding is precisely that every BCG method does this above 10 Hz.
             let gain = uncorrected > 0 ? band.snr / uncorrected : .nan
             lines.append("  " + padded(band.name, to: 8)
-                + String(format: " %6.2f  %6.2f  %6.2fx  %+8.2f",
-                         band.snr, uncorrected, gain, band.powerRatioDb))
+                + String(format: " %6.2f  %6.2f  %6.2fx  %6.3f  %6.3f  %10.3f",
+                         band.snr, uncorrected, gain, band.correlation,
+                         band.residualRMS, band.spectralDistortionDbRMS))
         }
     }
     lines.append("")
+    lines.append("  channel   SNR     corr    RMSE µV  PSD dB RMS")
+    lines.append("  -----------------------------------------------")
+    for channel in score.channels {
+        lines.append("  " + padded(channel.name, to: 8)
+            + String(format: " %6.2f  %7.3f  %8.3f  %10.3f",
+                     channel.snr, channel.correlation, channel.rmseMicrovolts,
+                     channel.spectralDistortionDbRMS))
+    }
+    lines.append("")
     lines.append("  SNR = std(clean) / std(clean - corrected), per band. Higher is better.")
+    lines.append("  PSD dB RMS = spectral-shape error; 0 is perfect. RMSE is absolute error.")
     lines.append("  power dB = corrected band power vs clean; negative means EEG was removed")
     lines.append("  along with the artifact.")
     return lines.joined(separator: "\n")
 }
 
 func csv(_ score: CorrectionScore, baseline: CorrectionScore?) -> String {
-    var lines = ["label,band,low_hz,high_hz,snr,uncorrected_snr,power_ratio_db,clean_rms_uv,residual_rms_uv"]
+    var lines = ["label,scope,channel,band,low_hz,high_hz,snr,uncorrected_snr,correlation,rmse_uv,spectral_distortion_db_rms,power_ratio_db,clean_rms_uv,residual_rms_uv"]
     for (index, band) in score.bands.enumerated() {
         let uncorrected = baseline.flatMap { index < $0.bands.count ? $0.bands[index].snr : nil }
         lines.append([
-            score.label, band.name, "\(band.lowHz)", "\(band.highHz)",
+            score.label, "aggregate", "", band.name, "\(band.lowHz)", "\(band.highHz)",
             String(format: "%.6f", band.snr),
             uncorrected.map { String(format: "%.6f", $0) } ?? "",
+            String(format: "%.6f", band.correlation),
+            String(format: "%.6f", band.residualRMS),
+            String(format: "%.6f", band.spectralDistortionDbRMS),
             String(format: "%.6f", band.powerRatioDb),
             String(format: "%.6f", band.cleanRMS),
             String(format: "%.6f", band.residualRMS)
         ].joined(separator: ","))
     }
     lines.append([
-        score.label, "broadband", "", "",
+        score.label, "aggregate", "", "broadband", "", "",
         String(format: "%.6f", score.broadbandSNR),
         baseline.map { String(format: "%.6f", $0.broadbandSNR) } ?? "",
+        String(format: "%.6f", score.broadbandCorrelation),
+        String(format: "%.6f", score.broadbandRMSEMicrovolts),
+        String(format: "%.6f", score.spectralDistortionDbRMS),
         "", String(format: "%.6f", score.cleanStandardDeviation),
         String(format: "%.6f", score.residualStandardDeviation)
     ].joined(separator: ","))
+    for channel in score.channels {
+        lines.append([
+            score.label, "channel", channel.name, "broadband", "", "",
+            String(format: "%.6f", channel.snr), "",
+            String(format: "%.6f", channel.correlation),
+            String(format: "%.6f", channel.rmseMicrovolts),
+            String(format: "%.6f", channel.spectralDistortionDbRMS), "",
+            String(format: "%.6f", channel.cleanStandardDeviation),
+            String(format: "%.6f", channel.residualStandardDeviation)
+        ].joined(separator: ","))
+        for band in channel.bands {
+            lines.append([
+                score.label, "channel", channel.name, band.name,
+                "\(band.lowHz)", "\(band.highHz)", String(format: "%.6f", band.snr), "",
+                String(format: "%.6f", band.correlation),
+                String(format: "%.6f", band.residualRMS),
+                String(format: "%.6f", band.spectralDistortionDbRMS),
+                String(format: "%.6f", band.powerRatioDb),
+                String(format: "%.6f", band.cleanRMS),
+                String(format: "%.6f", band.residualRMS)
+            ].joined(separator: ","))
+        }
+    }
     return lines.joined(separator: "\n") + "\n"
 }
 
@@ -676,7 +1704,8 @@ func runScore(_ arguments: Arguments) throws {
         label: label,
         clean: truth.channels,
         corrected: corrected.channels,
-        samplingRate: truth.rate
+        samplingRate: truth.rate,
+        channelNames: truth.names
     )
 
     var baseline: CorrectionScore?
@@ -685,11 +1714,15 @@ func runScore(_ arguments: Arguments) throws {
         guard noisy.channels.count == truth.channels.count else {
             throw SimulateError.io("baseline channel count differs from truth")
         }
+        guard abs(noisy.rate - truth.rate) < 1e-6 else {
+            throw SimulateError.io("baseline sampling rate differs from truth")
+        }
         baseline = SNRMetrics.score(
             label: "uncorrected",
             clean: truth.channels,
             corrected: noisy.channels,
-            samplingRate: truth.rate
+            samplingRate: truth.rate,
+            channelNames: truth.names
         )
     }
 
@@ -702,10 +1735,384 @@ func runScore(_ arguments: Arguments) throws {
     if let path = arguments.string("json") {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(
+            positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN"
+        )
         var payload = [score]
         if let baseline { payload.append(baseline) }
         try encoder.encode(payload).write(to: URL(fileURLWithPath: path))
         print("Wrote \(path)")
+    }
+}
+
+// MARK: - event-detection score
+
+func loadDetectedEvents(_ path: String, eventCode: String) throws -> [DetectedEvent] {
+    let url = URL(fileURLWithPath: path)
+    if url.pathExtension.lowercased() == "json" {
+        let data = try Data(contentsOf: url)
+        let decoder = JSONDecoder()
+        if let set = try? decoder.decode(DetectedEventSet.self, from: data) { return set.events }
+        if let events = try? decoder.decode([DetectedEvent].self, from: data) { return events }
+        throw SimulateError.io(
+            "could not decode \(path): expected {\"events\":[{\"timeSeconds\":...,\"score\":...}]}"
+        )
+    }
+    let signal = try MFFReader().loadSignal(from: url)
+    return signal.events.filter { $0.code == eventCode }.map {
+        DetectedEvent(id: $0.id, timeSeconds: $0.beginTimeSeconds)
+    }
+}
+
+func runEventScore(_ arguments: Arguments) throws {
+    try arguments.validate(known: [
+        "truth", "detected", "type", "event-code", "tolerance-ms", "json"
+    ])
+    guard let truthPath = arguments.string("truth"),
+          let detectedPath = arguments.string("detected"),
+          let type = arguments.string("type") else {
+        throw SimulateError.usage(
+            "score-events needs --truth <truth.json> --detected <json-or-mff> --type <event>"
+        )
+    }
+    let truth = try JSONDecoder().decode(
+        SimulationTruth.self,
+        from: Data(contentsOf: URL(fileURLWithPath: truthPath))
+    )
+    let eventTimes: [Double]
+    let defaultCode: String
+    let defaultTolerance: Double
+    switch type {
+    case "gradient":
+        eventTimes = truth.gradientVolumeOnsetsSeconds
+        defaultCode = "TREV"
+        defaultTolerance = 2
+    case "bcg":
+        eventTimes = truth.bcgTrueBeatSeconds
+        defaultCode = "QRSd"
+        defaultTolerance = 50
+    case "blink":
+        eventTimes = truth.blinkSeconds
+        defaultCode = "blnk"
+        defaultTolerance = 100
+    case "saccade":
+        eventTimes = truth.saccadeSeconds
+        defaultCode = "eyem"
+        defaultTolerance = 50
+    case "emg":
+        eventTimes = (truth.emgBursts ?? []).map(\.onsetSeconds)
+        defaultCode = "emg"
+        defaultTolerance = 100
+    case "chewing":
+        eventTimes = (truth.chewingEpisodes ?? []).map(\.onsetSeconds)
+        defaultCode = "chew"
+        defaultTolerance = 150
+    case "swallowing":
+        eventTimes = (truth.swallowingEpisodes ?? []).map(\.onsetSeconds)
+        defaultCode = "swal"
+        defaultTolerance = 100
+    case "movement":
+        eventTimes = (truth.cableMovementEpisodes ?? []).map(\.onsetSeconds)
+        defaultCode = "move"
+        defaultTolerance = 150
+    case "sweat":
+        eventTimes = (truth.sweatEpisodes ?? []).map(\.onsetSeconds)
+        defaultCode = "swet"
+        defaultTolerance = 250
+    default:
+        throw SimulateError.usage(
+            "--type expects gradient, bcg, blink, saccade, emg, chewing, swallowing, movement, or sweat"
+        )
+    }
+    let tolerance = try arguments.double("tolerance-ms") ?? defaultTolerance
+    guard tolerance > 0 else { throw SimulateError.usage("--tolerance-ms must be positive") }
+    let detected = try loadDetectedEvents(
+        detectedPath, eventCode: arguments.string("event-code") ?? defaultCode
+    )
+    let score = DetectionMetrics.score(
+        eventType: type, truth: eventTimes, detected: detected,
+        durationSeconds: truth.config.durationSeconds,
+        toleranceSeconds: tolerance / 1000
+    )
+    print("")
+    print(String(format: "%@: %d TP, %d FP, %d FN within %.1f ms",
+                 type, score.truePositives, score.falsePositives,
+                 score.falseNegatives, score.toleranceMilliseconds))
+    print(String(format: "  precision %.4f   sensitivity %.4f   specificity %.4f   F1 %.4f",
+                 score.precision, score.sensitivity, score.specificity, score.f1))
+    print(String(format: "  timing MAE %.3f ms   max %.3f ms   false positives %.3f/min",
+                 score.meanAbsoluteTimingErrorMilliseconds,
+                 score.maximumAbsoluteTimingErrorMilliseconds,
+                 score.falsePositivesPerMinute))
+    if let auc = score.rocAUC { print(String(format: "  ROC AUC %.4f", auc)) }
+    if let path = arguments.string("json") {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(score).write(to: URL(fileURLWithPath: path))
+        print("Wrote \(path)")
+    }
+}
+
+// MARK: - ERP score
+
+func loadERPComponents(
+    _ path: String, level: String = "average", excludeOverlap: Bool = false
+) throws -> [ERPComponent] {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let decoder = JSONDecoder()
+    if let set = try? decoder.decode(ERPComponentSet.self, from: data) { return set.components }
+    if let components = try? decoder.decode([ERPComponent].self, from: data) { return components }
+    if let truth = try? decoder.decode(SimulationTruth.self, from: data) {
+        if level == "trial", let trials = truth.erpTrials {
+            return trials.filter {
+                !$0.omitted && (!excludeOverlap || $0.overlapsAnotherTrial != true)
+            }.map {
+                ERPComponent(
+                    id: $0.id,
+                    peakLatencySeconds: $0.peakLatencySeconds,
+                    peakAmplitudeMicrovolts: $0.peakAmplitudeMicrovolts
+                )
+            }
+        }
+        if let components = truth.erpComponents { return components }
+    }
+    throw SimulateError.io(
+        "could not decode \(path): expected {\"components\":[{\"id\":...,"
+        + "\"peakLatencySeconds\":...,\"peakAmplitudeMicrovolts\":...}]}"
+    )
+}
+
+func runERPScore(_ arguments: Arguments) throws {
+    try arguments.validate(known: ["truth", "estimated", "level", "exclude-overlap", "json"])
+    guard let truthPath = arguments.string("truth"),
+          let estimatedPath = arguments.string("estimated") else {
+        throw SimulateError.usage("score-erp needs --truth <json> --estimated <json>")
+    }
+    let level = arguments.string("level") ?? "average"
+    guard level == "average" || level == "trial" else {
+        throw SimulateError.usage("--level expects average or trial")
+    }
+    let excludeOverlap = arguments.flag("exclude-overlap")
+    if excludeOverlap, level != "trial" {
+        throw SimulateError.usage("--exclude-overlap requires --level trial")
+    }
+    let score = ERPMetrics.score(
+        truth: try loadERPComponents(
+            truthPath, level: level, excludeOverlap: excludeOverlap
+        ),
+        estimated: try loadERPComponents(estimatedPath, level: level)
+    )
+    print("")
+    print("ERP \(level) recovery\(excludeOverlap ? " (non-overlapping only)" : ""): "
+        + "\(score.matchedCount) matched, \(score.missingEstimates) missing, "
+        + "\(score.extraEstimates) extra")
+    print(String(format: "  amplitude: bias %+.3f µV   MAE %.3f µV   RMSE %.3f µV",
+                 score.amplitudeBiasMicrovolts, score.amplitudeMAEMicrovolts,
+                 score.amplitudeRMSEMicrovolts))
+    print(String(format: "  latency:   bias %+.3f ms   MAE %.3f ms   RMSE %.3f ms",
+                 score.latencyBiasMilliseconds, score.latencyMAEMilliseconds,
+                 score.latencyRMSEMilliseconds))
+    if let path = arguments.string("json") {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(score).write(to: URL(fileURLWithPath: path))
+        print("Wrote \(path)")
+    }
+}
+
+// MARK: - phase-amplitude coupling score
+
+nonisolated struct PACEstimate: Codable, Sendable {
+    var strength: Double
+    var preferredPhaseRadians: Double
+}
+
+nonisolated struct PACScoreReport: Codable, Sendable {
+    var trueStrength: Double
+    var estimatedStrength: Double
+    var strengthError: Double
+    var truePreferredPhaseRadians: Double
+    var estimatedPreferredPhaseRadians: Double
+    var circularPhaseErrorRadians: Double
+    var circularPhaseErrorDegrees: Double
+}
+
+func runPACScore(_ arguments: Arguments) throws {
+    try arguments.validate(known: ["truth", "estimated", "json"])
+    guard let truthPath = arguments.string("truth"),
+          let estimatedPath = arguments.string("estimated") else {
+        throw SimulateError.usage("score-pac needs --truth <truth.json> --estimated <pac.json>")
+    }
+
+    let decoder = JSONDecoder()
+    let truth = try decoder.decode(
+        SimulationTruth.self,
+        from: Data(contentsOf: URL(fileURLWithPath: truthPath))
+    )
+    guard let known = truth.neuralNonstationarity?.phaseAmplitudeCoupling else {
+        throw SimulateError.io("truth sidecar does not contain phase-amplitude coupling truth")
+    }
+    let estimated = try decoder.decode(
+        PACEstimate.self,
+        from: Data(contentsOf: URL(fileURLWithPath: estimatedPath))
+    )
+    let signedPhaseError = atan2(
+        sin(estimated.preferredPhaseRadians - known.preferredPhaseRadians),
+        cos(estimated.preferredPhaseRadians - known.preferredPhaseRadians)
+    )
+    let report = PACScoreReport(
+        trueStrength: known.strength,
+        estimatedStrength: estimated.strength,
+        strengthError: estimated.strength - known.strength,
+        truePreferredPhaseRadians: known.preferredPhaseRadians,
+        estimatedPreferredPhaseRadians: estimated.preferredPhaseRadians,
+        circularPhaseErrorRadians: abs(signedPhaseError),
+        circularPhaseErrorDegrees: abs(signedPhaseError) * 180 / Double.pi
+    )
+
+    print("")
+    print("PAC recovery")
+    print(String(format: "  strength: true %.4f   estimated %.4f   error %+.4f",
+                 report.trueStrength, report.estimatedStrength, report.strengthError))
+    print(String(format: "  preferred phase: true %.4f rad   estimated %.4f rad   circular error %.3f°",
+                 report.truePreferredPhaseRadians, report.estimatedPreferredPhaseRadians,
+                 report.circularPhaseErrorDegrees))
+    if let path = arguments.string("json") {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(report).write(to: URL(fileURLWithPath: path))
+        print("Wrote \(path)")
+    }
+}
+
+// MARK: - source-space score
+
+func loadEstimatedSources(_ path: String) throws -> [EstimatedSource] {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let decoder = JSONDecoder()
+    if let set = try? decoder.decode(EstimatedSourceSet.self, from: data) {
+        return set.sources
+    }
+    if let array = try? decoder.decode([EstimatedSource].self, from: data) {
+        return array
+    }
+    throw SimulateError.io(
+        "could not decode \(path): expected {\"sources\":[{\"positionMeters\":{\"x\":...,\"y\":...,\"z\":...}}]}"
+    )
+}
+
+func formatted(_ score: SourceLocationScore) -> String {
+    var lines = [
+        "",
+        String(format: "source locations: %d matched, %d missed, %d extra",
+               score.matchedCount, score.missedTrueSources, score.extraEstimatedSources),
+        String(format: "  distance: mean %.3f mm   median %.3f mm   max %.3f mm",
+               score.meanDistanceMillimeters, score.medianDistanceMillimeters,
+               score.maximumDistanceMillimeters)
+    ]
+    if let orientation = score.meanOrientationErrorDegrees {
+        lines.append(String(format: "  mean axial orientation error: %.3f°", orientation))
+    }
+    for match in score.matches {
+        var line = String(format: "  %@ <- %@: %.3f mm",
+                          match.trueSourceID, match.estimatedSourceID,
+                          match.distanceMillimeters)
+        if let orientation = match.orientationErrorDegrees {
+            line += String(format: ", %.3f°", orientation)
+        }
+        lines.append(line)
+    }
+    return lines.joined(separator: "\n")
+}
+
+func formatted(_ score: SourceRecoveryScore) -> String {
+    var lines = [
+        "",
+        String(format: "source recovery: %d matched, %d missed, %d extra",
+               score.matchedCount, score.missedTrueSources, score.extraRecoveredComponents),
+        String(format: "  |r|: mean %.4f   median %.4f   minimum %.4f",
+               score.meanAbsoluteCorrelation, score.medianAbsoluteCorrelation,
+               score.minimumAbsoluteCorrelation)
+    ]
+    for match in score.matches {
+        lines.append(String(format: "  %@ <- %@: r=%+.4f",
+                            match.trueSourceID, match.recoveredComponent, match.correlation))
+    }
+    return lines.joined(separator: "\n")
+}
+
+func runSourceScore(_ arguments: Arguments) throws {
+    try arguments.validate(known: ["truth", "estimated", "recovered", "pad-seconds", "json"])
+    guard let truthPath = arguments.string("truth") else {
+        throw SimulateError.usage("score-sources needs --truth <truth.json>")
+    }
+    guard arguments.string("estimated") != nil || arguments.string("recovered") != nil else {
+        throw SimulateError.usage("score-sources needs --estimated <json>, --recovered <mff>, or both")
+    }
+
+    let truthData = try Data(contentsOf: URL(fileURLWithPath: truthPath))
+    let truth = try JSONDecoder().decode(SimulationTruth.self, from: truthData)
+    guard let sourceTruth = truth.sourceSpace else {
+        throw SimulateError.usage("the truth sidecar has no source space; generate with --eeg-model dipole")
+    }
+
+    var locationScore: SourceLocationScore?
+    if let path = arguments.string("estimated") {
+        locationScore = SourceMetrics.locationScore(
+            truth: sourceTruth.sources,
+            estimated: try loadEstimatedSources(path)
+        )
+        print(formatted(locationScore!))
+    }
+
+    var recoveryScore: SourceRecoveryScore?
+    if let path = arguments.string("recovered") {
+        let recovered = try MFFReader().loadSignal(from: URL(fileURLWithPath: path))
+        guard abs(recovered.samplingRate - truth.config.samplingRate) < 1e-9 else {
+            throw SimulateError.io(
+                "recovered sampling rate \(recovered.samplingRate) does not match truth \(truth.config.samplingRate)"
+            )
+        }
+        let regenerated = try DipoleEEGGenerator.generate(
+            config: truth.config,
+            montage: Montage.standard(count: truth.config.channelCount)
+        )
+        guard let regeneratedSources = regenerated.sourceSpace else {
+            throw SimulateError.io("could not regenerate source time courses from the truth configuration")
+        }
+        let recoveredSignals = recovered.data.map { $0.map(Double.init) }
+        let allSignals = regeneratedSources.timecoursesNanoampereMeters + recoveredSignals
+        let minimumCount = allSignals.map(\.count).min() ?? 0
+        let pad = max(0, Int(((try arguments.double("pad-seconds") ?? 0)
+                              * truth.config.samplingRate).rounded()))
+        guard minimumCount > 2 * pad else {
+            throw SimulateError.usage("--pad-seconds leaves no source samples to score")
+        }
+        let range = pad..<(minimumCount - pad)
+        let trueSignals = regeneratedSources.timecoursesNanoampereMeters.map {
+            Array($0[range])
+        }
+        let trimmedRecovered = recoveredSignals.map { Array($0[range]) }
+        let names = recovered.channelNames
+            ?? (0..<trimmedRecovered.count).map { "component-\($0 + 1)" }
+        recoveryScore = SourceMetrics.recoveryScore(
+            trueIDs: sourceTruth.sources.map(\.id),
+            trueSignals: trueSignals,
+            recoveredNames: names,
+            recoveredSignals: trimmedRecovered
+        )
+        print(formatted(recoveryScore!))
+    }
+
+    if let path = arguments.string("json") {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(SourceScoreReport(
+            location: locationScore,
+            recovery: recoveryScore
+        ))
+        try data.write(to: URL(fileURLWithPath: path))
+        print("\nWrote \(path)")
     }
 }
 
@@ -719,16 +2126,46 @@ func applySweep(_ parameter: String, value: Double, to config: inout SimulationC
     case "slow-modulation": config.slowModulationFraction = value
     case "clock-offset": config.clockOffsetMicrosecondsPerSecond = value
     case "rate": config.samplingRate = value
+    case "impedance":
+        guard value > 0 else { throw SimulateError.usage("an impedance sweep needs positive values") }
+        config.impedanceTypicalKOhm = value
+        config.includeImpedance = true
+        config.impedanceNoise = config.impedanceNoise ?? ImpedanceNoiseConfig()
+    case "emg-rate":
+        guard value > 0 else { throw SimulateError.usage("an EMG-rate sweep needs positive values") }
+        var emg = config.emg ?? EMGConfig()
+        emg.burstsPerMinute = value
+        config.emg = emg
+    case "emg-amplitude":
+        guard value > 0 else { throw SimulateError.usage("an EMG-amplitude sweep needs positive values") }
+        var emg = config.emg ?? EMGConfig()
+        emg.amplitudeMicrovolts = value
+        config.emg = emg
+    case "sources":
+        guard config.eegGenerationModel == .dipole else {
+            throw SimulateError.usage("a sources sweep requires --eeg-model dipole")
+        }
+        guard value > 0, value == value.rounded() else {
+            throw SimulateError.usage("a sources sweep needs positive whole-number values")
+        }
+        config.dipoleSourceCount = Int(value)
     default:
         throw SimulateError.usage(
             "unknown --parameter \"\(parameter)\"; expected one of qrs-jitter, bcg-amplitude, "
-            + "gradient-amplitude, slow-modulation, clock-offset, rate"
+            + "gradient-amplitude, slow-modulation, clock-offset, rate, impedance, sources, "
+            + "emg-rate, emg-amplitude"
         )
     }
 }
 
 func runSweep(_ arguments: Arguments) throws {
     try arguments.validate(known: generateOptions.union(["parameter", "values"]))
+
+    if arguments.string("write-config") != nil {
+        throw SimulateError.usage(
+            "--write-config is ambiguous for a sweep; save the base scenario with generate first"
+        )
+    }
 
     guard let parameter = arguments.string("parameter") else {
         throw SimulateError.usage("sweep needs --parameter <name>")
@@ -783,13 +2220,34 @@ do {
     switch command {
     case "generate":
         try arguments.validate(known: generateOptions)
-        guard let output = arguments.string("output") else {
-            throw SimulateError.usage("generate needs --output <dir>")
-        }
         let config = try makeConfig(arguments)
-        try runGenerate(config: config, arguments: arguments, outputDirectory: URL(fileURLWithPath: output))
+        if let path = arguments.string("write-config") {
+            guard !arguments.flag("write-config") else {
+                throw SimulateError.usage("--write-config needs a JSON file path")
+            }
+            let url = URL(fileURLWithPath: path)
+            try SimulationScenarioFile.write(config: config, to: url)
+            print("Wrote \(url.path)")
+        }
+        if let output = arguments.string("output") {
+            try runGenerate(
+                config: config,
+                arguments: arguments,
+                outputDirectory: URL(fileURLWithPath: output)
+            )
+        } else if arguments.string("write-config") == nil {
+            throw SimulateError.usage("generate needs --output <dir> or --write-config <json>")
+        }
     case "score":
         try runScore(arguments)
+    case "score-sources":
+        try runSourceScore(arguments)
+    case "score-events":
+        try runEventScore(arguments)
+    case "score-erp":
+        try runERPScore(arguments)
+    case "score-pac":
+        try runPACScore(arguments)
     case "sweep":
         try runSweep(arguments)
     case "selftest":

@@ -45,6 +45,9 @@ nonisolated struct SimulationTruth: Codable, Sendable {
     /// power against the eyes-open/eyes-closed design, without carrying a
     /// full-rate copy of a sine wave in the sidecar.
     var alphaEnvelope1Hz: [Double]
+    /// Exact burst, spectral-envelope, microstate, and PAC truth for opt-in
+    /// non-stationary EEG. Optional keeps earlier sidecars readable.
+    var neuralNonstationarity: NeuralNonstationarityTruth? = nil
     var gradientVolumeOnsetsSeconds: [Double]
     var gradientQuantizedVolumeOnsetsSeconds: [Double]
     var gradientChannelAmplitudesMicrovolts: [Double]
@@ -52,8 +55,26 @@ nonisolated struct SimulationTruth: Codable, Sendable {
     var bcgDetectedBeatSeconds: [Double]
     var bcgChannelScales: [Double]
     var bcgChannelLatenciesSeconds: [Double]
+    /// Spatial model used for the BCG: `channelIndex` (paper default, rank one,
+    /// weighted by channel number) or `generators` (physically placed).
+    var bcgSpatialModel: String? = nil
+    /// Present only under `generators`. Each physical generator's topography,
+    /// delay, width, share and per-beat weights — enough to score a recovered
+    /// component against the generator that produced it.
+    var bcgGenerators: [BCGGeneratorTruth]? = nil
+    /// Normalized singular values of the generator topography matrix, largest
+    /// first, and the count above 1%. This is the claim to check against
+    /// Rusiniak et al.'s reported 4-8 components: the old channel-index model
+    /// had exactly one.
+    var bcgNormalizedSingularValues: [Double]? = nil
+    var bcgSpatialRank: Int? = nil
+    var bcgFieldStrengthTesla: Double? = nil
     var montageName: String
     var channelNames: [String]
+    /// Reference applied to the complete additive sensor mixture before
+    /// physical recording defects such as a bad reference, bridges, or rails.
+    var recordingReference: EEGReference? = nil
+    var referenceApplicationStage: String? = nil
     /// 1-based channel number -> the defect applied to it.
     var badChannels: [String: String]
     var blinkSeconds: [Double]
@@ -63,11 +84,57 @@ nonisolated struct SimulationTruth: Codable, Sendable {
     /// was injected.
     var blinkTopography: [Double]
     var horizontalEyeTopography: [Double]
+    /// Muscle bursts and their three normalized source-region topographies.
+    /// Optional so truth sidecars written before EMG support remain readable.
+    var emgBursts: [EMGBurstTruth]? = nil
+    var emgLeftTemporalisTopography: [Double]? = nil
+    var emgRightTemporalisTopography: [Double]? = nil
+    var emgPosteriorNeckTopography: [Double]? = nil
+    var chewingEpisodes: [ArtifactEpisodeTruth]? = nil
+    var swallowingEpisodes: [ArtifactEpisodeTruth]? = nil
+    var cableMovementEpisodes: [ArtifactEpisodeTruth]? = nil
+    var sweatEpisodes: [ArtifactEpisodeTruth]? = nil
+    var chewingTopography: [Double]? = nil
+    var swallowingTopography: [Double]? = nil
+    var badReferenceRMSMicrovolts: Double? = nil
+    var bridgedChannelPairs: [ChannelBridge]? = nil
+    var clippedSampleCounts: [Int]? = nil
     /// Per-channel electrode impedance in kΩ, empty when none was recorded.
     var impedancesKOhm: [Double]
+    /// Latent contact impedance and its coupled noise realization. Optional so
+    /// truth sidecars from before roadmap item 2.2 remain readable. The latent
+    /// values remain populated when ICAL measurement export is disabled.
+    var simulatedImpedancesKOhm: [Double]? = nil
+    var impedanceThermalNoiseRMSMicrovolts: [Double]? = nil
+    var impedanceLineNoiseGainsMicrovolts: [Double]? = nil
     /// When the scanner was actually running, in seconds.
     var scanStartSeconds: Double
     var scanEndSeconds: Double
+    /// Present only for `--eeg-model dipole`. Full-rate source signals are
+    /// exactly regenerable from these per-source seeds and the configuration;
+    /// the small realized gain matrix is recorded directly.
+    var sourceSpace: SourceSpaceTruth?
+    var ocularDipoles: [OcularDipoleTruth]
+    /// Populated by the ERP simulator in roadmap item 1.2. The metric and file
+    /// contract exist now so future ERP truth is immediately scoreable.
+    var erpComponents: [ERPComponent]? = nil
+    var erpTrials: [ERPTrialTruth]? = nil
+    var erpSource: SimulatedSource? = nil
+    var erpTopography: [Double]? = nil
+    var erpWaveformDescription: String? = nil
+    var erpRealizedLatencyAmplitudeCorrelation: Double? = nil
+    var erpRandomSeeds: ERPRandomSeedTruth? = nil
+}
+
+nonisolated struct SourceSpaceTruth: Codable, Sendable {
+    var model: String
+    var headModel: SphericalHeadModel
+    var sources: [SimulatedSource]
+    var leadField: LeadField
+    var calibrationFactor: Double
+    var sourceCorrelationMatrix: [[Double]]
+    var topographicCorrelationMatrix: [[Double]]
+    var motions: [SourceMotionTruth]
 }
 
 nonisolated enum SimulationWriter {
@@ -77,44 +144,43 @@ nonisolated enum SimulationWriter {
     /// break that for no benefit.
     static let recordingStart = Date(timeIntervalSince1970: 1_755_000_000)
 
-    /// Snaps an event time to the nearest whole millisecond — the finest grid
-    /// the file format actually preserves.
+    /// Snaps an event time to the sample grid — the finest grid a discrete
+    /// recording actually has, and the one a reader recovers.
     ///
-    /// MFF stores event times as an absolute ISO-8601 datetime, and `MFFWriter`
-    /// formats them with `DateFormatter` using a six-digit fractional-seconds
-    /// pattern. `DateFormatter` only resolves milliseconds: the last three
-    /// digits it emits are always zeros. A time of 134.019775 s is written as
-    /// "…14.020000", so what comes back on read is not what went in. The
-    /// limitation affects every EVA export carrying events, not just simulated
-    /// ones — see TODO_Aug21.md.
-    static func writableEventTime(_ seconds: Double) -> Double {
-        (seconds * 1000).rounded() / 1000
+    /// This used to snap to a whole millisecond instead, because `MFFWriter`
+    /// formatted event times with `DateFormatter`, which carries millisecond
+    /// internal precision no matter how many fractional digits the format
+    /// string asks for. At 1024 Hz a sample is 976.5625 µs, so that displaced
+    /// markers by up to half a sample and an occasional TR interval landed two
+    /// samples off the median, which EVA's gradient stage rejects. Roadmap item
+    /// 4.9 fixed the writer and the reader; event times now survive at
+    /// microsecond precision, so nothing here needs to compensate.
+    ///
+    /// Three cleverer schemes were tried under the old constraint and all made
+    /// things worse. Recording them so they are not tried again: repairing
+    /// violations one at a time walks the error down the train; fitting each
+    /// marker to its ideal position independently still leaves pairs two samples
+    /// apart, because one marker can land 0.9 samples low while its neighbour
+    /// lands 0.9 high; and constraining the interval while walking the train
+    /// produces occasional large excursions when neither permitted interval is
+    /// reachable. None of them could succeed, because a 0.977 ms sample grid is
+    /// not representable on a 1 ms one — which is why the fix had to be in the
+    /// writer's precision rather than here.
+    static func writableEventTime(_ seconds: Double, samplingRate: Double) -> Double {
+        (seconds * samplingRate).rounded() / samplingRate
     }
 
     /// Which sample EVA will recover from a written event time.
     static func recoveredSample(_ seconds: Double, samplingRate: Double) -> Int {
-        Int((writableEventTime(seconds) * samplingRate).rounded())
+        Int((seconds * samplingRate).rounded())
     }
 
-    /// Places a run of periodic markers on the millisecond grid.
-    ///
-    /// Deliberately simple: round each onset to the nearest millisecond and
-    /// write it. The recovered train then carries an occasional interval two
-    /// samples off the median, which EVA's gradient stage rejects — see the note
-    /// on `writableEventTime` for why, and TODO_Aug21.md for the fix.
-    ///
-    /// Three cleverer schemes were tried here and all of them made things worse
-    /// or no better, which is worth recording so they are not tried again:
-    /// repairing violations one at a time walks the error down the train;
-    /// fitting each marker to its ideal position independently still leaves
-    /// pairs two samples apart, because one marker can land 0.9 samples low
-    /// while its neighbour lands 0.9 high; and constraining the interval while
-    /// walking the train produces occasional large excursions when neither
-    /// permitted interval is reachable. None of them can succeed, because a
-    /// 0.977 ms sample grid is not representable on a 1 ms one — the fix has to
-    /// be in the writer's precision, not here.
+    /// Places a run of periodic markers on the sample grid. No interval repair
+    /// is attempted or needed: rounding each onset to its own nearest sample
+    /// keeps every marker within half a sample of the truth, so any two adjacent
+    /// intervals differ by at most one sample.
     static func periodicMarkerTimes(onsets: [Double], samplingRate: Double) -> [Double] {
-        onsets.map(writableEventTime)
+        onsets.map { writableEventTime($0, samplingRate: samplingRate) }
     }
 
     static func channelNames(count: Int) -> [String] {
@@ -147,6 +213,9 @@ nonisolated enum SimulationWriter {
         gradient: GradientInjection?,
         bcg: BCGInjection?,
         ocular: OcularInjection?,
+        erp: ERPInjection?,
+        emg: EMGInjection? = nil,
+        additional: AdditionalArtifactInjection? = nil,
         config: SimulationConfig
     ) -> [MFFEvent] {
         var events: [MFFEvent] = []
@@ -182,8 +251,8 @@ nonisolated enum SimulationWriter {
                     label: "Detected beat",
                     eventDescription: "QRS as an automatic detector would report it, "
                         + "jittered by \(Int(config.qrsDetectionJitterSDSeconds * 1000)) ms SD",
-                    beginTimeSeconds: writableEventTime(beat),
-                    rawBeginTime: String(format: "%.6f", writableEventTime(beat)),
+                    beginTimeSeconds: writableEventTime(beat, samplingRate: config.samplingRate),
+                    rawBeginTime: String(format: "%.6f", writableEventTime(beat, samplingRate: config.samplingRate)),
                     sourceFile: "EVASimulate"
                 ))
             }
@@ -193,8 +262,8 @@ nonisolated enum SimulationWriter {
                     code: "QRSt",
                     label: "True beat",
                     eventDescription: "Ground-truth beat time; the artifact was injected here",
-                    beginTimeSeconds: writableEventTime(beat),
-                    rawBeginTime: String(format: "%.6f", writableEventTime(beat)),
+                    beginTimeSeconds: writableEventTime(beat, samplingRate: config.samplingRate),
+                    rawBeginTime: String(format: "%.6f", writableEventTime(beat, samplingRate: config.samplingRate)),
                     sourceFile: "EVASimulate"
                 ))
             }
@@ -202,7 +271,7 @@ nonisolated enum SimulationWriter {
 
         if let ocular {
             for (index, time) in ocular.blinkSeconds.enumerated() {
-                let aligned = writableEventTime(time)
+                let aligned = writableEventTime(time, samplingRate: config.samplingRate)
                 events.append(MFFEvent(
                     id: "sim-blink-\(index)",
                     code: "blnk",
@@ -214,7 +283,7 @@ nonisolated enum SimulationWriter {
                 ))
             }
             for (index, time) in ocular.saccadeSeconds.enumerated() {
-                let aligned = writableEventTime(time)
+                let aligned = writableEventTime(time, samplingRate: config.samplingRate)
                 events.append(MFFEvent(
                     id: "sim-saccade-\(index)",
                     code: "eyem",
@@ -223,6 +292,61 @@ nonisolated enum SimulationWriter {
                     rawBeginTime: String(format: "%.6f", aligned),
                     sourceFile: "EVASimulate",
                     durationSeconds: config.saccadeTransitionSeconds
+                ))
+            }
+        }
+
+        if let emg {
+            for burst in emg.bursts {
+                let aligned = writableEventTime(burst.onsetSeconds, samplingRate: config.samplingRate)
+                events.append(MFFEvent(
+                    id: "sim-\(burst.id)",
+                    code: "emg",
+                    label: "Muscle burst",
+                    eventDescription: "Simulated \(burst.muscle.rawValue) EMG burst",
+                    beginTimeSeconds: aligned,
+                    rawBeginTime: String(format: "%.6f", aligned),
+                    sourceFile: "EVASimulate",
+                    durationSeconds: burst.durationSeconds
+                ))
+            }
+        }
+
+        if let additional {
+            let episodeGroups: [([ArtifactEpisodeTruth], String, String)] = [
+                (additional.chewingEpisodes, "chew", "Chewing episode"),
+                (additional.swallowingEpisodes, "swal", "Swallow"),
+                (additional.cableMovementEpisodes, "move", "Cable movement"),
+                (additional.sweatEpisodes, "swet", "Sweat drift")
+            ]
+            for (episodes, code, label) in episodeGroups {
+                for episode in episodes {
+                    let aligned = writableEventTime(episode.onsetSeconds, samplingRate: config.samplingRate)
+                    events.append(MFFEvent(
+                        id: "sim-\(episode.id)", code: code, label: label,
+                        eventDescription: "Simulated \(episode.kind) artifact",
+                        beginTimeSeconds: aligned,
+                        rawBeginTime: String(format: "%.6f", aligned),
+                        sourceFile: "EVASimulate",
+                        durationSeconds: episode.durationSeconds
+                    ))
+                }
+            }
+        }
+
+        if let erp {
+            for trial in erp.trials {
+                let aligned = writableEventTime(trial.onsetSeconds, samplingRate: config.samplingRate)
+                events.append(MFFEvent(
+                    id: "sim-\(trial.id)",
+                    code: trial.eventCode,
+                    label: trial.condition,
+                    eventDescription: trial.omitted
+                        ? "Stimulus presented; neural response deliberately omitted"
+                        : "Simulated \(trial.condition) ERP trial",
+                    beginTimeSeconds: aligned,
+                    rawBeginTime: String(format: "%.6f", aligned),
+                    sourceFile: "EVASimulate"
                 ))
             }
         }

@@ -33,6 +33,11 @@ nonisolated struct GeneratedEEG: Sendable {
     /// Standard deviation of the generated EEG, pooled over channels. The
     /// denominator of every SNR this harness reports.
     var standardDeviation: Double
+    /// Present only for the opt-in dipole model. The legacy Grouiller path keeps
+    /// no fiction of explicit neural sources because its channel smoothing does
+    /// not define any.
+    var sourceSpace: GeneratedSourceSpace? = nil
+    var neuralNonstationarity: NeuralNonstationarityTruth? = nil
 }
 
 nonisolated enum EEGGenerator {
@@ -43,7 +48,8 @@ nonisolated enum EEGGenerator {
         source: inout GaussianSource
     ) -> GeneratedEEG {
         let sampleCount = config.sampleCount
-        let alphaEnvelope = alphaEnvelope(config: config)
+        let nonstationarity = NonstationaryEEGModel.makePlan(config: config, montage: montage)
+        let alphaEnvelope = nonstationarity?.alphaEnvelope ?? alphaEnvelope(config: config)
 
         // Each channel is its own mixture of the seven band-limited sources.
         // They are made spatially correlated afterwards rather than by sharing
@@ -63,6 +69,7 @@ nonisolated enum EEGGenerator {
                     highHz: band.highHz,
                     source: &source
                 )
+                nonstationarity?.applySpectralAndPAC(to: &component, band: band)
                 if band.isAlpha {
                     for i in 0..<sampleCount { component[i] *= alphaEnvelope[i] }
                 } else {
@@ -85,6 +92,18 @@ nonisolated enum EEGGenerator {
             )
         }
 
+        nonstationarity?.addMicrostates(
+            to: &channels,
+            amplitudeMicrovolts: config.neuralNonstationarity?.microstates?.amplitudeMicrovolts
+        )
+
+        // Calibrate the legacy model in the same reference in which it will be
+        // recorded. Average reference is linear, so applying it here to the
+        // neural layer and again at the complete additive boundary is
+        // idempotent; doing it only after calibration would silently reduce the
+        // promised 10.9 µV clean-EEG standard deviation.
+        EEGReferencing.apply(config.effectiveRecordingReference, to: &channels)
+
         // One global scale, not one per channel: per-channel normalization would
         // flatten the spatial structure the smoothing just created.
         let std = pooledStandardDeviation(channels)
@@ -97,8 +116,12 @@ nonisolated enum EEGGenerator {
 
         return GeneratedEEG(
             channels: channels,
-            alphaEnvelope: alphaEnvelope,
-            standardDeviation: pooledStandardDeviation(channels)
+            alphaEnvelope: nonstationarity?.reportedAlphaEnvelope ?? alphaEnvelope,
+            standardDeviation: pooledStandardDeviation(channels),
+            sourceSpace: nil,
+            neuralNonstationarity: nonstationarity?.truth(
+                calibrationFactor: std > 1e-12 ? config.eegTargetStdMicrovolts / std : 1
+            )
         )
     }
 

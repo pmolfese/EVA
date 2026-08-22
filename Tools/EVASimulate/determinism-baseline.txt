@@ -1,0 +1,9 @@
+# EVA Simulate determinism baseline
+# SHA-256 over every file each scenario generates, at its own settings.
+# Regenerate with scripts/check-determinism.sh --update, and only when
+# the output was *meant* to change — this file is the record that it did.
+929e9ed3d1856919776b7bac5f4169738d5de2675bdad17b96ead26b3650d9b8  bcg-generators
+f95de8a788c62c2637f8a1ee442a117fd62608b8555f1e9d3f950a979104f37f  dipole-separability
+ad80ae2b9059421327b4a328b499285f768411dd6afafa1154c28db3b6422fd3  oddball-erp
+05250c8849b024cf20fff736cb280b58887aed7c38d70800356b018c56af06af  paper-default
+5297ef635a4ace218b99a469b63d8083b40fe381d7830b7e7fdd4c2441c4d4a2  teaching-demo

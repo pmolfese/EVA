@@ -31,9 +31,13 @@ nonisolated struct SimulationConfig: Codable, Sendable {
 
     // MARK: Recording geometry
 
-    /// Paper: simulations ran over 20 channels for 3 minutes at 1024 Hz.
+    /// The paper ran at 1024 Hz; the operational default is 1000 Hz. That
+    /// started as a workaround for millisecond-quantized MFF event times, which
+    /// roadmap item 4.9 fixed — every rate now round-trips exactly, so this is
+    /// an ordinary default rather than a constraint. Use
+    /// scenarios/paper-default.json for the exact published sampling rate.
     var channelCount: Int = 20
-    var samplingRate: Double = 1024
+    var samplingRate: Double = 1000
     var durationSeconds: Double = 180
     var seed: UInt64 = 20_260_821
 
@@ -42,7 +46,7 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// the clock-offset model meaningful: the drift below is a fraction of an
     /// output sample per TR, so the continuous artifact has to exist at a finer
     /// resolution than the output grid for that shift to be representable.
-    /// 64 puts the timing quantum at ~15 µs (at 1024 Hz out), well under the
+    /// 64 puts the timing quantum at 15.625 µs (at 1000 Hz out), well under the
     /// 152 µs/s drift.
     var artifactOversampleFactor: Int = 64
 
@@ -78,6 +82,36 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// makes their reported SNRs comparable to ours. The generated EEG is
     /// scaled by one global factor to hit this.
     var eegTargetStdMicrovolts: Double = 10.9
+
+    /// The published Grouiller model remains the default. Dipoles are opt-in so
+    /// the original benchmark continues to reproduce the paper.
+    var eegGenerationModel: EEGGenerationModel = .grouiller
+    var dipoleSourceCount: Int = 7
+    var dipoleSourceRadiusFraction: Double = 0.85
+    var dipoleOrientationPattern: DipoleOrientationPattern = .mixed
+    /// Legacy field retained for older scenarios. `recordingReference`, when
+    /// present, supersedes it and applies to every additive signal layer.
+    var dipoleReference: EEGReference = .average
+    var recordingReference: EEGReference? = nil
+    var leadFieldTerms: Int = 100
+    var sphericalHeadModel: SphericalHeadModel = .classicThreeShell
+    /// Pearson correlation imposed between S001 and S002 after independent
+    /// signals are generated within S001's configured band. Zero disables it.
+    var dipoleSourceCorrelation: Double = 0
+    /// Move S002 this many degrees from S001, transporting its orientation with
+    /// it. Zero keeps the prefix-stable catalog unchanged.
+    var dipoleNearPairSeparationDegrees: Double = 0
+    /// Rotate S001 by this many degrees during the recording. Zero is static.
+    var dipoleMotionDegrees: Double = 0
+    var dipoleMotionStartFraction: Double = 0.45
+    var dipoleMotionTransitionFraction: Double = 0.10
+
+    // MARK: Neural non-stationarity
+
+    /// Nil preserves the stationary Grouiller/paper model. The opt-in model can
+    /// independently add burst-like alpha, slow spectral dynamics, topographic
+    /// microstates, and phase-amplitude coupling.
+    var neuralNonstationarity: NeuralNonstationarityConfig? = nil
 
     // MARK: Gradient artifact
 
@@ -130,6 +164,12 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// like; this is the main handle on how hard the synthetic artifact is.
     var gradientRampSeconds: Double = 0.00015
 
+    /// Optional measured slice template. Keeping the asset reference and rate
+    /// in the Codable configuration makes scenario files and truth sidecars
+    /// describe the actual model rather than only its synthetic fallback.
+    var gradientTemplatePath: String? = nil
+    var gradientTemplateRateHz: Double? = nil
+
     // MARK: Ballistocardiogram
 
     var bcgEnabled: Bool = true
@@ -151,6 +191,35 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// Paper: phase lags between vessel pulsations over the head, modelled as a
     /// per-channel latency of SD 15 ms.
     var bcgChannelLatencySDSeconds: Double = 0.015
+
+    // The three BCG generator settings are Optional rather than defaulted, and
+    // deliberately so. Swift's synthesized `Decodable` does *not* fall back to a
+    // property's default value when a key is absent, and every scenario file
+    // ever written carries the complete configuration — so a non-optional
+    // addition here would make every existing scenario, including users' own,
+    // fail to load. `recordingReference` established this pattern for the same
+    // reason. Read them through the `effective...` accessors below.
+
+    /// How the BCG is distributed over the head.
+    ///
+    /// `.channelIndex` is the original weighting and remains the default so the
+    /// published benchmark reproduces unchanged; it is a function of channel
+    /// *index*, not electrode position, and is rank one. `.generators` places
+    /// four physical generators with real topographies — see
+    /// `BCGGeneratorModel`. Anything that turns on BCG topography or on the
+    /// artifact's spatial rank needs `.generators`.
+    var bcgSpatialModel: BCGSpatialModel? = nil
+
+    /// Static field strength in tesla. Both motional EMF and the Hall
+    /// separation are linear in B, so amplitude scales from the 3 T reference
+    /// the paper's 10-200 µV range describes. Only `.generators` uses it.
+    var bcgFieldStrengthTesla: Double? = nil
+
+    /// Beat-to-beat variation of each generator's share, independently drawn.
+    /// Because the generators differ in topography *and* delay, this makes the
+    /// composite's shape vary from beat to beat, not only its size. Zero
+    /// restores a fixed morphology.
+    var bcgMorphologyJitterFraction: Double? = nil
 
     /// Paper: automatic QRS detection jitters the recovered beat time by about
     /// 20 ms; simulations used 25 ms SD and swept 0-50 ms.
@@ -218,6 +287,31 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// How long the eyes take to reach the new position. Real saccades are
     /// 30-80 ms depending on how far they travel.
     var saccadeTransitionSeconds: Double = 0.04
+    var ocularSpatialModel: OcularSpatialModel = .heuristic
+
+    // MARK: Muscle artifact
+
+    /// Nil keeps muscular activity out of the paper/default benchmark. EMG is
+    /// deliberately opt-in because it overlaps neural beta/gamma activity and
+    /// changes the question a correction benchmark is answering.
+    var emg: EMGConfig? = nil
+    var chewing: ChewingConfig? = nil
+    var swallowing: SwallowingConfig? = nil
+    var cableMovement: CableMovementConfig? = nil
+    var sweat: SweatConfig? = nil
+
+    // MARK: Non-additive recording artifacts
+
+    var bridgedChannelPairs: [ChannelBridge]? = nil
+    var badReference: BadReferenceConfig? = nil
+    /// Symmetric amplifier rails in µV. Nil leaves the signal linear.
+    var clippingThresholdMicrovolts: Double? = nil
+
+    // MARK: Event-related potentials
+
+    /// Nil preserves the paper-default continuous EEG exactly. An ERPConfig is
+    /// a complete opt-in experimental design and component model.
+    var erp: ERPConfig? = nil
 
     // MARK: Recording defects
 
@@ -231,6 +325,11 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// Typical impedance of a *healthy* electrode, in kΩ. Values scatter around
     /// this; bad channels get values appropriate to their defect instead.
     var impedanceTypicalKOhm: Double = 12
+
+    /// Couples the simulated contact impedance to Johnson noise and mains
+    /// pickup. Nil restores the pre-2.2 behaviour in which impedance was only a
+    /// recorded measurement. Optional also keeps older scenario files readable.
+    var impedanceNoise: ImpedanceNoiseConfig? = ImpedanceNoiseConfig()
 
     /// Mains frequency, in Hz; 0 disables line noise. Off by default for the
     /// same reason ocular artifacts are — but it is the single most useful thing
@@ -263,6 +362,14 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     var artifactRate: Double {
         samplingRate * Double(max(1, artifactOversampleFactor))
     }
+
+    var effectiveRecordingReference: EEGReference {
+        recordingReference ?? dipoleReference
+    }
+
+    var effectiveBCGSpatialModel: BCGSpatialModel { bcgSpatialModel ?? .channelIndex }
+    var effectiveBCGFieldStrengthTesla: Double { bcgFieldStrengthTesla ?? 3.0 }
+    var effectiveBCGMorphologyJitterFraction: Double { bcgMorphologyJitterFraction ?? 0.20 }
 }
 
 /// One band-limited Gaussian source in the EEG mixture.
@@ -290,6 +397,51 @@ nonisolated struct EEGBand: Codable, Sendable {
     ]
 }
 
+nonisolated struct NeuralNonstationarityConfig: Codable, Sendable {
+    var alphaBursts: AlphaBurstConfig? = AlphaBurstConfig()
+    var spectralDynamics: SpectralDynamicsConfig? = SpectralDynamicsConfig()
+    var microstates: MicrostateConfig? = MicrostateConfig()
+    var phaseAmplitudeCoupling: PhaseAmplitudeCouplingConfig? = PhaseAmplitudeCouplingConfig()
+}
+
+nonisolated struct AlphaBurstConfig: Codable, Sendable {
+    var burstsPerMinute: Double = 12
+    var meanDurationSeconds: Double = 1.0
+    var durationSDSeconds: Double = 0.25
+    /// Fraction of the block-design alpha amplitude retained between spindles.
+    var backgroundFraction: Double = 0.05
+}
+
+nonisolated struct SpectralDynamicsConfig: Codable, Sendable {
+    /// Stationary SD of the log-amplitude Ornstein-Uhlenbeck process.
+    var logAmplitudeSD: Double = 0.35
+    var timeConstantSeconds: Double = 12
+    var updateIntervalSeconds: Double = 1
+}
+
+nonisolated struct MicrostateConfig: Codable, Sendable {
+    var stateCount: Int = 4
+    var meanDwellSeconds: Double = 0.10
+    var minimumDwellSeconds: Double = 0.04
+    var maximumDwellSeconds: Double = 0.25
+    var transitionSeconds: Double = 0.01
+    /// RMS of the added broadband carrier before the final common EEG scale.
+    var amplitudeMicrovolts: Double = 4
+    var carrierLowHz: Double = 2
+    var carrierHighHz: Double = 20
+}
+
+nonisolated struct PhaseAmplitudeCouplingConfig: Codable, Sendable {
+    var phaseFrequencyHz: Double = 6
+    var targetBandName: String = "gamma-low"
+    /// Cosine modulation depth, from 0 (none) through 1 (zero at opposition).
+    var strength: Double = 0.7
+    var preferredPhaseRadians: Double = 0
+    /// Adds a visible phase-providing oscillator to the band containing
+    /// `phaseFrequencyHz`, relative to that band's unit-RMS stochastic carrier.
+    var phaseCarrierFraction: Double = 0.25
+}
+
 
 /// How EEG channels are made spatially correlated.
 nonisolated enum SpatialModel: String, Codable, Sendable, CaseIterable {
@@ -301,6 +453,125 @@ nonisolated enum SpatialModel: String, Codable, Sendable, CaseIterable {
     /// topographic map — prefer it for demos and for anything that tests a
     /// method's use of topography.
     case geometric
+}
+
+nonisolated enum EEGGenerationModel: String, Codable, Sendable, CaseIterable {
+    case grouiller
+    case dipole
+}
+
+nonisolated enum DipoleOrientationPattern: String, Codable, Sendable, CaseIterable {
+    case radial
+    case tangential
+    case mixed
+    /// Deterministic oblique orientations with non-zero x/y/z components.
+    case free
+}
+
+nonisolated enum OcularSpatialModel: String, Codable, Sendable, CaseIterable {
+    /// Original teaching topographies: recognizable, explicitly ad hoc.
+    case heuristic
+    /// Two corneo-retinal dipoles in a homogeneous conductor, average-referenced
+    /// and normalized at the scalp. Still simplified, but physically derived.
+    case dipole
+}
+
+nonisolated struct EMGConfig: Codable, Sendable {
+    /// Mean burst count per minute. Intervals are exponentially distributed
+    /// with a refractory floor, so the activity clusters without overlapping
+    /// unrealistically at every draw.
+    var burstsPerMinute: Double = 8
+    /// RMS carrier amplitude at the strongest electrode during the plateau of
+    /// an average burst. Individual bursts vary around this value.
+    var amplitudeMicrovolts: Double = 50
+    /// Mean duration; individual bursts vary from 0.6x to 1.4x this value.
+    var burstDurationSeconds: Double = 0.75
+    /// Surface EMG is broadband and predominantly above ordinary EEG rhythms.
+    var lowHz: Double = 20
+    var highHz: Double = 200
+}
+
+nonisolated struct ChewingConfig: Codable, Sendable {
+    var episodesPerMinute: Double = 2
+    var amplitudeMicrovolts: Double = 100
+    var durationSeconds: Double = 4
+    var cycleHz: Double = 1.5
+    var lowHz: Double = 20
+    var highHz: Double = 150
+}
+
+nonisolated struct SwallowingConfig: Codable, Sendable {
+    var eventsPerMinute: Double = 2
+    var amplitudeMicrovolts: Double = 120
+    var durationSeconds: Double = 1.0
+    var lowHz: Double = 20
+    var highHz: Double = 150
+}
+
+nonisolated struct CableMovementConfig: Codable, Sendable {
+    var eventsPerMinute: Double = 2
+    var amplitudeMicrovolts: Double = 150
+    var durationSeconds: Double = 3
+    var oscillationHz: Double = 0.8
+}
+
+nonisolated struct SweatConfig: Codable, Sendable {
+    var episodesPerMinute: Double = 1
+    var amplitudeMicrovolts: Double = 100
+    var durationSeconds: Double = 15
+    var affectedChannelCount: Int = 1
+}
+
+nonisolated struct ChannelBridge: Codable, Sendable, Hashable {
+    var firstChannel: Int
+    var secondChannel: Int
+}
+
+nonisolated struct BadReferenceConfig: Codable, Sendable {
+    var amplitudeMicrovolts: Double = 50
+    var lowHz: Double = 0.2
+    var highHz: Double = 30
+}
+
+/// Physically motivated contact-noise coupling. Johnson-Nyquist voltage is
+/// calculated from temperature, resistance, and the recording's Nyquist
+/// bandwidth. Mains pickup has no equally universal closed form, so its
+/// impedance exponent and safety clamp are explicit simulation parameters.
+nonisolated struct ImpedanceNoiseConfig: Codable, Sendable {
+    var temperatureKelvin: Double = 298.15
+    /// Fixed physical reference for the phenomenological mains law. Optional
+    /// keeps early 2.2 scenario drafts (which omitted the field) readable.
+    var referenceImpedanceKOhm: Double? = 12
+    var lineNoiseImpedanceExponent: Double = 1
+    var maximumLineNoiseScale: Double = 10
+}
+
+nonisolated enum ERPWaveformKind: String, Codable, Sendable, CaseIterable {
+    case gaussian
+    case biphasic
+    case measured
+}
+
+nonisolated struct ERPConfig: Codable, Sendable {
+    var trialCount: Int = 80
+    var startSeconds: Double = 1
+    var interStimulusIntervalSeconds: Double = 1.5
+    var interStimulusJitterSeconds: Double = 0.2
+    var targetFraction: Double = 0.2
+    var peakLatencySeconds: Double = 0.3
+    var latencyJitterSDSeconds: Double = 0.03
+    /// Zero is Gaussian. Positive/negative values add a standardized quadratic
+    /// term to create right/left-skewed latency distributions.
+    var latencySkew: Double = 0
+    var targetAmplitudeMicrovolts: Double = 8
+    var standardAmplitudeRatio: Double = 0.5
+    var amplitudeJitterFraction: Double = 0.2
+    var latencyAmplitudeCorrelation: Double = 0
+    var omissionRate: Double = 0.05
+    var waveform: ERPWaveformKind = .gaussian
+    var widthSeconds: Double = 0.06
+    var measuredTemplatePath: String? = nil
+    var measuredTemplateRateHz: Double? = nil
 }
 
 /// A way for one channel to be bad. Each is something that really happens to

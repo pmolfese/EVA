@@ -23,15 +23,26 @@ swiftc -O \
   -Xcc -DACCELERATE_NEW_LAPACK \
   -framework Accelerate \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationConfig.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationScenario.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SignalSynthesis.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/Montage.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SphericalForwardModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/EEGGenerator.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/NonstationaryEEGModel.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/DipoleEEGGenerator.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/ERPGenerator.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/OcularDipoleModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/OcularArtifactModel.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/EMGArtifactModel.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/AdditionalArtifactModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/ChannelDefectModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/ImpedanceModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/GradientArtifactModel.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/BCGGeneratorModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/BCGArtifactModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SNRMetrics.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/RichMetrics.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SourceMetrics.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationWriter.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SelfTest.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/main.swift" \
