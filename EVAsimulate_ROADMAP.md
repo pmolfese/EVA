@@ -998,10 +998,27 @@ shape while shrinking amplitude; and end-to-end separation improves SNR by at
 least 1.8x at the artifact's true rank.
 
 **Still open:** **ICA-S**. It differs from PCA-S only in where the artifact
-topographies come from, so the filter machinery is already in place — but it
-needs an ICA, and a *fair* evaluation additionally depends on the
-non-stationarity work, since stationary Gaussian sources satisfy ICA's
-assumptions artificially well. Also open: the method is implemented in
+topographies come from, so the filter machinery is already in place — and the
+Gram-Schmidt step in `spatialFilter` is what makes it work, since ICA
+topographies, unlike PCA ones, are not orthogonal.
+
+The solver is nearly free: `EVA/ICA/ICAArtifactDetector.swift` is a
+`nonisolated enum` depending only on Accelerate, Foundation and `MFFSignalData`,
+all of which EVASimulate already links, and Extended Infomax — the paper's
+algorithm — is among its solvers.
+
+What is missing is **component selection**, which the paper does by eye. See
+**5.4**: rather than inventing a heuristic threshold, use the simulator's known
+generator topographies to produce graded ground-truth labels and train a
+labeller that plugs into EVA's existing ICLabel infrastructure. Do not build a
+hand-rolled beat-correlation criterion first if 5.4 is being done — it is the
+heuristic 5.4 replaces.
+
+A fair evaluation also depended on the non-stationarity work, since stationary
+Gaussian sources satisfy ICA's assumptions artificially well; 1.3 has landed, so
+that is no longer a blocker — but the comparison now rests on how well our
+bursts, OU dynamics and microstates resemble real non-stationarity, which is a
+modelling assumption to state rather than assume. Also open: the method is implemented in
 EVASimulate rather than in EVA's own pipeline; porting it is a separate decision
 with a much larger surface (UI, replay, history, serialization).
 
@@ -1165,6 +1182,120 @@ their dipole model cannot be entered without it.
 
 **Effort:** medium. **Depends on:** 4.3, 5.1, 5.2, 1.3, and 3.2 for the sweep
 machinery.
+
+## 5.4 A simulator-trained BCG component labeller
+
+**Generalized by Tier 8**, which applies the same lever to ocular, muscle and
+channel artifacts. This item is the pilot: do one class end to end here before
+committing to the rest.
+
+**The idea:** use the simulator to generate the one thing component
+classification has never had — *ground-truth labels for ICA components* — and
+feed them back into EVA's existing ICLabel infrastructure as a scanner-specific
+BCG class.
+
+This is the honest way to do ICA-S's component selection. The paper picks BCG
+components by eye; an automatic substitute needs a criterion, and a criterion
+invented by hand is just a heuristic with a threshold nobody can defend.
+
+### Why the simulator can do this and real data cannot
+
+Real component labelling is supervised by *human judgement*, which is why ICLabel
+was trained on crowd-labelled components and why its labels carry that
+disagreement. The simulator has something better: it knows what it injected.
+
+After 5.1, the BCG is four generators with known topographies; after 1.1, the
+neural sources have known topographies too. So for any ICA decomposition of a
+simulated recording, each component's **true** BCG content is computable, not
+guessed: project its topography onto the span of the known BCG generators and
+onto the span of the neural sources, and the ratio is a continuous
+ground-truth "BCG-ness" — a *graded* target, not a binary label, which is
+strictly more information than any human rater can supply.
+
+That is the whole basis of the item. Everything else is machinery.
+
+### What exists already
+
+More than expected, and the integration point is clean:
+
+- **`ICLabelClassifier`** (`EVA/ICA/`) runs a Core ML model over seven classes —
+  Brain, Muscle, Eye, **Heart**, Line Noise, Channel Noise, Other — from three
+  features: an interpolated scalp image, relative PSD, and autocorrelation. It
+  returns `[Int: ICAComponentSuggestion]`.
+- **`ICAComponentAutoLabeler`** is the heuristic fallback when no Core ML model
+  is present, with hand-built scalp (dipolarity, focality), time and spectral
+  features.
+- **`ICADecomposition`** already carries `labelSuggestions`, so a new labeller
+  slots in beside these rather than replacing anything.
+- **`ICAArtifactDetector.fit`** is a `nonisolated enum` depending only on
+  Accelerate, Foundation and `MFFSignalData` — all of which EVASimulate already
+  links. Extended Infomax, the paper's algorithm, is among its solvers.
+
+**The gap worth naming:** ICLabel's "Heart" class was trained on ordinary
+cardiac contamination recorded *outside* a scanner. BCG is a different
+phenomenon — motion-induced rather than volume-conducted from the heart, an
+order of magnitude larger, with a topography set by head movement in B0 rather
+than by the cardiac dipole. There is no reason to expect the Heart class to
+transfer, and **measuring how badly it transfers is itself a result** the
+simulator can produce before any new model is trained.
+
+### Sketch
+
+1. **Score ICLabel as it stands.** Run `ICAArtifactDetector.fit` over simulated
+   recordings, compute the graded truth above, and ask how well the existing
+   Heart probability ranks the genuinely BCG components. Cheap, and it decides
+   whether the rest of the item is needed or merely nice.
+2. **Add beat-locked features**, which is what the existing feature sets lack and
+   what the paper's human rater was actually using: the component's
+   beat-triggered average, its spatio-temporal self-consistency across beats
+   (`SurrogateSeparation.spatioTemporalCorrelation` already does this), and its
+   relationship to the ECG channel the simulator emits. All computable from
+   *detected* QRS times, so nothing depends on ground truth at inference.
+3. **Fit a classifier** on generated corpora spanning field strength, montage,
+   BCG amplitude, and the generator mix — the parameters 5.1 made explicit.
+   Keep it small and inspectable; a logistic model over a handful of named
+   features is defensible in a methods section in a way a black box is not.
+4. **Deliver it as an `ICAComponentSuggestion` producer**, so it works
+   everywhere ICLabel already does, and ICA-S gets its component selection for
+   free.
+5. **Close the loop**: feed the labeller's selections back into 5.2's spatial
+   filter and score with 5.3's criteria. That is the "back and forth" — the
+   classifier is judged by whether the *correction* improves, not by
+   classification accuracy on its own.
+
+### The circularity, stated plainly
+
+A classifier trained on simulated BCG learns **our BCG model**, not BCG. If the
+four generators are wrong in some respect, the classifier inherits the error and
+then looks confident about it — and it would keep scoring well against the
+simulator that taught it.
+
+This is the same trap 2.2 flags for impedance-based channel rejection, and it
+needs the same discipline:
+
+- Treat simulator-derived thresholds as a **prior to be tested on real data**,
+  never as a validated result.
+- Hold out generator configurations at training time and report performance on
+  the held-out ones, not on the ones fitted.
+- **3.3 (measured template library) becomes load-bearing here.** A classifier
+  validated against measured BCG templates from real scanners is evidence; one
+  validated only against its own training model is an assertion.
+- State in any write-up which BCG model produced the training corpus, with its
+  parameters — `sim_truth.json` already records all of them.
+
+### Effort and sequencing
+
+**Effort:** medium. Step 1 is small and worth doing on its own. Steps 2-4 are the
+substance. Step 5 is nearly free once 5.2 and 5.3 exist, which they do.
+
+**Depends on:** 5.1 (known generator topographies — without them there is no
+graded truth), 1.3 (complete), and 5.2/5.3 for the closing loop. **Wants:** 3.3
+for external validation, and Tier 7's corpus machinery, which is why this sits
+after the 7.1-7.2 slice.
+
+**Supersedes:** the hand-rolled beat-correlation criterion sketched in 5.2's
+ICA-S notes. If this item is being done, do not build that first — it would be
+the heuristic this replaces.
 
 ---
 
@@ -1510,29 +1641,177 @@ is settled will need rewriting anyway.
 
 ---
 
+# Tier 8 — simulator-supervised component labelling
+
+Generalizes 5.4 from the BCG to artifact classification as a whole.
+
+**The observation that makes it worth a tier:** EVASimulate already generates
+**six of ICLabel's seven classes**, and knows the topography of each.
+
+| ICLabel class | EVASimulate source | Ground truth quality |
+| --- | --- | --- |
+| Brain | 1.1 dipole sources | **Derived** — three-shell forward model |
+| Eye | Ocular dipoles (2.1) | **Derived** — dipole field, approximate eye centres |
+| Heart | BCG generators (5.1) | **Derived + modelled** — see 5.1's split |
+| Muscle | EMG/chewing/swallowing (2.1) | **Modelled** — fixed regions, controlled carriers |
+| Line Noise | Mains model (2.1) | Trivially known per-channel gains |
+| Channel Noise | Defects, bridging, bad reference (2.1) | Trivially known |
+| Other | — | Not modelled |
+
+So for any ICA decomposition of a simulated recording, every component's true
+class membership is computable by projecting its topography onto each known
+subspace — and it comes out **graded**, not binary, which is more information
+than a human rater can give. That is the same lever as 5.4, applied across the
+board.
+
+## 8.0 What I would not do
+
+Stated first, because the failure modes here are more attractive than the
+successes.
+
+- **Do not report aggregate accuracy.** It will be dominated by the easy classes
+  and will hide failure on the hard ones. Line noise is identifiable from one
+  spectral peak; a single bad channel produces a component with a
+  one-electrode topography that any rule finds. A classifier scoring 95%
+  overall while failing to separate muscle from gamma is worse than useless,
+  because the 95% is what gets quoted. **Per-class, always.**
+- **Do not train a large model.** Simulated data is unlimited, which makes
+  over-parameterization easy and its consequence invisible: the model learns the
+  simulator, scores beautifully against the simulator, and transfers poorly. A
+  small model over named features is defensible in a methods section; a black box
+  trained on synthetic data is not.
+- **Do not try to replace ICLabel.** Produce `ICAComponentSuggestion`s that
+  compose with it, the way `ICAComponentAutoLabeler` already does.
+- **Do not treat the classes as equally well-founded.** See 8.2.
+
+## 8.1 Benchmark the labellers we already have — do this first
+
+Before training anything, score **ICLabel** and **`ICAComponentAutoLabeler`**
+against graded truth on simulated recordings, per class.
+
+This is cheap, it needs no new model, and it is a result on its own: nobody has a
+per-class, graded-truth benchmark for these labellers, because nobody else can
+make one. It also decides how much of the rest of the tier is warranted — if the
+existing labellers are already strong on ocular and weak only on Heart, then 5.4
+is the whole job and Tier 8 collapses to a paragraph.
+
+Expect the Heart class to do poorly: it was trained on cardiac contamination
+recorded *outside* a scanner, and BCG is a different phenomenon (see 5.4).
+
+**Effort:** small. **Do this before committing to anything else here.**
+
+## 8.2 Priority follows provenance, not convenience
+
+The reliability of a simulator-trained classifier inherits the reliability of the
+generative model behind each class. That ordering is already documented in the
+README's "what comes from the paper and what does not" split, and it should drive
+the order of work:
+
+1. **Ocular** — highest value after BCG. Dipole topographies, a genuinely
+   distinct spatial signature, and the class where a mislabel costs the most,
+   because removing a frontal component takes real frontal EEG with it.
+2. **Heart/BCG** — 5.4, already scoped.
+3. **Muscle** — valuable but the most hazardous. The README already states that
+   EMG uses fixed source regions and controlled carrier families, with no
+   motor-unit recruitment or subject-specific anatomy. Real EMG is heterogeneous,
+   and that heterogeneity is precisely why it is the hardest class for existing
+   labellers. A classifier trained on our EMG learns a stereotype. Worth doing,
+   worth labelling clearly as a lower-confidence class, and worth validating
+   against real data before anyone relies on it.
+4. **Line Noise and Channel Noise** — low priority. Existing heuristics already
+   handle them, and the simulator would mostly be teaching the easy case. Useful
+   as *negative controls* in the benchmark rather than as targets.
+
+## 8.3 The figure nobody else can produce: controlled overlap
+
+The interesting question in component labelling is not the clean cases, it is the
+overlapping ones — a component that is part muscle and part gamma, or part blink
+and part frontal delta. Real labelled datasets cannot vary that: whatever overlap
+the recording happened to contain is what you get, and the human labels are least
+reliable exactly there.
+
+The simulator can dial it continuously — 4.4's shared-band machinery,
+`--dipole-near-pair-separation`, EMG band edges against the neural gamma band,
+ocular amplitude against frontal source amplitude — and knows the answer at every
+setting.
+
+**Classifier performance as a function of controlled brain/artifact overlap** is
+the deliverable of this tier. It says where a labeller stops working, which is
+what a user actually needs to know, and it is not obtainable any other way.
+
+## 8.4 A second use: ICA identifiability itself
+
+The same corpora answer a question 1.1 raised and nothing has used yet. The true
+source count is known — neural dipoles plus BCG generators plus ocular plus
+muscle regions — so the simulator can generate the cases where unmixing must
+fail: more sources than channels, two sources with near-identical topographies,
+sources that move (1.1 already supports all three).
+
+Scoring *decomposition* quality rather than *labelling* quality, with
+`SourceMetrics.recoveryScore`, is nearly free once the corpora exist, and it
+tells you whether a mislabel was the labeller's fault or whether ICA never
+recovered the component in the first place. Those are different problems and are
+routinely confused.
+
+## 8.5 The circularity discipline, inherited from 5.4
+
+Everything 5.4 says applies here and matters more, because the weaker generative
+models are in this tier:
+
+- Hold out generator configurations; report on the held-out ones.
+- Treat simulator-derived thresholds as a prior to test on real data.
+- **3.3 (measured template library) is load-bearing**, and for muscle it is close
+  to mandatory.
+- Record which model version produced each corpus. `sim_truth.json` already
+  carries the complete configuration.
+
+## Effort and sequencing
+
+**Effort:** 8.1 small; 8.2-8.3 medium; 8.4 small once the corpora exist.
+
+**Depends on:** Tier 7's corpus machinery, and 5.4 as the pilot — do one class
+end to end before generalizing. **Wants:** 3.3 for external validation.
+
+**Note:** the deliverable lands in `EVA/ICA/` rather than in the simulator, which
+makes this the first item where the simulator's main product is a *feature of
+EVA* rather than a measurement. That is a good sign for the tool, and a reason to
+keep the training corpora and their provenance under version control alongside
+the model.
+
+---
+
 # Suggested order
 
 For the stated goal of supporting methods papers. **Tiers 1, 2 and 4 are now
 complete** (4.1 and 4.2 subsumed by 5.1). Tier 5 is complete apart from ICA-S
 and the localization criterion, which waits on Tier 6.
 
-1. ~~**4.3 placeable ERP dipoles**~~ — done 2026-08-22, together with 4.5a's
-   convergence-check follow-up. `scenarios/aep-bilateral.json` now carries the
-   paper's dipole model.
-2. ~~**Finish 5.3**~~ — done 2026-08-22, except dipole localization error, which
-   needs the inverse solver from 6.1-6.2.
-3. **7.1-7.2, first slice only** — one scenario, one processing script, one
-   floor, one watermark entry, green in CI. Out of order on purpose: it is the
-   only item that pays off on *every* later commit, and the locked-clock
-   gradient case has an analytically known expected value to anchor it. Do not
-   build the whole corpus yet; settle the assertion policy first.
-4. ~~**5.1 physically-generated BCG**~~ — done 2026-08-21, closing 4.1 and 4.2.
-5. **7.3-7.5** — the rest of the corpus and the GitHub Actions staging, once the
-   policy from step 2 has proven itself on one entry.
-6. **3.2 comparison harness** — unblocked now that 4.9 is fixed, and mostly a
+**Done in this pass:** 4.1-4.9 (4.1/4.2 subsumed by 5.1), 5.1, 5.2 for PCA-S,
+and 5.3 apart from dipole localization error.
+
+**Next:**
+
+1. **7.1-7.2, first slice only** — one scenario, one processing script, one
+   floor, one watermark entry, green in CI. First on purpose: it is the only
+   item that pays off on *every* later commit, and the locked-clock gradient
+   case has an analytically known expected value to anchor it. Do not build the
+   whole corpus yet; settle the assertion policy first.
+2. **8.1 benchmark the labellers we already have** — score ICLabel and
+   `ICAComponentAutoLabeler` against graded truth, per class. Small, needs no new
+   model, and it is a result nobody else can produce. Do it before committing to
+   5.4 or the rest of Tier 8: if the existing labellers turn out to be strong
+   everywhere except Heart, then 5.4 is the whole job and Tier 8 collapses.
+3. **5.4 simulator-trained BCG component labelling** — the pilot for Tier 8 and
+   the interesting way to finish ICA-S. One class end to end before
+   generalizing. Sits here because it wants Tier 7's corpus machinery.
+4. **7.3-7.5** — the rest of the corpus and the GitHub Actions staging, once the
+   assertion policy from step 1 has proven itself on one entry.
+   **Tier 8 proper (8.2-8.4)** follows here, once 5.4 has shown one class works
+   end to end.
+5. **3.2 comparison harness** — unblocked now that 4.9 is fixed, and mostly a
    reporting layer over Tier 7's machinery by this point.
-7. **ICA-S** (5.2) — the last piece of the Rusiniak comparison. Needs an ICA;
-   1.3 has landed, so a fair evaluation of it is now possible.
+6. **ICA-S** (5.2) — the last piece of the Rusiniak comparison, and mostly
+   assembly once 5.4 supplies the component selection.
 
 **Tier 6 is deliberately deferred.** It is a capability that would later support
 a paper; Tier 5 is the paper. The one exception worth pulling forward is **6.1**,
