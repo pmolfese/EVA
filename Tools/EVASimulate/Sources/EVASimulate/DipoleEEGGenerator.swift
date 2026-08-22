@@ -58,6 +58,16 @@ nonisolated enum SimulationSeedStreams {
     static func erpOnsetJitter(base: UInt64) -> UInt64 {
         mixed(base, domain: 0xE2F0_0151_E2F0_0151)
     }
+    /// One latency and one amplitude stream per explicitly placed ERP
+    /// component. Components of a real complex do not jitter together, and
+    /// separate streams also mean adding a component cannot move the trials of
+    /// the components already there.
+    static func erpComponentLatency(base: UInt64, index: Int) -> UInt64 {
+        mixed(base, domain: 0xE2F0_C01A_7E00_0001, index: UInt64(index))
+    }
+    static func erpComponentAmplitude(base: UInt64, index: Int) -> UInt64 {
+        mixed(base, domain: 0xE2F0_C0AA_9000_0002, index: UInt64(index))
+    }
     static func erpOmission(base: UInt64) -> UInt64 {
         mixed(base, domain: 0xE2F0_0A17_E2F0_0A17)
     }

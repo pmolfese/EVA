@@ -356,8 +356,11 @@ nonisolated enum EEGAnalysisEngine {
             let windowSeconds = max(source.windowSizeSeconds, 0.001)
             for event in source.events {
                 let halfWindow = windowSeconds / 2
-                let startSeconds = event.beginTimeSeconds - halfWindow
-                let endSeconds = event.beginTimeSeconds + halfWindow
+                // Centred on the event's own centre, which for an onset-stamped
+                // source is not `beginTimeSeconds` — that put the flagged
+                // interval half a window early for Topography/Continuous events.
+                let startSeconds = event.centerTimeSeconds - halfWindow
+                let endSeconds = event.centerTimeSeconds + halfWindow
                 let start = min(max(Int((startSeconds * signal.samplingRate).rounded(.down)), 0), sampleCount - 1)
                 let end = min(max(Int((endSeconds * signal.samplingRate).rounded(.up)), start), sampleCount - 1)
                 intervals.append(

@@ -141,6 +141,31 @@ nonisolated struct MFFSignalData: Sendable {
         )
     }
 
+    /// Replaces the event list on an unchanged timeline.
+    ///
+    /// For re-stamping events without touching samples — applying the user's
+    /// event-anchor rules at load, or reapplying them after the rules change.
+    func replacingEvents(_ newEvents: [MFFEvent]) -> MFFSignalData {
+        MFFSignalData(
+            dataRevision: dataRevision,
+            signalURL: signalURL,
+            signalType: signalType,
+            numberOfChannels: numberOfChannels,
+            samplingRate: samplingRate,
+            duration: duration,
+            recordingStartTime: recordingStartTime,
+            events: newEvents,
+            data: data,
+            channelNames: channelNames,
+            epochSegments: epochSegments,
+            isSegmented: isSegmented,
+            isAveraged: isAveraged,
+            isGrandAverage: isGrandAverage,
+            impedancesKOhm: impedancesKOhm,
+            positiveUpFlags: positiveUpFlags
+        )
+    }
+
     /// Builds a new timeline while retaining only source/channel metadata. Every
     /// time-dependent field must be supplied explicitly by the caller.
     func reconstructingTimeline(
@@ -181,6 +206,63 @@ nonisolated struct MFFSignalData: Sendable {
     }
 }
 
+/// Which instant of an event `MFFEvent.beginTimeSeconds` actually names.
+///
+/// EVA's event producers disagree, unavoidably: a file format records an onset,
+/// while a matched-filter or peak detector naturally reports the middle of what
+/// it found. Rather than have each reader guess from context — which is what
+/// EVA used to do, by matching on `sourceFile` prefixes at three separate call
+/// sites — every event now carries the answer, stamped once by whoever created
+/// it. Read the derived `onsetTimeSeconds` / `centerTimeSeconds` / `spanSeconds`
+/// instead of interpreting `beginTimeSeconds` yourself.
+nonisolated enum EventTimeAnchor: String, Codable, Sendable, CaseIterable, Hashable {
+    /// `beginTimeSeconds` is the event's start; its span runs forward from there.
+    /// The convention of every file format EVA reads, and of MFF's own
+    /// onset+duration pair.
+    case onset
+    /// `beginTimeSeconds` is the midpoint of the event's span.
+    case center
+    /// `beginTimeSeconds` is a measured extremum (an R peak, a blink apex) and
+    /// the duration is the deflection's width *around* it. Geometrically
+    /// identical to `.center`; kept distinct so the UI can say "Peak" where
+    /// that is the truer word, and so a rule that means "this detector found a
+    /// peak" is not silently conflated with "this span happens to be centered".
+    case peak
+
+    /// Whether `beginTimeSeconds` sits at the middle of the span rather than its
+    /// start. The only distinction that affects geometry — `.peak` and
+    /// `.center` are the same shape and differ only in what the UI calls them.
+    var isCentered: Bool { self != .onset }
+
+    /// How the event detail popover should label `beginTimeSeconds`.
+    var timeFieldLabel: String {
+        switch self {
+        case .onset: return "Onset"
+        case .center: return "Center"
+        case .peak: return "Peak"
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .onset: return "Onset"
+        case .center: return "Centered"
+        case .peak: return "Peak"
+        }
+    }
+
+    /// A full sentence fragment for the event popover's Anchor row: names the
+    /// anchor and says what it means for the marker, since "Centered" alone
+    /// does not tell you the flag sits at the middle of the span.
+    var detailDescription: String {
+        switch self {
+        case .onset: return "Onset — marker at the start"
+        case .center: return "Centered — marker at the middle"
+        case .peak: return "Peak — marker at the measured peak"
+        }
+    }
+}
+
 nonisolated struct MFFEvent: Identifiable, Hashable, Sendable, Codable {
     let id: String
     let code: String
@@ -193,6 +275,10 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable, Codable {
     /// Event duration in seconds, when the source records one (MFF `<duration>`
     /// is stored in microseconds). `nil` for instantaneous / unspecified events.
     let durationSeconds: Double?
+    /// Which instant of the event `beginTimeSeconds` names. See
+    /// `EventTimeAnchor`. Defaults to `.onset` — the file-format convention —
+    /// so a producer that does not think about this gets the safe answer.
+    let timeAnchor: EventTimeAnchor
 
     init(
         id: String,
@@ -203,7 +289,8 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable, Codable {
         beginTimeSeconds: Double,
         rawBeginTime: String,
         sourceFile: String,
-        durationSeconds: Double? = nil
+        durationSeconds: Double? = nil,
+        timeAnchor: EventTimeAnchor = .onset
     ) {
         self.id = id
         self.code = code
@@ -214,12 +301,124 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable, Codable {
         self.rawBeginTime = rawBeginTime
         self.sourceFile = sourceFile
         self.durationSeconds = durationSeconds
+        self.timeAnchor = timeAnchor
     }
 
     private static func nonEmpty(_ value: String?) -> String? {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             ? value?.trimmingCharacters(in: .whitespacesAndNewlines)
             : nil
+    }
+
+    // MARK: - Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case code
+        case label
+        case eventDescription
+        case cell
+        case beginTimeSeconds
+        case rawBeginTime
+        case sourceFile
+        case durationSeconds
+        case timeAnchor
+    }
+
+    /// Decodes, filling in `timeAnchor` for files written before it existed.
+    ///
+    /// The fill-in deliberately is *not* the `.onset` default the initializer
+    /// uses. `eva_artifacts.json` payloads written by earlier builds contain
+    /// events from center-stamping detectors, and defaulting those to `.onset`
+    /// would move every cleaning window half a duration late on reload — a
+    /// silent numerical regression in replayed results. Instead the legacy sniff
+    /// those builds performed at read time is replayed once here, so an old file
+    /// decodes to exactly the geometry it had before.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let sourceFile = try container.decode(String.self, forKey: .sourceFile)
+        self.init(
+            id: try container.decode(String.self, forKey: .id),
+            code: try container.decode(String.self, forKey: .code),
+            label: try container.decodeIfPresent(String.self, forKey: .label),
+            eventDescription: try container.decodeIfPresent(String.self, forKey: .eventDescription),
+            cell: try container.decodeIfPresent(String.self, forKey: .cell),
+            beginTimeSeconds: try container.decode(Double.self, forKey: .beginTimeSeconds),
+            rawBeginTime: try container.decode(String.self, forKey: .rawBeginTime),
+            sourceFile: sourceFile,
+            durationSeconds: try container.decodeIfPresent(Double.self, forKey: .durationSeconds),
+            timeAnchor: try container.decodeIfPresent(EventTimeAnchor.self, forKey: .timeAnchor)
+                ?? Self.legacyAnchor(forSourceFile: sourceFile)
+        )
+    }
+
+    /// The anchor EVA used to infer from `sourceFile` before `timeAnchor` was
+    /// stored. Exists solely to read payloads written by those builds and must
+    /// never gain a new case — new sources stamp themselves.
+    ///
+    /// The old rule, from `MFFEvent.centerTimeSeconds`: single-map Topography
+    /// and Continuous-scan topography stamped the true onset; every other
+    /// detector stamped the center.
+    private static func legacyAnchor(forSourceFile sourceFile: String) -> EventTimeAnchor {
+        if sourceFile.hasPrefix("Topography") || sourceFile.hasPrefix("Continuous") {
+            return .onset
+        }
+        return .center
+    }
+}
+
+extension MFFEvent {
+    /// The event's start, whatever `beginTimeSeconds` happens to name.
+    ///
+    /// For an anchor-less event (no duration) every instant coincides, so this
+    /// is `beginTimeSeconds` regardless of anchor.
+    var onsetTimeSeconds: Double {
+        guard timeAnchor.isCentered, let duration = durationSeconds else { return beginTimeSeconds }
+        return beginTimeSeconds - duration / 2
+    }
+
+    /// The event's midpoint.
+    ///
+    /// Every place that needs "the middle of this event" — cleaning windows,
+    /// OBS alignment search, averaged-template previews, the waveform highlight
+    /// band — should read this rather than `beginTimeSeconds`, or it will centre
+    /// on the wrong sample for onset-stamped sources.
+    var centerTimeSeconds: Double {
+        guard !timeAnchor.isCentered, let duration = durationSeconds else { return beginTimeSeconds }
+        return beginTimeSeconds + duration / 2
+    }
+
+    /// The event's end.
+    var endTimeSeconds: Double {
+        onsetTimeSeconds + (durationSeconds ?? 0)
+    }
+
+    /// The interval the event covers, or `nil` when it records no duration and
+    /// is therefore a point in time rather than a span.
+    var spanSeconds: ClosedRange<Double>? {
+        guard let duration = durationSeconds, duration > 0 else { return nil }
+        let start = onsetTimeSeconds
+        return start...(start + duration)
+    }
+
+    /// A copy of this event re-anchored, keeping `beginTimeSeconds` where it is.
+    ///
+    /// This *reinterprets* the stored instant rather than moving it, which is
+    /// what applying a user rule means: the sample never changed, only EVA's
+    /// understanding of which part of the event it marks.
+    func reanchored(to anchor: EventTimeAnchor, durationSeconds newDuration: Double? = nil) -> MFFEvent {
+        MFFEvent(
+            id: id,
+            code: code,
+            label: label,
+            eventDescription: eventDescription,
+            cell: cell,
+            beginTimeSeconds: beginTimeSeconds,
+            rawBeginTime: rawBeginTime,
+            sourceFile: sourceFile,
+            durationSeconds: newDuration ?? durationSeconds,
+            timeAnchor: anchor
+        )
     }
 }
 

@@ -25,14 +25,14 @@ import SwiftUI
 @Observable
 final class WaveletArtifactExplorerViewModel {
     /// `sourceFile` stamped on every `MFFEvent` built from a scan candidate.
-    /// Starts with "Continuous" so `MFFEvent.centerTimeSeconds` uses the
-    /// onset+duration/2 convention (candidates carry a genuine start/end, not
-    /// a pre-centered peak) — see `ArtifactCleaner.swift`'s `MFFEvent`
-    /// extension for the two coexisting conventions. Also special-cased in
-    /// `isCenteredArtifactDetectionEvent` so the waveform draws the duration
-    /// highlight band as soon as a scan finds candidates, before any cleaning
-    /// has been applied.
-    static let candidateSourceFile = "Continuous Wavelet Explorer"
+    ///
+    /// Provenance only — used to tell this VM's own display events apart from
+    /// every other source when refreshing them. It used to have to begin with
+    /// "Continuous" so the old `sourceFile`-sniffing geometry gave candidates
+    /// the onset+duration reading they need; candidates now stamp
+    /// `EventTimeAnchor.onset` directly, so the string is free to say what it
+    /// means.
+    static let candidateSourceFile = "Wavelet Explorer"
 
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).

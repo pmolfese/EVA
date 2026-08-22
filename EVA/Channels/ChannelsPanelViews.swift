@@ -323,21 +323,21 @@ extension WaveformView {
 
     /// Content-space x bounds of the tapped artifact's window.
     ///
-    /// Uses `centerTimeSeconds` (not `beginTimeSeconds`): Topography/Continuous
-    /// events stamp their true onset rather than their center, so centering the
-    /// band on `beginTimeSeconds` would draw it half a duration too early for
-    /// those sources.
+    /// Reads `event.spanSeconds`, which resolves the event's own `timeAnchor`:
+    /// an onset-stamped event's span runs forward from its marked sample, a
+    /// centered or peak-stamped one's straddles it. Deriving the span from
+    /// `beginTimeSeconds` here instead would draw the band half a duration off
+    /// for one convention or the other.
     private func artifactHighlightRange(in signal: MFFSignalData) -> ClosedRange<CGFloat>? {
         guard let event = highlightedArtifactEvent,
-              let duration = event.durationSeconds, duration > 0,
+              let span = event.spanSeconds,
               signal.samplingRate > 0,
               let sampleCount = signal.data.first?.count, sampleCount > 0 else {
             return nil
         }
 
-        let halfWindow = duration / 2
-        let startSample = Int(((event.centerTimeSeconds - halfWindow) * signal.samplingRate).rounded())
-        let endSample = Int(((event.centerTimeSeconds + halfWindow) * signal.samplingRate).rounded())
+        let startSample = Int((span.lowerBound * signal.samplingRate).rounded())
+        let endSample = Int((span.upperBound * signal.samplingRate).rounded())
         let lower = min(max(startSample, 0), sampleCount - 1)
         let upper = min(max(endSample, lower + 1), sampleCount)
         return contentX(forSample: lower, in: signal)...contentX(forSample: upper, in: signal)

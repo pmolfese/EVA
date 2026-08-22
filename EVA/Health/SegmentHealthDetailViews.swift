@@ -121,12 +121,15 @@ extension WaveformView {
             for event in artifact.events {
                 definedEvents.insert(event)
                 let halfWindow = windowSeconds / 2
+                // `centerTimeSeconds`, not `beginTimeSeconds`: the window is
+                // centred on the event, and an onset-stamped one is not centred
+                // on its own mark.
                 windows.append((
                     id: "\(artifact.id.uuidString)-\(event.id)",
                     code: event.code,
                     sourceFile: artifact.name,
-                    startSeconds: event.beginTimeSeconds - halfWindow,
-                    endSeconds: event.beginTimeSeconds + halfWindow
+                    startSeconds: event.centerTimeSeconds - halfWindow,
+                    endSeconds: event.centerTimeSeconds + halfWindow
                 ))
             }
         }
@@ -137,8 +140,8 @@ extension WaveformView {
                 id: event.id,
                 code: event.code,
                 sourceFile: event.sourceFile,
-                startSeconds: event.beginTimeSeconds - halfWindow,
-                endSeconds: event.beginTimeSeconds + halfWindow
+                startSeconds: event.centerTimeSeconds - halfWindow,
+                endSeconds: event.centerTimeSeconds + halfWindow
             ))
         }
 

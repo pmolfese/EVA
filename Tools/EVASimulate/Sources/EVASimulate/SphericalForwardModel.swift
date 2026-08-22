@@ -212,13 +212,42 @@ nonisolated enum SphericalForwardModel {
     /// Computes the oriented gain matrix once. Sensor positions are projected
     /// onto the outer shell because the current Montage is angular geometry on
     /// a unit sphere; the physical radius belongs to the head model.
+    /// - Parameter verifyConvergence: when true, checks the truncated series at
+    ///   the configured eccentricity and throws if it has not converged.
+    ///
+    ///   `runGenerate` checks convergence once for the neural sources, which
+    ///   used to cover every call site — but only because every source shared
+    ///   one radius fraction, and truncation error depends on r/R. Roadmap 4.3
+    ///   ends that: an explicitly placed ERP dipole can sit at any depth. Call
+    ///   sites that accept arbitrary positions should ask for the check here so
+    ///   it travels with them.
     static func leadField(
         head: SphericalHeadModel,
         montage: Montage,
         sources: [SimulatedSource],
         reference: EEGReference,
-        terms: Int
+        terms: Int,
+        verifyConvergence: Bool = false
     ) throws -> LeadField {
+        if verifyConvergence {
+            let report = try convergenceReport(
+                head: head, montage: montage, sources: sources,
+                reference: reference, terms: terms
+            )
+            guard report.converged else {
+                throw SphericalForwardError.invalid(
+                    String(
+                        format: "lead field has not converged: %.4g relative change between "
+                            + "%d and %d terms (%@ %@ axis, tolerance %.4g). "
+                            + "Increase --lead-field-terms or move the source away from the "
+                            + "brain-shell boundary.",
+                        report.maximumRelativeColumnChange, report.terms,
+                        report.comparisonTerms, report.worstSourceID ?? "unknown",
+                        report.worstOrientationAxis ?? "?", report.tolerance
+                    )
+                )
+            }
+        }
         if let error = head.validationError() { throw SphericalForwardError.invalid(error) }
         guard terms >= 1 else { throw SphericalForwardError.invalid("series needs at least one term") }
 

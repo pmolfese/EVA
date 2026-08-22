@@ -317,7 +317,8 @@ nonisolated enum RecordingCombiner {
                     beginTimeSeconds: event.beginTimeSeconds + offsetSeconds,
                     rawBeginTime: event.rawBeginTime,
                     sourceFile: input.url.lastPathComponent,
-                    durationSeconds: event.durationSeconds
+                    durationSeconds: event.durationSeconds,
+                    timeAnchor: event.timeAnchor
                 )
             })
             for seg in input.segments {

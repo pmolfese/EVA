@@ -171,7 +171,8 @@ nonisolated enum EyeArtifactThresholdDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: sourceFile,
-                durationSeconds: windowSeconds
+                durationSeconds: windowSeconds,
+                timeAnchor: .peak
             )
         }
     }

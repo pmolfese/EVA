@@ -34,6 +34,7 @@ final class ProcessingDefaults {
         static let filterNotch60 = "filterNotch60"
         static let filterAverageReference = "filterAverageReference"
         static let filterDefaultFamily = "filterDefaultFamily"
+        static let filterDefaultPreset = "filterDefaultPreset"
         static let icaMethod = "icaMethod"
         static let icaComponentCount = "icaComponentCount"
         static let bcgAutoSelectProxySet = "bcgAutoSelectProxySet"
@@ -59,6 +60,9 @@ final class ProcessingDefaults {
         static let filterNotch60 = false
         static let filterAverageReference = false
         static let filterDefaultFamily = FilterFamily.iir.rawValue
+        /// Empty means "no preset" — a newly-opened recording keeps EVA's own
+        /// per-field defaults rather than being configured like another package.
+        static let filterDefaultPreset = ""
         static let icaMethod = ICAMethod.picard
         static let icaComponentCount = 20
         static let bcgAutoSelectProxySet = false
@@ -99,6 +103,14 @@ final class ProcessingDefaults {
     var filterDefaultFamily: String {
         get { UserDefaults.standard.string(forKey: Keys.filterDefaultFamily) ?? Defaults.filterDefaultFamily }
         set { UserDefaults.standard.set(newValue, forKey: Keys.filterDefaultFamily) }
+    }
+
+    /// `FilterApproximationPreset.rawValue` applied to each newly-opened
+    /// recording, or empty for none. A lab that always filters the EEGLAB way
+    /// should not have to pick it per file.
+    var filterDefaultPreset: String {
+        get { UserDefaults.standard.string(forKey: Keys.filterDefaultPreset) ?? Defaults.filterDefaultPreset }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.filterDefaultPreset) }
     }
 
     // MARK: ICA defaults

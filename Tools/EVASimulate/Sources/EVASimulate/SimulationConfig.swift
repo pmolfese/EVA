@@ -572,6 +572,74 @@ nonisolated struct ERPConfig: Codable, Sendable {
     var widthSeconds: Double = 0.06
     var measuredTemplatePath: String? = nil
     var measuredTemplateRateHz: Double? = nil
+
+    /// Explicitly placed components. When nil, the single legacy component
+    /// described by the fields above is used, unchanged — so scenarios written
+    /// before roadmap 4.3 reproduce byte-for-byte.
+    ///
+    /// When present, these replace the single component entirely. Each carries
+    /// its own generator, waveform and per-condition amplitudes, which is what
+    /// makes published dipole models (and overlapping P1/N1/P2 complexes)
+    /// expressible at all.
+    var components: [ERPComponentConfig]? = nil
+}
+
+/// One explicitly placed ERP generator.
+///
+/// ## Coordinate frame
+///
+/// Positions and orientations are in the simulator's own frame:
+/// **+x toward the right ear, +y toward the nose, +z toward the vertex**, origin
+/// at the centre of the spherical head model, in **millimetres**. This is the
+/// same frame `Montage` uses for electrode directions and `SimulatedSource` uses
+/// for dipoles, so a position here is directly comparable to the neural sources
+/// in the truth sidecar.
+///
+/// Published models are usually stated in Talairach or MNI coordinates, whose
+/// axes match this frame's — right, anterior, superior — but whose origin is the
+/// anterior commissure rather than a sphere centre. `talairachApproximate`
+/// converts under a declared approximation; read its documentation before
+/// using it for anything that turns on absolute position.
+nonisolated struct ERPComponentConfig: Codable, Sendable {
+    var id: String = "component"
+    /// Millimetres in the simulator frame. Nil places the component the way the
+    /// legacy single-component path did, which is convenient for varying only
+    /// timing, and is recorded as such in the truth sidecar.
+    var positionMillimetres: Vector3D? = nil
+    /// Need not be normalized; it is normalized on use.
+    var orientation: Vector3D? = nil
+    var peakLatencySeconds: Double = 0.1
+    var widthSeconds: Double = 0.03
+    var waveform: ERPWaveformKind = .gaussian
+    var measuredTemplatePath: String? = nil
+    var measuredTemplateRateHz: Double? = nil
+    /// Peak source amplitude for target trials.
+    var targetAmplitudeMicrovolts: Double = 8
+    /// Multiplier applied on standard trials. A component that is genuinely
+    /// target-specific takes 0 here; one that is stimulus-driven takes 1.
+    var standardAmplitudeRatio: Double = 0.5
+    /// Per-trial latency jitter for this component. Components of a real
+    /// complex do not jitter together, which is precisely what single-trial
+    /// latency estimators are built to resolve.
+    var latencyJitterSDSeconds: Double = 0.02
+    var amplitudeJitterFraction: Double = 0.2
+
+    /// Talairach/MNI (x right, y anterior, z superior, millimetres, origin at
+    /// the anterior commissure) into the simulator frame.
+    ///
+    /// **This is an approximation and should be treated as one.** The simulator's
+    /// origin is the centre of a sphere, not the anterior commissure, and a
+    /// sphere is not a head. The AC sits below and behind a head's centroid, so
+    /// a fixed offset is applied; no scaling or shear is attempted. Positions
+    /// converted this way preserve the *relative* geometry of a published model
+    /// — which is what makes a bilateral pair bilateral — far better than they
+    /// preserve absolute anatomical location. A claim that turns on absolute
+    /// position needs a real head model, not this.
+    static func talairachApproximate(x: Double, y: Double, z: Double) -> Vector3D {
+        // Anterior commissure relative to the sphere centre, in millimetres.
+        let anteriorCommissureOffset = Vector3D(x: 0, y: 4, z: -12)
+        return Vector3D(x: x, y: y, z: z) + anteriorCommissureOffset
+    }
 }
 
 /// A way for one channel to be bad. Each is something that really happens to

@@ -1451,7 +1451,10 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         erpTopography: erp?.topography,
         erpWaveformDescription: erp?.waveformDescription,
         erpRealizedLatencyAmplitudeCorrelation: erp?.realizedLatencyAmplitudeCorrelation,
-        erpRandomSeeds: erp?.randomSeeds
+        erpRandomSeeds: erp?.randomSeeds,
+        erpComponentSources: (erp?.componentSources).flatMap { $0.isEmpty ? nil : $0 },
+        erpCoordinateFrame: erp == nil ? nil
+            : "+x right, +y anterior, +z vertex; origin at the head-model centre; millimetres"
     )
     try SimulationWriter.writeTruth(truth, to: truthURL)
 
@@ -1673,6 +1676,488 @@ func csv(_ score: CorrectionScore, baseline: CorrectionScore?) -> String {
         }
     }
     return lines.joined(separator: "\n") + "\n"
+}
+
+// MARK: - evaluate-surrogate
+
+/// Repeated-seed evaluation of surrogate separation across a swept condition.
+///
+/// Exists because single runs cannot support the comparison. Measured across
+/// five seeds at one fixed configuration, corrected broadband SNR ranged 1.39 to
+/// 2.53 — a spread wider than most of the differences anyone would want to claim
+/// between conditions. Rusiniak et al. used 55 subjects; that was not incidental
+/// generosity, it is what the variance demands.
+///
+/// Everything runs in memory: no MFF is written, so a sweep of dozens of runs
+/// costs seconds rather than minutes.
+func runEvaluateSurrogate(_ arguments: Arguments) throws {
+    try arguments.validate(known: [
+        "seeds", "offsets", "sources", "components", "brain-regularization",
+        "duration", "channels", "rate", "config", "with-erp", "json"
+    ])
+
+    let seedCount = try arguments.int("seeds") ?? 5
+    guard seedCount > 0 else { throw SimulateError.usage("--seeds must be positive") }
+    let offsets = (arguments.string("offsets") ?? "0")
+        .split(separator: ",")
+        .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+    guard !offsets.isEmpty else {
+        throw SimulateError.usage("--offsets needs at least one value, in millimetres")
+    }
+    let regionalCount = try arguments.int("sources") ?? 29
+    let componentCount = try arguments.int("components") ?? 4
+    let regularization = try arguments.double("brain-regularization") ?? 0.02
+
+    var base = SimulationConfig.default
+    if let path = arguments.string("config") {
+        base = try SimulationScenarioFile.load(from: URL(fileURLWithPath: path)).config
+    }
+    base.channelCount = try arguments.int("channels") ?? base.channelCount
+    base.samplingRate = try arguments.double("rate") ?? 250
+    base.durationSeconds = try arguments.double("duration") ?? 180
+    base.eegGenerationModel = .dipole
+    base.recordingReference = .average
+    base.bcgSpatialModel = .generators
+    base.gradientEnabled = false
+    let evaluateERP = arguments.flag("with-erp")
+    if evaluateERP, base.erp?.components == nil {
+        throw SimulateError.usage(
+            "--with-erp needs a scenario whose ERP has explicitly placed components; "
+                + "try --config scenarios/aep-bilateral.json"
+        )
+    }
+    if !evaluateERP { base.erp = nil }
+    let montage = Montage.standard(count: base.channelCount)
+
+    struct ConditionResult {
+        var offsetMillimetres: Double
+        var correctedSNR: [Double]
+        var uncorrectedSNR: [Double]
+        var nearestSourceMillimetres: [Double]
+        var acceptedBeatFraction: [Double]
+        // Rusiniak's four criteria, corrected and uncorrected.
+        var correctedTrials: [Double] = []
+        var uncorrectedTrials: [Double] = []
+        var correctedERPSNR: [Double] = []
+        var uncorrectedERPSNR: [Double] = []
+        var correctedLatencyErrorMilliseconds: [Double] = []
+        var uncorrectedLatencyErrorMilliseconds: [Double] = []
+        var correctedAmplitudeErrorFraction: [Double] = []
+        var uncorrectedAmplitudeErrorFraction: [Double] = []
+        var correctedExplainedVariance: [Double] = []
+        var uncorrectedExplainedVariance: [Double] = []
+    }
+
+    var results: [ConditionResult] = []
+    for offset in offsets {
+        var corrected: [Double] = []
+        var uncorrected: [Double] = []
+        var nearest: [Double] = []
+        var accepted: [Double] = []
+        var correctedTrialsBuffer: [Double] = []
+        var uncorrectedTrialsBuffer: [Double] = []
+        var correctedERPSNRBuffer: [Double] = []
+        var uncorrectedERPSNRBuffer: [Double] = []
+        var correctedLatencyBuffer: [Double] = []
+        var uncorrectedLatencyBuffer: [Double] = []
+        var correctedAmplitudeBuffer: [Double] = []
+        var uncorrectedAmplitudeBuffer: [Double] = []
+        var correctedVarianceBuffer: [Double] = []
+        var uncorrectedVarianceBuffer: [Double] = []
+
+        for seedIndex in 0..<seedCount {
+            var config = base
+            config.seed = UInt64(seedIndex + 1)
+
+            var clean = try DipoleEEGGenerator.generate(config: config, montage: montage).channels
+            var erpInjection: ERPInjection?
+            if evaluateERP {
+                erpInjection = try ERPGenerator.inject(
+                    into: &clean, config: config, montage: montage
+                )
+            }
+            var noisy = clean
+            var stream = GaussianSource(seed: SimulationSeedStreams.bcg(base: config.seed))
+            let bcg = BCGArtifactModel.inject(
+                into: &noisy, config: config, montage: montage, source: &stream
+            )
+            var cleanReferenced = clean
+            EEGReferencing.apply(.average, to: &cleanReferenced)
+            EEGReferencing.apply(.average, to: &noisy)
+
+            guard let components = SurrogateSeparation.artifactComponents(
+                channels: noisy,
+                samplingRate: config.samplingRate,
+                beatSeconds: bcg.detectedBeatSeconds
+            ) else { continue }
+            let brain = try SurrogateSeparation.brainModel(
+                head: config.sphericalHeadModel, montage: montage, count: regionalCount,
+                reference: .average, terms: config.leadFieldTerms, offsetMillimetres: offset
+            )
+            let filter = SurrogateSeparation.spatialFilter(
+                brain: brain,
+                artifactTopographies: Array(components.topographies.prefix(componentCount)),
+                brainRegularization: regularization
+            )
+            let output = SurrogateSeparation.apply(filter: filter, to: noisy)
+
+            func snr(_ candidate: [[Double]]) -> Double {
+                var signal = 0.0
+                var residual = 0.0
+                for channel in cleanReferenced.indices {
+                    for sample in cleanReferenced[channel].indices
+                    where sample < candidate[channel].count {
+                        let value = cleanReferenced[channel][sample]
+                        signal += value * value
+                        let error = value - candidate[channel][sample]
+                        residual += error * error
+                    }
+                }
+                return residual > 1e-30 ? (signal / residual).squareRoot() : .infinity
+            }
+            corrected.append(snr(output))
+            uncorrected.append(snr(noisy))
+            accepted.append(
+                Double(components.acceptedBeatCount) / Double(max(1, components.candidateBeatCount))
+            )
+            let simulated = DipoleEEGGenerator.makeSources(config: config)
+            nearest.append(
+                brain.sources.map { surrogate in
+                    simulated.map { (surrogate.positionMeters - $0.positionMeters).norm * 1000 }
+                        .min() ?? 0
+                }.min() ?? 0
+            )
+
+            if let erpInjection, !erpInjection.componentSources.isEmpty {
+                let onsets = erpInjection.trials.map(\.onsetSeconds)
+                let conditions = erpInjection.trials.map(\.condition)
+                let topographies = erpInjection.componentSources.map(\.topography)
+                // The paper's FWHM window, 81-114 ms, around the seeded N100.
+                let nominal = erpInjection.componentSources
+                    .map(\.nominalPeakLatencySeconds).min() ?? 0.1
+                let fwhmStart = nominal - 0.020
+                let fwhmEnd = nominal + 0.013
+                // Truth for the peak comes from the *clean* recording scored the
+                // same way, not from the nominal configuration: overlapping
+                // components and trial jitter both move the realized peak, and
+                // scoring against a number the data never had would charge every
+                // method for the simulator's own design.
+                func evaluate(_ data: [[Double]]) -> ERPEvaluationResult? {
+                    ERPEvaluation.evaluate(
+                        channels: data, samplingRate: config.samplingRate,
+                        onsets: onsets, conditions: conditions,
+                        modelTopographies: topographies,
+                        fwhmStartSeconds: fwhmStart, fwhmEndSeconds: fwhmEnd
+                    )
+                }
+                var cleanReferencedERP = clean
+                EEGReferencing.apply(.average, to: &cleanReferencedERP)
+                if let truthResult = evaluate(cleanReferencedERP),
+                   let correctedResult = evaluate(output),
+                   let uncorrectedResult = evaluate(noisy),
+                   abs(truthResult.peakAmplitudeMicrovolts) > 1e-12 {
+                    correctedTrialsBuffer.append(Double(correctedResult.acceptedTrials))
+                    uncorrectedTrialsBuffer.append(Double(uncorrectedResult.acceptedTrials))
+                    correctedERPSNRBuffer.append(correctedResult.signalToNoise)
+                    uncorrectedERPSNRBuffer.append(uncorrectedResult.signalToNoise)
+                    correctedLatencyBuffer.append(
+                        1000 * (correctedResult.peakLatencySeconds - truthResult.peakLatencySeconds)
+                    )
+                    uncorrectedLatencyBuffer.append(
+                        1000 * (uncorrectedResult.peakLatencySeconds - truthResult.peakLatencySeconds)
+                    )
+                    correctedAmplitudeBuffer.append(
+                        correctedResult.peakAmplitudeMicrovolts
+                            / truthResult.peakAmplitudeMicrovolts
+                    )
+                    uncorrectedAmplitudeBuffer.append(
+                        uncorrectedResult.peakAmplitudeMicrovolts
+                            / truthResult.peakAmplitudeMicrovolts
+                    )
+                    correctedVarianceBuffer.append(correctedResult.explainedVariance)
+                    uncorrectedVarianceBuffer.append(uncorrectedResult.explainedVariance)
+                }
+            }
+        }
+        results.append(ConditionResult(
+            offsetMillimetres: offset, correctedSNR: corrected, uncorrectedSNR: uncorrected,
+            nearestSourceMillimetres: nearest, acceptedBeatFraction: accepted,
+            correctedTrials: correctedTrialsBuffer,
+            uncorrectedTrials: uncorrectedTrialsBuffer,
+            correctedERPSNR: correctedERPSNRBuffer,
+            uncorrectedERPSNR: uncorrectedERPSNRBuffer,
+            correctedLatencyErrorMilliseconds: correctedLatencyBuffer,
+            uncorrectedLatencyErrorMilliseconds: uncorrectedLatencyBuffer,
+            correctedAmplitudeErrorFraction: correctedAmplitudeBuffer,
+            uncorrectedAmplitudeErrorFraction: uncorrectedAmplitudeBuffer,
+            correctedExplainedVariance: correctedVarianceBuffer,
+            uncorrectedExplainedVariance: uncorrectedVarianceBuffer
+        ))
+    }
+
+    func mean(_ values: [Double]) -> Double {
+        values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
+    }
+    func standardDeviation(_ values: [Double]) -> Double {
+        guard values.count > 1 else { return 0 }
+        let m = mean(values)
+        return (values.reduce(0.0) { $0 + ($1 - m) * ($1 - m) } / Double(values.count - 1))
+            .squareRoot()
+    }
+
+    if arguments.flag("json") {
+        var payload: [[String: Any]] = []
+        for result in results {
+            payload.append([
+                "offsetMillimetres": result.offsetMillimetres,
+                "correctedSNRMean": mean(result.correctedSNR),
+                "correctedSNRSD": standardDeviation(result.correctedSNR),
+                "uncorrectedSNRMean": mean(result.uncorrectedSNR),
+                "nearestSourceMillimetresMean": mean(result.nearestSourceMillimetres),
+                "acceptedBeatFractionMean": mean(result.acceptedBeatFraction),
+                "seeds": result.correctedSNR.count
+            ])
+        }
+        let data = try JSONSerialization.data(
+            withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]
+        )
+        print(String(data: data, encoding: .utf8) ?? "[]")
+        return
+    }
+
+    print("Surrogate separation, \(seedCount) seeds per condition")
+    print("  \(base.channelCount) channels, \(Int(base.samplingRate)) Hz, "
+        + "\(Int(base.durationSeconds)) s, \(regionalCount) regional sources, "
+        + "\(componentCount) artifact components")
+    print("")
+    print("  offset    corrected SNR      uncorrected   nearest src   beats kept")
+    print("  ---------------------------------------------------------------------")
+    for result in results {
+        print(String(
+            format: "  %5.0f mm   %5.2f ± %-5.2f     %5.2f         %5.1f mm      %3.0f%%",
+            result.offsetMillimetres,
+            mean(result.correctedSNR), standardDeviation(result.correctedSNR),
+            mean(result.uncorrectedSNR),
+            mean(result.nearestSourceMillimetres),
+            100 * mean(result.acceptedBeatFraction)
+        ))
+    }
+    if evaluateERP, results.contains(where: { !$0.correctedExplainedVariance.isEmpty }) {
+        print("")
+        print("  Rusiniak criteria, corrected vs uncorrected (mean ± SD over seeds)")
+        print("  ---------------------------------------------------------------------")
+        // One row per arm with its own spread. A compact corrected/uncorrected
+        // table reads well and invites precisely the mistake this command warns
+        // about — comparing two means whose spreads overlap completely.
+        print("  condition        trials kept    ERP SNR       latency err     "
+            + "amplitude      explained var")
+        func describe(_ label: String, _ result: ConditionResult, corrected: Bool) {
+            let trials = corrected ? result.correctedTrials : result.uncorrectedTrials
+            let snr = corrected ? result.correctedERPSNR : result.uncorrectedERPSNR
+            let latency = corrected
+                ? result.correctedLatencyErrorMilliseconds
+                : result.uncorrectedLatencyErrorMilliseconds
+            let amplitude = corrected
+                ? result.correctedAmplitudeErrorFraction
+                : result.uncorrectedAmplitudeErrorFraction
+            let variance = corrected
+                ? result.correctedExplainedVariance : result.uncorrectedExplainedVariance
+            print(String(
+                format: "  %-15@  %5.1f±%-4.1f  %5.2f±%-4.2f  %+5.1f±%-4.1f ms  "
+                    + "%4.2f±%-4.2f  %4.2f±%-4.2f",
+                label as NSString,
+                mean(trials), standardDeviation(trials),
+                mean(snr), standardDeviation(snr),
+                mean(latency), standardDeviation(latency),
+                mean(amplitude), standardDeviation(amplitude),
+                mean(variance), standardDeviation(variance)
+            ))
+        }
+        if let first = results.first(where: { !$0.uncorrectedExplainedVariance.isEmpty }) {
+            describe("uncorrected", first, corrected: false)
+        }
+        for result in results where !result.correctedExplainedVariance.isEmpty {
+            describe(String(format: "PCA-S %.0f mm", result.offsetMillimetres),
+                     result, corrected: true)
+        }
+        print("")
+        print("  amplitude is the recovered peak as a fraction of the same measurement on")
+        print("  the clean recording; 1.00 is undistorted. explained var is the share of")
+        print("  the averaged topography accounted for by the seeded dipole model.")
+    }
+    print("")
+    print("  The spread matters as much as the means: a difference smaller than the")
+    print("  standard deviation is not a result. Increase --seeds before concluding.")
+}
+
+// MARK: - correct
+
+/// Applies the PCA-surrogate BCG correction to a generated recording.
+///
+/// Beat times come from the recording's own event stream by default, and the
+/// default code is `QRSd` — the *detected* beats, jittered, not the true ones.
+/// That is deliberate: a correction method that quietly used ground-truth beat
+/// timing would score well for a reason no real pipeline can reproduce.
+func runCorrect(_ arguments: Arguments) throws {
+    try arguments.validate(known: [
+        "input", "output", "truth", "reference", "beat-code", "beat-times", "surrogate-sources",
+        "brain-regularization", "artifact-variance", "correlation-threshold",
+        "surrogate-offset-mm",
+        "components", "low-hz", "high-hz", "report", "json"
+    ])
+
+    guard let inputPath = arguments.string("input") else {
+        throw SimulateError.usage("correct needs --input <noisy.mff>")
+    }
+    guard let outputPath = arguments.string("output") else {
+        throw SimulateError.usage("correct needs --output <corrected.mff>")
+    }
+
+    let inputURL = URL(fileURLWithPath: inputPath)
+    let signal = try MFFReader().loadSignal(from: inputURL)
+    let channels = signal.data.map { $0.map(Double.init) }
+    guard !channels.isEmpty else { throw SimulateError.io("\(inputPath) has no channels") }
+
+    let beatCode = arguments.string("beat-code") ?? "QRSd"
+    var beats: [Double]
+    if let path = arguments.string("beat-times") {
+        let text = try String(contentsOfFile: path, encoding: .utf8)
+        beats = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" || $0 == "," })
+            .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+    } else {
+        beats = signal.events.filter { $0.code == beatCode }.map(\.beginTimeSeconds).sorted()
+    }
+    guard beats.count >= 2 else {
+        throw SimulateError.usage(
+            "no usable beat times: found \(beats.count) events with code '\(beatCode)'. "
+                + "Use --beat-code or --beat-times."
+        )
+    }
+
+    let regionalCount = try arguments.int("surrogate-sources") ?? 29
+    let regularization = try arguments.double("brain-regularization") ?? 0.02
+    let varianceThreshold = try arguments.double("artifact-variance") ?? 0.005
+    let correlationThreshold = try arguments.double("correlation-threshold") ?? 0.6
+    let lowHz = try arguments.double("low-hz") ?? 1
+    let highHz = try arguments.double("high-hz") ?? 20
+
+    guard let componentSet = SurrogateSeparation.artifactComponents(
+        channels: channels,
+        samplingRate: signal.samplingRate,
+        beatSeconds: beats,
+        lowHz: lowHz,
+        highHz: highHz,
+        correlationThreshold: correlationThreshold,
+        varianceThreshold: varianceThreshold
+    ) else {
+        throw SimulateError.io("could not build an artifact template from \(beats.count) beats")
+    }
+
+    var topographies = componentSet.topographies
+    if let requested = try arguments.int("components") {
+        guard requested > 0 else {
+            throw SimulateError.usage("--components must be positive")
+        }
+        topographies = Array(topographies.prefix(requested))
+    }
+
+    // The brain model has to be built in the *recording's* reference. Getting
+    // this wrong is not a subtle degradation: an average-referenced lead field
+    // against infinity-referenced data leaves the common mode unexplainable by
+    // the brain block, the artifact block absorbs it, and the filter removes
+    // most of the brain signal along with it. Prefer the truth sidecar, which
+    // records the convention (roadmap 4.6); fall back to the flag.
+    var reference: EEGReference = .average
+    var simulatedSources: [SimulatedSource] = []
+    if let truthPath = arguments.string("truth") {
+        let data = try Data(contentsOf: URL(fileURLWithPath: truthPath))
+        if let truth = try? JSONDecoder().decode(SimulationTruth.self, from: data) {
+            if let recorded = truth.recordingReference { reference = recorded }
+            simulatedSources = truth.sourceSpace?.sources ?? []
+        }
+    }
+    if let raw = arguments.string("reference") {
+        guard let explicit = EEGReference(rawValue: raw) else {
+            throw SimulateError.usage("unknown --reference '\(raw)'; expected average or infinity")
+        }
+        reference = explicit
+    }
+
+    let montage = Montage.standard(count: channels.count)
+    let head = SphericalHeadModel.classicThreeShell
+    let surrogateOffset = try arguments.double("surrogate-offset-mm") ?? 0
+    let brain = try SurrogateSeparation.brainModel(
+        head: head, montage: montage, count: regionalCount,
+        reference: reference, terms: 100, offsetMillimetres: surrogateOffset
+    )
+    let filter = SurrogateSeparation.spatialFilter(
+        brain: brain,
+        artifactTopographies: topographies,
+        brainRegularization: regularization
+    )
+    let corrected = SurrogateSeparation.apply(filter: filter, to: channels)
+
+    var report = SurrogateFilterReport(
+        method: "PCA-S",
+        regionalSourceCount: regionalCount,
+        brainColumnCount: brain.columnCount,
+        artifactComponentCount: topographies.count,
+        artifactVarianceFractions: Array(componentSet.varianceFractions.prefix(topographies.count)),
+        acceptedBeatCount: componentSet.acceptedBeatCount,
+        candidateBeatCount: componentSet.candidateBeatCount,
+        brainRegularization: regularization,
+        surrogateOffsetMillimetres: surrogateOffset,
+        nearestSimulatedSourceMillimetres: nil,
+        minimumSourceSeparationMillimetres: nil
+    )
+
+    // Record how far the surrogate basis sits from the sources that actually
+    // generated the data. A basis sitting on top of them would rig the
+    // comparison — see roadmap 5.3.
+    if !simulatedSources.isEmpty {
+        let distances = brain.sources.map { surrogate in
+            simulatedSources.map { (surrogate.positionMeters - $0.positionMeters).norm * 1000 }
+                .min() ?? 0
+        }
+        report.nearestSimulatedSourceMillimetres = distances
+        report.minimumSourceSeparationMillimetres = distances.min()
+    }
+
+    let outputURL = URL(fileURLWithPath: outputPath)
+    let correctedSignal = signal.replacingSamples(
+        corrected.map { $0.map(Float.init) }, signalTypeSuffix: "surrogate-corrected"
+    )
+    try MFFWriter.write(
+        signal: correctedSignal, segments: [], kind: .continuous,
+        to: outputURL, preserveSourceFileInfo: false
+    )
+
+    if let path = arguments.string("report") {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(report).write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
+    if arguments.flag("json") {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        print(String(data: try encoder.encode(report), encoding: .utf8) ?? "{}")
+    } else {
+        let shares = report.artifactVarianceFractions
+            .map { String(format: "%.1f%%", $0 * 100) }.joined(separator: " ")
+        print("PCA-S: \(report.artifactComponentCount) artifact components from "
+            + "\(report.acceptedBeatCount)/\(report.candidateBeatCount) beats "
+            + "(variance \(shares))")
+        print("  brain surrogate: \(regionalCount) regional sources, "
+            + "\(brain.columnCount) columns, \(Int(regularization * 100))% regularization")
+        if let minimum = report.minimumSourceSeparationMillimetres {
+            print(String(
+                format: "  nearest surrogate-to-simulated source: %.1f mm "
+                    + "(a small value means the basis is fitted to the truth)", minimum
+            ))
+        }
+        print("  wrote \(outputURL.lastPathComponent)")
+    }
 }
 
 func runScore(_ arguments: Arguments) throws {
@@ -2238,6 +2723,10 @@ do {
         } else if arguments.string("write-config") == nil {
             throw SimulateError.usage("generate needs --output <dir> or --write-config <json>")
         }
+    case "correct":
+        try runCorrect(arguments)
+    case "evaluate-surrogate":
+        try runEvaluateSurrogate(arguments)
     case "score":
         try runScore(arguments)
     case "score-sources":

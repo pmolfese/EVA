@@ -451,6 +451,64 @@ morphological one.
 
 ## 4.3 Make the ERP dipole placeable
 
+**Status (2026-08-22): complete.** `ERPConfig.components` takes an array of
+explicitly placed generators, each with its own position, orientation, waveform,
+latency, width and per-condition amplitudes. When absent, the single legacy
+component is used unchanged.
+
+**The confound is gone, and measured.** The old path derived the ERP source from
+`makeSources`, so it sat **exactly** on ongoing-EEG source #1 — signal and noise
+in the same place. `selftest` demonstrates rather than asserts this: the legacy
+component reports 0 mm to the nearest neural source, placed components report
+more than 10 mm, and the distance is written to the truth sidecar for every
+component so the confound stays visible.
+
+**Coordinate frame is declared.** `+x` right, `+y` anterior, `+z` vertex, origin
+at the head-model centre, millimetres — the same frame `Montage` and
+`SimulatedSource` already use, and it is recorded in the sidecar as
+`erpCoordinateFrame`. `ERPComponentConfig.talairachApproximate` converts
+published coordinates under a **stated approximation**: the simulator's origin is
+a sphere centre, not the anterior commissure, so a fixed offset is applied and no
+scaling or shear is attempted. Relative geometry — what makes a bilateral pair
+bilateral — survives far better than absolute anatomical position, and the
+documentation says so rather than implying anatomical fidelity.
+
+**New scenario:** `scenarios/aep-bilateral.json` — Rusiniak et al.'s Table 1 AEP,
+two dipoles perpendicular to the left and right Sylvian fissure with N100 peaks
+2 ms apart, converted from Talairach (-49,-18,12) and (49,-15,13). This is what
+5.3's remaining criteria need in order to have anything to localize.
+
+**Per-component per-trial truth.** Each component records its realized latency
+and amplitude for every trial, from its **own** seed streams — components of a
+real complex do not jitter together, and that independence is precisely what
+single-trial latency estimation has to contend with. A self-test pins that two
+components' per-trial latencies are close to uncorrelated.
+
+**4.5a's third follow-up landed with it.** `SphericalForwardModel.leadField` now
+takes `verifyConvergence`, and the placed-ERP path passes `true`. The run-level
+check in `runGenerate` covered every call site only because all sources shared
+one eccentricity; a placed component can sit at any depth. A self-test confirms
+that a component 0.5 mm inside the brain boundary with 8 series terms is
+**rejected** rather than producing a plausible-looking topography.
+
+**Backward compatibility, verified not assumed.** With the new truth fields
+suppressed, `oddball-erp` reproduces the recorded pre-4.3 directory hash
+`ad80ae2b…` exactly; it was also the only existing scenario whose hash moved, and
+only its sidecar changed. `components` is Optional, so scenarios written before
+4.3 — including users' own — still decode.
+
+**Self-tests added (78 total, 0 failures):** the coincidence defect and its fix;
+placed topographies reproduce a directly computed lead field to 1e-9 while the
+bilateral pair stays non-degenerate; independent per-component jitter; and
+rejection of an under-resolved placement.
+
+**Not done here:** condition-dependent *source location* (targets and standards
+can differ in amplitude per component but share a generator), and habituation.
+
+---
+
+**Original plan:**
+
 `ERPGenerator.makeSource` calls `DipoleEEGGenerator.makeSources(config)[0]` and
 renames the result. The ERP therefore inherits the golden-spiral position and
 orientation pattern of ongoing-EEG source #1 — and is **coincident with it**.
@@ -875,6 +933,82 @@ they differ precisely in how they handle shape variability.
 
 ## 5.2 The surrogate spatial filter
 
+**Status (2026-08-22): complete for PCA-S.** `eva-simulate correct` builds the
+brain surrogate basis, extracts artifact topographies, forms the spatial filter,
+and writes a corrected recording that `score` consumes directly, so the whole
+loop is `generate → correct → score` against known truth.
+
+**Measured:** broadband SNR **2.5-3.0x** against a known generator BCG
+(uncorrected ~1.1), with 4-5 artifact components from the paper's 0.5% variance
+threshold — inside the 4-8 the paper reports.
+
+**The optimum matches the artifact's true rank, which cross-validates 5.1.** A
+component sweep gives SNR 1.45 / 2.35 / 3.00 / 1.58 at k = 2/3/4/5. The
+generator BCG has spatial rank 4, and k=4 is the optimum; the fifth component
+carries about 1% of template variance and is ongoing EEG, so removing it costs
+more than it recovers. Two independent pieces of the model agreeing on 4 is
+stronger evidence than either alone.
+
+**Template quality is the binding constraint, and it is now quantified.**
+Broadband SNR by recording length at 250 Hz: 0.99 at 60 s, 2.81 at 120 s, 2.48 at
+240 s, 2.47 at 480 s. Below roughly 70 accepted beats the template retains enough
+EEG that its lower components are brain activity rather than artifact, and the
+correction is *worse than doing nothing*. This is a real property of the method,
+not a defect of the implementation, and it is the kind of thing the harness
+exists to measure.
+
+**Implementation notes worth keeping.**
+
+- The pattern search matches against an **iteratively refined average**, not a
+  single seed beat. The paper's operator picks a representative beat by eye;
+  matching automatically against one epoch is a poor substitute because that
+  epoch carries a full share of EEG. Seeding from one median-energy beat
+  accepted 30 of 149; averaging first and re-matching accepts 70-75.
+- The filter is built by **partialling out the unpenalized artifact block**
+  rather than inverting the combined Gram. `[brain | artifact]` has more columns
+  than channels, so its Gram is singular by construction, and with zero
+  regularization on part of the diagonal no truncation rescues it — the first
+  attempt produced filters that *inverted* the topographies they were meant to
+  preserve. Solving for the free block first leaves `Bᵀ M B + λI` with λ positive
+  on every column, which is positive definite and needs no truncation.
+- Brain columns are **normalized to unit norm** before combining. Lead-field
+  entries are in µV/(nA·m) and artifact topographies are unit vectors; without
+  normalization a regularization expressed as a fraction of the brain block means
+  something entirely different to each block.
+- The brain basis reaches to **0.95 of the brain radius** — past the 0.85 the
+  simulator places sources at. A basis that stops short cannot describe
+  superficial topographies without large coefficients that the regularization
+  then suppresses.
+- The filter is built in the **recording's own reference**, read from the truth
+  sidecar (roadmap 4.6). An average-referenced lead field against
+  infinity-referenced data is not a subtle degradation.
+
+**Guard against the 5.3 trap, in the output.** The report records the distance
+from each surrogate regional source to the nearest simulated source (15.9 mm
+minimum in the runs above). A surrogate basis sitting on top of the simulated
+sources would fit the brain activity perfectly and rig the comparison; the number
+is printed so a reader can check rather than trust.
+
+**Self-tests added (73 total, 0 failures):** the eigensolver reconstructs its
+input and returns orthonormal vectors; the brain model reproduces real dipole
+topographies (1.000 unregularized, 0.995 at 2%); a whole artifact-free recording
+survives the filter at residual SNR 21.9 — measured as SNR, not correlation,
+because correlation is scale-invariant and cannot see a filter that preserves
+shape while shrinking amplitude; and end-to-end separation improves SNR by at
+least 1.8x at the artifact's true rank.
+
+**Still open:** **ICA-S**. It differs from PCA-S only in where the artifact
+topographies come from, so the filter machinery is already in place — but it
+needs an ICA, and a *fair* evaluation additionally depends on the
+non-stationarity work, since stationary Gaussian sources satisfy ICA's
+assumptions artificially well. Also open: the method is implemented in
+EVASimulate rather than in EVA's own pipeline; porting it is a separate decision
+with a much larger surface (UI, replay, history, serialization).
+
+---
+
+**Original plan:**
+
 Implement the Berg & Scherg (1994) source-space separation the paper uses.
 
 - A **brain surrogate basis**: 29 regional sources distributed through the brain
@@ -895,6 +1029,112 @@ representative beat selected once, then matched at a correlation threshold of
 the filter itself can be written before it.
 
 ## 5.3 The evaluation, and the trap in it
+
+**Status (2026-08-22): complete except for dipole localization error.**
+`eva-simulate evaluate-surrogate --config scenarios/aep-bilateral.json --with-erp`
+runs the paper's evaluation across repeated seeds and reports every criterion as
+mean ± SD.
+
+`eva-simulate evaluate-surrogate` runs repeated seeds across a swept condition
+entirely in memory (8 seeds x 4 conditions in 16 seconds) and reports mean ± SD.
+
+### The headline finding: repeats are not optional
+
+Across five seeds at one fixed configuration, corrected broadband SNR ranged
+**1.39 to 2.53**. That spread is wider than most differences anyone would want to
+claim between methods or conditions. Every single-run comparison made while
+developing this item would have supported a confident and wrong conclusion.
+
+Rusiniak et al. used 55 subjects. That was not incidental generosity; it is what
+the variance demands. Any Tier 5 or 3.2 result must be reported as mean ± SD over
+seeds, and the harness now prints the spread next to every mean and says so.
+
+### The trap is real but points the other way
+
+The roadmap warned that a surrogate basis coinciding with the simulated sources
+would rig the comparison in PCA-S's favour. **Measured, the opposite happens.**
+
+Broadband SNR at 8 seeds per condition, 64 channels, 29 regional sources:
+
+| basis offset | corrected SNR | uncorrected |
+| --- | --- | --- |
+| 0 mm | 1.82 ± 0.44 | 1.14 |
+| 10 mm | 1.92 ± 0.46 | 1.14 |
+| 20 mm | 2.08 ± 0.54 | 1.14 |
+| 40 mm | 2.27 ± 0.53 | 1.14 |
+
+And by basis richness, at 0 and 40 mm offset:
+
+| regional sources | columns | SNR at 0 mm | SNR at 40 mm |
+| --- | --- | --- | --- |
+| 8 | 24 | 2.13 ± 0.53 | 2.45 ± 0.64 |
+| 16 | 48 | 2.20 ± 0.61 | 2.44 ± 0.62 |
+| 29 | 87 | 1.82 ± 0.44 | 2.27 ± 0.53 |
+| 60 | 180 | 1.50 ± 0.32 | 2.08 ± 0.47 |
+
+**A better brain model makes the artifact removal worse.** The mechanism follows
+from 5.2: separation is bought entirely by the asymmetry between a penalized
+brain block and an unpenalized artifact block. A richer or better-placed brain
+model can represent the artifact too, so it competes for it and less is left to
+the columns meant to carry it. `selftest` pins this deterministically — more of a
+BCG generator topography survives the filter with 60 regional sources than with 8
+— rather than resting on the seeded sweep, whose differences are close to its own
+spread.
+
+**Read this carefully.** It does not say the surrogate method is insensitive to
+its brain model in general; it says that *on this simulator, at this channel
+count, scored by broadband SNR against clean EEG*, a coincident basis does not
+flatter the method. Scored instead by ERP distortion — what the paper actually
+cares about — a brain model that absorbs artifact may well look different, since
+the cost there is to the evoked response rather than to broadband residual. That
+comparison needs the ERP criteria below.
+
+### The evaluation, with the bilateral AEP
+
+8 seeds, 64 channels, 200 s, the `aep-bilateral` model over a generator BCG:
+
+| condition | trials kept | ERP SNR | latency err | amplitude | explained var |
+| --- | --- | --- | --- | --- | --- |
+| uncorrected | 76.0 ± 1.6 | 2.81 ± 0.59 | +0.0 ± 0.0 ms | 1.09 ± 0.11 | 0.89 ± 0.10 |
+| PCA-S, 0 mm | 78.6 ± 2.5 | 3.36 ± 0.68 | +0.5 ± 3.3 ms | 0.98 ± 0.12 | 0.89 ± 0.13 |
+| PCA-S, 40 mm | 80.1 ± 2.5 | 3.62 ± 0.68 | +0.5 ± 3.3 ms | 0.96 ± 0.11 | 0.90 ± 0.13 |
+
+Read with the spreads, not past them:
+
+- **Amplitude fidelity is the clear win.** Uncorrected, the recovered N100 peak
+  is 9% too large — BCG residual adds to it. Corrected, the bias is 2%. That is
+  the one difference here comfortably larger than its own spread.
+- **Trial retention and ERP SNR improve modestly**, in the paper's direction, but
+  by roughly one standard deviation. Suggestive, not established at 8 seeds.
+- **Topographic fidelity does not change.** Explained variance is 0.89 either
+  way. This is not a failure of the correction — it is that averaging ~76 trials
+  already suppresses an artifact that is not time-locked to the stimulus, so the
+  uncorrected average starts out clean. The paper's large explained-variance
+  gaps (97.3% for PCA-S against 90.3% for BSS) came from methods that actively
+  *distort*; a method that does not distort has little room to show an advantage
+  on this criterion.
+- **Correction adds latency jitter** (±3.3 ms) where the uncorrected average had
+  none. Small, but it is a cost, and it is the kind of thing that only shows up
+  when the truth is known.
+
+### Remaining
+
+- **Dipole localization error.** The paper fits free dipoles with Nelder-Mead and
+  reports distance to the seeded positions. That needs an inverse solver, which
+  is Tier 6 work (6.1-6.2). Explained variance addresses the same concern —
+  topographic distortion — without one, and is the metric the paper leans on for
+  its grand average.
+- **ICA-S**, per 5.2.
+
+**Self-tests added (80 total, 0 failures):** explained variance is exactly 1.0
+for data built from the model topographies and falls below 0.7 once a foreign
+topography is added — both halves, since a metric that always returned 1 would
+pass the first alone; and epoch rejection drops exactly the one trial carrying a
+400 µV excursion, out of four candidates.
+
+---
+
+**Original plan:**
 
 Their four criteria map onto metrics we already have: accepted-trial count after
 amplitude/gradient rejection; SNR as the ratio of post-stimulus to pre-stimulus
@@ -1272,24 +1512,27 @@ is settled will need rewriting anyway.
 
 # Suggested order
 
-For the stated goal of supporting methods papers. Tier 1-2 are complete, and so
-is Tier 4 apart from 4.1/4.2 (subsumed by 5.1) and 4.3.
+For the stated goal of supporting methods papers. **Tiers 1, 2 and 4 are now
+complete** (4.1 and 4.2 subsumed by 5.1). Tier 5 is complete apart from ICA-S
+and the localization criterion, which waits on Tier 6.
 
-1. **4.3 placeable ERP dipoles** — small, and it removes an unchosen confound
-   from 1.2's existing results as well as unblocking 5.3. Move the convergence
-   check into `SphericalForwardModel.leadField` as part of it (see 4.5a).
-2. **7.1-7.2, first slice only** — one scenario, one processing script, one
+1. ~~**4.3 placeable ERP dipoles**~~ — done 2026-08-22, together with 4.5a's
+   convergence-check follow-up. `scenarios/aep-bilateral.json` now carries the
+   paper's dipole model.
+2. ~~**Finish 5.3**~~ — done 2026-08-22, except dipole localization error, which
+   needs the inverse solver from 6.1-6.2.
+3. **7.1-7.2, first slice only** — one scenario, one processing script, one
    floor, one watermark entry, green in CI. Out of order on purpose: it is the
    only item that pays off on *every* later commit, and the locked-clock
    gradient case has an analytically known expected value to anchor it. Do not
    build the whole corpus yet; settle the assertion policy first.
-3. ~~**5.1 physically-generated BCG**~~ — done 2026-08-21, closing 4.1 and 4.2.
-4. **7.3-7.5** — the rest of the corpus and the GitHub Actions staging, once the
+4. ~~**5.1 physically-generated BCG**~~ — done 2026-08-21, closing 4.1 and 4.2.
+5. **7.3-7.5** — the rest of the corpus and the GitHub Actions staging, once the
    policy from step 2 has proven itself on one entry.
-5. **3.2 comparison harness** — unblocked now that 4.9 is fixed, and mostly a
+6. **3.2 comparison harness** — unblocked now that 4.9 is fixed, and mostly a
    reporting layer over Tier 7's machinery by this point.
-6. **5.2 and 5.3 surrogate separation** — the Rusiniak comparison, once the
-   BCG is worth comparing methods on and the harness exists to sweep it.
+7. **ICA-S** (5.2) — the last piece of the Rusiniak comparison. Needs an ICA;
+   1.3 has landed, so a fair evaluation of it is now possible.
 
 **Tier 6 is deliberately deferred.** It is a capability that would later support
 a paper; Tier 5 is the paper. The one exception worth pulling forward is **6.1**,

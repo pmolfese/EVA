@@ -471,19 +471,24 @@ struct ArtifactCleanerTests {
     // MARK: - MFFEvent.centerTimeSeconds
 
     /// Waveform-template and Trajectory scanning stamp `beginTimeSeconds` as
-    /// the event's *center* directly (a pre-existing quirk of those two
-    /// scanners) — `centerTimeSeconds` must pass that through unchanged, or
-    /// every cleaning method (which centers its window on it) would shift.
+    /// the event's *center* — `centerTimeSeconds` must pass that through
+    /// unchanged, or every cleaning method (which centers its window on it)
+    /// would shift.
+    ///
+    /// The anchor is now read from the event's own `timeAnchor`, stamped by the
+    /// detector, rather than inferred from a `sourceFile` prefix. These events
+    /// therefore say `.center` outright; the `sourceFile` strings are kept only
+    /// so the test still reads as being about those two scanners.
     @Test func centerTimeSecondsPassesThroughForCenterTaggedSources() {
         let templateEvent = MFFEvent(
             id: "t", code: "BLINK", beginTimeSeconds: 12.5, rawBeginTime: "12.5",
-            sourceFile: "Template 80%", durationSeconds: 0.3
+            sourceFile: "Template 80%", durationSeconds: 0.3, timeAnchor: .center
         )
         #expect(templateEvent.centerTimeSeconds == 12.5)
 
         let trajectoryEvent = MFFEvent(
             id: "j", code: "BCG", beginTimeSeconds: 4.0, rawBeginTime: "4.0",
-            sourceFile: "Trajectory 85%", durationSeconds: 0.5
+            sourceFile: "Trajectory 85%", durationSeconds: 0.5, timeAnchor: .center
         )
         #expect(trajectoryEvent.centerTimeSeconds == 4.0)
     }
@@ -497,13 +502,13 @@ struct ArtifactCleanerTests {
     @Test func centerTimeSecondsAddsHalfDurationForOnsetTaggedSources() {
         let topographyEvent = MFFEvent(
             id: "p", code: "EYEM", beginTimeSeconds: 10.0, rawBeginTime: "10.0",
-            sourceFile: "Topography 80%", durationSeconds: 0.2
+            sourceFile: "Topography 80%", durationSeconds: 0.2, timeAnchor: .onset
         )
         #expect(abs(topographyEvent.centerTimeSeconds - 10.1) < 1e-9)
 
         let continuousEvent = MFFEvent(
             id: "c", code: "EYEM", beginTimeSeconds: 20.0, rawBeginTime: "20.0",
-            sourceFile: "Continuous 80%", durationSeconds: 1.2
+            sourceFile: "Continuous 80%", durationSeconds: 1.2, timeAnchor: .onset
         )
         #expect(abs(continuousEvent.centerTimeSeconds - 20.6) < 1e-9)
     }
@@ -533,13 +538,17 @@ struct ArtifactCleanerTests {
             channel[start + k] += 60 * longShape[k]
         }
 
+        // `.center`: the synthetic bump is centred on `center`, and the event
+        // marks that same sample. Stated outright now that the anchor is stored
+        // rather than inferred from `sourceFile`.
         let event = MFFEvent(
             id: "long-event",
             code: "BLINK",
             beginTimeSeconds: Double(center) / samplingRate,
             rawBeginTime: String(format: "%.4f", Double(center) / samplingRate),
             sourceFile: "test",
-            durationSeconds: Double(longWidth) / samplingRate
+            durationSeconds: Double(longWidth) / samplingRate,
+            timeAnchor: .center
         )
         let average = ArtifactTemplateAverage(
             samplingRate: samplingRate,
@@ -696,13 +705,16 @@ struct ArtifactCleanerTests {
             channel[start + k] += 5 * longShape[k]
         }
 
+        // `.center`: as above, the candidate's marked sample is the middle of
+        // the burst this test synthesizes.
         let event = MFFEvent(
             id: "wide-burst",
             code: "WAVX",
             beginTimeSeconds: Double(center) / samplingRate,
             rawBeginTime: String(format: "%.4f", Double(center) / samplingRate),
             sourceFile: "test",
-            durationSeconds: Double(longWidth) / samplingRate
+            durationSeconds: Double(longWidth) / samplingRate,
+            timeAnchor: .center
         )
         var artifact = DefinedArtifact(
             type: .other, name: "Wavelet Explorer Candidates", eventCode: "WAVX", events: [event],

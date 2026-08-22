@@ -152,7 +152,10 @@ final class MFFRecording: Identifiable {
         }
 
         loadTask = nil
-        signal = result.signal
+        signal = Self.applyingEventAnchorRules(to: result.signal)
+        // Listed for Preferences ▸ Events, which needs the codes present in
+        // real data and a handle to reapply edited rules. Weakly held there.
+        OpenRecordingRegistry.shared.register(self)
         pnsSignal = result.pnsSignal
         sensorLayout = result.layout
         electrodeGeometry = result.geometry
@@ -167,8 +170,43 @@ final class MFFRecording: Identifiable {
         isLoading = false
     }
 
+    /// Re-reads the freshly-loaded signal's imported events under the user's
+    /// event-anchor rules (Preferences ▸ Events).
+    ///
+    /// Applied here, once, rather than lazily wherever an anchor is read. The
+    /// anchor decides cleaning windows, so a lazily-resolved one would make the
+    /// preference a hidden input to every numerical result and let a later edit
+    /// silently change what a replayed run produces. Baking it in at load means
+    /// the events carried into `DefinedArtifact` — and from there into
+    /// `eva_artifacts.json` — describe their own geometry.
+    @MainActor
+    static func applyingEventAnchorRules(to signal: MFFSignalData?) -> MFFSignalData? {
+        guard let signal else { return nil }
+        let ruleSet = EventAnchorSettings.shared.ruleSet
+        guard !ruleSet.isEmpty else { return signal }
+        return signal.replacingEvents(ruleSet.applied(to: signal.events))
+    }
+
+    /// Reapplies the current event-anchor rules to an already-open recording.
+    ///
+    /// Rules are baked in at load, so editing them does not retroactively change
+    /// an open file — this is the explicit action that does, returning a short
+    /// description of what changed for the process log, or `nil` when nothing
+    /// did.
+    @MainActor
+    @discardableResult
+    func reapplyEventAnchorRules() -> String? {
+        guard let current = signal else { return nil }
+        let ruleSet = EventAnchorSettings.shared.ruleSet
+        let updated = ruleSet.applied(to: current.events)
+        guard updated != current.events else { return nil }
+        signal = current.replacingEvents(updated)
+        return ruleSet.appliedSummary(for: updated)
+    }
+
     @MainActor
     func tearDownForClose() {
+        OpenRecordingRegistry.shared.unregister(self)
         isClosed = true
         activeLoadRequestID = UUID()
         loadTask?.cancel()

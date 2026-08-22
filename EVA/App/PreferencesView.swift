@@ -207,6 +207,9 @@ struct PreferencesView: View {
 
             SegmentGoodnessSettingsView()
                 .tabItem { Label("Segment Goodness", systemImage: "chart.bar.doc.horizontal") }
+
+            EventAnchorPreferencesView()
+                .tabItem { Label("Events", systemImage: "flag") }
         }
         .frame(width: 480, height: 560)
     }
@@ -481,6 +484,18 @@ private struct ProcessingDefaultsView: View {
                     Text("FIR").tag(FilterFamily.fir)
                 }
                 .help("Filter family used for NEW filtering. The Filter popover selects the IIR design, FIR window, and FIR application. Auto uses IIR for a high-pass below the crossover and FIR elsewhere. Replaying an existing eva.xml always reproduces its recorded method.")
+
+                Picker("Default preset", selection: Binding(
+                    get: { defaults.filterDefaultPreset },
+                    set: { defaults.filterDefaultPreset = $0 }
+                )) {
+                    Text("None").tag("")
+                    Divider()
+                    ForEach(FilterApproximationPreset.allCases) { preset in
+                        Text(preset.label).tag(preset.rawValue)
+                    }
+                }
+                .help("Configures each newly-opened recording's filter mechanics like the chosen package, exactly as picking that preset in the Filter popover would. Applied after the default filter type above, which it supersedes. Replaying an existing eva.xml always reproduces its own recorded settings.")
             }
 
             Section("ICA") {

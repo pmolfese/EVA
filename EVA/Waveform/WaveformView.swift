@@ -382,6 +382,7 @@ struct WaveformView: View {
     @State var filter: FilterViewModel
     @State var showsFilterPopover = false
     @State var showsFilterLineNoiseOptions = false
+    @State var showsFilterAdvanced = false
     // Wavelet artifact reduction pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
     @State var wavelet: WaveletReductionViewModel
@@ -2876,7 +2877,10 @@ struct WaveformView: View {
     private func jumpToEvent(_ event: MFFEvent, in signal: MFFSignalData) {
         selectedEventID = event.id
         let plotWidth = plotWidth(for: signal)
-        let targetSample = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
+        // Onset, not `beginTimeSeconds`: jumping should land at the start of
+        // the event whichever convention stamped it, rather than mid-event for
+        // centered sources and at the edge for onset ones.
+        let targetSample = Int((event.onsetTimeSeconds * signal.samplingRate).rounded())
         let targetX = contentX(forSample: targetSample, in: signal)
         let viewportCenter = max(horizontalViewportWidth / 2, 1)
         let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
@@ -2896,15 +2900,13 @@ struct WaveformView: View {
         // still goes through `jumpToEvent` directly (see the `List` row
         // button above) and is unaffected by this.
         selectedEventID = event.id
-        // Toggle: selecting the highlighted flag again clears it. Only
-        // artifact-detection events (defined artifacts, eye-artifact threshold
-        // detection) get this band; imported MFF events aren't highlighted this
-        // way. The band centers on `event.centerTimeSeconds`, which accounts
-        // for onset-tagged sources (Topography/Continuous) vs. center-tagged
-        // ones (Template/Trajectory/threshold detection).
+        // Toggle: selecting the highlighted flag again clears it. Any event
+        // carrying a duration gets a band, drawn over the span its own
+        // `timeAnchor` implies — so an onset-stamped event's band runs forward
+        // from the flag and a centered or peak-stamped one's straddles it.
         if highlightedArtifactEvent?.id == event.id {
             highlightedArtifactEvent = nil
-        } else if isCenteredArtifactDetectionEvent(event) {
+        } else if isHighlightableSpanEvent(event) {
             highlightedArtifactEvent = event
             highlightedArtifactColor = color
         } else {

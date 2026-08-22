@@ -26,28 +26,6 @@
 
 import Foundation
 
-extension MFFEvent {
-    /// This event's true center in time, correcting for the two conventions
-    /// EVA's detectors use for `beginTimeSeconds`: waveform-template matching
-    /// and Trajectory (map-sequence) scanning stamp the *center* sample
-    /// directly; single-map Topography and Continuous-scan topography stamp
-    /// the true *onset* (matching the general Onset+Duration convention used
-    /// everywhere else — see the event detail popover), so their center is
-    /// onset + half their own measured duration, not `beginTimeSeconds` as-is.
-    /// Every place that needs "the middle of this event" (cleaning windows,
-    /// OBS alignment search, averaged-template previews) should read this
-    /// instead of `beginTimeSeconds` directly, or it'll center on the wrong
-    /// sample for onset-tagged events — most visibly wrong for Continuous
-    /// events, whose duration varies per event rather than matching a fixed
-    /// nominal window.
-    var centerTimeSeconds: Double {
-        if sourceFile.hasPrefix("Topography") || sourceFile.hasPrefix("Continuous") {
-            return beginTimeSeconds + (durationSeconds ?? 0) / 2
-        }
-        return beginTimeSeconds
-    }
-}
-
 enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable {
     case ocular = "Ocular Artifact"
     case ecg = "ECG Artifact"

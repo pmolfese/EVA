@@ -397,8 +397,8 @@ nonisolated enum EpochedOverlayEventMapper {
 
         if let overlapWindowSeconds, overlapWindowSeconds > 0 {
             let halfWindow = overlapWindowSeconds / 2
-            let eventStartSeconds = event.beginTimeSeconds - halfWindow
-            let eventEndSeconds = event.beginTimeSeconds + halfWindow
+            let eventStartSeconds = event.centerTimeSeconds - halfWindow
+            let eventEndSeconds = event.centerTimeSeconds + halfWindow
             guard eventEndSeconds >= epochStartSeconds,
                   eventStartSeconds <= epochEndSeconds else {
                 return nil
@@ -422,7 +422,8 @@ nonisolated enum EpochedOverlayEventMapper {
             beginTimeSeconds: displayTime,
             rawBeginTime: event.rawBeginTime,
             sourceFile: event.sourceFile,
-            durationSeconds: event.durationSeconds
+            durationSeconds: event.durationSeconds,
+            timeAnchor: event.timeAnchor
         )
     }
 }

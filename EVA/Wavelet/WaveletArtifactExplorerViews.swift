@@ -1169,10 +1169,9 @@ extension WaveformView {
     }
 
     /// Builds the waveform-display event for one candidate. `beginTimeSeconds`
-    /// is the true onset (not a pre-centered peak) and `sourceFile` starts
-    /// with "Continuous" so `MFFEvent.centerTimeSeconds` and the duration
-    /// highlight band both read it as onset+duration, spanning the candidate's
-    /// full detected window rather than a point at the peak.
+    /// is the true onset (not a pre-centered peak), stamped `.onset` so the
+    /// duration highlight band spans the candidate's full detected window
+    /// rather than a point at the peak.
     func waveletCandidateEvent(_ candidate: WaveletArtifactCandidate) -> MFFEvent {
         let duration = max(candidate.endTimeSeconds - candidate.startTimeSeconds, 0.01)
         return MFFEvent(
@@ -1186,7 +1185,8 @@ extension WaveformView {
             beginTimeSeconds: candidate.startTimeSeconds,
             rawBeginTime: String(format: "%.6f", candidate.startTimeSeconds),
             sourceFile: WaveletArtifactExplorerViewModel.candidateSourceFile,
-            durationSeconds: duration
+            durationSeconds: duration,
+            timeAnchor: .onset
         )
     }
 

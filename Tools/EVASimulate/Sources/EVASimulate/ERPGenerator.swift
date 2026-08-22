@@ -35,6 +35,27 @@ nonisolated struct ERPRandomSeedTruth: Codable, Sendable, Equatable {
     var omission: UInt64
 }
 
+/// One explicitly placed ERP generator, with its own per-trial truth.
+nonisolated struct ERPComponentTruth: Codable, Sendable {
+    var id: String
+    var source: SimulatedSource
+    /// Per-channel weight, peak-normalized.
+    var topography: [Double]
+    var waveformDescription: String
+    var nominalPeakLatencySeconds: Double
+    /// Distance to the nearest ongoing-EEG source, in millimetres.
+    ///
+    /// Before roadmap 4.3 the ERP source was *derived from* `makeSources`, so it
+    /// sat exactly on ongoing-EEG source #1 — signal and noise in the same
+    /// place, which is a confound nobody chose. Placement is explicit now, and
+    /// this number is written to the sidecar so the confound is visible rather
+    /// than assumed away.
+    var nearestNeuralSourceMillimetres: Double?
+    /// Per-trial realized latency and peak amplitude for this component.
+    var trialLatencySeconds: [Double]
+    var trialAmplitudeMicrovolts: [Double]
+}
+
 nonisolated struct ERPInjection: Sendable {
     var trials: [ERPTrialTruth]
     /// Exact peaks of the generated condition averages at the strongest sensor.
@@ -42,6 +63,9 @@ nonisolated struct ERPInjection: Sendable {
     var source: SimulatedSource
     var topography: [Double]
     var waveformDescription: String
+    /// Every generator that contributed, with per-trial truth. The legacy
+    /// single-component path reports itself here too, so the shape is uniform.
+    var componentSources: [ERPComponentTruth] = []
     var realizedLatencyAmplitudeCorrelation: Double
     var randomSeeds: ERPRandomSeedTruth
 }
@@ -59,6 +83,11 @@ nonisolated enum ERPGenerator {
         montage: Montage
     ) throws -> ERPInjection? {
         guard let erp = config.erp, erp.trialCount > 0 else { return nil }
+        if let placed = erp.components, !placed.isEmpty {
+            return try injectPlaced(
+                into: &channels, config: config, erp: erp, components: placed, montage: montage
+            )
+        }
         let source = makeSource(config: config)
         let field = try SphericalForwardModel.leadField(
             head: config.sphericalHeadModel, montage: montage, sources: [source],
@@ -209,10 +238,288 @@ nonisolated enum ERPGenerator {
             topography: topography,
             waveformDescription: measured == nil ? erp.waveform.rawValue
                 : "measured template: \(erp.measuredTemplatePath ?? "")",
+            componentSources: [
+                ERPComponentTruth(
+                    id: source.id,
+                    source: source,
+                    topography: topography,
+                    waveformDescription: measured == nil ? erp.waveform.rawValue
+                        : "measured template: \(erp.measuredTemplatePath ?? "")",
+                    nominalPeakLatencySeconds: erp.peakLatencySeconds,
+                    nearestNeuralSourceMillimetres: nearestNeuralSourceMillimetres(
+                        to: source, config: config
+                    ),
+                    trialLatencySeconds: trials.map(\.peakLatencySeconds),
+                    trialAmplitudeMicrovolts: trials.map(\.peakAmplitudeMicrovolts)
+                )
+            ],
             realizedLatencyAmplitudeCorrelation: DipoleEEGGenerator.pearson(
                 responded.map(\.peakLatencySeconds), normalizedAmplitudes
             ),
             randomSeeds: seeds
+        )
+    }
+
+
+    /// How far an ERP generator sits from the nearest ongoing-EEG source.
+    static func nearestNeuralSourceMillimetres(
+        to source: SimulatedSource, config: SimulationConfig
+    ) -> Double? {
+        guard config.eegGenerationModel == .dipole else { return nil }
+        let neural = DipoleEEGGenerator.makeSources(config: config)
+        guard !neural.isEmpty else { return nil }
+        return neural.map { (source.positionMeters - $0.positionMeters).norm * 1000 }.min()
+    }
+
+    /// Explicitly placed, multi-component ERPs.
+    ///
+    /// The trial *schedule* — onsets, condition assignment, omissions — is
+    /// shared, because those are properties of the experiment rather than of a
+    /// generator. Latency and amplitude are drawn per component from their own
+    /// streams: the components of a real complex do not jitter together, and
+    /// that independence is exactly what single-trial latency estimation has to
+    /// contend with.
+    private static func injectPlaced(
+        into channels: inout [[Double]],
+        config: SimulationConfig,
+        erp: ERPConfig,
+        components: [ERPComponentConfig],
+        montage: Montage
+    ) throws -> ERPInjection {
+        let count = erp.trialCount
+        var conditionRandom = GaussianSource(
+            seed: SimulationSeedStreams.erpConditionOrder(base: config.seed)
+        )
+        var onsetRandom = GaussianSource(
+            seed: SimulationSeedStreams.erpOnsetJitter(base: config.seed)
+        )
+        var omissionRandom = GaussianSource(
+            seed: SimulationSeedStreams.erpOmission(base: config.seed)
+        )
+
+        let targetCount = Int((Double(count) * erp.targetFraction).rounded())
+        var order = Array(0..<count)
+        if count > 1 {
+            for upper in stride(from: count - 1, through: 1, by: -1) {
+                let other = min(upper, Int(floor(conditionRandom.uniform() * Double(upper + 1))))
+                order.swapAt(upper, other)
+            }
+        }
+        let targets = Set(order.prefix(targetCount))
+        let onsets = (0..<count).map { index in
+            erp.startSeconds
+                + Double(index) * erp.interStimulusIntervalSeconds
+                + (2 * onsetRandom.uniform() - 1) * erp.interStimulusJitterSeconds
+        }
+        let omissionDraws = (0..<count).map { _ in omissionRandom.uniform() }
+
+        let windowSeconds = components.map {
+            $0.peakLatencySeconds + 6 * $0.widthSeconds + 6 * $0.latencyJitterSDSeconds
+        }.max() ?? 0
+        guard (onsets.min() ?? 0) >= 0,
+              (onsets.max() ?? 0) + windowSeconds < config.durationSeconds else {
+            throw SimulateError.usage(
+                "ERP schedule plus component window does not fit inside the recording"
+            )
+        }
+        let epochSamples = max(2, Int((windowSeconds * config.samplingRate).rounded(.up)) + 1)
+
+        var averages = [
+            "standard": [Double](repeating: 0, count: epochSamples),
+            "target": [Double](repeating: 0, count: epochSamples)
+        ]
+        var conditionCounts = ["standard": 0, "target": 0]
+        var componentTruths: [ERPComponentTruth] = []
+        var trialPeakAmplitude = [Double](repeating: 0, count: count)
+        var trialPeakLatency = [Double](repeating: 0, count: count)
+
+        for (componentIndex, component) in components.enumerated() {
+            let source = try makePlacedSource(
+                component: component, index: componentIndex, config: config
+            )
+            let field = try SphericalForwardModel.leadField(
+                head: config.sphericalHeadModel, montage: montage, sources: [source],
+                reference: config.effectiveRecordingReference, terms: config.leadFieldTerms,
+                // Placement is arbitrary now, so the run-level convergence check
+                // no longer covers this source (roadmap 4.5a).
+                verifyConvergence: true
+            )
+            var topography = field.matrixMicrovoltsPerNanoampereMeter.map { $0[0] }
+            let peak = topography.map(abs).max() ?? 0
+            if peak > 0 { for index in topography.indices { topography[index] /= peak } }
+
+            var latencyRandom = GaussianSource(
+                seed: SimulationSeedStreams.erpComponentLatency(
+                    base: config.seed, index: componentIndex
+                )
+            )
+            var amplitudeRandom = GaussianSource(
+                seed: SimulationSeedStreams.erpComponentAmplitude(
+                    base: config.seed, index: componentIndex
+                )
+            )
+            let measured = try loadMeasuredWaveform(
+                kind: component.waveform,
+                path: component.measuredTemplatePath,
+                rate: component.measuredTemplateRateHz
+            )
+
+            var latencies = [Double](repeating: 0, count: count)
+            var amplitudes = [Double](repeating: 0, count: count)
+            for trial in 0..<count {
+                let condition = targets.contains(trial) ? "target" : "standard"
+                let latency = max(
+                    0.005,
+                    component.peakLatencySeconds
+                        + component.latencyJitterSDSeconds * latencyRandom.gaussian()
+                )
+                let base = component.targetAmplitudeMicrovolts
+                    * (condition == "target" ? 1 : component.standardAmplitudeRatio)
+                let omitted = omissionDraws[trial] < erp.omissionRate
+                let amplitude = omitted ? 0 : base * max(
+                    0, 1 + component.amplitudeJitterFraction * amplitudeRandom.gaussian()
+                )
+                latencies[trial] = latency
+                amplitudes[trial] = amplitude
+
+                var waveform = trialWaveform(
+                    sampleCount: epochSamples, samplingRate: config.samplingRate,
+                    latency: latency, kind: component.waveform,
+                    width: component.widthSeconds, measured: measured
+                )
+                for sample in waveform.indices { waveform[sample] *= amplitude }
+
+                conditionCounts[condition, default: 0] += 1
+                for sample in waveform.indices { averages[condition]![sample] += waveform[sample] }
+                if abs(amplitude) > abs(trialPeakAmplitude[trial]) {
+                    trialPeakAmplitude[trial] = amplitude
+                    trialPeakLatency[trial] = latency
+                }
+
+                let onsetSample = Int((onsets[trial] * config.samplingRate).rounded())
+                for channel in channels.indices {
+                    let gain = channel < topography.count ? topography[channel] : 0
+                    guard gain != 0 else { continue }
+                    for sample in waveform.indices {
+                        let destination = onsetSample + sample
+                        guard destination >= 0, destination < channels[channel].count else { continue }
+                        channels[channel][destination] += gain * waveform[sample]
+                    }
+                }
+            }
+
+            componentTruths.append(ERPComponentTruth(
+                id: component.id,
+                source: source,
+                topography: topography,
+                waveformDescription: measured == nil ? component.waveform.rawValue
+                    : "measured template: \(component.measuredTemplatePath ?? "")",
+                nominalPeakLatencySeconds: component.peakLatencySeconds,
+                nearestNeuralSourceMillimetres: nearestNeuralSourceMillimetres(
+                    to: source, config: config
+                ),
+                trialLatencySeconds: latencies,
+                trialAmplitudeMicrovolts: amplitudes
+            ))
+        }
+
+        // Condition counts accumulated once per component; normalize back.
+        let componentCount = max(1, components.count)
+        var trials: [ERPTrialTruth] = []
+        trials.reserveCapacity(count)
+        for index in 0..<count {
+            let condition = targets.contains(index) ? "target" : "standard"
+            let omitted = omissionDraws[index] < erp.omissionRate
+            let windowEnd = onsets[index] + windowSeconds
+            trials.append(ERPTrialTruth(
+                id: String(format: "trial-%04d", index + 1),
+                condition: condition,
+                eventCode: condition == "target" ? "targ" : "std",
+                onsetSeconds: onsets[index],
+                peakLatencySeconds: trialPeakLatency[index],
+                peakTimeSeconds: onsets[index] + trialPeakLatency[index],
+                peakAmplitudeMicrovolts: trialPeakAmplitude[index],
+                omitted: omitted,
+                componentWindowEndSeconds: windowEnd,
+                overlapsPreviousTrial: index > 0
+                    && onsets[index] < onsets[index - 1] + windowSeconds,
+                overlapsNextTrial: index + 1 < count
+                    && onsets[index + 1] < windowEnd,
+                overlapsAnotherTrial: (index > 0
+                    && onsets[index] < onsets[index - 1] + windowSeconds)
+                    || (index + 1 < count && onsets[index + 1] < windowEnd)
+            ))
+        }
+
+        let summaries = ["standard", "target"].compactMap { condition -> ERPComponent? in
+            guard let total = conditionCounts[condition], total > 0,
+                  var average = averages[condition] else { return nil }
+            let trialsInCondition = Double(total / componentCount)
+            guard trialsInCondition > 0 else { return nil }
+            for sample in average.indices { average[sample] /= trialsInCondition }
+            guard let peakIndex = average.indices.max(by: {
+                abs(average[$0]) < abs(average[$1])
+            }) else { return nil }
+            return ERPComponent(
+                id: condition,
+                peakLatencySeconds: Double(peakIndex) / config.samplingRate,
+                peakAmplitudeMicrovolts: average[peakIndex]
+            )
+        }
+
+        return ERPInjection(
+            trials: trials,
+            components: summaries,
+            source: componentTruths.first?.source ?? makeSource(config: config),
+            topography: componentTruths.first?.topography ?? [],
+            waveformDescription: "\(components.count) placed components",
+            componentSources: componentTruths,
+            realizedLatencyAmplitudeCorrelation: 0,
+            randomSeeds: ERPRandomSeedTruth(
+                latency: SimulationSeedStreams.erpLatency(base: config.seed),
+                amplitude: SimulationSeedStreams.erpAmplitude(base: config.seed),
+                conditionOrder: SimulationSeedStreams.erpConditionOrder(base: config.seed),
+                onsetJitter: SimulationSeedStreams.erpOnsetJitter(base: config.seed),
+                omission: SimulationSeedStreams.erpOmission(base: config.seed)
+            )
+        )
+    }
+
+    private static func makePlacedSource(
+        component: ERPComponentConfig, index: Int, config: SimulationConfig
+    ) throws -> SimulatedSource {
+        let head = config.sphericalHeadModel
+        let position: Vector3D
+        if let millimetres = component.positionMillimetres {
+            position = head.centerMeters + millimetres * 0.001
+        } else {
+            var single = config
+            single.dipoleSourceCount = 1
+            position = DipoleEEGGenerator.makeSources(config: single)[0].positionMeters
+        }
+        let relative = position - head.centerMeters
+        guard relative.norm < head.brainRadiusMeters else {
+            throw SimulateError.usage(
+                String(
+                    format: "ERP component '%@' sits %.1f mm from the head centre, outside the "
+                        + "%.1f mm brain compartment",
+                    component.id, relative.norm * 1000, head.brainRadiusMeters * 1000
+                )
+            )
+        }
+        let orientation = component.orientation.map { $0.normalized() }
+            ?? (relative.norm > 1e-12 ? relative.normalized() : Vector3D(x: 0, y: 0, z: 1))
+        guard orientation.norm > 1e-9 else {
+            throw SimulateError.usage("ERP component '\(component.id)' has a zero orientation")
+        }
+        return SimulatedSource(
+            id: component.id,
+            positionMeters: position,
+            orientation: orientation,
+            bandName: "event-related potential",
+            seed: SimulationSeedStreams.erpComponentLatency(base: config.seed, index: index),
+            rmsMomentNanoampereMeters: 0,
+            scenarioRole: "placed ERP component"
         )
     }
 
@@ -227,9 +534,18 @@ nonisolated enum ERPGenerator {
     }
 
     private static func loadMeasuredWaveform(_ config: ERPConfig) throws -> MeasuredWaveform? {
-        guard config.waveform == .measured else { return nil }
-        guard let path = config.measuredTemplatePath,
-              let rate = config.measuredTemplateRateHz, rate > 0 else {
+        try loadMeasuredWaveform(
+            kind: config.waveform,
+            path: config.measuredTemplatePath,
+            rate: config.measuredTemplateRateHz
+        )
+    }
+
+    private static func loadMeasuredWaveform(
+        kind: ERPWaveformKind, path: String?, rate: Double?
+    ) throws -> MeasuredWaveform? {
+        guard kind == .measured else { return nil }
+        guard let path, let rate, rate > 0 else {
             throw SimulateError.badTemplate("measured ERP waveform needs a path and positive rate")
         }
         let text = try String(contentsOfFile: path, encoding: .utf8)

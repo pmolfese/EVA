@@ -16,8 +16,125 @@
 
 import SwiftUI
 
+/// What the Filter popover's Presets pop-up is currently showing.
+///
+/// `.custom` is a state the pop-up can *display* but that nothing applies —
+/// selecting it would mean "make my settings unlike every package", which is
+/// not an action. The binding below therefore ignores it.
+enum FilterPresetSelection: Hashable {
+    case custom
+    case preset(FilterApproximationPreset)
+}
+
 extension WaveformView {
     // MARK: - Filtering
+
+    /// Reads the preset the current mechanics correspond to, and applies one
+    /// when the user picks it. Selecting the displayed "Custom" entry is a
+    /// no-op — it is a description of the current state, not a destination.
+    var filterPresetSelection: Binding<FilterPresetSelection> {
+        Binding(
+            get: { filter.activePreset.map(FilterPresetSelection.preset) ?? .custom },
+            set: { selection in
+                if case let .preset(preset) = selection {
+                    filter.applyApproximation(preset)
+                }
+            }
+        )
+    }
+
+/// Advanced FIR mechanics, collapsed by default.
+    ///
+    /// Exists mainly to make the realized filter visible *before* Apply. The
+    /// kernel a request needs can exceed what a recording can carry — a narrow
+    /// hand-set transition still gets there easily — and EVA used to silently
+    /// shorten it, so the same settings quietly produced a different filter on a
+    /// shorter file. The readout states what was asked for, what will actually
+    /// be built, and how much data the full kernel would need.
+    @ViewBuilder
+    func firAdvancedSection(for signal: MFFSignalData) -> some View {
+        if filter.filterFamily != .iir || filter.notchIsFIREffective {
+            DisclosureGroup("Advanced", isExpanded: $showsFilterAdvanced) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 4) {
+                        Text("Design rule")
+                            .font(.caption)
+                            .fixedSize()
+                        InfoPopoverButton(title: "FIR Design Rule", message: """
+                            How a requested cutoff becomes a filter. Packages disagree, so the same "30 Hz low-pass" can mean measurably different things.
+
+                            EVA — the transition band is 25% of the cutoff, floored at 2 Hz and capped at the available band, and the frequency you type is the −6 dB point.
+
+                            EEGLAB / MNE — the same transition band, but the frequency you type is the passband edge, with −6 dB falling half a transition beyond it. A band-pass uses one kernel sized by the narrower edge. MNE documents its default design as reproducing EEGLAB's, so both packages share this rule.
+
+                            Whichever you pick is recorded in eva.xml, so a saved run states the convention that produced it rather than leaving it to be inferred.
+                            """)
+                        Spacer()
+                        Picker("Design rule", selection: $filter.firDesignRule) {
+                            ForEach(FIRDesignRule.allCases) { rule in
+                                Text(rule.label).tag(rule)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 150)
+                    }
+
+                    ForEach(firDesignReports(for: signal), id: \.label) { report in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(report.label)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 62, alignment: .leading)
+                            Text(report.report.summary)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(report.report.wasCapped ? Color.orange : .secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                    }
+
+                    if let capped = firDesignReports(for: signal).first(where: { $0.report.wasCapped }) {
+                        Text(String(
+                            format: "This recording is too short for the requested kernel. The full %d taps need %.0f s of data; widen the transition, raise the cutoff, or use a longer recording.",
+                            capped.report.requestedTaps, capped.report.requiredRecordingSeconds
+                        ))
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.top, 6)
+            }
+            .font(.caption)
+        }
+    }
+
+    /// Per-edge design reports for whichever edges actually resolve to FIR.
+    func firDesignReports(for signal: MFFSignalData) -> [(label: String, report: EEGSignalFilter.FIRDesignReport)] {
+        let sampleCount = signal.data.map(\.count).min() ?? 0
+        guard signal.samplingRate > 0, sampleCount > 0 else { return [] }
+
+        var out: [(label: String, report: EEGSignalFilter.FIRDesignReport)] = []
+        let edges: [(String, Double?, FilterEdge)] = [
+            ("High-pass", filter.highPassCutoff, .highPass),
+            ("Low-pass", filter.lowPassCutoff, .lowPass),
+        ]
+        for (label, cutoff, edge) in edges {
+            guard let cutoff else { continue }
+            let resolved = EEGSignalFilter.resolvedFamily(
+                filter.filterFamily, edge: edge, cutoff: cutoff,
+                crossoverHz: filter.firCrossoverHz, crossoverRule: filter.firCrossoverRule
+            )
+            guard resolved == .fir else { continue }
+            out.append((label, EEGSignalFilter.firDesignReport(
+                cutoff: cutoff, samplingRate: signal.samplingRate, edge: edge,
+                transitionHz: filter.firTransitionHz, maxChannelLength: sampleCount,
+                window: filter.firWindow, kaiserAttenuationDB: filter.firKaiserAttenuationDB,
+                rule: filter.firDesignRule
+            )))
+        }
+        return out
+    }
 
     func filterPopover(for signal: MFFSignalData) -> some View {
         let lineNoiseMode = filter.activeLineNoiseMode
@@ -53,28 +170,13 @@ extension WaveformView {
                         """)
                     Spacer()
                 }
-                HStack(spacing: 8) {
-                    Picker("Filter Type", selection: $filter.filterFamily) {
-                        ForEach(FilterFamily.allCases) { family in
-                            Text(family.label).tag(family)
-                        }
+                Picker("Filter Type", selection: $filter.filterFamily) {
+                    ForEach(FilterFamily.allCases) { family in
+                        Text(family.label).tag(family)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-
-                    Menu {
-                        ForEach(FilterApproximationPreset.allCases) { preset in
-                            Button(preset.label) {
-                                filter.applyApproximation(preset)
-                            }
-                        }
-                    } label: {
-                        Text("Approximate…")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("Configure filter mechanics like another EEG package. Passband cutoffs and line-noise/notch settings are preserved.")
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
 
                 if hasIIREdge {
                     HStack {
@@ -343,15 +445,62 @@ extension WaveformView {
             Toggle("Average reference", isOn: $filter.averageReference)
                 .help("Re-reference to the common average: subtract the mean across all channels at each time point. Removes shared reference signal.")
 
-            HStack {
-                Spacer()
+            firAdvancedSection(for: signal)
+
+            // Presets and Precision share a row: both name *how* filtering is
+            // carried out rather than what the passband is, so they belong
+            // together below the settings they summarize rather than above
+            // them. Labels sit beside each control instead of over the group,
+            // since neither heads a section any more.
+            HStack(spacing: 6) {
+                Text("Presets")
+                    .font(.caption)
+                    .fixedSize()
+                InfoPopoverButton(title: "Filter Presets", message: """
+                    Sets EVA's filter mechanics — type, design, window, application, and slopes — to match how another EEG package filters, so results are easier to compare.
+
+                    Your passband cutoffs and your line-noise, referencing, PNS, and precision settings are left exactly as they are.
+
+                    EEGLAB — Hamming-window FIR, one pass with its linear-phase delay removed, automatic transition width.
+
+                    ERPLAB — Butterworth IIR at 24 dB/oct on both edges.
+
+                    MNE-Python — Hamming-window FIR, delay-compensated, matching MNE's default design.
+
+                    EGI Net Station — the hybrid: elliptic IIR high-pass below 1 Hz, forward-only Kaiser FIR elsewhere.
+
+                    Reads Custom until you pick one, and returns to Custom as soon as you change any of these by hand.
+                    """)
+                Picker("Presets", selection: filterPresetSelection) {
+                    // "Custom" is listed only while it is the current state, the
+                    // way a Mac preset pop-up behaves: it describes where you
+                    // are, it is not somewhere to go.
+                    if filter.activePreset == nil {
+                        Text("Custom").tag(FilterPresetSelection.custom)
+                        Divider()
+                    }
+                    ForEach(FilterApproximationPreset.allCases) { preset in
+                        Text(preset.label).tag(FilterPresetSelection.preset(preset))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 142)
+                .help("Configure filter mechanics like another EEG package. Passband cutoffs and line-noise/notch settings are preserved.")
+
+                Spacer(minLength: 6)
+
+                Text("Precision")
+                    .font(.caption)
+                    .fixedSize()
                 Picker("Precision", selection: $filter.precision) {
                     ForEach(FilterPrecision.allCases) { precision in
                         Text(precision.label).tag(precision)
                     }
                 }
+                .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(width: 190)
+                .frame(width: 92)
                 .help("Auto uses Float for routine filters, Double for numerically risky settings, and retries in Double if Float becomes unstable.")
             }
 
@@ -383,7 +532,7 @@ extension WaveformView {
             }
         }
         .padding(16)
-        .frame(width: 390)
+        .frame(width: 430)
     }
 
     func applyBandpassFilter(to signal: MFFSignalData) {

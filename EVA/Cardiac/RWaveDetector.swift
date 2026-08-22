@@ -167,8 +167,8 @@ struct RWaveCandidate: Sendable {
 nonisolated enum RWaveDetector {
     static let eventCode = "R Wave"
     /// Prefix of every emitted event's `sourceFile` (the algorithm name is
-    /// appended). Callers match on the prefix to recognise detector output —
-    /// see `isCenteredArtifactDetectionEvent`.
+    /// appended). Provenance for display only — event geometry comes from
+    /// each event's own `timeAnchor`, never from this string.
     static let sourceFile = "ECG Detection"
     private static let baselineWindowSeconds = 0.60
     private static let qrsHighPassWindowSeconds = 0.20
@@ -225,9 +225,10 @@ nonisolated enum RWaveDetector {
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: "\(sourceFile): \(configuration.algorithm.rawValue)",
                 // The marker stays on the R peak, so unlike an imported event
-                // this duration is the deflection's width *around* the onset
-                // time rather than a span starting at it.
-                durationSeconds: candidate.widthSeconds
+                // this duration is the deflection's width *around* the marked
+                // time rather than a span starting at it — hence `.peak`.
+                durationSeconds: candidate.widthSeconds,
+                timeAnchor: .peak
             )
         }
     }

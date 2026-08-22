@@ -1823,12 +1823,22 @@ struct EventTrackView: View {
             eventDetailRow("Label", event.label)
             eventDetailRow("Description", event.eventDescription)
             eventDetailRow("Cell", event.cell)
-            eventDetailRow("Onset", String(format: "%.3f s", event.beginTimeSeconds))
+            // Labelled by the event's own anchor. Calling this "Onset"
+            // unconditionally, as EVA used to, misreported the time of every
+            // centered and peak-stamped event by half its duration.
+            eventDetailRow(event.timeAnchor.timeFieldLabel, String(format: "%.3f s", event.beginTimeSeconds))
             if let duration = event.durationSeconds {
-                eventDetailRow("Duration", duration >= 1
-                    ? String(format: "%.3f s", duration)
-                    : String(format: "%.0f ms", duration * 1000))
+                eventDetailRow("Duration", Self.formattedDuration(duration))
             }
+            if let span = event.spanSeconds {
+                eventDetailRow("Span", String(format: "%.3f – %.3f s", span.lowerBound, span.upperBound))
+            }
+            // Stated outright, not just implied by the time row's label. Which
+            // instant a marker names decides where every window derived from it
+            // sits, and it is the first thing to check when an event looks
+            // misplaced — so it should be readable without having to notice
+            // that the row above says "Peak" rather than "Onset".
+            eventDetailRow("Anchor", event.timeAnchor.detailDescription)
             eventDetailRow("Source", event.sourceFile)
         }
         .padding(14)
@@ -1857,14 +1867,23 @@ struct EventTrackView: View {
         if let label = event.label { lines.append("Label: \(label)") }
         if let description = event.eventDescription { lines.append("Description: \(description)") }
         if let cell = event.cell { lines.append("Cell: \(cell)") }
-        lines.append(String(format: "Onset: %.3f s", event.beginTimeSeconds))
+        lines.append(String(format: "\(event.timeAnchor.timeFieldLabel): %.3f s", event.beginTimeSeconds))
         if let duration = event.durationSeconds {
-            lines.append(duration >= 1
-                ? String(format: "Duration: %.3f s", duration)
-                : String(format: "Duration: %.0f ms", duration * 1000))
+            lines.append("Duration: \(Self.formattedDuration(duration))")
         }
+        if let span = event.spanSeconds {
+            lines.append(String(format: "Span: %.3f – %.3f s", span.lowerBound, span.upperBound))
+        }
+        lines.append("Anchor: \(event.timeAnchor.detailDescription)")
         lines.append("Source: \(event.sourceFile)")
         return lines.joined(separator: "\n")
+    }
+
+    /// Seconds for durations of a second or more, milliseconds below that.
+    private static func formattedDuration(_ duration: Double) -> String {
+        duration >= 1
+            ? String(format: "%.3f s", duration)
+            : String(format: "%.0f ms", duration * 1000)
     }
 
     private func overlapClusters(for markers: [EventTrackMarker]) -> [EventTrackOverlapCluster] {

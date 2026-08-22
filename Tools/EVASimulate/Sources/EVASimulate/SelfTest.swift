@@ -1852,6 +1852,558 @@ nonisolated enum SelfTest {
                     + "keys decodes to the pre-5.1 behaviour"
             ))
 
+            // ---------------------------------------------------------------
+            // Roadmap 5.2: surrogate-source separation.
+            // ---------------------------------------------------------------
+
+            // SymmetricEigen underpins both the 5.1 rank diagnostic and the
+            // 5.2 artifact PCA, and neither of those would fail loudly if it
+            // were subtly wrong. Verify the decomposition itself: A must equal
+            // the sum of lambda_i v_i v_i^T, and the vectors must be orthonormal.
+            var eigenTest = [[Double]](repeating: [Double](repeating: 0, count: 12), count: 12)
+            var eigenSeed = GaussianSource(seed: 0xEE_1E_11)
+            for row in 0..<12 {
+                for column in row..<12 {
+                    let value = eigenSeed.gaussian()
+                    eigenTest[row][column] = value
+                    eigenTest[column][row] = value
+                }
+            }
+            let eigenDecomposition = SymmetricEigen.decompose(eigenTest)
+            var reconstruction = [[Double]](
+                repeating: [Double](repeating: 0, count: 12), count: 12
+            )
+            for (value, vector) in zip(eigenDecomposition.values, eigenDecomposition.vectors) {
+                for row in 0..<12 {
+                    for column in 0..<12 {
+                        reconstruction[row][column] += value * vector[row] * vector[column]
+                    }
+                }
+            }
+            var reconstructionError = 0.0
+            for row in 0..<12 {
+                for column in 0..<12 {
+                    reconstructionError = max(
+                        reconstructionError,
+                        abs(reconstruction[row][column] - eigenTest[row][column])
+                    )
+                }
+            }
+            var orthonormalityError = 0.0
+            for i in 0..<12 {
+                for j in 0..<12 {
+                    let dot = zip(eigenDecomposition.vectors[i], eigenDecomposition.vectors[j])
+                        .reduce(0.0) { $0 + $1.0 * $1.1 }
+                    orthonormalityError = max(orthonormalityError, abs(dot - (i == j ? 1 : 0)))
+                }
+            }
+            outcomes.append(Outcome(
+                name: "Symmetric eigendecomposition reconstructs its input",
+                snr: reconstructionError,
+                passed: reconstructionError < 1e-10 && orthonormalityError < 1e-10,
+                expectation: "A = sum of lambda_i v_i v_i^T to 1e-10 with orthonormal vectors"
+            ))
+
+            let surrogateMontage = Montage.standard(count: 64)
+            let surrogateHead = SphericalHeadModel.classicThreeShell
+            let surrogateBrain = try SurrogateSeparation.brainModel(
+                head: surrogateHead, montage: surrogateMontage, count: 29,
+                reference: .average, terms: 100
+            )
+
+            func identityDeviation(regularization: Double, artifacts: [[Double]]) -> Double {
+                let filter = SurrogateSeparation.spatialFilter(
+                    brain: surrogateBrain, artifactTopographies: artifacts,
+                    brainRegularization: regularization
+                )
+                var worst = 0.0
+                for row in filter.indices {
+                    for column in filter[row].indices {
+                        let target = row == column ? 1.0 : 0.0
+                        worst = max(worst, abs(filter[row][column] - target))
+                    }
+                }
+                return worst
+            }
+
+            // Asking the filter to be the *identity* is the wrong test: a
+            // three-shell lead field is ill-conditioned, and the directions it
+            // reproduces poorly are spatial patterns no dipole can produce
+            // anyway. What must be preserved is physiologically reachable
+            // signal — topographies of actual dipoles at the depth the simulator
+            // uses.
+            var dipoleProbeConfig = SimulationConfig.default
+            dipoleProbeConfig.channelCount = 64
+            dipoleProbeConfig.dipoleSourceCount = 7
+            let probeSources = DipoleEEGGenerator.makeSources(config: dipoleProbeConfig)
+            let probeField = try SphericalForwardModel.leadField(
+                head: surrogateHead, montage: surrogateMontage, sources: probeSources,
+                reference: .average, terms: dipoleProbeConfig.leadFieldTerms
+            )
+            let probeTopographies = (0..<probeSources.count).map { index in
+                probeField.matrixMicrovoltsPerNanoampereMeter.map { $0[index] }
+            }
+
+            // `apply` takes channels x samples. Treat each probe topography as
+            // one sample column, so the matrix is channels x probes — passing
+            // the topographies as if they were channels silently computes
+            // something meaningless.
+            var probeMatrix = [[Double]](
+                repeating: [Double](repeating: 0, count: probeTopographies.count),
+                count: surrogateMontage.electrodes.count
+            )
+            for (probe, topography) in probeTopographies.enumerated() {
+                for channel in topography.indices { probeMatrix[channel][probe] = topography[channel] }
+            }
+
+            func preservation(regularization: Double, artifacts: [[Double]] = []) -> Double {
+                let filter = SurrogateSeparation.spatialFilter(
+                    brain: surrogateBrain, artifactTopographies: artifacts,
+                    brainRegularization: regularization
+                )
+                let projected = SurrogateSeparation.apply(filter: filter, to: probeMatrix)
+                var worst = 1.0
+                for probe in probeTopographies.indices {
+                    let recovered = (0..<projected.count).map { projected[$0][probe] }
+                    worst = min(worst, DipoleEEGGenerator.pearson(probeTopographies[probe], recovered))
+                }
+                return worst
+            }
+
+            let unregularizedPreservation = preservation(regularization: 0)
+            let regularizedPreservation = preservation(regularization: 0.02)
+            outcomes.append(Outcome(
+                name: "Surrogate brain model reproduces real dipole topographies",
+                snr: unregularizedPreservation,
+                passed: unregularizedPreservation > 0.99,
+                expectation: "with no artifact columns and no regularization, every dipole "
+                    + "topography survives the filter with correlation above 0.99"
+            ))
+            // The end-to-end property: a *whole simulated recording* containing
+            // no artifact must survive the filter. Topography preservation
+            // alone is not enough to conclude this — it is measured one
+            // topography at a time, while a recording mixes them.
+            var passthroughConfig = SimulationConfig.default
+            passthroughConfig.channelCount = 64
+            passthroughConfig.samplingRate = 250
+            passthroughConfig.durationSeconds = 8
+            passthroughConfig.eegGenerationModel = .dipole
+            passthroughConfig.recordingReference = .average
+            let passthroughEEG = try DipoleEEGGenerator.generate(
+                config: passthroughConfig, montage: surrogateMontage
+            )
+            var passthroughChannels = passthroughEEG.channels
+            EEGReferencing.apply(.average, to: &passthroughChannels)
+            let passthroughFilter = SurrogateSeparation.spatialFilter(
+                brain: surrogateBrain, artifactTopographies: [], brainRegularization: 0.02
+            )
+            let passthroughResult = SurrogateSeparation.apply(
+                filter: passthroughFilter, to: passthroughChannels
+            )
+            let passthroughCorrelation = zip(passthroughChannels, passthroughResult)
+                .map { DipoleEEGGenerator.pearson($0, $1) }.min() ?? 0
+            // Correlation is scale-invariant, so it cannot see a filter that
+            // preserves shape while shrinking amplitude — and shrinkage is
+            // exactly what a regularized fit does. Measure the residual the way
+            // `score` does, against the signal itself.
+            var passthroughSignalSquares = 0.0
+            var passthroughResidualSquares = 0.0
+            for channel in passthroughChannels.indices {
+                for sample in passthroughChannels[channel].indices {
+                    let value = passthroughChannels[channel][sample]
+                    passthroughSignalSquares += value * value
+                    let residual = value - passthroughResult[channel][sample]
+                    passthroughResidualSquares += residual * residual
+                }
+            }
+            let passthroughSNR = passthroughResidualSquares > 1e-30
+                ? (passthroughSignalSquares / passthroughResidualSquares).squareRoot()
+                : Double.infinity
+            outcomes.append(Outcome(
+                name: "A whole artifact-free recording survives the surrogate filter",
+                snr: passthroughSNR,
+                passed: passthroughCorrelation > 0.97 && passthroughSNR > 5,
+                expectation: "a clean recording survives with correlation above 0.97 and "
+                    + "residual SNR above 5 — correlation alone would miss amplitude shrinkage"
+            ))
+
+            outcomes.append(Outcome(
+                name: "Brain regularization keeps dipole topographies intact",
+                snr: regularizedPreservation,
+                passed: regularizedPreservation > 0.95,
+                expectation: "2% regularization still preserves dipole topographies above 0.95; "
+                    + "a low value means the basis is too deep to describe them"
+            ))
+
+            // End to end: generate a recording whose BCG is known, correct it,
+            // and check the correction actually recovers signal rather than
+            // merely changing it. Scored against the clean truth the same way
+            // the `score` command scores a file.
+            var separationConfig = SimulationConfig.default
+            separationConfig.channelCount = 64
+            separationConfig.samplingRate = 250
+            // Long enough that the template averages well over 70 accepted
+            // beats. This is not padding: the harness measures broadband SNR
+            // 0.99 (worse than no correction) at 60 s, against 2.8 at 120 s and
+            // 2.5 at 480 s. Below roughly 70 beats the template retains enough
+            // ongoing EEG that its third and fourth components are brain
+            // activity, and removing them costs more than the artifact does.
+            separationConfig.durationSeconds = 150
+            separationConfig.eegGenerationModel = .dipole
+            separationConfig.recordingReference = .average
+            separationConfig.bcgSpatialModel = .generators
+            separationConfig.gradientEnabled = false
+            let separationMontage = Montage.standard(count: separationConfig.channelCount)
+            let separationClean = try DipoleEEGGenerator.generate(
+                config: separationConfig, montage: separationMontage
+            ).channels
+            var separationNoisy = separationClean
+            var separationStream = GaussianSource(
+                seed: SimulationSeedStreams.bcg(base: separationConfig.seed)
+            )
+            let separationBCG = BCGArtifactModel.inject(
+                into: &separationNoisy, config: separationConfig,
+                montage: separationMontage, source: &separationStream
+            )
+            EEGReferencing.apply(.average, to: &separationNoisy)
+            var separationCleanReferenced = separationClean
+            EEGReferencing.apply(.average, to: &separationCleanReferenced)
+
+            let separationComponents = SurrogateSeparation.artifactComponents(
+                channels: separationNoisy,
+                samplingRate: separationConfig.samplingRate,
+                beatSeconds: separationBCG.detectedBeatSeconds
+            )
+            // The generator BCG has spatial rank 4 (roadmap 5.1), and that is
+            // how many components the artifact genuinely occupies. Retaining
+            // more starts removing EEG: the harness measures broadband SNR 3.00
+            // at four components and 1.58 at five, because the fifth carries
+            // about 1% of template variance and is ongoing activity rather than
+            // artifact. Faithfulness to the paper's 0.5% threshold is kept in
+            // the default; this test pins the behaviour at the true rank.
+            let separationTopographies = Array(
+                (separationComponents?.topographies ?? []).prefix(4)
+            )
+            let separationBrain = try SurrogateSeparation.brainModel(
+                head: separationConfig.sphericalHeadModel, montage: separationMontage,
+                count: 29, reference: .average, terms: separationConfig.leadFieldTerms
+            )
+            let separationFilter = SurrogateSeparation.spatialFilter(
+                brain: separationBrain, artifactTopographies: separationTopographies,
+                brainRegularization: 0.02
+            )
+            let separationCorrected = SurrogateSeparation.apply(
+                filter: separationFilter, to: separationNoisy
+            )
+            func broadbandSNR(_ corrected: [[Double]]) -> Double {
+                var cleanSquares = 0.0
+                var residualSquares = 0.0
+                for channel in separationCleanReferenced.indices {
+                    for sample in separationCleanReferenced[channel].indices
+                    where sample < corrected[channel].count {
+                        let clean = separationCleanReferenced[channel][sample]
+                        cleanSquares += clean * clean
+                        let residual = clean - corrected[channel][sample]
+                        residualSquares += residual * residual
+                    }
+                }
+                return residualSquares > 1e-30
+                    ? (cleanSquares / residualSquares).squareRoot() : .infinity
+            }
+            let correctedSNR = broadbandSNR(separationCorrected)
+            let uncorrectedSNR = broadbandSNR(separationNoisy)
+            outcomes.append(Outcome(
+                name: "Surrogate separation improves SNR against a known BCG",
+                snr: correctedSNR,
+                passed: correctedSNR > 1.8 * uncorrectedSNR
+                    && separationTopographies.count == 4
+                    && (separationComponents?.acceptedBeatCount ?? 0)
+                        > (separationComponents?.candidateBeatCount ?? 1) / 3,
+                expectation: "broadband SNR improves by at least 1.8x at the BCG's true rank, "
+                    + "with over a third of beats accepted by the pattern search"
+            ))
+
+            // ---------------------------------------------------------------
+            // Roadmap 5.3: what the brain basis actually contributes.
+            // ---------------------------------------------------------------
+            //
+            // The roadmap warned that a surrogate basis sitting on the simulated
+            // sources would flatter this method. Swept with repeated seeds, the
+            // harness says the opposite: correction quality *falls* as the brain
+            // basis gets richer or closer (broadband SNR 2.13 / 2.20 / 1.82 /
+            // 1.50 at 8 / 16 / 29 / 60 regional sources), and displacing the
+            // basis by 40 mm slightly helps.
+            //
+            // The mechanism: separation is bought entirely by the asymmetry
+            // between a penalized brain block and an unpenalized artifact block.
+            // A more expressive brain model can represent the artifact too, so it
+            // competes for it, and less of the artifact is left for the columns
+            // meant to carry it.
+            //
+            // Pinned deterministically here rather than through the seeded sweep,
+            // because the sweep's differences are close to its own spread.
+            func artifactAbsorption(regionalSources: Int) throws -> Double {
+                let brain = try SurrogateSeparation.brainModel(
+                    head: separationConfig.sphericalHeadModel, montage: separationMontage,
+                    count: regionalSources, reference: .average,
+                    terms: separationConfig.leadFieldTerms
+                )
+                let filter = SurrogateSeparation.spatialFilter(
+                    brain: brain, artifactTopographies: separationTopographies,
+                    brainRegularization: 0.02
+                )
+                // Feed the filter a BCG generator topography that the artifact
+                // model is meant to remove, and see how much survives.
+                guard let generator = separationBCG.generatorSet?.generators.first else { return 0 }
+                let column = (0..<separationMontage.electrodes.count).map {
+                    $0 < generator.topography.count ? generator.topography[$0] : 0
+                }
+                let passed = SurrogateSeparation.apply(filter: filter, to: column.map { [$0] })
+                let inputNorm = column.reduce(0.0) { $0 + $1 * $1 }.squareRoot()
+                let outputNorm = passed.reduce(0.0) { $0 + $1[0] * $1[0] }.squareRoot()
+                return inputNorm > 1e-15 ? outputNorm / inputNorm : 0
+            }
+            let sparseAbsorption = try artifactAbsorption(regionalSources: 8)
+            let richAbsorption = try artifactAbsorption(regionalSources: 60)
+            outcomes.append(Outcome(
+                name: "A richer brain basis absorbs more artifact, weakening the separation",
+                snr: richAbsorption - sparseAbsorption,
+                passed: richAbsorption > sparseAbsorption,
+                expectation: "more of a BCG generator topography survives the filter with 60 "
+                    + "regional sources than with 8 — the brain block competing for the artifact"
+            ))
+
+            // ---------------------------------------------------------------
+            // Roadmap 4.3: placeable ERP components.
+            // ---------------------------------------------------------------
+
+            var placedConfig = SimulationConfig.default
+            placedConfig.channelCount = 64
+            placedConfig.samplingRate = 250
+            placedConfig.durationSeconds = 40
+            placedConfig.eegGenerationModel = .dipole
+            placedConfig.recordingReference = .average
+            let placedMontage = Montage.standard(count: placedConfig.channelCount)
+
+            func placedInjection(
+                _ components: [ERPComponentConfig]?
+            ) throws -> ERPInjection? {
+                var config = placedConfig
+                var design = ERPConfig()
+                design.trialCount = 20
+                design.interStimulusIntervalSeconds = 1.5
+                design.omissionRate = 0
+                design.components = components
+                config.erp = design
+                var channels = [[Double]](
+                    repeating: [Double](repeating: 0, count: config.sampleCount),
+                    count: config.channelCount
+                )
+                return try ERPGenerator.inject(
+                    into: &channels, config: config, montage: placedMontage
+                )
+            }
+
+            let bilateral = [
+                ERPComponentConfig(
+                    id: "left",
+                    positionMillimetres: Vector3D(x: -49, y: -14, z: 0),
+                    orientation: Vector3D(x: -0.17, y: -0.25, z: -0.95),
+                    peakLatencySeconds: 0.101, widthSeconds: 0.028
+                ),
+                ERPComponentConfig(
+                    id: "right",
+                    positionMillimetres: Vector3D(x: 49, y: -11, z: 1),
+                    orientation: Vector3D(x: 0.15, y: -0.24, z: -0.96),
+                    peakLatencySeconds: 0.103, widthSeconds: 0.028
+                )
+            ]
+            let legacyERP = try placedInjection(nil)
+            let placedERP = try placedInjection(bilateral)
+
+            // The 4.3 defect, demonstrated rather than asserted. The old path
+            // derived the ERP source from `makeSources`, so it sat *exactly* on
+            // ongoing-EEG source #1 — signal and noise in the same place.
+            let legacyDistance = legacyERP?.componentSources.first?
+                .nearestNeuralSourceMillimetres ?? -1
+            let placedDistances = (placedERP?.componentSources ?? [])
+                .compactMap(\.nearestNeuralSourceMillimetres)
+            outcomes.append(Outcome(
+                name: "A placed ERP component no longer sits on an ongoing-EEG source",
+                snr: placedDistances.min() ?? 0,
+                passed: legacyDistance < 1e-6
+                    && placedDistances.count == 2
+                    && (placedDistances.min() ?? 0) > 10,
+                expectation: "the legacy component is 0 mm from a neural source; placed "
+                    + "components are more than 10 mm away, and the distance is in the sidecar"
+            ))
+
+            // Placement is honoured: the emitted topography must match a lead
+            // field computed directly at the stated coordinates.
+            if let placedERP, placedERP.componentSources.count == 2 {
+                var worstTopographyError = 0.0
+                for component in placedERP.componentSources {
+                    let field = try SphericalForwardModel.leadField(
+                        head: placedConfig.sphericalHeadModel, montage: placedMontage,
+                        sources: [component.source], reference: .average,
+                        terms: placedConfig.leadFieldTerms
+                    )
+                    var expected = field.matrixMicrovoltsPerNanoampereMeter.map { $0[0] }
+                    let peak = expected.map(abs).max() ?? 1
+                    if peak > 0 { for index in expected.indices { expected[index] /= peak } }
+                    let error = zip(component.topography, expected)
+                        .map { abs($0 - $1) }.max() ?? 1
+                    worstTopographyError = max(worstTopographyError, error)
+                }
+                // A bilateral pair must actually be bilateral: the two
+                // topographies should be near mirror images, which is the whole
+                // point of being able to enter a published dipole model.
+                let left = placedERP.componentSources[0].topography
+                let right = placedERP.componentSources[1].topography
+                let mirrorCorrelation = DipoleEEGGenerator.pearson(left, right)
+                outcomes.append(Outcome(
+                    name: "Placed ERP topographies match their stated coordinates",
+                    snr: worstTopographyError,
+                    passed: worstTopographyError < 1e-9 && mirrorCorrelation < 0.999,
+                    expectation: "each topography reproduces a directly computed lead field to "
+                        + "1e-9, and the bilateral pair is not one degenerate pattern"
+                ))
+
+                // Components of a real complex do not jitter together.
+                let leftLatencies = placedERP.componentSources[0].trialLatencySeconds
+                let rightLatencies = placedERP.componentSources[1].trialLatencySeconds
+                let jitterCorrelation = abs(
+                    DipoleEEGGenerator.pearson(leftLatencies, rightLatencies)
+                )
+                outcomes.append(Outcome(
+                    name: "Each ERP component jitters on its own stream",
+                    snr: jitterCorrelation,
+                    passed: jitterCorrelation < 0.5
+                        && leftLatencies.count == 20 && rightLatencies.count == 20,
+                    expectation: "per-trial latencies of two components are close to uncorrelated, "
+                        + "which is the confound single-trial estimators exist to resolve"
+                ))
+            }
+
+            // 4.5a: the convergence check now travels with the call site, because
+            // a placed component can sit at any depth and the run-level check
+            // covers only the ongoing sources.
+            var deepComponent = ERPComponentConfig(id: "deep")
+            deepComponent.positionMillimetres = Vector3D(x: 0, y: 0, z: 71.5)
+            var deepConfig = placedConfig
+            deepConfig.leadFieldTerms = 8
+            var deepDesign = ERPConfig()
+            deepDesign.trialCount = 4
+            deepDesign.components = [deepComponent]
+            deepConfig.erp = deepDesign
+            var deepChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: deepConfig.sampleCount),
+                count: deepConfig.channelCount
+            )
+            var deepRejected = false
+            do {
+                _ = try ERPGenerator.inject(
+                    into: &deepChannels, config: deepConfig, montage: placedMontage
+                )
+            } catch {
+                deepRejected = true
+            }
+            outcomes.append(Outcome(
+                name: "An under-resolved placed component is rejected, not silently wrong",
+                snr: deepRejected ? 0 : 1,
+                passed: deepRejected,
+                expectation: "a component 0.5 mm inside the brain boundary with 8 series terms "
+                    + "fails the convergence check rather than producing a plausible topography"
+            ))
+
+            // ---------------------------------------------------------------
+            // Roadmap 5.3: the Rusiniak evaluation criteria.
+            // ---------------------------------------------------------------
+
+            // Explained variance must be exactly 1 when the data lies in the
+            // model span, and must fall when something outside it is added.
+            // Both halves are needed: a metric that always returned 1 would pass
+            // the first on its own.
+            let evChannels = 16
+            let evSamples = 40
+            var evModel = [[Double]](repeating: [Double](repeating: 0, count: evChannels), count: 2)
+            var evSeed = GaussianSource(seed: 0xE_1_7A_2C)
+            for component in 0..<2 {
+                for channel in 0..<evChannels { evModel[component][channel] = evSeed.gaussian() }
+            }
+            var inModel = [[Double]](
+                repeating: [Double](repeating: 0, count: evSamples), count: evChannels
+            )
+            for sample in 0..<evSamples {
+                let a = sin(Double(sample) * 0.3)
+                let b = cos(Double(sample) * 0.11)
+                for channel in 0..<evChannels {
+                    inModel[channel][sample] = a * evModel[0][channel] + b * evModel[1][channel]
+                }
+            }
+            let insideVariance = ERPEvaluation.explainedVariance(
+                average: inModel, samplingRate: 100, preSamples: 0,
+                modelTopographies: evModel, startSeconds: 0, endSeconds: 0.4
+            )
+            var withForeign = inModel
+            var foreign = [Double](repeating: 0, count: evChannels)
+            for channel in 0..<evChannels { foreign[channel] = evSeed.gaussian() }
+            for sample in 0..<evSamples {
+                for channel in 0..<evChannels {
+                    withForeign[channel][sample] += 3 * foreign[channel] * sin(Double(sample) * 0.7)
+                }
+            }
+            let contaminatedVariance = ERPEvaluation.explainedVariance(
+                average: withForeign, samplingRate: 100, preSamples: 0,
+                modelTopographies: evModel, startSeconds: 0, endSeconds: 0.4
+            )
+            outcomes.append(Outcome(
+                name: "Explained variance is exact in the model span and falls outside it",
+                snr: contaminatedVariance,
+                passed: abs(insideVariance - 1) < 1e-9 && contaminatedVariance < 0.7,
+                expectation: "1.0 for data built from the model topographies, below 0.7 once a "
+                    + "foreign topography is added"
+            ))
+
+            // Trial rejection has to actually reject. The thresholds are the
+            // paper's: 120 µV peak-to-peak, 75 µV per sample.
+            var rejectionConfig = SimulationConfig.default
+            rejectionConfig.samplingRate = 250
+            let rejectionRate = rejectionConfig.samplingRate
+            let rejectionOnsets = [1.0, 3.0, 5.0, 7.0]
+            var rejectionChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: Int(9 * rejectionRate)), count: 4
+            )
+            // A clean response on every trial, then one trial spoiled by a large
+            // excursion that must cost exactly one accepted epoch.
+            for onset in rejectionOnsets {
+                let start = Int(onset * rejectionRate)
+                for offset in 0..<Int(0.2 * rejectionRate) {
+                    for channel in rejectionChannels.indices {
+                        rejectionChannels[channel][start + offset] += 5 * sin(
+                            Double(offset) / (0.2 * rejectionRate) * Double.pi
+                        )
+                    }
+                }
+            }
+            let spoiled = Int(rejectionOnsets[2] * rejectionRate)
+            for offset in 0..<20 { rejectionChannels[0][spoiled + offset] += 400 }
+
+            let rejectionResult = ERPEvaluation.evaluate(
+                channels: rejectionChannels, samplingRate: rejectionRate,
+                onsets: rejectionOnsets, conditions: rejectionOnsets.map { _ in "target" },
+                modelTopographies: [[1, 0, 0, 0]],
+                fwhmStartSeconds: 0.05, fwhmEndSeconds: 0.15
+            )
+            outcomes.append(Outcome(
+                name: "Epoch rejection drops exactly the spoiled trial",
+                snr: Double(rejectionResult?.acceptedTrials ?? -1),
+                passed: rejectionResult?.candidateTrials == 4
+                    && rejectionResult?.acceptedTrials == 3,
+                expectation: "4 candidate epochs, 3 accepted — the one carrying a 400 µV "
+                    + "excursion fails the amplitude and gradient thresholds"
+            ))
+
             var bridged = [[1.0, 2, 3], [3.0, 4, 5], [7.0, 8, 9]]
             let pairs = [ChannelBridge(firstChannel: 1, secondChannel: 2)]
             _ = AdditionalArtifactModel.applyBridging(to: &bridged, pairs: pairs)

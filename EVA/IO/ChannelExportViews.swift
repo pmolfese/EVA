@@ -37,6 +37,9 @@ private struct ChannelExportEvent: Codable {
     var beginTimeSeconds: Double
     var durationSeconds: Double?
     var sourceFile: String
+    /// Which instant `beginTimeSeconds` names, so the export describes its own
+    /// geometry rather than leaving the reader to assume an onset.
+    var timeAnchor: EventTimeAnchor
 }
 
 private struct ChannelExportPayload: Codable {
@@ -154,7 +157,8 @@ extension WaveformView {
             cell: event.cell,
             beginTimeSeconds: event.beginTimeSeconds,
             durationSeconds: event.durationSeconds,
-            sourceFile: event.sourceFile
+            sourceFile: event.sourceFile,
+            timeAnchor: event.timeAnchor
         )
     }
 
@@ -222,7 +226,10 @@ extension WaveformView {
         var values = [Double](repeating: 0, count: sampleCount)
 
         for event in events {
-            let eventStart = event.beginTimeSeconds
+            // Spans come from the event's own anchor, so a centered or
+            // peak-stamped event marks the samples it actually covers rather
+            // than a window starting at its midpoint.
+            let eventStart = event.onsetTimeSeconds
             let duration = max(event.durationSeconds ?? 0, 0)
             if duration > 0 {
                 let eventEnd = eventStart + duration

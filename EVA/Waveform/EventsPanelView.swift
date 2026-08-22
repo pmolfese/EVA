@@ -158,9 +158,19 @@ struct EventsPanelView: View, Equatable {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)
                         }
-                        Text(Self.formattedEventTime(event.beginTimeSeconds))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            Text(Self.formattedEventTime(event.beginTimeSeconds))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            // Without this the time is ambiguous: a peak-anchored
+                            // blink and an onset-anchored stimulus marker print
+                            // identically, and only the flag popover said which
+                            // was which. Onset is the assumed case, so it stays
+                            // unmarked and only the surprising ones draw a badge.
+                            if event.timeAnchor != .onset {
+                                AnchorBadge(anchor: event.timeAnchor, isCompact: true)
+                            }
+                        }
                         Text(event.sourceFile)
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
@@ -172,7 +182,8 @@ struct EventsPanelView: View, Equatable {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(
-                "Event \(offset + 1), \(Self.accessibilitySummary(event)), \(Self.formattedEventTime(event.beginTimeSeconds))"
+                "Event \(offset + 1), \(Self.accessibilitySummary(event)), "
+                + "\(event.timeAnchor.timeFieldLabel) \(Self.formattedEventTime(event.beginTimeSeconds))"
             )
             .listRowBackground(
                 selectedEventID == event.id ? Color.accentColor.opacity(0.14) : Color.clear

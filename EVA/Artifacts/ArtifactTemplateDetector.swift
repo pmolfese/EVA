@@ -685,7 +685,8 @@ nonisolated enum ArtifactTemplateDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Topography %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: Double(hit.durationSamples) / signal.samplingRate
+                durationSeconds: Double(hit.durationSamples) / signal.samplingRate,
+                timeAnchor: .onset
             )
         }
 
@@ -859,7 +860,8 @@ nonisolated enum ArtifactTemplateDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Continuous %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: duration
+                durationSeconds: duration,
+                timeAnchor: .onset
             )
         }
 
@@ -1204,7 +1206,8 @@ nonisolated enum ArtifactTemplateDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Trajectory %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: Double(hit.durationSamples) / sr
+                durationSeconds: Double(hit.durationSamples) / sr,
+                timeAnchor: .center
             )
         }
 
@@ -1544,7 +1547,8 @@ nonisolated enum ArtifactTemplateDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Template %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: Double(hit.durationSamples) / downsampledRate
+                durationSeconds: Double(hit.durationSamples) / downsampledRate,
+                timeAnchor: .center
             )
         }
     }
@@ -1738,6 +1742,16 @@ nonisolated enum ArtifactTemplateDetector {
         var accepted = 0
 
         for event in events {
+            // `beginTimeSeconds`, deliberately — NOT `centerTimeSeconds`.
+            //
+            // This averager built every stored `DefinedArtifact.average`, so it
+            // has to keep building them the same way or replaying a saved
+            // artifact produces a different template than the one it was
+            // defined with. See `templateAverage`'s note on the second,
+            // non-agreeing averager in `ArtifactPreviewViews`. The window is
+            // centred on the marked sample whatever that sample means, which is
+            // a quirk of this function's history rather than a claim about
+            // event geometry.
             let center = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
             let start = center - windowSamples / 2
             let end = start + windowSamples

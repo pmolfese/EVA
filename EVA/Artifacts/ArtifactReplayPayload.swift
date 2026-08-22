@@ -124,7 +124,11 @@ nonisolated struct ArtifactReplayPayload: Codable, Sendable {
             put("method=\(artifact.cleaningMethod.rawValue)")
             put("window=\(artifact.windowSizeSeconds)")
             put("channels=\(artifact.selectedChannelIndices.sorted().map(String.init).joined(separator: ","))")
-            put("events=\(artifact.events.map { String(format: "%.6f", $0.beginTimeSeconds) }.sorted().joined(separator: ","))")
+            // Anchored, not raw: two artifacts whose events sit on the same
+            // samples but read them as onsets in one case and centers in the
+            // other clean different windows, so a fingerprint over
+            // `beginTimeSeconds` alone would call them identical.
+            put("events=\(artifact.events.map { String(format: "%.6f@\($0.timeAnchor.rawValue)", $0.beginTimeSeconds) }.sorted().joined(separator: ","))")
             // The method's own parameters, via the encoding `eva.xml` already
             // uses — one source of truth for "what defines this cleaning".
             let parameters = artifact.processingParameters(prefix: "a")

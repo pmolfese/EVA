@@ -1208,7 +1208,9 @@ with open(os.path.join(outdir, "meta.json"), "w", encoding="utf-8") as f:
                 cell: $0.cell,
                 beginTimeSeconds: $0.beginTimeSeconds,
                 rawBeginTime: $0.rawBeginTime,
-                sourceFile: $0.sourceFile
+                sourceFile: $0.sourceFile,
+                // The MNE bridge reports onsets, as every file format does.
+                timeAnchor: .onset
             )
         }
         return MFFSignalData(

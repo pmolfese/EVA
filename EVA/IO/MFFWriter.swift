@@ -754,9 +754,16 @@ nonisolated enum MFFWriter {
                 // `sourceFile` describes where EVA imported the event from; MFF
                 // has no dedicated field for that provenance, so do not overwrite
                 // the event's real semantic description with it.
+                //
+                // `onsetTimeSeconds`, not `beginTimeSeconds`: MFF's format is
+                // onset plus duration and has no way to express a centered
+                // event, so a centered or peak-stamped event must be converted
+                // on the way out. Writing `beginTimeSeconds` straight through —
+                // as EVA did before events carried an anchor — exported every
+                // such event half its duration late.
                 ExportEvent(
                     code: $0.code,
-                    beginTimeSeconds: $0.beginTimeSeconds,
+                    beginTimeSeconds: $0.onsetTimeSeconds,
                     durationSeconds: $0.durationSeconds,
                     label: $0.label,
                     description: $0.eventDescription,

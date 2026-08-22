@@ -124,6 +124,13 @@ nonisolated struct SimulationTruth: Codable, Sendable {
     var erpWaveformDescription: String? = nil
     var erpRealizedLatencyAmplitudeCorrelation: Double? = nil
     var erpRandomSeeds: ERPRandomSeedTruth? = nil
+    /// Every ERP generator that contributed, with its placement, topography and
+    /// per-trial latency and amplitude. Also records each component's distance
+    /// to the nearest ongoing-EEG source, so a signal sitting on top of a noise
+    /// source is visible rather than assumed away (roadmap 4.3).
+    var erpComponentSources: [ERPComponentTruth]? = nil
+    /// The frame `erpComponentSources` positions are expressed in.
+    var erpCoordinateFrame: String? = nil
 }
 
 nonisolated struct SourceSpaceTruth: Codable, Sendable {

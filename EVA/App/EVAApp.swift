@@ -28,6 +28,7 @@ struct EVAApp: App {
     @State private var goodnessSettings = ChannelGoodnessSettings()
     @State private var segmentGoodnessSettings = SegmentGoodnessSettings()
     @State private var processingDefaults = ProcessingDefaults.shared
+    @State private var eventAnchorSettings = EventAnchorSettings.shared
     @State private var isCheckingForUpdates = false
     /// Owned here, not inside `BatchWindowView`, so it can be injected at the
     /// `Window` scene's own definition below rather than from inside that
@@ -181,6 +182,7 @@ struct EVAApp: App {
                 .environment(goodnessSettings)
                 .environment(segmentGoodnessSettings)
                 .environment(processingDefaults)
+                .environment(eventAnchorSettings)
         }
     }
 

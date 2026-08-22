@@ -1260,27 +1260,15 @@ extension WaveformView {
         artifactVM.statusMessage = "\(result.topographyEvents.count) topography matches"
     }
 
-    func isCenteredArtifactDetectionEvent(_ event: MFFEvent) -> Bool {
-        guard event.durationSeconds != nil else { return false }
-        if event.sourceFile == EyeArtifactThresholdDetector.sourceFile {
-            return true
-        }
-        // Wavelet Explorer candidates get the highlight band as soon as a
-        // scan finds them, before Apply promotes them into a DefinedArtifact —
-        // reviewing what was found shouldn't require cleaning it first.
-        if event.sourceFile == WaveletArtifactExplorerViewModel.candidateSourceFile {
-            return true
-        }
-        // ECG detection stamps the marker on the R peak and records the measured
-        // width of the deflection *around* it, so the band centers the same way
-        // the other detectors' do. `hasPrefix` because the algorithm name is
-        // appended to the source file ("ECG Detection: Pan-Tompkins").
-        if event.sourceFile.hasPrefix(RWaveDetector.sourceFile) {
-            return true
-        }
-        return template.definedArtifacts.contains { artifact in
-            artifact.events.contains { $0.id == event.id }
-        }
+    /// Whether clicking `event`'s flag should draw the span highlight band.
+    ///
+    /// Any event that records a duration can show one: the band's geometry now
+    /// comes from the event's own `timeAnchor` (via `spanSeconds`), so it no
+    /// longer matters which detector produced it. This used to be a whitelist
+    /// of `sourceFile` strings, which meant a source that forgot to enrol —
+    /// BCG detection did — silently got no band at all.
+    func isHighlightableSpanEvent(_ event: MFFEvent) -> Bool {
+        event.spanSeconds != nil
     }
 
     func artifactTemplateChannelChipColor(
@@ -1468,7 +1456,8 @@ extension WaveformView {
                 beginTimeSeconds: event.beginTimeSeconds,
                 rawBeginTime: event.rawBeginTime,
                 sourceFile: event.sourceFile,
-                durationSeconds: event.durationSeconds
+                durationSeconds: event.durationSeconds,
+                timeAnchor: event.timeAnchor
             )
         }
 
@@ -1493,7 +1482,8 @@ extension WaveformView {
                 beginTimeSeconds: event.beginTimeSeconds,
                 rawBeginTime: event.rawBeginTime,
                 sourceFile: event.sourceFile,
-                durationSeconds: event.durationSeconds
+                durationSeconds: event.durationSeconds,
+                timeAnchor: event.timeAnchor
             )
         }
     }

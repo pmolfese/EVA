@@ -580,7 +580,8 @@ nonisolated enum BCGDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.4f", time),
                 sourceFile: sourceFile,
-                durationSeconds: duration
+                durationSeconds: duration,
+                timeAnchor: .peak
             )
         }
     }

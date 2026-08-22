@@ -40,6 +40,8 @@ swiftc -O \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/GradientArtifactModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/BCGGeneratorModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/BCGArtifactModel.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SurrogateSeparation.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/ERPEvaluation.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SNRMetrics.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/RichMetrics.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SourceMetrics.swift" \

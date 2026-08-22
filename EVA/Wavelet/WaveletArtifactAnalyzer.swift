@@ -2559,7 +2559,8 @@ nonisolated enum WaveletArtifactAnalyzer {
                 code: eventCode,
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
-                sourceFile: String(format: "\(sourceLabel) %.0f%%", threshold * 100)
+                sourceFile: String(format: "\(sourceLabel) %.0f%%", threshold * 100),
+                timeAnchor: .center
             )
         }
     }
