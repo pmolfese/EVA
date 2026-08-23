@@ -195,8 +195,8 @@ nonisolated struct ChannelImpedanceSettings: Codable, Sendable {
     var goodMaxKOhm: Double = 60
     var goodScore: Double = 0.78
     /// Impedance (kΩ) marking the "fair" band edge (score interpolates from
-    /// `goodScore` down to `fairScore` here).
-    var fairMaxKOhm: Double = 70
+    /// `goodScore` down to `fairScore` here). Anything above this counts as bad.
+    var fairMaxKOhm: Double = 100
     var fairScore: Double = 0.50
     /// Impedance (kΩ) at or above which a channel scores fully poor (0.0).
     /// Score interpolates from `fairScore` down to 0.0 between `fairMaxKOhm`
