@@ -1,0 +1,6 @@
+{
+  "gradient-locked": {
+    "broadbandSNR": 2.4701,
+    "note": "MAS, 8 donor volumes, CPU backend, no alignment or upsampling, locked EEG/MRI clocks. Recorded 2026-08-25. A mean template over 8 donors ceilings at sqrt(9)=3.00; a median is less efficient by sqrt(pi/2)=1.253, predicting ~2.39. Measured 2.47, so the analytic reasoning and the implementation agree. Changing the method, donor count, backend, or the scenario requires re-recording this with EVA_UPDATE_WATERMARK=1 -- and the change should be visible in that commit."
+  }
+}

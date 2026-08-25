@@ -87,6 +87,17 @@ nonisolated enum TrialSimilarityAnalyzer {
         /// MAD-standardised distance past which a trial is unusual regardless
         /// of which individual measure carries it.
         var divergentRobustDistance: Double = 3.0
+        /// A cross-category match is only asserted when the winning correlation
+        /// is at least this high. Without a floor, a pure-noise trial — which
+        /// correlates with nothing — still has a "best" match, and whichever
+        /// category edges ahead by luck gets named. That would put false
+        /// mislabel claims in front of the user on the one measure here that is
+        /// supposed to be directly checkable.
+        var mislabelMinimumCorrelation: Double = 0.3
+        /// And it must beat the trial's own category by at least this margin,
+        /// so a near-tie between two similar conditions is not called a
+        /// mislabel either.
+        var mislabelMargin: Double = 0.1
 
         static let defaults = Thresholds()
     }
@@ -272,6 +283,14 @@ nonisolated enum TrialSimilarityAnalyzer {
                     }
                 }
 
+                // Only claim a mislabel when the winner is both convincing on
+                // its own terms and clearly ahead of the trial's own category.
+                let isConfidentMismatch =
+                    bestCategory != nil
+                    && bestCategory != category.name
+                    && (bestCorrelation ?? 0) >= thresholds.mislabelMinimumCorrelation
+                    && (bestCorrelation ?? 0) - fit.correlation >= thresholds.mislabelMargin
+
                 rows.append(TrialSimilarity(
                     id: index,
                     trialIndex: index,
@@ -282,7 +301,7 @@ nonisolated enum TrialSimilarityAnalyzer {
                     robustDistance: 0,
                     bestMatchingCategory: bestCategory,
                     bestMatchingCorrelation: bestCorrelation,
-                    matchesOwnCategory: bestCategory == nil || bestCategory == category.name,
+                    matchesOwnCategory: !isConfidentMismatch,
                     classification: .typical
                 ))
             }

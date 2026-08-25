@@ -169,6 +169,45 @@ struct TrialSimilarityAnalyzerTests {
         }
     }
 
+    @Test func aNoiseTrialDoesNotGetAccusedOfBeingMislabelled() throws {
+        // A pure-noise trial correlates with nothing, so it still has a "best"
+        // match — whichever category wins by luck. Naming that category would be
+        // a false accusation on the one measure here meant to be checkable.
+        var aTrials = ordinaryTrials(count: 12)
+        aTrials[6] = trial(noise(seed: 555, scale: 1.0), at: 6)
+        let bTrials = (0 ..< 12).map { index in
+            trial(combine(component(amplitude: 1.0, phase: .pi), noise(seed: UInt64(index + 700))), at: Double(index))
+        }
+
+        let results = try analyze([
+            .init(name: "A", trials: aTrials),
+            .init(name: "B", trials: bTrials)
+        ])
+        let a = try #require(results.first { $0.name == "A" })
+        let noisy = try #require(a.trials.first { $0.trialIndex == 6 })
+
+        #expect(noisy.classification == .divergent, "it is still divergent")
+        #expect(noisy.matchesOwnCategory, "but not a mislabel: best r was \(noisy.bestMatchingCorrelation ?? -1)")
+        #expect(a.possibleMislabels.isEmpty)
+    }
+
+    @Test func twoSimilarCategoriesDoNotAccuseEachOtherOnANearTie() throws {
+        // Nearly identical conditions: every trial correlates about equally with
+        // both averages. Without the margin, half of them would be "mislabelled".
+        let aTrials = ordinaryTrials(count: 14, amplitude: 1.0)
+        let bTrials = (0 ..< 14).map { index in
+            trial(combine(component(amplitude: 1.02), noise(seed: UInt64(index + 3000))), at: Double(index))
+        }
+
+        let results = try analyze([
+            .init(name: "A", trials: aTrials),
+            .init(name: "B", trials: bTrials)
+        ])
+        for category in results {
+            #expect(category.possibleMislabels.isEmpty, "\(category.name) accused \(category.possibleMislabels.count)")
+        }
+    }
+
     // MARK: - Leave-one-out
 
     @Test func leaveOneOutRemovesATrialsInfluenceOnItsOwnScore() throws {

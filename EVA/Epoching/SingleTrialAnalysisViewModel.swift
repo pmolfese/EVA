@@ -33,6 +33,7 @@ enum SingleTrialAnalysisMode: String, CaseIterable, Identifiable {
     case ride = "RIDE"
     case cwtRidge = "CWT Ridge"
     case clusterStatistics = "Cluster Statistics"
+    case trialDiagnostics = "Trial Diagnostics"
 
     var id: String { rawValue }
 }
@@ -82,6 +83,15 @@ final class SingleTrialAnalysisViewModel {
     var splitCount = 2
     var outlierThresholdSD = 3.0
     var distributionChunkCount = 2
+    // Trial diagnostics (TRIALWISE.md phase 2).
+    var similarityResults: [TrialSimilarityAnalyzer.CategoryResult]?
+    var diagnosticsRows: [TrialDiagnosticsCategory] = []
+    var diagnosticsAxis = TrialDiagnosticsAxis.trialIndex
+    var diagnosticsMeasure = "Peak (own, +)"
+    var diagnosticsGroupCount = 3
+    /// Comparing every category at once is what makes the cross-category
+    /// mislabel check possible; off, only the selected category is scored.
+    var diagnosticsUsesAllCategories = true
     var usesWoodyAlignedTrialsForMeasurements = false
     var woodyAlignmentMode = WoodyAlignmentAnalyzer.AlignmentMode.correlation
     var woodyPeakPolarity = WoodyAlignmentAnalyzer.PeakPolarity.either

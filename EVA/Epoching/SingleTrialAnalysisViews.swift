@@ -228,6 +228,14 @@ struct SingleTrialAnalysisSheet: View {
                         } else if viewModel.analysisMode == .cwtRidge, let result = currentCWTResult {
                             Divider()
                             cwtResultsSection(result)
+                        } else if viewModel.analysisMode == .trialDiagnostics, !viewModel.diagnosticsRows.isEmpty {
+                            Divider()
+                            TrialDiagnosticsPanels(
+                                categories: viewModel.diagnosticsRows,
+                                axis: $viewModel.diagnosticsAxis,
+                                selectedMeasure: $viewModel.diagnosticsMeasure,
+                                groupCount: $viewModel.diagnosticsGroupCount
+                            )
                         } else if let statusMessage = viewModel.statusMessage {
                             Text(statusMessage)
                                 .font(.callout)
@@ -681,7 +689,7 @@ struct SingleTrialAnalysisSheet: View {
     @ViewBuilder
     private var alignmentInspectorControls: some View {
         switch viewModel.analysisMode {
-        case .measurements, .clusterStatistics:
+        case .measurements, .clusterStatistics, .trialDiagnostics:
             EmptyView()
         case .cwtRidge:
             EmptyView()
@@ -936,6 +944,13 @@ struct SingleTrialAnalysisSheet: View {
             switch viewModel.analysisMode {
             case .clusterStatistics:
                 EmptyView()
+            case .trialDiagnostics:
+                HStack(spacing: 20) {
+                    labeledField("Adaptive ± ms", value: $viewModel.adaptiveHalfWidthMs, width: 70)
+                    Toggle("Compare across all categories", isOn: $viewModel.diagnosticsUsesAllCategories)
+                        .toggleStyle(.checkbox)
+                        .help("Scores every category at once so a trial can be checked against the other conditions' averages — the mislabel test.")
+                }
             case .measurements:
                 HStack(spacing: 20) {
                     labeledField("Adaptive ± ms", value: $viewModel.adaptiveHalfWidthMs, width: 70)
@@ -1190,6 +1205,7 @@ struct SingleTrialAnalysisSheet: View {
         case .ride: "Run RIDE"
         case .cwtRidge: "Run CWT Ridge"
         case .clusterStatistics: "Run Cluster Statistics"
+        case .trialDiagnostics: "Score Trials"
         }
     }
 
@@ -1205,6 +1221,8 @@ struct SingleTrialAnalysisSheet: View {
             runCWTRidge()
         case .clusterStatistics:
             break
+        case .trialDiagnostics:
+            runTrialDiagnostics()
         }
     }
 
@@ -1237,6 +1255,113 @@ struct SingleTrialAnalysisSheet: View {
 
         viewModel.result = result
         viewModel.statusMessage = result == nil ? "Could not compute a result for this window." : nil
+    }
+
+    /// Scores every trial against its category's leave-one-out average, and —
+    /// when comparing across categories — against the other conditions too, then
+    /// joins the result to the amplitude/latency measures for the panels.
+    private func runTrialDiagnostics() {
+        guard let selected = viewModel.selectedCategory,
+              let rawSignal,
+              !selectedChannelIndices.isEmpty else { return }
+
+        let names = viewModel.diagnosticsUsesAllCategories
+            ? orderedCategoryNames()
+            : [selected]
+
+        let inputs: [TrialSimilarityAnalyzer.CategoryInput] = names.compactMap { name in
+            let trials = measurementTrials(category: name, rawSignal: rawSignal)
+            guard trials.count >= 2 else { return nil }
+            return TrialSimilarityAnalyzer.CategoryInput(name: name, trials: trials)
+        }
+        guard !inputs.isEmpty else {
+            viewModel.diagnosticsRows = []
+            viewModel.statusMessage = "Need at least two trials in a category to compare against."
+            return
+        }
+
+        let windowStart = viewModel.windowStartMs ?? 0
+        let windowEnd = viewModel.windowEndMs ?? 0
+        guard let similarity = TrialSimilarityAnalyzer.analyze(
+            categories: inputs,
+            samplingRate: rawSignal.samplingRate,
+            windowStartMs: windowStart,
+            windowEndMs: windowEnd
+        ) else {
+            viewModel.diagnosticsRows = []
+            viewModel.statusMessage = "Could not score trials for this window."
+            return
+        }
+        viewModel.similarityResults = similarity
+
+        // Only the selected category gets panels; the others were scored so the
+        // cross-category comparison had something to compare against.
+        guard let scored = similarity.first(where: { $0.name == selected }),
+              let input = inputs.first(where: { $0.name == selected }) else {
+            viewModel.diagnosticsRows = []
+            return
+        }
+
+        let reference = TrialSimilarityAnalyzer.average(input.trials, reference: .mean) ?? []
+        let measures = SingleTrialAnalyzer.analyze(
+            averageSamples: reference.map(Float.init),
+            averageStimulusOffsetSamples: input.trials.first?.stimulusOffsetSamples ?? 0,
+            samplingRate: rawSignal.samplingRate,
+            trials: input.trials,
+            windowStartMs: windowStart,
+            windowEndMs: windowEnd,
+            adaptiveHalfWidthMs: viewModel.adaptiveHalfWidthMs,
+            splitCount: viewModel.diagnosticsGroupCount,
+            outlierThresholdSD: viewModel.outlierThresholdSD,
+            distributionChunkCount: viewModel.distributionChunkCount
+        )
+
+        let rows = scored.trials.map { similarity -> TrialDiagnosticsRow in
+            let measured = measures?.trials.first { $0.trialIndex == similarity.trialIndex }
+            return TrialDiagnosticsRow(
+                id: similarity.trialIndex,
+                trialIndex: similarity.trialIndex,
+                sourceTimeSeconds: similarity.sourceTimeSeconds,
+                correlation: similarity.correlation,
+                slope: similarity.slope,
+                normalizedResidualRMS: similarity.normalizedResidualRMS,
+                robustDistance: similarity.robustDistance,
+                classification: similarity.classification,
+                bestMatchingCategory: similarity.bestMatchingCategory,
+                matchesOwnCategory: similarity.matchesOwnCategory,
+                measures: [
+                    "Peak (own, +)": measured?.peakAmplitudeOwnLatencyPositive ?? 0,
+                    "Peak (own, −)": measured?.peakAmplitudeOwnLatencyNegative ?? 0,
+                    "Peak latency (+) ms": measured?.peakLatencyOwnPositiveMs ?? 0,
+                    "Peak latency (−) ms": measured?.peakLatencyOwnNegativeMs ?? 0,
+                    "Mean amplitude": measured?.meanAmplitude ?? 0,
+                    "Peak-to-peak": measured?.peakToPeakAmplitude ?? 0,
+                    "Correlation (r)": similarity.correlation,
+                    "Slope (β)": similarity.slope,
+                    "Residual RMS": similarity.normalizedResidualRMS
+                ]
+            )
+        }
+
+        let doubles = input.trials.map { $0.samples.map(Double.init) }
+        viewModel.diagnosticsRows = [
+            TrialDiagnosticsCategory(
+                name: selected,
+                rows: rows,
+                residuals: TrialDriftStatistics.residuals(trials: doubles, reference: reference),
+                convergence: TrialDriftStatistics.convergence(trials: doubles)
+            )
+        ]
+        viewModel.statusMessage = nil
+    }
+
+    /// Category names in a stable order, taken from the raw segments.
+    private func orderedCategoryNames() -> [String] {
+        var seen: [String] = []
+        for segment in rawSegments where !seen.contains(segment.category) {
+            seen.append(segment.category)
+        }
+        return seen
     }
 
     private func runWoodyAlignment() {
