@@ -88,10 +88,103 @@ final class SingleTrialAnalysisViewModel {
     var diagnosticsRows: [TrialDiagnosticsCategory] = []
     var diagnosticsAxis = TrialDiagnosticsAxis.trialIndex
     var diagnosticsMeasure = "Peak (own, +)"
+    var diagnosticsSecondaryMeasure = "Slope (β)"
     var diagnosticsGroupCount = 3
     /// Comparing every category at once is what makes the cross-category
     /// mislabel check possible; off, only the selected category is scored.
     var diagnosticsUsesAllCategories = true
+    /// The plot and its controls fold away once a run has produced results —
+    /// otherwise the answer always starts below the fold. Reopens on demand,
+    /// and whenever a run fails.
+    var setupIsExpanded = true
+
+    // MARK: - Free-form analysis windows
+    //
+    // RIDE has three fixed components with their own stored bounds. Every other
+    // mode gets a list you can add to, so a window can point at whichever peak
+    // is being investigated. Kept per mode, because the windows you want while
+    // measuring are rarely the ones you want while scoring trials.
+    var measurementWindows: [TrialAlignmentMetrics.AnalysisWindow] = []
+    var cwtWindows: [TrialAlignmentMetrics.AnalysisWindow] = []
+    var diagnosticsWindows: [TrialAlignmentMetrics.AnalysisWindow] = []
+    /// Woody aligns on a single window by construction — one rigid shift per
+    /// trial, estimated against one target. Showing it as a window makes that
+    /// visible instead of implied.
+    var woodyWindows: [TrialAlignmentMetrics.AnalysisWindow] = []
+
+    /// How many windows a mode admits. Woody's 1 is a statement about the
+    /// method.
+    func maximumWindows(for mode: SingleTrialAnalysisMode) -> Int {
+        switch mode {
+        case .woody: 1
+        case .measurements, .cwtRidge, .trialDiagnostics: 8
+        case .ride, .clusterStatistics: 0
+        }
+    }
+
+    func windows(for mode: SingleTrialAnalysisMode) -> [TrialAlignmentMetrics.AnalysisWindow] {
+        switch mode {
+        case .measurements: measurementWindows
+        case .cwtRidge: cwtWindows
+        case .trialDiagnostics: diagnosticsWindows
+        case .woody: woodyWindows
+        case .ride, .clusterStatistics: []
+        }
+    }
+
+    func setWindows(_ windows: [TrialAlignmentMetrics.AnalysisWindow], for mode: SingleTrialAnalysisMode) {
+        switch mode {
+        case .measurements: measurementWindows = windows
+        case .cwtRidge: cwtWindows = windows
+        case .trialDiagnostics: diagnosticsWindows = windows
+        // Woody estimates ONE rigid shift per trial, so it gets exactly one
+        // window — the cap is the point, not a limitation to work around.
+        case .woody: woodyWindows = Array(windows.prefix(1))
+        case .ride, .clusterStatistics: break
+        }
+    }
+
+    func updateWindow(_ id: UUID, startMs: Double, endMs: Double, for mode: SingleTrialAnalysisMode) {
+        var current = windows(for: mode)
+        guard let index = current.firstIndex(where: { $0.id == id }) else { return }
+        current[index].startMs = min(startMs, endMs)
+        current[index].endMs = max(startMs, endMs)
+        setWindows(current, for: mode)
+    }
+
+    /// Adds a window over the middle of the current analysis span, so a new one
+    /// lands somewhere visible rather than at zero width.
+    func addWindow(for mode: SingleTrialAnalysisMode) {
+        var current = windows(for: mode)
+        guard current.count < maximumWindows(for: mode) else { return }
+        let spanStart = windowStartMs ?? 0
+        let spanEnd = windowEndMs ?? (spanStart + 400)
+        let span = max(spanEnd - spanStart, 50)
+        let start = spanStart + span * 0.35
+        current.append(
+            TrialAlignmentMetrics.AnalysisWindow(
+                name: "W\(current.count + 1)",
+                startMs: start,
+                endMs: start + span * 0.3
+            )
+        )
+        setWindows(current, for: mode)
+    }
+
+    func removeWindow(_ id: UUID, for mode: SingleTrialAnalysisMode) {
+        setWindows(windows(for: mode).filter { $0.id != id }, for: mode)
+    }
+    // Phase 3: exclusion criteria and what they buy.
+    var selectionCriteria = TrialSelectionAnalyzer.Criteria.none
+    var selectionOutcome: TrialSelectionAnalyzer.Outcome?
+    var selectionExclusions: [TrialSelectionAnalyzer.Exclusion] = []
+    /// Channel-resolved averages for the before/after overlay.
+    var selectionAverageAll: [Double] = []
+    var selectionAverageKept: [Double] = []
+    /// Multichannel trials for the selected category, kept so dragging a
+    /// threshold re-scores without re-slicing the recording.
+    var selectionTrialMatrices: [[[Float]]] = []
+    var selectionBaselineSampleCount = 0
     var usesWoodyAlignedTrialsForMeasurements = false
     var woodyAlignmentMode = WoodyAlignmentAnalyzer.AlignmentMode.correlation
     var woodyPeakPolarity = WoodyAlignmentAnalyzer.PeakPolarity.either

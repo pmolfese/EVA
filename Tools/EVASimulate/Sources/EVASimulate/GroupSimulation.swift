@@ -99,17 +99,46 @@ nonisolated struct SubjectDraw: Codable, Sendable {
     /// Multiplier on the population ERP condition difference.
     var erpEffectScale: Double
     /// This subject's realized condition difference, in µV. Nil when the
-    /// scenario has no ERP.
+    /// scenario has no ERP or has more than one non-zero component contrast.
+    /// Retained as a convenience/backward-compatible scalar for simple designs.
     var erpEffectMicrovolts: Double?
+    /// Explicit per-component target-minus-standard peak-amplitude effects.
+    /// This is the scoreable truth for multi-component designs.
+    var erpComponentEffectsMicrovolts: [String: Double]? = nil
+}
+
+nonisolated struct GroupERPComponentEffect: Codable, Sendable {
+    var componentID: String
+    var nominalPeakLatencySeconds: Double
+    var targetPeakAmplitudeMicrovolts: Double
+    var standardPeakAmplitudeMicrovolts: Double
+    var targetMinusStandardMicrovolts: Double
+}
+
+/// The population quantity a group ERP analysis is expected to recover.
+///
+/// Effects are defined per generator because adding component peaks across
+/// different latencies, polarities and scalp topographies does not describe an
+/// observable voltage. A recovered analysis can match `componentID` and compare
+/// its target-minus-standard peak amplitude directly.
+nonisolated struct GroupERPEstimand: Codable, Sendable {
+    var kind: String = "component-peak-amplitude-contrast"
+    var units: String = "microvolts"
+    var contrast: String = "target-minus-standard"
+    var aggregation: String = "none; score each component by id"
+    var components: [GroupERPComponentEffect]
 }
 
 nonisolated struct GroupTruth: Codable, Sendable {
     var subjectCount: Int
     var groupSeed: UInt64
     var variation: GroupVariation
-    /// The population-level ERP condition difference the cohort was drawn
-    /// around. A group analysis should recover this, not any one subject's value.
+    /// Convenience scalar for a design with zero or one non-zero component
+    /// contrast. Nil for multi-component contrasts because summing peaks across
+    /// different generators, times and topographies is not a valid estimand.
     var populationEffectMicrovolts: Double?
+    /// Explicit, scoreable population ERP estimand. Present for every ERP design.
+    var erpEstimand: GroupERPEstimand? = nil
     var subjects: [SubjectDraw]
     /// Between-subject standard deviations actually realized. Reported because a
     /// requested SD and a realized SD are different things at small N, and a
@@ -153,7 +182,12 @@ nonisolated enum GroupSimulation {
             impedanceScale: impedance,
             heartRateBPM: heartRate,
             erpEffectScale: effect,
-            erpEffectMicrovolts: populationEffect(base).map { $0 * effect }
+            erpEffectMicrovolts: populationEffect(base).map { $0 * effect },
+            erpComponentEffectsMicrovolts: populationComponentEffects(base).map { effects in
+                effects.reduce(into: [String: Double]()) {
+                    $0[$1.componentID] = $1.targetMinusStandardMicrovolts * effect
+                }
+            }
         )
     }
 
@@ -212,16 +246,44 @@ nonisolated enum GroupSimulation {
         return config
     }
 
-    /// The population-level condition difference implied by a configuration, in
-    /// µV — summed over components when there are several.
-    static func populationEffect(_ config: SimulationConfig) -> Double? {
+    /// Per-component population contrasts implied by a configuration.
+    static func populationComponentEffects(
+        _ config: SimulationConfig
+    ) -> [GroupERPComponentEffect]? {
         guard let erp = config.erp else { return nil }
         if let components = erp.components, !components.isEmpty {
-            return components.reduce(0.0) {
-                $0 + $1.targetAmplitudeMicrovolts * (1 - $1.standardAmplitudeRatio)
+            return components.map { component in
+                let standard = component.targetAmplitudeMicrovolts
+                    * component.standardAmplitudeRatio
+                return GroupERPComponentEffect(
+                    componentID: component.id,
+                    nominalPeakLatencySeconds: component.peakLatencySeconds,
+                    targetPeakAmplitudeMicrovolts: component.targetAmplitudeMicrovolts,
+                    standardPeakAmplitudeMicrovolts: standard,
+                    targetMinusStandardMicrovolts:
+                        component.targetAmplitudeMicrovolts - standard
+                )
             }
         }
-        return erp.targetAmplitudeMicrovolts * (1 - erp.standardAmplitudeRatio)
+        let standard = erp.targetAmplitudeMicrovolts * erp.standardAmplitudeRatio
+        return [GroupERPComponentEffect(
+            componentID: "ERP001",
+            nominalPeakLatencySeconds: erp.peakLatencySeconds,
+            targetPeakAmplitudeMicrovolts: erp.targetAmplitudeMicrovolts,
+            standardPeakAmplitudeMicrovolts: standard,
+            targetMinusStandardMicrovolts: erp.targetAmplitudeMicrovolts - standard
+        )]
+    }
+
+    /// Backward-compatible scalar for simple designs. Multiple non-zero
+    /// component contrasts have no defensible scalar sum, so return nil and make
+    /// callers use `populationComponentEffects` instead.
+    static func populationEffect(_ config: SimulationConfig) -> Double? {
+        guard let effects = populationComponentEffects(config) else { return nil }
+        let nonzero = effects.filter { abs($0.targetMinusStandardMicrovolts) > 1e-12 }
+        if nonzero.isEmpty { return 0 }
+        guard nonzero.count == 1 else { return nil }
+        return nonzero[0].targetMinusStandardMicrovolts
     }
 
     static func truth(
@@ -239,6 +301,9 @@ nonisolated enum GroupSimulation {
             groupSeed: groupSeed,
             variation: variation,
             populationEffectMicrovolts: populationEffect(base),
+            erpEstimand: populationComponentEffects(base).map {
+                GroupERPEstimand(components: $0)
+            },
             subjects: subjects,
             realizedBetweenSubjectSD: [
                 "headRadiusScale": spread(subjects.map(\.headRadiusScale)),

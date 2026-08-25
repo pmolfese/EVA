@@ -135,10 +135,12 @@ struct TrialSimilarityAnalyzerTests {
         // The one claim here that is directly checkable rather than heuristic:
         // this trial is labelled A but is B's waveform.
         var aTrials = ordinaryTrials(count: 12, amplitude: 1.0)
+        // Distinct times: two categories cannot contain the same event, and the
+        // pooling derivation reads shared timestamps as exactly that.
         let bTrials = (0 ..< 12).map { index in
             trial(
                 combine(component(amplitude: 1.0, phase: .pi), noise(seed: UInt64(index + 500))),
-                at: Double(index)
+                at: 100 + Double(index)
             )
         }
         aTrials[4] = trial(combine(component(amplitude: 1.0, phase: .pi), noise(seed: 4242)), at: 4)
@@ -160,7 +162,7 @@ struct TrialSimilarityAnalyzerTests {
         let results = try analyze([
             .init(name: "A", trials: ordinaryTrials(count: 10)),
             .init(name: "B", trials: (0 ..< 10).map { index in
-                trial(combine(component(amplitude: 1.0, phase: .pi), noise(seed: UInt64(index + 900))), at: Double(index))
+                trial(combine(component(amplitude: 1.0, phase: .pi), noise(seed: UInt64(index + 900))), at: 100 + Double(index))
             })
         ])
 
@@ -176,7 +178,7 @@ struct TrialSimilarityAnalyzerTests {
         var aTrials = ordinaryTrials(count: 12)
         aTrials[6] = trial(noise(seed: 555, scale: 1.0), at: 6)
         let bTrials = (0 ..< 12).map { index in
-            trial(combine(component(amplitude: 1.0, phase: .pi), noise(seed: UInt64(index + 700))), at: Double(index))
+            trial(combine(component(amplitude: 1.0, phase: .pi), noise(seed: UInt64(index + 700))), at: 100 + Double(index))
         }
 
         let results = try analyze([
@@ -196,7 +198,7 @@ struct TrialSimilarityAnalyzerTests {
         // both averages. Without the margin, half of them would be "mislabelled".
         let aTrials = ordinaryTrials(count: 14, amplitude: 1.0)
         let bTrials = (0 ..< 14).map { index in
-            trial(combine(component(amplitude: 1.02), noise(seed: UInt64(index + 3000))), at: Double(index))
+            trial(combine(component(amplitude: 1.02), noise(seed: UInt64(index + 3000))), at: 100 + Double(index))
         }
 
         let results = try analyze([
@@ -206,6 +208,109 @@ struct TrialSimilarityAnalyzerTests {
         for category in results {
             #expect(category.possibleMislabels.isEmpty, "\(category.name) accused \(category.possibleMislabels.count)")
         }
+    }
+
+    // MARK: - Pooled categories
+
+    /// LC++/RC++ pooled into "correct", LI++/RI++ into "incorrect", built the
+    /// way PSA builds them: one event fans out to its own code AND its group, so
+    /// the pooled category literally contains the sub-category's trials, at the
+    /// same `sourceTimeSeconds`.
+    private func flankerCategories() -> [TrialSimilarityAnalyzer.CategoryInput] {
+        func make(_ amplitude: Double, _ phase: Double, seed: UInt64, at times: [Double]) -> [SingleTrialAnalyzer.TrialInput] {
+            times.enumerated().map { index, time in
+                trial(combine(component(amplitude: amplitude, phase: phase), noise(seed: seed &+ UInt64(index))), at: time)
+            }
+        }
+        let lcTimes = (0 ..< 10).map { Double($0) * 2 }
+        let rcTimes = (0 ..< 10).map { Double($0) * 2 + 1 }
+        let liTimes = (0 ..< 10).map { 100 + Double($0) * 2 }
+        let riTimes = (0 ..< 10).map { 100 + Double($0) * 2 + 1 }
+
+        // Two "correct" conditions that differ a little; the "incorrect" pair is
+        // clearly different from both.
+        let lc = make(1.0, 0.0, seed: 10, at: lcTimes)
+        let rc = make(1.0, 0.5, seed: 20, at: rcTimes)
+        let li = make(1.0, .pi, seed: 30, at: liTimes)
+        let ri = make(1.0, .pi - 0.5, seed: 40, at: riTimes)
+
+        return [
+            .init(name: "LC++", trials: lc),
+            .init(name: "RC++", trials: rc),
+            .init(name: "LI++", trials: li),
+            .init(name: "RI++", trials: ri),
+            .init(name: "correct", trials: lc + rc),
+            .init(name: "incorrect", trials: li + ri)
+        ]
+    }
+
+    @Test func poolingIsDerivedFromTheTrialsThemselves() {
+        let relations = TrialSimilarityAnalyzer.pooledRelations(flankerCategories())
+
+        // "correct" holds LC++ and RC++ trials, so all three overlap.
+        #expect(relations["correct"] == ["LC++", "RC++"])
+        #expect(relations["LC++"] == ["correct"])
+        #expect(relations["RC++"] == ["correct"])
+        // And nothing crosses to the other pool.
+        #expect(relations["LC++"]?.contains("LI++") == false)
+        #expect(relations["correct"]?.contains("incorrect") == false)
+    }
+
+    @Test func aPooledCategoryDoesNotAccuseItsOwnMembers() throws {
+        // The bug this fixes: every "correct" trial resembles its own
+        // sub-condition more than the pool, because the pool is diluted by the
+        // other condition. Left unhandled it flagged nearly every trial.
+        let results = try analyze(flankerCategories())
+        let pooled = try #require(results.first { $0.name == "correct" })
+
+        #expect(pooled.possibleMislabels.isEmpty,
+                "accused \(pooled.possibleMislabels.map(\.trialIndex))")
+    }
+
+    @Test func lcMatchingRcIsNotLCButIsStillCorrect() throws {
+        // The user's rule, verbatim: LC yes to RC is "LC no, correct yes".
+        let results = try analyze(flankerCategories())
+        let lc = try #require(results.first { $0.name == "LC++" })
+
+        for row in lc.trials where row.bestMatchingCategory == "RC++" || row.bestMatchingCategory == "correct" {
+            #expect(row.matchesOwnPool, "trial \(row.trialIndex) was accused for matching a pool sibling")
+        }
+        #expect(lc.possibleMislabels.isEmpty)
+    }
+
+    @Test func aTrialResemblingTheOtherPoolIsStillAMislabel() throws {
+        // And the rule has to keep working: LC++ looking like LI++ crosses the
+        // pool boundary and is a real labelling claim.
+        var categories = flankerCategories()
+        guard let lcIndex = categories.firstIndex(where: { $0.name == "LC++" }),
+              let correctIndex = categories.firstIndex(where: { $0.name == "correct" }) else {
+            Issue.record("fixture shape changed")
+            return
+        }
+        let planted = trial(combine(component(amplitude: 1.0, phase: .pi), noise(seed: 8080)), at: 4)
+        categories[lcIndex].trials[2] = planted
+        // The pooled category holds the same trial, since it is the same event.
+        categories[correctIndex].trials[2] = planted
+
+        let results = try analyze(categories)
+        let lc = try #require(results.first { $0.name == "LC++" })
+        let suspect = try #require(lc.trials.first { $0.trialIndex == 2 })
+
+        #expect(suspect.matchesOwnPool == false, "best was \(suspect.bestMatchingCategory ?? "?")")
+        #expect(lc.possibleMislabels.map(\.trialIndex).contains(2))
+    }
+
+    @Test func explicitPoolingOverridesTheDerivedRelation() throws {
+        // For callers that know their grouping and would rather say so.
+        var categories = flankerCategories()
+        guard let index = categories.firstIndex(where: { $0.name == "LC++" }) else {
+            Issue.record("fixture shape changed")
+            return
+        }
+        categories[index].pooledWith = []
+
+        let relations = TrialSimilarityAnalyzer.pooledRelations(categories)
+        #expect(relations["LC++"] == [])
     }
 
     // MARK: - Leave-one-out

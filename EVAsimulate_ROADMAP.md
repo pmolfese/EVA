@@ -31,9 +31,9 @@ is what gets read instead of scrolling 1,800 lines.
 | 1.3 Non-stationarity | ✅ Complete | 2026-08-21: bursts, spectral dynamics, microstates, PAC. |
 | 2.1 More artifact types | ✅ Complete | 2026-08-21, all seven families. |
 | 2.2 Impedance-coupled noise | ✅ Complete | 2026-08-21, thermal and mains coupling. |
-| 2.3 Richer metrics | ✅ Complete | 2026-08-21, waveform/channel/detection/source/ERP. |
+| 2.3 Richer metrics | ✅ Complete | 2026-08-25, waveform/channel/detection/source/ERP plus versioned repeated-evaluation JSON with all per-seed values. |
 | 2.4 Scenario files | ✅ Complete | 2026-08-21, versioned catalog with override tests. |
-| 3.1 Multi-subject simulation | ✅ Complete | 2026-08-22. `generate-group`, population effect + between-subject variance, prefix-stable cohorts. |
+| 3.1 Multi-subject simulation | ✅ Complete | 2026-08-25. `generate-group`, explicit component-wise ERP estimands + between-subject variance, prefix-stable cohorts. |
 | 3.2 Comparison harness | Open | No longer blocked — 4.9 fixed the event-precision bug. Mostly a reporting layer over Tier 7 now. |
 | 3.3 Measured template library | Partial | Gradient-template import exists; curated library and BCG import do not. Load-bearing for 5.4/Tier 8. |
 | 3.4 Clinical patterns | Not started | Interictal spikes first. |
@@ -47,24 +47,40 @@ is what gets read instead of scrolling 1,800 lines.
 | 4.8 Declare ERP overlap | ✅ Complete | 2026-08-21, directional flags and non-overlap scoring. |
 | 4.9 Sub-millisecond MFF event times | ✅ Complete | 2026-08-21. Reader *and* writer were quantizing; 1024 Hz now exact. |
 | 5.1 Multi-generator BCG | ✅ Complete | 2026-08-21, four physical generators, spatial rank 4. |
-| 5.2 Surrogate spatial filter | ✅ PCA-S complete | 2026-08-21. ICA-S open — needs component selection, see 5.4. |
-| 5.3 The evaluation | ✅ Complete except localization | 2026-08-22. Dipole localization error needs the 6.1-6.2 inverse solver. |
+| 5.2 Surrogate spatial filter | ✅ PCA-S complete | 2026-08-25. Paper and iterative pattern searches are explicit; ICA-S remains open, see 5.4. |
+| 5.3 The evaluation | ✅ Complete except localization | 2026-08-25. Completed averages are filtered per paper and all outcomes are in JSON; dipole localization needs 6.1-6.2. |
 | 5.4 Simulator-trained BCG labeller | Not started | Pilot for Tier 8. Do 8.1 first. |
 | 6.x Distributed inverse methods | Not started | Deferred; 6.1 worth pulling forward if 5.2 needs a source grid. |
-| 7.1-7.2 Pipeline regression | ✅ First slice complete | 2026-08-25. Locked-clock gradient case, floor + analytic ceiling + watermark, all three verified to fire. |
+| 7.1-7.2 Pipeline regression | ✅ First slice complete | 2026-08-25. Locked-clock gradient case, floor + 2%-tolerance analytic ceiling + watermark; focused test green. |
 | 7.3-7.5 Corpus and CI | Not started | Clean control next; then GitHub Actions staging. |
 | 8.x Component labelling | Not started | Start with 8.1, a benchmark rather than a model. |
 
+### 2026-08-25 implementation-audit follow-up
+
+| Finding | Status | Resolution or remaining work |
+| --- | --- | --- |
+| Correction assumes the standard montage/head and needs an explicit PNS-preservation test | Open | Reconstruct the actual montage and head from recording/truth metadata; prove ECG and motion PNS channels survive `correct`. |
+| ERP evaluation omitted the paper's filter on the completed average | ✅ Fixed | Accepted epochs are averaged, then zero-phase filtered 0.3-30 Hz before baseline and scoring; a 100 Hz regression test pins the order. |
+| PCA-S used only the iterative pattern-search extension | ✅ Fixed | `paper` and `iterative` are separate modes. Paper mode accepts an operator-selected representative beat or deterministic unattended stand-in; reports preserve the choice. |
+| Measured-template scenarios depend on mutable external paths | Open | Package/embed templates or record a content digest and copied provenance so a scenario remains regenerable. |
+| Multi-component group truth collapsed peaks into one scalar | ✅ Fixed | `group_truth.json` and subject draws now preserve each component ID, latency, units, and contrast; no cross-latency scalar sum. |
+| Pipeline ceiling was too permissive to catch information leakage | ✅ Fixed | Ceiling is the analytic `sqrt(N+1)` bound with only 2% numerical tolerance; focused pipeline regression passes. |
+| `evaluate-surrogate --json` omitted most evaluation outcomes | ✅ Fixed | Versioned JSON now contains configuration, per-seed values, mean/SD, correction diagnostics, and every ERP criterion. |
+| Determinism checker exists only in the untracked `scripts/` tree | Open | Decide whether it belongs to this repository and, if so, land it with the roadmap work so CI can actually call it. |
+
 ### Next, in order
 
-1. **8.1** — benchmark ICLabel and `ICAComponentAutoLabeler` against graded
-   truth, per class. Small, and it decides how much of Tier 8 and 5.4 is
-   warranted.
-2. **7.3** — more corpus entries, starting with the **clean control**: a
-   recording needing no correction, asserting the pipeline does not damage it.
-   Cheap now that the machinery exists.
-3. **5.4** — the Tier 8 pilot, and the interesting way to finish ICA-S.
-4. **7.4-7.5** (CI staging), then **8.2-8.4**, then **3.2**, then **ICA-S**.
+1. **Close the correction input contract** — use the recording's actual
+   montage/head metadata and add a PNS round-trip test. This is the most direct
+   correctness issue still open from the audit.
+2. **Make measured templates portable** — package the bytes or pin their digest
+   and provenance; otherwise a reviewed scenario is not independently
+   regenerable. Land the determinism checker at the same time if it belongs here.
+3. **7.3 clean control** — assert that a pipeline does not damage a recording
+   needing no correction, then add representative BCG/ERP corpus cases.
+4. **8.1** — benchmark ICLabel and `ICAComponentAutoLabeler` against graded
+   truth. Its result decides how much of 5.4/Tier 8 is warranted.
+5. **5.4**, then **7.4-7.5**, **8.2-8.4**, **3.2**, and **ICA-S**.
 
 The full reasoning behind this order is in [Suggested order](#suggested-order) at
 the end of the document; this list is the short form and should agree with it.
@@ -105,8 +121,8 @@ Implemented, tested, and documented in `Tools/EVASimulate/README.md`:
   per-channel breakdowns; optimal source assignment; event detection with
   timing/ROC metrics; and ERP amplitude/latency recovery metrics.
 - **Scenarios**: versioned JSON configuration files, explicit flag precedence,
-  config-only export, and four reviewed configurations in a shipped catalog.
-- **60 passing self-test outcomes** on the model's own behaviour, and byte-level
+  config-only export, and eight reviewed configurations in a shipped catalog.
+- **88 passing self-test outcomes** on the model's own behaviour, and byte-level
   determinism.
 
 ## Principles to hold onto
@@ -115,11 +131,10 @@ These are what make the tool trustworthy; every item below should preserve them.
 
 1. **Determinism is not negotiable.** Same seed, byte-identical output. A
    benchmark that moves between runs cannot support a claim.
-2. **Paper reproduction stays explicit.** The operational default is 1000 Hz so
-   event samples survive the current MFF writer; the reviewed
-   `scenarios/paper-default.json` retains the paper's 1024 Hz rate and every
-   addition has a documented switch or scenario value restoring the published
-   behaviour.
+2. **Paper reproduction stays explicit.** The operational default is 1000 Hz;
+   the reviewed `scenarios/paper-default.json` retains the paper's 1024 Hz rate.
+   The event-time round trip is now exact at both rates, and every addition has a
+   documented switch or scenario value restoring the published behaviour.
 3. **Declare what was invented.** The README's "what comes from the paper and
    what does not" split is load-bearing. A result that turns on an invented
    waveform shape is weaker evidence than one that turns on a measured
@@ -374,13 +389,17 @@ fitted to them estimates a variance component that is zero by construction — a
 looks like it works regardless. A group study needs *two* levels of ground truth,
 and both are now recorded:
 
-- **The population parameter** — the condition difference that exists in the
-  population, which a group analysis is trying to recover.
+- **The population estimand** — each ERP component's ID, nominal peak latency,
+  units, and target-minus-standard condition difference. Components at different
+  latencies and polarities are scored separately, never summed into one scalar.
 - **Between-subject variance** — each subject's departure from it, drawn from
   declared distributions.
 
-Score group results against `group_truth.json`'s population value, never against
-one subject's realization.
+Score group results against `group_truth.json`'s `erpEstimand.components`, never
+against one subject's realization. The compatibility scalar
+`populationEffectMicrovolts` is present only for a one-effect design (or zero for
+a negative control); it is `null` when multiple non-zero components would make a
+scalar ambiguous.
 
 **What varies per subject:** head radius (which changes the forward model, so
 topographies differ even for identical sources), electrode placement, alpha
@@ -408,7 +427,7 @@ not resample the subjects already in it.
 
 **New scenario:** `scenarios/group-oddball.json` — the bilateral Sylvian N100
 identical across conditions plus a midline target-only P300, so the contrast is
-carried entirely by the P300 and the population effect is a clean 6.00 µV.
+carried entirely by the P300 and its component estimand is a clean 6.00 µV.
 `aep-bilateral` deliberately has **no** contrast (Rusiniak's AEP is one repeated
 stimulus), and `generate-group` now says so explicitly rather than reporting a
 between-subject SD for a quantity that is identically zero.
@@ -417,11 +436,12 @@ between-subject SD for a quantity that is identically zero.
 `eva-bids to-bids` call per subject. Keeping the tools composable beats coupling
 them.
 
-**Self-tests added (85 total, 0 failures):** prefix stability; realized
+**Self-tests (88 total, 0 failures):** prefix stability; realized
 between-subject SD within 0.05 of the request over 400 subjects; `--homogeneous`
 fixing every parameter at 1 while leaving each subject its own seed; effect
 scaling moving the contrast and giving exactly zero when conditions are
-identical; and `participants.tsv` shape.
+identical; multi-component effects remaining distinct; and `participants.tsv`
+shape.
 
 **Not done:** per-subject *source* variation beyond head size (individual
 anatomy), and sessions/runs.
@@ -1029,9 +1049,12 @@ brain surrogate basis, extracts artifact topographies, forms the spatial filter,
 and writes a corrected recording that `score` consumes directly, so the whole
 loop is `generate → correct → score` against known truth.
 
-**Measured:** broadband SNR **2.5-3.0x** against a known generator BCG
-(uncorrected ~1.1), with 4-5 artifact components from the paper's 0.5% variance
-threshold — inside the 4-8 the paper reports.
+**Measured with the iterative mode:** broadband SNR **2.45 ± 0.57** at 0 mm and
+**2.76 ± 0.54** at 40 mm against a known generator BCG (uncorrected ~1.14),
+with 4 artifact components at the paper's 0.5% variance threshold. The unattended
+paper mode is much weaker here (**0.82 ± 0.16** and **1.01 ± 0.12**) because its
+deterministic representative candidate accepts only ~9% of beats. That is a
+result to report, not hide by calling the iterative extension "the paper mode."
 
 **The optimum matches the artifact's true rank, which cross-validates 5.1.** A
 component sweep gives SNR 1.45 / 2.35 / 3.00 / 1.58 at k = 2/3/4/5. The
@@ -1040,7 +1063,8 @@ carries about 1% of template variance and is ongoing EEG, so removing it costs
 more than it recovers. Two independent pieces of the model agreeing on 4 is
 stronger evidence than either alone.
 
-**Template quality is the binding constraint, and it is now quantified.**
+**Template quality is the binding constraint, and it is now quantified for the
+iterative extension.**
 Broadband SNR by recording length at 250 Hz: 0.99 at 60 s, 2.81 at 120 s, 2.48 at
 240 s, 2.47 at 480 s. Below roughly 70 accepted beats the template retains enough
 EEG that its lower components are brain activity rather than artifact, and the
@@ -1050,11 +1074,12 @@ exists to measure.
 
 **Implementation notes worth keeping.**
 
-- The pattern search matches against an **iteratively refined average**, not a
-  single seed beat. The paper's operator picks a representative beat by eye;
-  matching automatically against one epoch is a poor substitute because that
-  epoch carries a full share of EEG. Seeding from one median-energy beat
-  accepted 30 of 149; averaging first and re-matching accepts 70-75.
+- The pattern search is now an explicit choice. **`paper`** matches every epoch
+  once against one representative beat. `--representative-beat N` records the
+  operator's one-based choice; without it, median energy is a deterministic
+  unattended stand-in. **`iterative`** starts from the all-beat average and
+  performs two refinement passes. It is much more robust on simulated data, but
+  it is an extension and must not be attributed to the paper.
 - The filter is built by **partialling out the unpenalized artifact block**
   rather than inverting the combined Gram. `[brain | artifact]` has more columns
   than channels, so its Gram is singular by construction, and with zero
@@ -1080,13 +1105,14 @@ minimum in the runs above). A surrogate basis sitting on top of the simulated
 sources would fit the brain activity perfectly and rig the comparison; the number
 is printed so a reader can check rather than trust.
 
-**Self-tests added (73 total, 0 failures):** the eigensolver reconstructs its
+**Self-tests (88 total, 0 failures):** the eigensolver reconstructs its
 input and returns orthonormal vectors; the brain model reproduces real dipole
 topographies (1.000 unregularized, 0.995 at 2%); a whole artifact-free recording
 survives the filter at residual SNR 21.9 — measured as SNR, not correlation,
 because correlation is scale-invariant and cannot see a filter that preserves
 shape while shrinking amplitude; and end-to-end separation improves SNR by at
-least 1.8x at the artifact's true rank.
+least 1.8x at the artifact's true rank. A separate check pins both pattern modes,
+the paper representative candidate, and deterministic repeatability.
 
 **Still open:** **ICA-S**. It differs from PCA-S only in where the artifact
 topographies come from, so the filter machinery is already in place — and the
@@ -1138,10 +1164,12 @@ the filter itself can be written before it.
 
 ## 5.3 The evaluation, and the trap in it
 
-**Status (2026-08-22): complete except for dipole localization error.**
+**Status (2026-08-25): complete except for dipole localization error.**
 `eva-simulate evaluate-surrogate --config scenarios/aep-bilateral.json --with-erp`
 runs the paper's evaluation across repeated seeds and reports every criterion as
-mean ± SD.
+mean ± SD. `--json` is a versioned result, not a summary stub: it includes the
+resolved evaluation configuration, correction diagnostics, every per-seed value,
+and mean/SD for broadband and every ERP criterion.
 
 `eva-simulate evaluate-surrogate` runs repeated seeds across a swept condition
 entirely in memory (8 seeds x 4 conditions in 16 seconds) and reports mean ± SD.
@@ -1162,7 +1190,8 @@ seeds, and the harness now prints the spread next to every mean and says so.
 The roadmap warned that a surrogate basis coinciding with the simulated sources
 would rig the comparison in PCA-S's favour. **Measured, the opposite happens.**
 
-Broadband SNR at 8 seeds per condition, 64 channels, 29 regional sources:
+Broadband SNR with the iterative search at 8 seeds per condition, 64 channels,
+29 regional sources:
 
 | basis offset | corrected SNR | uncorrected |
 | --- | --- | --- |
@@ -1199,21 +1228,32 @@ comparison needs the ERP criteria below.
 
 ### The evaluation, with the bilateral AEP
 
+The evaluation order now matches the paper: reject individual epochs, average
+the accepted epochs, zero-phase filter the **completed average** at 0.3-30 Hz,
+then baseline and measure. The earlier implementation documented this step but
+did not perform it. A high-frequency regression check would fail if filtering
+were again moved to only the epoch inputs.
+
 8 seeds, 64 channels, 200 s, the `aep-bilateral` model over a generator BCG:
 
 | condition | trials kept | ERP SNR | latency err | amplitude | explained var |
 | --- | --- | --- | --- | --- | --- |
-| uncorrected | 76.0 ± 1.6 | 2.81 ± 0.59 | +0.0 ± 0.0 ms | 1.09 ± 0.11 | 0.89 ± 0.10 |
-| PCA-S, 0 mm | 78.6 ± 2.5 | 3.36 ± 0.68 | +0.5 ± 3.3 ms | 0.98 ± 0.12 | 0.89 ± 0.13 |
-| PCA-S, 40 mm | 80.1 ± 2.5 | 3.62 ± 0.68 | +0.5 ± 3.3 ms | 0.96 ± 0.11 | 0.90 ± 0.13 |
+| uncorrected | 76.0 ± 1.6 | 2.96 ± 0.67 | -0.5 ± 2.6 ms | 1.11 ± 0.12 | 0.88 ± 0.10 |
+| paper PCA-S, 0 mm | 61.8 ± 40.2 | 2.90 ± 0.91 | -3.0 ± 30.9 ms | 0.92 ± 0.64 | 0.80 ± 0.25 |
+| paper PCA-S, 40 mm | 98.5 ± 1.9 | 3.54 ± 0.69 | -2.5 ± 12.6 ms | 0.83 ± 0.19 | 0.86 ± 0.15 |
+| iterative PCA-S, 0 mm | 78.6 ± 2.5 | 3.44 ± 0.67 | +0.5 ± 1.4 ms | 0.99 ± 0.13 | 0.89 ± 0.13 |
+| iterative PCA-S, 40 mm | 80.1 ± 2.5 | 3.67 ± 0.70 | +0.0 ± 2.1 ms | 0.97 ± 0.11 | 0.90 ± 0.13 |
 
 Read with the spreads, not past them:
 
-- **Amplitude fidelity is the clear win.** Uncorrected, the recovered N100 peak
-  is 9% too large — BCG residual adds to it. Corrected, the bias is 2%. That is
-  the one difference here comfortably larger than its own spread.
-- **Trial retention and ERP SNR improve modestly**, in the paper's direction, but
-  by roughly one standard deviation. Suggestive, not established at 8 seeds.
+- **The iterative mode is the stable automated method.** It keeps about half of
+  candidate beats and has tight trial-count/latency spreads. The paper-style
+  unattended representative accepts only ~9%; at 0 mm that instability reaches
+  the final ERP result. A manually chosen representative may improve it and is
+  now expressible with `--representative-beat`, but must be recorded.
+- **Iterative amplitude fidelity improves.** Uncorrected, the recovered N100
+  peak is 11% too large; iterative correction reduces that to 1-3% while modestly
+  improving trial retention and ERP SNR.
 - **Topographic fidelity does not change.** Explained variance is 0.89 either
   way. This is not a failure of the correction — it is that averaging ~76 trials
   already suppresses an artifact that is not time-locked to the stimulus, so the
@@ -1221,9 +1261,9 @@ Read with the spreads, not past them:
   gaps (97.3% for PCA-S against 90.3% for BSS) came from methods that actively
   *distort*; a method that does not distort has little room to show an advantage
   on this criterion.
-- **Correction adds latency jitter** (±3.3 ms) where the uncorrected average had
-  none. Small, but it is a cost, and it is the kind of thing that only shows up
-  when the truth is known.
+- **Iterative correction does not add meaningful latency jitter here.** The
+  post-filter errors remain within about 2 ms SD. Paper-mode instability is a
+  different and much larger effect.
 
 ### Remaining
 
@@ -1234,11 +1274,12 @@ Read with the spreads, not past them:
   its grand average.
 - **ICA-S**, per 5.2.
 
-**Self-tests added (80 total, 0 failures):** explained variance is exactly 1.0
+**Self-tests (88 total, 0 failures):** explained variance is exactly 1.0
 for data built from the model topographies and falls below 0.7 once a foreign
 topography is added — both halves, since a metric that always returned 1 would
 pass the first alone; and epoch rejection drops exactly the one trial carrying a
-400 µV excursion, out of four candidates.
+400 µV excursion, out of four candidates. The suite also pins the completed-
+average filtering order and the two distinct pattern-search contracts.
 
 ---
 
@@ -1597,8 +1638,10 @@ the √N reasoning the README has carried since the beginning.
 ### Three assertions, each doing a different job
 
 1. **Floor** — 15% below the watermark. The regression check proper.
-2. **Ceiling** — `sqrt(N+1) x 1.25`. A score *above* this means the correction is
-   using information it should not have; on a simulated recording, with the clean
+2. **Ceiling** — `sqrt(N+1) x 1.02`. The previous 25% allowance was so large that
+   meaningful information leakage could pass. Two percent is reserved for
+   floating-point and estimator details; a score above it means the correction is
+   using information it should not have. On a simulated recording, with the clean
    signal sitting in the next directory, that is a real possibility an end-to-end
    harness would otherwise conceal.
 3. **Watermark** — an improvement above 15% fails too, with instructions to
@@ -1955,30 +1998,39 @@ This is the reasoning behind the short list in
 [Completion status](#completion-status) at the top of the document. If the two
 ever disagree, the top table is the one people read — fix it first.
 
-**Done in this pass:** 3.1, 4.1-4.9 (4.1/4.2 subsumed by 5.1), 5.1, 5.2 for
-PCA-S, and 5.3 apart from dipole localization error.
+**Done through this pass:** 3.1, 4.1-4.9 (4.1/4.2 subsumed by 5.1), 5.1, 5.2
+for PCA-S, and 5.3 apart from dipole localization error. The 2026-08-25 audit
+also fixed the ERP filtering order, split paper/iterative pattern searches,
+preserved component-wise group estimands, tightened the pipeline ceiling, and
+completed repeated-evaluation JSON.
 
 **Next:**
 
-1. ~~**7.1-7.2, first slice**~~ — done 2026-08-25. The assertion policy is
-   settled and demonstrated: floor, analytic ceiling, and watermark, all three
-   verified to fire. The locked-clock case's analytic anchor held — predicted
-   ~2.39, measured 2.4701. Adding corpus entries is cheap now.
-2. **8.1 benchmark the labellers we already have** — score ICLabel and
+1. **Close the correction input contract** — build the surrogate head and
+   montage from the actual recording/truth instead of `Montage.standard` plus the
+   classic head, and add a regression proving ECG/motion PNS channels survive.
+2. **Make measured templates portable** — copy/package their bytes or pin a
+   content digest and provenance. A path alone does not reproduce a scenario.
+   Decide whether to land the currently untracked determinism checker here.
+3. **7.3 clean control and representative corpus cases** — assert that an
+   unnecessary pipeline does not damage clean data, then cover BCG/ERP. The
+   locked-clock case's floor, 2%-tolerance analytic ceiling, and watermark are
+   already green, so adding entries is cheap.
+4. **8.1 benchmark the labellers we already have** — score ICLabel and
    `ICAComponentAutoLabeler` against graded truth, per class. Small, needs no new
    model, and it is a result nobody else can produce. Do it before committing to
    5.4 or the rest of Tier 8: if the existing labellers turn out to be strong
    everywhere except Heart, then 5.4 is the whole job and Tier 8 collapses.
-3. **5.4 simulator-trained BCG component labelling** — the pilot for Tier 8 and
+5. **5.4 simulator-trained BCG component labelling** — the pilot for Tier 8 and
    the interesting way to finish ICA-S. One class end to end before
    generalizing. Sits here because it wants Tier 7's corpus machinery.
-4. **7.3-7.5** — the rest of the corpus and the GitHub Actions staging, once the
-   assertion policy from step 1 has proven itself on one entry.
+6. **7.4-7.5** — GitHub Actions staging once the corpus has representative
+   entries.
    **Tier 8 proper (8.2-8.4)** follows here, once 5.4 has shown one class works
    end to end.
-5. **3.2 comparison harness** — unblocked now that 4.9 is fixed, and mostly a
+7. **3.2 comparison harness** — unblocked now that 4.9 is fixed, and mostly a
    reporting layer over Tier 7's machinery by this point.
-6. **ICA-S** (5.2) — the last piece of the Rusiniak comparison, and mostly
+8. **ICA-S** (5.2) — the last piece of the Rusiniak comparison, and mostly
    assembly once 5.4 supplies the component selection.
 
 **Tier 6 is deliberately deferred.** It is a capability that would later support
@@ -1989,9 +2041,9 @@ separate code. If 6.1 gets written for 5.2, then MNE from 6.2 and **6.4
 resolution metrics** become cheap enough to do opportunistically, and 6.5's
 parameter-mismatch check should travel with them rather than follow later.
 
-Deferred entirely for now: 3.3 the measured-template library
-(small in code, slow in permissions — start collecting in parallel if it is
-wanted), 3.4 clinical patterns, and the rest of Tier 6.
+The curated-library part of 3.3 remains deferred and permission-heavy; the
+portable-template contract above is not deferred because it affects scenarios
+that already exist. Also deferred: 3.4 clinical patterns and the rest of Tier 6.
 
 ## Known blockers carried from elsewhere
 

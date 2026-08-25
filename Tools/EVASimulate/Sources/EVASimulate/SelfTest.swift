@@ -1656,8 +1656,6 @@ nonisolated enum SelfTest {
 
             let legacyForward = bcgWeights(model: .channelIndex, montage: generatorMontage)
             let legacyReversed = bcgWeights(model: .channelIndex, montage: reversedMontage)
-            let generatorForward = bcgWeights(model: .generators, montage: generatorMontage)
-            let generatorReversed = bcgWeights(model: .generators, montage: reversedMontage)
 
             let legacyDrift = zip(legacyForward, legacyReversed)
                 .map { abs($0 - $1) }.max() ?? 0
@@ -2072,8 +2070,34 @@ nonisolated enum SelfTest {
             let separationComponents = SurrogateSeparation.artifactComponents(
                 channels: separationNoisy,
                 samplingRate: separationConfig.samplingRate,
-                beatSeconds: separationBCG.detectedBeatSeconds
+                beatSeconds: separationBCG.detectedBeatSeconds,
+                patternSearchMode: .iterative
             )
+            let paperComponents = SurrogateSeparation.artifactComponents(
+                channels: separationNoisy,
+                samplingRate: separationConfig.samplingRate,
+                beatSeconds: separationBCG.detectedBeatSeconds,
+                patternSearchMode: .paper
+            )
+            let paperComponentsRepeat = SurrogateSeparation.artifactComponents(
+                channels: separationNoisy,
+                samplingRate: separationConfig.samplingRate,
+                beatSeconds: separationBCG.detectedBeatSeconds,
+                patternSearchMode: .paper
+            )
+            outcomes.append(Outcome(
+                name: "Paper and iterative BCG pattern searches are explicit and deterministic",
+                snr: Double(paperComponents?.acceptedBeatCount ?? 0),
+                passed: paperComponents?.patternSearchMode == .paper
+                    && paperComponents?.representativeBeatIndex != nil
+                    && paperComponents?.representativeBeatIndex
+                        == paperComponentsRepeat?.representativeBeatIndex
+                    && paperComponents?.template == paperComponentsRepeat?.template
+                    && separationComponents?.patternSearchMode == .iterative
+                    && separationComponents?.representativeBeatIndex == nil,
+                expectation: "paper mode uses one repeatable representative beat; iterative mode "
+                    + "uses the refined all-beat average, and the modes cannot be confused"
+            ))
             // The generator BCG has spatial rank 4 (roadmap 5.1), and that is
             // how many components the artifact genuinely occupies. Retaining
             // more starts removing EEG: the harness measures broadband SNR 3.00
@@ -2404,6 +2428,40 @@ nonisolated enum SelfTest {
                     + "excursion fails the amplitude and gradient thresholds"
             ))
 
+            // The paper evaluates the completed average after reapplying its
+            // 0.3-30 Hz band. A post-stimulus 100 Hz term should therefore be
+            // strongly attenuated even when rejection thresholds are relaxed so
+            // the epoch itself remains accepted.
+            let filterRate = 250.0
+            let filterOnset = 0.5
+            var filterChannels = [[Double]](
+                repeating: [Double](repeating: 0, count: Int(2 * filterRate)), count: 1
+            )
+            let responseStart = Int(filterOnset * filterRate)
+            for sample in responseStart..<min(filterChannels[0].count, responseStart + 50) {
+                filterChannels[0][sample] = 100 * sin(
+                    2 * Double.pi * 100 * Double(sample - responseStart) / filterRate
+                )
+            }
+            var relaxedThresholds = ERPEvaluationThresholds.paper
+            relaxedThresholds.peakToPeakMicrovolts = 1_000
+            relaxedThresholds.gradientMicrovoltsPerSample = 1_000
+            let filteredAverage = ERPEvaluation.evaluate(
+                channels: filterChannels, samplingRate: filterRate,
+                onsets: [filterOnset], conditions: ["target"],
+                modelTopographies: [[1]],
+                fwhmStartSeconds: 0, fwhmEndSeconds: 0.2,
+                thresholds: relaxedThresholds
+            )
+            outcomes.append(Outcome(
+                name: "ERP metrics use the paper-filtered completed average",
+                snr: abs(filteredAverage?.peakAmplitudeMicrovolts ?? .infinity),
+                passed: filteredAverage?.acceptedTrials == 1
+                    && abs(filteredAverage?.peakAmplitudeMicrovolts ?? .infinity) < 10,
+                expectation: "an accepted 100 Hz response is attenuated below 10 µV by the "
+                    + "0.3-30 Hz evaluation filter before peak scoring"
+            ))
+
             // ---------------------------------------------------------------
             // Roadmap 3.1: multi-subject and group simulation.
             // ---------------------------------------------------------------
@@ -2505,6 +2563,33 @@ nonisolated enum SelfTest {
                 passed: abs(realizedEffect - expectedEffect) < 1e-9 && abs(flatEffect) < 1e-12,
                 expectation: "a subject's effect is the population effect times its own draw, "
                     + "and identical conditions give exactly zero"
+            ))
+
+            var multiEffectBase = cohortBase
+            var multiEffectDesign = cohortDesign
+            var early = ERPComponentConfig()
+            early.id = "early"
+            early.peakLatencySeconds = 0.1
+            early.targetAmplitudeMicrovolts = -4
+            early.standardAmplitudeRatio = 0.5
+            var late = ERPComponentConfig()
+            late.id = "late"
+            late.peakLatencySeconds = 0.35
+            late.targetAmplitudeMicrovolts = 6
+            late.standardAmplitudeRatio = 0
+            multiEffectDesign.components = [early, late]
+            multiEffectBase.erp = multiEffectDesign
+            let explicitEffects = GroupSimulation.populationComponentEffects(multiEffectBase) ?? []
+            let ambiguousScalar = GroupSimulation.populationEffect(multiEffectBase)
+            outcomes.append(Outcome(
+                name: "Group ERP truth keeps distinct component estimands",
+                snr: Double(explicitEffects.count),
+                passed: ambiguousScalar == nil
+                    && explicitEffects.map(\.componentID) == ["early", "late"]
+                    && abs(explicitEffects[0].targetMinusStandardMicrovolts - (-2)) < 1e-12
+                    && abs(explicitEffects[1].targetMinusStandardMicrovolts - 6) < 1e-12,
+                expectation: "opposite, differently timed component peaks remain separate; no "
+                    + "scientifically meaningless scalar sum is reported"
             ))
 
             // participants.tsv is the covariate table a group analysis would

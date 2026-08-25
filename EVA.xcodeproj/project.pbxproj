@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D000000000000000000000C /* EVAQuickLook.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D0000000000000000000002 /* EVAQuickLook.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		D000000000000000000001C /* EVAThumbnail.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D0000000000000000000012 /* EVAThumbnail.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		77BE28C92FED64E30080DAF5 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -21,12 +26,43 @@
 			remoteGlobalIDString = 77BE28BA2FED64E10080DAF5;
 			remoteInfo = EVA;
 		};
+		D000000000000000000000B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 77BE28B32FED64E10080DAF5 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D0000000000000000000001;
+			remoteInfo = EVAQuickLook;
+		};
+		D000000000000000000001B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 77BE28B32FED64E10080DAF5 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D0000000000000000000011;
+			remoteInfo = EVAThumbnail;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		D00000000000000000000021 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				D000000000000000000000C /* EVAQuickLook.appex in Embed Foundation Extensions */,
+				D000000000000000000001C /* EVAThumbnail.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		77BE28BB2FED64E10080DAF5 /* EVA.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EVA.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		77BE28C82FED64E30080DAF5 /* EVATests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EVATests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		77BE28D22FED64E30080DAF5 /* EVAUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EVAUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D0000000000000000000002 /* EVAQuickLook.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EVAQuickLook.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		D0000000000000000000012 /* EVAThumbnail.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EVAThumbnail.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -47,6 +83,20 @@
 				"Fixtures/LICENSE-mffpy.txt",
 			);
 			target = 77BE28C72FED64E30080DAF5 /* EVATests */;
+		};
+		D000000000000000000000D /* Exceptions for "EVAQuickLook" folder in "EVAQuickLook" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = D0000000000000000000001 /* EVAQuickLook */;
+		};
+		D000000000000000000001D /* Exceptions for "EVAThumbnail" folder in "EVAThumbnail" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = D0000000000000000000011 /* EVAThumbnail */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -70,6 +120,27 @@
 		77BE28D52FED64E30080DAF5 /* EVAUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = EVAUITests;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000020 /* MFFPreviewKit */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MFFPreviewKit;
+			sourceTree = "<group>";
+		};
+		D0000000000000000000009 /* EVAQuickLook */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				D000000000000000000000D /* Exceptions for "EVAQuickLook" folder in "EVAQuickLook" target */,
+			);
+			path = EVAQuickLook;
+			sourceTree = "<group>";
+		};
+		D0000000000000000000019 /* EVAThumbnail */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				D000000000000000000001D /* Exceptions for "EVAThumbnail" folder in "EVAThumbnail" target */,
+			);
+			path = EVAThumbnail;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -96,6 +167,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D0000000000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D0000000000000000000014 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -105,6 +190,9 @@
 				77BE28BD2FED64E10080DAF5 /* EVA */,
 				77BE28CB2FED64E30080DAF5 /* EVATests */,
 				77BE28D52FED64E30080DAF5 /* EVAUITests */,
+				D00000000000000000000020 /* MFFPreviewKit */,
+				D0000000000000000000009 /* EVAQuickLook */,
+				D0000000000000000000019 /* EVAThumbnail */,
 				77BE28BC2FED64E10080DAF5 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -115,6 +203,8 @@
 				77BE28BB2FED64E10080DAF5 /* EVA.app */,
 				77BE28C82FED64E30080DAF5 /* EVATests.xctest */,
 				77BE28D22FED64E30080DAF5 /* EVAUITests.xctest */,
+				D0000000000000000000002 /* EVAQuickLook.appex */,
+				D0000000000000000000012 /* EVAThumbnail.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -129,10 +219,13 @@
 				77BE28B72FED64E10080DAF5 /* Sources */,
 				77BE28B82FED64E10080DAF5 /* Frameworks */,
 				77BE28B92FED64E10080DAF5 /* Resources */,
+				D00000000000000000000021 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				D000000000000000000000A /* PBXTargetDependency */,
+				D000000000000000000001A /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				77BE28BD2FED64E10080DAF5 /* EVA */,
@@ -159,6 +252,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				77BE28CB2FED64E30080DAF5 /* EVATests */,
+				D00000000000000000000020 /* MFFPreviewKit */,
 			);
 			name = EVATests;
 			packageProductDependencies = (
@@ -190,6 +284,52 @@
 			productReference = 77BE28D22FED64E30080DAF5 /* EVAUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		D0000000000000000000001 /* EVAQuickLook */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D0000000000000000000006 /* Build configuration list for PBXNativeTarget "EVAQuickLook" */;
+			buildPhases = (
+				D0000000000000000000003 /* Sources */,
+				D0000000000000000000004 /* Frameworks */,
+				D0000000000000000000005 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				D00000000000000000000020 /* MFFPreviewKit */,
+				D0000000000000000000009 /* EVAQuickLook */,
+			);
+			name = EVAQuickLook;
+			packageProductDependencies = (
+			);
+			productName = EVAQuickLook;
+			productReference = D0000000000000000000002 /* EVAQuickLook.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		D0000000000000000000011 /* EVAThumbnail */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D0000000000000000000016 /* Build configuration list for PBXNativeTarget "EVAThumbnail" */;
+			buildPhases = (
+				D0000000000000000000013 /* Sources */,
+				D0000000000000000000014 /* Frameworks */,
+				D0000000000000000000015 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				D00000000000000000000020 /* MFFPreviewKit */,
+				D0000000000000000000019 /* EVAThumbnail */,
+			);
+			name = EVAThumbnail;
+			packageProductDependencies = (
+			);
+			productName = EVAThumbnail;
+			productReference = D0000000000000000000012 /* EVAThumbnail.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -211,6 +351,12 @@
 						CreatedOnToolsVersion = 26.5;
 						TestTargetID = 77BE28BA2FED64E10080DAF5;
 					};
+					D0000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					D0000000000000000000011 = {
+						CreatedOnToolsVersion = 26.6;
+					};
 				};
 			};
 			buildConfigurationList = 77BE28B62FED64E10080DAF5 /* Build configuration list for PBXProject "EVA" */;
@@ -230,6 +376,8 @@
 				77BE28BA2FED64E10080DAF5 /* EVA */,
 				77BE28C72FED64E30080DAF5 /* EVATests */,
 				77BE28D12FED64E30080DAF5 /* EVAUITests */,
+				D0000000000000000000001 /* EVAQuickLook */,
+				D0000000000000000000011 /* EVAThumbnail */,
 			);
 		};
 /* End PBXProject section */
@@ -250,6 +398,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		77BE28D02FED64E30080DAF5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D0000000000000000000005 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D0000000000000000000015 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -280,6 +442,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D0000000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D0000000000000000000013 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -292,6 +468,16 @@
 			isa = PBXTargetDependency;
 			target = 77BE28BA2FED64E10080DAF5 /* EVA */;
 			targetProxy = 77BE28D32FED64E30080DAF5 /* PBXContainerItemProxy */;
+		};
+		D000000000000000000000A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D0000000000000000000001 /* EVAQuickLook */;
+			targetProxy = D000000000000000000000B /* PBXContainerItemProxy */;
+		};
+		D000000000000000000001A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D0000000000000000000011 /* EVAThumbnail */;
+			targetProxy = D000000000000000000001B /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -578,6 +764,114 @@
 			};
 			name = Release;
 		};
+		D0000000000000000000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EVAQuickLook/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.7;
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.quicklook;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		D0000000000000000000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EVAQuickLook/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.7;
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.quicklook;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		D0000000000000000000017 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EVAThumbnail/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.7;
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.thumbnail;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		D0000000000000000000018 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EVAThumbnail/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.7;
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.thumbnail;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -613,6 +907,24 @@
 			buildConfigurations = (
 				77BE28E32FED64E30080DAF5 /* Debug */,
 				77BE28E42FED64E30080DAF5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D0000000000000000000006 /* Build configuration list for PBXNativeTarget "EVAQuickLook" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D0000000000000000000007 /* Debug */,
+				D0000000000000000000008 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D0000000000000000000016 /* Build configuration list for PBXNativeTarget "EVAThumbnail" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D0000000000000000000017 /* Debug */,
+				D0000000000000000000018 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

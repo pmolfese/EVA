@@ -171,6 +171,18 @@ nonisolated enum ERPEvaluation {
             for offset in 0..<epochLength { sum[channel][offset] /= Double(accepted) }
         }
 
+        // The paper disables filtering while epochs are accumulated, then
+        // applies the same 0.3-30 Hz evaluation band to the finished average.
+        // Previously the comment above promised this step but the metrics below
+        // were computed from the unfiltered average. That made our values
+        // internally repeatable, but not comparable with the stated procedure.
+        for channel in sum.indices {
+            sum[channel] = Filtering.bandPassZeroPhase(
+                sum[channel], samplingRate: samplingRate,
+                lowHz: thresholds.detectionLowHz, highHz: thresholds.detectionHighHz
+            )
+        }
+
         // Baseline-correct on the pre-stimulus interval, as any ERP pipeline
         // does; without it the SNR ratio measures offset rather than response.
         for channel in sum.indices {

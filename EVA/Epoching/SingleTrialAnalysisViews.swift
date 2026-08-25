@@ -158,33 +158,64 @@ struct SingleTrialAnalysisSheet: View {
         return true
     }
 
-    private var activeRIDEComponentWindows: [RIDEComponentWindowSelection] {
-        var windows: [RIDEComponentWindowSelection] = []
+    private var activeRIDEComponentWindows: [TrialWindowSelection] {
+        var windows: [TrialWindowSelection] = []
+        func append(_ component: RIDEAnalyzer.Component, _ startMs: Double, _ endMs: Double, _ colorIndex: Int) {
+            windows.append(
+                TrialWindowSelection(
+                    id: component.rawValue,
+                    label: component.label,
+                    startMs: startMs,
+                    endMs: endMs,
+                    colorIndex: colorIndex
+                )
+            )
+        }
         if viewModel.rideIncludesStimulusComponent {
-            windows.append(RIDEComponentWindowSelection(
-                component: .stimulus,
-                startMs: viewModel.rideStimulusWindowStartMs,
-                endMs: viewModel.rideStimulusWindowEndMs
-            ))
+            append(.stimulus, viewModel.rideStimulusWindowStartMs, viewModel.rideStimulusWindowEndMs, 0)
         }
         if viewModel.rideIncludesCentralComponent {
-            windows.append(RIDEComponentWindowSelection(
-                component: .central,
-                startMs: viewModel.rideCentralWindowStartMs,
-                endMs: viewModel.rideCentralWindowEndMs
-            ))
+            append(.central, viewModel.rideCentralWindowStartMs, viewModel.rideCentralWindowEndMs, 1)
         }
         if viewModel.rideIncludesResponseComponent {
             let responseAnchor = viewModel.rideResponseLatencySource == .stimulusLocked
                 ? 0
                 : viewModel.rideDefaultResponseLatencyMs
-            windows.append(RIDEComponentWindowSelection(
-                component: .response,
-                startMs: viewModel.rideResponseWindowStartMs + responseAnchor,
-                endMs: viewModel.rideResponseWindowEndMs + responseAnchor
-            ))
+            append(.response,
+                   viewModel.rideResponseWindowStartMs + responseAnchor,
+                   viewModel.rideResponseWindowEndMs + responseAnchor,
+                   2)
         }
         return windows
+    }
+
+    /// The free-form windows for whichever mode is showing. RIDE keeps its own
+    /// fixed three; every other mode gets a list you can add to.
+    private var activeUserWindows: [TrialWindowSelection] {
+        viewModel.windows(for: viewModel.analysisMode).enumerated().map { index, window in
+            TrialWindowSelection(
+                id: window.id.uuidString,
+                label: window.name,
+                startMs: window.startMs,
+                endMs: window.endMs,
+                colorIndex: index
+            )
+        }
+    }
+
+    /// What the overlay should draw right now.
+    private var activeWindowSelections: [TrialWindowSelection] {
+        viewModel.analysisMode == .ride ? activeRIDEComponentWindows : activeUserWindows
+    }
+
+    private func setWindow(id: String, startMs: Double, endMs: Double) {
+        if viewModel.analysisMode == .ride {
+            guard let component = RIDEAnalyzer.Component(rawValue: id) else { return }
+            setRIDEComponentWindow(component, startMs: startMs, endMs: endMs)
+            return
+        }
+        guard let uuid = UUID(uuidString: id) else { return }
+        viewModel.updateWindow(uuid, startMs: startMs, endMs: endMs, for: viewModel.analysisMode)
     }
 
     var body: some View {
@@ -211,9 +242,7 @@ struct SingleTrialAnalysisSheet: View {
                         )
                     } else {
                         selectionControls
-                        scaleControls
-                        trialInspectorRow
-                        parameterControls
+                        setupSection
                         runBar
 
                         if viewModel.analysisMode == .measurements, let result = viewModel.result {
@@ -230,12 +259,23 @@ struct SingleTrialAnalysisSheet: View {
                             cwtResultsSection(result)
                         } else if viewModel.analysisMode == .trialDiagnostics, !viewModel.diagnosticsRows.isEmpty {
                             Divider()
-                            TrialDiagnosticsPanels(
+                            TrialDiagnosticsDashboard(
                                 categories: viewModel.diagnosticsRows,
                                 axis: $viewModel.diagnosticsAxis,
                                 selectedMeasure: $viewModel.diagnosticsMeasure,
-                                groupCount: $viewModel.diagnosticsGroupCount
+                                secondaryMeasure: $viewModel.diagnosticsSecondaryMeasure,
+                                groupCount: $viewModel.diagnosticsGroupCount,
+                                similarityTrials: viewModel.similarityResults?
+                                    .first(where: { $0.name == viewModel.selectedCategory })?.trials ?? [],
+                                exclusions: viewModel.selectionExclusions,
+                                outcome: viewModel.selectionOutcome,
+                                averageAll: viewModel.selectionAverageAll,
+                                averageKept: viewModel.selectionAverageKept,
+                                criteria: $viewModel.selectionCriteria
                             )
+                            .onChange(of: viewModel.selectionCriteria) { _, _ in
+                                refreshTrialSelection()
+                            }
                         } else if let statusMessage = viewModel.statusMessage {
                             Text(statusMessage)
                                 .font(.callout)
@@ -549,10 +589,9 @@ struct SingleTrialAnalysisSheet: View {
                     channelName: channelName,
                     windowStartMs: $viewModel.windowStartMs,
                     windowEndMs: $viewModel.windowEndMs,
-                    componentWindows: isRIDEWindowMode ? activeRIDEComponentWindows : [],
-                    colorForComponent: color(forRIDEComponent:),
-                    onComponentWindowChange: { component, startMs, endMs in
-                        setRIDEComponentWindow(component, startMs: startMs, endMs: endMs)
+                    componentWindows: activeWindowSelections,
+                    onComponentWindowChange: { id, startMs, endMs in
+                        setWindow(id: id, startMs: startMs, endMs: endMs)
                     },
                     onTapChannel: { channel in
                         viewModel.channelScope = .singleChannel
@@ -578,8 +617,7 @@ struct SingleTrialAnalysisSheet: View {
                             channelName: channelName,
                             windowStartMs: .constant(viewModel.windowStartMs),
                             windowEndMs: .constant(viewModel.windowEndMs),
-                            componentWindows: isRIDEWindowMode ? activeRIDEComponentWindows : [],
-                            colorForComponent: color(forRIDEComponent:),
+                            componentWindows: activeWindowSelections,
                             onComponentWindowChange: { _, _, _ in },
                             onTapChannel: { _ in }
                         )
@@ -939,17 +977,136 @@ struct SingleTrialAnalysisSheet: View {
 
     // MARK: - Parameters
 
+    /// Add/rename/remove for the free-form windows. Shown in every mode that
+    /// has them, so the overlay is never something you can see but not create.
+    @ViewBuilder
+    private var analysisWindowControls: some View {
+        let mode = viewModel.analysisMode
+        let windows = viewModel.windows(for: mode)
+
+        HStack(spacing: 8) {
+            Text("Windows").font(.caption).foregroundStyle(.secondary)
+
+            ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
+                HStack(spacing: 3) {
+                    Circle()
+                        .fill(TrialWindowPalette.color(at: index))
+                        .frame(width: 7, height: 7)
+                    TextField("Name", text: Binding(
+                        get: { window.name },
+                        set: { newName in
+                            var current = viewModel.windows(for: mode)
+                            guard let position = current.firstIndex(where: { $0.id == window.id }) else { return }
+                            current[position].name = newName
+                            viewModel.setWindows(current, for: mode)
+                        }
+                    ))
+                    .textFieldStyle(.plain)
+                    .frame(width: 46)
+                    .font(.caption)
+                    Text("\(Int(window.startMs))–\(Int(window.endMs))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Button {
+                        viewModel.removeWindow(window.id, for: mode)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 4))
+            }
+
+            let limit = viewModel.maximumWindows(for: mode)
+            Button {
+                viewModel.addWindow(for: mode)
+            } label: {
+                Label("Add", systemImage: "plus")
+            }
+            .font(.caption)
+            .disabled(windows.count >= limit)
+            .help(windows.count >= limit
+                  ? (limit == 1
+                     ? "Woody estimates one rigid shift per trial, so it aligns on a single window."
+                     : "Window limit reached.")
+                  : "Add a window, then drag it or its edges on the plot above.")
+
+            if windows.isEmpty {
+                Text(limit == 1
+                     ? "Add the window Woody should align on — it gets exactly one."
+                     : "Add a window to score a single component instead of the whole epoch.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// The plot and its controls, foldable.
+    ///
+    /// Everything above the results — the butterfly, the scale, the parameters,
+    /// the windows — is setup you touch once per run and then want out of the
+    /// way. Left expanded, the answer always begins below the fold.
+    @ViewBuilder
+    private var setupSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { viewModel.setupIsExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: viewModel.setupIsExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                    Text("Setup").font(.subheadline.weight(.semibold))
+                    if !viewModel.setupIsExpanded {
+                        Text(setupSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if viewModel.setupIsExpanded {
+                scaleControls
+                trialInspectorRow
+                parameterControls
+            }
+        }
+    }
+
+    /// What the collapsed header has to say so folding it costs nothing.
+    private var setupSummary: String {
+        var parts: [String] = []
+        if let category = viewModel.selectedCategory { parts.append(category) }
+        if let start = viewModel.windowStartMs, let end = viewModel.windowEndMs {
+            parts.append("\(Int(start))–\(Int(end)) ms")
+        }
+        let windows = viewModel.windows(for: viewModel.analysisMode)
+        if !windows.isEmpty {
+            parts.append(windows.map(\.name).joined(separator: "/"))
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private var parameterControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             switch viewModel.analysisMode {
             case .clusterStatistics:
                 EmptyView()
             case .trialDiagnostics:
-                HStack(spacing: 20) {
-                    labeledField("Adaptive ± ms", value: $viewModel.adaptiveHalfWidthMs, width: 70)
-                    Toggle("Compare across all categories", isOn: $viewModel.diagnosticsUsesAllCategories)
-                        .toggleStyle(.checkbox)
-                        .help("Scores every category at once so a trial can be checked against the other conditions' averages — the mislabel test.")
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 20) {
+                        labeledField("Adaptive ± ms", value: $viewModel.adaptiveHalfWidthMs, width: 70)
+                        Toggle("Compare across all categories", isOn: $viewModel.diagnosticsUsesAllCategories)
+                            .toggleStyle(.checkbox)
+                            .help("Scores every category at once so a trial can be checked against the other conditions' averages — the mislabel test.")
+                    }
+                    analysisWindowControls
                 }
             case .measurements:
                 HStack(spacing: 20) {
@@ -962,7 +1119,9 @@ struct SingleTrialAnalysisSheet: View {
                         .disabled(!hasCurrentWoodyAlignment)
                         .help("Run the measurement table on the most recent Woody-aligned traces for this selection.")
                 }
+                analysisWindowControls
             case .woody:
+                analysisWindowControls
                 HStack(spacing: 20) {
                     Toggle("All categories", isOn: $viewModel.woodyRunsAllCategories)
                         .toggleStyle(.checkbox)
@@ -1012,6 +1171,7 @@ struct SingleTrialAnalysisSheet: View {
                     .foregroundStyle(.secondary)
             case .cwtRidge:
                 VStack(alignment: .leading, spacing: 8) {
+                    analysisWindowControls
                     HStack(spacing: 16) {
                         Toggle("All categories", isOn: $viewModel.cwtRunsAllCategories)
                             .toggleStyle(.checkbox)
@@ -1277,6 +1437,7 @@ struct SingleTrialAnalysisSheet: View {
         guard !inputs.isEmpty else {
             viewModel.diagnosticsRows = []
             viewModel.statusMessage = "Need at least two trials in a category to compare against."
+            viewModel.setupIsExpanded = true
             return
         }
 
@@ -1290,6 +1451,7 @@ struct SingleTrialAnalysisSheet: View {
         ) else {
             viewModel.diagnosticsRows = []
             viewModel.statusMessage = "Could not score trials for this window."
+            viewModel.setupIsExpanded = true
             return
         }
         viewModel.similarityResults = similarity
@@ -1329,6 +1491,7 @@ struct SingleTrialAnalysisSheet: View {
                 classification: similarity.classification,
                 bestMatchingCategory: similarity.bestMatchingCategory,
                 matchesOwnCategory: similarity.matchesOwnCategory,
+                matchesOwnPool: similarity.matchesOwnPool,
                 measures: [
                     "Peak (own, +)": measured?.peakAmplitudeOwnLatencyPositive ?? 0,
                     "Peak (own, −)": measured?.peakAmplitudeOwnLatencyNegative ?? 0,
@@ -1349,10 +1512,125 @@ struct SingleTrialAnalysisSheet: View {
                 name: selected,
                 rows: rows,
                 residuals: TrialDriftStatistics.residuals(trials: doubles, reference: reference),
-                convergence: TrialDriftStatistics.convergence(trials: doubles)
+                convergence: TrialDriftStatistics.convergence(trials: doubles),
+                windowSeries: windowSeries(
+                    trials: input.trials,
+                    reference: reference,
+                    samplingRate: rawSignal.samplingRate
+                )
             )
         ]
+
+        // SNR is a multichannel measure, so the selection panel needs the whole
+        // net rather than the channel-resolved series the scores were built on.
+        // Sliced once here; dragging a threshold only re-scores.
+        viewModel.selectionTrialMatrices = multichannelTrials(category: selected, rawSignal: rawSignal)
+        viewModel.selectionBaselineSampleCount = max(
+            Int((-min(windowStart, 0) / 1000 * rawSignal.samplingRate).rounded()),
+            0
+        )
+        refreshTrialSelection()
         viewModel.statusMessage = nil
+        withAnimation(.easeInOut(duration: 0.18)) { viewModel.setupIsExpanded = false }
+    }
+
+    /// Re-applies the exclusion criteria to the scores already computed. Cheap
+    /// enough to run on every slider drag except the null, which dominates.
+    func refreshTrialSelection() {
+        guard let selected = viewModel.selectedCategory,
+              let scored = viewModel.similarityResults?.first(where: { $0.name == selected }) else {
+            viewModel.selectionExclusions = []
+            viewModel.selectionOutcome = nil
+            return
+        }
+
+        let exclusions = TrialSelectionAnalyzer.exclusions(
+            from: scored.trials,
+            criteria: viewModel.selectionCriteria
+        )
+        viewModel.selectionExclusions = exclusions
+
+        let excludedIndices = Set(exclusions.map(\.trialIndex))
+
+        viewModel.selectionOutcome = TrialSelectionAnalyzer.evaluate(
+            trials: viewModel.selectionTrialMatrices,
+            excludedIndices: excludedIndices,
+            baselineSampleCount: viewModel.selectionBaselineSampleCount
+        )
+
+        // Channel-resolved averages for the overlay, from the same series the
+        // scores were computed on.
+        guard let rawSignal else { return }
+        let inputs = measurementTrials(category: selected, rawSignal: rawSignal)
+        viewModel.selectionAverageAll = TrialSimilarityAnalyzer.average(inputs, reference: .mean) ?? []
+        let kept = inputs.enumerated().filter { !excludedIndices.contains($0.offset) }.map(\.element)
+        viewModel.selectionAverageKept = kept.count >= 2
+            ? (TrialSimilarityAnalyzer.average(kept, reference: .mean) ?? [])
+            : viewModel.selectionAverageAll
+    }
+
+    /// Every channel of every trial in `category`, as `[trial][channel][sample]`.
+    private func multichannelTrials(category: String, rawSignal: MFFSignalData) -> [[[Float]]] {
+        rawSegments.filter { $0.category == category }.map { segment in
+            rawSignal.data.map { channel in
+                let lower = max(segment.startSample, 0)
+                let upper = min(segment.endSample, channel.count - 1)
+                guard lower <= upper else { return [Float]() }
+                return Array(channel[lower ... upper])
+            }
+        }
+    }
+
+    /// Per-trial numbers inside each highlighted window: the peak in the window,
+    /// and how well the trial matches the average within that window alone.
+    private func windowSeries(
+        trials: [SingleTrialAnalyzer.TrialInput],
+        reference: [Double],
+        samplingRate: Double
+    ) -> [TrialWindowSeries] {
+        let windows = viewModel.windows(for: .trialDiagnostics)
+        guard !windows.isEmpty else { return [] }
+
+        return windows.enumerated().map { colorIndex, window in
+            var peaks: [(trialIndex: Int, value: Double)] = []
+            var scores: [(trialIndex: Int, correlation: Double, slope: Double)] = []
+
+            for (index, trial) in trials.enumerated() {
+                let samples = trial.samples.map(Double.init)
+                guard let range = window.sampleRange(
+                    stimulusOffsetSamples: trial.stimulusOffsetSamples,
+                    samplingRate: samplingRate,
+                    length: samples.count
+                ), range.count > 2 else { continue }
+
+                // Largest absolute deflection in the window, signed — the peak
+                // a reader means when pointing at a component.
+                let slice = Array(samples[range])
+                let peak = slice.max(by: { abs($0) < abs($1) }) ?? 0
+                peaks.append((index, peak))
+
+                let scored = TrialAlignmentMetrics.windowScores(
+                    trial: samples,
+                    reference: reference,
+                    windows: [window],
+                    stimulusOffsetSamples: trial.stimulusOffsetSamples,
+                    samplingRate: samplingRate
+                )
+                if let first = scored.first {
+                    scores.append((index, first.correlation, first.slope))
+                }
+            }
+
+            return TrialWindowSeries(
+                id: window.id,
+                name: window.name,
+                colorIndex: colorIndex,
+                startMs: window.startMs,
+                endMs: window.endMs,
+                peaks: peaks,
+                scores: scores
+            )
+        }
     }
 
     /// Category names in a stable order, taken from the raw segments.
@@ -2656,9 +2934,8 @@ private struct SingleTrialWindowPicker: View {
     let channelName: (Int) -> String
     @Binding var windowStartMs: Double?
     @Binding var windowEndMs: Double?
-    let componentWindows: [RIDEComponentWindowSelection]
-    let colorForComponent: (RIDEAnalyzer.Component) -> Color
-    let onComponentWindowChange: (RIDEAnalyzer.Component, Double, Double) -> Void
+    let componentWindows: [TrialWindowSelection]
+    let onComponentWindowChange: (String, Double, Double) -> Void
     let onTapChannel: (Int) -> Void
 
     @State private var dragStartX: CGFloat?
@@ -2693,7 +2970,7 @@ private struct SingleTrialWindowPicker: View {
                 }
                 ForEach(componentWindows) { window in
                     if let rect = componentSelectionRect(window, in: proxy.size) {
-                        let color = colorForComponent(window.component)
+                        let color = window.color
                         Rectangle()
                             .fill(color.opacity(0.14))
                             .frame(width: rect.width, height: rect.height)
@@ -2707,7 +2984,7 @@ private struct SingleTrialWindowPicker: View {
                         }
                         .stroke(color.opacity(0.75), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                         .allowsHitTesting(false)
-                        Text(window.component.label)
+                        Text(window.label)
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(color)
                             .padding(.horizontal, 4)
@@ -2773,7 +3050,7 @@ private struct SingleTrialWindowPicker: View {
         return CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: size.height)
     }
 
-    private func componentSelectionRect(_ window: RIDEComponentWindowSelection, in size: CGSize) -> CGRect? {
+    private func componentSelectionRect(_ window: TrialWindowSelection, in size: CGSize) -> CGRect? {
         guard size.width > 0 else { return nil }
         let startSample = relativeSample(forMs: window.startMs)
         let endSample = relativeSample(forMs: window.endMs)
@@ -2835,7 +3112,7 @@ private struct SingleTrialWindowPicker: View {
             next = (start, end)
         }
         onComponentWindowChange(
-            drag.component,
+            drag.id,
             msFromRelativeSample(next.start),
             msFromRelativeSample(next.end)
         )
@@ -2843,27 +3120,19 @@ private struct SingleTrialWindowPicker: View {
 
     private func dragTarget(at x: CGFloat, width: CGFloat) -> ComponentWindowDrag? {
         let edgeSlop: CGFloat = 8
-        let candidates = componentWindows.compactMap { window -> (window: RIDEComponentWindowSelection, rect: CGRect)? in
+        let candidates = componentWindows.compactMap { window -> (window: TrialWindowSelection, rect: CGRect)? in
             componentSelectionRect(window, in: CGSize(width: width, height: 1)).map { (window, $0) }
         }
         let edgeHit = candidates.first { _, rect in abs(x - rect.minX) <= edgeSlop || abs(x - rect.maxX) <= edgeSlop }
         if let edgeHit {
             let mode: ComponentWindowDrag.Mode = abs(x - edgeHit.rect.minX) <= abs(x - edgeHit.rect.maxX) ? .resizeStart : .resizeEnd
-            return ComponentWindowDrag(component: edgeHit.window.component, startMs: edgeHit.window.startMs, endMs: edgeHit.window.endMs, mode: mode)
+            return ComponentWindowDrag(id: edgeHit.window.id, startMs: edgeHit.window.startMs, endMs: edgeHit.window.endMs, mode: mode)
         }
         if let bodyHit = candidates.first(where: { $0.rect.contains(CGPoint(x: x, y: 0.5)) }) {
-            return ComponentWindowDrag(component: bodyHit.window.component, startMs: bodyHit.window.startMs, endMs: bodyHit.window.endMs, mode: .move)
+            return ComponentWindowDrag(id: bodyHit.window.id, startMs: bodyHit.window.startMs, endMs: bodyHit.window.endMs, mode: .move)
         }
         return nil
     }
-}
-
-private struct RIDEComponentWindowSelection: Identifiable, Sendable {
-    var component: RIDEAnalyzer.Component
-    var startMs: Double
-    var endMs: Double
-
-    var id: RIDEAnalyzer.Component { component }
 }
 
 private struct ComponentWindowDrag {
@@ -2873,7 +3142,7 @@ private struct ComponentWindowDrag {
         case resizeEnd
     }
 
-    var component: RIDEAnalyzer.Component
+    var id: String
     var startMs: Double
     var endMs: Double
     var mode: Mode

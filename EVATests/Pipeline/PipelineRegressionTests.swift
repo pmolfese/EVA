@@ -186,9 +186,12 @@ struct PipelineRegressionTests {
 
         // The analytic ceiling. A median template is slightly less efficient
         // than a mean at suppressing Gaussian noise — asymptotically by
-        // sqrt(pi/2) — so MAS cannot beat sqrt(N) either, and the bound holds
-        // with room to spare.
-        let ceiling = Double(donorVolumes + 1).squareRoot() * 1.25
+        // sqrt(pi/2) — so MAS cannot beat sqrt(N) either. Keep only a 2%
+        // numerical tolerance: the previous 25% allowance admitted scores from
+        // 3.00 to 3.75 even though that entire range is impossible for this
+        // method and therefore defeated the leakage check's purpose.
+        let theoreticalCeiling = Double(donorVolumes + 1).squareRoot()
+        let ceiling = theoreticalCeiling * 1.02
 
         if ProcessInfo.processInfo.environment["EVA_UPDATE_WATERMARK"] == "1" {
             Issue.record("""
@@ -215,7 +218,8 @@ struct PipelineRegressionTests {
             """
             broadband SNR \(String(format: "%.3f", achieved)) exceeds the analytic ceiling \
             \(String(format: "%.3f", ceiling)) for a \(donorVolumes)-donor template. \
-            Template subtraction cannot do better than sqrt(N) with locked clocks, so this \
+            Template subtraction cannot do better than sqrt(N) with locked clocks (plus the \
+            stated 2% numerical tolerance), so this \
             means the correction is using information it should not have.
             """
         )

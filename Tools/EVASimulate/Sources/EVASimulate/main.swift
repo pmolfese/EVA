@@ -299,6 +299,27 @@ func usage() -> String {
                                     spatial model, pre/post-scan quiet, and two
                                     bad channels. Any explicit flag still wins.
 
+    correct — apply PCA surrogate BCG separation to an MFF recording
+
+        --input <noisy.mff>         Recording to correct. Required.
+        --output <corrected.mff>    Corrected recording to write. Required.
+        --truth <truth.json>        Use the simulation reference/source truth.
+        --pattern-search <mode>     paper (default) or iterative.
+        --representative-beat <n>   Optional 1-based candidate beat selected for
+                                    paper mode; otherwise median-energy is used.
+        --report <json>             Write filter construction and provenance.
+
+    evaluate-surrogate — repeated-seed PCA-S evaluation
+
+        --config <scenario.json>    Base scenario; AEP evaluation needs placed ERP.
+        --seeds <n>                 Repeated realizations per condition (default 5).
+        --offsets <mm,...>          Surrogate-basis mismatch sweep.
+        --pattern-search <mode>     paper (default) or iterative.
+        --representative-beat <n>   Optional 1-based paper-mode candidate beat.
+        --with-erp                  Report accepted trials, ERP SNR, peak errors,
+                                    and explained variance against clean truth.
+        --json                      Emit full statistics and per-seed values.
+
     score — reports waveform, spectral, band, and channel fidelity against truth
 
         --truth <clean.mff>         Ground-truth recording from `generate`. Required.
@@ -1750,14 +1771,34 @@ func runGenerateGroup(_ arguments: Arguments) throws {
 
     print("")
     print("Cohort: \(subjectCount) subjects in \(root.lastPathComponent)")
-    if let effect = truth.populationEffectMicrovolts, abs(effect) > 1e-9 {
+    let componentEffects = truth.erpEstimand?.components ?? []
+    let nonzeroEffects = componentEffects.filter { abs($0.targetMinusStandardMicrovolts) > 1e-9 }
+    if let effect = truth.populationEffectMicrovolts, abs(effect) > 1e-9,
+       nonzeroEffects.count == 1 {
         let realized = truth.realizedBetweenSubjectSD["erpEffectScale"] ?? 0
         print(String(
-            format: "  population ERP effect %.2f µV, between-subject SD %.0f%% requested / "
+            format: "  population ERP effect %@: %.2f µV, between-subject SD %.0f%% requested / "
                 + "%.0f%% realized",
-            effect, 100 * variation.erpEffectSD, 100 * realized
+            nonzeroEffects[0].componentID as NSString, effect,
+            100 * variation.erpEffectSD, 100 * realized
         ))
-    } else if truth.populationEffectMicrovolts != nil {
+    } else if !nonzeroEffects.isEmpty {
+        let realized = truth.realizedBetweenSubjectSD["erpEffectScale"] ?? 0
+        print("  population ERP estimand: target-minus-standard peak amplitude, per component")
+        for component in nonzeroEffects {
+            print(String(
+                format: "    %@ at %.0f ms: %+.2f µV",
+                component.componentID as NSString,
+                1000 * component.nominalPeakLatencySeconds,
+                component.targetMinusStandardMicrovolts
+            ))
+        }
+        print(String(
+            format: "  between-subject effect SD %.0f%% requested / %.0f%% realized",
+            100 * variation.erpEffectSD, 100 * realized
+        ))
+        print("  no scalar populationEffectMicrovolts is reported: component peaks cannot be summed")
+    } else if truth.erpEstimand != nil {
         // Reporting a between-subject SD here would be actively misleading: the
         // effect-scale draws multiply zero, so they vary nothing. A cohort with
         // no condition contrast is a legitimate *negative control* — a group
@@ -1781,7 +1822,7 @@ func runGenerateGroup(_ arguments: Arguments) throws {
     print("  wrote participants.tsv and group_truth.json")
     print("")
     print("  A requested SD and a realized SD are different things at small N.")
-    print("  Score group results against group_truth.json's population value,")
+    print("  Score group results against group_truth.json's per-component ERP estimand,")
     print("  not against any one subject.")
 }
 
@@ -1800,7 +1841,8 @@ func runGenerateGroup(_ arguments: Arguments) throws {
 func runEvaluateSurrogate(_ arguments: Arguments) throws {
     try arguments.validate(known: [
         "seeds", "offsets", "sources", "components", "brain-regularization",
-        "duration", "channels", "rate", "config", "with-erp", "json"
+        "duration", "channels", "rate", "config", "with-erp", "pattern-search",
+        "representative-beat", "json"
     ])
 
     let seedCount = try arguments.int("seeds") ?? 5
@@ -1814,6 +1856,17 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
     let regionalCount = try arguments.int("sources") ?? 29
     let componentCount = try arguments.int("components") ?? 4
     let regularization = try arguments.double("brain-regularization") ?? 0.02
+    let patternSearchRaw = arguments.string("pattern-search") ?? "paper"
+    guard let patternSearchMode = ArtifactPatternSearchMode(rawValue: patternSearchRaw) else {
+        throw SimulateError.usage("--pattern-search expects paper or iterative")
+    }
+    let requestedRepresentative = try arguments.int("representative-beat").map { $0 - 1 }
+    if let requestedRepresentative, requestedRepresentative < 0 {
+        throw SimulateError.usage("--representative-beat is 1-based and must be positive")
+    }
+    if requestedRepresentative != nil, patternSearchMode != .paper {
+        throw SimulateError.usage("--representative-beat applies only to --pattern-search paper")
+    }
 
     var base = SimulationConfig.default
     if let path = arguments.string("config") {
@@ -1838,10 +1891,14 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
 
     struct ConditionResult {
         var offsetMillimetres: Double
+        var successfulSeeds: [UInt64]
+        var erpSuccessfulSeeds: [UInt64]
         var correctedSNR: [Double]
         var uncorrectedSNR: [Double]
         var nearestSourceMillimetres: [Double]
         var acceptedBeatFraction: [Double]
+        var artifactComponentCounts: [Double]
+        var representativeCandidateBeats: [Int]
         // Rusiniak's four criteria, corrected and uncorrected.
         var correctedTrials: [Double] = []
         var uncorrectedTrials: [Double] = []
@@ -1857,10 +1914,14 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
 
     var results: [ConditionResult] = []
     for offset in offsets {
+        var successfulSeeds: [UInt64] = []
+        var erpSuccessfulSeeds: [UInt64] = []
         var corrected: [Double] = []
         var uncorrected: [Double] = []
         var nearest: [Double] = []
         var accepted: [Double] = []
+        var artifactCounts: [Double] = []
+        var representativeBeats: [Int] = []
         var correctedTrialsBuffer: [Double] = []
         var uncorrectedTrialsBuffer: [Double] = []
         var correctedERPSNRBuffer: [Double] = []
@@ -1895,7 +1956,9 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
             guard let components = SurrogateSeparation.artifactComponents(
                 channels: noisy,
                 samplingRate: config.samplingRate,
-                beatSeconds: bcg.detectedBeatSeconds
+                beatSeconds: bcg.detectedBeatSeconds,
+                patternSearchMode: patternSearchMode,
+                representativeBeatIndex: requestedRepresentative
             ) else { continue }
             let brain = try SurrogateSeparation.brainModel(
                 head: config.sphericalHeadModel, montage: montage, count: regionalCount,
@@ -1922,11 +1985,16 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                 }
                 return residual > 1e-30 ? (signal / residual).squareRoot() : .infinity
             }
+            successfulSeeds.append(config.seed)
             corrected.append(snr(output))
             uncorrected.append(snr(noisy))
             accepted.append(
                 Double(components.acceptedBeatCount) / Double(max(1, components.candidateBeatCount))
             )
+            artifactCounts.append(Double(min(componentCount, components.topographies.count)))
+            if let representative = components.representativeBeatIndex {
+                representativeBeats.append(representative + 1)
+            }
             let simulated = DipoleEEGGenerator.makeSources(config: config)
             nearest.append(
                 brain.sources.map { surrogate in
@@ -1963,6 +2031,7 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                    let correctedResult = evaluate(output),
                    let uncorrectedResult = evaluate(noisy),
                    abs(truthResult.peakAmplitudeMicrovolts) > 1e-12 {
+                    erpSuccessfulSeeds.append(config.seed)
                     correctedTrialsBuffer.append(Double(correctedResult.acceptedTrials))
                     uncorrectedTrialsBuffer.append(Double(uncorrectedResult.acceptedTrials))
                     correctedERPSNRBuffer.append(correctedResult.signalToNoise)
@@ -1987,8 +2056,12 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
             }
         }
         results.append(ConditionResult(
-            offsetMillimetres: offset, correctedSNR: corrected, uncorrectedSNR: uncorrected,
+            offsetMillimetres: offset, successfulSeeds: successfulSeeds,
+            erpSuccessfulSeeds: erpSuccessfulSeeds,
+            correctedSNR: corrected, uncorrectedSNR: uncorrected,
             nearestSourceMillimetres: nearest, acceptedBeatFraction: accepted,
+            artifactComponentCounts: artifactCounts,
+            representativeCandidateBeats: representativeBeats,
             correctedTrials: correctedTrialsBuffer,
             uncorrectedTrials: uncorrectedTrialsBuffer,
             correctedERPSNR: correctedERPSNRBuffer,
@@ -2013,18 +2086,85 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
     }
 
     if arguments.flag("json") {
-        var payload: [[String: Any]] = []
-        for result in results {
-            payload.append([
-                "offsetMillimetres": result.offsetMillimetres,
-                "correctedSNRMean": mean(result.correctedSNR),
-                "correctedSNRSD": standardDeviation(result.correctedSNR),
-                "uncorrectedSNRMean": mean(result.uncorrectedSNR),
-                "nearestSourceMillimetresMean": mean(result.nearestSourceMillimetres),
-                "acceptedBeatFractionMean": mean(result.acceptedBeatFraction),
-                "seeds": result.correctedSNR.count
-            ])
+        func jsonNumber(_ value: Double) -> Any {
+            value.isFinite ? value : NSNull()
         }
+        func statistics(_ values: [Double]) -> [String: Any] {
+            guard !values.isEmpty else {
+                return [
+                    "count": 0,
+                    "mean": NSNull(),
+                    "standardDeviation": NSNull(),
+                    "values": []
+                ]
+            }
+            return [
+                "count": values.count,
+                "mean": jsonNumber(mean(values)),
+                "standardDeviation": jsonNumber(standardDeviation(values)),
+                "values": values.map(jsonNumber)
+            ]
+        }
+        var conditions: [[String: Any]] = []
+        for result in results {
+            var condition: [String: Any] = [
+                "offsetMillimetres": result.offsetMillimetres,
+                "successfulSeedCount": result.successfulSeeds.count,
+                "successfulSeeds": result.successfulSeeds,
+                "broadbandSNR": [
+                    "corrected": statistics(result.correctedSNR),
+                    "uncorrected": statistics(result.uncorrectedSNR)
+                ],
+                "nearestSourceMillimetres": statistics(result.nearestSourceMillimetres),
+                "acceptedBeatFraction": statistics(result.acceptedBeatFraction),
+                "artifactComponentCount": statistics(result.artifactComponentCounts),
+                "representativeCandidateBeats": result.representativeCandidateBeats
+            ]
+            if evaluateERP {
+                condition["erp"] = [
+                    "successfulSeeds": result.erpSuccessfulSeeds,
+                    "acceptedTrials": [
+                        "corrected": statistics(result.correctedTrials),
+                        "uncorrected": statistics(result.uncorrectedTrials)
+                    ],
+                    "signalToNoise": [
+                        "corrected": statistics(result.correctedERPSNR),
+                        "uncorrected": statistics(result.uncorrectedERPSNR)
+                    ],
+                    "latencyErrorMilliseconds": [
+                        "corrected": statistics(result.correctedLatencyErrorMilliseconds),
+                        "uncorrected": statistics(result.uncorrectedLatencyErrorMilliseconds)
+                    ],
+                    "amplitudeFractionOfClean": [
+                        "corrected": statistics(result.correctedAmplitudeErrorFraction),
+                        "uncorrected": statistics(result.uncorrectedAmplitudeErrorFraction)
+                    ],
+                    "explainedVariance": [
+                        "corrected": statistics(result.correctedExplainedVariance),
+                        "uncorrected": statistics(result.uncorrectedExplainedVariance)
+                    ]
+                ] as [String: Any]
+            }
+            conditions.append(condition)
+        }
+        let payload: [String: Any] = [
+            "schemaVersion": 1,
+            "method": "PCA-S",
+            "patternSearchMode": patternSearchMode.rawValue,
+            "requestedSeedsPerCondition": seedCount,
+            "configuration": [
+                "channels": base.channelCount,
+                "samplingRateHz": base.samplingRate,
+                "durationSeconds": base.durationSeconds,
+                "regionalSourceCount": regionalCount,
+                "artifactComponentLimit": componentCount,
+                "brainRegularization": regularization,
+                "requestedRepresentativeBeat": requestedRepresentative.map { ($0 + 1) as Any }
+                    ?? NSNull(),
+                "erpEvaluationEnabled": evaluateERP
+            ] as [String: Any],
+            "conditions": conditions
+        ]
         let data = try JSONSerialization.data(
             withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]
         )
@@ -2032,10 +2172,11 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         return
     }
 
-    print("Surrogate separation, \(seedCount) seeds per condition")
+    print("Surrogate separation, \(seedCount) requested seeds per condition")
     print("  \(base.channelCount) channels, \(Int(base.samplingRate)) Hz, "
         + "\(Int(base.durationSeconds)) s, \(regionalCount) regional sources, "
         + "\(componentCount) artifact components")
+    print("  pattern search: \(patternSearchMode.rawValue)")
     print("")
     print("  offset    corrected SNR      uncorrected   nearest src   beats kept")
     print("  ---------------------------------------------------------------------")
@@ -2109,7 +2250,7 @@ func runCorrect(_ arguments: Arguments) throws {
     try arguments.validate(known: [
         "input", "output", "truth", "reference", "beat-code", "beat-times", "surrogate-sources",
         "brain-regularization", "artifact-variance", "correlation-threshold",
-        "surrogate-offset-mm",
+        "surrogate-offset-mm", "pattern-search", "representative-beat",
         "components", "low-hz", "high-hz", "report", "json"
     ])
 
@@ -2147,6 +2288,17 @@ func runCorrect(_ arguments: Arguments) throws {
     let correlationThreshold = try arguments.double("correlation-threshold") ?? 0.6
     let lowHz = try arguments.double("low-hz") ?? 1
     let highHz = try arguments.double("high-hz") ?? 20
+    let patternSearchRaw = arguments.string("pattern-search") ?? "paper"
+    guard let patternSearchMode = ArtifactPatternSearchMode(rawValue: patternSearchRaw) else {
+        throw SimulateError.usage("--pattern-search expects paper or iterative")
+    }
+    let requestedRepresentative = try arguments.int("representative-beat").map { $0 - 1 }
+    if let requestedRepresentative, requestedRepresentative < 0 {
+        throw SimulateError.usage("--representative-beat is 1-based and must be positive")
+    }
+    if requestedRepresentative != nil, patternSearchMode != .paper {
+        throw SimulateError.usage("--representative-beat applies only to --pattern-search paper")
+    }
 
     guard let componentSet = SurrogateSeparation.artifactComponents(
         channels: channels,
@@ -2155,7 +2307,9 @@ func runCorrect(_ arguments: Arguments) throws {
         lowHz: lowHz,
         highHz: highHz,
         correlationThreshold: correlationThreshold,
-        varianceThreshold: varianceThreshold
+        varianceThreshold: varianceThreshold,
+        patternSearchMode: patternSearchMode,
+        representativeBeatIndex: requestedRepresentative
     ) else {
         throw SimulateError.io("could not build an artifact template from \(beats.count) beats")
     }
@@ -2212,6 +2366,8 @@ func runCorrect(_ arguments: Arguments) throws {
         artifactVarianceFractions: Array(componentSet.varianceFractions.prefix(topographies.count)),
         acceptedBeatCount: componentSet.acceptedBeatCount,
         candidateBeatCount: componentSet.candidateBeatCount,
+        patternSearchMode: componentSet.patternSearchMode.rawValue,
+        representativeBeatIndex: componentSet.representativeBeatIndex,
         brainRegularization: regularization,
         surrogateOffsetMillimetres: surrogateOffset,
         nearestSimulatedSourceMillimetres: nil,
@@ -2255,6 +2411,11 @@ func runCorrect(_ arguments: Arguments) throws {
         print("PCA-S: \(report.artifactComponentCount) artifact components from "
             + "\(report.acceptedBeatCount)/\(report.candidateBeatCount) beats "
             + "(variance \(shares))")
+        let representative = report.representativeBeatIndex.map {
+            ", representative candidate beat \($0 + 1)"
+        }
+            ?? ""
+        print("  pattern search: \(report.patternSearchMode)\(representative)")
         print("  brain surrogate: \(regionalCount) regional sources, "
             + "\(brain.columnCount) columns, \(Int(regularization * 100))% regularization")
         if let minimum = report.minimumSourceSeparationMillimetres {

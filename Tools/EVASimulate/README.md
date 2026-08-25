@@ -311,9 +311,15 @@ levels of ground truth, and both are recorded — the **population** condition
 difference a group analysis is trying to recover, and the **between-subject
 variance** around it. N draws from one distribution have no between-subject
 structure at all, so a mixed-effects model fitted to them estimates a variance
-component that is zero by construction and appears to work regardless. Score
-group results against `group_truth.json`'s population value, not against any one
-subject.
+component that is zero by construction and appears to work regardless.
+
+`group_truth.json` records the group ERP estimand explicitly by component ID,
+nominal peak latency, units, and target-minus-standard contrast. A scalar
+`populationEffectMicrovolts` is emitted only when exactly one non-zero ERP
+component carries the contrast (or zero for a negative control). Multiple
+components are never summed across latencies or polarities into a scientifically
+meaningless scalar. Score every component against `erpEstimand.components`, not
+against any one subject.
 
 Per subject the tool varies head radius (which changes the forward model, so
 topographies differ even for identical sources), electrode placement, alpha
@@ -328,6 +334,29 @@ subjects already in it.
 
 For BIDS, run `eva-bids to-bids` once per subject; the two tools are kept
 separate rather than one calling the other.
+
+## PCA-S correction and evaluation
+
+The surrogate correction supports two explicit beat-pattern searches:
+
+- `--pattern-search paper` is the default. It matches every beat once against
+  one representative beat, as in the paper. Supply the paper operator's
+  one-based choice with `--representative-beat N`; when it is omitted, the CLI
+  uses a deterministic median-energy candidate as an unattended stand-in.
+- `--pattern-search iterative` starts from the all-beat average and performs two
+  match-and-refine passes. It is an intentional robustness extension, not the
+  paper algorithm.
+
+The selected mode, actual representative candidate, accepted-beat fraction,
+artifact-component count, and correction parameters are written to the report.
+`evaluate-surrogate --json` emits a versioned machine-readable result containing
+the full per-seed values and mean/SD for broadband and, with `--with-erp`, every
+ERP criterion.
+
+ERP evaluation follows the paper's order: reject single epochs, average the
+accepted epochs, apply the 0.3-30 Hz zero-phase filter to the completed average,
+then baseline and score it. Filtering only the inputs is not equivalent because
+the epoch edges alter the filter response.
 
 ## Scenario files
 
@@ -369,7 +398,7 @@ resolved scenario embedded in the truth sidecar. Measured gradient-template
 paths written by the CLI are canonicalized to absolute paths. A relative path
 authored directly in JSON is resolved relative to that scenario file.
 
-Four reviewed scenarios ship in `Tools/EVASimulate/scenarios/`:
+Eight reviewed scenarios ship in `Tools/EVASimulate/scenarios/`:
 
 | Scenario | Purpose |
 | --- | --- |
@@ -377,6 +406,10 @@ Four reviewed scenarios ship in `Tools/EVASimulate/scenarios/`:
 | `teaching-demo.json` | Ocular and muscle artifacts, mains noise, bad channels, and scanner lead-in/out. |
 | `dipole-separability.json` | Correlated, near-degenerate, moving neural sources plus non-stationarity and ocular dipoles. |
 | `oddball-erp.json` | Trial-variable target/standard ERP design with skew, correlation, and omissions. |
+| `aep-bilateral.json` | Bilateral auditory N100 evaluation over the generator BCG. |
+| `bcg-generators.json` | Four placed BCG generators with genuine spatial rank and morphology variation. |
+| `group-oddball.json` | Multi-component oddball cohort with a known component-wise group contrast. |
+| `regression-gradient-locked.json` | Analytically anchored locked-clock pipeline regression fixture. |
 
 Scenario schema versions are checked when loading. A newer unsupported schema
 fails loudly instead of silently dropping or misreading model parameters.
@@ -713,9 +746,10 @@ gets over-trusted.
   that no montage produces. This applies to the default Grouiller model;
   `--eeg-model dipole` replaces it with a spherical volume conductor, which is
   still an approximation rather than an individual anatomical head model.
-- **The ERP model has one fixed dipole component.** Targets and standards share
-  its topography and differ in amplitude; it does not yet model overlapping
-  P1/N1/P3 generators, habituation, or condition-dependent source locations.
+- **ERP generators are spherical and fixed within a scenario.** Scenarios can
+  contain multiple placed components with independent latency streams and
+  overlapping windows, but do not yet model individual anatomy, habituation, or
+  condition-dependent source locations.
 - **The default BCG is a fixed waveform with varying amplitude and latency**,
   not the genuinely varying morphology of a real one, and its topography is a
   function of channel *index* rather than electrode position — which makes the
@@ -781,7 +815,7 @@ default remains, now as an ordinary choice rather than a workaround.
 Tools/EVASimulate/.build/eva-simulate selftest
 ```
 
-Sixty passing outcomes, each on
+Eighty-eight passing outcomes, each on
 the model rather than on any EVA code: that locked clocks put
 template subtraction exactly on the sqrt(N) ceiling; that the paper's 152 µs/s
 drift pushes it far below that; that QRS jitter penalizes correction which relies
@@ -797,7 +831,8 @@ The metric checks pin perfect-reconstruction behavior, DC-error sensitivity,
 optimal event matching/ROC generation, and ERP amplitude/latency statistics.
 ERP-specific checks also pin deterministic designs and markers, exact controlled
 variability, dipole topography, condition averages, true response omissions,
-factor-isolated streams, and explicit component-window overlap.
+factor-isolated streams, explicit component-window overlap, filtering of the
+completed accepted-trial average, and distinct component-wise group estimands.
 Five non-stationarity checks pin stationary-default compatibility, deterministic
 truth, burst timing and quiet intervals, slowly continuous stochastic spectra,
 distinct microstate switching, and phase-locked gamma modulation.
@@ -807,6 +842,9 @@ Reference and correlated-source checks pin zero-mean average referencing at the
 shared additive boundary and truthful within-band source mixing.
 Three impedance checks pin the square-root resistance law, ordered mains pickup,
 the disabled compatibility path, and deceptively low true bridges.
+Surrogate checks pin deterministic paper and iterative pattern-search modes,
+artifact-free preservation, end-to-end separation, and the brain-basis
+competition effect.
 Run it after touching anything in the model — a
 harness that silently stops reproducing the phenomenon it exists to study is
 worse than no harness, because everything it emits still looks like evidence.

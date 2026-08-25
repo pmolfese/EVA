@@ -81,6 +81,19 @@ nonisolated struct SurrogateBrainModel: Sendable {
     var columnCount: Int { matrix.first?.count ?? 0 }
 }
 
+/// How the representative BCG pattern is chosen before beat averaging.
+///
+/// `paper` follows the published procedure as closely as an unattended command
+/// can: select one deterministic representative beat, correlate every candidate
+/// against it once, then average the accepted beats. `iterative` is EVA's more
+/// noise-tolerant variant: initialize from the all-beat average and refine the
+/// accepted set twice. They are intentionally separate because the latter is a
+/// useful algorithm, but it is not the procedure described in the paper.
+nonisolated enum ArtifactPatternSearchMode: String, Codable, Sendable, CaseIterable {
+    case paper
+    case iterative
+}
+
 nonisolated struct ArtifactComponentSet: Sendable {
     /// channels x components, unit-norm topographies.
     var topographies: [[Double]]
@@ -92,6 +105,10 @@ nonisolated struct ArtifactComponentSet: Sendable {
     /// The averaged artifact template, channels x samples.
     var template: [[Double]]
     var templateStartSeconds: Double
+    var patternSearchMode: ArtifactPatternSearchMode
+    /// Candidate-epoch index selected as the representative beat in paper mode.
+    /// Nil for iterative mode, which starts from the all-beat average.
+    var representativeBeatIndex: Int?
 }
 
 nonisolated struct SurrogateFilterReport: Codable, Sendable {
@@ -102,6 +119,8 @@ nonisolated struct SurrogateFilterReport: Codable, Sendable {
     var artifactVarianceFractions: [Double]
     var acceptedBeatCount: Int
     var candidateBeatCount: Int
+    var patternSearchMode: String
+    var representativeBeatIndex: Int?
     var brainRegularization: Double
     /// Deliberate displacement applied to the surrogate basis, in millimetres.
     var surrogateOffsetMillimetres: Double = 0
@@ -240,11 +259,14 @@ nonisolated enum SurrogateSeparation {
 
     /// Builds the averaged artifact template and its principal components.
     ///
-    /// Follows the paper: band-pass to the BCG range, take one representative
-    /// beat as a seed template, keep only beats whose spatio-temporal
-    /// correlation with it exceeds `correlationThreshold` (the paper uses 60%),
-    /// average those, then keep the principal components above
-    /// `varianceThreshold` of template variance (the paper uses 0.5%).
+    /// In `.paper` mode: band-pass to the BCG range, use the explicitly requested
+    /// representative beat or choose the median-energy beat as a deterministic
+    /// stand-in for the paper's manual selection, retain beats whose
+    /// spatio-temporal correlation with it exceeds `correlationThreshold` (the
+    /// paper uses 60%), and average them.
+    /// `.iterative` mode instead initializes from all beats and refines twice.
+    /// Both modes then retain principal components above `varianceThreshold` of
+    /// template variance (the paper uses 0.5%).
     static func artifactComponents(
         channels: [[Double]],
         samplingRate: Double,
@@ -254,7 +276,9 @@ nonisolated enum SurrogateSeparation {
         lowHz: Double = 1,
         highHz: Double = 20,
         correlationThreshold: Double = 0.6,
-        varianceThreshold: Double = 0.005
+        varianceThreshold: Double = 0.005,
+        patternSearchMode: ArtifactPatternSearchMode = .paper,
+        representativeBeatIndex requestedRepresentativeBeatIndex: Int? = nil
     ) -> ArtifactComponentSet? {
         guard !channels.isEmpty, !beatSeconds.isEmpty else { return nil }
         let filtered = channels.map {
@@ -274,7 +298,7 @@ nonisolated enum SurrogateSeparation {
         }
         guard epochs.count >= 2 else { return nil }
 
-        // Pattern search, refined iteratively rather than against a single beat.
+        // Why expose two pattern-search modes instead of quietly choosing one.
         //
         // The paper's operator picks one representative beat by eye and matches
         // against it. Matching against a *single* epoch is a poor automatic
@@ -287,8 +311,10 @@ nonisolated enum SurrogateSeparation {
         //
         // Averaging first and re-matching against the average suppresses EEG by
         // sqrt(N) before the comparison, so the threshold judges beats against
-        // the artifact rather than against one noisy example. Two refinement
-        // passes are enough; the accepted count is reported either way.
+        // the artifact rather than against one noisy example. That is the
+        // `.iterative` variant. `.paper` retains the single-beat procedure so a
+        // methods comparison can distinguish fidelity from the practical
+        // improvement instead of conflating them.
         func average(_ selection: [[[Double]]]) -> [[Double]] {
             var result = [[Double]](
                 repeating: [Double](repeating: 0, count: length), count: filtered.count
@@ -305,18 +331,57 @@ nonisolated enum SurrogateSeparation {
             return result
         }
 
-        var template = average(epochs)
-        var accepted = epochs
-        for _ in 0..<2 {
-            let matched = epochs.filter {
-                spatioTemporalCorrelation($0, template) >= correlationThreshold
+        let template: [[Double]]
+        let accepted: [[[Double]]]
+        let selectedRepresentativeBeatIndex: Int?
+        switch patternSearchMode {
+        case .paper:
+            // The publication chooses a representative beat manually. An
+            // unattended, deterministic harness needs an explicit rule, so use
+            // the median-energy epoch: unlike the largest beat it does not select
+            // an outlier, and unlike an all-beat average it does not leak every
+            // candidate into the reference pattern.
+            var ranked: [(index: Int, energy: Double)] = []
+            ranked.reserveCapacity(epochs.count)
+            for (index, epoch) in epochs.enumerated() {
+                var energy = 0.0
+                for channel in epoch {
+                    for value in channel { energy += value * value }
+                }
+                ranked.append((index: index, energy: energy))
             }
-            // Never end up with nothing: if the threshold rejects everything the
-            // previous selection stands, and the accepted count makes that
-            // visible rather than silent.
-            guard matched.count >= 2 else { break }
+            ranked.sort {
+                $0.energy == $1.energy ? $0.index < $1.index : $0.energy < $1.energy
+            }
+            let representative = requestedRepresentativeBeatIndex
+                ?? ranked[ranked.count / 2].index
+            guard epochs.indices.contains(representative) else { return nil }
+            let seedTemplate = epochs[representative]
+            let matched = epochs.filter {
+                spatioTemporalCorrelation($0, seedTemplate) >= correlationThreshold
+            }
+            guard matched.count >= 2 else { return nil }
             accepted = matched
-            template = average(accepted)
+            template = average(matched)
+            selectedRepresentativeBeatIndex = representative
+
+        case .iterative:
+            var refinedTemplate = average(epochs)
+            var refinedAccepted = epochs
+            for _ in 0..<2 {
+                let matched = epochs.filter {
+                    spatioTemporalCorrelation($0, refinedTemplate) >= correlationThreshold
+                }
+                // Never end up with nothing: if the threshold rejects everything
+                // the previous selection stands, and the accepted count makes
+                // that visible rather than silent.
+                guard matched.count >= 2 else { break }
+                refinedAccepted = matched
+                refinedTemplate = average(refinedAccepted)
+            }
+            accepted = refinedAccepted
+            template = refinedTemplate
+            selectedRepresentativeBeatIndex = nil
         }
 
         // PCA over channels: the covariance is channels x channels, and its
@@ -355,7 +420,9 @@ nonisolated enum SurrogateSeparation {
             acceptedBeatCount: accepted.count,
             candidateBeatCount: epochs.count,
             template: template,
-            templateStartSeconds: windowStartSeconds
+            templateStartSeconds: windowStartSeconds,
+            patternSearchMode: patternSearchMode,
+            representativeBeatIndex: selectedRepresentativeBeatIndex
         )
     }
 

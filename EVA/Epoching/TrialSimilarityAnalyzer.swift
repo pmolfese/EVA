@@ -47,16 +47,77 @@ nonisolated enum TrialSimilarityAnalyzer {
         /// Sample offset of "0 ms" in this category's own average, when it
         /// differs from the trials'. Defaults to the first trial's.
         var averageStimulusOffsetSamples: Int?
+        /// Categories a match to which is NOT a mislabel, because they pool the
+        /// same trials. `nil` derives them from the trials themselves.
+        var pooledWith: Set<String>?
 
         init(
             name: String,
             trials: [SingleTrialAnalyzer.TrialInput],
-            averageStimulusOffsetSamples: Int? = nil
+            averageStimulusOffsetSamples: Int? = nil,
+            pooledWith: Set<String>? = nil
         ) {
             self.name = name
             self.trials = trials
             self.averageStimulusOffsetSamples = averageStimulusOffsetSamples
+            self.pooledWith = pooledWith
         }
+    }
+
+    /// Which categories share trials with which.
+    ///
+    /// A pooled category ("correct") is built from the very trials of its
+    /// members ("LC++", "RC++"), so a member's trial resembles its own
+    /// sub-category average more than the pool's — the pool is diluted by the
+    /// other condition. Left unaccounted for, every pooled category flags
+    /// almost all of its trials as mislabelled.
+    ///
+    /// Matching is therefore hierarchical: an LC++ trial that looks like RC++
+    /// is "not LC++, but still correct", and only a match landing OUTSIDE the
+    /// pool — LC++ looking like LI++ — is a labelling claim.
+    ///
+    /// Derived rather than declared, because pooling shows up in the data:
+    /// overlapping categories literally contain the same epochs, at the same
+    /// `sourceTimeSeconds`.
+    ///
+    /// This rests on distinct categories having distinct trial times, which
+    /// holds because a category's trials come from events and one event cannot
+    /// occur twice. Callers who would rather state the grouping outright can
+    /// set `CategoryInput.pooledWith`.
+    static func pooledRelations(_ categories: [CategoryInput]) -> [String: Set<String>] {
+        var timesByCategory: [String: Set<Int64>] = [:]
+        for category in categories {
+            // Microsecond keys: these come from the same segments, but they are
+            // Doubles and exact equality is not something to rely on.
+            timesByCategory[category.name] = Set(
+                category.trials.map { Int64(($0.sourceTimeSeconds * 1_000_000).rounded()) }
+            )
+        }
+
+        var relations: [String: Set<String>] = [:]
+        for category in categories {
+            if let declared = category.pooledWith {
+                relations[category.name] = declared
+                continue
+            }
+            guard let mine = timesByCategory[category.name], !mine.isEmpty else {
+                relations[category.name] = []
+                continue
+            }
+            var related: Set<String> = []
+            for other in categories where other.name != category.name {
+                guard let theirs = timesByCategory[other.name], !theirs.isEmpty else { continue }
+                // Containment, not mere overlap. Pooling is a superset relation
+                // — "correct" holds every LC++ trial — so one side's epochs are
+                // wholly inside the other's. Partial overlap is not pooling and
+                // should not silence a labelling claim.
+                if mine.isSubset(of: theirs) || theirs.isSubset(of: mine) {
+                    related.insert(other.name)
+                }
+            }
+            relations[category.name] = related
+        }
+        return relations
     }
 
     /// What a trial is compared against.
@@ -154,7 +215,14 @@ nonisolated enum TrialSimilarityAnalyzer {
         /// label is worth checking.
         var bestMatchingCategory: String?
         var bestMatchingCorrelation: Double?
+        /// The match is this trial's exact category. Informative on its own —
+        /// an LC++ trial that looks like RC++ may be a response-hand confusion
+        /// worth seeing — but it is NOT the mislabel test.
         var matchesOwnCategory: Bool
+        /// The match is the trial's category or something pooled with it. This
+        /// is what a mislabel claim rests on: only a match from outside the
+        /// pool is a labelling claim.
+        var matchesOwnPool: Bool
 
         var classification: Classification
     }
@@ -162,9 +230,16 @@ nonisolated enum TrialSimilarityAnalyzer {
     struct CategoryResult: Sendable {
         var name: String
         var trials: [TrialSimilarity]
-        /// Trials whose best-matching average was a different category.
+        /// Trials whose best-matching average came from outside their pool.
         var possibleMislabels: [TrialSimilarity] {
-            trials.filter { !$0.matchesOwnCategory }
+            trials.filter { !$0.matchesOwnPool }
+        }
+
+        /// Matched a sibling inside the same pool — not a labelling error, but
+        /// worth a look: within `correct`, an LC++ trial resembling RC++ is a
+        /// statement about the two conditions, not about the label.
+        var poolSiblingMatches: [TrialSimilarity] {
+            trials.filter { $0.matchesOwnPool && !$0.matchesOwnCategory }
         }
         func trials(classified as: Classification) -> [TrialSimilarity] {
             trials.filter { $0.classification == `as` }
@@ -204,6 +279,7 @@ nonisolated enum TrialSimilarityAnalyzer {
         }
         guard !referenceByCategory.isEmpty else { return nil }
 
+        let relations = pooledRelations(categories)
         var results: [CategoryResult] = []
 
         for category in categories {
@@ -283,13 +359,16 @@ nonisolated enum TrialSimilarityAnalyzer {
                     }
                 }
 
-                // Only claim a mislabel when the winner is both convincing on
-                // its own terms and clearly ahead of the trial's own category.
-                let isConfidentMismatch =
+                // Only claim anything when the winner is both convincing on its
+                // own terms and clearly ahead of the trial's own category.
+                let isConfident =
                     bestCategory != nil
                     && bestCategory != category.name
                     && (bestCorrelation ?? 0) >= thresholds.mislabelMinimumCorrelation
                     && (bestCorrelation ?? 0) - fit.correlation >= thresholds.mislabelMargin
+
+                let pool = relations[category.name] ?? []
+                let matchedOutsidePool = isConfident && !pool.contains(bestCategory ?? "")
 
                 rows.append(TrialSimilarity(
                     id: index,
@@ -301,7 +380,8 @@ nonisolated enum TrialSimilarityAnalyzer {
                     robustDistance: 0,
                     bestMatchingCategory: bestCategory,
                     bestMatchingCorrelation: bestCorrelation,
-                    matchesOwnCategory: !isConfidentMismatch,
+                    matchesOwnCategory: !isConfident,
+                    matchesOwnPool: !matchedOutsidePool,
                     classification: .typical
                 ))
             }

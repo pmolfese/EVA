@@ -39,9 +39,24 @@ nonisolated struct TrialDiagnosticsRow: Identifiable, Sendable {
     var classification: TrialSimilarityAnalyzer.Classification
     var bestMatchingCategory: String?
     var matchesOwnCategory: Bool
+    var matchesOwnPool: Bool
     /// Measure name → value, from `SingleTrialAnalyzer`. Kept open so new
     /// measures appear as panels without touching this file.
     var measures: [String: Double]
+}
+
+/// One highlighted window's per-trial numbers: the peak inside it, and how well
+/// each trial matches the average *within that window only*.
+nonisolated struct TrialWindowSeries: Identifiable, Sendable {
+    var id: UUID
+    var name: String
+    var colorIndex: Int
+    var startMs: Double
+    var endMs: Double
+    /// trialIndex → peak amplitude inside the window.
+    var peaks: [(trialIndex: Int, value: Double)]
+    /// trialIndex → within-window r and β.
+    var scores: [(trialIndex: Int, correlation: Double, slope: Double)]
 }
 
 nonisolated struct TrialDiagnosticsCategory: Identifiable, Sendable {
@@ -52,6 +67,8 @@ nonisolated struct TrialDiagnosticsCategory: Identifiable, Sendable {
     var residuals: [[Double]] = []
     /// Running-average convergence toward the final average.
     var convergence: [TrialDriftStatistics.ConvergencePoint] = []
+    /// One entry per highlighted window.
+    var windowSeries: [TrialWindowSeries] = []
 }
 
 enum TrialDiagnosticsAxis: String, CaseIterable, Identifiable {
@@ -74,109 +91,85 @@ extension TrialSimilarityAnalyzer.Classification {
     }
 }
 
-// MARK: - Root
+/// A draggable span shown over the butterfly plot.
+///
+/// Identified by a plain `String` rather than RIDE's component enum, so the same
+/// overlay serves RIDE's fixed S/C/R and the free-form windows the other modes
+/// let you add. RIDE passes its component `rawValue`; the others pass a UUID
+/// string.
+struct TrialWindowSelection: Identifiable, Sendable, Equatable {
+    var id: String
+    var label: String
+    var startMs: Double
+    var endMs: Double
+    var colorIndex: Int
 
-struct TrialDiagnosticsPanels: View {
-    let categories: [TrialDiagnosticsCategory]
-    @Binding var axis: TrialDiagnosticsAxis
-    @Binding var selectedMeasure: String
-    @Binding var groupCount: Int
+    var color: Color { TrialWindowPalette.color(at: colorIndex) }
+}
+
+enum TrialWindowPalette {
+    static let colors: [Color] = [.orange, .purple, .teal, .pink, .green, .indigo]
+    static func color(at index: Int) -> Color {
+        colors[((index % colors.count) + colors.count) % colors.count]
+    }
+}
+
+// MARK: - Shared chrome
+
+/// A "?" beside a chart title that explains how to read it.
+///
+/// Every panel here reports something whose interpretation is not obvious from
+/// its axes — a slope near zero is a finding, a convergence curve ending at 1 is
+/// not — so the explanation belongs next to the plot rather than in a document
+/// nobody has open.
+struct ChartHelpBadge: View {
+    let title: String
+    let what: String
+    let read: String
+    var caution: String?
+
+    @State private var isPresented = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            controls
-
-            ForEach(categories) { category in
-                VStack(alignment: .leading, spacing: 14) {
-                    header(for: category)
-                    TrialShapeMagnitudeScatter(rows: category.rows)
-                    TrialMeasureOverOrderChart(
-                        rows: category.rows,
-                        measure: selectedMeasure,
-                        axis: axis
-                    )
-                    TrialSplitGroupChart(
-                        rows: category.rows,
-                        measure: selectedMeasure,
-                        groupCount: groupCount
-                    )
-                    if !category.convergence.isEmpty {
-                        TrialConvergenceChart(points: category.convergence)
-                    }
-                    if !category.residuals.isEmpty {
-                        TrialResidualHeatmap(residuals: category.residuals)
-                    }
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.callout.weight(.semibold))
+                labelled("What it shows", what)
+                labelled("How to read it", read)
+                if let caution {
+                    labelled("Watch out", caution, tint: .orange)
                 }
-                .padding(.bottom, 6)
             }
+            .padding(12)
+            .frame(width: 320, alignment: .leading)
         }
     }
 
-    private var availableMeasures: [String] {
-        let names = Set(categories.flatMap { $0.rows.flatMap(\.measures.keys) })
-        return names.sorted()
-    }
-
-    private var controls: some View {
-        HStack(spacing: 16) {
-            Picker("X axis", selection: $axis) {
-                ForEach(TrialDiagnosticsAxis.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 240)
-            .help("Trial order is ordinal; elapsed time includes gaps, and drift often tracks the clock rather than the count.")
-
-            Picker("Measure", selection: $selectedMeasure) {
-                ForEach(availableMeasures, id: \.self) { Text($0).tag($0) }
-            }
-            .frame(width: 240)
-
-            Stepper("Groups: \(groupCount)", value: $groupCount, in: 2 ... 8)
-                .frame(width: 140)
-
-            Spacer()
-            classificationLegend
+    private func labelled(_ heading: String, _ body: String, tint: Color = .secondary) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(heading).font(.caption2.weight(.semibold)).foregroundStyle(tint)
+            Text(body).font(.caption).foregroundStyle(.primary)
         }
     }
+}
 
-    private var classificationLegend: some View {
-        HStack(spacing: 10) {
-            ForEach(TrialSimilarityAnalyzer.Classification.allCases, id: \.self) { classification in
-                HStack(spacing: 4) {
-                    Circle().fill(classification.color).frame(width: 7, height: 7)
-                    Text(classification.displayName).font(.caption2).foregroundStyle(.secondary)
-                }
-                .fixedSize()
-            }
-        }
-    }
+/// Chart title + help, so every panel gets the same treatment.
+struct ChartTitle: View {
+    let text: String
+    let help: ChartHelpBadge
 
-    private func header(for category: TrialDiagnosticsCategory) -> some View {
-        let counts = Dictionary(grouping: category.rows, by: \.classification)
-            .mapValues(\.count)
-        let mislabels = category.rows.filter { !$0.matchesOwnCategory }
-
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
-                Text(category.name).font(.headline)
-                Text("\(category.rows.count) trials")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                ForEach(TrialSimilarityAnalyzer.Classification.allCases, id: \.self) { classification in
-                    if let count = counts[classification], count > 0, classification != .typical {
-                        Text("\(count) \(classification.displayName.lowercased())")
-                            .font(.caption)
-                            .foregroundStyle(classification.color)
-                    }
-                }
-            }
-            if !mislabels.isEmpty {
-                // The one claim here that is checkable rather than heuristic.
-                Text("\(mislabels.count) trial\(mislabels.count == 1 ? "" : "s") match another category's average more closely: "
-                     + mislabels.prefix(6).map { "#\($0.trialIndex) → \($0.bestMatchingCategory ?? "?")" }.joined(separator: ", "))
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(text).font(.caption).foregroundStyle(.secondary)
+            help
         }
     }
 }
@@ -188,6 +181,13 @@ struct TrialDiagnosticsPanels: View {
 /// inverted; low correlation anywhere = noise.
 struct TrialShapeMagnitudeScatter: View {
     let rows: [TrialDiagnosticsRow]
+    /// Selecting a trial anywhere rings it here, so the rail and the table stay
+    /// tied to the same object.
+    var selectedTrial: Binding<Int?> = .constant(nil)
+
+    private func symbolSize(for row: TrialDiagnosticsRow) -> CGFloat {
+        row.matchesOwnPool ? 45 : 130
+    }
 
     private var xDomain: ClosedRange<Double> {
         let lowest = rows.map(\.correlation).min() ?? -1
@@ -196,7 +196,15 @@ struct TrialShapeMagnitudeScatter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Shape (r) vs magnitude (β)").font(.caption).foregroundStyle(.secondary)
+            ChartTitle(
+                text: "Shape (r) vs magnitude (β)",
+                help: ChartHelpBadge(
+                    title: "Shape vs magnitude",
+                    what: "Each trial regressed on the average of the OTHER trials in its category. r is shape similarity, β is amplitude scaling.",
+                    read: "Top right (r high, β near 1) is an ordinary trial. r high with β near 0 means the response is absent — the participant was not engaged. Negative β runs opposite the average. Low r anywhere is noise or an artifact. Crosses matched an average from outside this trial's pool.",
+                    caution: "Single-trial EEG is noisy: r far below 1 is normal, not evidence of a bad trial. Compare trials against each other rather than against an absolute cutoff."
+                )
+            )
             Chart {
                 RectangleMark(
                     xStart: .value("r", 0.4), xEnd: .value("r", 1.0),
@@ -217,8 +225,18 @@ struct TrialShapeMagnitudeScatter: View {
                         y: .value("Slope", row.slope)
                     )
                     .foregroundStyle(row.classification.color)
-                    .symbolSize(row.matchesOwnCategory ? 45 : 130)
-                    .symbol(row.matchesOwnCategory ? .circle : .cross)
+                    .symbolSize(symbolSize(for: row))
+                    .symbol(row.matchesOwnPool ? .circle : .cross)
+                }
+                if let selected = selectedTrial.wrappedValue,
+                   let row = rows.first(where: { $0.trialIndex == selected }) {
+                    PointMark(
+                        x: .value("Correlation", row.correlation),
+                        y: .value("Slope", row.slope)
+                    )
+                    .foregroundStyle(Color.accentColor)
+                    .symbolSize(260)
+                    .symbol(.circle.strokeBorder(lineWidth: 2))
                 }
             }
             // Typical trials pile up just below r = 1, so a fixed −1…1 domain
@@ -229,6 +247,96 @@ struct TrialShapeMagnitudeScatter: View {
             .chartXAxisLabel("r")
             .chartYAxisLabel("β")
             .frame(height: 200)
+        }
+    }
+}
+
+// MARK: - Per-window peaks
+
+/// One row per highlighted window: the peak inside it over trial order, beside
+/// the within-window similarity. This is the point of drawing windows at all —
+/// a number that refers to a component instead of to the whole epoch.
+struct TrialWindowPanels: View {
+    let series: [TrialWindowSeries]
+    let axis: TrialDiagnosticsAxis
+    let rows: [TrialDiagnosticsRow]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(series) { window in
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(TrialWindowPalette.color(at: window.colorIndex))
+                            .frame(width: 8, height: 8)
+                        Text(window.name).font(.caption.weight(.semibold))
+                        Text("\(Int(window.startMs))–\(Int(window.endMs)) ms")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        ChartHelpBadge(
+                            title: "\(window.name): \(Int(window.startMs))–\(Int(window.endMs)) ms",
+                            what: "Left: the largest deflection inside this window on each trial. Right: how well each trial matches the category average within this window only.",
+                            read: "A drift in the left plot is that component changing over the run. On the right, r near 1 with β near 0 means the component's shape is there but its size is not — the signature of a trial the participant did not engage with.",
+                            caution: "Windows that overlap in time both claim the shared variance, so a component's neighbour can inflate it. For overlapping components use the joint fit rather than reading each window alone."
+                        )
+                    }
+
+                    HStack(alignment: .top, spacing: 14) {
+                        windowChart(
+                            title: "Peak in window",
+                            points: window.peaks.map { (x: xValue(forTrial: $0.trialIndex), y: $0.value, trial: $0.trialIndex) },
+                            color: TrialWindowPalette.color(at: window.colorIndex)
+                        )
+                        windowChart(
+                            title: "r within window",
+                            points: window.scores.map { (x: xValue(forTrial: $0.trialIndex), y: $0.correlation, trial: $0.trialIndex) },
+                            color: TrialWindowPalette.color(at: window.colorIndex),
+                            yDomain: -1 ... 1
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func xValue(forTrial index: Int) -> Double {
+        guard axis == .elapsedTime else { return Double(index) }
+        return rows.first { $0.trialIndex == index }?.sourceTimeSeconds ?? Double(index)
+    }
+
+    /// A little headroom past the data, so points do not sit on the frame.
+    private func defaultDomain(for points: [(x: Double, y: Double, trial: Int)]) -> ClosedRange<Double> {
+        let values = points.map(\.y)
+        guard let low = values.min(), let high = values.max(), high > low else { return -1 ... 1 }
+        let padding = (high - low) * 0.1
+        return (low - padding) ... (high + padding)
+    }
+
+    private func classification(forTrial index: Int) -> TrialSimilarityAnalyzer.Classification {
+        rows.first { $0.trialIndex == index }?.classification ?? .typical
+    }
+
+    @ViewBuilder
+    private func windowChart(
+        title: String,
+        points: [(x: Double, y: Double, trial: Int)],
+        color: Color,
+        yDomain: ClosedRange<Double>? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Chart {
+                ForEach(Array(points.enumerated()), id: \.offset) { _, point in
+                    PointMark(
+                        x: .value("Order", point.x),
+                        y: .value(title, point.y)
+                    )
+                    .foregroundStyle(classification(forTrial: point.trial).color)
+                    .symbolSize(classification(forTrial: point.trial) == .typical ? 22 : 70)
+                }
+            }
+            .chartYScale(domain: yDomain ?? defaultDomain(for: points))
+            .frame(height: 120)
         }
     }
 }
@@ -261,9 +369,15 @@ struct TrialMeasureOverOrderChart: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("\(measure) over \(axis.rawValue.lowercased())")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                ChartTitle(
+                    text: "\(measure) over \(axis.rawValue.lowercased())",
+                    help: ChartHelpBadge(
+                        title: "\(measure) over the run",
+                        what: "One point per trial in order, with a running median through them. ρ is Spearman's rank correlation against order, with its p.",
+                        read: "A sloped median line means the measure drifted — fatigue, habituation or electrode drift. Trial order and elapsed time differ wherever the session had breaks, so check both.",
+                        caution: "The p is uncorrected for the several measures in the picker; treat a single p just under 0.05 as a prompt to look, not a result."
+                    )
+                )
                 Spacer()
                 if let drift {
                     // ρ says whether it is monotonic; the p is on n trials, and
@@ -312,9 +426,15 @@ struct TrialSplitGroupChart: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("\(measure) by group (mean ± SEM)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            ChartTitle(
+                text: "\(measure) by group (mean ± SEM)",
+                help: ChartHelpBadge(
+                    title: "Split groups",
+                    what: "Trials divided into equal, contiguous blocks in order — the classic split-half or early/middle/late comparison.",
+                    read: "Bars are group means, whiskers the standard error. Non-overlapping whiskers suggest the measure really did change across the run.",
+                    caution: "Groups are contiguous in trial order, so anything that tracks time — a break, a re-application of gel — lands in one group and looks like an effect."
+                )
+            )
             Chart(summaries) { group in
                 BarMark(
                     x: .value("Group", group.label),
@@ -342,9 +462,15 @@ struct TrialConvergenceChart: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Running average vs final average")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            ChartTitle(
+                text: "Running average vs final average",
+                help: ChartHelpBadge(
+                    title: "Convergence",
+                    what: "How far the average of the first N trials sits from the final average, as N grows. Solid is RMS distance, dashed is 1 − r (shape only).",
+                    read: "A curve that flattens early means the ERP had settled and more trials were not buying much. Still falling at the right edge means it had not.",
+                    caution: "Both reach 0 at the last trial by construction. A late outlier cannot show as a dip, because the final average already contains it — only early contamination shows."
+                )
+            )
             Chart(points) { point in
                 LineMark(
                     x: .value("Trials", point.trialCount),
@@ -389,9 +515,15 @@ struct TrialResidualHeatmap: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Residual per trial over time")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            ChartTitle(
+                text: "Residual per trial over time",
+                help: ChartHelpBadge(
+                    title: "Residual heatmap",
+                    what: "Trial minus the category average, per sample. Rows are trials in order, red above the average and blue below.",
+                    read: "A whole row coloured means that trial is off throughout. A coloured column across many rows means a moment in the epoch where every trial departs — usually an artifact or a mistimed marker rather than a trial problem.",
+                    caution: "Intensity is scaled to the 95th percentile of all residuals, so one extreme sample cannot wash the map out — but it also means the scale changes between categories."
+                )
+            )
             Canvas { context, size in
                 guard let columns = residuals.first?.count, columns > 0 else { return }
                 let rowHeight = size.height / CGFloat(residuals.count)
