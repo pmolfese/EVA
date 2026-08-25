@@ -314,6 +314,13 @@ final class EpochingViewModel {
     /// Multi-Butterfly's grid column count ("play with doing two per row" —
     /// 1 keeps the original single-column stack).
     var multiButterflyColumns: Int = 2
+    /// Width of the Averages workspace's Topography pane, dragged by its left
+    /// edge. Clamped to `averagesTopographyWidthRange` and further clamped to
+    /// the space actually available, so a width dragged wide on a big display
+    /// cannot push the layout off a smaller one.
+    var averagesTopographyWidth: Double = 430
+
+    static let averagesTopographyWidthRange: ClosedRange<Double> = 280 ... 1000
 
     /// Adds a joint marker at exactly `relativeSample` — used by "Add Joint"
     /// in a butterfly's right-click menu, where the click location itself is

@@ -66,6 +66,9 @@ extension WaveformView {
             } else {
                 let relativeSample = averagesWorkspaceRelativeSample(for: segments)
 
+                GeometryReader { workspace in
+                let availableWidth = workspace.size.width
+
                 VStack(spacing: 12) {
                     if showsPlotArea || epoching.showsAveragesLog {
                         HStack(alignment: .top, spacing: 12) {
@@ -89,16 +92,25 @@ extension WaveformView {
                                             )
                                     }
                                 }
-                                .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+                                .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
                             }
 
                             if epoching.showsAveragesTopography {
-                                averagesTopographyPane(signal: signal, relativeSample: relativeSample)
-                                    .frame(
-                                        minWidth: 320,
-                                        maxWidth: showsLeftColumn ? 430 : .infinity,
-                                        maxHeight: .infinity
+                                if showsLeftColumn {
+                                    AveragesTopographyResizer(
+                                        width: $epoching.averagesTopographyWidth,
+                                        available: availableWidth
                                     )
+                                }
+
+                                if showsLeftColumn {
+                                    averagesTopographyPane(signal: signal, relativeSample: relativeSample)
+                                        .frame(width: resolvedTopographyWidth(available: availableWidth))
+                                        .frame(maxHeight: .infinity)
+                                } else {
+                                    averagesTopographyPane(signal: signal, relativeSample: relativeSample)
+                                        .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+                                }
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -128,52 +140,38 @@ extension WaveformView {
                 .onAppear {
                     seedAveragesWorkspaceLatencyIfNeeded(segment: segments[0])
                 }
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
     }
 
+    /// The Topography pane's width, clamped both to its own range and to the
+    /// space this window actually has. Without the second clamp a width dragged
+    /// wide on a large display would squeeze the left column off a smaller one.
+    func resolvedTopographyWidth(available: CGFloat) -> CGFloat {
+        let range = EpochingViewModel.averagesTopographyWidthRange
+        let requested = min(max(epoching.averagesTopographyWidth, range.lowerBound), range.upperBound)
+        guard available > 0 else { return requested }
+        // Leave room for the left column plus the gutter and the drag handle.
+        let ceiling = max(range.lowerBound, available - 300)
+        return min(requested, ceiling)
+    }
+
     func averagesToolbar(for signal: MFFSignalData) -> some View {
         return HStack(spacing: 12) {
             toolbarScaleControls(showsTimeScale: false)
 
-            HStack(spacing: 6) {
-                averagesToolbarToggle(
-                    title: "Waveforms",
-                    systemImage: "waveform.path.ecg",
-                    isOn: $epoching.showsAveragesInspector
-                )
-                averagesToolbarToggle(
-                    title: "Topomaps",
-                    systemImage: "circle.grid.3x3.fill",
-                    isOn: $epoching.showsAveragesTopography
-                )
-                averagesToolbarToggle(
-                    title: "Butterfly",
-                    systemImage: "chart.xyaxis.line",
-                    isOn: $epoching.showsAveragesButterfly
-                )
-                averagesToolbarToggle(
-                    title: "Logs",
-                    systemImage: "list.bullet.rectangle",
-                    isOn: $epoching.showsAveragesLog
-                )
-                averagesToolbarToggle(
-                    title: "Multi-Butterfly",
-                    systemImage: "rectangle.grid.1x2",
-                    isOn: $epoching.showsAveragesMultiButterfly
-                )
-                averagesToolbarToggle(
-                    title: "Difference",
-                    systemImage: "plusminus",
-                    isOn: $epoching.showsAveragesDifference
-                )
-                averagesToolbarToggle(
-                    title: "Filmstrip",
-                    systemImage: "square.grid.3x1.below.line.grid.1x2",
-                    isOn: $epoching.showsAveragesFilmstrip
-                )
+            // Seven fixed-width buttons were the single biggest contributor to
+            // this workspace's minimum width, which is what pushed the window
+            // past the edge of smaller displays. ViewThatFits picks the roomiest
+            // arrangement that actually fits: full row, compact row, then a
+            // two-row grid.
+            ViewThatFits(in: .horizontal) {
+                averagesViewToggleRow(metrics: .regular)
+                averagesViewToggleRow(metrics: .compact)
+                averagesViewToggleGrid(metrics: .compact)
             }
 
             Divider()
@@ -206,22 +204,86 @@ extension WaveformView {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private func averagesToolbarToggle(title: String, systemImage: String, isOn: Binding<Bool>) -> some View {
+    /// The two sizes the view toggles come in. `compact` keeps the same icon and
+    /// label but drops the button to roughly two-thirds the width, which is what
+    /// lets seven of them fit on a laptop display.
+    struct AveragesToggleMetrics {
+        let buttonWidth: CGFloat
+        let buttonHeight: CGFloat
+        let iconSize: CGFloat
+        let labelSize: CGFloat
+
+        static let regular = AveragesToggleMetrics(buttonWidth: 77, buttonHeight: 58, iconSize: 22, labelSize: 8)
+        static let compact = AveragesToggleMetrics(buttonWidth: 52, buttonHeight: 46, iconSize: 16, labelSize: 7)
+    }
+
+    private var averagesViewToggles: [(title: String, image: String, binding: Binding<Bool>)] {
+        [
+            ("Waveforms", "waveform.path.ecg", $epoching.showsAveragesInspector),
+            ("Topomaps", "circle.grid.3x3.fill", $epoching.showsAveragesTopography),
+            ("Butterfly", "chart.xyaxis.line", $epoching.showsAveragesButterfly),
+            ("Logs", "list.bullet.rectangle", $epoching.showsAveragesLog),
+            ("Multi-Butterfly", "rectangle.grid.1x2", $epoching.showsAveragesMultiButterfly),
+            ("Difference", "plusminus", $epoching.showsAveragesDifference),
+            ("Filmstrip", "square.grid.3x1.below.line.grid.1x2", $epoching.showsAveragesFilmstrip)
+        ]
+    }
+
+    private func averagesViewToggleRow(metrics: AveragesToggleMetrics) -> some View {
+        HStack(spacing: 6) {
+            ForEach(Array(averagesViewToggles.enumerated()), id: \.offset) { _, toggle in
+                averagesToolbarToggle(
+                    title: toggle.title,
+                    systemImage: toggle.image,
+                    isOn: toggle.binding,
+                    metrics: metrics
+                )
+            }
+        }
+    }
+
+    /// Last resort: two rows of four and three. Taller than the row forms, but
+    /// it never forces the window wider than the screen.
+    private func averagesViewToggleGrid(metrics: AveragesToggleMetrics) -> some View {
+        let toggles = averagesViewToggles
+        let split = (toggles.count + 1) / 2
+        return VStack(spacing: 4) {
+            ForEach([Array(toggles.prefix(split)), Array(toggles.dropFirst(split))], id: \.first?.title) { row in
+                HStack(spacing: 4) {
+                    ForEach(Array(row.enumerated()), id: \.offset) { _, toggle in
+                        averagesToolbarToggle(
+                            title: toggle.title,
+                            systemImage: toggle.image,
+                            isOn: toggle.binding,
+                            metrics: metrics
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func averagesToolbarToggle(
+        title: String,
+        systemImage: String,
+        isOn: Binding<Bool>,
+        metrics: AveragesToggleMetrics = .regular
+    ) -> some View {
         Button {
             isOn.wrappedValue.toggle()
         } label: {
             VStack(spacing: 3) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 22, weight: .semibold))
-                    .frame(width: 24, height: 24)
+                    .font(.system(size: metrics.iconSize, weight: .semibold))
+                    .frame(width: metrics.iconSize + 2, height: metrics.iconSize + 2)
                 Text(title.uppercased())
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: metrics.labelSize, weight: .bold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
-                    .frame(width: 67, height: 10)
+                    .frame(width: metrics.buttonWidth - 10, height: 10)
             }
             .foregroundStyle(isOn.wrappedValue ? Color.white : Color.primary)
-            .frame(width: 77, height: 58)
+            .frame(width: metrics.buttonWidth, height: metrics.buttonHeight)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(isOn.wrappedValue ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
@@ -1110,5 +1172,42 @@ private struct AveragesButterflyFigure: View {
             WaveformTimeAxisView(segment: segments[0], samplingRate: signal.samplingRate)
                 .frame(height: Self.timeAxisHeight)
         }
+    }
+}
+
+/// Drag handle sitting between the plot column and the Topography pane.
+/// Dragging it left widens Topography, dragging right narrows it — the pane is
+/// on the right, so its left edge is the grip.
+private struct AveragesTopographyResizer: View {
+    @Binding var width: Double
+    let available: CGFloat
+
+    @State private var widthAtDragStart: Double?
+
+    var body: some View {
+        let range = EpochingViewModel.averagesTopographyWidthRange
+
+        RoundedRectangle(cornerRadius: 2, style: .continuous)
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: 3)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle().inset(by: -5))
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let start = widthAtDragStart ?? width
+                        if widthAtDragStart == nil { widthAtDragStart = start }
+                        // Dragging left (negative translation) grows the pane.
+                        let ceiling = available > 0 ? max(range.lowerBound, Double(available) - 300) : range.upperBound
+                        let proposed = start - Double(value.translation.width)
+                        width = min(max(proposed, range.lowerBound), min(range.upperBound, ceiling))
+                    }
+                    .onEnded { _ in widthAtDragStart = nil }
+            )
+            .help("Drag to resize the Topography pane")
+            .accessibilityLabel("Topography pane width")
     }
 }

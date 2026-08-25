@@ -143,8 +143,16 @@ nonisolated struct MFFQuickLookSummary: Sendable {
         let baselineSeconds: Double?
         let conditions: [ConditionTally]
         let faultHistogram: [String: Int]
+        /// Whether the package actually records what was thrown away. EGI marks
+        /// rejected segments `status="bad"`, and EVA exports record per-category
+        /// totals in eva.xml -- but a plain EVA epoch export contains only the
+        /// survivors, with nothing to say how many candidates there were. In
+        /// that case "kept vs rejected" is unanswerable and a retention figure
+        /// would be a fabricated 100%.
+        let recordsRejections: Bool
         var kept: Int { conditions.reduce(0) { $0 + $1.kept } }
         var rejected: Int { conditions.reduce(0) { $0 + $1.rejected } }
+        /// Only meaningful when `recordsRejections` is true.
         var retention: Double {
             let total = kept + rejected
             return total > 0 ? Double(kept) / Double(total) : 0

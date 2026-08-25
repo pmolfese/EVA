@@ -136,7 +136,9 @@ extension MFFQuickLookSummary {
 
         // MARK: eva.xml
 
-        let declaredType = root("eva.xml")?.firstText("fileType").flatMap(FileType.init(rawValue:))
+        let evaRoot = root("eva.xml")
+        let declaredType = evaRoot?.firstText("fileType").flatMap(FileType.init(rawValue:))
+        let declaredRejections = evaRoot.map(parseDeclaredRejections) ?? [:]
 
         // MARK: classification
 
@@ -167,6 +169,21 @@ extension MFFQuickLookSummary {
                 tallies[segment.category] = tally
                 for fault in segment.faults { faults[fault, default: 0] += 1 }
             }
+
+            // eva.xml is authoritative when it recorded per-category totals,
+            // because the package itself holds only the survivors.
+            if !declaredRejections.isEmpty {
+                for (name, declared) in declaredRejections {
+                    if tallies[name] == nil { order.append(name) }
+                    let trials = tallies[name]?.trials ?? declared.included
+                    tallies[name] = (declared.included, max(declared.total - declared.included, 0), trials)
+                    for (reason, count) in declared.reasons { faults[reason, default: 0] += count }
+                }
+            }
+
+            let recordsRejections = !declaredRejections.isEmpty
+                || segments.contains { $0.hasStatus }
+
             segmentedDetail = SegmentedDetail(
                 epochLengthSeconds: segments.first.map { Double($0.endMicroseconds - $0.beginMicroseconds) / 1_000_000 },
                 baselineSeconds: segments.first.map { Double($0.eventMicroseconds - $0.beginMicroseconds) / 1_000_000 },
@@ -179,7 +196,8 @@ extension MFFQuickLookSummary {
                         contributingTrials: tally.trials
                     )
                 },
-                faultHistogram: faults
+                faultHistogram: faults,
+                recordsRejections: recordsRejections
             )
 
         case .averaged, .grandAverage:
@@ -247,6 +265,37 @@ extension MFFQuickLookSummary {
         )
     }
 
+    // MARK: - Declared rejections
+
+    struct DeclaredRejection: Sendable {
+        let total: Int
+        let included: Int
+        let reasons: [String: Int]
+    }
+
+    /// Reads the `<category name total included>` records EVA writes into
+    /// eva.xml. Mirrors `EVAProcessingScript`'s reader, and like
+    /// `RecordingCombiner` takes the last step that carries any.
+    static func parseDeclaredRejections(in evaRoot: XMLElement) -> [String: DeclaredRejection] {
+        var latest: [String: DeclaredRejection] = [:]
+        for step in evaRoot.descendants("step") {
+            var found: [String: DeclaredRejection] = [:]
+            for category in step.descendants("category") {
+                guard let name = category.attribute(forName: "name")?.stringValue else { continue }
+                let total = category.attribute(forName: "total")?.stringValue.flatMap { Int($0) } ?? 0
+                let included = category.attribute(forName: "included")?.stringValue.flatMap { Int($0) } ?? 0
+                var reasons: [String: Int] = [:]
+                for reason in category.descendants("reason") {
+                    guard let code = reason.attribute(forName: "code")?.stringValue else { continue }
+                    reasons[code] = reason.attribute(forName: "count")?.stringValue.flatMap { Int($0) } ?? 0
+                }
+                found[name] = DeclaredRejection(total: total, included: included, reasons: reasons)
+            }
+            if !found.isEmpty { latest = found }
+        }
+        return latest
+    }
+
     // MARK: - Impedance
 
     /// Reads the `ICAL` calibration block, which records electrode impedance in
@@ -283,6 +332,10 @@ extension MFFQuickLookSummary {
     struct CategorySegment: Sendable {
         let category: String
         let isBad: Bool
+        /// EGI writes `status` on every segment; an EVA epoch export writes none
+        /// at all, which is how we tell "nothing was rejected" apart from
+        /// "rejections were never recorded".
+        let hasStatus: Bool
         let isAverage: Bool
         let contributingTrials: Int
         let subject: String?
@@ -324,6 +377,7 @@ extension MFFQuickLookSummary {
                     CategorySegment(
                         category: name,
                         isBad: segment.attribute(forName: "status")?.stringValue == "bad",
+                        hasStatus: segment.attribute(forName: "status") != nil,
                         // EGI marks a segment that is itself an average with this
                         // name. Grand averages and singleton category averages
                         // both use #seg == 1, so the name is the reliable marker.

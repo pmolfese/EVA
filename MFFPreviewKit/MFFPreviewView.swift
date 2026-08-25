@@ -59,6 +59,11 @@ struct MFFPreviewContent: View {
                 if let version = summary.mffVersion {
                     Badge(text: "MFF v\(version)", tint: .secondary)
                 }
+                // eva.xml means EVA has processed this package. Worth saying up
+                // front rather than as one manifest chip among many.
+                if summary.manifest.hasEVAScript {
+                    Badge(text: "EVA", tint: .orange)
+                }
             }
             Text(identityLine)
                 .font(.subheadline)
@@ -184,10 +189,15 @@ struct MFFPreviewContent: View {
                     }
                 case .segmented:
                     if let detail = summary.segmentedDetail {
-                        Text("Segments kept and rejected")
+                        Text(detail.recordsRejections ? "Segments kept and rejected" : "Segments per condition")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         SegmentedBarsView(detail: detail)
+                        if !detail.recordsRejections {
+                            Text("This package holds only the surviving segments — it records no rejection counts.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 case .averaged, .grandAverage:
                     if let detail = summary.averagedDetail {
@@ -234,7 +244,11 @@ struct MFFPreviewContent: View {
             rows.append(("Median impedance", "\(Int(median.rounded())) kΩ"))
         }
         if let detail = summary.segmentedDetail {
-            rows.append(("Retention", "\(Int((detail.retention * 100).rounded()))%"))
+            // Only claim a retention figure when the file actually says what was
+            // discarded; otherwise it is always a meaningless 100%.
+            if detail.recordsRejections {
+                rows.append(("Retention", "\(Int((detail.retention * 100).rounded()))%"))
+            }
             if let length = detail.epochLengthSeconds {
                 rows.append(("Epoch length", String(format: "%.2f s", length)))
             }
@@ -269,7 +283,6 @@ struct MFFPreviewContent: View {
             if summary.manifest.hasPNS { Chip(text: "PNS signal", tint: .secondary) }
             if summary.manifest.hasCoordinates { Chip(text: "coordinates.xml", tint: .secondary) }
             if summary.manifest.hasHistory { Chip(text: "history.xml", tint: .secondary) }
-            if summary.manifest.hasEVAScript { Chip(text: "written by EVA", tint: .secondary) }
             if let detail = summary.continuousDetail, !detail.tracks.isEmpty {
                 Chip(
                     text: detail.tracks.count == 1 ? "1 event track" : "\(detail.tracks.count) event tracks",
@@ -511,15 +524,19 @@ private struct SegmentedBarsView: View {
                             Rectangle()
                                 .fill(.teal)
                                 .frame(width: unit * CGFloat(condition.kept))
-                            Rectangle()
-                                .fill(.red)
-                                .frame(width: unit * CGFloat(condition.rejected))
+                            if detail.recordsRejections {
+                                Rectangle()
+                                    .fill(.red)
+                                    .frame(width: unit * CGFloat(condition.rejected))
+                            }
                             Spacer(minLength: 0)
                         }
                         .clipShape(RoundedRectangle(cornerRadius: 2))
                     }
                     .frame(height: 13)
-                    Text("\(condition.kept) / \(condition.rejected)")
+                    Text(detail.recordsRejections
+                         ? "\(condition.kept) / \(condition.rejected)"
+                         : "\(condition.kept)")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                         .frame(width: 56, alignment: .trailing)
