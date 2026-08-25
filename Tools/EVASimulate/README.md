@@ -353,6 +353,30 @@ artifact-component count, and correction parameters are written to the report.
 the full per-seed values and mean/SD for broadband and, with `--with-erp`, every
 ERP criterion.
 
+PCA-S uses the recording's electrode geometry instead of silently substituting
+the built-in montage. For generated data, give `correct` its truth sidecar so it
+can also reproduce the exact spherical head model and lead-field truncation:
+
+```sh
+eva-simulate correct \
+  --input sim_noisy.mff \
+  --output sim_corrected.mff \
+  --truth sim_truth.json \
+  --pattern-search iterative \
+  --report sim_correction.json
+```
+
+Geometry resolution is explicit and ordered: `--coordinates <path>` wins, then
+the input MFF's `coordinates.xml`, then a coordinates asset referenced by the
+truth configuration. The override accepts either a standalone `coordinates.xml`
+or an MFF/package containing one. If none is valid, correction stops; the legacy
+built-in approximation is available only with `--assume-standard-montage`.
+Real recordings have no shell geometry in MFF, so their reports declare the
+classic three-shell approximation; simulation truth supplies exact shell radii
+and series terms. The corrected MFF preserves the input coordinates and all PNS
+channels, including samples, names, rate, and `positiveUp` convention. The JSON
+report records all of this provenance.
+
 ERP evaluation follows the paper's order: reject single epochs, average the
 accepted epochs, apply the 0.3-30 Hz zero-phase filter to the completed average,
 then baseline and score it. Filtering only the inputs is not equivalent because
@@ -413,6 +437,35 @@ Eight reviewed scenarios ship in `Tools/EVASimulate/scenarios/`:
 
 Scenario schema versions are checked when loading. A newer unsupported schema
 fails loudly instead of silently dropping or misreading model parameters.
+
+The Tier 7 regression runner derives six short corpora in
+`.regression-corpus/`: locked- and drifting-clock gradient, QRS-driven BCG,
+oddball ERP, recording defects, and an artifact-free clean control. The clean
+control comes from the locked-gradient fixture by disabling gradient and
+impedance noise and setting BCG EEG amplitude to zero. BCG timing remains
+enabled solely to produce realistic ECG and motion PNS streams for the MFF
+round-trip check. Keeping these reviewed overrides in `run-all-tests.sh` avoids
+near-duplicate scenario files.
+
+Run the complete generate → process → score loop with:
+
+```sh
+./run-all-tests.sh
+```
+
+The EVA tests watermark correction quality, detector timing, ERP peak recovery,
+bad-channel recall, planted bridge/reference signatures, and clean-signal
+preservation with tolerances. The generated MFFs remain local and uncommitted;
+the recipes and score watermarks are the reviewed artifacts.
+
+The same stage generates a deliberately mixed 60-second recording for the Tier
+8.1 ICA component-labelling benchmark. One Picard-O decomposition is scored
+against graded class membership derived from the simulator's known Brain, Eye,
+Heart, Muscle, Line Noise, and Channel Noise topographies. ICLabel and the
+transparent heuristic branch of `ICAComponentAutoLabeler` are reported
+separately, per class. The initial macro-F1 baselines are 0.100 and 0.170,
+respectively; these are regression measurements on simulated data, not claims of
+external validity.
 
 ## Source-space EEG
 
@@ -638,6 +691,14 @@ a front-to-back ordering would hand back an all-frontal montage); above 41 it
 falls back to a spiral, which is named "Spiral (synthetic)" so nobody mistakes it
 for a real montage.
 
+Use a digitized or project-specific layout at generation time with
+`--coordinates <path>`. The path may be a standalone `coordinates.xml` or an
+MFF/package containing it; when `--channels` is omitted, the simulator infers
+the EEG channel count from the file. Sensor names and normalized 3D directions
+are retained, subject-level montage jitter still applies when requested, and
+the resolved absolute path is stored in scenario/truth configuration. Relative
+paths in a scenario are resolved from that scenario file's directory.
+
 Positions are the 10-20 construction for the midline and outer ring, and
 eyeballed to a few degrees for the intermediate and 10-10 sites. Fine for
 simulating where a blink is large and for drawing a recognizable head map; not a
@@ -684,7 +745,9 @@ tool invented.
   nod in a uniform B0); the vessel-pulsation kernels are *modelled*, because
   electrode motion over an artery is a moving half-cell potential and not a
   current source. Relative amplitudes and delays are plausible, not measured.
-  Off by default.
+  `--bcg-generator-scales a,l,r,h` sweeps the four physical shares without
+  changing the requested composite peak-to-peak amplitude; the default
+  `1,1,1,1` preserves the original generator model. Off by default.
 
 
 - Everything under "For class demos" above plus the expanded 2.1 artifacts:
@@ -815,7 +878,7 @@ default remains, now as an ordinary choice rather than a workaround.
 Tools/EVASimulate/.build/eva-simulate selftest
 ```
 
-Eighty-eight passing outcomes, each on
+Ninety passing outcomes, each on
 the model rather than on any EVA code: that locked clocks put
 template subtraction exactly on the sqrt(N) ceiling; that the paper's 152 µs/s
 drift pushes it far below that; that QRS jitter penalizes correction which relies
@@ -827,6 +890,9 @@ determinism invariants. It also pins correlated/near/moving source scenarios,
 ocular dipole fields, and permutation- and polarity-invariant source scoring.
 They also verify complete scenario round trips and the
 defaults → scenario → explicit-flags precedence contract.
+They also pin imported MFF/standalone coordinates, strict correction geometry
+fallback, truth-head reconstruction, exact coordinate copying, and ECG/motion
+PNS preservation.
 The metric checks pin perfect-reconstruction behavior, DC-error sensitivity,
 optimal event matching/ROC generation, and ERP amplitude/latency statistics.
 ERP-specific checks also pin deterministic designs and markers, exact controlled

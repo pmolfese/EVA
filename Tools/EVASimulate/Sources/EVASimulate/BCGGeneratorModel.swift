@@ -137,6 +137,10 @@ nonisolated enum BCGGeneratorModel {
             vesselPulsation(sensors: sensors, head: head, side: .right),
             headRotation(sensors: sensors, head: head)
         ]
+        let amplitudeScales = config.effectiveBCGGeneratorAmplitudeScales
+        for index in specifications.indices {
+            specifications[index].relativeAmplitude *= amplitudeScales[index]
+        }
 
         // Per-beat weights: each generator varies independently around its
         // nominal share. Because the generators differ in both topography and

@@ -145,6 +145,63 @@ elif [ -x "Tools/EVASimulate/.build/eva-simulate" ]; then
         '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
             --config '$REPO/Tools/EVASimulate/scenarios/regression-gradient-locked.json' \
             --output '$CORPUS/gradient-locked'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/regression-gradient-locked.json' \
+            --no-gradient --with-bcg --bcg-amplitude 0 \
+            --no-impedance --no-impedance-noise \
+            --output '$CORPUS/clean-control'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/regression-gradient-locked.json' \
+            --clock-offset 152 \
+            --output '$CORPUS/gradient-drifting'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/bcg-generators.json' \
+            --no-gradient --rate 250 --duration 60 --qrs-jitter 25 \
+            --output '$CORPUS/bcg-jitter'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/oddball-erp.json' \
+            --no-gradient --no-bcg --rate 250 --duration 50 --erp-trials 30 \
+            --output '$CORPUS/oddball-erp'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/teaching-demo.json' \
+            --no-gradient --no-bcg --no-emg --blinks 0 --eye-movements 0 \
+            --line-noise 0 --rate 250 --duration 30 \
+            --bad-channels '7:noisy,15:drift' --bridge '3:4' --bad-reference 30 \
+            --output '$CORPUS/recording-defects'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/teaching-demo.json' \
+            --no-gradient --rate 250 --duration 60 \
+            --eeg-model dipole --sources 5 --bcg-model generators \
+            --bcg-amplitude 150 --qrs-jitter 0 --ocular-model dipole \
+            --blinks 12 --eye-movements 8 --with-emg --emg 8 \
+            --emg-amplitude 60 --emg-high 100 --line-noise 60 \
+            --line-noise-amplitude 15 --with-impedance-noise \
+            --bad-channels '7:noisy,15:drift' \
+            --output '$CORPUS/labeller-benchmark'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/bcg-generators.json' \
+            --no-gradient --rate 200 --duration 30 --channels 20 --seed 5401 \
+            --eeg-model dipole --sources 5 --bcg-model generators \
+            --bcg-field-strength 1.5 --bcg-amplitude 80 --bcg-morphology-jitter 0.08 \
+            --bcg-generator-scales '1.4,0.7,0.7,0.5' \
+            --no-emg --blinks 0 --eye-movements 0 --line-noise 0 \
+            --output '$CORPUS/bcg-labeller-train-lowfield'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/bcg-generators.json' \
+            --no-gradient --rate 200 --duration 30 --channels 32 --seed 5402 \
+            --eeg-model dipole --sources 7 --bcg-model generators \
+            --bcg-field-strength 3 --bcg-amplitude 140 --bcg-morphology-jitter 0.20 \
+            --bcg-generator-scales '0.8,1.2,1.2,0.9' \
+            --no-emg --blinks 0 --eye-movements 0 --line-noise 0 \
+            --output '$CORPUS/bcg-labeller-train-standard'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/bcg-generators.json' \
+            --no-gradient --rate 200 --duration 30 --channels 24 --seed 5499 \
+            --eeg-model dipole --sources 6 --bcg-model generators \
+            --bcg-field-strength 7 --bcg-amplitude 70 --bcg-morphology-jitter 0.35 \
+            --bcg-generator-scales '0.3,1.7,0.5,1.6' \
+            --no-emg --blinks 0 --eye-movements 0 --line-noise 0 \
+            --output '$CORPUS/bcg-labeller-heldout'
     "
 else
     SKIPPED+=("regression corpus (eva-simulate not built)")

@@ -120,6 +120,10 @@ func usage() -> String {
                                     --prefix test1 gives test1_clean.mff,
                                     test1_noisy.mff and test1_truth.json.
         --channels <n>              Channel count (default 20).
+        --coordinates <path>       Use a standalone coordinates.xml or an MFF
+                                    containing coordinates.xml. When --channels
+                                    is omitted, its EEG sensor count is used.
+        --no-coordinates            Return a loaded scenario to the built-in montage.
         --rate <hz>                 Sampling rate (default 1000; paper used 1024).
         --duration <s>              Duration in seconds (default 180).
         --seed <n>                  Seed; same seed gives the same recording.
@@ -149,6 +153,9 @@ func usage() -> String {
     --bcg-field-strength <T>    Static field for the generator model (default 3).
     --bcg-morphology-jitter <f> Per-generator beat-to-beat weight SD (default
                                 0.20). Zero fixes the composite morphology.
+    --bcg-generator-scales <a,l,r,h>
+                                Relative aortic, left-vessel, right-vessel and
+                                head-rotation shares (default 1,1,1,1).
         --qrs-jitter <ms>           SD of detected-beat timing error (default 25).
         --heart-rate-min <bpm>      Default 65.
         --heart-rate-max <bpm>      Default 85.
@@ -304,6 +311,10 @@ func usage() -> String {
         --input <noisy.mff>         Recording to correct. Required.
         --output <corrected.mff>    Corrected recording to write. Required.
         --truth <truth.json>        Use the simulation reference/source truth.
+        --coordinates <path>       Override the input recording's coordinates
+                                    with coordinates.xml or another MFF package.
+        --assume-standard-montage  Explicitly allow the built-in montage when
+                                    no valid coordinates.xml is available.
         --pattern-search <mode>     paper (default) or iterative.
         --representative-beat <n>   Optional 1-based candidate beat selected for
                                     paper mode; otherwise median-energy is used.
@@ -389,11 +400,12 @@ func usage() -> String {
 // MARK: - Config assembly
 
 let generateOptions: Set<String> = [
-    "config", "write-config", "output", "channels", "rate", "duration", "seed",
+    "config", "write-config", "output", "channels", "coordinates", "no-coordinates",
+    "rate", "duration", "seed",
     "with-gradient", "no-gradient", "tr", "slices", "gradient-amplitude", "gradient-amplitude-min",
     "clock-offset", "slow-modulation", "gradient-template", "gradient-template-rate",
     "no-gradient-template", "with-bcg", "no-bcg", "bcg-amplitude", "bcg-model", "bcg-field-strength",
-    "bcg-morphology-jitter", "qrs-jitter", "heart-rate-min", "heart-rate-max",
+    "bcg-morphology-jitter", "bcg-generator-scales", "qrs-jitter", "heart-rate-min", "heart-rate-max",
     "hrv", "respiration",
     "alpha-low", "alpha-high", "eeg-std", "eeg-model", "sources", "source-depth",
     "source-orientations", "lead-field-terms", "source-correlation", "reference",
@@ -444,6 +456,52 @@ func normalizedPrefix(_ raw: String) throws -> String {
         )
     }
     return prefix
+}
+
+nonisolated struct ImportedMontageResolution {
+    var montage: Montage
+    var sourceDescription: String
+    var sourcePath: String
+}
+
+/// Loads a standalone coordinates.xml or an MFF/package containing one and
+/// aligns it to the EEG channel order. For an MFF source, names from its EEG
+/// descriptor take precedence over names embedded in coordinates.xml.
+func importedMontage(
+    path: String,
+    channelCount: Int,
+    signalChannelNames: [String]? = nil
+) throws -> ImportedMontageResolution {
+    let url = URL(fileURLWithPath: path).standardizedFileURL
+    guard let geometry = ElectrodeGeometry.load(from: url) else {
+        throw SimulateError.io(
+            "could not load EEG coordinates from \(url.path); expected coordinates.xml "
+                + "or an MFF/package directory containing it"
+        )
+    }
+
+    var names = signalChannelNames
+    var source = "standalone coordinates.xml"
+    var isDirectory: ObjCBool = false
+    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+       isDirectory.boolValue {
+        source = "MFF/package coordinates.xml"
+        if names == nil, let signal = try? MFFReader().loadSignal(from: url) {
+            names = signal.channelNames
+        }
+    }
+
+    do {
+        return ImportedMontageResolution(
+            montage: try Montage.fromGeometry(
+                geometry, channelCount: channelCount, signalChannelNames: names
+            ),
+            sourceDescription: source,
+            sourcePath: url.path
+        )
+    } catch {
+        throw SimulateError.usage("invalid imported montage at \(url.path): \(error.localizedDescription)")
+    }
 }
 
 func parseBadChannels(_ spec: String) throws -> [Int: ChannelDefect] {
@@ -518,6 +576,23 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     }
 
     if let value = try arguments.int("channels") { config.channelCount = value }
+    if arguments.flag("no-coordinates") { config.coordinatesPath = nil }
+    if let path = arguments.string("coordinates") {
+        guard !arguments.flag("coordinates") else {
+            throw SimulateError.usage("--coordinates needs a coordinates.xml or MFF path")
+        }
+        let canonical = URL(fileURLWithPath: path).standardizedFileURL.path
+        config.coordinatesPath = canonical
+        if arguments.string("channels") == nil {
+            guard let geometry = ElectrodeGeometry.load(from: URL(fileURLWithPath: canonical)) else {
+                throw SimulateError.io(
+                    "could not load EEG coordinates from \(canonical); expected coordinates.xml "
+                        + "or an MFF/package directory containing it"
+                )
+            }
+            config.channelCount = geometry.positions.count
+        }
+    }
     if let value = try arguments.double("rate") { config.samplingRate = value }
     if let value = try arguments.double("duration") { config.durationSeconds = value }
     if let value = try arguments.uint64("seed") { config.seed = value }
@@ -565,6 +640,18 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
             throw SimulateError.usage("--bcg-morphology-jitter cannot be negative")
         }
         config.bcgMorphologyJitterFraction = value
+    }
+    if let raw = arguments.string("bcg-generator-scales") {
+        let values = try raw.split(separator: ",").map { token -> Double in
+            guard let value = Double(token.trimmingCharacters(in: .whitespaces)), value >= 0 else {
+                throw SimulateError.usage("--bcg-generator-scales expects four non-negative numbers")
+            }
+            return value
+        }
+        guard values.count == 4, values.contains(where: { $0 > 0 }) else {
+            throw SimulateError.usage("--bcg-generator-scales expects four values with at least one above zero")
+        }
+        config.bcgGeneratorAmplitudeScales = values
     }
     if let value = try arguments.double("qrs-jitter") { config.qrsDetectionJitterSDSeconds = value / 1000 }
     if let value = try arguments.double("heart-rate-min") { config.heartRateMinBPM = value }
@@ -848,6 +935,9 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if arguments.flag("no-motion-sensor") { config.includeMotionSensor = false }
 
     guard config.channelCount > 0 else { throw SimulateError.usage("--channels must be positive") }
+    if let path = config.coordinatesPath {
+        _ = try importedMontage(path: path, channelCount: config.channelCount)
+    }
     guard config.samplingRate > 0 else { throw SimulateError.usage("--rate must be positive") }
     // Checked here rather than at write time: MFF stores an integer sample rate,
     // and finding that out after generating three minutes of data wastes the run.
@@ -1117,12 +1207,17 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
     // Preserve the legacy single stream exactly. Dipole mode deliberately uses
     // independent domains so changing source count cannot change an artifact.
     var legacySource = GaussianSource(seed: config.seed)
-    let montage = config.montageJitterDegrees.map {
-        Montage.standard(
-            count: config.channelCount, jitterDegrees: $0,
-            seed: SimulationSeedStreams.montageJitter(base: config.seed)
+    var montage: Montage
+    if let path = config.coordinatesPath {
+        montage = try importedMontage(path: path, channelCount: config.channelCount).montage
+    } else {
+        montage = Montage.standard(count: config.channelCount)
+    }
+    if let jitter = config.montageJitterDegrees {
+        montage = montage.jittered(
+            degrees: jitter, seed: SimulationSeedStreams.montageJitter(base: config.seed)
         )
-    } ?? Montage.standard(count: config.channelCount)
+    }
     var leadFieldConvergence: LeadFieldConvergenceReport?
     // One check covers every lead field this run builds — the ERP's (its source
     // comes from `makeSources`, same radius fraction) and the moving-source
@@ -1197,7 +1292,9 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         var template: HighRateTemplate?
         if let path = config.gradientTemplatePath,
            let rate = config.gradientTemplateRateHz {
-            template = try GradientArtifactModel.loadTemplate(path: path, templateRate: rate, config: config)
+            template = try GradientArtifactModel.loadTemplate(
+                path: path, templateRate: rate, config: config
+            )
         }
         gradient = GradientArtifactModel.inject(into: &noisy, config: config, montage: montage, template: template)
     }
@@ -1841,7 +1938,7 @@ func runGenerateGroup(_ arguments: Arguments) throws {
 func runEvaluateSurrogate(_ arguments: Arguments) throws {
     try arguments.validate(known: [
         "seeds", "offsets", "sources", "components", "brain-regularization",
-        "duration", "channels", "rate", "config", "with-erp", "pattern-search",
+        "duration", "channels", "coordinates", "rate", "config", "with-erp", "pattern-search",
         "representative-beat", "json"
     ])
 
@@ -1873,6 +1970,16 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         base = try SimulationScenarioFile.load(from: URL(fileURLWithPath: path)).config
     }
     base.channelCount = try arguments.int("channels") ?? base.channelCount
+    if let path = arguments.string("coordinates") {
+        guard !arguments.flag("coordinates") else {
+            throw SimulateError.usage("--coordinates needs a coordinates.xml or MFF path")
+        }
+        base.coordinatesPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        if arguments.string("channels") == nil,
+           let geometry = ElectrodeGeometry.load(from: URL(fileURLWithPath: path)) {
+            base.channelCount = geometry.positions.count
+        }
+    }
     base.samplingRate = try arguments.double("rate") ?? 250
     base.durationSeconds = try arguments.double("duration") ?? 180
     base.eegGenerationModel = .dipole
@@ -1887,7 +1994,9 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         )
     }
     if !evaluateERP { base.erp = nil }
-    let montage = Montage.standard(count: base.channelCount)
+    let montage = try base.coordinatesPath.map {
+        try importedMontage(path: $0, channelCount: base.channelCount).montage
+    } ?? Montage.standard(count: base.channelCount)
 
     struct ConditionResult {
         var offsetMillimetres: Double
@@ -2250,7 +2359,8 @@ func runCorrect(_ arguments: Arguments) throws {
     try arguments.validate(known: [
         "input", "output", "truth", "reference", "beat-code", "beat-times", "surrogate-sources",
         "brain-regularization", "artifact-variance", "correlation-threshold",
-        "surrogate-offset-mm", "pattern-search", "representative-beat",
+        "surrogate-offset-mm", "pattern-search", "representative-beat", "coordinates",
+        "assume-standard-montage",
         "components", "low-hz", "high-hz", "report", "json"
     ])
 
@@ -2262,7 +2372,9 @@ func runCorrect(_ arguments: Arguments) throws {
     }
 
     let inputURL = URL(fileURLWithPath: inputPath)
-    let signal = try MFFReader().loadSignal(from: inputURL)
+    let reader = MFFReader()
+    let signal = try reader.loadSignal(from: inputURL)
+    let pnsSignal = try reader.loadPNSSignal(from: inputURL)
     let channels = signal.data.map { $0.map(Double.init) }
     guard !channels.isEmpty else { throw SimulateError.io("\(inputPath) has no channels") }
 
@@ -2330,11 +2442,18 @@ func runCorrect(_ arguments: Arguments) throws {
     // records the convention (roadmap 4.6); fall back to the flag.
     var reference: EEGReference = .average
     var simulatedSources: [SimulatedSource] = []
+    var simulationTruth: SimulationTruth?
     if let truthPath = arguments.string("truth") {
-        let data = try Data(contentsOf: URL(fileURLWithPath: truthPath))
-        if let truth = try? JSONDecoder().decode(SimulationTruth.self, from: data) {
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: truthPath))
+            let truth = try JSONDecoder().decode(SimulationTruth.self, from: data)
+            simulationTruth = truth
             if let recorded = truth.recordingReference { reference = recorded }
             simulatedSources = truth.sourceSpace?.sources ?? []
+        } catch {
+            throw SimulateError.io(
+                "could not read simulation truth \(truthPath): \(error.localizedDescription)"
+            )
         }
     }
     if let raw = arguments.string("reference") {
@@ -2344,12 +2463,63 @@ func runCorrect(_ arguments: Arguments) throws {
         reference = explicit
     }
 
-    let montage = Montage.standard(count: channels.count)
-    let head = SphericalHeadModel.classicThreeShell
+    // Electrode coordinates are observable recording metadata; never silently
+    // replace them with an unrelated standard montage. An explicit override can
+    // be either coordinates.xml or another MFF package. If the input lacks
+    // geometry, a truth-sidecar asset is the next-best exact source. The legacy
+    // standard montage remains available only behind an opt-in flag.
+    let explicitCoordinates = arguments.string("coordinates")
+    if arguments.flag("coordinates") {
+        throw SimulateError.usage("--coordinates needs a coordinates.xml or MFF path")
+    }
+    let geometryResolution: ImportedMontageResolution
+    let assumedStandardMontage: Bool
+    if let explicitCoordinates {
+        geometryResolution = try importedMontage(
+            path: explicitCoordinates, channelCount: channels.count,
+            signalChannelNames: signal.channelNames
+        )
+        assumedStandardMontage = false
+    } else if ElectrodeGeometry.load(from: inputURL) != nil {
+        geometryResolution = try importedMontage(
+            path: inputURL.path, channelCount: channels.count,
+            signalChannelNames: signal.channelNames
+        )
+        assumedStandardMontage = false
+    } else if let path = simulationTruth?.config.coordinatesPath,
+              ElectrodeGeometry.load(from: URL(fileURLWithPath: path)) != nil {
+        geometryResolution = try importedMontage(
+            path: path, channelCount: channels.count,
+            signalChannelNames: signal.channelNames
+        )
+        assumedStandardMontage = false
+    } else if arguments.flag("assume-standard-montage") {
+        geometryResolution = ImportedMontageResolution(
+            montage: Montage.standard(count: channels.count),
+            sourceDescription: "explicit built-in standard-montage assumption",
+            sourcePath: ""
+        )
+        assumedStandardMontage = true
+    } else {
+        throw SimulateError.usage(
+            "the input has no valid coordinates.xml. Supply --coordinates <coordinates.xml|mff> "
+                + "or explicitly opt into --assume-standard-montage"
+        )
+    }
+    let montage = geometryResolution.montage
+
+    // MFF carries electrodes but not individual brain/skull/scalp shells. A
+    // simulation truth sidecar does, so it is exact; real recordings use the
+    // declared classic approximation until EVA gains MRI/BEM import.
+    let head = simulationTruth?.config.sphericalHeadModel ?? .classicThreeShell
+    let headModelSource = simulationTruth == nil
+        ? "declared classic three-shell approximation"
+        : "simulation truth config"
+    let leadFieldTerms = simulationTruth?.config.leadFieldTerms ?? 100
     let surrogateOffset = try arguments.double("surrogate-offset-mm") ?? 0
     let brain = try SurrogateSeparation.brainModel(
         head: head, montage: montage, count: regionalCount,
-        reference: reference, terms: 100, offsetMillimetres: surrogateOffset
+        reference: reference, terms: leadFieldTerms, offsetMillimetres: surrogateOffset
     )
     let filter = SurrogateSeparation.spatialFilter(
         brain: brain,
@@ -2369,6 +2539,19 @@ func runCorrect(_ arguments: Arguments) throws {
         patternSearchMode: componentSet.patternSearchMode.rawValue,
         representativeBeatIndex: componentSet.representativeBeatIndex,
         brainRegularization: regularization,
+        geometrySource: geometryResolution.sourceDescription,
+        geometryPath: geometryResolution.sourcePath.isEmpty
+            ? nil : geometryResolution.sourcePath,
+        montageName: montage.name,
+        electrodeCount: montage.electrodes.count,
+        assumedStandardMontage: assumedStandardMontage,
+        headModelSource: headModelSource,
+        headModelName: head.name,
+        headShellRadiiMeters: head.shells.map(\.radiusMeters),
+        leadFieldTerms: leadFieldTerms,
+        pnsPreserved: true,
+        pnsChannelCount: pnsSignal?.numberOfChannels ?? 0,
+        pnsChannelNames: pnsSignal?.channelNames ?? [],
         surrogateOffsetMillimetres: surrogateOffset,
         nearestSimulatedSourceMillimetres: nil,
         minimumSourceSeparationMillimetres: nil
@@ -2391,7 +2574,8 @@ func runCorrect(_ arguments: Arguments) throws {
         corrected.map { $0.map(Float.init) }, signalTypeSuffix: "surrogate-corrected"
     )
     try MFFWriter.write(
-        signal: correctedSignal, segments: [], kind: .continuous,
+        signal: correctedSignal, pnsSignal: pnsSignal,
+        segments: [], kind: .continuous,
         to: outputURL, preserveSourceFileInfo: false
     )
 
@@ -2418,6 +2602,15 @@ func runCorrect(_ arguments: Arguments) throws {
         print("  pattern search: \(report.patternSearchMode)\(representative)")
         print("  brain surrogate: \(regionalCount) regional sources, "
             + "\(brain.columnCount) columns, \(Int(regularization * 100))% regularization")
+        print("  electrodes: \(montage.name), \(montage.electrodes.count) channels "
+            + "[\(geometryResolution.sourceDescription)]")
+        print("  head model: \(head.name) [\(headModelSource)]")
+        if let pnsSignal {
+            let names = pnsSignal.channelNames?.joined(separator: ", ") ?? "unnamed"
+            print("  preserved PNS: \(pnsSignal.numberOfChannels) channels (\(names))")
+        } else {
+            print("  preserved PNS: none present")
+        }
         if let minimum = report.minimumSourceSeparationMillimetres {
             print(String(
                 format: "  nearest surrogate-to-simulated source: %.1f mm "
@@ -2826,9 +3019,11 @@ func runSourceScore(_ arguments: Arguments) throws {
                 "recovered sampling rate \(recovered.samplingRate) does not match truth \(truth.config.samplingRate)"
             )
         }
+        let scoringMontage = try truth.config.coordinatesPath.map {
+            try importedMontage(path: $0, channelCount: truth.config.channelCount).montage
+        } ?? Montage.standard(count: truth.config.channelCount)
         let regenerated = try DipoleEEGGenerator.generate(
-            config: truth.config,
-            montage: Montage.standard(count: truth.config.channelCount)
+            config: truth.config, montage: scoringMontage
         )
         guard let regeneratedSources = regenerated.sourceSpace else {
             throw SimulateError.io("could not regenerate source time courses from the truth configuration")

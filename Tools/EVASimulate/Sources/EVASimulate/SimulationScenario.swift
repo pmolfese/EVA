@@ -50,6 +50,11 @@ nonisolated enum SimulationScenarioFile {
             resolved.config.gradientTemplatePath = url.deletingLastPathComponent()
                 .appendingPathComponent(path).standardizedFileURL.path
         }
+        if let path = resolved.config.coordinatesPath,
+           !(path as NSString).isAbsolutePath {
+            resolved.config.coordinatesPath = url.deletingLastPathComponent()
+                .appendingPathComponent(path).standardizedFileURL.path
+        }
         return resolved
     }
 

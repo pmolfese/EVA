@@ -33,6 +33,20 @@
 
 import Foundation
 
+nonisolated enum MontageGeometryError: LocalizedError {
+    case incomplete(expected: Int, found: Int, missingOneBased: [Int])
+
+    var errorDescription: String? {
+        switch self {
+        case .incomplete(let expected, let found, let missing):
+            let preview = missing.prefix(8).map(String.init).joined(separator: ", ")
+            let suffix = missing.count > 8 ? ", …" : ""
+            return "coordinates contain \(found) of \(expected) EEG channels"
+                + (missing.isEmpty ? "" : "; missing channel numbers \(preview)\(suffix)")
+        }
+    }
+}
+
 nonisolated struct Electrode: Sendable {
     var name: String
     /// Arc angle from the vertex, in degrees. Cz is 0, the equator is 90.
@@ -54,6 +68,45 @@ nonisolated struct Montage: Sendable {
     var channelNames: [String] { electrodes.map(\.name) }
 
     var positions: [(x: Double, y: Double, z: Double)] { electrodes.map(\.position) }
+
+    /// Converts EVA's parsed coordinates.xml geometry into the angular montage
+    /// representation used by the spherical forward model. `coordinates.xml`
+    /// is authoritative for channel order; optional signal names take precedence
+    /// over names embedded in the coordinate file.
+    static func fromGeometry(
+        _ geometry: ElectrodeGeometry,
+        channelCount: Int,
+        signalChannelNames: [String]? = nil
+    ) throws -> Montage {
+        let expected = Set(0..<channelCount)
+        let present = Set(geometry.positions.keys.filter(expected.contains))
+        let missing = expected.subtracting(present).sorted().map { $0 + 1 }
+        guard geometry.positions.count == channelCount,
+              present.count == channelCount, missing.isEmpty else {
+            throw MontageGeometryError.incomplete(
+                expected: channelCount, found: geometry.positions.count, missingOneBased: missing
+            )
+        }
+
+        let electrodes = (0..<channelCount).map { index -> Electrode in
+            let position = geometry.positions[index]!
+            let z = min(1, max(-1, position.z))
+            let theta = acos(z) * 180 / Double.pi
+            // Montage uses +y as phi=0 (nose) and +x as phi=+90 (right).
+            let phi = atan2(position.x, position.y) * 180 / Double.pi
+            let signalName = signalChannelNames.flatMap {
+                $0.indices.contains(index) ? $0[index] : nil
+            }?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = signalName?.isEmpty == false
+                ? signalName!
+                : geometry.channelNames[index] ?? "E\(index + 1)"
+            return Electrode(name: name, thetaDegrees: theta, phiDegrees: phi)
+        }
+        return Montage(
+            name: geometry.name.isEmpty ? "Imported coordinates" : geometry.name,
+            electrodes: dedupe(electrodes)
+        )
+    }
 
     /// The standard 19-electrode 10-20 montage plus Oz, ordered roughly front to
     /// back. The ordering matters beyond cosmetics: the paper's spatial model
@@ -121,7 +174,13 @@ nonisolated struct Montage: Sendable {
     /// applied in the spherical angles the montage is defined in, seeded from
     /// the recording's own seed so a subject's montage is reproducible.
     static func standard(count: Int, jitterDegrees: Double, seed: UInt64) -> Montage {
-        var montage = standard(count: count)
+        standard(count: count).jittered(degrees: jitterDegrees, seed: seed)
+    }
+
+    /// Applies deterministic subject-specific placement variation to any base
+    /// montage, including one imported from coordinates.xml.
+    func jittered(degrees jitterDegrees: Double, seed: UInt64) -> Montage {
+        var montage = self
         guard jitterDegrees > 0 else { return montage }
         var random = GaussianSource(seed: seed)
         for index in montage.electrodes.indices {

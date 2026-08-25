@@ -218,12 +218,19 @@ nonisolated enum MFFWriter {
         var body = ""
         for index in 0..<pns.numberOfChannels {
             let name = (names != nil && index < names!.count) ? names![index] : "PNS \(index + 1)"
+            let positiveUpXML: String
+            if let flags = pns.positiveUpFlags, flags.indices.contains(index) {
+                let value = flags[index] ? "true" : "false"
+                positiveUpXML = "    <positiveUp>\(value)</positiveUp>\n"
+            } else {
+                positiveUpXML = ""
+            }
             body += """
   <sensor>
     <number>\(index)</number>
     <name>\(xmlEscape(name))</name>
     <type>PNS</type>
-  </sensor>
+\(positiveUpXML)  </sensor>
 """
         }
         let xml = """

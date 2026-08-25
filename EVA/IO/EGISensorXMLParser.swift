@@ -14,6 +14,7 @@ import Foundation
 
 nonisolated struct EGISensorXMLSensor: Sendable {
     var number: Int
+    var name: String?
     var type: Int
     var x: Double
     var y: Double
@@ -40,6 +41,7 @@ private nonisolated final class EGISensorXMLParserDelegate: NSObject, XMLParserD
     private var text = ""
 
     private var pendingNumber: Int?
+    private var pendingName: String?
     private var pendingType: Int?
     private var pendingX: Double?
     private var pendingY: Double?
@@ -61,6 +63,7 @@ private nonisolated final class EGISensorXMLParserDelegate: NSObject, XMLParserD
         case "sensor":
             insideSensor = true
             pendingNumber = nil
+            pendingName = nil
             pendingType = nil
             pendingX = nil
             pendingY = nil
@@ -90,9 +93,13 @@ private nonisolated final class EGISensorXMLParserDelegate: NSObject, XMLParserD
         case "x": pendingX = Double(trimmed)
         case "y": pendingY = Double(trimmed)
         case "z": pendingZ = Double(trimmed)
-        case "name" where insideTopName:
-            if layoutName.isEmpty { layoutName = trimmed }
-            insideTopName = false
+        case "name":
+            if insideSensor {
+                pendingName = trimmed.isEmpty ? nil : trimmed
+            } else if insideTopName {
+                if layoutName.isEmpty { layoutName = trimmed }
+                insideTopName = false
+            }
         case "sensor":
             appendPendingSensor()
             insideSensor = false
@@ -111,6 +118,9 @@ private nonisolated final class EGISensorXMLParserDelegate: NSObject, XMLParserD
               !requiresZ || pendingZ != nil else {
             return
         }
-        sensors.append(EGISensorXMLSensor(number: number, type: type, x: x, y: y, z: pendingZ))
+        sensors.append(EGISensorXMLSensor(
+            number: number, name: pendingName, type: type,
+            x: x, y: y, z: pendingZ
+        ))
     }
 }

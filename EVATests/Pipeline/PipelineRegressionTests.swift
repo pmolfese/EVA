@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  End-to-end pipeline regression against known ground truth (roadmap 7.1-7.2).
+//  End-to-end pipeline regression against known ground truth (roadmap 7.1-7.3).
 //
 //  The loop: EVASimulate generates a recording whose clean signal is known, EVA
 //  processes it headlessly, and the result is scored against that clean signal.
@@ -84,7 +84,15 @@ struct PipelineRegressionTests {
         .appendingPathComponent("pipeline-watermark.json")
 
     struct Watermark: Codable {
-        var broadbandSNR: Double
+        var broadbandSNR: Double?
+        var improvementRatio: Double?
+        var eventF1: Double?
+        var timingMAEMilliseconds: Double?
+        var erpAmplitudeErrorMicrovolts: Double?
+        var erpLatencyErrorMilliseconds: Double?
+        var defectRecall: Double?
+        var bridgeCorrelation: Double?
+        var commonModeRMSMicrovolts: Double?
         var note: String?
     }
 
@@ -117,6 +125,101 @@ struct PipelineRegressionTests {
         }
         guard residualSquares > 1e-30 else { return .infinity }
         return (signalSquares / residualSquares).squareRoot()
+    }
+
+    struct Fidelity {
+        var rmsAmplitudeRatio: Double
+        var maximumAbsoluteErrorMicrovolts: Double
+    }
+
+    static func fidelity(clean: [[Float]], processed: [[Float]]) -> Fidelity {
+        var cleanSquares = 0.0
+        var processedSquares = 0.0
+        var maximumError = 0.0
+        for channel in 0..<min(clean.count, processed.count) {
+            let count = min(clean[channel].count, processed[channel].count)
+            for sample in 0..<count {
+                let truth = Double(clean[channel][sample])
+                let value = Double(processed[channel][sample])
+                cleanSquares += truth * truth
+                processedSquares += value * value
+                maximumError = max(maximumError, abs(truth - value))
+            }
+        }
+        return Fidelity(
+            rmsAmplitudeRatio: cleanSquares > 0
+                ? (processedSquares / cleanSquares).squareRoot() : 1,
+            maximumAbsoluteErrorMicrovolts: maximumError
+        )
+    }
+
+    struct EventScore {
+        var f1: Double
+        var meanAbsoluteErrorMilliseconds: Double
+    }
+
+    static func eventScore(
+        detected: [Double], truth: [Double], toleranceSeconds: Double
+    ) -> EventScore {
+        var unused = Set(truth.indices)
+        var errors: [Double] = []
+        for time in detected.sorted() {
+            guard let match = unused.min(by: {
+                abs(truth[$0] - time) < abs(truth[$1] - time)
+            }), abs(truth[match] - time) <= toleranceSeconds else { continue }
+            unused.remove(match)
+            errors.append(abs(truth[match] - time))
+        }
+        let truePositives = errors.count
+        let falsePositives = max(detected.count - truePositives, 0)
+        let falseNegatives = max(truth.count - truePositives, 0)
+        let denominator = 2 * truePositives + falsePositives + falseNegatives
+        return EventScore(
+            f1: denominator > 0 ? Double(2 * truePositives) / Double(denominator) : 1,
+            meanAbsoluteErrorMilliseconds: errors.isEmpty
+                ? .infinity : errors.reduce(0, +) / Double(errors.count) * 1000
+        )
+    }
+
+    static func absoluteCorrelation(_ lhs: [Float], _ rhs: [Float]) -> Double {
+        let count = min(lhs.count, rhs.count)
+        guard count > 1 else { return 0 }
+        let leftMean = lhs.prefix(count).reduce(0) { $0 + Double($1) } / Double(count)
+        let rightMean = rhs.prefix(count).reduce(0) { $0 + Double($1) } / Double(count)
+        var covariance = 0.0
+        var leftEnergy = 0.0
+        var rightEnergy = 0.0
+        for index in 0..<count {
+            let left = Double(lhs[index]) - leftMean
+            let right = Double(rhs[index]) - rightMean
+            covariance += left * right
+            leftEnergy += left * left
+            rightEnergy += right * right
+        }
+        guard leftEnergy > 0, rightEnergy > 0 else { return 0 }
+        return abs(covariance / sqrt(leftEnergy * rightEnergy))
+    }
+
+    static func commonModeRMS(_ data: [[Float]]) -> Double {
+        guard !data.isEmpty else { return 0 }
+        let count = data.map(\.count).min() ?? 0
+        guard count > 0 else { return 0 }
+        var squares = 0.0
+        for sample in 0..<count {
+            let mean = data.reduce(0.0) { $0 + Double($1[sample]) } / Double(data.count)
+            squares += mean * mean
+        }
+        return sqrt(squares / Double(count))
+    }
+
+    static func corpusURLs(_ caseName: String) -> (directory: URL, noisy: URL, clean: URL, truth: URL) {
+        let directory = corpusDirectory.appendingPathComponent(caseName)
+        return (
+            directory,
+            directory.appendingPathComponent("sim_noisy.mff"),
+            directory.appendingPathComponent("sim_clean.mff"),
+            directory.appendingPathComponent("sim_truth.json")
+        )
     }
 
     // MARK: - Cases
@@ -203,7 +306,8 @@ struct PipelineRegressionTests {
             return
         }
 
-        guard let watermark = Self.watermark(for: caseName) else {
+        guard let watermark = Self.watermark(for: caseName),
+              let recordedSNR = watermark.broadbandSNR else {
             Issue.record("""
                 No watermark for "\(caseName)" in \(Self.watermarkURL.path). \
                 Achieved broadband SNR \(String(format: "%.4f", achieved)); \
@@ -226,24 +330,386 @@ struct PipelineRegressionTests {
 
         // Floor: a 15% fall is a regression. Wide enough to absorb float-level
         // differences across machines, narrow enough that a real change trips it.
-        let floor = watermark.broadbandSNR * 0.85
+        let floor = recordedSNR * 0.85
         #expect(
             achieved >= floor,
             """
             broadband SNR fell to \(String(format: "%.3f", achieved)) from a recorded \
-            \(String(format: "%.3f", watermark.broadbandSNR)); floor is \
+            \(String(format: "%.3f", recordedSNR)); floor is \
             \(String(format: "%.3f", floor)).
             """
         )
 
         // Watermark: an improvement is not a failure, but it should be recorded
         // rather than left to drift silently.
-        if achieved > watermark.broadbandSNR * 1.15 {
+        if achieved > recordedSNR * 1.15 {
             Issue.record("""
                 broadband SNR improved to \(String(format: "%.3f", achieved)) from a recorded \
-                \(String(format: "%.3f", watermark.broadbandSNR)). That is good news — \
+                \(String(format: "%.3f", recordedSNR)). That is good news — \
                 re-record the watermark with EVA_UPDATE_WATERMARK=1 so the gain is kept.
                 """)
         }
+    }
+
+    @Test func cleanAverageReferenceControlDoesNoHarm() async throws {
+        let caseName = "clean-control"
+        let caseDirectory = Self.corpusDirectory.appendingPathComponent(caseName)
+        let inputURL = caseDirectory.appendingPathComponent("sim_noisy.mff")
+        let cleanURL = caseDirectory.appendingPathComponent("sim_clean.mff")
+
+        guard FileManager.default.fileExists(atPath: inputURL.path),
+              FileManager.default.fileExists(atPath: cleanURL.path) else {
+            print("""
+                PipelineRegressionTests: no clean control at \(caseDirectory.path) — skipping. \
+                Run ./run-all-tests.sh to generate it.
+                """)
+            return
+        }
+
+        // The simulator already applies one common-average reference at the
+        // additive boundary. Reapplying the same reference is mathematically
+        // idempotent, so this is a real no-harm control rather than an empty
+        // script that would test only MFF copying.
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(operation: .filter, parameters: [:]))
+        script.append(EVAProcessingStep(
+            operation: .reference,
+            parameters: Rereferencing.parameters(
+                scheme: .average, domain: .continuous, excluding: []
+            )
+        ))
+
+        let outputFolder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-clean-control-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: outputFolder) }
+
+        let outcome = try await HeadlessBatchProcessor.process(
+            url: inputURL, script: script, outputFolder: outputFolder
+        )
+        guard case .completed(let processedURL) = outcome else {
+            Issue.record("clean-control pipeline did not complete: \(outcome)")
+            return
+        }
+
+        let reader = MFFReader()
+        let clean = try reader.loadSignal(from: cleanURL)
+        let input = try reader.loadSignal(from: inputURL)
+        let processed = try reader.loadSignal(from: processedURL)
+        try #require(clean.numberOfChannels == input.numberOfChannels)
+        try #require(clean.numberOfChannels == processed.numberOfChannels)
+        try #require(clean.samplingRate == input.samplingRate)
+        try #require(clean.samplingRate == processed.samplingRate)
+        try #require(clean.data.map(\.count) == input.data.map(\.count))
+        try #require(clean.data.map(\.count) == processed.data.map(\.count))
+
+        // The fixture must itself remain clean. A later scenario change must
+        // not quietly turn this into another artifact-correction case.
+        let inputFidelity = Self.fidelity(clean: clean.data, processed: input.data)
+        try #require(inputFidelity.maximumAbsoluteErrorMicrovolts <= 1e-7)
+
+        let achieved = Self.broadbandSNR(
+            clean: clean.data, corrected: processed.data, padSeconds: 0
+        )
+        let fidelity = Self.fidelity(clean: clean.data, processed: processed.data)
+
+        if ProcessInfo.processInfo.environment["EVA_UPDATE_WATERMARK"] == "1" {
+            Issue.record("""
+                EVA_UPDATE_WATERMARK is set. Record this in \
+                EVATests/Fixtures/pipeline-watermark.json under "\(caseName)":
+                    "broadbandSNR": \(String(format: "%.4f", achieved))
+                RMS amplitude ratio: \(String(format: "%.10f", fidelity.rmsAmplitudeRatio))
+                Maximum error: \(String(format: "%.10g", fidelity.maximumAbsoluteErrorMicrovolts)) µV
+                Failing deliberately so re-recording is always an explicit edit.
+                """)
+            return
+        }
+
+        guard let watermark = Self.watermark(for: caseName),
+              let recordedSNR = watermark.broadbandSNR else {
+            Issue.record("""
+                No watermark for "\(caseName)" in \(Self.watermarkURL.path). \
+                Achieved broadband SNR \(String(format: "%.4f", achieved)); \
+                RMS amplitude ratio \(String(format: "%.10f", fidelity.rmsAmplitudeRatio)); \
+                maximum error \(String(format: "%.10g", fidelity.maximumAbsoluteErrorMicrovolts)) µV.
+                """)
+            return
+        }
+
+        // Analytic no-harm bounds. The only permitted difference is Float
+        // roundoff from subtracting a channel mean that is already zero.
+        #expect(abs(fidelity.rmsAmplitudeRatio - 1) <= 1e-6)
+        #expect(fidelity.maximumAbsoluteErrorMicrovolts <= 1e-4)
+
+        // Watermark policy matches the artifact case: a 15% loss fails, while
+        // a material improvement must be recorded rather than drifting silently.
+        #expect(
+            achieved >= recordedSNR * 0.85,
+            "clean-control SNR fell to \(achieved) from \(recordedSNR)"
+        )
+        if achieved > recordedSNR * 1.15 {
+            Issue.record("""
+                clean-control SNR improved to \(String(format: "%.3f", achieved)) from \
+                \(String(format: "%.3f", recordedSNR)). Re-record the watermark \
+                with EVA_UPDATE_WATERMARK=1 so the gain is kept.
+                """)
+        }
+
+        // The headless round trip must retain observable recording metadata too.
+        #expect(input.channelNames == processed.channelNames)
+        #expect(input.events.map(\.code) == processed.events.map(\.code))
+        let inputPNS = try #require(try reader.loadPNSSignal(from: inputURL))
+        let processedPNS = try #require(try reader.loadPNSSignal(from: processedURL))
+        #expect(inputPNS.channelNames == ["ECG", "Motion"])
+        #expect(inputPNS.samplingRate == processedPNS.samplingRate)
+        #expect(inputPNS.channelNames == processedPNS.channelNames)
+        #expect(inputPNS.positiveUpFlags == processedPNS.positiveUpFlags)
+        #expect(inputPNS.data == processedPNS.data)
+
+        let inputCoordinates = try? Data(
+            contentsOf: inputURL.appendingPathComponent("coordinates.xml")
+        )
+        let processedCoordinates = try? Data(
+            contentsOf: processedURL.appendingPathComponent("coordinates.xml")
+        )
+        #expect(inputCoordinates == processedCoordinates)
+        #expect(EVAProcessingScriptXML.read(fromPackage: processedURL)?.steps.map(\.operation)
+            == [.filter, .reference])
+    }
+
+    @Test func driftingClockGradientCorrectionRetainsQuality() async throws {
+        let caseName = "gradient-drifting"
+        let urls = Self.corpusURLs(caseName)
+        guard FileManager.default.fileExists(atPath: urls.noisy.path),
+              FileManager.default.fileExists(atPath: urls.clean.path) else {
+            print("PipelineRegressionTests: no \(caseName) corpus — skipping.")
+            return
+        }
+
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(
+            operation: .mriGradientCorrection,
+            parameters: [
+                "trMarkerCode": "TREV", "method": "MAS", "donorVolumes": "8",
+                "backend": "cpu", "alignment": "true", "subSample": "true",
+                "upsampleFactor": "10"
+            ]
+        ))
+        let outputFolder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-gradient-drift-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: outputFolder) }
+        let outcome = try await HeadlessBatchProcessor.process(
+            url: urls.noisy, script: script, outputFolder: outputFolder
+        )
+        guard case .completed(let outputURL) = outcome else {
+            Issue.record("drifting-gradient pipeline did not complete: \(outcome)")
+            return
+        }
+
+        let reader = MFFReader()
+        let clean = try reader.loadSignal(from: urls.clean)
+        let corrected = try reader.loadSignal(from: outputURL)
+        let pad = Int(2 * clean.samplingRate)
+        let achieved = Self.broadbandSNR(
+            clean: clean.data, corrected: corrected.data, padSeconds: pad
+        )
+        if ProcessInfo.processInfo.environment["EVA_UPDATE_WATERMARK"] == "1" {
+            Issue.record("\(caseName) broadbandSNR: \(String(format: "%.6f", achieved))")
+            return
+        }
+        guard let recorded = Self.watermark(for: caseName)?.broadbandSNR else {
+            Issue.record("No \(caseName) watermark; achieved SNR \(achieved)")
+            return
+        }
+        #expect(achieved >= recorded * 0.85)
+        if achieved > recorded * 1.15 {
+            Issue.record("\(caseName) improved from \(recorded) to \(achieved); update watermark")
+        }
+    }
+
+    @Test func qrsDrivenBCGCorrectionImprovesKnownTruth() throws {
+        let caseName = "bcg-jitter"
+        let urls = Self.corpusURLs(caseName)
+        guard FileManager.default.fileExists(atPath: urls.noisy.path),
+              FileManager.default.fileExists(atPath: urls.clean.path),
+              FileManager.default.fileExists(atPath: urls.truth.path) else {
+            print("PipelineRegressionTests: no \(caseName) corpus — skipping.")
+            return
+        }
+
+        let reader = MFFReader()
+        let noisy = try reader.loadSignal(from: urls.noisy)
+        let clean = try reader.loadSignal(from: urls.clean)
+        let pns = try #require(try reader.loadPNSSignal(from: urls.noisy))
+        let truth = try SimulationTruthFixture.load(from: urls.truth)
+        let names = pns.channelNames ?? []
+        let ecgIndex = try #require(names.firstIndex(of: "ECG"))
+        let source = ECGDetectionSource(
+            id: "sim-ecg", label: "Simulated ECG", channelLabels: ["ECG"],
+            channels: [pns.data[ecgIndex]], samplingRate: pns.samplingRate,
+            duration: pns.duration
+        )
+        let detected = RWaveDetector.detect(
+            sources: [source],
+            configuration: ECGDetectionConfiguration(
+                algorithm: .panTompkins, thresholdSD: 2.5,
+                minimumRRSeconds: 0.4, polarity: .positive
+            )
+        )
+        let detection = Self.eventScore(
+            detected: detected.map(\.beginTimeSeconds),
+            truth: truth.bcgTrueBeatSeconds,
+            toleranceSeconds: 0.10
+        )
+
+        var artifact = DefinedArtifact(
+            type: .bcg, name: "BCG", eventCode: RWaveDetector.eventCode,
+            events: detected, selectedChannelIndices: Array(noisy.data.indices),
+            windowSizeSeconds: 1.0, average: nil, topography: nil,
+            cleaningMethod: .mas
+        )
+        artifact.localTemplateWindowSize = 21
+        artifact.localTemplateUsesAMRIPreprocessing = true
+        let corrected = ArtifactCleaner.cleanedSignal(
+            from: noisy, artifacts: [artifact], excluding: []
+        ).signal
+        let baseline = Self.broadbandSNR(clean: clean.data, corrected: noisy.data, padSeconds: 0)
+        let achieved = Self.broadbandSNR(clean: clean.data, corrected: corrected.data, padSeconds: 0)
+        let improvement = baseline > 0 ? achieved / baseline : 0
+
+        if ProcessInfo.processInfo.environment["EVA_UPDATE_WATERMARK"] == "1" {
+            Issue.record("""
+                \(caseName): improvementRatio \(String(format: "%.6f", improvement)), \
+                eventF1 \(String(format: "%.6f", detection.f1)), timingMAE \
+                \(String(format: "%.6f", detection.meanAbsoluteErrorMilliseconds)) ms
+                """)
+            return
+        }
+        guard let watermark = Self.watermark(for: caseName),
+              let recordedImprovement = watermark.improvementRatio,
+              let recordedF1 = watermark.eventF1,
+              let recordedTiming = watermark.timingMAEMilliseconds else {
+            Issue.record("No complete \(caseName) watermark; improvement \(improvement), F1 \(detection.f1), timing \(detection.meanAbsoluteErrorMilliseconds) ms")
+            return
+        }
+        #expect(improvement >= recordedImprovement * 0.85)
+        #expect(detection.f1 >= max(recordedF1 - 0.05, 0))
+        #expect(detection.meanAbsoluteErrorMilliseconds <= recordedTiming + 5)
+    }
+
+    @Test func oddballAverageRecoversKnownERP() async throws {
+        let caseName = "oddball-erp"
+        let urls = Self.corpusURLs(caseName)
+        guard FileManager.default.fileExists(atPath: urls.noisy.path),
+              FileManager.default.fileExists(atPath: urls.truth.path) else {
+            print("PipelineRegressionTests: no \(caseName) corpus — skipping.")
+            return
+        }
+
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(operation: .segment, parameters: [
+            "segmentField": PSASegmentField.code.rawValue,
+            "eventCodes": "std,targ", "category.std": "standard", "category.targ": "target",
+            "preStimulusMs": "200", "postStimulusMs": "800",
+            "offsetMs": "0", "average": "true", "skipEyeBlinks": "false",
+            "skipEyeMovements": "false", "skipArtifacts": "false",
+            "skipLabeledBad": "false", "interpolateBadChannelsPerEpoch": "false"
+        ]))
+        // Baseline follows segment in provenance, while ReplaySettingsRestore
+        // sees the whole script up front and enables it during the segment fold.
+        script.append(EVAProcessingStep(operation: .baseline))
+        let outputFolder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-erp-regression-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: outputFolder) }
+        let outcome = try await HeadlessBatchProcessor.process(
+            url: urls.noisy, script: script, outputFolder: outputFolder
+        )
+        guard case .completed(let outputURL) = outcome else {
+            Issue.record("ERP pipeline did not complete: \(outcome)")
+            return
+        }
+
+        let averaged = try MFFReader().loadSignal(from: outputURL)
+        let truth = try SimulationTruthFixture.load(from: urls.truth)
+        let targetTruth = try #require(truth.erpComponents?.first { $0.id == "target" })
+        let topography = try #require(truth.erpTopography)
+        let strongestChannel = try #require(topography.indices.max {
+            abs(topography[$0]) < abs(topography[$1])
+        })
+        let targetSegment = try #require(averaged.epochSegments.first {
+            $0.category == "targ" || $0.category.lowercased() == "target"
+        })
+        let expectedSample = targetSegment.startSample + targetSegment.stimulusOffsetSamples
+            + Int((targetTruth.peakLatencySeconds * averaged.samplingRate).rounded())
+        let radius = Int((0.12 * averaged.samplingRate).rounded())
+        let lower = max(targetSegment.startSample, expectedSample - radius)
+        let upper = min(targetSegment.endSample, expectedSample + radius)
+        let peakSample = try #require((lower...upper).max {
+            abs(averaged.data[strongestChannel][$0]) < abs(averaged.data[strongestChannel][$1])
+        })
+        let recoveredAmplitude = Double(averaged.data[strongestChannel][peakSample])
+        let recoveredLatency = Double(
+            peakSample - targetSegment.startSample - targetSegment.stimulusOffsetSamples
+        ) / averaged.samplingRate
+        let amplitudeError = abs(recoveredAmplitude - targetTruth.peakAmplitudeMicrovolts)
+        let latencyError = abs(recoveredLatency - targetTruth.peakLatencySeconds) * 1000
+
+        if ProcessInfo.processInfo.environment["EVA_UPDATE_WATERMARK"] == "1" {
+            Issue.record("\(caseName): amplitudeError \(amplitudeError) µV, latencyError \(latencyError) ms")
+            return
+        }
+        guard let watermark = Self.watermark(for: caseName),
+              let recordedAmplitude = watermark.erpAmplitudeErrorMicrovolts,
+              let recordedLatency = watermark.erpLatencyErrorMilliseconds else {
+            Issue.record("No \(caseName) watermark; amplitude error \(amplitudeError) µV, latency error \(latencyError) ms")
+            return
+        }
+        #expect(amplitudeError <= recordedAmplitude + 1.0)
+        #expect(latencyError <= recordedLatency + 8.0)
+        #expect(averaged.isAveraged)
+        #expect(targetSegment.contributingEpochCount > 1)
+    }
+
+    @Test func recordingDefectCorpusKeepsItsDetectableSignatures() throws {
+        let caseName = "recording-defects"
+        let urls = Self.corpusURLs(caseName)
+        guard FileManager.default.fileExists(atPath: urls.noisy.path),
+              FileManager.default.fileExists(atPath: urls.truth.path) else {
+            print("PipelineRegressionTests: no \(caseName) corpus — skipping.")
+            return
+        }
+        let noisy = try MFFReader().loadSignal(from: urls.noisy)
+        let truth = try SimulationTruthFixture.load(from: urls.truth)
+        let layout = SensorLayout.load(
+            fromPackageContaining: urls.noisy.appendingPathComponent("signal1.bin")
+        )
+        let analysis = ChannelHealthAnalyzer.analyze(signal: noisy, layout: layout)
+        let trueBad = Set(truth.badChannels.keys.compactMap(Int.init).map { $0 - 1 })
+        let predicted = Set(analysis.resultsByChannel.values
+            .sorted { $0.goodPercentage < $1.goodPercentage }
+            .prefix(trueBad.count).map(\.channelIndex))
+        let recall = trueBad.isEmpty
+            ? 1 : Double(predicted.intersection(trueBad).count) / Double(trueBad.count)
+
+        let bridge = try #require(truth.bridgedChannelPairs?.first)
+        let first = bridge.firstChannel - 1
+        let second = bridge.secondChannel - 1
+        let bridgeCorrelation = Self.absoluteCorrelation(noisy.data[first], noisy.data[second])
+        let commonMode = Self.commonModeRMS(noisy.data)
+
+        if ProcessInfo.processInfo.environment["EVA_UPDATE_WATERMARK"] == "1" {
+            Issue.record("\(caseName): defectRecall \(recall), bridgeCorrelation \(bridgeCorrelation), commonModeRMS \(commonMode) µV")
+            return
+        }
+        guard let watermark = Self.watermark(for: caseName),
+              let recordedRecall = watermark.defectRecall,
+              let recordedBridge = watermark.bridgeCorrelation,
+              let recordedCommonMode = watermark.commonModeRMSMicrovolts else {
+            Issue.record("No \(caseName) watermark; recall \(recall), bridge \(bridgeCorrelation), common mode \(commonMode) µV")
+            return
+        }
+        #expect(recall >= max(recordedRecall - 0.25, 0))
+        #expect(bridgeCorrelation >= recordedBridge - 0.001)
+        #expect(commonMode >= recordedCommonMode * 0.75)
+        #expect((truth.badReferenceRMSMicrovolts ?? 0) > 0)
     }
 }

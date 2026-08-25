@@ -971,6 +971,42 @@ nonisolated enum SelfTest {
                 expectation: "schema, metadata, nested model values and seed survive exactly"
             ))
 
+            let geometryPackage = scenarioDirectory.appendingPathComponent(
+                "subject-geometry.mff", isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: geometryPackage, withIntermediateDirectories: true
+            )
+            let sourceMontage = Montage.standard(count: 7).jittered(
+                degrees: 2.5, seed: 9876
+            )
+            try MontageWriter.writeLayoutFiles(montage: sourceMontage, to: geometryPackage)
+            let geometryConfig = try makeConfig(Arguments([
+                "--coordinates", geometryPackage.path,
+                "--duration", "7", "--no-gradient", "--no-bcg"
+            ]))
+            let standaloneGeometryConfig = try makeConfig(Arguments([
+                "--coordinates", geometryPackage.appendingPathComponent("coordinates.xml").path,
+                "--duration", "7", "--no-gradient", "--no-bcg"
+            ]))
+            let reconstructed = try importedMontage(
+                path: geometryPackage.path, channelCount: geometryConfig.channelCount
+            ).montage
+            let geometryError = zip(sourceMontage.positions, reconstructed.positions).map {
+                abs($0.x - $1.x) + abs($0.y - $1.y) + abs($0.z - $1.z)
+            }.max() ?? .infinity
+            outcomes.append(Outcome(
+                name: "Imported coordinates.xml controls the simulator montage",
+                snr: geometryError,
+                passed: geometryConfig.channelCount == 7
+                    && standaloneGeometryConfig.channelCount == 7
+                    && geometryConfig.coordinatesPath == geometryPackage.standardizedFileURL.path
+                    && reconstructed.channelNames == sourceMontage.channelNames
+                    && geometryError < 5e-6,
+                expectation: "--coordinates accepts an MFF/package, infers channel count, and "
+                    + "round-trips every named electrode direction"
+            ))
+
             let overridden = try makeConfig(Arguments([
                 "--config", scenarioURL.path,
                 "--duration", "7",
@@ -1034,6 +1070,130 @@ nonisolated enum SelfTest {
                 name: "Scenario file reproducibility",
                 snr: .infinity, passed: false,
                 expectation: "successful round trip and override (\(error.localizedDescription))"
+            ))
+        }
+
+        do {
+            let contractDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("eva-correction-contract-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: contractDirectory) }
+
+            var contractConfig = SimulationConfig.default
+            contractConfig.channelCount = 8
+            contractConfig.samplingRate = 250
+            contractConfig.durationSeconds = 16
+            contractConfig.gradientEnabled = false
+            contractConfig.bcgEnabled = true
+            contractConfig.bcgSpatialModel = .generators
+            contractConfig.eegGenerationModel = .dipole
+            contractConfig.recordingReference = .average
+            contractConfig.includeECG = true
+            contractConfig.includeMotionSensor = true
+            contractConfig.leadFieldTerms = 50
+            contractConfig.sphericalHeadModel.shells = contractConfig.sphericalHeadModel.shells.map {
+                HeadShell(
+                    name: $0.name, radiusMeters: $0.radiusMeters * 1.07,
+                    conductivitySiemensPerMeter: $0.conductivitySiemensPerMeter
+                )
+            }
+
+            _ = try runGenerate(
+                config: contractConfig,
+                arguments: Arguments(["--prefix", "contract"]),
+                outputDirectory: contractDirectory
+            )
+            let noisyURL = contractDirectory.appendingPathComponent("contract_noisy.mff")
+            let truthURL = contractDirectory.appendingPathComponent("contract_truth.json")
+            let correctedURL = contractDirectory.appendingPathComponent("contract_corrected.mff")
+            let reportURL = contractDirectory.appendingPathComponent("contract_report.json")
+            try runCorrect(Arguments([
+                "--input", noisyURL.path,
+                "--output", correctedURL.path,
+                "--truth", truthURL.path,
+                "--pattern-search", "iterative",
+                "--components", "4",
+                "--report", reportURL.path
+            ]))
+
+            let reader = MFFReader()
+            let inputPNS = try reader.loadPNSSignal(from: noisyURL)
+            let outputPNS = try reader.loadPNSSignal(from: correctedURL)
+            let report = try JSONDecoder().decode(
+                SurrogateFilterReport.self, from: Data(contentsOf: reportURL)
+            )
+            let inputCoordinates = try Data(
+                contentsOf: noisyURL.appendingPathComponent("coordinates.xml")
+            )
+            let outputCoordinates = try Data(
+                contentsOf: correctedURL.appendingPathComponent("coordinates.xml")
+            )
+
+            let missingGeometryURL = contractDirectory.appendingPathComponent("missing-geometry.mff")
+            try FileManager.default.copyItem(at: noisyURL, to: missingGeometryURL)
+            try FileManager.default.removeItem(
+                at: missingGeometryURL.appendingPathComponent("coordinates.xml")
+            )
+            var rejectedMissingGeometry = false
+            do {
+                try runCorrect(Arguments([
+                    "--input", missingGeometryURL.path,
+                    "--output", contractDirectory.appendingPathComponent("should-not-exist.mff").path,
+                    "--truth", truthURL.path,
+                    "--pattern-search", "iterative"
+                ]))
+            } catch {
+                rejectedMissingGeometry = true
+            }
+            let fallbackReportURL = contractDirectory.appendingPathComponent("fallback-report.json")
+            try runCorrect(Arguments([
+                "--input", missingGeometryURL.path,
+                "--output", contractDirectory.appendingPathComponent("fallback.mff").path,
+                "--truth", truthURL.path,
+                "--pattern-search", "iterative",
+                "--assume-standard-montage",
+                "--report", fallbackReportURL.path
+            ]))
+            let fallbackReport = try JSONDecoder().decode(
+                SurrogateFilterReport.self, from: Data(contentsOf: fallbackReportURL)
+            )
+            let overrideReportURL = contractDirectory.appendingPathComponent("override-report.json")
+            try runCorrect(Arguments([
+                "--input", missingGeometryURL.path,
+                "--output", contractDirectory.appendingPathComponent("override.mff").path,
+                "--truth", truthURL.path,
+                "--coordinates", noisyURL.path,
+                "--pattern-search", "iterative",
+                "--report", overrideReportURL.path
+            ]))
+            let overrideReport = try JSONDecoder().decode(
+                SurrogateFilterReport.self, from: Data(contentsOf: overrideReportURL)
+            )
+            outcomes.append(Outcome(
+                name: "Correction uses true geometry and preserves PNS",
+                snr: Double(report.pnsChannelCount ?? -1),
+                passed: report.geometrySource == "MFF/package coordinates.xml"
+                    && report.assumedStandardMontage == false
+                    && report.headModelSource == "simulation truth config"
+                    && report.headShellRadiiMeters
+                        == contractConfig.sphericalHeadModel.shells.map(\.radiusMeters)
+                    && report.leadFieldTerms == contractConfig.leadFieldTerms
+                    && report.pnsPreserved == true
+                    && report.pnsChannelNames == ["ECG", "Motion"]
+                    && inputPNS?.data == outputPNS?.data
+                    && inputPNS?.channelNames == outputPNS?.channelNames
+                    && inputCoordinates == outputCoordinates
+                    && rejectedMissingGeometry
+                    && fallbackReport.assumedStandardMontage == true
+                    && overrideReport.assumedStandardMontage == false
+                    && overrideReport.geometryPath == noisyURL.standardizedFileURL.path,
+                expectation: "correct builds from input coordinates plus truth shells, copies "
+                    + "coordinates.xml, preserves PNS, and requires explicit geometry fallback"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "Correction uses true geometry and preserves PNS",
+                snr: .infinity, passed: false,
+                expectation: "geometry/PNS correction contract (\(error.localizedDescription))"
             ))
         }
 
@@ -1832,7 +1992,8 @@ nonisolated enum SelfTest {
                 with: try JSONEncoder().encode(SimulationConfig.default)
             ) as? [String: Any] ?? [:]
             let addedKeys = [
-                "bcgSpatialModel", "bcgFieldStrengthTesla", "bcgMorphologyJitterFraction"
+                "bcgSpatialModel", "bcgFieldStrengthTesla", "bcgMorphologyJitterFraction",
+                "bcgGeneratorAmplitudeScales"
             ]
             for key in addedKeys { legacyScenarioJSON.removeValue(forKey: key) }
             let decodedLegacy = try JSONDecoder().decode(
@@ -1845,8 +2006,9 @@ nonisolated enum SelfTest {
                 passed: SimulationConfig.default.effectiveBCGSpatialModel == .channelIndex
                     && decodedLegacy.effectiveBCGSpatialModel == .channelIndex
                     && decodedLegacy.effectiveBCGFieldStrengthTesla == 3.0
-                    && decodedLegacy.effectiveBCGMorphologyJitterFraction == 0.20,
-                expectation: "generators are opt-in, and a configuration missing all three new "
+                    && decodedLegacy.effectiveBCGMorphologyJitterFraction == 0.20
+                    && decodedLegacy.effectiveBCGGeneratorAmplitudeScales == [1, 1, 1, 1],
+                expectation: "generators are opt-in, and a configuration missing all four new "
                     + "keys decodes to the pre-5.1 behaviour"
             ))
 

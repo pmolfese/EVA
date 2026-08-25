@@ -21,7 +21,7 @@ struct EGISensorXMLParserTests {
     <sensorLayout xmlns="http://www.egi.com/coordinates_mff">
       <name>Test Layout</name>
       <sensors>
-        <sensor><number>1</number><type>0</type><x>10</x><y>20</y><z>30</z></sensor>
+        <sensor><number>1</number><name>Cz</name><type>0</type><x>10</x><y>20</y><z>30</z></sensor>
         <sensor><number>2</number><type>0</type><x>-5</x><y>15</y><z>25</z></sensor>
         <sensor><number>3</number><type>1</type><x>0</x><y>0</y><z>0</z></sensor>
       </sensors>
@@ -40,6 +40,7 @@ struct EGISensorXMLParserTests {
         #expect(first.y == 20)
         #expect(first.z == 30)
         #expect(first.type == 0)
+        #expect(first.name == "Cz")
     }
 
     @Test func returnsNilForMalformedXML() {

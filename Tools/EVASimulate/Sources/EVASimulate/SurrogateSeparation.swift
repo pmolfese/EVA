@@ -122,6 +122,20 @@ nonisolated struct SurrogateFilterReport: Codable, Sendable {
     var patternSearchMode: String
     var representativeBeatIndex: Int?
     var brainRegularization: Double
+    /// Provenance of the geometry actually used to build the brain basis.
+    var geometrySource: String? = nil
+    var geometryPath: String? = nil
+    var montageName: String? = nil
+    var electrodeCount: Int? = nil
+    var assumedStandardMontage: Bool? = nil
+    var headModelSource: String? = nil
+    var headModelName: String? = nil
+    var headShellRadiiMeters: [Double]? = nil
+    var leadFieldTerms: Int? = nil
+    /// PNS is not corrected by PCA-S, but must survive the MFF round trip.
+    var pnsPreserved: Bool? = nil
+    var pnsChannelCount: Int? = nil
+    var pnsChannelNames: [String]? = nil
     /// Deliberate displacement applied to the surrogate basis, in millimetres.
     var surrogateOffsetMillimetres: Double = 0
     /// Distance from each surrogate regional source to the nearest simulated

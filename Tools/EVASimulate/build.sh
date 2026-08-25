@@ -26,6 +26,8 @@ swiftc -O \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationScenario.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/GroupSimulation.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SignalSynthesis.swift" \
+  "$ROOT/EVA/IO/EGISensorXMLParser.swift" \
+  "$ROOT/EVA/Channels/ElectrodeGeometry.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/Montage.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SphericalForwardModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/EEGGenerator.swift" \

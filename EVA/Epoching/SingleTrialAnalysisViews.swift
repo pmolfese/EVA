@@ -146,6 +146,25 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Names the one thing that is missing, rather than listing everything that
+    /// could be. A generic hint sent the reader looking at a trace that had been
+    /// folded away.
+    private var missingPreconditionHint: String {
+        if averagedSegment == nil { return "Average a category first." }
+        if viewModel.selectedCategory == nil { return "Pick a category." }
+        if selectedChannelIndices.isEmpty { return "Pick a channel or ROI." }
+        if viewModel.analysisMode == .ride {
+            let windows = activeRIDEComponentWindows
+            if windows.isEmpty { return "Turn on at least one RIDE component." }
+            if !windows.allSatisfy({ $0.endMs > $0.startMs }) { return "A RIDE component window has no width." }
+        }
+        if viewModel.analysisMode == .trialDiagnostics, diagnosticsAnalysisSpan == nil {
+            return "Add a window above, or drag on the trace, to say what to score."
+        }
+        if !viewModel.hasWindow { return "Drag on the trace above to select the analysis window." }
+        return "Not ready to run."
+    }
+
     private var canRun: Bool {
         guard averagedSegment != nil, !selectedChannelIndices.isEmpty,
               let category = viewModel.selectedCategory,
@@ -154,8 +173,25 @@ struct SingleTrialAnalysisSheet: View {
             let windows = activeRIDEComponentWindows
             return !windows.isEmpty && windows.allSatisfy { $0.endMs > $0.startMs }
         }
+        // Trial Diagnostics is driven by added windows, not by dragging a span
+        // on the trace: adding W1 IS the setup. Either satisfies it.
+        if viewModel.analysisMode == .trialDiagnostics, diagnosticsAnalysisSpan != nil {
+            return true
+        }
         guard viewModel.hasWindow else { return false }
         return true
+    }
+
+    /// The span Trial Diagnostics scores over: the dragged analysis window when
+    /// there is one, otherwise the extent of the added windows.
+    private var diagnosticsAnalysisSpan: (startMs: Double, endMs: Double)? {
+        if let start = viewModel.windowStartMs, let end = viewModel.windowEndMs, end > start {
+            return (start, end)
+        }
+        let windows = viewModel.windows(for: .trialDiagnostics).filter { $0.endMs > $0.startMs }
+        guard let start = windows.map(\.startMs).min(),
+              let end = windows.map(\.endMs).max(), end > start else { return nil }
+        return (start, end)
     }
 
     private var activeRIDEComponentWindows: [TrialWindowSelection] {
@@ -1051,15 +1087,21 @@ struct SingleTrialAnalysisSheet: View {
     /// way. Left expanded, the answer always begins below the fold.
     @ViewBuilder
     private var setupSection: some View {
+        // Folded only while a run is actually possible. The window that `canRun`
+        // requires is set by dragging on the trace INSIDE this section, so
+        // collapsing it while the precondition is unmet hides the only cure and
+        // leaves the run button disabled with no way to fix it.
+        let isOpen = viewModel.setupIsExpanded || !canRun
+
         VStack(alignment: .leading, spacing: 8) {
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) { viewModel.setupIsExpanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: viewModel.setupIsExpanded ? "chevron.down" : "chevron.right")
+                    Image(systemName: isOpen ? "chevron.down" : "chevron.right")
                         .font(.caption2)
                     Text("Setup").font(.subheadline.weight(.semibold))
-                    if !viewModel.setupIsExpanded {
+                    if !isOpen {
                         Text(setupSummary)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -1070,8 +1112,10 @@ struct SingleTrialAnalysisSheet: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(!canRun)
+            .help(canRun ? "Hide the plot and parameters" : "Stays open until a run is possible")
 
-            if viewModel.setupIsExpanded {
+            if isOpen {
                 scaleControls
                 trialInspectorRow
                 parameterControls
@@ -1333,6 +1377,7 @@ struct SingleTrialAnalysisSheet: View {
             Button(runButtonTitle) { runCurrentMode() }
                 .disabled(!canRun || viewModel.isRunning)
                 .keyboardShortcut(.defaultAction)
+                .help(canRun ? runButtonTitle : missingPreconditionHint)
             if let progress = viewModel.runProgress, viewModel.isRunning {
                 VStack(alignment: .leading, spacing: 3) {
                     ProgressView(value: min(max(progress.fraction, 0), 1))
@@ -1350,7 +1395,7 @@ struct SingleTrialAnalysisSheet: View {
                 .accessibilityLabel("\(progress.title). \(progress.detail)")
             }
             if !canRun {
-                Text("Pick a category, channel/ROI, and drag a window on the trace above.")
+                Text(missingPreconditionHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1441,8 +1486,14 @@ struct SingleTrialAnalysisSheet: View {
             return
         }
 
-        let windowStart = viewModel.windowStartMs ?? 0
-        let windowEnd = viewModel.windowEndMs ?? 0
+        guard let span = diagnosticsAnalysisSpan else {
+            viewModel.diagnosticsRows = []
+            viewModel.statusMessage = "Add a window, or drag on the trace, to say what to score."
+            viewModel.setupIsExpanded = true
+            return
+        }
+        let windowStart = span.startMs
+        let windowEnd = span.endMs
         guard let similarity = TrialSimilarityAnalyzer.analyze(
             categories: inputs,
             samplingRate: rawSignal.samplingRate,

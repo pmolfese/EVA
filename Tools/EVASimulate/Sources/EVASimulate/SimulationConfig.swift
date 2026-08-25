@@ -95,6 +95,10 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     var recordingReference: EEGReference? = nil
     var leadFieldTerms: Int = 100
     var sphericalHeadModel: SphericalHeadModel = .classicThreeShell
+    /// Standalone coordinates.xml or an MFF/package directory containing one.
+    /// Nil uses EVASimulate's deterministic built-in montage. Optional keeps
+    /// scenarios written before imported geometry readable.
+    var coordinatesPath: String? = nil
     /// Pearson correlation imposed between S001 and S002 after independent
     /// signals are generated within S001's configured band. Zero disables it.
     var dipoleSourceCorrelation: Double = 0
@@ -220,6 +224,11 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// composite's shape vary from beat to beat, not only its size. Zero
     /// restores a fixed morphology.
     var bcgMorphologyJitterFraction: Double? = nil
+
+    /// Multipliers for aortic, left-vessel, right-vessel and head-rotation
+    /// generator shares, in that order. Optional for backward-compatible
+    /// scenario decoding; the effective default preserves the original model.
+    var bcgGeneratorAmplitudeScales: [Double]? = nil
 
     /// Paper: automatic QRS detection jitters the recovered beat time by about
     /// 20 ms; simulations used 25 ms SD and swept 0-50 ms.
@@ -375,6 +384,12 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     var effectiveBCGSpatialModel: BCGSpatialModel { bcgSpatialModel ?? .channelIndex }
     var effectiveBCGFieldStrengthTesla: Double { bcgFieldStrengthTesla ?? 3.0 }
     var effectiveBCGMorphologyJitterFraction: Double { bcgMorphologyJitterFraction ?? 0.20 }
+    var effectiveBCGGeneratorAmplitudeScales: [Double] {
+        guard let values = bcgGeneratorAmplitudeScales, values.count == 4 else {
+            return [1, 1, 1, 1]
+        }
+        return values
+    }
 }
 
 /// One band-limited Gaussian source in the EEG mixture.

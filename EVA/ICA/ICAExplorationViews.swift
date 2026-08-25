@@ -567,9 +567,20 @@ extension WaveformView {
                 ica.progress = 1
                 ica.progressMessage = "ICA complete"
                 var labeledDecomposition = decomposition
-                let suggestions = ICAComponentAutoLabeler.suggestions(
+                let baseSuggestions = ICAComponentAutoLabeler.suggestions(
                     for: decomposition,
                     layout: recording.sensorLayout
+                )
+                let detectedBeats = signal.events
+                    .filter { $0.code == RWaveDetector.eventCode }
+                    .map(\.beginTimeSeconds)
+                let ecg = BCGComponentLabeller.likelyECG(in: displayedPhysioSignal())
+                let suggestions = BCGComponentLabeller.augmenting(
+                    baseSuggestions,
+                    decomposition: decomposition,
+                    detectedBeatTimes: detectedBeats,
+                    ecg: ecg?.samples,
+                    ecgSamplingRate: ecg?.samplingRate
                 )
                 labeledDecomposition.labelSuggestions = suggestions
                 for (component, suggestion) in suggestions {
@@ -587,10 +598,13 @@ extension WaveformView {
                     )
                 } else if decomposition.finalChange.isFinite {
                     ica.statusMessage = String(
-                        format: "ICA finished in %d iterations. Auto-labeled %d components. Final change %.2g.",
+                        format: "ICA finished in %d iterations. Auto-labeled %d components. Final change %.2g.%@",
                         decomposition.iterations,
                         suggestions.count,
-                        decomposition.finalChange
+                        decomposition.finalChange,
+                        detectedBeats.count >= BCGComponentLabeller.minimumBeatCount
+                            ? " BCG evidence used \(detectedBeats.count) detected R waves."
+                            : " Detect at least \(BCGComponentLabeller.minimumBeatCount) R waves to add BCG-specific labels."
                     )
                 } else {
                     ica.statusMessage = "ICA finished in \(decomposition.iterations) iterations after learning-rate backoff."
