@@ -129,6 +129,27 @@ else
     SKIPPED+=("scenario determinism (scripts/check-determinism.sh missing)")
 fi
 
+# ---------------------------------------------------------------- regression corpus
+# Tier 7: recordings with known ground truth for the pipeline-regression tests.
+# Generated fresh rather than committed — no binary blobs in git, and the
+# generator/pipeline seam gets exercised instead of frozen. The tests skip
+# cleanly when this directory is absent, so a bare `xcodebuild test` stays fast.
+CORPUS="$REPO/.regression-corpus"
+if [ "$FAST" -eq 1 ]; then
+    SKIPPED+=("regression corpus (--fast)")
+elif [ -x "Tools/EVASimulate/.build/eva-simulate" ]; then
+    stage "regression corpus" bash -c "
+        set -e
+        rm -rf '$CORPUS'
+        mkdir -p '$CORPUS'
+        '$REPO/Tools/EVASimulate/.build/eva-simulate' generate \
+            --config '$REPO/Tools/EVASimulate/scenarios/regression-gradient-locked.json' \
+            --output '$CORPUS/gradient-locked'
+    "
+else
+    SKIPPED+=("regression corpus (eva-simulate not built)")
+fi
+
 # ---------------------------------------------------------------- EVA unit suite
 # EVAUITests is excluded: it needs the UI automation runner, which fails on a
 # headless or otherwise busy machine for reasons unrelated to the code. Run it

@@ -51,19 +51,20 @@ is what gets read instead of scrolling 1,800 lines.
 | 5.3 The evaluation | ✅ Complete except localization | 2026-08-22. Dipole localization error needs the 6.1-6.2 inverse solver. |
 | 5.4 Simulator-trained BCG labeller | Not started | Pilot for Tier 8. Do 8.1 first. |
 | 6.x Distributed inverse methods | Not started | Deferred; 6.1 worth pulling forward if 5.2 needs a source grid. |
-| 7.x Pipeline regression | Not started | 7.1-7.2 first slice is the highest-value next item. |
+| 7.1-7.2 Pipeline regression | ✅ First slice complete | 2026-08-25. Locked-clock gradient case, floor + analytic ceiling + watermark, all three verified to fire. |
+| 7.3-7.5 Corpus and CI | Not started | Clean control next; then GitHub Actions staging. |
 | 8.x Component labelling | Not started | Start with 8.1, a benchmark rather than a model. |
 
 ### Next, in order
 
-1. **7.1-7.2 first slice** — one scenario, one processing script, one floor, one
-   watermark entry, green in CI. The only item that pays off on every later
-   commit.
-2. **8.1** — benchmark ICLabel and `ICAComponentAutoLabeler` against graded
+1. **8.1** — benchmark ICLabel and `ICAComponentAutoLabeler` against graded
    truth, per class. Small, and it decides how much of Tier 8 and 5.4 is
    warranted.
+2. **7.3** — more corpus entries, starting with the **clean control**: a
+   recording needing no correction, asserting the pipeline does not damage it.
+   Cheap now that the machinery exists.
 3. **5.4** — the Tier 8 pilot, and the interesting way to finish ICA-S.
-4. **7.3-7.5**, then **8.2-8.4**, then **3.2**, then **ICA-S** itself.
+4. **7.4-7.5** (CI staging), then **8.2-8.4**, then **3.2**, then **ICA-S**.
 
 The full reasoning behind this order is in [Suggested order](#suggested-order) at
 the end of the document; this list is the short form and should agree with it.
@@ -1565,6 +1566,80 @@ commit, and it leaves 3.2 needing little more than a different reporting layer.
 The missing pieces are the glue and — much more importantly — the assertion
 policy in 7.2.
 
+## 7.1-7.2 first slice — DELIVERED
+
+**Status (2026-08-25): first slice complete.** One case, end to end, green in the
+full suite:
+
+    generate (locked-clock gradient) -> EVA processes headlessly -> score vs truth
+
+- **`Tools/EVASimulate/scenarios/regression-gradient-locked.json`** — zero clock
+  drift, gradient only, no BCG or ocular activity, no defects.
+- **`EVATests/Pipeline/PipelineRegressionTests.swift`** — drives
+  `HeadlessBatchProcessor` with an `EVAProcessingScript`, scores the output
+  against `sim_clean.mff`.
+- **`EVATests/Fixtures/pipeline-watermark.json`** — the committed achieved value.
+- **`run-all-tests.sh`** gains a `regression corpus` stage that generates into
+  `.regression-corpus/` (gitignored). The tests **skip** when it is absent, so a
+  bare `xcodebuild test` stays fast for someone working on unrelated code.
+
+### The analytic anchor paid off immediately
+
+This case was chosen because its best possible result is known in advance rather
+than merely observed. A mean template over 8 donor volumes ceilings at
+`sqrt(9) = 3.00`; a median is less efficient by `sqrt(pi/2) = 1.253`, predicting
+about **2.39**. The pipeline delivered **2.4701**.
+
+Theory and implementation agreeing to that tolerance is worth more than the
+number itself: it means the floor is anchored to something real, and it validates
+the √N reasoning the README has carried since the beginning.
+
+### Three assertions, each doing a different job
+
+1. **Floor** — 15% below the watermark. The regression check proper.
+2. **Ceiling** — `sqrt(N+1) x 1.25`. A score *above* this means the correction is
+   using information it should not have; on a simulated recording, with the clean
+   signal sitting in the next directory, that is a real possibility an end-to-end
+   harness would otherwise conceal.
+3. **Watermark** — an improvement above 15% fails too, with instructions to
+   re-record. A floor alone hides slow drift: a number can fall from 6.2 to 4.1
+   over years without ever tripping a floor of 4.0.
+
+**All three were verified to fire**, by moving the watermark up, moving it down,
+and temporarily lowering the ceiling. An assertion nobody has seen fail is
+decoration until proven otherwise — and the ceiling in particular would never
+fire in normal operation.
+
+### Decisions worth keeping
+
+- **CPU backend is pinned.** Metal and CPU agree only to a tolerance, CI machines
+  have no usable Metal device, and a watermark recorded on one backend would fail
+  forever on the other. GPU/CPU agreement has its own dedicated test.
+- **Alignment and upsampling off.** This case is about template subtraction with
+  locked clocks; interpolation would put a second mechanism between input and
+  score.
+- **The corpus is generated, never committed.** No binary blobs in git, and the
+  generator/pipeline seam is exercised rather than frozen. It is also covered by
+  `check-determinism.sh`, so the regression input is itself reproducible.
+- **`EVAHelper` was evaluated and rejected** as the runner: it is a fixed AAS+CWL
+  pipeline requiring PNS channels, with no AAS-only path, so it could not give
+  the clean case whose value is analytically known. `EVAProcessingScript` through
+  `HeadlessBatchProcessor` takes an arbitrary pipeline, which is why 7.1 chose it.
+
+### Next for Tier 7
+
+- The method is a one-line constant in the test. **`AllenAAS`, once it lands**,
+  is a natural second case — and a *mean* template would restore the exact
+  `sqrt(N)` anchor that MAS's median blurs.
+- 7.3's remaining corpus entries, especially the **clean control** (a recording
+  needing no correction, asserting the pipeline does not damage it) — a real
+  regression class no artifact-focused entry can catch.
+- 7.5's GitHub Actions staging.
+
+---
+
+**Original plan:**
+
 ## 7.1 Where the suite lives
 
 **In `EVATests`, not in a new tool.** A separate batch runner would be a fourth
@@ -1885,11 +1960,10 @@ PCA-S, and 5.3 apart from dipole localization error.
 
 **Next:**
 
-1. **7.1-7.2, first slice only** — one scenario, one processing script, one
-   floor, one watermark entry, green in CI. First on purpose: it is the only
-   item that pays off on *every* later commit, and the locked-clock gradient
-   case has an analytically known expected value to anchor it. Do not build the
-   whole corpus yet; settle the assertion policy first.
+1. ~~**7.1-7.2, first slice**~~ — done 2026-08-25. The assertion policy is
+   settled and demonstrated: floor, analytic ceiling, and watermark, all three
+   verified to fire. The locked-clock case's analytic anchor held — predicted
+   ~2.39, measured 2.4701. Adding corpus entries is cheap now.
 2. **8.1 benchmark the labellers we already have** — score ICLabel and
    `ICAComponentAutoLabeler` against graded truth, per class. Small, needs no new
    model, and it is a result nobody else can produce. Do it before committing to
