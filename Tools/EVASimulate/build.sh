@@ -24,6 +24,7 @@ swiftc -O \
   -framework Accelerate \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationConfig.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationScenario.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/GroupSimulation.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SignalSynthesis.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/Montage.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SphericalForwardModel.swift" \

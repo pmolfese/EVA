@@ -230,6 +230,7 @@ final class ProcessingCore {
                 }
                 ica.apply(parameters: step.parameters)
                 do {
+                    let before = current
                     current = try await ICAComponentRemoval.apply(
                         to: current,
                         payload: icaPayload,
@@ -239,6 +240,14 @@ final class ProcessingCore {
                         epoching: epoching,
                         segHealth: segHealth,
                         store: store
+                    )
+                    store.cleaningVariance.record(
+                        CleaningVarianceAccount.between(
+                            original: before,
+                            cleaned: current,
+                            epochSeconds: CleaningVarianceAccount.defaultEpochSeconds,
+                            stageName: "icaClean"
+                        )
                     )
                 } catch {
                     // Stopping rather than continuing with the uncorrected
@@ -275,6 +284,14 @@ final class ProcessingCore {
                     epoching: epoching,
                     segHealth: segHealth,
                     store: store
+                )
+                store.cleaningVariance.record(
+                    CleaningVarianceAccount.between(
+                        original: current,
+                        cleaned: outcome.signal,
+                        epochSeconds: CleaningVarianceAccount.defaultEpochSeconds,
+                        stageName: "artifactClean"
+                    )
                 )
                 current = outcome.signal
 

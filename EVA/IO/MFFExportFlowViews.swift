@@ -464,7 +464,14 @@ extension WaveformView {
             if epoching.baselineCorrected {
                 script.append(EVAProcessingStep(operation: .baseline))
             }
-            script.append(EVAProcessingStep(operation: .segment, parameters: epoching.parameters))
+            // Record what segmentation threw away, per category. An MFF holds
+            // only the surviving segments, so without this the retention story
+            // is lost the moment the file is written.
+            script.append(EVAProcessingStep(
+                operation: .segment,
+                parameters: epoching.parameters,
+                rejections: epoching.psaExclusionSummary.categoryRejections
+            ))
         }
         // Bad-channel marks and interpolation, as provenance. Shared with the
         // headless path so the two cannot drift — `HeadlessBatchProcessor` writes
@@ -517,7 +524,10 @@ extension WaveformView {
     /// part of `eva.xml` because Copy Processing should replay the portable
     /// settings, not this file's resulting channel/epoch decisions.
     func currentProcessingAuditLogLines() -> [String] {
-        ProcessingAuditLog.lines(gradient: gradient, epoching: epoching, channels: channels)
+        ProcessingAuditLog.lines(
+            gradient: gradient, epoching: epoching, channels: channels,
+            cleaningVariance: recordingStore.cleaningVariance
+        )
     }
 
     func currentMFFExportSnapshot() -> MFFExportSnapshot? {

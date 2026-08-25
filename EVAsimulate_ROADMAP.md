@@ -19,30 +19,54 @@ to regenerate the exact data.
 
 ## Completion status
 
-This table is the authoritative progress summary. A checkmark means the item is
-implemented, tested, and documented—not merely started.
+The authoritative progress summary. A checkmark means implemented, tested, and
+documented — not merely started. **Keep this table current in the same commit
+that completes an item**; a stale row here is worse than no table, because this
+is what gets read instead of scrolling 1,800 lines.
 
 | Item | Status | Note |
 | --- | --- | --- |
-| 1.1 Source-space simulation | ✅ Complete | Delivered 2026-08-21. |
-| 1.2 ERPs with trial variability | ✅ Complete | Delivered 2026-08-21 with average and single-trial scoring truth. |
-| 1.3 Non-stationarity | ✅ Complete | Delivered 2026-08-21 with bursts, spectral dynamics, microstates, and PAC truth/scoring. |
-| 2.1 More artifact types | ✅ Complete | Delivered 2026-08-21 across all seven requested artifact families. |
-| 2.2 Impedance-coupled noise | ✅ Complete | Delivered 2026-08-21 with thermal and mains coupling. |
-| 2.3 Richer metrics | ✅ Complete | Delivered 2026-08-21 across waveform, channel, detection, source, and ERP scoring. |
-| 2.4 Scenario files | ✅ Complete | Delivered 2026-08-21 with a versioned catalog and override tests. |
-| 3.1 Multi-subject simulation | Not started | Depends on 2.4. |
-| 3.2 Comparison harness | Blocked | Depends on 2.3/2.4 and the MFF event-precision fix. |
-| 3.3 Measured template library | Partial | Gradient-template import exists; the curated library and BCG import do not. |
-| 3.4 Clinical patterns | Not started | Interictal spikes are first priority. |
-| 4.4 Correlated-source band identity | ✅ Complete | Delivered 2026-08-21 with within-band correlation construction and truth tests. |
-| 4.5 Lead-field convergence check | ✅ Complete | Delivered 2026-08-21 with N→2N diagnostics, eccentricity coverage, and runtime warnings. |
-| 4.6 One reference convention | ✅ Complete | Delivered 2026-08-21 with one recorded additive-boundary reference. |
-| 4.7 Split ERP streams | ✅ Complete | Delivered 2026-08-21 with five named, recorded seed domains. |
-| 4.8 Declare ERP overlap | ✅ Complete | Delivered 2026-08-21 with directional flags and non-overlap scoring. |
+| 1.1 Source-space simulation | ✅ Complete | 2026-08-21. |
+| 1.2 ERPs with trial variability | ✅ Complete | 2026-08-21, average and single-trial truth. |
+| 1.3 Non-stationarity | ✅ Complete | 2026-08-21: bursts, spectral dynamics, microstates, PAC. |
+| 2.1 More artifact types | ✅ Complete | 2026-08-21, all seven families. |
+| 2.2 Impedance-coupled noise | ✅ Complete | 2026-08-21, thermal and mains coupling. |
+| 2.3 Richer metrics | ✅ Complete | 2026-08-21, waveform/channel/detection/source/ERP. |
+| 2.4 Scenario files | ✅ Complete | 2026-08-21, versioned catalog with override tests. |
+| 3.1 Multi-subject simulation | ✅ Complete | 2026-08-22. `generate-group`, population effect + between-subject variance, prefix-stable cohorts. |
+| 3.2 Comparison harness | Open | No longer blocked — 4.9 fixed the event-precision bug. Mostly a reporting layer over Tier 7 now. |
+| 3.3 Measured template library | Partial | Gradient-template import exists; curated library and BCG import do not. Load-bearing for 5.4/Tier 8. |
+| 3.4 Clinical patterns | Not started | Interictal spikes first. |
+| 4.1 BCG geometric topography | ✅ Closed by 5.1 | 2026-08-21, superseded rather than fixed separately. |
+| 4.2 BCG spatial rank | ✅ Closed by 5.1 | 2026-08-21, rank 4 emerges from four generators. |
+| 4.3 Placeable ERP dipoles | ✅ Complete | 2026-08-22, with `scenarios/aep-bilateral.json` and the 4.5a convergence follow-up. |
+| 4.4 Correlated-source band identity | ✅ Complete | 2026-08-21, within-band construction, spectrum tested. |
+| 4.5 Lead-field convergence check | ✅ Complete | 2026-08-21; 4.5a follow-ups closed 2026-08-22. |
+| 4.6 One reference convention | ✅ Complete | 2026-08-21, one recorded additive-boundary reference. |
+| 4.7 Split ERP streams | ✅ Complete | 2026-08-21, five named seed domains. |
+| 4.8 Declare ERP overlap | ✅ Complete | 2026-08-21, directional flags and non-overlap scoring. |
+| 4.9 Sub-millisecond MFF event times | ✅ Complete | 2026-08-21. Reader *and* writer were quantizing; 1024 Hz now exact. |
+| 5.1 Multi-generator BCG | ✅ Complete | 2026-08-21, four physical generators, spatial rank 4. |
+| 5.2 Surrogate spatial filter | ✅ PCA-S complete | 2026-08-21. ICA-S open — needs component selection, see 5.4. |
+| 5.3 The evaluation | ✅ Complete except localization | 2026-08-22. Dipole localization error needs the 6.1-6.2 inverse solver. |
+| 5.4 Simulator-trained BCG labeller | Not started | Pilot for Tier 8. Do 8.1 first. |
+| 6.x Distributed inverse methods | Not started | Deferred; 6.1 worth pulling forward if 5.2 needs a source grid. |
+| 7.x Pipeline regression | Not started | 7.1-7.2 first slice is the highest-value next item. |
+| 8.x Component labelling | Not started | Start with 8.1, a benchmark rather than a model. |
 
-**Next:** do **4.3 placeable ERP dipoles**, then **4.9 sub-millisecond MFF event
-times**; alternatively begin **3.1 multi-subject simulation**.
+### Next, in order
+
+1. **7.1-7.2 first slice** — one scenario, one processing script, one floor, one
+   watermark entry, green in CI. The only item that pays off on every later
+   commit.
+2. **8.1** — benchmark ICLabel and `ICAComponentAutoLabeler` against graded
+   truth, per class. Small, and it decides how much of Tier 8 and 5.4 is
+   warranted.
+3. **5.4** — the Tier 8 pilot, and the interesting way to finish ICA-S.
+4. **7.3-7.5**, then **8.2-8.4**, then **3.2**, then **ICA-S** itself.
+
+The full reasoning behind this order is in [Suggested order](#suggested-order) at
+the end of the document; this list is the short form and should agree with it.
 
 ---
 
@@ -338,6 +362,72 @@ citable and composes with 3.2.
 # Tier 3 — valuable, more work
 
 ## 3.1 Multi-subject and group simulation
+
+**Status (2026-08-22): complete.** `eva-simulate generate-group` writes a cohort
+of `sub-XX/` packages plus `participants.tsv` and `group_truth.json`. 12 subjects
+in ~23 s.
+
+**The part that matters most is not "run the generator N times".** N draws from
+one distribution have no between-subject structure, so a mixed-effects model
+fitted to them estimates a variance component that is zero by construction — and
+looks like it works regardless. A group study needs *two* levels of ground truth,
+and both are now recorded:
+
+- **The population parameter** — the condition difference that exists in the
+  population, which a group analysis is trying to recover.
+- **Between-subject variance** — each subject's departure from it, drawn from
+  declared distributions.
+
+Score group results against `group_truth.json`'s population value, never against
+one subject's realization.
+
+**What varies per subject:** head radius (which changes the forward model, so
+topographies differ even for identical sources), electrode placement, alpha
+amplitude, BCG severity, impedance quality, heart rate, and the ERP effect size.
+Every draw is declared as an SD and recorded. `--homogeneous` zeroes them all,
+which is the negative control: a group method that finds structure in a
+homogeneous cohort is finding noise.
+
+**Effect scaling moves the contrast, not the response.** Multiplying both
+condition amplitudes would be a gain difference, leaving target-minus-standard
+proportionally identical across subjects — no between-subject variance in the
+quantity being estimated. The per-subject draw adjusts the standard ratio
+instead, so the *difference* varies and the common response barely moves.
+
+**Covariates are exact**, which is unusual and useful. `participants.tsv` carries
+each subject's true drawn parameters in BIDS format. Real group analyses regress
+on covariates measured with error and often mis-specified; here they are known,
+so it is possible to ask how much of a group result survives perfect covariate
+knowledge — and how much was mis-specification all along.
+
+**Determinism is prefix-stable.** Subject seeds depend on the group seed and
+index alone, never on cohort size: verified that the first 6 subjects of a
+12-subject cohort are byte-identical to a 6-subject cohort. Growing a cohort must
+not resample the subjects already in it.
+
+**New scenario:** `scenarios/group-oddball.json` — the bilateral Sylvian N100
+identical across conditions plus a midline target-only P300, so the contrast is
+carried entirely by the P300 and the population effect is a clean 6.00 µV.
+`aep-bilateral` deliberately has **no** contrast (Rusiniak's AEP is one repeated
+stimulus), and `generate-group` now says so explicitly rather than reporting a
+between-subject SD for a quantity that is identically zero.
+
+**BIDS export is left to `Tools/EVABIDS`** rather than built in — one
+`eva-bids to-bids` call per subject. Keeping the tools composable beats coupling
+them.
+
+**Self-tests added (85 total, 0 failures):** prefix stability; realized
+between-subject SD within 0.05 of the request over 400 subjects; `--homogeneous`
+fixing every parameter at 1 while leaving each subject its own seed; effect
+scaling moving the contrast and giving exactly zero when conditions are
+identical; and `participants.tsv` shape.
+
+**Not done:** per-subject *source* variation beyond head size (individual
+anatomy), and sessions/runs.
+
+---
+
+**Original plan:**
 
 Per-subject parameter draws (montage variation, artifact severity, alpha
 amplitude, impedance quality) so group-level and mixed-effects methods can be
@@ -1782,12 +1872,16 @@ the model.
 
 # Suggested order
 
-For the stated goal of supporting methods papers. **Tiers 1, 2 and 4 are now
-complete** (4.1 and 4.2 subsumed by 5.1). Tier 5 is complete apart from ICA-S
-and the localization criterion, which waits on Tier 6.
+For the stated goal of supporting methods papers. **Tiers 1, 2 and 4 are
+complete** (4.1 and 4.2 subsumed by 5.1), Tier 3 has 3.1 done, and Tier 5 is
+complete apart from ICA-S and the localization criterion, which waits on Tier 6.
 
-**Done in this pass:** 4.1-4.9 (4.1/4.2 subsumed by 5.1), 5.1, 5.2 for PCA-S,
-and 5.3 apart from dipole localization error.
+This is the reasoning behind the short list in
+[Completion status](#completion-status) at the top of the document. If the two
+ever disagree, the top table is the one people read — fix it first.
+
+**Done in this pass:** 3.1, 4.1-4.9 (4.1/4.2 subsumed by 5.1), 5.1, 5.2 for
+PCA-S, and 5.3 apart from dipole localization error.
 
 **Next:**
 
@@ -1821,7 +1915,7 @@ separate code. If 6.1 gets written for 5.2, then MNE from 6.2 and **6.4
 resolution metrics** become cheap enough to do opportunistically, and 6.5's
 parameter-mismatch check should travel with them rather than follow later.
 
-Deferred entirely for now: 3.1 multi-subject, 3.3 the measured-template library
+Deferred entirely for now: 3.3 the measured-template library
 (small in code, slow in permissions — start collecting in parallel if it is
 wanted), 3.4 clinical patterns, and the rest of Tier 6.
 

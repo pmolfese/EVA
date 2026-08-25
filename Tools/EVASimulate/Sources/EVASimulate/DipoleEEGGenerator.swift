@@ -29,6 +29,15 @@ nonisolated enum SimulationSeedStreams {
     static func dipoleSource(base: UInt64, index: Int) -> UInt64 {
         mixed(base, domain: 0xD1F0_1E50_0ACE_0001, index: UInt64(index))
     }
+    /// One stream per simulated subject. Depends on the index alone, never on
+    /// the cohort size, so growing a cohort does not resample the subjects
+    /// already in it (roadmap 3.1).
+    static func subject(base: UInt64, index: Int) -> UInt64 {
+        mixed(base, domain: 0x50B1_EC70_0000_0001, index: UInt64(index))
+    }
+    static func montageJitter(base: UInt64) -> UInt64 {
+        mixed(base, domain: 0x3074_A9E0_0000_0002)
+    }
     static func bcg(base: UInt64) -> UInt64 { mixed(base, domain: 0xBC60_BC60_BC60_BC60) }
     /// One stream per BCG generator, so adding or removing a generator cannot
     /// move any other generator's per-beat weights or any other artifact layer.

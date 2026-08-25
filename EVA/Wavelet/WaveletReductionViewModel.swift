@@ -230,6 +230,19 @@ final class WaveletReductionViewModel {
         reducedSignal = result.cleaned
         artifact = result.artifact
         self.result = result
+        // `fromArtifact` rather than a before/after difference: this stage
+        // already produces the removed estimate, so using it avoids recomputing
+        // a subtraction the reducer has already done exactly.
+        store.cleaningVariance.record(
+            CleaningVarianceAccount.fromArtifact(
+                original: signal.data,
+                artifact: result.artifact.data,
+                channelIndices: Array(reduceIndices),
+                samplingRate: signal.samplingRate,
+                epochSeconds: CleaningVarianceAccount.defaultEpochSeconds,
+                stageName: "waveletReduction"
+            )
+        )
         bandVarianceRetained = bandRetained
         let analyzedRange = config.analysisRange(
             sampleCount: signal.data.first?.count ?? 0, samplingRate: signal.samplingRate)

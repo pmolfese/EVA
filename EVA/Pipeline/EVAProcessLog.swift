@@ -65,3 +65,11 @@ nonisolated final class EVAProcessLog: @unchecked Sendable {
         return f
     }()
 }
+
+extension EVAProcessLog {
+    /// Records what a cleaning stage removed, in the uniform form every stage
+    /// reports. See [[CleaningVarianceAccount]].
+    func record(_ account: CleaningVarianceAccount, channelNames: [String]? = nil) {
+        append(account.summary(channelNames: channelNames))
+    }
+}

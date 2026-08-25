@@ -509,6 +509,23 @@ struct AveragedTopomapSample: Identifiable {
 }
 
 nonisolated struct PSAExclusionSummary: Sendable, Equatable {
+    /// What happened to one category's candidate epochs.
+    ///
+    /// Note that these DO NOT sum to the global counters. One event can feed
+    /// several categories at once — its own code plus any pooled group it
+    /// belongs to — so a single dropped event is debited from every category it
+    /// would have contributed to. The global counters count events; these count
+    /// per-category contributions.
+    nonisolated struct CategoryTally: Sendable, Equatable {
+        var candidates = 0
+        var accepted = 0
+        /// Reason label → count, using the same labels as
+        /// `skippedArtifactBreakdown` plus the non-artifact rejection causes.
+        var reasons: [String: Int] = [:]
+
+        var excluded: Int { max(candidates - accepted, 0) }
+    }
+
     var candidateEvents = 0
     var acceptedEpochs = 0
     var outputSegments = 0
@@ -520,6 +537,17 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
     var timingAdjusted = 0
     var rejectedForTooManyBadChannels = 0
     var badChannelCount = 0
+    /// Per-category breakdown. Empty for packages segmented before EVA started
+    /// recording it.
+    var perCategory: [String: CategoryTally] = [:]
+
+    /// True when categories overlap, i.e. some event fed more than one category
+    /// and the per-category candidate counts therefore sum past
+    /// `candidateEvents`. Pooled category groups always cause this, because a
+    /// group only ever pools codes that are themselves selected categories.
+    var categoriesOverlap: Bool {
+        perCategory.values.reduce(0) { $0 + $1.candidates } > candidateEvents
+    }
 
     var keptEpochs: Int {
         max(acceptedEpochs - skippedLabeledBadSegments, 0)
@@ -531,6 +559,24 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
 
     var hasExclusions: Bool {
         excludedEpochs > 0
+    }
+
+    /// The per-category tallies as the record `eva.xml` already knows how to
+    /// write. Without this a segmented export keeps only its survivors, and
+    /// nothing downstream — a reload, a QuickLook preview, `RecordingCombiner` —
+    /// can say how many trials a category started with.
+    var categoryRejections: [CategoryRejection] {
+        perCategory
+            .filter { $0.value.candidates > 0 }
+            .map { name, tally in
+                CategoryRejection(
+                    category: name,
+                    total: tally.candidates,
+                    included: tally.accepted,
+                    reasons: tally.reasons.filter { $0.value > 0 }
+                )
+            }
+            .sorted { $0.category < $1.category }
     }
 }
 
@@ -815,6 +861,15 @@ nonisolated struct PSABuildJob: Sendable {
         var skippedArtifactBreakdown: [String: Int] = [:]
         var skippedTimingMarkers = 0
         var timingAdjusted = 0
+        // Per-category tallies. `categories` is resolved at the top of the loop
+        // below, before every skip site, so each drop can be debited to exactly
+        // the categories it would have fed.
+        var perCategory: [String: PSAExclusionSummary.CategoryTally] = [:]
+        func debit(_ categories: [String], _ reason: String) {
+            for category in categories {
+                perCategory[category, default: .init()].reasons[reason, default: 0] += 1
+            }
+        }
         let artifactRejectionGroups = artifactEventsForRejectionByLabel.isEmpty
             ? (artifactEventsForRejection.isEmpty ? [:] : [artifactRejectionLabel: artifactEventsForRejection])
             : artifactEventsForRejectionByLabel
@@ -839,7 +894,12 @@ nonisolated struct PSABuildJob: Sendable {
                     categories.append(entry.rule.resolvedCategoryName(for: match))
                 }
             }
+            // An event mapping to no category is not a candidate for anything,
+            // so it is counted globally but debited from nobody.
             guard !categories.isEmpty else { continue }
+            for category in categories {
+                perCategory[category, default: .init()].candidates += 1
+            }
             let segmentValue: String = categoriesBySegmentValue[event.code] != nil ? event.code : (event.label ?? event.code)
             let anchorTimeSeconds: Double
             let timingMarkerValue = timingMarkersBySegmentValue[event.code] ?? timingMarkersBySegmentValue[event.label ?? ""]
@@ -847,6 +907,7 @@ nonisolated struct PSABuildJob: Sendable {
                 let candidates = timingEventsBySegmentValue[timingMarkerValue] ?? []
                 guard let timingEvent = nearestEvent(to: event, in: candidates) else {
                     skippedTimingMarkers += 1
+                    debit(categories, "Missing timing marker")
                     continue
                 }
                 anchorTimeSeconds = timingEvent.beginTimeSeconds
@@ -860,6 +921,7 @@ nonisolated struct PSABuildJob: Sendable {
 
             guard startSample >= 0, endSample <= sampleCount else {
                 skippedOutOfBounds += 1
+                debit(categories, "Out of bounds")
                 continue
             }
             if skipIfContainsArtifact, !artifactRejectionGroups.isEmpty {
@@ -885,11 +947,15 @@ nonisolated struct PSABuildJob: Sendable {
                     }
                     let breakdownLabel = sortedLabels.joined(separator: " + ")
                     skippedArtifactBreakdown[breakdownLabel, default: 0] += 1
+                    debit(categories, breakdownLabel)
                     continue
                 }
             }
 
-            guard signal.data.indices.allSatisfy({ signal.data[$0].count >= endSample }) else { continue }
+            guard signal.data.indices.allSatisfy({ signal.data[$0].count >= endSample }) else {
+                debit(categories, "Out of bounds")
+                continue
+            }
 
             // One event can feed multiple categories (its own + any pooled
             // group it belongs to) — one job per category, duplicating the epoch.
@@ -1023,7 +1089,15 @@ nonisolated struct PSABuildJob: Sendable {
         var outputStartSample = 0
 
         for (jobIndex, job) in jobs.enumerated() {
-            guard let slice = slices[jobIndex] else { continue }
+            // Pass 2 leaves a job's slice nil only when it rejected the epoch
+            // for having too many bad channels; jobs carry their category, so
+            // that rejection is attributed here rather than under the lock.
+            guard let slice = slices[jobIndex] else {
+                perCategory[job.category, default: .init()]
+                    .reasons["Too many bad channels", default: 0] += 1
+                continue
+            }
+            perCategory[job.category, default: .init()].accepted += 1
             let acceptedSegmentNumber = segments.count + 1
             if interpolatesBadChannelsPerEpoch, let badSet = jobBadChannels[jobIndex], !badSet.isEmpty {
                 for channel in badSet.sorted() {
@@ -1104,7 +1178,8 @@ nonisolated struct PSABuildJob: Sendable {
                 skippedOutOfBounds: skippedOutOfBounds,
                 timingAdjusted: timingAdjusted,
                 rejectedForTooManyBadChannels: rejectedForTooManyBadChannels,
-                badChannelCount: epochBadChannelCounts.count
+                badChannelCount: epochBadChannelCounts.count,
+                perCategory: perCategory
             )
         )
     }

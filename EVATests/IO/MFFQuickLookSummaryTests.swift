@@ -210,6 +210,43 @@ struct MFFQuickLookSummaryTests {
         #expect(try MFFQuickLookSummary.read(from: Fixtures.url("example_4.mff")).impedance == nil)
     }
 
+    @Test func declaredRejectionsInEvaXMLDriveTheKeptRejectedSplit() throws {
+        // The other half of per-category drop tracking: EVA records what
+        // segmentation discarded into eva.xml, and the preview reports it rather
+        // than the misleading 100% a survivors-only package would otherwise show.
+        let source = Fixtures.url("example_1.mff")
+        let package = FileManager.default.temporaryDirectory
+            .appendingPathComponent("declared-rejections-\(UUID().uuidString).mff")
+        try FileManager.default.copyItem(at: source, to: package)
+        defer { try? FileManager.default.removeItem(at: package) }
+
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(
+            operation: .segment,
+            parameters: ["average": "false"],
+            rejections: [
+                CategoryRejection(category: "ULRN", total: 90, included: 8, reasons: ["Eye Blink": 60]),
+                CategoryRejection(category: "LRND", total: 40, included: 13, reasons: ["Out of bounds": 27])
+            ]
+        ))
+        try EVAProcessingScriptXML.write(script, toPackage: package)
+
+        let summary = try MFFQuickLookSummary.read(from: package)
+        let detail = try #require(summary.segmentedDetail)
+        #expect(detail.recordsRejections)
+
+        let ulrn = try #require(detail.conditions.first { $0.name == "ULRN" })
+        #expect(ulrn.kept == 8)
+        #expect(ulrn.rejected == 82)
+
+        let lrnd = try #require(detail.conditions.first { $0.name == "LRND" })
+        #expect(lrnd.kept == 13)
+        #expect(lrnd.rejected == 27)
+
+        #expect(detail.faultHistogram["Eye Blink"] == 60)
+        #expect(abs(detail.retention - 21.0 / 130.0) < 0.001)
+    }
+
     @Test func thumbnailModelReflectsTheSummary() throws {
         let segmented = MFFThumbnailRenderer.Model(
             summary: try MFFQuickLookSummary.read(from: Fixtures.url("example_1.mff"), options: .thumbnail)

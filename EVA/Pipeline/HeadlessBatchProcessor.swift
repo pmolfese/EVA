@@ -105,7 +105,8 @@ enum HeadlessBatchProcessor {
         let auditLogLines = ProcessingAuditLog.lines(
             gradient: core.gradient,
             epoching: core.epoching,
-            channels: store.channels
+            channels: store.channels,
+            cleaningVariance: store.cleaningVariance
         )
         // The script written out is the one handed in *plus* the channel
         // decisions this run made — PSA's globally-bad escalation can mark and

@@ -129,6 +129,7 @@ enum PipelineInvalidation {
         segHealth: SegmentHealthViewModel
     ) {
         appliedArtifactCleaning(artifactVM: artifactVM, template: template)
+        store.cleaningVariance.clear(stageName: "artifactClean")
         artifactVM.detectionRefreshToken += 1
         epochsAndDerived(epoching: epoching, segHealth: segHealth, selection: store.selection)
         interpolations(store: store)
@@ -180,6 +181,14 @@ enum PipelineInvalidation {
 
         appliedArtifactCleaning(artifactVM: artifactVM, template: template)
         artifactVM.detectionRefreshToken += 1
+
+        // Variance accounts live exactly as long as the outputs they describe.
+        // Only the stages cleared above are cleared here -- notably *not* the
+        // whole ledger, because the stage that triggered this cascade records
+        // its own account before calling out, and a blanket clear would erase
+        // the line that just became true.
+        if clearsICA { store.cleaningVariance.clear(stageName: "icaClean") }
+        store.cleaningVariance.clear(stageName: "artifactClean")
 
         epochsAndDerived(epoching: epoching, segHealth: segHealth, selection: store.selection)
         interpolations(store: store)

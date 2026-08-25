@@ -2404,6 +2404,129 @@ nonisolated enum SelfTest {
                     + "excursion fails the amplitude and gradient thresholds"
             ))
 
+            // ---------------------------------------------------------------
+            // Roadmap 3.1: multi-subject and group simulation.
+            // ---------------------------------------------------------------
+
+            var cohortBase = SimulationConfig.default
+            cohortBase.channelCount = 20
+            var cohortDesign = ERPConfig()
+            cohortDesign.targetAmplitudeMicrovolts = 10
+            cohortDesign.standardAmplitudeRatio = 0.4
+            cohortBase.erp = cohortDesign
+            let cohortVariation = GroupVariation()
+
+            func cohort(_ count: Int, seed: UInt64 = 20260822) -> [SubjectDraw] {
+                (0..<count).map {
+                    GroupSimulation.draw(
+                        index: $0, groupSeed: seed, variation: cohortVariation, base: cohortBase
+                    )
+                }
+            }
+
+            // Prefix stability. Growing a simulated cohort must not resample the
+            // subjects already in it — the same property `stableDirection` gives
+            // dipole placement, and for the same reason: a cohort that reshuffles
+            // when it grows makes every earlier result unreproducible.
+            let smallCohort = cohort(6)
+            let largeCohort = cohort(20)
+            let prefixStable = zip(smallCohort, largeCohort).allSatisfy {
+                $0.seed == $1.seed
+                    && $0.headRadiusScale == $1.headRadiusScale
+                    && $0.erpEffectScale == $1.erpEffectScale
+            }
+            outcomes.append(Outcome(
+                name: "Growing a cohort does not resample the subjects already in it",
+                snr: Double(smallCohort.count),
+                passed: prefixStable && smallCohort.count == 6 && largeCohort.count == 20,
+                expectation: "the first 6 draws of a 20-subject cohort equal a 6-subject cohort"
+            ))
+
+            // Between-subject spread has to actually appear, and near the
+            // requested size. A group simulation whose subjects were identical
+            // would let a mixed-effects model estimate a variance component that
+            // is zero by construction — and look like it worked.
+            let spreadCohort = cohort(400)
+            func spread(_ values: [Double]) -> Double {
+                let mean = values.reduce(0, +) / Double(values.count)
+                return (values.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) }
+                    / Double(values.count - 1)).squareRoot()
+            }
+            let alphaSpread = spread(spreadCohort.map(\.alphaAmplitudeScale))
+            let effectSpread = spread(spreadCohort.map(\.erpEffectScale))
+            outcomes.append(Outcome(
+                name: "Between-subject draws match the requested spread",
+                snr: alphaSpread,
+                passed: abs(alphaSpread - cohortVariation.alphaAmplitudeSD) < 0.05
+                    && abs(effectSpread - cohortVariation.erpEffectSD) < 0.05,
+                expectation: "realized SD within 0.05 of the requested value over 400 subjects"
+            ))
+
+            // A homogeneous cohort is the negative control: a group method that
+            // finds structure in it is finding noise.
+            let identicalCohort = (0..<8).map {
+                GroupSimulation.draw(
+                    index: $0, groupSeed: 7, variation: .none, base: cohortBase
+                )
+            }
+            let identical = identicalCohort.allSatisfy {
+                $0.alphaAmplitudeScale == 1 && $0.erpEffectScale == 1 && $0.headRadiusScale == 1
+            }
+            // ...but the subjects must still differ in their *recordings*, since
+            // their seeds differ. Same population, different noise.
+            let distinctSeeds = Set(identicalCohort.map(\.seed)).count == identicalCohort.count
+            outcomes.append(Outcome(
+                name: "A homogeneous cohort varies noise but not parameters",
+                snr: Double(Set(identicalCohort.map(\.seed)).count),
+                passed: identical && distinctSeeds,
+                expectation: "--homogeneous fixes every drawn parameter at 1 while leaving each "
+                    + "subject its own seed"
+            ))
+
+            // The condition contrast is what a group analysis recovers, so it
+            // has to be scaled per subject rather than the whole response. A
+            // scenario whose conditions are identical must report an effect of
+            // exactly zero rather than a small spurious one.
+            let effectSubject = GroupSimulation.draw(
+                index: 3, groupSeed: 99, variation: cohortVariation, base: cohortBase
+            )
+            let effectConfig = GroupSimulation.configure(cohortBase, with: effectSubject)
+            let realizedEffect = GroupSimulation.populationEffect(effectConfig) ?? 0
+            let expectedEffect = (GroupSimulation.populationEffect(cohortBase) ?? 0)
+                * effectSubject.erpEffectScale
+            var flatBase = cohortBase
+            var flatDesign = cohortDesign
+            flatDesign.standardAmplitudeRatio = 1
+            flatBase.erp = flatDesign
+            let flatEffect = GroupSimulation.populationEffect(flatBase) ?? -1
+            outcomes.append(Outcome(
+                name: "Per-subject scaling moves the condition contrast, not the whole response",
+                snr: abs(realizedEffect - expectedEffect),
+                passed: abs(realizedEffect - expectedEffect) < 1e-9 && abs(flatEffect) < 1e-12,
+                expectation: "a subject's effect is the population effect times its own draw, "
+                    + "and identical conditions give exactly zero"
+            ))
+
+            // participants.tsv is the covariate table a group analysis would
+            // regress on, so its shape matters as much as its contents.
+            let cohortTruth = GroupSimulation.truth(
+                subjects: smallCohort, groupSeed: 20260822,
+                variation: cohortVariation, base: cohortBase
+            )
+            let tsvLines = GroupSimulation.participantsTSV(cohortTruth)
+                .split(separator: "\n", omittingEmptySubsequences: true)
+            let columnCounts = Set(tsvLines.map { $0.split(separator: "\t").count })
+            outcomes.append(Outcome(
+                name: "participants.tsv is well formed and starts with participant_id",
+                snr: Double(tsvLines.count),
+                passed: tsvLines.count == smallCohort.count + 1
+                    && columnCounts.count == 1
+                    && tsvLines.first?.hasPrefix("participant_id") == true
+                    && tsvLines.dropFirst().allSatisfy { $0.hasPrefix("sub-") },
+                expectation: "one header plus one row per subject, all the same width, "
+                    + "BIDS participant_id first"
+            ))
+
             var bridged = [[1.0, 2, 3], [3.0, 4, 5], [7.0, 8, 9]]
             let pairs = [ChannelBridge(firstChannel: 1, secondChannel: 2)]
             _ = AdditionalArtifactModel.applyBridging(to: &bridged, pairs: pairs)

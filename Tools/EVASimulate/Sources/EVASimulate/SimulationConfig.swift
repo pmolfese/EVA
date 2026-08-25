@@ -324,6 +324,11 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     var includeImpedance: Bool = true
     /// Typical impedance of a *healthy* electrode, in kΩ. Values scatter around
     /// this; bad channels get values appropriate to their defect instead.
+    /// Per-subject electrode placement variation, in degrees (roadmap 3.1).
+    /// Nil keeps the nominal montage, which is what every single-subject
+    /// scenario wants.
+    var montageJitterDegrees: Double? = nil
+
     var impedanceTypicalKOhm: Double = 12
 
     /// Couples the simulated contact impedance to Johnson noise and mains

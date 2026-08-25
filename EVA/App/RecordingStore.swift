@@ -46,6 +46,9 @@ final class RecordingStore {
     /// The processing history tree and the History rail's display state. Derived
     /// from the processing script for now — see `RecordingHistoryModel`.
     var processingHistory = RecordingHistoryModel()
+    /// What each cleaning stage removed, in the order the stages ran. See
+    /// `CleaningVarianceLedger`.
+    var cleaningVariance = CleaningVarianceLedger()
     /// Single owner of in-flight operation progress, replacing the per-view-model
     /// `operationProgress` properties. See `OperationProgressCenter`.
     var operationProgress = OperationProgressCenter()

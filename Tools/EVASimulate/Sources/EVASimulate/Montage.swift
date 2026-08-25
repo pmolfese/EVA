@@ -114,6 +114,24 @@ nonisolated struct Montage: Sendable {
     /// a front-to-back ordering would hand back an all-frontal montage — fine
     /// for arithmetic, useless for a demo. Above 41 it falls back to a spiral,
     /// which is not a real montage and is named so nobody mistakes it for one.
+    /// The standard montage with each electrode displaced by a random angle.
+    ///
+    /// Models cap placement, which is never twice the same and which changes
+    /// every subject's topography even for identical sources. The jitter is
+    /// applied in the spherical angles the montage is defined in, seeded from
+    /// the recording's own seed so a subject's montage is reproducible.
+    static func standard(count: Int, jitterDegrees: Double, seed: UInt64) -> Montage {
+        var montage = standard(count: count)
+        guard jitterDegrees > 0 else { return montage }
+        var random = GaussianSource(seed: seed)
+        for index in montage.electrodes.indices {
+            montage.electrodes[index].thetaDegrees += jitterDegrees * random.gaussian()
+            montage.electrodes[index].phiDegrees += jitterDegrees * random.gaussian()
+        }
+        montage.name += String(format: " (placement ±%.1f°)", jitterDegrees)
+        return montage
+    }
+
     static func standard(count: Int) -> Montage {
         let full = tenTwenty + tenTenExtension
         guard count > 0 else { return Montage(name: "Empty", electrodes: []) }

@@ -785,6 +785,15 @@ final class GradientViewModel {
                     + "volumes \(listed)\(censored.count > 20 ? ", …" : ""))"
                 )
             }
+            store.cleaningVariance.record(
+                CleaningVarianceAccount.between(
+                    original: sourceData,
+                    cleaned: result.0,
+                    samplingRate: signal.samplingRate,
+                    epochSeconds: CleaningVarianceAccount.defaultEpochSeconds,
+                    stageName: Self.operation
+                )
+            )
             correctedSignal = signal.replacingSamples(result.0)
             if let pnsInput, let correctedPNSData = result.1 {
                 correctedPNSSignal = pnsInput.replacingSamples(correctedPNSData, signalTypeSuffix: "MRI")

@@ -41,12 +41,17 @@ enum ProcessingAuditLog {
     static func lines(
         gradient: GradientViewModel,
         epoching: EpochingViewModel,
-        channels: ChannelModel
+        channels: ChannelModel,
+        cleaningVariance: CleaningVarianceLedger
     ) -> [String] {
         var lines: [String] = []
 
         // What the gradient run excluded and why.
         lines.append(contentsOf: gradient.auditLogLines)
+
+        // What each cleaning stage removed, in the order the stages ran. One
+        // ledger rather than a question per stage: see `CleaningVarianceLedger`.
+        lines.append(contentsOf: cleaningVariance.auditLogLines)
 
         if !epoching.skippedLabeledBadSegmentsSummary.isEmpty {
             lines.append("segment result: skippedLabeledBadSegments=\(epoching.skippedLabeledBadSegmentsSummary.joined(separator: "; "))")

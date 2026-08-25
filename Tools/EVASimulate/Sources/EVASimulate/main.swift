@@ -1096,7 +1096,12 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
     // Preserve the legacy single stream exactly. Dipole mode deliberately uses
     // independent domains so changing source count cannot change an artifact.
     var legacySource = GaussianSource(seed: config.seed)
-    let montage = Montage.standard(count: config.channelCount)
+    let montage = config.montageJitterDegrees.map {
+        Montage.standard(
+            count: config.channelCount, jitterDegrees: $0,
+            seed: SimulationSeedStreams.montageJitter(base: config.seed)
+        )
+    } ?? Montage.standard(count: config.channelCount)
     var leadFieldConvergence: LeadFieldConvergenceReport?
     // One check covers every lead field this run builds — the ERP's (its source
     // comes from `makeSources`, same radius fraction) and the moving-source
@@ -1676,6 +1681,108 @@ func csv(_ score: CorrectionScore, baseline: CorrectionScore?) -> String {
         }
     }
     return lines.joined(separator: "\n") + "\n"
+}
+
+// MARK: - generate-group
+
+/// Generates a cohort of simulated subjects (roadmap 3.1).
+///
+/// Writes `sub-XX/` directories carrying the usual per-subject packages, plus
+/// `participants.tsv` and `group_truth.json` at the root. Push the result
+/// through `eva-bids to-bids` per subject to get a BIDS dataset; the two tools
+/// are kept separate deliberately rather than one calling the other.
+func runGenerateGroup(_ arguments: Arguments) throws {
+    let known = generateOptions.union([
+        "subjects", "group-seed", "head-radius-sd", "placement-sd", "alpha-sd",
+        "bcg-sd", "impedance-sd", "heart-rate-sd", "erp-effect-sd", "homogeneous"
+    ])
+    try arguments.validate(known: known)
+
+    let subjectCount = try arguments.int("subjects") ?? 12
+    guard subjectCount > 0 else { throw SimulateError.usage("--subjects must be positive") }
+    guard let outputPath = arguments.string("output") else {
+        throw SimulateError.usage("generate-group needs --output <dir>")
+    }
+    let base = try makeConfig(arguments)
+    let groupSeed = try arguments.uint64("group-seed") ?? base.seed
+
+    var variation = arguments.flag("homogeneous") ? GroupVariation.none : GroupVariation()
+    if let value = try arguments.double("head-radius-sd") { variation.headRadiusSD = value }
+    if let value = try arguments.double("placement-sd") {
+        variation.electrodePlacementSDDegrees = value
+    }
+    if let value = try arguments.double("alpha-sd") { variation.alphaAmplitudeSD = value }
+    if let value = try arguments.double("bcg-sd") { variation.bcgAmplitudeSD = value }
+    if let value = try arguments.double("impedance-sd") { variation.impedanceSD = value }
+    if let value = try arguments.double("heart-rate-sd") { variation.heartRateSDBPM = value }
+    if let value = try arguments.double("erp-effect-sd") { variation.erpEffectSD = value }
+
+    let root = URL(fileURLWithPath: outputPath)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    var subjects: [SubjectDraw] = []
+    for index in 0..<subjectCount {
+        let draw = GroupSimulation.draw(
+            index: index, groupSeed: groupSeed, variation: variation, base: base
+        )
+        subjects.append(draw)
+        let config = GroupSimulation.configure(base, with: draw)
+        FileHandle.standardError.write(Data(
+            "[sub-\(draw.label)] \(index + 1)/\(subjectCount)\n".utf8
+        ))
+        _ = try runGenerate(
+            config: config, arguments: arguments,
+            outputDirectory: root.appendingPathComponent("sub-\(draw.label)")
+        )
+    }
+
+    let truth = GroupSimulation.truth(
+        subjects: subjects, groupSeed: groupSeed, variation: variation, base: base
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    try encoder.encode(truth).write(
+        to: root.appendingPathComponent("group_truth.json"), options: .atomic
+    )
+    try GroupSimulation.participantsTSV(truth).write(
+        to: root.appendingPathComponent("participants.tsv"), atomically: true, encoding: .utf8
+    )
+
+    print("")
+    print("Cohort: \(subjectCount) subjects in \(root.lastPathComponent)")
+    if let effect = truth.populationEffectMicrovolts, abs(effect) > 1e-9 {
+        let realized = truth.realizedBetweenSubjectSD["erpEffectScale"] ?? 0
+        print(String(
+            format: "  population ERP effect %.2f µV, between-subject SD %.0f%% requested / "
+                + "%.0f%% realized",
+            effect, 100 * variation.erpEffectSD, 100 * realized
+        ))
+    } else if truth.populationEffectMicrovolts != nil {
+        // Reporting a between-subject SD here would be actively misleading: the
+        // effect-scale draws multiply zero, so they vary nothing. A cohort with
+        // no condition contrast is a legitimate *negative control* — a group
+        // method that finds an effect in it is finding noise — but it cannot be
+        // used to test effect recovery, and saying so is cheaper than letting
+        // someone discover it from a null result.
+        print("  NOTE: every ERP component has standardAmplitudeRatio 1, so target and")
+        print("        standard are identical and the population effect is exactly 0 µV.")
+        print("        Useful as a negative control; useless for testing effect recovery.")
+        print("        Use scenarios/group-oddball.json for a cohort with a real contrast.")
+    } else {
+        print("  no ERP in this scenario, so there is no population effect to recover")
+    }
+    print(String(
+        format: "  realized between-subject SD: head %.3f, alpha %.3f, BCG %.3f, impedance %.3f",
+        truth.realizedBetweenSubjectSD["headRadiusScale"] ?? 0,
+        truth.realizedBetweenSubjectSD["alphaAmplitudeScale"] ?? 0,
+        truth.realizedBetweenSubjectSD["bcgAmplitudeScale"] ?? 0,
+        truth.realizedBetweenSubjectSD["impedanceScale"] ?? 0
+    ))
+    print("  wrote participants.tsv and group_truth.json")
+    print("")
+    print("  A requested SD and a realized SD are different things at small N.")
+    print("  Score group results against group_truth.json's population value,")
+    print("  not against any one subject.")
 }
 
 // MARK: - evaluate-surrogate
@@ -2723,6 +2830,8 @@ do {
         } else if arguments.string("write-config") == nil {
             throw SimulateError.usage("generate needs --output <dir> or --write-config <json>")
         }
+    case "generate-group":
+        try runGenerateGroup(arguments)
     case "correct":
         try runCorrect(arguments)
     case "evaluate-surrogate":

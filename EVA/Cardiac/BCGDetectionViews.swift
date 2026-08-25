@@ -1506,7 +1506,22 @@ extension WaveformView {
                 : sr
             if outputRate == sr, correctedData.first?.count == signal.data.first?.count {
                 bcg.correctedSignal = signal.replacingSamples(correctedData, signalTypeSuffix: "CWL")
+                // Only the rate-preserving branch is accounted. When CWL
+                // downsamples, input and output samples do not correspond, so a
+                // sample-wise difference would not be the removed signal --
+                // it would be the removed signal plus the resampling. Better to
+                // report nothing than to report that as artifact.
+                bcg.store.cleaningVariance.record(
+                    CleaningVarianceAccount.between(
+                        original: signal.data,
+                        cleaned: correctedData,
+                        samplingRate: sr,
+                        epochSeconds: CleaningVarianceAccount.defaultEpochSeconds,
+                        stageName: "cwlCorrection"
+                    )
+                )
             } else {
+                bcg.store.cleaningVariance.clear(stageName: "cwlCorrection")
                 let ratio = outputRate / sr
                 let segments = signal.epochSegments.compactMap { segment -> EpochSegment? in
                     let start = Int((Double(segment.startSample) * ratio).rounded())

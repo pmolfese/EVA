@@ -293,6 +293,42 @@ stage. `--reference infinity` preserves native potentials without
 re-referencing; `scenarios/paper-default.json` uses that legacy convention so
 the reviewed paper-reproduction waveform is not changed by this addition.
 
+## Cohorts
+
+`generate-group` writes a cohort of subjects rather than one recording:
+
+```sh
+eva-simulate generate-group --config scenarios/group-oddball.json \
+    --subjects 20 --output cohort/
+```
+
+Each subject gets a `sub-XX/` directory with the usual packages, and the root
+gets `participants.tsv` (BIDS covariate table, with each subject's *true* drawn
+parameters) and `group_truth.json`.
+
+The reason this is more than running the generator N times: a group study has two
+levels of ground truth, and both are recorded — the **population** condition
+difference a group analysis is trying to recover, and the **between-subject
+variance** around it. N draws from one distribution have no between-subject
+structure at all, so a mixed-effects model fitted to them estimates a variance
+component that is zero by construction and appears to work regardless. Score
+group results against `group_truth.json`'s population value, not against any one
+subject.
+
+Per subject the tool varies head radius (which changes the forward model, so
+topographies differ even for identical sources), electrode placement, alpha
+amplitude, BCG severity, impedance quality, heart rate, and the ERP effect size —
+each declared as a standard deviation and recorded. `--homogeneous` zeroes all of
+them, which is the negative control: a group method that finds structure in a
+homogeneous cohort is finding noise.
+
+Cohorts are **prefix-stable**: the first 6 subjects of a 12-subject cohort are
+byte-identical to a 6-subject cohort, so growing a cohort never resamples the
+subjects already in it.
+
+For BIDS, run `eva-bids to-bids` once per subject; the two tools are kept
+separate rather than one calling the other.
+
 ## Scenario files
 
 A scenario is a versioned JSON envelope containing a name, description, schema
