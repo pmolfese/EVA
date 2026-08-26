@@ -10,8 +10,10 @@
 //  may apply.
 //
 //  The panel behind the toolbar status area: **Queue** and **History** as two
-//  tabs of one popover — `REWIND.md`'s "the queue and the tree are one state
-//  machine", and the layout in `docs/figures/REWIND_FIG_2.png`.
+//  adjacent tabs in one popover, using the layout in
+//  `docs/figures/REWIND_FIG_2.png`. Queue owns active progress and the status
+//  log; History owns committed processing lineage. They do not currently share
+//  one node lifecycle.
 //
 //  ## Why the history lives here rather than in a sidebar
 //
@@ -20,11 +22,7 @@
 //  occasionally — and the waveform is the thing people are actually looking at.
 //  The status area already owns "what is this app doing", already opens a
 //  popover, and is already where progress appears. Putting the tree there costs
-//  no waveform width and puts the two renderings of the same objects side by
-//  side, which is what the design says they are:
-//
-//  > History renders that lifecycle **positionally** (where in the tree). Queue
-//  > renders it **temporally** (what order, how long, what is blocking).
+//  no waveform width and puts progress beside lineage without conflating them.
 //
 //  ## What happened to the two old popovers
 //

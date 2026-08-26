@@ -397,9 +397,10 @@ final class FilterViewModel {
     var parameters: [String: String] {
         let cutoffs = try? currentCutoffs()
         // `averageReference` is deliberately absent: re-referencing is its own
-        // `reference` step now, so that flipping it forks the history *after*
-        // the filter instead of recomputing a band-pass that did not change,
-        // and so that the excluded-channel set it depends on is recorded.
+        // `reference` step now, so its history state sits *after* the filter
+        // instead of recomputing a band-pass that did not change, and so that
+        // the excluded-channel set it depends on is recorded. Alternatives are
+        // preserved with an explicit window fork.
         // See `Rereferencing`.
         var params: [String: String] = [:]
         if let highPassHz = cutoffs?.highPassHz {

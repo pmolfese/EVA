@@ -37,14 +37,14 @@ when it is an independent bug fix required for safe use.
 | 16 | **UI-1 — Display density and montages** | Decouple sensitivity from row pitch, add channels-per-screen, then named subsets/order. | **NOT STARTED** |
 | 17 | **UX-1 — Figure Composer Phase 2** | Add a freeform, multi-page publication-layout canvas. | **NOT STARTED** |
 | 18 | **F-1 — Focused feature backlog** | Finish exports, importer mapping, detector comparators, and other bounded follow-ups. | **DEFERRED** |
-| C1 | **Performance/Observation refactor** | Remove measured SwiftUI invalidation, struct-copy, sheet, and scroll hot spots. | **COMPLETED** |
-| C2 | **Processing and batch core** | Establish shared headless transforms, replay compatibility, export, and parity. | **COMPLETED** |
-| C3 | **REWIND foundation** | History tree, snapshots, navigation, payloads, progress center, branching, and multi-window support. | **COMPLETED** |
-| C4 | **App/window stability fixes** | Correct multi-window routing, Batch scene dependencies, focus publication, and new-window workflows. | **COMPLETED** |
-| C5 | **Channel-set geometry catalog** | Persist real net geometries and manage net-specific channel sets. | **COMPLETED** |
-| C6 | **Physical display/export scales** | Label and persist physical display units and correct exported-figure scale metadata. | **COMPLETED** |
-| C7 | **Figure Composer Phase 1** | Basket, reorder/remove, and vector contact-sheet export. | **COMPLETED** |
-| C8 | **Trial-wise diagnostics foundation** | LOO similarity, drift plots, reviewed selection previews, multi-peak metrics, and the dashboard. | **COMPLETED** |
+| C1 | **Performance/Observation refactor** | Remove measured SwiftUI invalidation, struct-copy, sheet, and scroll hot spots. | ✅ **COMPLETED** |
+| C2 | **Processing and batch core** | Establish shared headless transforms, replay compatibility, export, and parity. | ✅ **COMPLETED** |
+| C3 | **REWIND foundation** | Linear per-window undo/redo, snapshots, navigation, payloads, progress center, explicit window forks, and multi-window support. | ✅ **COMPLETED** |
+| C4 | **App/window stability fixes** | Correct multi-window routing, Batch scene dependencies, focus publication, and new-window workflows. | ✅ **COMPLETED** |
+| C5 | **Channel-set geometry catalog** | Persist real net geometries and manage net-specific channel sets. | ✅ **COMPLETED** |
+| C6 | **Physical display/export scales** | Label and persist physical display units and correct exported-figure scale metadata. | ✅ **COMPLETED** |
+| C7 | **Figure Composer Phase 1** | Basket, reorder/remove, and vector contact-sheet export. | ✅ **COMPLETED** |
+| C8 | **Trial-wise diagnostics foundation** | LOO similarity, drift plots, reviewed selection previews, multi-peak metrics, and the dashboard. | ✅ **COMPLETED** |
 
 ## Execution order and dependency map
 
@@ -204,19 +204,166 @@ The history foundation is built; do not reopen its architecture. This milestone
 is a bounded correctness/validation pass so `bcgCorrection` can join a reliable
 pipeline. `REWIND.md` remains the detailed design record.
 
-- [ ] Run paired byte comparisons for artifact-template re-derivation, ICA
-  replay, `markBad`, gradient motion parameters, and continuous/epoch reference.
-- [ ] Instrument—not guess—the observed impossible state where `eva_ica.json`
-  existed without an `icaClean` step.
-- [ ] Finish `markBad`/interpolation carry-through and resolve their position
-  relative to wavelet and segment operations.
-- [ ] Make replay interaction represent “resolved from this file's payload”
-  rather than relying on a batch-local workaround.
-- [ ] Ensure threshold configuration edits produce deliberate history nodes
-  without recording one node per slider tick.
-- [ ] Re-derive evicted snapshots and expose the memory-budget preference;
-  disabled, unreachable history nodes are not the final behavior.
-- [ ] Add A/B compare only after two nodes can be selected reliably.
+### REWIND consistency audit — prioritized TODOs (2026-08-25)
+
+These are ordered by correctness risk, then by user-facing coherence. Several
+replace stale items in `REWIND.md`: evicted-node re-derivation already exists,
+history is linear within one window, and A/B alternatives are explicit window
+forks rather than persistent sibling nodes.
+
+1. [ ] **Make on-disk-prefix navigation safe.** A processed MFF opens with its
+   loaded samples already at the tip of `eva.xml`; rebuilding an interior prefix
+   node from `recording.signal` can apply those steps a second time. Either keep
+   those nodes non-navigable until the true pre-prefix source is available, or
+   re-derive from an explicitly cached/source input. Add a processed-file test
+   proving an interior click never double-filters, double-references, or
+   double-corrects.
+2. [ ] **Make re-derivation latest-only and commit-safe.** Multiple rapid history
+   clicks currently launch independent rebuild tasks. Serialize or cancel them,
+   cancel on close/source change, and verify the recording ID, history node, and
+   source revision again before committing so an older completion cannot move
+   the window after a newer request.
+3. [ ] **Finish channel-decision identity and carry-through.** Resolve where
+   `markBad` and `interpolateChannels` belong relative to filter, reference,
+   wavelet, and segment; persist or deterministically re-solve every required
+   interpolation input; patch or re-derive `segmentedEpochSignal` consistently;
+   and test interactive, replay, and re-derivation parity.
+   A failed re-solve must return the channel to bad, retain an explicit
+   “interpolation lost” state, appear in the channel row and status history, and
+   reach the processing audit log—never leave stale replacement samples active.
+4. [ ] **Complete the paired validation and impossible-state instrumentation.**
+   Run byte comparisons for artifact-template re-derivation, ICA replay,
+   `markBad`, gradient motion parameters, and continuous/epoch reference.
+   Instrument—not guess—the observed `eva_ica.json` without an `icaClean` step.
+5. [ ] **Commit threshold edits deliberately.** Threshold configuration changes
+   must create one history state when applied, not zero states and not one node
+   per slider tick.
+6. [ ] **Represent “resolved from this file's payload” in replay policy.** Move
+   the batch-local workaround into `ReplayInteraction`, with per-file gating and
+   an explicit skip/ask policy when the payload is absent. Decide which recorded
+   decisions—at least `markBad`, interpolation, and BCG detection—pause to open
+   their file-specific interface in windowed replay, and which remain inert.
+7. [ ] **Make the snapshot policy truthful.** Re-derivation is built, so harden
+   its supported-step matrix and failure UI; expose the memory budget; either
+   wire Pin into the rail and exempt pinned snapshots during eviction or remove
+   the dormant pin promise. Record measured `computeCost` before showing any
+   cached/fast/slow estimate.
+8. [ ] **Choose the real Queue/History contract.** Today Queue shows in-flight
+   progress plus a status log; it is not the same node-lifecycle system as
+   History. Linear replacement also contradicts REWIND's “stale descendants stay
+   visible” section. Prefer documenting the two tabs as adjacent views for now;
+   add queued/dependency/speculative node states only when full-rate rebuilds
+   actually require them.
+9. [ ] **Finish the minimum Mac history surface and trim aspirational UI.** Add
+   Command-Z / Shift-Command-Z routing to back/forward. Decide which promised
+   row actions are real requirements—rename, delete future, pin, reopen stage,
+   export/report from node—and remove or defer the rest instead of documenting
+   an unimplemented context menu. Fork to New Window is the only row action
+   currently shipped.
+10. [ ] **Define A/B comparison around related forked windows.** Replace the old
+    “select two sibling nodes” prerequisite with a way to identify two windows
+    forked from the same state, align their signals/viewport, and compare overlay,
+    difference, and health metrics. Decide whether independently opening the same
+    file should warn, relate the windows, or remain unrelated.
+11. [ ] **Decide portable history versus session cache.** Settle whether export
+    carries the whole history or only the current lineage, and whether a slim
+    `eva_history.json` accompanies an optional machine-local snapshot/import
+    cache. Cache staleness should use cheap source metadata such as mtime + size;
+    record enough build/backend compatibility to avoid trusting GPU- or
+    Accelerate-derived snapshots across incompatible machines. External motion
+    inputs need the same explicit staleness rule. Expanded SHA-256 infrastructure
+    is not a prerequisite or project priority.
+12. [ ] **Make forks reliable for non-MFF imports.** Preserve the required
+    security scope or create a normalized disposable cache for BrainVision, EDF,
+    Persyst, and BESA so a fork never depends on inaccessible original sidecars.
+13. [x] **Reconcile `REWIND.md` and code comments with shipped behavior —
+    completed 2026-08-25.** Removed stale claims about the sidebar, persistent
+    sibling branches, disabled evicted nodes, missing re-derivation, unbuilt
+    transport, `Window` rather than `WindowGroup`, and the already-finished
+    Observation refactor. Historical design sections remain, clearly labeled as
+    historical.
+14. [ ] **Close or justify history-derived invalidation.** REWIND still proposes
+    replacing clear/cascade logic with history navigation, while the shipped
+    architecture centralizes those rules in `PipelineInvalidation`. Treat the
+    centralized shared cascade as the final design unless a concrete bug proves
+    that deriving invalidation from history would be safer; do not maintain two
+    competing architectural promises.
+15. [ ] **Define provenance for combined recordings.** Decide whether append,
+    grand average, and other multi-recording outputs start a fresh history that
+    records input recording/node identities, rather than implying that multiple
+    histories can be merged into one linear undo chain.
+16. [ ] **Separate “not assessed” from “good.”** Segment Health currently treats
+    an artifact metric with no detection run as fully good. Decide and regression
+    test an explicit unavailable/not-assessed state before changing exported
+    training scores.
+
+### REWIND material carried into this ROADMAP
+
+`REWIND.md` is retained as the detailed rationale and implementation archive.
+This section is the completeness index: every execution-relevant proposal,
+decision, gap, and deferred question from that document has a home here. If the
+two documents disagree, this ROADMAP controls priority and current behavior.
+
+| REWIND material | Authoritative ROADMAP home |
+|---|---|
+| Core content-addressed history model, canonical script adoption, linear per-window undo/redo | C3 completed foundation; RW-1 items 1–2 harden navigation |
+| Navigation snapshots, memory budget, eviction, re-derivation, preview/cost ideas | RW-1 items 1, 2, and 7; portable/session storage in item 11 |
+| Node granularity, toggles, preview-versus-apply, threshold configuration | Canonical decisions below; RW-1 items 5 and 9 |
+| Queue/History lifecycle, work classes, stale descendants, preview race | RW-1 item 8; original lifecycle proposal is deferred unless full-rate queued rebuilds require it |
+| History interactions: transport, keyboard, pin, rename, delete, reopen, export/report | RW-1 items 7 and 9 |
+| A/B overlay, difference, health comparison | RW-1 item 10, using related forked windows |
+| Generic invalidation | RW-1 item 14; centralized `PipelineInvalidation` is the current implementation |
+| ICA/artifact payloads, bad-channel decisions, interpolation recipes and failure visibility | C2/C3 completed payload foundation; RW-1 items 3, 4, and 6 |
+| Determinism and paired interactive/headless validation | RW-1 item 4 |
+| Session persistence, `eva_history.json`, snapshot cache, normalized imports | RW-1 items 11 and 12 |
+| Replay/batch per-file decisions and payload resolution | RW-1 item 6; PB-1 later completes batch policy |
+| Copy-processing semantics, batch target-state identity, and node-specific reports | PB-1; RW-1 items 9–10; REPORTS work in F-1 |
+| BCG detection decisions and the dormant `ecgDetection` history operation | RW-1 item 6 and SI-3; dormant ECG operation is carried in F-1 detector work |
+| Processed-file lineage and unavailable interior snapshots | C3 seeding foundation; RW-1 item 1 correctness fix |
+| Reference and baseline as explicit domain-aware operations | C2/C3 completed foundation; paired validation remains RW-1 item 4 |
+| Segment-history fixes, regex-only segmentation, total settings restoration | C2/C3 completed foundation |
+| Segment Health “not assessed” semantics | RW-1 item 16 |
+| Explicit Fork to New Window and multi-window ownership | C3/C4 completed foundation; non-MFF reliability is RW-1 item 12 |
+| Same-file multi-window identity and cross-window comparison | RW-1 item 10 |
+| Dedicated Batch window and window-scoped recording state | C4 completed foundation |
+| Multi-recording combine/grand-average provenance | RW-1 item 15 |
+| Observation/performance refactor | C1 completed; snapshot policy follow-up is RW-1 item 7 |
+| Machine-local GPU/Accelerate cache limits and external motion-file inputs | RW-1 item 11; motion policy in MRI-1 |
+
+### Canonical REWIND decisions carried forward
+
+- **One window has linear history.** Removing a stage retains redo; applying a
+  different action at that point discards the abandoned future and snapshots.
+  Re-applying the exact undone action reuses it. Preserve alternatives by
+  explicitly forking a window.
+- **The canonical processing script describes state.** History follows pipeline
+  order, not the chronological order in which sheets happened to be applied.
+- **A node is committed processing, not editing UI.** Panning, scaling, opening a
+  sheet, and preview/slider motion are not nodes. Applying a signal- or
+  export-changing state is a node. Undo-shaped actions navigate rather than
+  append inverse steps.
+- **Snapshots make ordinary navigation instant; re-derivation is fallback.** A
+  fallback must be exact, latest-only, source-valid, and all-or-nothing. A
+  plausible partial reconstruction is a correctness failure.
+- **Subject-specific fitted state needs its own payload.** Portable parameters
+  and recording-specific ICA/artifact/channel decisions remain distinct. Replay
+  may use a payload only when it belongs to the file being processed.
+- **Reference is an explicit operation with a domain.** Continuous and epoch
+  reference share a scheme type but occur at different pipeline positions and
+  carry their excluded-channel set.
+- **Centralized invalidation is the current design.** `PipelineInvalidation`
+  serves interactive and headless paths. History-derived invalidation remains
+  closed unless evidence shows a concrete safety advantage.
+- **Queue and History are adjacent views today.** Queue owns active progress and
+  the status log; History owns processing lineage. If queued rebuilds later make
+  nodes lifecycle-bearing, work classes remain user-initiated, dependency, and
+  speculative, in that priority order, with speculative work preemptible.
+- **No native EVA project format is planned.** Portable lineage may remain a
+  small sidecar while large snapshots and normalized imports live in an optional,
+  disposable machine-local cache. Deleting that cache must lose only speed.
+- **Do not expand hashing as a project.** Existing node identity remains an
+  implementation detail already in use; new SHA-256 manifests or whole-recording
+  hash infrastructure are not a priority or prerequisite.
 
 **Exit:** a new correction stage can be recorded, restored, replayed, exported,
 and compared without introducing another view-only or non-deterministic path.
@@ -490,6 +637,9 @@ projects above, not treated as one parallel program.
 
 - [ ] Engzee/Engelse–Zeelenberg QRS comparator.
 - [ ] Hilbert/energy-transform QRS comparator.
+- [ ] Reconcile the dormant `ecgDetection` history operation: emit it from the
+  canonical ECG-detection state if it belongs in lineage, or retire it if it is
+  provenance-only.
 - [ ] Editable resting-state spectral bands after the dashboard workflow settles.
 - [ ] Seed BCG Spatial PCA from a selected trajectory-strip frame, bypassing
   covariance/PCA derivation when the exemplar is too short or noisy.

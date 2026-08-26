@@ -6,12 +6,22 @@ forking to a second window.
 
 Written 2026-08-11.
 
+**Document role after 2026-08-25.** This file is retained as REWIND's detailed
+design rationale and implementation archive. [`ROADMAP.md`](ROADMAP.md), section
+**RW-1**, is the authoritative list of current behavior, remaining work, and
+priority. Every execution-relevant decision, gap, proposal, and open question in
+this document is represented there; dated proposals below are not independent
+TODO lists.
+
 **Where this stands after 2026-08-25.** Undo and redo work: the History tab in
-the status popover shows the processing lineage, clicking a node restores that
-point instantly, and back/forward transport is live. Fork to New Window is also
-built. Items 1, 4, and 9 are built; 5 and 8 have had a substantial first pass.
-What is *not* built is A/B compare, session persistence, and re-derivation for
-nodes whose snapshot has been evicted.
+the status popover shows the processing lineage, clicking a cached node restores
+that point instantly, evicted supported nodes can be re-derived, and
+back/forward transport is live. Fork to New Window is also built. Items 1, 4,
+and 9 are built; 5 and 8 have had a substantial first pass. What is *not* built
+is A/B compare, session persistence, the complete interaction menu, or the
+fully hardened re-derivation contract. In particular, processed-file prefix
+navigation and rapid competing rebuilds need the safeguards in ROADMAP RW-1
+items 1–2.
 
 **Behavior correction 2026-08-25.** A normal recording window no longer keeps
 every replaced processing choice as a persistent sibling branch. Removing a
@@ -27,17 +37,19 @@ lineage and snapshots and then evolves independently. This resolves the open
 question at the bottom of this document: the branch tree did not earn its
 complexity as the default one-window behavior.
 
-**Read `Open threads` at the bottom first** if you are picking this up — it
-carries the unresolved items and two things that are verified only by reasoning.
+**Start with ROADMAP RW-1 if you are picking this up.** The `Open threads`,
+`Next`, and `Open questions` sections below are preserved for context; their
+current disposition is indexed in the ROADMAP under *REWIND material carried
+into this ROADMAP*.
 
 ---
 
-## Status 2026-08-13 — prerequisites done, then the first three pieces built
+## Historical checkpoint: 2026-08-13 prerequisites and first build
 
 The morning's status: nothing in this document had been built, but the ground it
 stands on had changed. That is still the right framing for the table below, which
 records what the Priority 1 refactor and the parity work handed this design.
-**What has since been built is listed under *What has to be built*, item by
+**What has since been built is listed under *Work-item record and current disposition*, item by
 item** — `EVAHistory`, the ICA payload, and the determinism audit's first pass.
 
 The `ROADMAP.md` Priority 1 refactor completed, and a day of headless/interactive
@@ -52,9 +64,11 @@ parity work landed several things this design assumed it would have to create:
 | One invalidation cascade instead of hand-written per-stage ones | `PipelineInvalidation` — the precursor to item 3 |
 | Re-applying a step headlessly and getting the same answer | **Verified byte-identical** (see below) |
 
-**Item 9 (progress consolidation) is complete.** Item 3 (generic invalidation) is
-partly staged: the cascade is now defined once, so replacing it with a *derived*
-one means changing one file rather than hunting `clear*()` functions.
+**Item 9 (progress consolidation) is complete.** The shipped answer to item 3 is
+the one centralized `PipelineInvalidation` cascade shared by interactive and
+headless paths. History-derived invalidation is no longer the presumed next
+architecture; ROADMAP RW-1 item 14 keeps it closed unless a concrete bug shows a
+safety advantage.
 
 ### Determinism is no longer hypothetical
 
@@ -207,7 +221,11 @@ inputs, not one large generic container.
 
 ---
 
-## The problem today
+## Original problem that motivated REWIND
+
+The present implementation has history, snapshots, linear undo/redo, centralized
+invalidation, and explicit window forks. This section preserves the pre-REWIND
+failure mode; it is not a description of the current UI.
 
 Undo exists per-stage, but there is no history and no redo.
 
@@ -277,9 +295,11 @@ Node
   label         user-editable, defaults to a rendering of the step
 ```
 
-Navigating to a node means: find the nearest cached ancestor, then re-apply the
-steps between it and the target. Undo is "navigate to parent". Redo is "navigate
-to the child you came from". Branching is free — it's just a second child.
+Navigating to a cached node restores its `PipelineSnapshot`. A supported evicted
+node is rebuilt from a valid source and then snapshotted. Undo is "navigate to
+parent" and redo is "navigate to the child you came from". The value type can
+represent a second child for old/copied histories, but ordinary window history
+is linear; retained alternatives use Fork to New Window.
 
 ### Why the payload matters
 
@@ -410,14 +430,20 @@ Consequences worth designing around:
 - Replacement pruning is immediate, not memory-pressure policy. Otherwise the
   History rail continues to imply that superseded processing remains part of the
   active work.
-- Replay must never recompute when a valid cache exists. Node identity is what
-  guarantees this: if the ID matches, the bytes match.
+- Replay must never recompute when a valid snapshot for the exact source and
+  state exists. Node identity is necessary, but ambient channel decisions and
+  external inputs must also be captured before identity alone can guarantee the
+  bytes; that is ROADMAP RW-1 item 3.
 - The A/B case ("with and without ICA") belongs in two forked recording windows,
   where both alternatives are visible and neither silently changes the other.
 
 ---
 
-## Memory: the real constraint
+## Memory: original cache-policy design
+
+Snapshots and a byte budget shipped; manual pinning, measured cost, disk spill,
+and the preview tier did not. Treat the policy below as rationale for ROADMAP
+RW-1 items 7, 11, and 12, not as current behavior.
 
 A cached signal is large. 128 ch × 1000 Hz × 20 min × 4 bytes ≈ **614 MB**.
 256 ch × 60 min ≈ **3.7 GB**. Caching every node is not an option.
@@ -431,7 +457,7 @@ Policy:
   when disk is cheaper than recompute.
 - **Auto-pin expensive stages** by measured wall time: if a step took >30 s, keep
   its output by default.
-- **Show the cost.** Each node in the sidebar knows whether navigating to it is
+- **Show the cost.** Each node in the History popover should say whether navigating to it is
   instant (cached), fast (a few cheap steps), or slow (needs a gradient re-run).
   Surface that before the click, not after.
 
@@ -476,7 +502,8 @@ support this.
 
 ## Granularity
 
-Open question, and the one most likely to be got wrong.
+Settled for ordinary recording windows; threshold editing is the remaining
+edge case (ROADMAP RW-1 item 5).
 
 **Proposal: a node is a step that changes the derived signal, or changes what
 gets exported.** That means `apply filter`, `remove ICA components`, `mark bad`,
@@ -485,12 +512,11 @@ the waveform, changing a display scale, or opening a sheet do not.
 
 Two things deserve care:
 
-- **Toggles.** "Turn artifact correction off" is a real node (it changes the
-  data), but a user flipping it back and forth six times should not produce six
-  nodes. Collapse a toggle back to its previous state — navigating to an existing
-  identical node rather than creating a new one. The node ID being a hash of the
-  full ancestry makes this automatic: the same steps in the same order produce
-  the same ID, so the tree self-deduplicates.
+- **Toggles.** "Turn artifact correction off" changes the derived state, but it
+  is an undo-shaped action and therefore navigates/removes rather than appending
+  an inverse operation. Node identity does **not** automatically collapse
+  `off → on`: ancestry makes that a different node. Linear replacement semantics
+  are what prevent six flips from creating six persistent states.
 - **Parameter tweaking.** Adjusting a filter cutoff four times while previewing
   should produce one node, not four. Debounce: only commit a node when the stage
   is *applied*, not while its sheet is open. EVA already distinguishes preview
@@ -498,11 +524,18 @@ Two things deserve care:
 
 ---
 
-## The queue and the tree are one state machine
+## Original proposal: Queue and History as one state machine
 
-The sidebar is a tab view — **Queue** and **History** — but they are two
-renderings of the same objects, not two systems. A queued operation *is* a node
-that does not have its signal yet.
+**Current correction.** The shipped tabs are adjacent, not two renderings of
+the same node lifecycle. Queue shows active operations and the status log;
+History shows committed processing lineage. The lifecycle/work-class design
+below remains useful if full-rate background rebuilds later need it, but it is
+not the present model. Linear replacement also means the old proposal to keep
+stale descendants visible does not describe ordinary current behavior. See
+ROADMAP RW-1 item 8.
+
+The original proposal treated the tabs as two renderings of the same objects: a
+queued operation would have been a node without its signal yet.
 
 ![Queue and History tabs](docs/figures/REWIND_FIG_2.png)
 
@@ -532,7 +565,7 @@ work is always preemptible** — it must yield the moment real work arrives.
 `ProcessingQueue` and the existing `try Task.checkCancellation()` checks give us
 most of this.
 
-### Stale descendants stay visible
+### Original proposal: stale descendants stay visible
 
 When an ancestor changes, its descendants do not disappear from the tree. They
 render dashed and greyed as `stale · queued`. This is what makes "you changed
@@ -544,7 +577,7 @@ it gives the user something to click to prioritise.
 The two-tier cache creates a window where the display shows node N but the
 full-rate signal is not ready. Rather than blocking:
 
-- Say so plainly in the sidebar — "viewing a preview; edits will queue".
+- Say so plainly in the History popover — "viewing a preview; edits will queue".
 - Scrolling, zooming, and inspection work immediately off the preview.
 - Any action needing real samples (apply a stage, fit ICA, export) is **enqueued**
   against the full-rate rebuild rather than reading a partial buffer.
@@ -553,14 +586,12 @@ Reading a not-yet-valid buffer is the same class of bug as the current
 hand-written cascades. Making the queue the only path to the full-rate signal is
 what prevents reintroducing it.
 
-### It replaces the scattered progress UI
+### Progress consolidation that did ship
 
-Progress is currently per-view-model — `operationProgress: OperationProgress?` on
-`GradientViewModel`, `FilterViewModel`, and others, each fed by its own
-`ProgressBridge.make { … }` and surfaced in its own panel. The Queue tab becomes
-the **single consumer**: one place that shows what is running regardless of which
-stage owns it. Per-VM progress state migrates to the queue rather than each sheet
-rendering its own bar.
+Progress was formerly per-view-model. `OperationProgressCenter` now consolidates
+in-flight progress, and the Queue tab is its single status-area consumer. That
+completed work does not imply that queued operations and history nodes share one
+lifecycle.
 
 This is a simplification, not an addition — and it is a natural companion to the
 Priority 1 Observation work, since it removes a set of frequently-ticking
@@ -571,14 +602,20 @@ re-evaluate.
 
 ## Interactions
 
-The sidebar is the primary view for navigating processing state, not a passive
-readout.
+This section records the intended Mac interaction model. The shipped primary
+view is the **History tab in the processing-status popover**, not a sidebar.
+Click navigation, back/forward transport, and **Fork to New Window** are built.
+Keyboard undo/redo, pinning, rename, delete-future, reopen-stage,
+export/report-from-node, cost hints backed by measured `computeCost`, and A/B
+comparison remain proposals tracked by ROADMAP RW-1 items 7, 9, and 10.
 
-**Click a node** — navigate to it. Instant when cached, otherwise it enqueues the
-recompute and shows the estimated cost first. This is undo and redo: clicking
-the parent is undo, clicking back down is redo. No separate undo stack.
+**Click a node** — navigate to it. It is instant when cached; supported evicted
+nodes currently launch re-derivation. The latest-only/source-valid safeguards
+and truthful cost UI are still required. This is undo and redo: clicking the
+parent is undo, clicking back down is redo. No separate undo stack.
 
-**Right-click a node** — context menu:
+**Right-click a node** — intended context menu. Only **Fork to New Window** is
+currently wired:
 
 | Item | Behavior |
 |---|---|
@@ -590,10 +627,10 @@ the parent is undo, clicking back down is redo. No separate undo stack.
 | Report from here… | generate an `EVAReport` for this node (see `REPORTS.md`) |
 | Delete future | prune this redo node and its descendants; disabled on ancestors of current |
 
-**Hover a node** — show the cost hint (cached / fast / needs a gradient re-run)
-and the measured `computeCost` from when it was first computed.
+**Hover a node** — proposed: show the cost hint (cached / fast / needs a
+gradient re-run) only after measured `computeCost` is populated.
 
-**Double-click a step's parameters** — reopen that stage's sheet with its recorded
+**Double-click a step's parameters** — proposed: reopen that stage's sheet with its recorded
 parameters loaded. Applying with changes replaces the redo chain in this window;
 applying unchanged follows the retained node or is a no-op.
 
@@ -601,8 +638,8 @@ applying unchanged follows the retained node or is a no-op.
 the retained redo child, so back-then-forward is always a round trip until a
 different action deliberately replaces that future.
 
-**Keyboard** — `⌘Z` / `⇧⌘Z` map to step back and step forward, so the feature is
-reachable without the sidebar open and behaves the way every other Mac app does.
+**Keyboard** — proposed: `⌘Z` / `⇧⌘Z` map to step back and step forward, so the
+feature is reachable without the popover open and behaves like a Mac document.
 
 ### A/B compare
 
@@ -641,7 +678,10 @@ pointed at a node's ancestry instead of an imported script.
 
 ---
 
-## What has to be built
+## Work-item record and current disposition
+
+This numbered list is retained because later design notes refer to it. The live
+TODO ordering is ROADMAP RW-1.
 
 1. ~~**`EVAHistory`**~~ — **done 2026-08-13** (`EVA/Pipeline/EVAHistory.swift`,
    `EVAHistoryTests`). A pure value type: no SwiftUI, no view models, no signals,
@@ -687,9 +727,8 @@ pointed at a node's ancestry instead of an imported script.
    still pays: those commits are where measured `computeCost` has to come from,
    and cost is what work item 2's eviction policy runs on.
 
-   **Still owed before this is a full record:** per-node `computeCost`, and
-   navigation. Clicking a node does nothing yet, and navigation is what forces
-   the cache design.
+   **Still owed before this is a full record:** measured per-node `computeCost`
+   and the remaining interaction affordances. Navigation itself is built.
 
    The low-level value remains branch-capable, but ordinary recording history
    now prunes a divergent redo chain. Deliberate branching is the separate
@@ -720,21 +759,22 @@ pointed at a node's ancestry instead of an imported script.
      eviction (never the current node) is enough; the cost-per-byte machinery can
      wait for a measurement rather than a guess.
 
-   **What is still genuinely wanted from this item:** re-derivation for nodes
-   whose snapshot has been evicted — today those rows are disabled rather than
-   offered and then refused — the decimated preview tier, measured `computeCost`,
-   and a preference for the memory budget so the user chooses when EVA switches
-   from restoring to re-deriving.
-3. **Generic invalidation** — replace the hand-written cascades. Once the tree
-   knows the chain order, "everything after node N is invalid" is derived, and
-   `clearGradientCorrection()` and its siblings collapse into
-   `history.navigate(to: node.parent)`.
-   *Partly staged 2026-08-13:* the cascade is now defined **once**, in
+   **Current disposition.** Evicted-node re-derivation is built for supported
+   steps. It still needs latest-only/source-valid commits, a safe rule for
+   processed-file prefixes, honest supported-step/failure UI, and channel-state
+   carry-through. The memory preference, measured `computeCost`, truthful
+   pin/eviction behavior, and optional preview/disk tiers remain open (ROADMAP
+   RW-1 items 1, 2, 3, 7, 11, and 12).
+3. **Generic invalidation — original proposal, superseded unless evidence
+   reopens it.** The proposal was to derive "everything after node N is invalid"
+   from the history tree and collapse stage-specific clears into navigation.
+   The shipped architecture instead defines the cascade **once**, in
    `PipelineInvalidation` (`epochsAndDerived`, `interpolations`,
    `appliedArtifactCleaning`, `downstreamOfBaseSignalChange`,
    `downstreamOfFilterChange`, `downstreamOfWaveletChange`), used by both the
-   interactive and headless paths. Deriving it from the tree now means replacing
-   one file rather than hunting per-stage `clear*()` functions. Note the
+   interactive and headless paths. This centralized shared cascade is the
+   current design; do not create a second invalidation authority without a
+   concrete correctness case (ROADMAP RW-1 item 14). Note the
    deliberate asymmetry encoded there — filter clears applied artifact cleaning,
    wavelet does not, because cleaning sits between them in the chain.
 4. **Payload persistence** — **ICA and channel decisions done 2026-08-13.**
@@ -806,7 +846,7 @@ pointed at a node's ancestry instead of an imported script.
    serialized-vs-read gaps, and the GPU/machine-locality caveat for the cache).
    Not finished: nothing here proves interactive/headless parity, which needs a
    paired run and a byte comparison rather than a green test suite.
-6. **Session persistence** — was a one-line placeholder here; now has a real
+6. **Session persistence — designed, not built.** This was a one-line placeholder here; now has a real
    design, see *The EVA cache: content-addressed snapshots and normalized
    imports* below. Short version: a private, non-user-facing cache holds
    snapshots content-addressed by `EVAHistoryNodeID` (so an evicted snapshot
@@ -816,18 +856,19 @@ pointed at a node's ancestry instead of an imported script.
    the package for the tree structure itself — small and portable, versus
    the cache's large and disposable snapshots — see that section's open
    questions.
-7. **Queue integration** — node lifecycle states, the three work classes with
-   preemptible speculation, and enqueueing user actions against a pending
-   full-rate rebuild instead of reading a partial buffer.
+7. **Queue integration — deferred original proposal.** Node lifecycle states,
+   the three work classes with preemptible speculation, and enqueueing user
+   actions against a pending full-rate rebuild remain a possible future model.
+   Today Queue and History are adjacent systems; see ROADMAP RW-1 item 8.
 8. **UI** — the Queue / History status popover: lineage rail, current-node
    highlight, stale-descendant rendering, transport controls, per-node cost hint,
    pin toggle, labels, and the right-click menu.
 
    **Navigation landed 2026-08-13.** Rail rows are clickable and the History tab
    has working back/forward transport; clicking restores that node's snapshot.
-   The cost hint is there in its simplest form — a node without a snapshot is
-   disabled with a tooltip saying why, which is `REWIND.md`'s "surface that
-   before the click, not after" at the coarsest useful resolution.
+   A node without a snapshot originally rendered disabled. Supported evicted
+   nodes now initiate re-derivation; the rail still needs accurate availability,
+   progress, failure, and cost communication.
 
    **The branch-rendering pass landed before the policy was simplified.** The
    rail can still decode and display older branch-capable histories, but a normal
@@ -835,24 +876,24 @@ pointed at a node's ancestry instead of an imported script.
    are created through Fork to New Window rather than accumulating siblings in
    this rail.
 
-   **Read-only first pass done 2026-08-13**, and it lives in **the status
+   **First pass done 2026-08-13**, and it lives in **the status
    popover as a Queue / History tab view** — the layout in
    `docs/figures/REWIND_FIG_2.png` — not in a sidebar.
    `ProcessingStatusPopoverView` (`EVA/Waveform/ProcessingStatusPopover.swift`)
    hosts it; `HistoryRailNodeList` / `HistoryRailRow`
    (`EVA/Waveform/HistoryRailView.swift`) draw the trunk, dots, connectors,
    per-node parameter subtitles (`HistoryStepSummary`), current-node highlight,
-   and pin indicator. Clicking a node does nothing yet, and the transport
-   controls from the figure are deliberately **absent rather than
-   present-and-disabled**: a dead button is a worse explanation than none.
+   and pin indicator. Click navigation and back/forward transport have since
+   shipped. Fork to New Window is the only context-menu action currently wired;
+   the other interaction ideas are tracked in ROADMAP RW-1 items 7 and 9.
 
    **It began as a 260 pt sidebar left of the waveform and that was wrong.** It
    worked, but it spent permanent horizontal room on something consulted
    occasionally, and the waveform is what people are actually looking at. The
    status area already owns "what is this app doing", already opens a popover,
    and is already where progress appears — so the tree costs no waveform width
-   and sits beside the queue, which is what this document says they are: two
-   renderings of the same objects, one positional and one temporal.
+   and sits beside the queue. They are adjacent status views, not currently two
+   renderings of one shared node lifecycle.
 
    **This also fixed an older problem.** The status area used to switch between a
    live-progress popover and a status-history popover depending on whether
@@ -1139,7 +1180,8 @@ This is arguably a document of its own (a `REPLAY.md` covering the replay/batch
 engine — `ReplayController`, `ReplayConfigSheet`, `BatchController`,
 `ProcessingCore`, `HeadlessBatchProcessor` — which has no design doc despite
 being most of the batch suite). Recorded here for now because the payload work
-above is what makes the third state necessary.
+above is what makes the third state necessary. Its current implementation home
+is ROADMAP RW-1 item 6, with the broader resume/skip/preflight workflow in PB-1.
 
 ---
 
@@ -1164,9 +1206,10 @@ trees. Deferred.
 
 ---
 
-## Open threads — 2026-08-13
+## Historical open threads — 2026-08-13
 
-Carried out of a long session. Roughly in the order they would bite.
+Carried out of a long session. These headings preserve the investigation record;
+ROADMAP RW-1 now owns anything still actionable.
 
 ### Baseline correction is its own step too
 
@@ -1219,12 +1262,12 @@ same regardless of which comes first.
 
 **No snapshot exists for the prefix's interior nodes** — the intermediate
 signals were never in this session's memory, only the final loaded bytes are.
-That did not need new machinery: a node without a snapshot already renders
-disabled in the rail with a tooltip explaining why (REWIND's "surface the cost
-before the click"), so seeding real nodes rather than a cosmetic label gets
-"shown but not navigable" for free. The tip — what is actually on screen — gets
-an (empty) snapshot immediately after seeding, the same way live recording
-snapshots the node it just created.
+Those nodes originally rendered disabled. Re-derivation now makes some
+snapshotless nodes navigable, which exposes a serious newer constraint: the
+loaded signal is already the processed prefix tip, so using it as the source for
+an interior prefix can apply recorded steps twice. ROADMAP RW-1 item 1 requires
+either a true pre-prefix source or an explicit non-navigable rule. The tip—what
+is actually on screen—still gets a snapshot after seeding.
 
 ### Fixed: a regex-only PSA average left no `segment` step in eva.xml
 
@@ -1369,12 +1412,15 @@ Three explanations were proposed and all three were wrong (file copy-through:
 writer deletes an existing package first; wrong input file: confirmed by the
 user). **Do not guess a fourth — instrument it.**
 
-### Verified by reasoning only
+Still unresolved; carried as ROADMAP RW-1 item 4 alongside the paired-run work.
 
-- **The double-window fix.** `WindowGroup` → `Window` makes a second window
-  structurally impossible, and that argument is stronger than one observation of
-  an intermittent bug — but a Finder double-click was never actually tested, cold
-  or warm. The failure mode to watch for is the opposite one: files not opening.
+### Historical reasoning-only notes
+
+- ~~**The double-window fix.** `WindowGroup` → `Window` makes a second window
+  structurally impossible.~~ **Superseded 2026-08-15:** EVA deliberately uses a
+  `WindowGroup`; explicit multi-window ownership and Fork to New Window are
+  built. The current behavior is recorded under *EVA as a multi-window app* and
+  ROADMAP C4.
 - **The snapshot memory budget.** Sized from physical memory now, but the
   original slowness report is *unexplained*. The retention theory was disproved
   (137 GB machine, 2 GB budget — not swapping). The one real cost found and fixed
@@ -1391,19 +1437,25 @@ user). **Do not guess a fourth — instrument it.**
   the same work as *Open: replay and batch should let you make the per-file
   decisions* below.
 
-### Next, in order
+Tracked by ROADMAP RW-1 item 6.
+
+### Historical next list — superseded by ROADMAP RW-1
 
 1. ~~**Forking as a deliberate act.**~~ **Built 2026-08-15.** Fork to New
    Window preserves the chosen state and gives each alternative an independent
    future. The 2026-08-25 linear-history correction makes this the sole normal
    way to preserve divergent processing choices.
-2. **A/B compare** (item 10). Its inputs are two explicitly forked windows, not
-   sibling nodes accumulated by ordinary editing.
-3. **Re-derivation** for evicted snapshots, plus the memory preference. Nodes
-   without a snapshot are currently disabled rather than slow.
-4. **The `markBad` carry-through work**, designed but unbuilt — see *Channel
-   decisions: the carry-through rules*. It is the fix for the filter's unrecorded
-   bad-channel input, which is a live content-addressing gap.
+2. **A/B compare** remains open as ROADMAP RW-1 item 10. Its inputs are related
+   forked windows, not sibling nodes accumulated by ordinary editing.
+3. ~~**Basic re-derivation for evicted snapshots.**~~ **Built.** Its correctness
+   hardening is now ROADMAP RW-1 items 1–3 and 7: safe prefix sources,
+   latest-only commits, channel carry-through, and truthful cache policy/UI.
+4. **The `markBad` and interpolation carry-through work** remains ROADMAP RW-1
+   item 3.
+
+The current order begins with processed-prefix safety and latest-only
+re-derivation commits. Do not infer implementation priority from this historical
+list.
 
 ## Forking to a new window
 
@@ -1622,12 +1674,15 @@ thing anyone's data actually lives in.
 
 ### Open questions
 
+These are retained as cache-design rationale and are consolidated in ROADMAP
+RW-1 items 11–12.
+
 - **Eviction policy for the on-disk store**, independent of the in-RAM
   budget — presumably larger and slower to fill, but not unbounded.
 - **Invalidation**: a normalized import copy is only correct as long as the
   original file has not changed on disk since. Needs a cheap staleness check
-  (mtime + size, most likely) rather than re-hashing a whole recording on
-  every open.
+  (mtime + size, most likely). Expanded SHA-256 manifests or whole-recording
+  hashing are explicitly **not** a project priority or prerequisite.
 - **Does this replace the `eva_history.json` sidecar plan, or sit alongside
   it?** Leaning toward: the cache holds the *snapshots* (large, disposable,
   never meant to leave the machine); a slim `eva_history.json` sidecar still
@@ -1965,14 +2020,16 @@ step 6 used to be — every remaining item has a known shape.
   natural receiving window to reuse and the menu command does not. See
   "What was actually built" above for why those needed to differ rather
   than share one rule.
-- **Cross-window comparison beyond fork** — resolved above for the visual
-  case (windows). Whether the tree-only, single-window rail view of A/B
-  should still exist *in addition to* the windowed version, or whether
-  forking supersedes it, is still open.
+- **Cross-window comparison beyond fork** — the current direction is comparison
+  between related forked windows. A second single-window sibling-node A/B mode
+  is not assumed; ROADMAP RW-1 item 10 owns the product and identity details.
 
 ---
 
 ## Open questions
+
+This is an archive of the original questions. Their current homes are ROADMAP
+RW-1 and the completed milestones.
 
 - ~~**Does the branch tree earn its complexity, or is linear undo/redo enough?**~~
   **Answered 2026-08-25:** linear undo/redo is the one-window behavior. Explicit
@@ -1984,8 +2041,7 @@ step 6 used to be — every remaining item has a known shape.
 - **Should nodes survive export?** A package written from node N — does it carry
   the whole tree or just its own lineage? Leaning toward whole tree, since it is
   small (steps + payloads, no signals) and makes a package self-documenting.
-- **Interaction with the Priority 1 Observation refactor** (`ROADMAP.md`). The
-  history tree changes how VM state is owned — arguably it *is* a state-ownership
-  refactor. Sequencing matters: doing this before the Observation work may mean
-  doing it twice; doing it after may make the Observation work easier to reason
-  about. Probably: after.
+  **Current home:** ROADMAP RW-1 item 11.
+- ~~**Interaction with the Priority 1 Observation refactor.**~~ **Resolved:**
+  that refactor is complete (ROADMAP C1). Remaining history memory/cache policy
+  is ROADMAP RW-1 item 7.

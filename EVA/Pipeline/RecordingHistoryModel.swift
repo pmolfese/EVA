@@ -27,14 +27,12 @@
 //  would record a lineage that does not reproduce the bytes, and reproducing the
 //  bytes is the whole promise of a node ID. See `EVAHistory.adopt`.
 //
-//  Navigation restores from `PipelineSnapshot` rather than re-deriving, which is
-//  what makes undo/redo instant — see that file for why the design's
-//  re-derivation model is right for reproducing a package and wrong for moving
-//  around inside a session.
+//  Navigation restores from `PipelineSnapshot` when available, which makes the
+//  common undo/redo path instant. Supported nodes whose snapshots were evicted
+//  can be re-derived; that fallback must remain exact and source-valid.
 //
-//  **Still missing:** measured `computeCost` per node, which only the apply sites
-//  know, and re-derivation for nodes whose snapshot has been evicted (today they
-//  are simply not offered). Both are `REWIND.md` work item 2's territory.
+//  **Still missing:** measured `computeCost` per node, a truthful pin/eviction
+//  UI, and the re-derivation hardening tracked by ROADMAP RW-1.
 //
 //  It lives here rather than in `WaveformUIModels.swift` because that file is
 //  explicitly display state that "nothing here belongs in eva.xml or affects
@@ -97,12 +95,11 @@ final class RecordingHistoryModel {
     /// this is what lets the rail show that lineage instead of discarding it.
     ///
     /// There is no snapshot for any node in this prefix except its tip: the
-    /// intermediate signals were never in memory this session and cannot be
-    /// recovered, only re-derived (REWIND work item 2, not built). The rail's
-    /// existing "no snapshot" affordance — disabled row, tooltip — already
-    /// covers exactly this, which is the point of seeding real nodes rather than
-    /// a label: "shown but not navigable" falls out of machinery that already
-    /// exists rather than needing its own.
+    /// intermediate signals were never in memory this session. Generic
+    /// re-derivation exists, but these nodes require special care because the
+    /// loaded signal is already the prefix output, not its input. ROADMAP RW-1
+    /// item 1 requires a true source or an explicit non-navigable rule before an
+    /// interior prefix node may be rebuilt safely.
     @ObservationIgnored private(set) var onDiskPrefix: [EVAProcessingStep] = []
     /// Payload digests for `onDiskPrefix`'s own subject-specific steps (ICA's
     /// operator, on disk) — kept separate from a live `record()` call's digests
@@ -386,14 +383,15 @@ nonisolated struct HistoryRailNode: Identifiable, Hashable, Sendable {
     var subtitle: String
     var isCurrent: Bool
     var isPinned: Bool
-    /// Whether navigating here restores from a snapshot rather than needing a
-    /// re-derivation that does not exist yet. `REWIND.md` asks for the cost hint
-    /// to be shown *before* the click, not after.
+    /// Whether navigating here restores immediately from a snapshot rather than
+    /// requiring re-derivation. `REWIND.md` asks for the cost hint to be shown
+    /// *before* the click, not after.
     var isInstant: Bool = true
     /// Indentation level. Only increases at a fork, so a linear session stays
     /// flat rather than becoming a staircase.
     var depth: Int = 0
     /// Whether this node is an ancestor of, or is, the current one. Off-path
-    /// nodes are the branches you left — dimmed, but reachable.
+    /// nodes can occur in decoded legacy trees or explicit copied histories;
+    /// ordinary recording-window replacement prunes an abandoned future.
     var isOnCurrentPath: Bool = true
 }

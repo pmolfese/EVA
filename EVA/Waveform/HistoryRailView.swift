@@ -11,9 +11,9 @@
 //
 //  The history rail from `REWIND.md` — the trunk, the current-node highlight,
 //  and each node's defining parameters. Clicking a node navigates to it: the
-//  pipeline is restored from that node's snapshot, so undo and redo are just
-//  moving the pointer. A node whose snapshot has been evicted is shown disabled
-//  rather than offered and then refused.
+//  pipeline is restored from that node's snapshot when cached; a supported
+//  evicted node is re-derived first. Undo and redo are pointer movement, with
+//  reconstruction only as the cache fallback.
 //
 //  **These are the rail's contents, not a panel.** The rail is presented inside
 //  the status popover's History tab (`ProcessingStatusPopover.swift`), which is

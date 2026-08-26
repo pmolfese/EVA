@@ -19,10 +19,10 @@
 //  the stage that happened to host it. Three things were wrong with that:
 //
 //  1. **It is the comparison people actually want to run.** Referenced versus not
-//     is the classic A/B, and as a filter parameter, flipping it forks the history
-//     at `filter` and recomputes a band-pass that did not change. As its own step
-//     it forks *after* the filter, and both branches share one filter output
-//     through copy-on-write.
+//     is the classic A/B, and as a filter parameter, changing it makes the filter
+//     look different and recomputes a band-pass that did not change. As its own
+//     step its state sits *after* the filter. Explicitly forked windows can share
+//     that filter output through copy-on-write and then diverge at reference.
 //  2. **It reads the bad-channel set, and nothing said so.** The reference is the
 //     mean of the good channels, so marking a channel bad changes the output of
 //     every channel — while the `filter` step's parameters, and therefore its

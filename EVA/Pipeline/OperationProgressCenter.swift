@@ -19,12 +19,13 @@
 //    into `gradient.operationProgress` and `filter.operationProgress` by name, so
 //    every new long-running stage meant editing the status view too. It now reads
 //    one ordered list, and a new stage appears simply by reporting into it.
-//  - **`REWIND.md` needs it.** The history tree's Queue tab is the single surface
+//  - **`REWIND.md` needs it.** The status popover's Queue tab is the single surface
 //    that shows what is running, regardless of which stage owns it. That is not
 //    expressible while progress is scattered across view models.
 //  - **It pairs with `ProcessingQueue`.** That already serializes *which*
-//    operation runs; this holds *how far along* it is. Together they are the
-//    "queue and tree are one state machine" model REWIND describes.
+//    operation runs; this holds *how far along* it is. History remains a separate
+//    view of committed lineage unless queued rebuilds later require shared node
+//    lifecycle state.
 //
 //  Ordering is insertion order, so the status area lists operations in the order
 //  they started rather than in an arbitrary dictionary order.
