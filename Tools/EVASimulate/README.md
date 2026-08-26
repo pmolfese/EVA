@@ -21,6 +21,12 @@ The operational default is 1000 Hz, which gives every sample an exactly
 representable millisecond MFF event timestamp. The paper used 1024 Hz; load
 `scenarios/paper-default.json` or pass `--rate 1024` for that exact rate.
 
+The concentric-sphere forward solver is shared production code in
+`EVA/Core/Forward/`. EVASimulate owns scenario/source/truth representations and
+adapts them to that ordered physical-electrode API; it does not keep a second
+copy of the spherical-harmonic implementation. This lets simulator fixtures
+test the same forward mathematics EVA will use for source-informed methods.
+
 Build:
 
 ```sh
@@ -349,9 +355,13 @@ The surrogate correction supports two explicit beat-pattern searches:
 
 The selected mode, actual representative candidate, accepted-beat fraction,
 artifact-component count, and correction parameters are written to the report.
-`evaluate-surrogate --json` emits a versioned machine-readable result containing
-the full per-seed values and mean/SD for broadband and, with `--with-erp`, every
-ERP criterion.
+Operator construction and application use EVA's shared UI-free
+`SourceInformedSeparation` engine; EVASimulate owns only regional-basis and BCG
+template discovery policies at this boundary. The report also records operator
+dimensions, retained/dropped artifact columns, requested and effective ridge,
+projected brain power, and the Cholesky-factor range. `evaluate-surrogate --json`
+emits a versioned machine-readable result containing the full per-seed values
+and mean/SD for broadband and, with `--with-erp`, every ERP criterion.
 
 PCA-S uses the recording's electrode geometry instead of silently substituting
 the built-in montage. For generated data, give `correct` its truth sidecar so it
@@ -878,8 +888,10 @@ default remains, now as an ordinary choice rather than a workaround.
 Tools/EVASimulate/.build/eva-simulate selftest
 ```
 
-Ninety passing outcomes, each on
-the model rather than on any EVA code: that locked clocks put
+Ninety-nine passing outcomes, including the compact SI-0 extraction-boundary
+fixtures documented in `SI0_CONTRACTS.md`. The forward and source-informed
+fixtures exercise EVA's shared solvers through EVASimulate's adapters; the remaining fixtures exercise
+the simulator model: locked clocks put
 template subtraction exactly on the sqrt(N) ceiling; that the paper's 152 µs/s
 drift pushes it far below that; that QRS jitter penalizes correction which relies
 on beat timing; that every injected waveform starts and ends at baseline rather
@@ -909,8 +921,10 @@ shared additive boundary and truthful within-band source mixing.
 Three impedance checks pin the square-root resistance law, ordered mains pickup,
 the disabled compatibility path, and deceptively low true bridges.
 Surrogate checks pin deterministic paper and iterative pattern-search modes,
-artifact-free preservation, end-to-end separation, and the brain-basis
-competition effect.
+artifact attenuation, artifact-free preservation, end-to-end separation,
+brain-map correlation, explicit degeneracy failures, and the brain-basis
+competition effect. The phase-by-phase extraction record is
+`SI2_EXTRACTION.md`.
 Run it after touching anything in the model — a
 harness that silently stops reproducing the phenomenon it exists to study is
 worse than no harness, because everything it emits still looks like evidence.

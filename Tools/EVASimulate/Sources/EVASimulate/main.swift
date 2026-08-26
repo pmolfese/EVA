@@ -2073,12 +2073,12 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                 head: config.sphericalHeadModel, montage: montage, count: regionalCount,
                 reference: .average, terms: config.leadFieldTerms, offsetMillimetres: offset
             )
-            let filter = SurrogateSeparation.spatialFilter(
+            let sourceInformedOperator = try SurrogateSeparation.sourceInformedOperator(
                 brain: brain,
                 artifactTopographies: Array(components.topographies.prefix(componentCount)),
                 brainRegularization: regularization
             )
-            let output = SurrogateSeparation.apply(filter: filter, to: noisy)
+            let output = try SourceInformedSeparation.apply(sourceInformedOperator, to: noisy)
 
             func snr(_ candidate: [[Double]]) -> Double {
                 var signal = 0.0
@@ -2521,12 +2521,12 @@ func runCorrect(_ arguments: Arguments) throws {
         head: head, montage: montage, count: regionalCount,
         reference: reference, terms: leadFieldTerms, offsetMillimetres: surrogateOffset
     )
-    let filter = SurrogateSeparation.spatialFilter(
+    let sourceInformedOperator = try SurrogateSeparation.sourceInformedOperator(
         brain: brain,
         artifactTopographies: topographies,
         brainRegularization: regularization
     )
-    let corrected = SurrogateSeparation.apply(filter: filter, to: channels)
+    let corrected = try SourceInformedSeparation.apply(sourceInformedOperator, to: channels)
 
     var report = SurrogateFilterReport(
         method: "PCA-S",
@@ -2539,6 +2539,7 @@ func runCorrect(_ arguments: Arguments) throws {
         patternSearchMode: componentSet.patternSearchMode.rawValue,
         representativeBeatIndex: componentSet.representativeBeatIndex,
         brainRegularization: regularization,
+        operatorDiagnostics: sourceInformedOperator.diagnostics,
         geometrySource: geometryResolution.sourceDescription,
         geometryPath: geometryResolution.sourcePath.isEmpty
             ? nil : geometryResolution.sourcePath,

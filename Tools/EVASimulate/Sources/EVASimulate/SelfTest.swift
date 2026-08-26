@@ -1177,6 +1177,10 @@ nonisolated enum SelfTest {
                     && report.headShellRadiiMeters
                         == contractConfig.sphericalHeadModel.shells.map(\.radiusMeters)
                     && report.leadFieldTerms == contractConfig.leadFieldTerms
+                    && report.operatorDiagnostics?.electrodeCount == contractConfig.channelCount
+                    && report.operatorDiagnostics?.brainColumnCount == 87
+                    && (report.operatorDiagnostics?.artifactRetainedCount ?? 0) > 0
+                    && (report.operatorDiagnostics?.effectiveRidge ?? 0) > 0
                     && report.pnsPreserved == true
                     && report.pnsChannelNames == ["ECG", "Motion"]
                     && inputPNS?.data == outputPNS?.data
@@ -1186,8 +1190,9 @@ nonisolated enum SelfTest {
                     && fallbackReport.assumedStandardMontage == true
                     && overrideReport.assumedStandardMontage == false
                     && overrideReport.geometryPath == noisyURL.standardizedFileURL.path,
-                expectation: "correct builds from input coordinates plus truth shells, copies "
-                    + "coordinates.xml, preserves PNS, and requires explicit geometry fallback"
+                expectation: "correct builds from input coordinates plus truth shells, reports "
+                    + "operator diagnostics, copies coordinates.xml, preserves PNS, and requires "
+                    + "explicit geometry fallback"
             ))
         } catch {
             outcomes.append(Outcome(
@@ -2071,21 +2076,6 @@ nonisolated enum SelfTest {
                 reference: .average, terms: 100
             )
 
-            func identityDeviation(regularization: Double, artifacts: [[Double]]) -> Double {
-                let filter = SurrogateSeparation.spatialFilter(
-                    brain: surrogateBrain, artifactTopographies: artifacts,
-                    brainRegularization: regularization
-                )
-                var worst = 0.0
-                for row in filter.indices {
-                    for column in filter[row].indices {
-                        let target = row == column ? 1.0 : 0.0
-                        worst = max(worst, abs(filter[row][column] - target))
-                    }
-                }
-                return worst
-            }
-
             // Asking the filter to be the *identity* is the wrong test: a
             // three-shell lead field is ill-conditioned, and the directions it
             // reproduces poorly are spatial patterns no dipole can produce
@@ -2116,12 +2106,12 @@ nonisolated enum SelfTest {
                 for channel in topography.indices { probeMatrix[channel][probe] = topography[channel] }
             }
 
-            func preservation(regularization: Double, artifacts: [[Double]] = []) -> Double {
-                let filter = SurrogateSeparation.spatialFilter(
+            func preservation(regularization: Double, artifacts: [[Double]] = []) throws -> Double {
+                let filter = try SurrogateSeparation.spatialFilter(
                     brain: surrogateBrain, artifactTopographies: artifacts,
                     brainRegularization: regularization
                 )
-                let projected = SurrogateSeparation.apply(filter: filter, to: probeMatrix)
+                let projected = try SurrogateSeparation.apply(filter: filter, to: probeMatrix)
                 var worst = 1.0
                 for probe in probeTopographies.indices {
                     let recovered = (0..<projected.count).map { projected[$0][probe] }
@@ -2130,8 +2120,8 @@ nonisolated enum SelfTest {
                 return worst
             }
 
-            let unregularizedPreservation = preservation(regularization: 0)
-            let regularizedPreservation = preservation(regularization: 0.02)
+            let unregularizedPreservation = try preservation(regularization: 0)
+            let regularizedPreservation = try preservation(regularization: 0.02)
             outcomes.append(Outcome(
                 name: "Surrogate brain model reproduces real dipole topographies",
                 snr: unregularizedPreservation,
@@ -2154,10 +2144,10 @@ nonisolated enum SelfTest {
             )
             var passthroughChannels = passthroughEEG.channels
             EEGReferencing.apply(.average, to: &passthroughChannels)
-            let passthroughFilter = SurrogateSeparation.spatialFilter(
+            let passthroughFilter = try SurrogateSeparation.spatialFilter(
                 brain: surrogateBrain, artifactTopographies: [], brainRegularization: 0.02
             )
-            let passthroughResult = SurrogateSeparation.apply(
+            let passthroughResult = try SurrogateSeparation.apply(
                 filter: passthroughFilter, to: passthroughChannels
             )
             let passthroughCorrelation = zip(passthroughChannels, passthroughResult)
@@ -2274,11 +2264,11 @@ nonisolated enum SelfTest {
                 head: separationConfig.sphericalHeadModel, montage: separationMontage,
                 count: 29, reference: .average, terms: separationConfig.leadFieldTerms
             )
-            let separationFilter = SurrogateSeparation.spatialFilter(
+            let separationFilter = try SurrogateSeparation.spatialFilter(
                 brain: separationBrain, artifactTopographies: separationTopographies,
                 brainRegularization: 0.02
             )
-            let separationCorrected = SurrogateSeparation.apply(
+            let separationCorrected = try SurrogateSeparation.apply(
                 filter: separationFilter, to: separationNoisy
             )
             func broadbandSNR(_ corrected: [[Double]]) -> Double {
@@ -2334,7 +2324,7 @@ nonisolated enum SelfTest {
                     count: regionalSources, reference: .average,
                     terms: separationConfig.leadFieldTerms
                 )
-                let filter = SurrogateSeparation.spatialFilter(
+                let filter = try SurrogateSeparation.spatialFilter(
                     brain: brain, artifactTopographies: separationTopographies,
                     brainRegularization: 0.02
                 )
@@ -2344,7 +2334,9 @@ nonisolated enum SelfTest {
                 let column = (0..<separationMontage.electrodes.count).map {
                     $0 < generator.topography.count ? generator.topography[$0] : 0
                 }
-                let passed = SurrogateSeparation.apply(filter: filter, to: column.map { [$0] })
+                let passed = try SurrogateSeparation.apply(
+                    filter: filter, to: column.map { [$0] }
+                )
                 let inputNorm = column.reduce(0.0) { $0 + $1 * $1 }.squareRoot()
                 let outputNorm = passed.reduce(0.0) { $0 + $1[0] * $1[0] }.squareRoot()
                 return inputNorm > 1e-15 ? outputNorm / inputNorm : 0
@@ -2912,6 +2904,7 @@ nonisolated enum SelfTest {
             ))
         }
 
+        outcomes.append(contentsOf: SI0ContractFixtures.run())
         return outcomes
     }
 }

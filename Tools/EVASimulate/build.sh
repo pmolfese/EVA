@@ -22,14 +22,17 @@ swiftc -O \
   -module-cache-path "$MODULE_CACHE" \
   -Xcc -DACCELERATE_NEW_LAPACK \
   -framework Accelerate \
+  "$ROOT/EVA/Core/Forward/ForwardTypes.swift" \
+  "$ROOT/EVA/Core/Forward/SphericalForwardModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationConfig.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationScenario.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/GroupSimulation.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SignalSynthesis.swift" \
   "$ROOT/EVA/IO/EGISensorXMLParser.swift" \
   "$ROOT/EVA/Channels/ElectrodeGeometry.swift" \
+  "$ROOT/EVA/Channels/SensorLayout.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/Montage.swift" \
-  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SphericalForwardModel.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationForwardDomain.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/EEGGenerator.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/NonstationaryEEGModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/DipoleEEGGenerator.swift" \
@@ -43,12 +46,14 @@ swiftc -O \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/GradientArtifactModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/BCGGeneratorModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/BCGArtifactModel.swift" \
+  "$ROOT/EVA/Artifacts/SourceInformed/SourceInformedOperator.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SurrogateSeparation.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/ERPEvaluation.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SNRMetrics.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/RichMetrics.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SourceMetrics.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationWriter.swift" \
+  "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SI0ContractFixtures.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SelfTest.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/main.swift" \
   "$ROOT/EVA/Core/AccelerateCompat.swift" \

@@ -53,6 +53,28 @@ struct LinearAlgebraTests {
         #expect(LinearAlgebra.solveLinearSystem(a, b) == nil)
     }
 
+    @Test func choleskyFactorSolvesSeveralRightHandSides() throws {
+        let matrix = [[4.0, 1.0], [1.0, 3.0]]
+        let factor = try #require(LinearAlgebra.factorSymmetricPositiveDefinite(matrix))
+        let solution = try #require(factor.solve([[1.0, 2.0], [2.0, 1.0]]))
+
+        for rightHandSide in 0..<2 {
+            for row in 0..<2 {
+                let recovered = (0..<2).reduce(0.0) {
+                    $0 + matrix[row][$1] * solution[$1][rightHandSide]
+                }
+                let expected = [[1.0, 2.0], [2.0, 1.0]][row][rightHandSide]
+                #expect(abs(recovered - expected) < 1e-12)
+            }
+        }
+        #expect(factor.factorDiagonal.allSatisfy { $0 > 0 && $0.isFinite })
+    }
+
+    @Test func choleskyFactorRejectsNonPositiveDefiniteAndAsymmetricInput() {
+        #expect(LinearAlgebra.factorSymmetricPositiveDefinite([[1.0, 2.0], [2.0, 1.0]]) == nil)
+        #expect(LinearAlgebra.factorSymmetricPositiveDefinite([[2.0, 1.0], [0.0, 2.0]]) == nil)
+    }
+
     @Test func symmetricEigenDecompositionMatchesDiagonal() {
         // Eigenvalues of a diagonal matrix are its diagonal entries.
         let matrix = [[2.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 9.0]]

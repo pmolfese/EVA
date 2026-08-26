@@ -57,6 +57,8 @@ is what gets read instead of scrolling 1,800 lines.
 | 7.4-7.5 Execution and CI | Not started | Establish cross-machine tolerances, then GitHub Actions staging. |
 | 8.1 Existing-labeller benchmark | ✅ Complete | 2026-08-25. ICLabel and the independent `ICAComponentAutoLabeler` heuristic path are scored per class against graded topographic truth. |
 | 8.2-8.4 Component labelling | Heart/BCG pilot complete | 5.4 proves the narrow workflow; the remaining classes and broader dataset/model-card work are open. |
+| SI-1 Shared spherical forward model | ✅ Complete | 2026-08-26. EVA owns the app-neutral solver in `EVA/Core/Forward/`; EVASimulate uses boundary adapters with unchanged scenario/truth schemas and generated outputs. |
+| SI-2 Shared source-informed operator | ✅ Complete | 2026-08-26. EVA owns validated PCA-S/MSEC operator construction, diagnostics, application, and the LAPACK Cholesky solve; EVASimulate retains regional-source and paper/iterative BCG discovery policies. |
 
 ### 2026-08-25 implementation-audit follow-up
 
@@ -81,17 +83,12 @@ only if the owner explicitly asks to reopen it.
 
 ### Next, in order
 
-1. **Calibrate the new bridge and reference diagnostics** — the review-only
-   Channels window and Channel Health deep-link are implemented. Validate
-   thresholds on real recordings, then add pair overlay/difference previews and
-   explicit mark/exclude actions before considering automated intervention.
-   Reference identity, processing convention, and before/after rereference
-   context are already implemented.
-2. **7.4-7.5** — establish cross-machine score tolerances, then stage the nine-case
-   corpus in GitHub Actions.
-3. **ICA-S**, then **8.2-8.4** and **3.2**. 5.4 now supplies ICA-S component
-   selection; every additional label class still needs the provenance discipline
-   in 8.2.
+The authoritative cross-project sequence is in `ROADMAP.md`. After SI-2, finish
+the bounded RW-1 history/replay hardening required by a new correction stage,
+then ship broadband BCG PCA-S through EVA as SI-3, and measure its adversarial
+operating limits as SI-4. Bridge/reference calibration, cross-machine corpus
+tolerances, ICA-S, and broader component labelling remain valuable follow-ups,
+but they do not move ahead of that dependency chain.
 
 The full reasoning behind this order is in [Suggested order](#suggested-order) at
 the end of the document; this list is the short form and should agree with it.
@@ -135,7 +132,8 @@ Implemented, tested, and documented in `Tools/EVASimulate/README.md`:
   timing/ROC metrics; and ERP amplitude/latency recovery metrics.
 - **Scenarios**: versioned JSON configuration files, explicit flag precedence,
   config-only export, and eight reviewed configurations in a shipped catalog.
-- **90 passing self-test outcomes** on the model's own behaviour, and byte-level
+- **99 passing self-test outcomes** on the model and shared-forward boundaries,
+  and byte-level
   determinism.
 
 ## Principles to hold onto
@@ -173,6 +171,13 @@ true source time courses, and `score-sources` evaluates inverse locations and
 recovered components with optimal, order- and polarity-invariant assignment.
 Source-space invariants and end-to-end workflow checks are included in
 `selftest`.
+
+**Structural integration (2026-08-26): complete.** The app-neutral head,
+ordered-electrode, dipole, reference, leadfield, convergence, validation, and
+spherical-harmonic solver now live in `EVA/Core/Forward/`. EVASimulate adapts
+its stable montage/source/truth types at its boundary. All 99 simulator outcomes,
+all eight existing generated-scenario fingerprints, and all 1,264 EVA tests
+pass without changing a baseline.
 
 **The largest structural change here, and the one most other items compose
 with.**

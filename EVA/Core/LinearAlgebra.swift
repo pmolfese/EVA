@@ -165,6 +165,98 @@ nonisolated enum LinearAlgebra {
         return LUFactorization(columnMajorLU: columnMajor, ipiv: ipiv, size: size)
     }
 
+    /// A reusable Cholesky factorization for a real symmetric positive-definite
+    /// matrix. Unlike a general inverse, this preserves the structure of a
+    /// regularized normal system and solves all requested right-hand sides in
+    /// one LAPACK call.
+    final class CholeskyFactorization: @unchecked Sendable {
+        private let columnMajorFactor: [Double]
+        private let size: Int
+
+        /// Diagonal of LAPACK's upper-triangular Cholesky factor. These values
+        /// are useful as a compact numerical diagnostic; they are not singular
+        /// values or eigenvalues.
+        let factorDiagonal: [Double]
+
+        fileprivate init(columnMajorFactor: [Double], size: Int) {
+            self.columnMajorFactor = columnMajorFactor
+            self.size = size
+            factorDiagonal = (0..<size).map { columnMajorFactor[$0 * size + $0] }
+        }
+
+        /// Solves A·X = B. `rhs` and the returned value are ordinary row-major
+        /// Swift matrices with `size` rows and any positive number of columns.
+        func solve(_ rhs: [[Double]]) -> [[Double]]? {
+            guard rhs.count == size,
+                  let rightHandSideCount = rhs.first?.count,
+                  rightHandSideCount > 0,
+                  rhs.allSatisfy({ $0.count == rightHandSideCount && $0.allSatisfy(\.isFinite) })
+            else { return nil }
+
+            var factor = columnMajorFactor
+            var columnMajorRHS = [Double](repeating: 0, count: size * rightHandSideCount)
+            for row in 0..<size {
+                for column in 0..<rightHandSideCount {
+                    columnMajorRHS[column * size + row] = rhs[row][column]
+                }
+            }
+            var uplo = Int8(UnicodeScalar("U").value)
+            var n = LAPACKInt(size)
+            var nrhs = LAPACKInt(rightHandSideCount)
+            var lda = LAPACKInt(size)
+            var ldb = LAPACKInt(size)
+            var info: LAPACKInt = 0
+
+            dpotrs_(&uplo, &n, &nrhs, &factor, &lda, &columnMajorRHS, &ldb, &info)
+            guard info == 0, columnMajorRHS.allSatisfy(\.isFinite) else { return nil }
+
+            var solution = [[Double]](
+                repeating: [Double](repeating: 0, count: rightHandSideCount), count: size
+            )
+            for row in 0..<size {
+                for column in 0..<rightHandSideCount {
+                    solution[row][column] = columnMajorRHS[column * size + row]
+                }
+            }
+            return solution
+        }
+    }
+
+    /// Factors an ordinary row-major Swift matrix with LAPACK `dpotrf_`.
+    /// Returns nil for malformed, non-finite, asymmetric, or non-positive-
+    /// definite input instead of silently falling back to an unsuitable solve.
+    static func factorSymmetricPositiveDefinite(
+        _ matrix: [[Double]]
+    ) -> CholeskyFactorization? {
+        let size = matrix.count
+        guard size > 0,
+              matrix.allSatisfy({ $0.count == size && $0.allSatisfy(\.isFinite) })
+        else { return nil }
+        for row in 0..<size {
+            for column in (row + 1)..<size {
+                let scale = max(1, abs(matrix[row][column]), abs(matrix[column][row]))
+                guard abs(matrix[row][column] - matrix[column][row]) <= 1e-12 * scale else {
+                    return nil
+                }
+            }
+        }
+
+        var columnMajor = [Double](repeating: 0, count: size * size)
+        for row in 0..<size {
+            for column in 0..<size {
+                columnMajor[column * size + row] = matrix[row][column]
+            }
+        }
+        var uplo = Int8(UnicodeScalar("U").value)
+        var n = LAPACKInt(size)
+        var lda = LAPACKInt(size)
+        var info: LAPACKInt = 0
+        dpotrf_(&uplo, &n, &columnMajor, &lda, &info)
+
+        guard info == 0 else { return nil }
+        return CholeskyFactorization(columnMajorFactor: columnMajor, size: size)
+    }
+
     private static func solveLinearSystemLAPACK(a: [Double], b: [Double], size: Int) -> [Double]? {
         // dgesv_ expects column-major storage; `a` here is row-major
         // (a[row*size+col]). Transposing is O(n²), negligible next to the

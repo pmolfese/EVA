@@ -37,8 +37,10 @@
 //  2. **Artifact topographies.** Average the artifact over detected beats, then
 //     take the principal components of that template that carry more than 0.5%
 //     of its variance. The paper reports 4-8 per subject, mean 5.7.
-//  3. **One regularized inverse of `[brain | artifact]`.** The brain block is
-//     regularized at 2%; the artifact block is not.
+//  3. **One regularized joint solve for `[brain | artifact]`.** The brain block
+//     is regularized at 2%; the artifact block is not. The implementation
+//     partials out the free artifact block and solves the remaining
+//     positive-definite brain system without materializing an inverse.
 //  4. **Back-project the brain block only.**
 //
 //  ## Why the regularization *is* the method
@@ -122,6 +124,9 @@ nonisolated struct SurrogateFilterReport: Codable, Sendable {
     var patternSearchMode: String
     var representativeBeatIndex: Int?
     var brainRegularization: Double
+    /// Stable-solve dimensions and numerical provenance from EVA's shared
+    /// source-informed engine.
+    var operatorDiagnostics: SourceInformedOperatorDiagnostics? = nil
     /// Provenance of the geometry actually used to build the brain basis.
     var geometrySource: String? = nil
     var geometryPath: String? = nil
@@ -412,13 +417,17 @@ nonisolated enum SurrogateSeparation {
                 covariance[column][row] = sum
             }
         }
-        let decomposition = SymmetricEigen.decompose(covariance)
+        let decomposition = LinearAlgebra.symmetricEigenDecomposition(covariance)
         let total = decomposition.values.reduce(0.0) { $0 + max(0, $1) }
         guard total > 1e-30 else { return nil }
 
         var topographies: [[Double]] = []
         var fractions: [Double] = []
-        for (value, vector) in zip(decomposition.values, decomposition.vectors) {
+        // EVA's LAPACK wrapper stores eigenvectors as columns and values in
+        // ascending order. PCA-S consumes the same eigenpairs largest-first.
+        for component in decomposition.values.indices.reversed() {
+            let value = decomposition.values[component]
+            let vector = (0..<channelCount).map { decomposition.vectors[$0][component] }
             let fraction = max(0, value) / total
             guard fraction > varianceThreshold else { break }
             let norm = vector.reduce(0.0) { $0 + $1 * $1 }.squareRoot()
@@ -461,169 +470,37 @@ nonisolated enum SurrogateSeparation {
 
     // MARK: - The spatial filter
 
-    /// Builds the channels x channels operator that keeps the brain block.
-    ///
-    /// The whole method collapses to one spatial matrix. Solving for source
-    /// waveforms and back-projecting is
-    ///
-    ///     X_clean = B · [ (LᵀL + Λ)⁻¹ Lᵀ X ]_brain  =  ( B · M_brain ) X
-    ///
-    /// so `B · M_brain` can be formed once and applied per sample. That is what
-    /// "spatial filter" means here, and it makes the operator directly
-    /// inspectable — which the self-tests use.
+    /// Adapts the simulator's regional-source value to EVA's UI-free engine.
+    /// BCG discovery and regional placement remain simulator policies; all
+    /// operator construction, validation, diagnostics, and application are
+    /// app-owned.
+    static func sourceInformedOperator(
+        brain: SurrogateBrainModel,
+        artifactTopographies: [[Double]],
+        brainRegularization: Double
+    ) throws -> SourceInformedOperator {
+        try SourceInformedSeparation.makeOperator(
+            brainBasis: brain.matrix,
+            artifactTopographies: artifactTopographies,
+            brainRegularization: brainRegularization
+        )
+    }
+
+    /// Compatibility boundary for truth reports and existing simulator tests.
     static func spatialFilter(
         brain: SurrogateBrainModel,
         artifactTopographies: [[Double]],
         brainRegularization: Double
-    ) -> [[Double]] {
-        let channelCount = brain.matrix.count
-        guard channelCount > 0 else { return [] }
-        let brainColumns = brain.columnCount
-        guard brainColumns > 0 else { return [] }
-
-        // Normalize brain columns to unit norm. Lead-field entries are in
-        // µV/(nA·m) and artifact topographies are unit vectors, so without this
-        // a regularization expressed as a fraction of the brain block means
-        // something entirely different to each block.
-        var b = [[Double]](
-            repeating: [Double](repeating: 0, count: brainColumns), count: channelCount
-        )
-        for column in 0..<brainColumns {
-            var sum = 0.0
-            for channel in 0..<channelCount {
-                sum += brain.matrix[channel][column] * brain.matrix[channel][column]
-            }
-            let norm = sum.squareRoot()
-            let scale = norm > 1e-30 ? 1 / norm : 1
-            for channel in 0..<channelCount {
-                b[channel][column] = brain.matrix[channel][column] * scale
-            }
-        }
-
-        // Orthonormalize the artifact topographies. PCA components already are,
-        // but a caller may pass anything, and the projector below assumes it.
-        var a: [[Double]] = []
-        for topography in artifactTopographies {
-            var vector = (0..<channelCount).map { $0 < topography.count ? topography[$0] : 0 }
-            for existing in a {
-                let dot = zip(vector, existing).reduce(0.0) { $0 + $1.0 * $1.1 }
-                for index in vector.indices { vector[index] -= dot * existing[index] }
-            }
-            let norm = vector.reduce(0.0) { $0 + $1 * $1 }.squareRoot()
-            guard norm > 1e-12 else { continue }
-            a.append(vector.map { $0 / norm })
-        }
-
-        // Partial out the *unpenalized* artifact block instead of inverting a
-        // combined Gram matrix.
-        //
-        // Minimizing ‖x − Bb − Aa‖² + λ‖b‖² over both a and b is a partially
-        // penalized least-squares problem. Solving for the free block first
-        // gives a = A⁺(x − Bb), and substituting leaves
-        //
-        //     b = (Bᵀ M B + λI)⁻¹ Bᵀ M x,     M = I − AAᵀ
-        //
-        // so the reconstruction is P = B (Bᵀ M B + λI)⁻¹ Bᵀ M.
-        //
-        // This matters numerically as much as conceptually. Inverting the
-        // combined [brain | artifact] Gram directly means inverting a matrix
-        // that is singular by construction — more columns than channels — with
-        // *zero* regularization on part of its diagonal. No truncation rescues
-        // that: it produced filters that inverted the sign of the topographies
-        // they were supposed to preserve. Here λ is positive on every remaining
-        // column, so the matrix is positive definite and no truncation is needed
-        // at all.
-        func projectOutArtifacts(_ vector: [Double]) -> [Double] {
-            var result = vector
-            for component in a {
-                let dot = zip(vector, component).reduce(0.0) { $0 + $1.0 * $1.1 }
-                for index in result.indices { result[index] -= dot * component[index] }
-            }
-            return result
-        }
-
-        // MB, channels x brainColumns.
-        var mb = [[Double]](
-            repeating: [Double](repeating: 0, count: brainColumns), count: channelCount
-        )
-        for column in 0..<brainColumns {
-            let projected = projectOutArtifacts((0..<channelCount).map { b[$0][column] })
-            for channel in 0..<channelCount { mb[channel][column] = projected[channel] }
-        }
-
-        // K = Bᵀ M B + λI. M is a projector, so BᵀMB = (MB)ᵀ(MB) and the result
-        // is symmetric positive semi-definite before the ridge is added.
-        var k = [[Double]](
-            repeating: [Double](repeating: 0, count: brainColumns), count: brainColumns
-        )
-        for row in 0..<brainColumns {
-            for column in row..<brainColumns {
-                var sum = 0.0
-                for channel in 0..<channelCount { sum += mb[channel][row] * mb[channel][column] }
-                k[row][column] = sum
-                k[column][row] = sum
-            }
-        }
-        let meanDiagonal = (0..<brainColumns).reduce(0.0) { $0 + k[$1][$1] } / Double(brainColumns)
-        // A positive floor keeps K invertible even if the caller asks for no
-        // regularization at all; at the default 2% it is irrelevant.
-        let lambda = max(brainRegularization * meanDiagonal, 1e-12 * max(meanDiagonal, 1e-30))
-        for column in 0..<brainColumns { k[column][column] += lambda }
-
-        let decomposition = SymmetricEigen.decompose(k)
-        var inverse = [[Double]](
-            repeating: [Double](repeating: 0, count: brainColumns), count: brainColumns
-        )
-        for (value, vector) in zip(decomposition.values, decomposition.vectors) {
-            guard value > 0 else { continue }
-            let weight = 1 / value
-            for row in 0..<brainColumns {
-                let scaled = weight * vector[row]
-                guard scaled != 0 else { continue }
-                for column in 0..<brainColumns { inverse[row][column] += scaled * vector[column] }
-            }
-        }
-
-        // P = B K⁻¹ (MB)ᵀ.
-        var bk = [[Double]](
-            repeating: [Double](repeating: 0, count: brainColumns), count: channelCount
-        )
-        for channel in 0..<channelCount {
-            for column in 0..<brainColumns {
-                var sum = 0.0
-                for index in 0..<brainColumns { sum += b[channel][index] * inverse[index][column] }
-                bk[channel][column] = sum
-            }
-        }
-        var filter = [[Double]](
-            repeating: [Double](repeating: 0, count: channelCount), count: channelCount
-        )
-        for row in 0..<channelCount {
-            for column in 0..<channelCount {
-                var sum = 0.0
-                for index in 0..<brainColumns { sum += bk[row][index] * mb[column][index] }
-                filter[row][column] = sum
-            }
-        }
-        return filter
+    ) throws -> [[Double]] {
+        try sourceInformedOperator(
+            brain: brain,
+            artifactTopographies: artifactTopographies,
+            brainRegularization: brainRegularization
+        ).matrix
     }
 
-    static func apply(filter: [[Double]], to channels: [[Double]]) -> [[Double]] {
-        guard !filter.isEmpty, !channels.isEmpty else { return channels }
-        let sampleCount = channels.map(\.count).min() ?? 0
-        var output = [[Double]](
-            repeating: [Double](repeating: 0, count: sampleCount), count: filter.count
-        )
-        for row in 0..<filter.count {
-            for column in 0..<min(filter[row].count, channels.count) {
-                let weight = filter[row][column]
-                guard weight != 0 else { continue }
-                for sample in 0..<sampleCount {
-                    output[row][sample] += weight * channels[column][sample]
-                }
-            }
-        }
-        return output
+    static func apply(filter: [[Double]], to channels: [[Double]]) throws -> [[Double]] {
+        try SourceInformedSeparation.apply(matrix: filter, to: channels)
     }
 
     private static func fractionalPart(_ value: Double) -> Double { value - floor(value) }

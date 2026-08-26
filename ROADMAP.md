@@ -19,9 +19,9 @@ when it is an independent bug fix required for safe use.
 
 | Order | Milestone | Brief description | Status |
 |---:|---|---|---|
-| 1 | **SI-0 — Characterize source-informed contracts** | Pin the current EVASimulate leadfield and surrogate-filter behavior before moving code. | **NEXT** |
-| 2 | **SI-1 — Shared spherical forward model** | Move app-neutral forward math into EVA and make EVASimulate consume it. | **NOT STARTED** |
-| 3 | **SI-2 — Shared surrogate-filter engine** | Extract the UI-free PCA-S operator, diagnostics, and stable linear algebra into EVA. | **NOT STARTED** |
+| 1 | **SI-0 — Characterize source-informed contracts** | Pin the current EVASimulate leadfield and surrogate-filter behavior before moving code. | ✅ **COMPLETED** |
+| 2 | **SI-1 — Shared spherical forward model** | Move app-neutral forward math into EVA and make EVASimulate consume it. | ✅ **COMPLETED** |
+| 3 | **SI-2 — Shared surrogate-filter engine** | Extract the UI-free PCA-S operator, diagnostics, and stable linear algebra into EVA. | ✅ **COMPLETED** |
 | 4 | **RW-1 — Harden history/replay foundations** | Close the bounded REWIND correctness and paired-validation gaps needed by a new correction stage. | **IN PROGRESS** |
 | 5 | **SI-3 — EVA broadband BCG PCA-S** | Integrate PCA-S through interactive, headless, replay, history, provenance, and export paths. | **NOT STARTED** |
 | 6 | **SI-4 — Adversarial validation** | Measure operating limits under geometry, head-model, rank, channel, and data-quality mismatch. | **NOT STARTED** |
@@ -157,46 +157,98 @@ top-level wavelet or ICA stage.
 - **Headless parity:** `ProcessingCore`, Copy Processing, windowed use, and the
   regression corpus call the same engine. A sheet-only path is incomplete.
 
-### SI-0 — Characterize contracts — **NEXT**
+### SI-0 — Characterize contracts — ✅ **COMPLETED 2026-08-26**
 
-- [ ] Add deterministic fixtures for leadfield and PCA-S matrix dimensions,
+- [x] Add deterministic fixtures for leadfield and PCA-S matrix dimensions,
   finiteness, reference, artifact-free near-identity behavior, known artifact
   attenuation, brain-topography preservation, and invalid-input failures.
-- [ ] Record current EVASimulate self-test metrics and determinism hashes.
-- [ ] Separate exact invariants from scientific metrics allowed a documented
+- [x] Record current EVASimulate self-test metrics and determinism hashes.
+- [x] Separate exact invariants from scientific metrics allowed a documented
   tolerance when the eigensolver changes.
-- [ ] Define ordered-electrode and `ForwardDipole` APIs, including units,
+- [x] Define ordered-electrode and `ForwardDipole` APIs, including units,
   coordinate frame, reference, and errors.
+
+Implementation record:
+
+- `SI0ContractFixtures.swift` adds nine compact extraction-boundary checks to the
+  existing scientific self-test, bringing it to 99 passing outcomes.
+- `SI0_CONTRACTS.md` records exact versus tolerance-bearing contracts, the
+  ordered physical-electrode/`ForwardDipole` API, units/frame/reference/errors,
+  current metrics, and the eight existing determinism fingerprints.
+- PCA-S construction now rejects empty, ragged, non-finite, channel-mismatched,
+  and negative-regularization inputs instead of padding/truncating them.
+- EVASimulate's direct-source build now includes EVA's `SensorLayout.swift`, a
+  dependency added to `MFFReader` after the simulator build list was last synced.
+- Verification: optimized build succeeds; all 99 self-tests pass; all eight
+  generated scenarios match the committed determinism baseline without updating
+  it. No new hashing system was introduced.
 
 **Exit:** extraction cannot silently change the science, and later score changes
 can be attributed.
 
-### SI-1 — Extract the shared spherical forward model — **NOT STARTED**
+### SI-1 — Extract the shared spherical forward model — ✅ **COMPLETED 2026-08-26**
 
-- [ ] Move only app-neutral forward types and math into `EVA/Core/Forward/`.
-- [ ] Adapt EVA `ElectrodeGeometry` and EVASimulate `Montage`/
+- [x] Establish app-neutral forward types and typed validation errors in
+  `EVA/Core/Forward/`.
+- [x] Move the spherical-harmonic solver math into `EVA/Core/Forward/`.
+- [x] Adapt EVA `ElectrodeGeometry` and EVASimulate `Montage`/
   `SimulatedSource` at their own boundaries.
-- [ ] Compile the shared EVA sources from EVASimulate's existing build without
+- [x] Wire the shared EVA sources into EVASimulate's existing build without
   copying the implementation or adding a heavy dependency.
-- [ ] Run forward self-tests, complete simulator tests, determinism checks, and
+- [x] Compile both consumers and pass focused forward parity/contracts (99
+  simulator outcomes and 5 focused EVA tests).
+- [x] Run forward self-tests, complete simulator tests, determinism checks, and
   the EVA suite with no intended generated-signal change.
 
 **Exit:** both programs use one forward solver and simulator leadfields remain
 within the pinned numerical tolerance.
 
-### SI-2 — Extract the surrogate spatial-filter engine — **NOT STARTED**
+Implementation record:
 
-- [ ] Separate regional-basis generation, artifact-topography input, operator
+- EVA owns app-neutral head/electrode/dipole/reference/leadfield values, typed
+  errors, the arbitrary-shell spherical-harmonic solver, and convergence checks
+  under `EVA/Core/Forward/`.
+- EVA's `ElectrodeGeometry` and EVASimulate's stable montage/source/truth values
+  adapt at their own boundaries; EVASimulate compiles the EVA sources directly
+  and contains no second solver implementation.
+- Verification: optimized simulator build; 99/99 simulator outcomes; 5/5
+  focused shared-forward tests; unchanged fingerprints for all eight existing
+  scenarios; 1,264/1,264 EVA tests across 130 suites. No baseline or hashing
+  infrastructure changed.
+- The complete phase record is `Tools/EVASimulate/SI1_EXTRACTION.md`; SI-0
+  remains the acceptance contract.
+
+### SI-2 — Extract the surrogate spatial-filter engine — ✅ **COMPLETED 2026-08-26**
+
+- [x] Separate regional-basis generation, artifact-topography input, operator
   construction/application, and diagnostics from BCG template discovery.
-- [ ] Replace the simulator-only Jacobi dependency with EVA's LAPACK-backed
+- [x] Replace the simulator-only Jacobi dependency with EVA's LAPACK-backed
   routines and explicit errors; solve regularized positive-definite systems
   instead of constructing an inverse where practical.
-- [ ] Preserve paper versus iterative template discovery as named BCG policies.
-- [ ] Pin operator determinism, artifact attenuation, artifact-free residual
+- [x] Preserve paper versus iterative template discovery as named BCG policies.
+- [x] Pin operator determinism, artifact attenuation, artifact-free residual
   SNR, brain-map gain/correlation, and degeneracy failures.
 
 **Exit:** EVASimulate calls the app-owned engine and retains or improves the
 committed repeated-seed results.
+
+Implementation record:
+
+- `EVA/Artifacts/SourceInformed/SourceInformedOperator.swift` owns validated
+  basis normalization, artifact-subspace projection, operator construction and
+  application, typed failures, and auditable numerical diagnostics.
+- `LinearAlgebra.CholeskyFactorization` uses LAPACK `dpotrf_`/`dpotrs_` to solve
+  the regularized positive-definite system for all sensor right-hand sides; the
+  former eigendecomposition-built inverse is gone from EVASimulate.
+- EVASimulate retains regional-source placement and named paper/iterative BCG
+  template discovery, but correction and repeated evaluation call the shared
+  operator directly and correction reports include its diagnostics.
+- Verification: 99/99 simulator outcomes; all SI-0 measurements unchanged at
+  printed precision; 19/19 focused engine/linear-algebra tests; all eight
+  existing generated scenarios unchanged; 1,271/1,271 EVA tests across 131
+  suites. No baseline or hashing infrastructure changed.
+- The complete phase record is `Tools/EVASimulate/SI2_EXTRACTION.md`; SI-0
+  remains the scientific acceptance contract.
 
 ## 2. RW-1 — REWIND hardening required by SI-3 — **IN PROGRESS**
 
