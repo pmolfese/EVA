@@ -56,7 +56,20 @@ final class MFFRecording: Identifiable {
     let id = UUID()
     let packageURL: URL
     let packageName: String
-    private let securityScopedURLs: [URL]
+    /// Sidecar/folder URLs whose security scope this recording was opened with.
+    ///
+    /// Readable because a **fork** needs them: the second window re-reads the
+    /// file for itself (`MFFRecording` cannot be shared — see
+    /// `WaveformView.forkToNewWindow`), and a format whose data lives beside the
+    /// header rather than inside a package — BrainVision's `.vmrk`/`.eeg`, EDF,
+    /// Persyst, BESA — cannot be re-read without the same scope the original
+    /// open was granted. Forks used to drop them and fail to load
+    /// (ROADMAP RW-1 item 12).
+    ///
+    /// Scopes are process-wide and refcounted, so handing the same URLs to a
+    /// second window in this process is enough; no bookmark round-trip and no
+    /// normalized copy of the file are needed.
+    private(set) var securityScopedURLs: [URL]
 
     private(set) var signal: MFFSignalData?
     /// Peripheral/physiological channels (ECG, EMG, …), shown alongside the EEG.

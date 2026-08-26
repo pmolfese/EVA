@@ -539,6 +539,12 @@ struct WaveformView: View {
     /// re-derivation on a large recording reads as work in progress rather
     /// than a frozen click.
     @State var isReDerivingHistory = false
+    /// The in-flight history re-derivation, so a newer click (or closing the
+    /// file) can cancel it rather than leaving minutes of work running for a
+    /// node nobody is waiting on. Publication safety is separate and belongs to
+    /// `RecordingStore.historyReDeriveRunner` — cancellation is cooperative, so
+    /// a cancelled rebuild can still reach its end. See `reDeriveHistory`.
+    @State var historyReDeriveTask: Task<Void, Never>?
     @State var waveletExplorerTask: Task<Void, Never>?
     @State var topographyTask: Task<Void, Never>?
     @State var artifactTemplateTask: Task<Void, Never>?
@@ -804,6 +810,26 @@ struct WaveformView: View {
         .focusedSceneValue(\.datasetInfoRequest, $datasetInfoRequest)
         .focusedSceneValue(\.importPhysioRequest, $importPhysioRequest)
         .focusedSceneValue(\.physioViewControls, physioViewControls)
+        .focusedSceneValue(\.historyTransportActions, historyTransportActions)
+    }
+
+    /// ⌘Z / ⇧⌘Z for this window — see `HistoryTransportCommands`.
+    ///
+    /// The names come from the nodes themselves, so the menu says "Undo Filter"
+    /// rather than a bare "Undo": stepping back is navigation to the parent
+    /// node, and naming the step it leaves is the difference between a menu item
+    /// the operator can predict and one they have to try.
+    var historyTransportActions: HistoryTransportActions {
+        let model = recordingStore.processingHistory
+        return HistoryTransportActions(
+            undoStepName: model.stepBackTarget == nil
+                ? nil
+                : model.history.current.displayLabel,
+            redoStepName: model.stepForwardTarget
+                .flatMap { model.history.node($0)?.displayLabel },
+            stepBack: { stepHistoryBack() },
+            stepForward: { stepHistoryForward() }
+        )
     }
 
     /// Split out of `body` (and further split below) so each modifier chain stays
@@ -1060,6 +1086,29 @@ struct WaveformView: View {
         // instant. Matches what `recordProcessingHistory()` does after every
         // live `record()`: capture immediately follows adopt.
         recordingStore.processingHistory.storeSnapshot(capturePipelineSnapshot())
+
+        // Does what this package carries agree with what it says happened? The
+        // answer goes into the status history rather than into an alert: it is
+        // a note about the file, not a reason to refuse it. See
+        // `PayloadConsistency` (ROADMAP RW-1 item 4).
+        let findings = PayloadConsistency.findings(
+            script: script,
+            hasICAPayload: ICAReplayPayload.read(fromPackage: recording.packageURL) != nil,
+            hasArtifactPayload: ArtifactReplayPayload.read(fromPackage: recording.packageURL) != nil
+        )
+        // Only the impossible direction is surfaced here. A step whose payload
+        // is absent is ordinary — every package written before the sidecar
+        // existed is in that state, and the batch config pane already says the
+        // step will not re-apply. A payload with no step is the one nobody can
+        // explain.
+        let unexplained = findings.first { finding in
+            if case .payloadWithoutStep = finding { return true }
+            return false
+        }
+        if let unexplained {
+            channelStatusMessage = unexplained.message
+            channelStatusIsError = true
+        }
     }
 
     /// Puts the newly-opened recording at the preferred sensitivity and sweep
@@ -1122,7 +1171,10 @@ struct WaveformView: View {
         // files may not be with this one (e.g. missing TR markers), so it's
         // re-checked here even though the batch template already chose which
         // steps to include.
-        replay.configure(fromBatch: batch, script: script, signal: signal)
+        replay.configure(
+            fromBatch: batch, script: script, signal: signal,
+            availability: currentReplayPayloadAvailability()
+        )
         batch.setStatus(.processing)
         startInteractiveReplay()
     }
@@ -2061,6 +2113,20 @@ struct WaveformView: View {
         if let channelStatusMessage {
             lines.append(StatusLogLine(source: "Channel", text: channelStatusMessage, isError: channelStatusIsError))
         }
+        // A repair the record claims that this session could not re-solve. It
+        // gets its own source line so it lands in the status history and stays
+        // there, rather than living only in the transient channel status that
+        // the next click overwrites (ROADMAP RW-1 item 3).
+        if !channels.interpolationLost.isEmpty {
+            let list = channels.interpolationLost.keys.sorted()
+                .map { "Ch \($0 + 1)" }
+                .joined(separator: ", ")
+            lines.append(StatusLogLine(
+                source: "Interpolation",
+                text: "Interpolation lost for \(list) — those channels are marked bad instead.",
+                isError: true
+            ))
+        }
         if let chanStatus = chanHealth.statusMessage {
             lines.append(StatusLogLine(source: "Channel Health", text: chanStatus, isError: false))
         }
@@ -2176,7 +2242,10 @@ struct WaveformView: View {
                 onStepBack: { stepHistoryBack() },
                 onStepForward: { stepHistoryForward() },
                 onFork: { forkToNewWindow() },
-                onForkNode: { forkNode(EVAHistoryNodeID(hex: $0)) }
+                onForkNode: { forkNode(EVAHistoryNodeID(hex: $0)) },
+                cacheSummary: recordingStore.processingHistory.snapshotBudgetSummary,
+                onTogglePinNode: { togglePin(EVAHistoryNodeID(hex: $0)) },
+                onRenameNode: { beginRenamingHistoryNode(EVAHistoryNodeID(hex: $0)) }
             )
         }
     }
@@ -2437,55 +2506,56 @@ struct WaveformView: View {
 
     /// Replaces channel `index` with a spherical-spline interpolation from the
     /// good channels of the currently displayed signal.
+    /// `recordsLossOnFailure` distinguishes the two callers. A fresh click that
+    /// fails is just a refusal — the channel is whatever it was. A *re-solve* of
+    /// a repair the record already claims is different: failing there means the
+    /// file says this channel is repaired and it is not, so the channel goes
+    /// back to bad and the loss is remembered (ROADMAP RW-1 item 3).
     @discardableResult
-    func interpolate(_ index: Int, in signal: MFFSignalData, updatesStatus: Bool = true) -> (message: String, isError: Bool) {
+    func interpolate(
+        _ index: Int,
+        in signal: MFFSignalData,
+        updatesStatus: Bool = true,
+        recordsLossOnFailure: Bool = false
+    ) -> (message: String, isError: Bool) {
         if updatesStatus {
             channelStatusMessage = nil
             channelStatusIsError = false
         }
-        guard let geometry = electrodeGeometry, geometry.positions[index] != nil else {
-            let message = "No 3D coordinates for Ch \(index + 1); can't interpolate."
-            if updatesStatus {
-                channelStatusMessage = message
-                channelStatusIsError = true
-            }
-            return (message, true)
-        }
-
-        let good = signal.data.indices.filter {
-            $0 != index
-                && !channels.bad.contains($0)
-                && channels.interpolated[$0] == nil
-                && geometry.positions[$0] != nil
-        }
-
-        guard let (indices, weights) = SphericalSpline.interpolationWeights(
+        // One solver for the click, replay, batch, and re-derivation — the
+        // parity ROADMAP RW-1 item 3 asks for is a property of there being a
+        // single implementation, not of two being carefully matched.
+        let outcome = ChannelInterpolationSolver.solve(
             target: index,
-            good: good,
-            positions: geometry.positions
-        ) else {
-            let message = "Couldn't compute interpolation weights for Ch \(index + 1)."
+            in: signal,
+            bad: channels.bad,
+            alreadyInterpolated: Set(channels.interpolated.keys),
+            positions: electrodeGeometry?.positions ?? [:]
+        )
+
+        let solution: ChannelInterpolationSolver.Solution
+        switch outcome {
+        case .success(let value):
+            solution = value
+        case .failure(let failure):
+            let message = failure.message
+            if recordsLossOnFailure {
+                channels.recordInterpolationLoss(target: index, reason: message)
+            }
             if updatesStatus {
                 channelStatusMessage = message
                 channelStatusIsError = true
             }
             return (message, true)
         }
-
-        let length = signal.data[index].count
-        var series = [Float](repeating: 0, count: length)
-        for (channelIndex, weight) in zip(indices, weights) {
-            let source = signal.data[channelIndex]
-            guard source.count == length else { continue }
-            // series += Float(weight) * source
-            vDSP.add(multiplication: (source, Float(weight)), series, result: &series)
-        }
+        let indices = solution.indices
+        let weights = solution.weights.map(Double.init)
 
         channels.setInterpolation(
             target: index,
-            replacement: series,
-            sourceIndices: indices,
-            sourceWeights: weights.map(Float.init)
+            replacement: solution.replacement,
+            sourceIndices: solution.indices,
+            sourceWeights: solution.weights
         )
         channels.bad.remove(index)
         let message = "Interpolated Ch \(index + 1) from \(indices.count) neighbors."
@@ -2506,36 +2576,71 @@ struct WaveformView: View {
         // falling through to invalidateEpochsForSignalChange() every time
         // (previously masked; surfaced once something else called interpolate()
         // right after an Apply, e.g. the bad-channel escalation feature).
-        if reinterpolateEpochedSignal(index, indices: indices, weights: weights) {
-            // Averages patched in place — segmentation/averages remain intact.
+        if reinterpolateEpochSignals(index, indices: indices, weights: weights) {
+            // Epoch caches patched in place — segmentation/averages remain intact.
         } else {
             invalidateEpochsForSignalChange()
         }
         return (message, false)
     }
 
-    /// Re-derives channel `index` in the already-averaged `epoching.epochedSignal`
-    /// using the SAME per-source weights just computed for the continuous signal,
-    /// so an interpolation doesn't force re-running PSA. Returns false (no-op) if
-    /// there's no averaged result yet, or the epoched signal doesn't have the
-    /// same channel layout (stale/mismatched — safer to fall back to invalidating).
-    private func reinterpolateEpochedSignal(_ index: Int, indices: [Int], weights: [Double]) -> Bool {
-        guard let epoched = epoching.epochedSignal,
-              epoched.data.indices.contains(index),
-              indices.allSatisfy({ epoched.data.indices.contains($0) })
-        else { return false }
+    /// Re-derives channel `index` in **both** epoch caches — the averaged
+    /// `epochedSignal` and the pre-average `segmentedEpochSignal` — using the
+    /// SAME per-source weights just computed for the continuous signal, so an
+    /// interpolation doesn't force re-running PSA.
+    ///
+    /// All or nothing, deliberately (ROADMAP RW-1 item 3). Patching only the
+    /// averages left the raw-epoch cache holding the *un*-repaired channel, and
+    /// that cache is what Single Trial Analysis reads — so the butterfly plot
+    /// and the per-trial view disagreed about the same channel, with neither
+    /// saying which one had been repaired. Returns false when any existing cache
+    /// cannot be patched (no result yet, or a mismatched channel layout), and
+    /// the caller invalidates instead: recomputing is slow, but a cache that
+    /// half-agrees with the signal is wrong.
+    private func reinterpolateEpochSignals(_ index: Int, indices: [Int], weights: [Double]) -> Bool {
+        guard epoching.epochedSignal != nil || epoching.segmentedEpochSignal != nil else {
+            return false
+        }
 
-        let length = epoched.data[index].count
+        var patchedAverage: MFFSignalData?
+        if let epoched = epoching.epochedSignal {
+            guard let patched = reinterpolating(epoched, channel: index, indices: indices, weights: weights)
+            else { return false }
+            patchedAverage = patched
+        }
+
+        var patchedSegments: MFFSignalData?
+        if let segmented = epoching.segmentedEpochSignal {
+            guard let patched = reinterpolating(segmented, channel: index, indices: indices, weights: weights)
+            else { return false }
+            patchedSegments = patched
+        }
+
+        if let patchedAverage { epoching.epochedSignal = patchedAverage }
+        if let patchedSegments { epoching.segmentedEpochSignal = patchedSegments }
+        return true
+    }
+
+    /// `signal` with channel `index` replaced by the weighted sum of its donors,
+    /// or nil when the layout doesn't match. Pure — the caller decides whether
+    /// to commit, which is what lets the two caches move together.
+    private func reinterpolating(
+        _ signal: MFFSignalData, channel index: Int, indices: [Int], weights: [Double]
+    ) -> MFFSignalData? {
+        guard signal.data.indices.contains(index),
+              indices.allSatisfy({ signal.data.indices.contains($0) })
+        else { return nil }
+
+        let length = signal.data[index].count
         var series = [Float](repeating: 0, count: length)
         for (channelIndex, weight) in zip(indices, weights) {
-            let source = epoched.data[channelIndex]
-            guard source.count == length else { return false }
+            let source = signal.data[channelIndex]
+            guard source.count == length else { return nil }
             vDSP.add(multiplication: (source, Float(weight)), series, result: &series)
         }
-        var newData = epoched.data
+        var newData = signal.data
         newData[index] = series
-        epoching.epochedSignal = epoched.replacingSamples(newData)
-        return true
+        return signal.replacingSamples(newData)
     }
 
     /// Interpolated channels are derived from the source data, so they go stale
@@ -2583,6 +2688,12 @@ struct WaveformView: View {
         bcgRefinementTask = nil
         artifactIdentityRefreshTask?.cancel()
         artifactIdentityRefreshTask = nil
+        historyReDeriveTask?.cancel()
+        historyReDeriveTask = nil
+        // Disown it as well: a rebuild that reaches its end after the file is
+        // gone must not restore itself into the reused view models.
+        recordingStore.historyReDeriveRunner.invalidate()
+        isReDerivingHistory = false
 
         filter.cancelInFlightWork()
         chanHealth.resetForClose()

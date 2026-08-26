@@ -263,55 +263,133 @@ replace stale items in `REWIND.md`: evicted-node re-derivation already exists,
 history is linear within one window, and A/B alternatives are explicit window
 forks rather than persistent sibling nodes.
 
-1. [ ] **Make on-disk-prefix navigation safe.** A processed MFF opens with its
-   loaded samples already at the tip of `eva.xml`; rebuilding an interior prefix
-   node from `recording.signal` can apply those steps a second time. Either keep
-   those nodes non-navigable until the true pre-prefix source is available, or
-   re-derive from an explicitly cached/source input. Add a processed-file test
-   proving an interior click never double-filters, double-references, or
-   double-corrects.
-2. [ ] **Make re-derivation latest-only and commit-safe.** Multiple rapid history
-   clicks currently launch independent rebuild tasks. Serialize or cancel them,
-   cancel on close/source change, and verify the recording ID, history node, and
-   source revision again before committing so an older completion cannot move
-   the window after a newer request.
-3. [ ] **Finish channel-decision identity and carry-through.** Resolve where
-   `markBad` and `interpolateChannels` belong relative to filter, reference,
-   wavelet, and segment; persist or deterministically re-solve every required
-   interpolation input; patch or re-derive `segmentedEpochSignal` consistently;
-   and test interactive, replay, and re-derivation parity.
-   A failed re-solve must return the channel to bad, retain an explicit
-   “interpolation lost” state, appear in the channel row and status history, and
-   reach the processing audit log—never leave stale replacement samples active.
-4. [ ] **Complete the paired validation and impossible-state instrumentation.**
-   Run byte comparisons for artifact-template re-derivation, ICA replay,
-   `markBad`, gradient motion parameters, and continuous/epoch reference.
-   Instrument—not guess—the observed `eva_ica.json` without an `icaClean` step.
-5. [ ] **Commit threshold edits deliberately.** Threshold configuration changes
-   must create one history state when applied, not zero states and not one node
-   per slider tick.
-6. [ ] **Represent “resolved from this file's payload” in replay policy.** Move
-   the batch-local workaround into `ReplayInteraction`, with per-file gating and
-   an explicit skip/ask policy when the payload is absent. Decide which recorded
-   decisions—at least `markBad`, interpolation, and BCG detection—pause to open
-   their file-specific interface in windowed replay, and which remain inert.
-7. [ ] **Make the snapshot policy truthful.** Re-derivation is built, so harden
-   its supported-step matrix and failure UI; expose the memory budget; either
-   wire Pin into the rail and exempt pinned snapshots during eviction or remove
-   the dormant pin promise. Record measured `computeCost` before showing any
-   cached/fast/slow estimate.
-8. [ ] **Choose the real Queue/History contract.** Today Queue shows in-flight
-   progress plus a status log; it is not the same node-lifecycle system as
-   History. Linear replacement also contradicts REWIND's “stale descendants stay
-   visible” section. Prefer documenting the two tabs as adjacent views for now;
-   add queued/dependency/speculative node states only when full-rate rebuilds
-   actually require them.
-9. [ ] **Finish the minimum Mac history surface and trim aspirational UI.** Add
-   Command-Z / Shift-Command-Z routing to back/forward. Decide which promised
-   row actions are real requirements—rename, delete future, pin, reopen stage,
-   export/report from node—and remove or defer the rest instead of documenting
-   an unimplemented context menu. Fork to New Window is the only row action
-   currently shipped.
+1. [x] **Make on-disk-prefix navigation safe — completed 2026-08-26.**
+   `RecordingHistoryModel.reDerivationSource(for:)` is now the single rule for
+   what a snapshot-less node may be rebuilt from: the loaded signal is the
+   on-disk prefix's *output*, so only the steps after the prefix are replayed,
+   and a node at or inside the prefix (or one whose lineage does not lead with
+   the prefix) is `.unavailable`. Unreachable rows render greyed with an
+   explanation instead of offering a click, and their Fork menu is withheld;
+   `undoSegmentationTarget` now asks the same `isReachable` question every other
+   entry point does. This also fixed a quieter half: a *live* node in a
+   processed file previously replayed the on-disk steps too. Covered by
+   `HistoryReDerivationSourceTests`, including the numeric premise that a second
+   filter application really does change the samples. The pre-prefix source
+   cache is deferred to item 11's cache policy.
+2. [x] **Make re-derivation latest-only and commit-safe — completed 2026-08-26.**
+   Rebuilds run through `RecordingStore.historyReDeriveRunner`
+   (`LatestOnlyRunner`), so a superseded run publishes nothing and cannot clear
+   a newer run's spinner; a new snapshot-less click cancels the previous task,
+   and closing the recording cancels and disowns it. The derivation itself moved
+   into a `deriveSnapshot` helper that only *returns* a snapshot — the commit is
+   a separate block that re-checks the recording name, the source signal's
+   `dataRevision`, the node's continued existence, and the history model's
+   identity before moving the window, and says so when it discards a late
+   arrival.
+3. [x] **Finish channel-decision identity and carry-through — completed
+   2026-08-26.** Four answers:
+   - **Position vs application order.** `markBad` stays where
+     `ChannelDecisionSteps` writes it and carries `scope: ambient`;
+     `ProcessingCore` applies every mark *before* the walk, since wavelet,
+     referencing, and PSA all consult the final bad set and can precede that
+     position. Moving the step to the front of the script was rejected: a
+     mid-session bad mark would then change the first node and discard the whole
+     content-addressed lineage, snapshots included.
+   - **Interpolation inputs are re-solved, not persisted.** The donor recipe is
+     a pure function of electrode positions and the ambient channel state, both
+     already recorded, so `ChannelInterpolationSolver` is now the single
+     implementation behind the click, replay, batch, and re-derivation — and
+     re-derivation no longer refuses a path containing an interpolation when the
+     package has geometry. No new sidecar.
+   - **Epoch caches move together.** The averaged `epochedSignal` and the
+     pre-average `segmentedEpochSignal` are patched all-or-nothing; patching
+     only the averages left Single Trial Analysis reading the unrepaired
+     channel.
+   - **Failure is explicit.** An unsolvable repair drops any replacement
+     samples, returns the channel to bad, and records `interpolationLost` —
+     surfaced in the channel row (its own badge and a retry), the status
+     history, and an `interpolateChannels lost:` audit-log line.
+   Parity is covered by byte comparison in `PairedValidationTests`.
+4. [x] **Complete the paired validation and impossible-state instrumentation —
+   completed 2026-08-26.** `PairedValidationTests` compares interactive against
+   headless by sample equality for `markBad` (including the ambient rule above),
+   channel interpolation, ICA replay driven through `ProcessingCore`, and
+   continuous and epoch referencing — each paired with a test proving the thing
+   being compared is observable at all, so none of them can pass vacuously.
+   Artifact-template re-derivation and payload-level ICA replay were already
+   byte-compared in `ArtifactReplayPayloadTests` and `ICAReplayPayloadTests`
+   and are referenced rather than duplicated. Gradient motion is compared on the
+   volume-exclusion set its parameters drive rather than on corrected samples:
+   the repository carries no MRI fixture with TR markers, and that set is the
+   decision the parameters actually make. `PayloadConsistency` now checks script
+   against sidecars in both directions at the two moments both are in hand — the
+   export audit log records any disagreement, and opening a package surfaces the
+   unexplainable direction (a payload with no step) in the status line.
+5. [x] **Commit threshold edits deliberately — completed 2026-08-26.** It was
+   the zero-state end of that range: `ProcessingChainSignature` carries no
+   parameter values and threshold detection produces no signal, so a retuned
+   detector never reached the history at all. `ArtifactViewModel`
+   `.thresholdConfigCommits` is bumped once when the ocular threshold sheet
+   commits (Done, Restore Defaults, or dismissal) and is the signature's only
+   count-valued term, so a drag mints nothing and a commit mints one node.
+   Navigating to a threshold node now also restores its blink/movement
+   configurations, so the detector re-runs off the values that node's hash was
+   built from. Covered by `ThresholdConfigCommitTests`.
+6. [x] **Represent “resolved from this file's payload” in replay policy —
+   completed 2026-08-26.** `ReplayInteraction` gains `.resolvedFromPayload`, and
+   `EVAProcessingStep.replayInteraction(given:)` classifies against a
+   `ReplayPayloadAvailability` describing *the file being processed* — ICA and
+   artifact sidecars, and electrode geometry. The rule that lived privately in
+   `BatchSetupSheet` (and, differently, inside `ProcessingCore`) is now one
+   function every path asks. Channel decisions were the real divergence, not a
+   labelling problem: headless batch applied the source recording's bad-channel
+   list to every file while windowed replay ignored the step entirely. Both are
+   now `.decision` — windowed replay pauses on
+   `ChannelDecisionReplaySheet`, which lists the carried channels, flags the ones
+   this file cannot honour, and applies only what the operator keeps; batch
+   cannot ask, so the steps start **unchecked** and applying them is a
+   deliberate tick. BCG detection stays inert (2026-08-26 decision) and is
+   carried in F-1's detector work.
+7. [x] **Make the snapshot policy truthful — completed 2026-08-26.** Four
+   promises, each now kept or withdrawn:
+   - **Supported-step matrix** is one pure function on the model
+     (`RecordingHistoryModel.firstNonReDerivableStep`), folded into
+     `reDerivationSource(for:availability:)` so a node that cannot be rebuilt —
+     BCG anywhere on its path, ICA without this file's sidecar, interpolation
+     without geometry — is greyed with a reason *before* the click instead of
+     failing after it. The rule reads the same `ReplayPayloadAvailability` the
+     replay engine classifies with (item 6).
+   - **Pin is wired** into the row menu and exempted during eviction — and
+     **capped**: pinned snapshots may hold at most `pinnedByteShare` of the
+     budget, because an unlimited exemption is a way to switch the budget off by
+     accident. A refused pin says what is already held and what the ceiling is.
+   - **The budget is visible** in the History tab footer (`420 MB of 1.5 GB
+     cached · 6 of 24`), so eviction stops being invisible.
+   - **`computeCost` is measured or absent.** Re-derivation times itself and
+     records the result; a row offers a duration only when one was measured, and
+     there is no fast/slow guess from a table of stage names.
+8. [x] **Choose the real Queue/History contract — completed 2026-08-26.** The
+   two tabs are adjacent views, and now say so: Queue is “what is running now,
+   and what it has reported”, History is “the steps that produced the signal on
+   screen” (`ProcessingStatusTab.summary`, surfaced on each tab). No node
+   lifecycle is shared between them — a node never appears in Queue, and a
+   running operation is not a node until it has produced something. Queued,
+   dependency, and speculative node states stay unbuilt; `REWIND.md`'s lifecycle
+   design is relabelled as the starting point *if* full-rate background rebuilds
+   are ever built, not as pending work.
+9. [x] **Finish the minimum Mac history surface and trim aspirational UI —
+   completed 2026-08-26.** ⌘Z / ⇧⌘Z route to back/forward through a focused
+   scene value (`HistoryTransportCommands`), replacing the standard Edit-menu
+   pair; the items name the step they act on — “Undo Filter”, not a bare “Undo”
+   — and are disabled rather than hidden when no recording window is focused.
+   Undo stays *navigation*, never an appended inverse.
+   The row menu is settled at three actions: Fork to New Window (shipped),
+   Pin/Unpin (item 7), and Rename. **Delete future, reopen stage, and
+   export/report from node were dropped, not deferred** — delete-future is
+   already what applying a divergent action does, and offering it separately
+   would be a second way to destroy work; reopen-stage is a restore-the-sheet
+   feature far larger than a menu item; per-node export belongs with F-1's
+   reports. `REWIND.md`'s interaction section now matches.
 10. [ ] **Define A/B comparison around related forked windows.** Replace the old
     “select two sibling nodes” prerequisite with a way to identify two windows
     forked from the same state, align their signals/viewport, and compare overlay,
@@ -325,9 +403,16 @@ forks rather than persistent sibling nodes.
     Accelerate-derived snapshots across incompatible machines. External motion
     inputs need the same explicit staleness rule. Expanded SHA-256 infrastructure
     is not a prerequisite or project priority.
-12. [ ] **Make forks reliable for non-MFF imports.** Preserve the required
-    security scope or create a normalized disposable cache for BrainVision, EDF,
-    Persyst, and BESA so a fork never depends on inaccessible original sidecars.
+12. [x] **Make forks reliable for non-MFF imports — completed 2026-08-26.** The
+    security scope is preserved, and no normalized cache was needed.
+    `MFFRecording` already accepted `securityScopedURLs` and the BrainVision open
+    path already threaded the folder scope through; the *fork* dropped them —
+    `PendingWindowForks.Payload` carried only `packageURL`, so the claiming
+    window re-read a header whose `.vmrk`/`.eeg` it had no access to, and failed
+    to load a file the source window had open. The payload now carries the
+    scopes. They are process-wide and refcounted, so handing the same URLs to
+    the second window is the whole fix: no bookmark round-trip, and no copy of
+    the recording.
 13. [x] **Reconcile `REWIND.md` and code comments with shipped behavior —
     completed 2026-08-25.** Removed stale claims about the sidebar, persistent
     sibling branches, disabled evicted nodes, missing re-derivation, unbuilt

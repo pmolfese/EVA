@@ -139,6 +139,33 @@ final class ProcessingCore {
                 // a batch output claiming no channels were bad when its own
                 // script said one was. Found by a paired run, 2026-08-13.
                 || $0.operation == .markBad
+                // Interpolation is re-solvable, not merely carried: the donor
+                // recipe is a pure function of the electrode positions and the
+                // ambient channel state, both of which this file supplies. It
+                // joins the walk even when there is no geometry to solve from,
+                // because *not* applying it is not the same as ignoring it —
+                // the channel was taken out of `bad` when it was repaired, so
+                // dropping the step would leave it looking good. The case below
+                // turns an unsolvable target back into a bad channel with an
+                // explicit loss instead (RW-1 item 3).
+                || $0.operation == .interpolateChannels
+        }
+
+        // Channel decisions are ambient state, not positioned transforms
+        // (ROADMAP RW-1 item 3, settled 2026-08-26). Wavelet reduction reads
+        // `channels.bad` as its excluded set, continuous and epoch referencing
+        // exclude it, and PSA consults it — and all three can precede the
+        // position `ChannelDecisionSteps` writes the step at, which is chosen
+        // for history stability rather than for chain order. Applying the marks
+        // *before* the walk is what makes the recorded script reproduce the
+        // recorded bytes: a wavelet pass that should have excluded a bad
+        // channel otherwise excluded nothing, silently. The step's own case
+        // below still runs and is idempotent — the set is absolute, so
+        // re-asserting it is a no-op.
+        for step in steps where step.operation == .markBad {
+            store.channels.bad = ChannelDecisionSteps.channelIndices(
+                from: step.parameters["channels"] ?? ""
+            )
         }
         // Lights off before the walk, so the script alone decides. Without this
         // a script with no `reference` step still average-referenced its epochs,
@@ -303,6 +330,43 @@ final class ProcessingCore {
                 store.channels.bad = ChannelDecisionSteps.channelIndices(
                     from: step.parameters["channels"] ?? ""
                 )
+
+            case .interpolateChannels:
+                // Re-solved here rather than replayed from stored samples: the
+                // weights are a pure function of the positions and the good-channel
+                // set, so this reproduces the interactive click's arithmetic
+                // exactly — same solver, same order (`ChannelInterpolationSolver`).
+                //
+                // A target that cannot be solved does not quietly stay
+                // "interpolated": it returns to bad and the loss is recorded, so
+                // the channel row, the status history, and the audit log all say
+                // the repair did not survive. Never stale replacement samples.
+                let targets = ChannelDecisionSteps.channelIndices(
+                    from: step.parameters["channels"] ?? ""
+                ).sorted()
+                for target in targets {
+                    let outcome = ChannelInterpolationSolver.solve(
+                        target: target,
+                        in: current,
+                        bad: store.channels.bad,
+                        alreadyInterpolated: Set(store.channels.interpolated.keys),
+                        positions: electrodePositions
+                    )
+                    switch outcome {
+                    case .success(let solution):
+                        store.channels.setInterpolation(
+                            target: target,
+                            replacement: solution.replacement,
+                            sourceIndices: solution.indices,
+                            sourceWeights: solution.weights
+                        )
+                        store.channels.bad.remove(target)
+                    case .failure(let failure):
+                        store.channels.recordInterpolationLoss(
+                            target: target, reason: failure.message
+                        )
+                    }
+                }
 
             case .thresholdArtifactDetection:
                 artifactVM.detectionMethod = .threshold

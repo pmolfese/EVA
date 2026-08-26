@@ -43,7 +43,16 @@ extension WaveformView {
         // launches `interactiveReplay()` via `startInteractiveReplay()`. Passing
         // the CURRENT recording's signal runs the compatibility pre-flight
         // against the file this script is about to be replayed onto.
-        replay.configure(script: script, sourceName: url.lastPathComponent, signal: recording.signal)
+        replay.configure(
+            script: script,
+            sourceName: url.lastPathComponent,
+            signal: recording.signal,
+            // Classified against *this* recording, not the script's source —
+            // whether ICA re-applies from a sidecar, and whether a recorded
+            // interpolation can be re-solved here, are facts about the file
+            // being replayed onto (ROADMAP RW-1 item 6).
+            availability: currentReplayPayloadAvailability()
+        )
     }
 
     // MARK: - MFF export

@@ -33,6 +33,7 @@
 //  correctly changes nothing, because nothing about the signal changed either.
 //
 
+import AppKit
 import SwiftUI
 
 extension WaveformView {
@@ -61,6 +62,13 @@ extension WaveformView {
         var thresholdDetection: Bool
         var detectsBlinks: Bool
         var detectsMovements: Bool
+        /// The one term that is a *count* rather than a state: threshold values
+        /// are parameters, and this signature deliberately carries none, so a
+        /// retuned detector would otherwise change nothing observable here and
+        /// never reach the history at all. Bumped only when the sheet commits,
+        /// so a drag does not mint a node per tick. See
+        /// `ArtifactViewModel.thresholdConfigCommits` (ROADMAP RW-1 item 5).
+        var thresholdConfigCommits: Int
     }
 
     var processingChainSignature: ProcessingChainSignature {
@@ -78,7 +86,8 @@ extension WaveformView {
             // own terms or its step would appear and disappear unnoticed.
             thresholdDetection: artifactVM.detectionMethod == .threshold,
             detectsBlinks: detectsEyeBlinkArtifacts,
-            detectsMovements: detectsEyeMovementArtifacts
+            detectsMovements: detectsEyeMovementArtifacts,
+            thresholdConfigCommits: artifactVM.thresholdConfigCommits
         )
     }
 
@@ -115,10 +124,11 @@ extension WaveformView {
     /// them into the snapshot would create a second source of truth that could
     /// disagree with it.
     ///
-    /// Returns false when the node has no snapshot. Re-deriving it is possible —
-    /// the steps are all there — but that is the signal cache's job, and until it
-    /// exists the honest answer is to refuse rather than to silently show a state
-    /// that is only partly the one asked for.
+    /// Returns false when the node has no snapshot: this is the instant path
+    /// only. Callers reach it through `requestNavigation(to:)`, which falls back
+    /// to `reDeriveHistory` for a node that can honestly be rebuilt and refuses
+    /// for one that cannot, rather than silently showing a state that is only
+    /// partly the one asked for.
     @discardableResult
     func navigateHistory(to id: EVAHistoryNodeID) -> Bool {
         let historyModel = recordingStore.processingHistory
@@ -170,6 +180,15 @@ extension WaveformView {
             case .icaClean: ica.apply(parameters: step.parameters)
             case .waveletReduce: wavelet.apply(parameters: step.parameters)
             case .segment: epoching.apply(parameters: step.parameters)
+            // Threshold values are part of what the node *is* (they are in its
+            // content hash), so navigating to one has to put them back — the
+            // detector re-runs off them, and leaving the last-typed values in
+            // place would show one node's events under another node's label.
+            case .thresholdArtifactDetection:
+                artifactVM.blinkThresholdConfig = .fromFlatParameters(
+                    step.parameters, prefix: "blink", base: artifactVM.blinkThresholdConfig)
+                artifactVM.movementThresholdConfig = .fromFlatParameters(
+                    step.parameters, prefix: "movement", base: artifactVM.movementThresholdConfig)
             // BCG has no `apply(parameters:)` — its step is provenance-only and
             // its settings are subject-specific, so there is nothing to restore.
             default: break
@@ -213,22 +232,18 @@ extension WaveformView {
     var undoSegmentationTarget: EVAHistoryNodeID? {
         let model = recordingStore.processingHistory
         let path = model.history.currentPath
-        guard let target = EVAHistory.segmentationBuildParent(along: path),
-              let index = path.firstIndex(where: { $0.id == target.id })
-        else { return nil }
+        guard let target = EVAHistory.segmentationBuildParent(along: path) else { return nil }
 
         // A node the file arrived with cannot be reached: the steps in
         // `onDiskPrefix` produced the bytes *before* this session opened them,
         // so there is no snapshot for any of them but the tip, and re-deriving
-        // is not available either — `reDeriveHistory` replays from
-        // `recording.signal`, which for an already-processed file is the
-        // prefix's *output*, not its input. Refusing is the honest answer; the
-        // menu says so rather than silently doing something else.
-        if !model.onDiskPrefix.isEmpty,
-           index <= model.onDiskPrefix.count,
-           !model.hasSnapshot(for: target.id) {
-            return nil
-        }
+        // is not available either — the replay source is `recording.signal`,
+        // which for an already-processed file is the prefix's *output*, not its
+        // input. Refusing is the honest answer; the menu says so rather than
+        // silently doing something else. `isReachable` is the same rule every
+        // other navigation entry point asks (`reDerivationSource(for:)`).
+        guard model.isReachable(target.id, availability: currentReplayPayloadAvailability())
+        else { return nil }
         return target.id
     }
 
@@ -271,16 +286,21 @@ extension WaveformView {
     /// other node became unclickable — the reported regression (2026-08-16).
     /// `REWIND.md` always named re-derivation as the answer for an evicted
     /// node ("the steps are all there"); this is it.
+    ///
+    /// A snapshot-less click supersedes any rebuild already running: the older
+    /// task is cancelled here, and `LatestOnlyRunner` makes sure it publishes
+    /// nothing even if it finishes anyway (RW-1 item 2).
     func requestNavigation(to id: EVAHistoryNodeID) {
         if recordingStore.processingHistory.hasSnapshot(for: id) {
             navigateHistory(to: id)
             return
         }
-        Task { await reDeriveHistory(to: id) }
+        historyReDeriveTask?.cancel()
+        historyReDeriveTask = Task { await reDeriveHistory(to: id) }
     }
 
-    /// Rebuilds an evicted node's pipeline state by replaying its step path
-    /// from the raw recording, then navigates to it.
+    /// Rebuilds an evicted node's pipeline state by replaying its steps against
+    /// the signal this session loaded, then navigates to it.
     ///
     /// Derived in a **throwaway** set of view models (a fresh `RecordingStore`
     /// and VM set, exactly as `HeadlessBatchProcessor` does), not the live
@@ -292,31 +312,137 @@ extension WaveformView {
     ///
     /// Faithfulness over reach: a path containing a step this cannot reproduce
     /// exactly — BCG (subject-specific, no re-derive path), ICA or artifact
-    /// cleaning whose payload sidecar isn't on disk, or an explicit channel
-    /// interpolation (`ProcessingCore` doesn't apply one) — is refused up
-    /// front rather than silently re-derived without that step, which would
+    /// cleaning whose payload sidecar isn't on disk, or a channel interpolation
+    /// on a package with no electrode geometry to re-solve it from — is refused
+    /// up front rather than silently re-derived without that step, which would
     /// serve a plausible-looking wrong signal. Those nodes stay reachable
     /// only while their snapshot is still cached.
+    ///
+    /// ## Source, not just steps (RW-1 item 1)
+    ///
+    /// The replay input is `recording.signal`, which for an already-processed
+    /// file is the output of the steps in `eva.xml`, not the recording before
+    /// them. Replaying the node's *whole* path against it would apply every
+    /// on-disk step a second time — a double filter, a double reference, a
+    /// double correction, silently. `reDerivationSource(for:)` owns that rule:
+    /// it hands back only the steps downstream of the on-disk prefix, and
+    /// refuses outright for a node at or inside the prefix, whose input this
+    /// session never had.
+    ///
+    /// ## Only the newest run commits (RW-1 item 2)
+    ///
+    /// Rebuilds are minutes long on a large recording, and clicking three rows
+    /// in a row starts three of them. The work runs through
+    /// `historyReDeriveRunner`, so a superseded run publishes nothing, and the
+    /// commit re-checks the recording, the node, and the source signal's
+    /// revision before it moves the window — a rebuild whose file was closed or
+    /// whose source was reprocessed under it must not land.
     @MainActor
     func reDeriveHistory(to id: EVAHistoryNodeID) async {
         let model = recordingStore.processingHistory
         guard model.history.node(id) != nil, let rawSignal = recording.signal else { return }
-        let path = model.history.path(to: id)
-        let steps = path.compactMap(\.step)
 
-        let icaPayload = ICAReplayPayload.read(fromPackage: recording.packageURL)
-        let artifactPayload = ArtifactReplayPayload.read(fromPackage: recording.packageURL)
-        if let blocker = firstNonReDerivableStep(
-            in: steps, icaPayload: icaPayload, artifactPayload: artifactPayload
-        ) {
-            channelStatusMessage = "Can't rebuild this step (\(ReplayStepDisplay.label(for: blocker))) from disk — it stays reachable only while its data is still cached."
+        let source = model.reDerivationSource(
+            for: id, availability: currentReplayPayloadAvailability()
+        )
+        guard case .loadedSignal(let steps) = source else {
+            channelStatusMessage = source.unavailableReason?.message
             channelStatusIsError = true
             return
         }
 
-        isReDerivingHistory = true
-        defer { isReDerivingHistory = false }
+        let icaPayload = ICAReplayPayload.read(fromPackage: recording.packageURL)
+        let artifactPayload = ArtifactReplayPayload.read(fromPackage: recording.packageURL)
 
+        // Identity of what this rebuild is *for*, captured before the first
+        // suspension point and checked again at the commit.
+        let recordingKey = recording.packageName
+        let sourceRevision = rawSignal.dataRevision
+        // Measured, not estimated: this is the only place EVA learns what a
+        // node actually costs to produce, and the rail shows no cost hint at
+        // all for a node that has never been timed (ROADMAP RW-1 item 7).
+        let startedAt = Date()
+
+        isReDerivingHistory = true
+
+        let outcome = await recordingStore.historyReDeriveRunner.run("historyReDerive") { () -> PipelineSnapshot? in
+            await deriveSnapshot(
+                steps: steps,
+                from: rawSignal,
+                icaPayload: icaPayload,
+                artifactPayload: artifactPayload
+            )
+        }
+
+        let derived: PipelineSnapshot?
+        switch outcome {
+        case .superseded:
+            // A newer rebuild owns `isReDerivingHistory` and the window now.
+            // Touching either would blank a spinner for work still running.
+            return
+        case .cancelled:
+            isReDerivingHistory = false
+            return
+        case .completed(let value):
+            isReDerivingHistory = false
+            derived = value
+        }
+
+        guard let snapshot = derived else {
+            // Something in the path stopped the walk after the pre-check passed
+            // — a compatibility mismatch against this signal, most likely.
+            // Nothing was touched in the live window, so there's nothing to
+            // undo; just say so.
+            channelStatusMessage = "Couldn't fully rebuild this point in the history."
+            channelStatusIsError = true
+            return
+        }
+
+        // Commit-safety: the window may have moved on while this ran. Being the
+        // newest *run* is not enough — the newest run can still be for a file
+        // that has since closed, a node discarded by an abandoned future, or a
+        // source signal that was reprocessed underneath it.
+        guard recording.packageName == recordingKey,
+              recording.signal?.dataRevision == sourceRevision,
+              model.history.node(id) != nil,
+              recordingStore.processingHistory === model
+        else {
+            channelStatusMessage = "Discarded a rebuild that finished after this window moved on."
+            channelStatusIsError = false
+            return
+        }
+
+        // Move the pointer, file the freshly-derived snapshot under it (so the
+        // next visit is instant), and restore it into the live models — the
+        // same restore path an ordinary cached navigation takes.
+        // `beginNavigation` returns nil here (no snapshot cached yet); it's
+        // called for its side effects — moving the pointer and setting
+        // `isNavigating`, which `storeSnapshot` needs so it files under `id`.
+        _ = model.beginNavigation(to: id)
+        model.recordComputeCost(Date().timeIntervalSince(startedAt), for: id)
+        model.storeSnapshot(snapshot)
+        PipelineSnapshotting.restore(
+            snapshot,
+            store: recordingStore, gradient: gradient, bcg: bcg, ica: ica,
+            filter: filter, wavelet: wavelet, artifactVM: artifactVM, template: template,
+            segHealth: segHealth, epoching: epoching
+        )
+        restoreStageSettings(along: model.history.currentPath)
+        model.endNavigation()
+        channelStatusMessage = "Rebuilt and moved to \(model.history.current.displayLabel)."
+        channelStatusIsError = false
+    }
+
+    /// Runs `steps` against `source` in a throwaway pipeline and captures the
+    /// result, or `nil` if the walk could not finish. Publishes nothing: the
+    /// caller decides whether this rebuild is still the one the window wants.
+    @MainActor
+    private func deriveSnapshot(
+        steps: [EVAProcessingStep],
+        from source: MFFSignalData,
+        icaPayload: ICAReplayPayload?,
+        artifactPayload: ArtifactReplayPayload?
+    ) async -> PipelineSnapshot? {
         let throwStore = RecordingStore()
         let throwFilter = FilterViewModel(store: throwStore)
         let throwGradient = GradientViewModel(store: throwStore)
@@ -343,70 +469,18 @@ extension WaveformView {
 
         let result = await core.applyAutoSteps(
             EVAProcessingScript(steps: steps),
-            to: rawSignal,
+            to: source,
             pnsSignal: recording.pnsSignal,
             icaPayload: icaPayload,
             artifactPayload: artifactPayload
         )
+        guard result.remainingSteps.isEmpty else { return nil }
 
-        guard result.remainingSteps.isEmpty else {
-            // Something in the path stopped the walk after the pre-check passed
-            // — a compatibility mismatch against this signal, most likely.
-            // Nothing was touched in the live window, so there's nothing to
-            // undo; just say so.
-            channelStatusMessage = "Couldn't fully rebuild this point in the history."
-            channelStatusIsError = true
-            return
-        }
-
-        let snapshot = PipelineSnapshotting.capture(
+        return PipelineSnapshotting.capture(
             store: throwStore, gradient: throwGradient, bcg: throwBCG, ica: throwICA,
             filter: throwFilter, wavelet: throwWavelet, artifactVM: throwArtifact,
             template: throwTemplate, epoching: throwEpoching
         )
-
-        // Commit: move the pointer, file the freshly-derived snapshot under it
-        // (so the next visit is instant), and restore it into the live models —
-        // the same restore path an ordinary cached navigation takes.
-        // `beginNavigation` returns nil here (no snapshot cached yet); it's
-        // called for its side effects — moving the pointer and setting
-        // `isNavigating`, which `storeSnapshot` needs so it files under `id`.
-        _ = model.beginNavigation(to: id)
-        model.storeSnapshot(snapshot)
-        PipelineSnapshotting.restore(
-            snapshot,
-            store: recordingStore, gradient: gradient, bcg: bcg, ica: ica,
-            filter: filter, wavelet: wavelet, artifactVM: artifactVM, template: template,
-            segHealth: segHealth, epoching: epoching
-        )
-        restoreStageSettings(along: model.history.currentPath)
-        model.endNavigation()
-        channelStatusMessage = "Rebuilt and moved to \(model.history.current.displayLabel)."
-        channelStatusIsError = false
-    }
-
-    /// The first step in `steps` that `reDeriveHistory` cannot reproduce
-    /// exactly, or `nil` if the whole path is re-derivable. See that method
-    /// for why each is excluded.
-    private func firstNonReDerivableStep(
-        in steps: [EVAProcessingStep],
-        icaPayload: ICAReplayPayload?,
-        artifactPayload: ArtifactReplayPayload?
-    ) -> EVAProcessingStep.Operation? {
-        for step in steps {
-            switch step.operation {
-            case .filter, .reference, .baseline, .segment, .waveletReduce,
-                 .thresholdArtifactDetection, .mriGradientCorrection, .markBad:
-                continue
-            case .icaClean where icaPayload != nil:
-                continue
-            case .artifactClean where artifactPayload != nil:
-                continue
-            default:
-                return step.operation
-            }
-        }
-        return nil
     }
 
     /// "Fork to New Window" — REWIND.md "Forking to a new window". Opens a
@@ -425,6 +499,9 @@ extension WaveformView {
         let liveSnapshot = capturePipelineSnapshot()
         PendingWindowForks.shared.push(PendingWindowForks.Payload(
             packageURL: recording.packageURL,
+            // Without these a forked BrainVision/EDF/Persyst/BESA window cannot
+            // read the sidecars this one was granted access to.
+            securityScopedURLs: recording.securityScopedURLs,
             historySeed: historySeed,
             liveSnapshot: liveSnapshot,
             channels: recordingStore.channels.copy()
@@ -453,13 +530,30 @@ extension WaveformView {
             guard navigateHistory(to: id) else { return }
             forkAndReturn()
         } else {
-            Task {
+            historyReDeriveTask?.cancel()
+            historyReDeriveTask = Task {
                 await reDeriveHistory(to: id)
                 // Only fork if the re-derivation actually landed on the node.
                 guard recordingStore.processingHistory.history.currentID == id else { return }
                 forkAndReturn()
             }
         }
+    }
+
+    /// What *this* recording brings to a replay, beyond the script it is being
+    /// given: its own ICA and artifact sidecars, and electrode coordinates for
+    /// re-solving a recorded interpolation.
+    ///
+    /// Read from the file being processed, never from the file the script came
+    /// from — that asymmetry is the safety property. A script copied from
+    /// another subject arrives with none of this, so every subject-specific step
+    /// correctly stays a decision (ROADMAP RW-1 item 6).
+    func currentReplayPayloadAvailability() -> ReplayPayloadAvailability {
+        ReplayPayloadAvailability(
+            hasICAPayload: ICAReplayPayload.read(fromPackage: recording.packageURL) != nil,
+            hasArtifactPayload: ArtifactReplayPayload.read(fromPackage: recording.packageURL) != nil,
+            hasElectrodeGeometry: !(electrodeGeometry?.positions.isEmpty ?? true)
+        )
     }
 
     /// Subject-specific identity for the steps whose portable parameters do not
@@ -479,7 +573,60 @@ extension WaveformView {
     /// Rail rows, with the root's subtitle describing the recording itself the
     /// way the figure in `REWIND.md` does: `128 ch · 1000 Hz · 21:04`.
     var historyRailNodes: [HistoryRailNode] {
-        recordingStore.processingHistory.railNodes(rawSubtitle: rawRecordingSummary)
+        recordingStore.processingHistory.railNodes(
+            rawSubtitle: rawRecordingSummary,
+            availability: currentReplayPayloadAvailability()
+        )
+    }
+
+    /// Rename a history node — the operator's own name for a point, replacing
+    /// the default step rendering (`EVAHistoryNode.displayLabel`).
+    ///
+    /// An `NSAlert` with a text field rather than a sheet: renaming is a
+    /// one-field, one-answer question raised from a context menu inside a
+    /// popover, and the window's single-sheet host (`WaveformSheetHost`) would
+    /// have to dismiss that popover to present. Same choice, and the same
+    /// AppKit prompt, that `confirmChannelRoleEditReset` already makes.
+    ///
+    /// An empty name clears the label rather than storing one, so "rename back
+    /// to the default" needs no separate command.
+    func beginRenamingHistoryNode(_ id: EVAHistoryNodeID) {
+        let model = recordingStore.processingHistory
+        guard let node = model.history.node(id) else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Rename this point"
+        alert.informativeText = "Give this point in the history a name. Leave it empty to go back to “\(node.defaultLabel)”."
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = node.label ?? ""
+        field.placeholderString = node.defaultLabel
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        model.setLabel(field.stringValue, for: id)
+    }
+
+    /// Pin or unpin a node's snapshot, reporting a refusal rather than
+    /// silently doing nothing — the allowance exists so pinning cannot quietly
+    /// disable the memory budget, which only works if the refusal is visible
+    /// (ROADMAP RW-1 item 7).
+    func togglePin(_ id: EVAHistoryNodeID) {
+        let model = recordingStore.processingHistory
+        switch model.setPinned(!model.isPinned(id), for: id) {
+        case .pinned:
+            channelStatusMessage = "Pinned — this point stays instant while the cache evicts others."
+            channelStatusIsError = false
+        case .unpinned:
+            channelStatusMessage = "Unpinned."
+            channelStatusIsError = false
+        case .refused(let pinned, let allowance):
+            channelStatusMessage = "Can't pin: pinned snapshots already hold \(RecordingHistoryModel.byteSummary(pinned)) of the \(RecordingHistoryModel.byteSummary(allowance)) allowed. Unpin another point first."
+            channelStatusIsError = true
+        }
     }
 
     private var rawRecordingSummary: String {

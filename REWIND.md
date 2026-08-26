@@ -433,7 +433,9 @@ Consequences worth designing around:
 - Replay must never recompute when a valid snapshot for the exact source and
   state exists. Node identity is necessary, but ambient channel decisions and
   external inputs must also be captured before identity alone can guarantee the
-  bytes; that is ROADMAP RW-1 item 3.
+  bytes. The channel half of that is settled (ROADMAP RW-1 item 3, 2026-08-26):
+  bad marks are recorded with `scope: ambient` and applied before the walk, and
+  interpolation re-solves from the recorded positions and channel state.
 - The A/B case ("with and without ICA") belongs in two forked recording windows,
   where both alternatives are visible and neither silently changes the other.
 
@@ -502,8 +504,10 @@ support this.
 
 ## Granularity
 
-Settled for ordinary recording windows; threshold editing is the remaining
-edge case (ROADMAP RW-1 item 5).
+Settled for ordinary recording windows. Threshold editing was the remaining
+edge case and is settled too (ROADMAP RW-1 item 5, 2026-08-26): the ocular
+threshold sheet commits one node when it is dismissed, not one per slider tick
+and — as it did before — not none at all.
 
 **Proposal: a node is a step that changes the derived signal, or changes what
 gets exported.** That means `apply filter`, `remove ICA components`, `mark bad`,
@@ -526,13 +530,19 @@ Two things deserve care:
 
 ## Original proposal: Queue and History as one state machine
 
-**Current correction.** The shipped tabs are adjacent, not two renderings of
-the same node lifecycle. Queue shows active operations and the status log;
-History shows committed processing lineage. The lifecycle/work-class design
-below remains useful if full-rate background rebuilds later need it, but it is
-not the present model. Linear replacement also means the old proposal to keep
-stale descendants visible does not describe ordinary current behavior. See
-ROADMAP RW-1 item 8.
+**Settled 2026-08-26 (ROADMAP RW-1 item 8).** The shipped tabs are adjacent
+views, not two renderings of the same node lifecycle, and that is now the
+decision rather than the status quo: Queue is *what is running now, and what it
+has reported*; History is *the steps that produced the signal on screen*. Each
+tab says so (`ProcessingStatusTab.summary`). A node never appears in Queue, and a
+running operation is not a node until it has produced something.
+
+The lifecycle and work-class design below is **not** the present model and is not
+scheduled. It stays here because it would be the right starting point if
+full-rate background rebuilds are ever built — until then, `queued`, `stale`, and
+`speculative` node states would be three more things to keep truthful for
+behaviour nobody can see. Linear replacement also means the old proposal to keep
+stale descendants visible does not describe current behaviour.
 
 The original proposal treated the tabs as two renderings of the same objects: a
 queued operation would have been a node without its signal yet.
@@ -604,10 +614,17 @@ re-evaluate.
 
 This section records the intended Mac interaction model. The shipped primary
 view is the **History tab in the processing-status popover**, not a sidebar.
-Click navigation, back/forward transport, and **Fork to New Window** are built.
-Keyboard undo/redo, pinning, rename, delete-future, reopen-stage,
-export/report-from-node, cost hints backed by measured `computeCost`, and A/B
-comparison remain proposals tracked by ROADMAP RW-1 items 7, 9, and 10.
+Click navigation, back/forward transport, **Fork to New Window**, **keyboard
+undo/redo** (⌘Z / ⇧⌘Z, naming the step they act on), **pinning** against an
+allowance, **rename**, and cost hints backed by measured `computeCost` are built
+(2026-08-26, ROADMAP RW-1 items 7 and 9).
+
+**Delete-future, reopen-stage, and export/report-from-node were dropped rather
+than deferred** (item 9). Delete-future is already what applying a divergent
+action does, and offering it separately would be a second way to destroy work;
+reopen-stage is a restore-the-sheet feature much larger than a menu item;
+per-node export belongs with the reports work in F-1. A/B comparison remains a
+proposal, tracked as item 10.
 
 **Click a node** — navigate to it. It is instant when cached; supported evicted
 nodes currently launch re-derivation. The latest-only/source-valid safeguards
@@ -884,8 +901,9 @@ TODO ordering is ROADMAP RW-1.
    (`EVA/Waveform/HistoryRailView.swift`) draw the trunk, dots, connectors,
    per-node parameter subtitles (`HistoryStepSummary`), current-node highlight,
    and pin indicator. Click navigation and back/forward transport have since
-   shipped. Fork to New Window is the only context-menu action currently wired;
-   the other interaction ideas are tracked in ROADMAP RW-1 items 7 and 9.
+   shipped. The row menu is Fork to New Window, Pin/Unpin, and Rename — the
+   three that are real; see *Interactions* above for what was dropped
+   (ROADMAP RW-1 item 9).
 
    **It began as a 260 pt sidebar left of the waveform and that was wrong.** It
    worked, but it spent permanent horizontal room on something consulted
@@ -1262,12 +1280,17 @@ same regardless of which comes first.
 
 **No snapshot exists for the prefix's interior nodes** — the intermediate
 signals were never in this session's memory, only the final loaded bytes are.
-Those nodes originally rendered disabled. Re-derivation now makes some
-snapshotless nodes navigable, which exposes a serious newer constraint: the
-loaded signal is already the processed prefix tip, so using it as the source for
-an interior prefix can apply recorded steps twice. ROADMAP RW-1 item 1 requires
-either a true pre-prefix source or an explicit non-navigable rule. The tip—what
-is actually on screen—still gets a snapshot after seeding.
+Those nodes originally rendered disabled. Re-derivation then made some
+snapshotless nodes navigable, which exposed a serious constraint: the loaded
+signal is already the processed prefix tip, so using it as the source for an
+interior prefix applies recorded steps twice. Settled 2026-08-26 (ROADMAP RW-1
+item 1) as the explicit non-navigable rule, in
+`RecordingHistoryModel.reDerivationSource(for:)`: nodes at or inside the prefix
+are unreachable once their snapshot is gone and the rail greys them, while nodes
+*after* the prefix re-derive from the loaded signal replaying only the steps the
+prefix did not already produce. A true pre-prefix source remains possible later
+under item 11's cache policy. The tip—what is actually on screen—still gets a
+snapshot after seeding.
 
 ### Fixed: a regex-only PSA average left no `segment` step in eva.xml
 
@@ -1412,7 +1435,12 @@ Three explanations were proposed and all three were wrong (file copy-through:
 writer deletes an existing package first; wrong input file: confirmed by the
 user). **Do not guess a fourth — instrument it.**
 
-Still unresolved; carried as ROADMAP RW-1 item 4 alongside the paired-run work.
+Instrumented rather than guessed at, 2026-08-26 (ROADMAP RW-1 item 4).
+`PayloadConsistency` checks the script against the sidecars in both directions
+at the two moments both are in hand: every export records a disagreement in its
+audit log, and opening a package surfaces the unexplainable direction — a
+payload with no step — in the status line. The next occurrence arrives with a
+note saying which way round it was and where it came from.
 
 ### Historical reasoning-only notes
 
@@ -1430,14 +1458,18 @@ Still unresolved; carried as ROADMAP RW-1 item 4 alongside the paired-run work.
 
 ### Known-stale UI
 
-- **`ReplayInteraction` cannot express the third state.** A step is `auto`,
+- **`ReplayInteraction` could not express the third state.** A step was `auto`,
   `review`, `decision`, or `skip` — with no way to say *resolvable from this
-  file's own record*. The batch pane works around it with a local
-  `resolvesFromPayload` check. That belongs in the type, and doing it properly is
-  the same work as *Open: replay and batch should let you make the per-file
-  decisions* below.
+  file's own record*, so the batch pane worked around it with a local
+  `resolvesFromPayload` check.
 
-Tracked by ROADMAP RW-1 item 6.
+Settled 2026-08-26 (ROADMAP RW-1 item 6): the type gained
+`.resolvedFromPayload`, and `EVAProcessingStep.replayInteraction(given:)`
+classifies against a `ReplayPayloadAvailability` describing the file being
+processed. Channel decisions turned out to be the sharper half of the same
+item — headless batch applied the source's bad-channel list to every file while
+windowed replay ignored it — and are now a decision in both engines: a pause in
+a window, an unchecked-by-default tick in a batch.
 
 ### Historical next list — superseded by ROADMAP RW-1
 
@@ -1450,8 +1482,11 @@ Tracked by ROADMAP RW-1 item 6.
 3. ~~**Basic re-derivation for evicted snapshots.**~~ **Built.** Its correctness
    hardening is now ROADMAP RW-1 items 1–3 and 7: safe prefix sources,
    latest-only commits, channel carry-through, and truthful cache policy/UI.
-4. **The `markBad` and interpolation carry-through work** remains ROADMAP RW-1
-   item 3.
+4. ~~**The `markBad` and interpolation carry-through work.**~~ **Done
+   2026-08-26** (ROADMAP RW-1 item 3): bad marks apply ahead of the walk as
+   ambient state, interpolation re-solves through one shared solver, and a
+   repair that cannot be re-solved becomes an explicit "interpolation lost"
+   rather than stale samples.
 
 The current order begins with processed-prefix safety and latest-only
 re-derivation commits. Do not infer implementation priority from this historical

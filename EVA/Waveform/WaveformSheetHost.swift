@@ -59,6 +59,7 @@ enum ActiveRecordingSheet: String, Identifiable, CaseIterable, Sendable {
     case channelGoodnessSettings
     case segmentHealthDetails
     case motionConfig
+    case channelDecisionReplay
 
     var id: String { rawValue }
 }
@@ -90,6 +91,9 @@ extension WaveformView {
         if showsChannelGoodnessSettings { return .channelGoodnessSettings }
         if segHealth.showsDetails { return .segmentHealthDetails }
         if gradient.showsMotionConfig { return .motionConfig }
+        // Last, so it cannot pre-empt a stage sheet the replay loop itself
+        // opened; it is only ever set while the loop is parked at its gate.
+        if channelDecisionReplayRequest != nil { return .channelDecisionReplay }
         return nil
     }
 
@@ -130,6 +134,9 @@ extension WaveformView {
         case .channelGoodnessSettings: showsChannelGoodnessSettings = false
         case .segmentHealthDetails: segHealth.showsDetails = false
         case .motionConfig: gradient.showsMotionConfig = false
+        // Dismissing by Esc or click-away is a skip: the loop is waiting on the
+        // gate, and leaving it waiting would park the whole replay.
+        case .channelDecisionReplay: resolveChannelDecisionReplay(.skip)
         case nil: break
         }
     }
@@ -234,6 +241,17 @@ extension WaveformView {
         case .channelGoodnessSettings:
             ChannelGoodnessSettingsView()
                 .environment(goodnessSettings)
+
+        case .channelDecisionReplay:
+            if let request = channelDecisionReplayRequest {
+                ChannelDecisionReplaySheet(
+                    request: request,
+                    sourceName: replay.sourceName,
+                    selection: binding(recordingStore.status, \.replayChannelDecisionSelection),
+                    onApply: { resolveChannelDecisionReplay(.proceed) },
+                    onSkip: { resolveChannelDecisionReplay(.skip) }
+                )
+            }
 
         case .segmentHealthDetails:
             segmentHealthDetailsSheet()

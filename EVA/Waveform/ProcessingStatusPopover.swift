@@ -50,6 +50,23 @@ nonisolated enum ProcessingStatusTab: String, CaseIterable, Identifiable {
         case .history: return "History"
         }
     }
+
+    /// What each tab is *for*, in one line.
+    ///
+    /// ROADMAP RW-1 item 8 settled the relationship between them: these are two
+    /// **adjacent views**, not one node-lifecycle system seen twice. Queue is
+    /// work in flight and what it has said; History is the lineage of the
+    /// signal currently on screen. A node never appears in Queue, and a running
+    /// operation is never a node until it has produced something. Queued,
+    /// dependency, and speculative node states stay unbuilt until full-rate
+    /// rebuilds actually require them — until then they would be three more
+    /// states to keep truthful for no behaviour anyone can see.
+    var summary: String {
+        switch self {
+        case .queue: return "What is running now, and what it has reported."
+        case .history: return "The steps that produced the signal on screen."
+        }
+    }
 }
 
 struct ProcessingStatusPopoverView: View {
@@ -66,6 +83,11 @@ struct ProcessingStatusPopoverView: View {
     let onStepForward: () -> Void
     let onFork: () -> Void
     let onForkNode: (String) -> Void
+    /// What the snapshot cache is holding against its budget — see
+    /// `RecordingHistoryModel.snapshotBudgetSummary`.
+    var cacheSummary: String = ""
+    var onTogglePinNode: ((String) -> Void)?
+    var onRenameNode: ((String) -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -89,7 +111,10 @@ struct ProcessingStatusPopoverView: View {
                         onStepBack: onStepBack,
                         onStepForward: onStepForward,
                         onFork: onFork,
-                        onForkNode: onForkNode
+                        onForkNode: onForkNode,
+                        cacheSummary: cacheSummary,
+                        onTogglePinNode: onTogglePinNode,
+                        onRenameNode: onRenameNode
                     )
                 }
             }
@@ -128,6 +153,10 @@ struct ProcessingStatusPopoverView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                // The two tabs are adjacent views of different things, and
+                // saying which is which is the whole of ROADMAP RW-1 item 8 —
+                // see `ProcessingStatusTab.summary`.
+                .help(candidate.summary)
                 .accessibilityAddTraits(tab == candidate ? [.isSelected] : [])
             }
         }
@@ -327,12 +356,22 @@ struct HistoryTabView: View {
     /// now" (footer) and "that other node up there" (right-click) without
     /// first clicking to navigate there.
     let onForkNode: (String) -> Void
+    /// Cache occupancy against the byte budget. Empty hides the line.
+    var cacheSummary: String = ""
+    var onTogglePinNode: ((String) -> Void)?
+    var onRenameNode: ((String) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
-                HistoryRailNodeList(nodes: nodes, onSelect: onSelectNode, onFork: onForkNode)
-                    .equatable()
+                HistoryRailNodeList(
+                    nodes: nodes,
+                    onSelect: onSelectNode,
+                    onFork: onForkNode,
+                    onTogglePin: onTogglePinNode,
+                    onRename: onRenameNode
+                )
+                .equatable()
             }
             Divider()
             footer
@@ -360,6 +399,16 @@ struct HistoryTabView: View {
             Text("\(nodes.count) \(nodes.count == 1 ? "step" : "steps")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // Eviction is otherwise invisible: nodes quietly stop being instant
+            // and nothing says a budget exists (ROADMAP RW-1 item 7).
+            if !cacheSummary.isEmpty {
+                Text(cacheSummary)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .help("Cached signals let you jump back instantly. Past this budget the oldest are freed and their steps are recomputed on demand; pinned points are kept.")
+            }
 
             Spacer()
 

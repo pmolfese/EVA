@@ -213,49 +213,53 @@ struct BatchSetupSheet: View {
                     .toggleStyle(.checkbox)
                     .font(.caption)
                     .disabled(!step.wrappedValue.included)
+            } else if isChannelDecision(step.wrappedValue.step.operation) {
+                // Classified `.decision` because *windowed* replay pauses to ask
+                // about it. A batch cannot ask, so the tick in this row is the
+                // answer — and the label says whose channels it would carry
+                // rather than promising a pause that will not happen.
+                Label("carries the source's channels", systemImage: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .help("These channel numbers come from the recording the script was copied from, not from each input file. Tick it only if the same electrodes are bad in every file.")
             } else if kind == .decision {
                 Label("Pauses", systemImage: "hand.raised")
                     .font(.caption2)
                     .foregroundStyle(.orange)
             } else if kind == .skip {
-                // A `.skip` step is no longer automatically inert. When every
-                // selected file carries its own payload — the ICA operator, the
-                // drawn artifact definitions — the decision is already recorded
-                // and re-applying it asks nobody anything. Saying "not
-                // replayable" there is worse than saying nothing: it tells the
-                // user a step will not happen while it does.
-                if resolvesFromPayload(step.wrappedValue.step.operation) {
-                    Label("from this file's own record", systemImage: "checkmark.seal")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
-                        .help("Every selected file carries its own saved settings for this step, so it re-applies exactly without needing a decision.")
-                } else {
-                    Label("not replayable", systemImage: "nosign")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .help("Specific to the recording it came from, so it is recorded for provenance and not applied to other files.")
-                }
+                Label("not replayable", systemImage: "nosign")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .help("Specific to the recording it came from, so it is recorded for provenance and not applied to other files.")
+            } else if kind == .resolvedFromPayload {
+                // The third state between "portable" and "subject-specific",
+                // now decided once in `EVAProcessingStep.replayInteraction(given:)`
+                // rather than privately here (ROADMAP RW-1 item 6).
+                Label("from this file's own record", systemImage: "checkmark.seal")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                    .help("Every selected file carries its own saved settings for this step, so it re-applies exactly without needing a decision.")
             }
         }
-        .opacity(kind == .skip && !resolvesFromPayload(step.wrappedValue.step.operation) ? 0.5 : 1)
+        .opacity(kind == .skip ? 0.5 : 1)
     }
 
-    /// Whether a provenance-only step will in fact run, because every selected
-    /// file carries the payload it needs.
-    ///
-    /// The third state between "portable" and "subject-specific": *resolvable
-    /// from this file's own record*. It is a property of (operation, what these
-    /// files carry) rather than of the operation alone, which is why it cannot
-    /// come from `ReplayInteraction`.
-    private func resolvesFromPayload(_ operation: EVAProcessingStep.Operation) -> Bool {
-        switch operation {
-        case .icaClean: return everyFileHasItsOwn(ICAReplayPayload.read)
-        case .artifactClean: return everyFileHasItsOwn(ArtifactReplayPayload.read)
-        // Bad-channel marks and interpolation carry their own channel lists in
-        // `eva.xml`; `ProcessingCore` applies them directly.
-        case .markBad: return true
-        default: return false
-        }
+    private func isChannelDecision(_ operation: EVAProcessingStep.Operation) -> Bool {
+        operation == .markBad || operation == .interpolateChannels
+    }
+
+    /// What every selected file carries, as one value the shared classification
+    /// can be asked with. All-or-nothing across the batch: a step is only
+    /// "resolved from this file's own record" if that is true of *each* file, so
+    /// one file without a sidecar keeps the step a decision for the whole run.
+    private var batchPayloadAvailability: ReplayPayloadAvailability {
+        ReplayPayloadAvailability(
+            hasICAPayload: everyFileHasItsOwn(ICAReplayPayload.read),
+            hasArtifactPayload: everyFileHasItsOwn(ArtifactReplayPayload.read),
+            hasElectrodeGeometry: everyFileHasItsOwn { url in
+                ElectrodeGeometry.load(from: url).flatMap { $0.positions.isEmpty ? nil : $0 }
+            }
+        )
     }
 
     private func settingsPopoverBinding(for id: Int) -> Binding<Bool> {
@@ -335,11 +339,12 @@ struct BatchSetupSheet: View {
             // operator, the drawn artifact definitions — the answer is already
             // recorded and re-applying it asks nobody anything, so it stops
             // being a reason to open a window.
-            switch step.step.operation {
-            case .icaClean: return !everyFileHasItsOwn(ICAReplayPayload.read)
-            case .artifactClean: return !everyFileHasItsOwn(ArtifactReplayPayload.read)
-            default: return true
-            }
+            // Channel decisions are `.decision` because windowed replay pauses
+            // to ask about them. A batch does not ask — the operator already
+            // answered by ticking the step in this sheet — so they do not force
+            // a window; `ProcessingCore` applies exactly the ones left checked.
+            if isChannelDecision(step.step.operation) { return false }
+            return true
         }
     }
 
@@ -428,7 +433,26 @@ struct BatchSetupSheet: View {
         } else {
             inputDropMessage = nil
         }
+        // Availability is a property of the *files*, so adding one can change
+        // how a step classifies (a file with no ICA sidecar turns "from this
+        // file's own record" back into a decision). Re-classify rather than
+        // leaving a label that was true of the earlier selection.
+        reclassifySteps()
         return true
+    }
+
+    /// Re-runs the shared classification against the current file selection,
+    /// preserving the include/review ticks the operator has already made.
+    private func reclassifySteps() {
+        guard let script else { return }
+        let previous = config.steps
+        config.configure(
+            script: script, sourceName: sourceName, availability: batchPayloadAvailability
+        )
+        for index in config.steps.indices where previous.indices.contains(index) {
+            config.steps[index].included = previous[index].included
+            config.steps[index].pauseToReview = previous[index].pauseToReview
+        }
     }
 
     private func handleProcessingSourceDrop(_ urls: [URL]) -> Bool {
@@ -464,7 +488,9 @@ struct BatchSetupSheet: View {
         sourceName = url.lastPathComponent
         settingsPopoverStepID = nil
         sourceDropMessage = nil
-        config.configure(script: read, sourceName: sourceName)
+        config.configure(
+            script: read, sourceName: sourceName, availability: batchPayloadAvailability
+        )
         config.showsConfigPane = false
         return true
     }

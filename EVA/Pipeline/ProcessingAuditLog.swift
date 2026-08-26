@@ -73,6 +73,19 @@ enum ProcessingAuditLog {
             lines.append("interpolateChannels result: \(fields.joined(separator: ", "))")
         }
 
+        // A repair that was recorded but could not be re-solved on this file.
+        // It reads as its own line rather than as an absence from the
+        // `interpolateChannels` list, because "we did not repair this channel"
+        // and "we tried to repair this channel and could not" are different
+        // facts about the output, and only the second one needs looking into
+        // (ROADMAP RW-1 item 3).
+        if !channels.interpolationLost.isEmpty {
+            let fields = channels.interpolationLost.keys.sorted().map { index in
+                "\(index + 1): \(channels.interpolationLost[index] ?? "")"
+            }
+            lines.append("interpolateChannels lost: \(fields.joined(separator: "; "))")
+        }
+
         if !channels.bad.isEmpty {
             lines.append("markBad result: channels=\(channels.bad.sorted().map { String($0 + 1) }.joined(separator: ","))")
         }

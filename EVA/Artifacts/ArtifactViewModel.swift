@@ -55,6 +55,25 @@ final class ArtifactViewModel {
     var showsThresholdSheet = false
     var blinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
     var movementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
+    /// How many times the threshold configuration has been *committed*.
+    ///
+    /// The sheet's controls are bound live, so detection re-runs as you drag —
+    /// but the processing history must not. Recording every intermediate value
+    /// would mint a node per slider tick, and recording none (what the chain
+    /// signature did, since it carries no parameters and thresholds produce no
+    /// signal of their own) meant a threshold change never reached `eva.xml`'s
+    /// lineage at all. Bumping this once when the sheet commits is the middle
+    /// answer ROADMAP RW-1 item 5 asks for: one history state per deliberate
+    /// edit. A commit whose values did not actually change costs nothing — the
+    /// tree is content-addressed, so the identical script resolves to the node
+    /// already current.
+    var thresholdConfigCommits = 0
+
+    /// Commits the current threshold configuration to the processing history.
+    /// Called when the ocular threshold sheet is dismissed or reset.
+    func commitThresholdConfiguration() {
+        thresholdConfigCommits += 1
+    }
 
     // MARK: Cleaning
     var showsCleaningSheet = false

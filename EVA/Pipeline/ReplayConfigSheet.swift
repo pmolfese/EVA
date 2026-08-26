@@ -46,6 +46,7 @@ nonisolated enum ReplayStepDisplay {
         case .auto: return "Runs automatically"
         case .review: return "Review parameters, then runs"
         case .decision: return "Pauses for your decision"
+        case .resolvedFromPayload: return "Re-applies from this file's own record"
         case .skip: return "Recorded for provenance only"
         }
     }

@@ -28,15 +28,20 @@ final class PendingWindowForks {
     static let shared = PendingWindowForks()
     private init() {}
 
-    /// Everything the claiming window needs. `packageURL` is enough to
-    /// re-open the file — no security-scoped folder access beyond the
-    /// package itself is threaded through, so a fork of a BrainVision
-    /// recording (which needs sidecar-folder access `.mff` does not) can
-    /// fail to load; it fails the same visible way any other open failure
-    /// does rather than silently, but re-granting that access automatically
-    /// is not built.
+    /// Everything the claiming window needs.
+    ///
+    /// `securityScopedURLs` are carried alongside `packageURL` because the
+    /// claiming window re-reads the file itself, and for a format whose data
+    /// lives *beside* the header — BrainVision's `.vmrk`/`.eeg`, EDF, Persyst,
+    /// BESA — the package URL alone is not enough to read it. Forking one of
+    /// those used to produce a window that failed to load, visibly but for no
+    /// reason the operator could act on (ROADMAP RW-1 item 12). Scopes are
+    /// process-wide and refcounted, so passing the same URLs across is the whole
+    /// fix: no bookmarks, and no normalized copy of the recording.
     struct Payload {
         var packageURL: URL
+        /// See `MFFRecording.securityScopedURLs`.
+        var securityScopedURLs: [URL] = []
         var historySeed: RecordingHistoryModel.ForkSeed
         var liveSnapshot: PipelineSnapshot
         var channels: ChannelModel

@@ -108,16 +108,21 @@ final class ReplayController {
     /// a step that doesn't fit (missing TR markers, out-of-range channel
     /// override, unmatched event codes) starts unchecked with a reason shown
     /// in the config pane, rather than silently no-oping mid-run.
-    func configure(script: EVAProcessingScript, sourceName: String, signal: MFFSignalData? = nil) {
+    func configure(
+        script: EVAProcessingScript,
+        sourceName: String,
+        signal: MFFSignalData? = nil,
+        availability: ReplayPayloadAvailability = .none
+    ) {
         self.sourceName = sourceName
         steps = script.steps.enumerated().map { index, step in
-            let kind = step.replayInteraction
+            let kind = step.replayInteraction(given: availability)
             let flag = signal.flatMap { ReplayCompatibility.check(step, against: $0) }
             return StepConfig(
                 id: index,
                 step: step,
                 kind: kind,
-                included: kind != .skip && flag == nil,
+                included: Self.defaultInclusion(of: step, kind: kind) && flag == nil,
                 pauseToReview: kind == .review,
                 compatibilityFlag: flag
             )
@@ -140,8 +145,15 @@ final class ReplayController {
     /// another (e.g. a TR-marker code present in most files but missing from
     /// this one), so an incompatible step is force-excluded here even if the
     /// batch template had it included.
-    func configure(fromBatch batch: BatchController, script: EVAProcessingScript, signal: MFFSignalData? = nil) {
-        configure(script: script, sourceName: batch.sourceName, signal: signal)
+    func configure(
+        fromBatch batch: BatchController,
+        script: EVAProcessingScript,
+        signal: MFFSignalData? = nil,
+        availability: ReplayPayloadAvailability = .none
+    ) {
+        configure(
+            script: script, sourceName: batch.sourceName, signal: signal, availability: availability
+        )
         for i in steps.indices where batch.stepTemplates.indices.contains(i) {
             steps[i].included = batch.stepTemplates[i].included && steps[i].compatibilityFlag == nil
             steps[i].pauseToReview = batch.stepTemplates[i].pauseToReview
@@ -150,6 +162,23 @@ final class ReplayController {
         exportWhenFinished = true
         outputFolder = batch.outputFolder
         showsConfigPane = false
+    }
+
+    /// Whether a step starts checked.
+    ///
+    /// Everything runnable does, with one deliberate exception: the channel
+    /// decisions (ROADMAP RW-1 item 6). `markBad` and `interpolateChannels`
+    /// describe the *source* recording's electrodes, and carrying them onto a
+    /// different subject marks channels bad that may be perfectly good there.
+    /// Windowed replay pauses to ask; a batch cannot ask, so the honest default
+    /// is off and applying them is something the operator ticks on purpose.
+    /// Before this, headless batch applied the source's bad list to every file
+    /// with no way to decline, while windowed replay ignored it entirely.
+    static func defaultInclusion(of step: EVAProcessingStep, kind: ReplayInteraction) -> Bool {
+        switch step.operation {
+        case .markBad, .interpolateChannels: return false
+        default: return kind != .skip
+        }
     }
 
     /// Pure reduction of (steps + mode) → the ordered actions the loop runs.
@@ -163,7 +192,9 @@ final class ReplayController {
                 gate = .decision
             case .review:
                 gate = cfg.pauseToReview ? .review : nil
-            case .auto:
+            // Already decided, in this file's own record — it runs like any
+            // portable step, and only Review-Each stops on it.
+            case .auto, .resolvedFromPayload:
                 gate = (mode == .reviewEach || cfg.pauseToReview) ? .review : nil
             case .skip:
                 gate = nil

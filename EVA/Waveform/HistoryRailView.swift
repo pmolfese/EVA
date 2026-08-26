@@ -58,9 +58,43 @@ struct HistoryRailNodeList: View, Equatable {
     /// this one just navigates there first. `nil` disables the menu entirely
     /// (e.g. in render-only contexts like `ImageRenderer` snapshots).
     var onFork: ((String) -> Void)?
+    /// Pin or unpin this node's snapshot — an exemption from cache eviction,
+    /// within an allowance (`RecordingHistoryModel.setPinned`).
+    var onTogglePin: ((String) -> Void)?
+    /// Rename a node, replacing the default step rendering with the operator's
+    /// own name for that point.
+    var onRename: ((String) -> Void)?
 
     static func == (lhs: HistoryRailNodeList, rhs: HistoryRailNodeList) -> Bool {
         lhs.nodes == rhs.nodes
+    }
+
+    /// What clicking this row will cost, said before the click rather than
+    /// after it.
+    ///
+    /// The cost half is **measured or absent** (ROADMAP RW-1 item 7): a node
+    /// EVA has actually timed says how long its rebuild took, and one it has
+    /// not says only that a rebuild is needed. There is deliberately no
+    /// fast/slow guess from a table of stage names — a wrong estimate is worse
+    /// than none, because it is the number someone decides to wait on.
+    static func helpText(for node: HistoryRailNode) -> String {
+        if node.isInstant {
+            return node.isPinned
+                ? "Go to this point — pinned, so its signal stays cached."
+                : "Go to this point in the processing history"
+        }
+        guard let seconds = node.rebuildSeconds else {
+            return "Rebuild and go to this point — its signal was freed to save memory, so this recomputes it."
+        }
+        return "Rebuild and go to this point — its signal was freed to save memory. It took \(durationText(seconds)) to compute the first time."
+    }
+
+    static func durationText(_ seconds: TimeInterval) -> String {
+        if seconds < 1 { return "under a second" }
+        if seconds < 60 { return "\(Int(seconds.rounded())) s" }
+        let minutes = Int(seconds / 60)
+        let rest = Int(seconds) % 60
+        return rest == 0 ? "\(minutes) min" : "\(minutes) min \(rest) s"
     }
 
     var body: some View {
@@ -72,9 +106,11 @@ struct HistoryRailNodeList: View, Equatable {
                     isLast: index == nodes.count - 1
                 )
                 .equatable()
-                .modifier(HistoryRailForkContextMenu(node: node, onFork: onFork))
+                .modifier(HistoryRailRowMenu(
+                    node: node, onFork: onFork, onTogglePin: onTogglePin, onRename: onRename
+                ))
 
-                if let onSelect, !node.isCurrent {
+                if let onSelect, !node.isCurrent, node.isReachable {
                     // Non-instant nodes are no longer disabled: clicking one
                     // re-derives it from its steps (see
                     // `WaveformHistoryRail.requestNavigation`), so the only
@@ -82,9 +118,19 @@ struct HistoryRailNodeList: View, Equatable {
                     // than by refusing the click (2026-08-16).
                     Button { onSelect(node.id) } label: { row }
                         .buttonStyle(.plain)
-                        .help(node.isInstant
-                              ? "Go to this point in the processing history"
-                              : "Rebuild and go to this point — its signal was freed to save memory, so this recomputes it.")
+                        .help(HistoryRailNodeList.helpText(for: node))
+                } else if !node.isReachable, !node.isCurrent {
+                    // Unreachable: a step the file arrived with, whose input
+                    // this session never had. It is real history and stays
+                    // listed, but it is not a click that could be honoured —
+                    // re-deriving it would replay the on-disk steps against
+                    // their own output (ROADMAP RW-1 item 1). Showing it
+                    // greyed and saying why beats offering a click that only
+                    // ever produces an error.
+                    row
+                        .opacity(0.6)
+                        .help(node.unreachableReason
+                              ?? "This point can't be rebuilt from what this session has.")
                 } else {
                     row
                 }
@@ -95,21 +141,58 @@ struct HistoryRailNodeList: View, Equatable {
     }
 }
 
-/// Offered for any node once `onFork` is wired — forking a node whose
-/// snapshot was evicted re-derives it first (see
-/// `WaveformHistoryRail.forkNode`), same as clicking it does, so there's no
-/// longer a reason to hide the menu on non-instant nodes.
-private struct HistoryRailForkContextMenu: ViewModifier {
+/// The per-row menu: the three actions that are real.
+///
+/// ROADMAP RW-1 item 9 settled the rest by deletion rather than by building
+/// them. `REWIND.md` promised a row menu with rename, delete-future, pin,
+/// reopen-stage, and export/report-from-node; of those, **delete future** is
+/// already what applying a divergent action does (and doing it explicitly would
+/// be a second way to destroy work), **reopen stage** is a restore-the-sheet
+/// feature much larger than a menu item, and **export/report from node**
+/// belongs with the reports work in F-1. What remains is Fork (shipped
+/// 2026-08-16), Pin (item 7), and Rename.
+///
+/// Fork and Pin are withheld on an unreachable node: forking one starts by
+/// navigating there, and pinning one would reserve an allowance for a snapshot
+/// that can never be rebuilt. Rename is offered on every node — a name is an
+/// annotation, and naming a point you can no longer visit is still useful.
+private struct HistoryRailRowMenu: ViewModifier {
     let node: HistoryRailNode
     let onFork: ((String) -> Void)?
+    let onTogglePin: ((String) -> Void)?
+    let onRename: ((String) -> Void)?
+
+    private var hasAnyAction: Bool {
+        onRename != nil || (node.isReachable && (onFork != nil || onTogglePin != nil))
+    }
 
     func body(content: Content) -> some View {
-        if let onFork {
+        if hasAnyAction {
             content.contextMenu {
-                Button {
-                    onFork(node.id)
-                } label: {
-                    Label("Fork to New Window", systemImage: "macwindow.badge.plus")
+                if let onFork, node.isReachable {
+                    Button {
+                        onFork(node.id)
+                    } label: {
+                        Label("Fork to New Window", systemImage: "macwindow.badge.plus")
+                    }
+                }
+                if let onTogglePin, node.isReachable {
+                    Button {
+                        onTogglePin(node.id)
+                    } label: {
+                        Label(
+                            node.isPinned ? "Unpin" : "Pin",
+                            systemImage: node.isPinned ? "pin.slash" : "pin"
+                        )
+                    }
+                    .help("A pinned point keeps its cached signal instead of being evicted to save memory.")
+                }
+                if let onRename {
+                    Button {
+                        onRename(node.id)
+                    } label: {
+                        Label("Rename…", systemImage: "pencil")
+                    }
                 }
             }
         } else {

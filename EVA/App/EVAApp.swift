@@ -110,6 +110,13 @@ struct EVAApp: App {
                 .keyboardShortcut("q", modifiers: .command)
             }
 
+            // Undo/Redo are history navigation, not a text-edit stack — see
+            // `HistoryTransportCommands` for what they act on and why they
+            // replace the standard pair (ROADMAP RW-1 item 9).
+            CommandGroup(replacing: .undoRedo) {
+                HistoryTransportCommands()
+            }
+
             CommandGroup(after: .toolbar) {
                 ViewCommands()
             }

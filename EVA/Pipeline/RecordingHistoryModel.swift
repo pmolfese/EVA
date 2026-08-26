@@ -31,8 +31,10 @@
 //  common undo/redo path instant. Supported nodes whose snapshots were evicted
 //  can be re-derived; that fallback must remain exact and source-valid.
 //
-//  **Still missing:** measured `computeCost` per node, a truthful pin/eviction
-//  UI, and the re-derivation hardening tracked by ROADMAP RW-1.
+//  **Still missing:** measured `computeCost` per node and a truthful
+//  pin/eviction UI (ROADMAP RW-1 item 7). Re-derivation's source rule and
+//  commit safety are settled — see `reDerivationSource(for:)` and
+//  `WaveformView.reDeriveHistory`.
 //
 //  It lives here rather than in `WaveformUIModels.swift` because that file is
 //  explicitly display state that "nothing here belongs in eva.xml or affects
@@ -96,10 +98,10 @@ final class RecordingHistoryModel {
     ///
     /// There is no snapshot for any node in this prefix except its tip: the
     /// intermediate signals were never in memory this session. Generic
-    /// re-derivation exists, but these nodes require special care because the
-    /// loaded signal is already the prefix output, not its input. ROADMAP RW-1
-    /// item 1 requires a true source or an explicit non-navigable rule before an
-    /// interior prefix node may be rebuilt safely.
+    /// re-derivation cannot reach them either, because the loaded signal is the
+    /// prefix's *output*, not its input — so they are explicitly non-navigable
+    /// once their snapshot is gone, and the steps downstream of the prefix are
+    /// replayed without it. That rule is `reDerivationSource(for:)`.
     @ObservationIgnored private(set) var onDiskPrefix: [EVAProcessingStep] = []
     /// Payload digests for `onDiskPrefix`'s own subject-specific steps (ICA's
     /// operator, on disk) — kept separate from a live `record()` call's digests
@@ -229,13 +231,261 @@ final class RecordingHistoryModel {
         while index < snapshotOrder.count,
               total > snapshotByteBudget || snapshots.count > snapshotCountLimit {
             let candidate = snapshotOrder[index]
-            guard candidate != history.currentID, let victim = snapshots[candidate] else {
+            // The current node is never evicted — it describes the state on
+            // screen. A pinned node is never evicted either, which is the whole
+            // content of the pin (ROADMAP RW-1 item 7); `setPinned` caps how
+            // much may be held that way, so this exemption cannot grow to
+            // disable the budget.
+            guard candidate != history.currentID,
+                  history.node(candidate)?.isPinned != true,
+                  let victim = snapshots[candidate]
+            else {
                 index += 1
                 continue
             }
             total -= victim.estimatedBytes
             snapshots.removeValue(forKey: candidate)
             snapshotOrder.remove(at: index)
+        }
+    }
+
+    // MARK: - Pinning
+
+    /// How much of the budget pinned snapshots may hold.
+    ///
+    /// A pin is an exemption from eviction, and an unlimited exemption is not a
+    /// policy — pinning everything would silently disable the byte budget,
+    /// which is the exact failure the budget exists to prevent (the app swapped
+    /// when a flat 2 GB constant did that on a small machine). Half is the
+    /// starting point: enough to keep several reference states, not enough to
+    /// leave the live pipeline without room.
+    var pinnedByteShare = 0.5
+
+    var pinnedByteAllowance: Int { Int(Double(snapshotByteBudget) * pinnedByteShare) }
+
+    var pinnedBytes: Int {
+        snapshots.reduce(0) { total, entry in
+            history.node(entry.key)?.isPinned == true ? total + entry.value.estimatedBytes : total
+        }
+    }
+
+    enum PinOutcome: Equatable {
+        case pinned
+        case unpinned
+        /// Refused: this pin would push the pinned total past its allowance.
+        /// Carries what is already held and what the ceiling is, so the caller
+        /// can say so rather than failing silently.
+        case refused(pinnedBytes: Int, allowanceBytes: Int)
+    }
+
+    /// Pins or unpins `id`, refusing a pin that would exceed the allowance.
+    @discardableResult
+    func setPinned(_ pinned: Bool, for id: EVAHistoryNodeID) -> PinOutcome {
+        guard pinned else {
+            history.setPinned(false, for: id)
+            return .unpinned
+        }
+        guard history.node(id)?.isPinned != true else { return .pinned }
+
+        // Only a node that actually holds a snapshot spends the allowance; a
+        // pin on an evicted node costs nothing until it is rebuilt, and
+        // refusing it would be refusing an intent rather than a cost.
+        let cost = snapshots[id]?.estimatedBytes ?? 0
+        let allowance = pinnedByteAllowance
+        guard cost == 0 || pinnedBytes + cost <= allowance else {
+            return .refused(pinnedBytes: pinnedBytes, allowanceBytes: allowance)
+        }
+        history.setPinned(true, for: id)
+        return .pinned
+    }
+
+    func isPinned(_ id: EVAHistoryNodeID) -> Bool {
+        history.node(id)?.isPinned == true
+    }
+
+    // MARK: - Cache reporting
+
+    /// What the snapshot cache is holding, for the History tab's footer.
+    ///
+    /// Shown rather than kept private because eviction is otherwise invisible:
+    /// nodes quietly stop being instant and the operator has no way to see why,
+    /// or that a budget exists at all (ROADMAP RW-1 item 7).
+    var snapshotBudgetSummary: String {
+        "\(Self.byteSummary(snapshotBytes)) of \(Self.byteSummary(snapshotByteBudget)) cached · \(snapshotCount) of \(snapshotCountLimit)"
+    }
+
+    static func byteSummary(_ bytes: Int) -> String {
+        let gigabyte = 1_000_000_000.0
+        let megabyte = 1_000_000.0
+        if Double(bytes) >= gigabyte {
+            return String(format: "%.1f GB", Double(bytes) / gigabyte)
+        }
+        return String(format: "%.0f MB", Double(bytes) / megabyte)
+    }
+
+    /// Records the measured wall time of a node's first computation.
+    ///
+    /// Measured, never estimated: `REWIND.md` is explicit that a cost hint must
+    /// come from a real timing rather than a table of "expensive" stages, and a
+    /// row shows no time at all until one exists (ROADMAP RW-1 item 7).
+    func recordComputeCost(_ seconds: TimeInterval, for id: EVAHistoryNodeID) {
+        history.recordComputeCost(seconds, for: id)
+    }
+
+    func computeCost(for id: EVAHistoryNodeID) -> TimeInterval? {
+        history.node(id)?.computeCost
+    }
+
+    // MARK: - Re-derivation source
+
+    /// What a node whose snapshot is gone can be rebuilt from.
+    ///
+    /// The only input a session reliably has is the signal it loaded, and for a
+    /// processed file that signal is **not** the raw recording — it is the
+    /// output of `onDiskPrefix`. Replaying a whole path against it therefore
+    /// applies every prefix step a second time: the reported double-filter /
+    /// double-reference / double-correct (ROADMAP RW-1 item 1). So the steps a
+    /// caller may replay are the ones *after* the prefix, and a node at or
+    /// inside the prefix has no available input at all.
+    enum ReDerivationSource: Equatable {
+        /// Replay these steps against the signal this session loaded
+        /// (`recording.signal`). Empty means the loaded signal already *is*
+        /// this node's state.
+        case loadedSignal(steps: [EVAProcessingStep])
+        /// Nothing this session holds can produce this node's state. Its
+        /// snapshot is the only way to reach it, and that snapshot is gone.
+        case unavailable(Reason)
+
+        /// Why a rebuild is impossible, in the operator's terms.
+        ///
+        /// A reason rather than a bare `nil` because ROADMAP RW-1 item 7 asks
+        /// for a truthful failure surface: the rail can grey the row *and* say
+        /// what would make it reachable, before the click rather than after it.
+        enum Reason: Equatable {
+            /// No such node (a stale id from a discarded future, say).
+            case unknownNode
+            /// At or inside the steps the file arrived with. The loaded samples
+            /// are this node's own output or something downstream of it, so its
+            /// input was never in this session (item 1).
+            case producedBeforeThisSession
+            /// The path does not lead with the file's on-disk steps, so the
+            /// loaded signal is the wrong starting point and there is nothing
+            /// to subtract.
+            case lineageDoesNotMatchFile
+            /// A step on the path cannot be reproduced exactly here.
+            case blockedStep(EVAProcessingStep.Operation)
+
+            var message: String {
+                switch self {
+                case .unknownNode:
+                    return "That point is no longer in this recording's history."
+                case .producedBeforeThisSession:
+                    return "This step happened before the file was saved, so the samples it started from aren't in this session. It stays reachable only while its snapshot is cached."
+                case .lineageDoesNotMatchFile:
+                    return "This point came from a different lineage than the file on disk, so it can't be rebuilt from the loaded signal."
+                case .blockedStep(let operation):
+                    return "Can't rebuild \(ReplayStepDisplay.label(for: operation)) from disk — it stays reachable only while its data is still cached."
+                }
+            }
+        }
+
+        var isAvailable: Bool {
+            if case .loadedSignal = self { return true }
+            return false
+        }
+
+        var unavailableReason: Reason? {
+            if case .unavailable(let reason) = self { return reason }
+            return nil
+        }
+    }
+
+    /// Where `id` can be rebuilt from, and with what — see `ReDerivationSource`.
+    ///
+    /// Both halves of the question are answered here (ROADMAP RW-1 item 7):
+    /// which signal the steps may be replayed against, *and* whether every step
+    /// on the way can be reproduced exactly given what this file carries. They
+    /// were previously split between this method and a private helper on the
+    /// view, so the rail could only report the first — a node blocked by a
+    /// missing ICA sidecar still rendered as an ordinary click that failed.
+    ///
+    /// `availability` describes the file being rebuilt onto, the same value the
+    /// replay engine classifies with (`EVAProcessingStep.replayInteraction(given:)`).
+    func reDerivationSource(
+        for id: EVAHistoryNodeID,
+        availability: ReplayPayloadAvailability = .none
+    ) -> ReDerivationSource {
+        guard history.node(id) != nil else { return .unavailable(.unknownNode) }
+        let steps = history.path(to: id).compactMap(\.step)
+
+        let replayable: [EVAProcessingStep]
+        if onDiskPrefix.isEmpty {
+            replayable = steps
+        } else if steps.count <= onDiskPrefix.count {
+            // At or inside the prefix.
+            return .unavailable(.producedBeforeThisSession)
+        } else if !Self.stepsMatch(Array(steps.prefix(onDiskPrefix.count)), onDiskPrefix) {
+            return .unavailable(.lineageDoesNotMatchFile)
+        } else {
+            replayable = Array(steps.dropFirst(onDiskPrefix.count))
+        }
+
+        if let blocker = Self.firstNonReDerivableStep(in: replayable, availability: availability) {
+            return .unavailable(.blockedStep(blocker))
+        }
+        return .loadedSignal(steps: replayable)
+    }
+
+    /// The first step that cannot be reproduced exactly on a file with
+    /// `availability`, or nil when the whole path can be.
+    ///
+    /// The supported-step matrix, in one place and pure. Faithfulness over
+    /// reach: a step that would have to be *approximated* is refused, because a
+    /// plausible-looking wrong signal is worse than a click that declines.
+    static func firstNonReDerivableStep(
+        in steps: [EVAProcessingStep],
+        availability: ReplayPayloadAvailability
+    ) -> EVAProcessingStep.Operation? {
+        for step in steps {
+            switch step.operation {
+            // Portable, or carrying their own subject-specific list.
+            case .filter, .reference, .baseline, .segment, .waveletReduce,
+                 .thresholdArtifactDetection, .mriGradientCorrection, .markBad:
+                continue
+            // Re-appliable exactly from this file's own sidecar.
+            case .icaClean where availability.hasICAPayload:
+                continue
+            case .artifactClean where availability.hasArtifactPayload:
+                continue
+            // Re-solvable from this file's electrode positions
+            // (`ChannelInterpolationSolver`).
+            case .interpolateChannels where availability.hasElectrodeGeometry:
+                continue
+            // Everything else — BCG above all, which is subject-specific with
+            // no re-derive path at all.
+            default:
+                return step.operation
+            }
+        }
+        return nil
+    }
+
+    /// Whether navigating to `id` can honestly land there — instantly from a
+    /// snapshot, or by re-deriving from an available source.
+    func isReachable(
+        _ id: EVAHistoryNodeID,
+        availability: ReplayPayloadAvailability = .none
+    ) -> Bool {
+        hasSnapshot(for: id) || reDerivationSource(for: id, availability: availability).isAvailable
+    }
+
+    /// Compares steps by what identifies them in the tree — operation and
+    /// parameters. `EVAProcessingStep`'s synthesized `==` also covers its
+    /// per-instance `id` and `appliedAt`, which two equal-in-content steps do
+    /// not share.
+    private static func stepsMatch(_ lhs: [EVAProcessingStep], _ rhs: [EVAProcessingStep]) -> Bool {
+        lhs.count == rhs.count && zip(lhs, rhs).allSatisfy {
+            $0.operation == $1.operation && $0.parameters == $1.parameters
         }
     }
 
@@ -276,7 +526,10 @@ final class RecordingHistoryModel {
     /// structs take plain data and can be `Equatable` — the pattern ROADMAP B2
     /// measured as the one that actually pays (`ChannelLabelRow`'s one-line
     /// `Equatable` was the single biggest win in the whole refactor).
-    func railNodes(rawSubtitle: String) -> [HistoryRailNode] {
+    func railNodes(
+        rawSubtitle: String,
+        availability: ReplayPayloadAvailability = .none
+    ) -> [HistoryRailNode] {
         let onPath = Set(history.currentPath.map(\.id))
         var rows: [HistoryRailNode] = []
 
@@ -289,6 +542,12 @@ final class RecordingHistoryModel {
                 isCurrent: node.id == history.currentID,
                 isPinned: node.isPinned,
                 isInstant: snapshots[node.id] != nil,
+                isReachable: isReachable(node.id, availability: availability),
+                unreachableReason: snapshots[node.id] != nil
+                    ? nil
+                    : reDerivationSource(for: node.id, availability: availability)
+                        .unavailableReason?.message,
+                rebuildSeconds: snapshots[node.id] == nil ? node.computeCost : nil,
                 depth: depth,
                 isOnCurrentPath: onPath.contains(node.id)
             ))
@@ -303,10 +562,9 @@ final class RecordingHistoryModel {
         return rows
     }
 
-    func setPinned(_ pinned: Bool, for id: EVAHistoryNodeID) {
-        history.setPinned(pinned, for: id)
-    }
-
+    /// An empty or whitespace-only name clears the label rather than storing
+    /// one, so "rename back to the default" needs no separate command
+    /// (`EVAHistory.setLabel` does the trimming).
     func setLabel(_ label: String?, for id: EVAHistoryNodeID) {
         history.setLabel(label, for: id)
     }
@@ -387,6 +645,19 @@ nonisolated struct HistoryRailNode: Identifiable, Hashable, Sendable {
     /// requiring re-derivation. `REWIND.md` asks for the cost hint to be shown
     /// *before* the click, not after.
     var isInstant: Bool = true
+    /// Whether this node can be reached at all — instantly, or by re-deriving
+    /// from a source this session actually has. False for a node the file
+    /// arrived with whose snapshot is gone, and for one whose path contains a
+    /// step this file cannot reproduce (BCG, or ICA with no sidecar): the rail
+    /// shows those as history rather than offering a click that cannot honestly
+    /// be honoured. See `RecordingHistoryModel.reDerivationSource(for:availability:)`.
+    var isReachable: Bool = true
+    /// Why it cannot be reached, ready to show. Nil when it can.
+    var unreachableReason: String?
+    /// Measured seconds the first computation took, when one was measured and
+    /// this node's snapshot is gone — so the rail can say what a rebuild will
+    /// cost. Nil means *unknown*, and the row says nothing rather than guessing.
+    var rebuildSeconds: TimeInterval?
     /// Indentation level. Only increases at a fork, so a linear session stays
     /// flat rather than becoming a staircase.
     var depth: Int = 0

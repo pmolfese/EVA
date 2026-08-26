@@ -78,13 +78,49 @@ nonisolated enum ReplayInteraction: Equatable {
     /// Requires a human decision: an automated part runs, then replay pauses for
     /// the user to make a subject-specific choice (ICA component removal).
     case decision
-    /// Not replayable and not surfaced as a pause (interpolation, bad marks,
-    /// wavelet — for now).
+    /// Applied automatically **because the target file's own record supplies
+    /// what the step needs** — the ICA operator in its `eva_ica.json`, the drawn
+    /// artifact definitions in its artifact sidecar. Subject-specific by
+    /// classification, already-decided in fact, so nothing is asked and nothing
+    /// is carried across subjects.
+    ///
+    /// This is the third state between "portable" and "subject-specific", and it
+    /// is a property of *(operation, what this file carries)* rather than of the
+    /// operation alone — which is why it only exists on
+    /// `replayInteraction(given:)` and never on the plain classification
+    /// (ROADMAP RW-1 item 6).
+    case resolvedFromPayload
+    /// Not replayable and not surfaced as a pause.
     case skip
 }
 
+/// What a *particular* file brings to a replay, beyond the script.
+///
+/// Payload availability is per-file and must be read from the file being
+/// processed, never from the file the script came from: an ICA operator belongs
+/// to one subject's electrodes and a drawn template to one subject's blink. A
+/// script copied from another subject arrives with none of this, and every
+/// subject-specific step correctly stays a decision.
+nonisolated struct ReplayPayloadAvailability: Equatable, Sendable {
+    /// This file has its own `eva_ica.json`.
+    var hasICAPayload = false
+    /// This file has its own drawn-artifact payload.
+    var hasArtifactPayload = false
+    /// This file has electrode coordinates, so a recorded interpolation can be
+    /// re-solved for it (`ChannelInterpolationSolver`).
+    var hasElectrodeGeometry = false
+
+    /// What a plain script read tells you: nothing about any file.
+    static let none = ReplayPayloadAvailability()
+}
+
 extension EVAProcessingStep {
-    /// Pure classification of this step for the interactive replay engine.
+    /// Pure classification of this step for the interactive replay engine,
+    /// knowing nothing about the file it will be applied to.
+    ///
+    /// Prefer `replayInteraction(given:)` wherever the target file is known —
+    /// this one has to assume the worst, so it reports the subject-specific
+    /// steps as `.skip`/`.decision` even when the file could resolve them.
     var replayInteraction: ReplayInteraction {
         guard replayable else { return .skip }
         switch operation {
@@ -98,6 +134,40 @@ extension EVAProcessingStep {
         case .mriGradientCorrection: return .review
         case .icaClean, .artifactClean: return .decision
         default: return .skip
+        }
+    }
+
+    /// Classification for a *specific* file, given what that file carries.
+    ///
+    /// Three rules, each of which used to live somewhere it could not be reused
+    /// or tested (ROADMAP RW-1 item 6):
+    ///
+    /// 1. **ICA and artifact cleaning become `.resolvedFromPayload`** when the
+    ///    file has its own sidecar. `BatchSetupSheet` worked this out privately
+    ///    to label a row and, separately, to decide whether a batch could run
+    ///    headlessly — while `ProcessingCore` worked it out a third time from
+    ///    the payload arguments it was handed. Same rule, three copies.
+    /// 2. **Channel decisions become `.decision`**, not `.skip`. `markBad` and
+    ///    `interpolateChannels` describe *this* subject's electrodes, so
+    ///    carrying them onto another file is a choice a person has to make —
+    ///    and today headless batch applied the source's bad-channel list to
+    ///    every file while windowed replay ignored it entirely, which is the
+    ///    divergence rather than either answer. Interpolation additionally
+    ///    needs geometry to re-solve against; without it there is nothing to
+    ///    offer, so it stays `.skip`.
+    /// 3. Everything else classifies exactly as it does without a file.
+    func replayInteraction(given availability: ReplayPayloadAvailability) -> ReplayInteraction {
+        switch operation {
+        case .icaClean where availability.hasICAPayload:
+            return .resolvedFromPayload
+        case .artifactClean where availability.hasArtifactPayload:
+            return .resolvedFromPayload
+        case .markBad:
+            return .decision
+        case .interpolateChannels:
+            return availability.hasElectrodeGeometry ? .decision : .skip
+        default:
+            return replayInteraction
         }
     }
 }

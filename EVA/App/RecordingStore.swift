@@ -57,6 +57,12 @@ final class RecordingStore {
     /// superseded export resuming later would otherwise clear the flag the newer
     /// one just set. See `LatestOnlyRunner`.
     @ObservationIgnored let exportRunner = LatestOnlyRunner()
+    /// Owns the in-flight history re-derivation. Rapid clicks down the rail
+    /// start one rebuild each, and without this the *first* one to finish moves
+    /// the window — so the state on screen is whichever rebuild happened to be
+    /// shortest, not the node last clicked. Only the newest may commit
+    /// (ROADMAP RW-1 item 2). See `LatestOnlyRunner`.
+    @ObservationIgnored let historyReDeriveRunner = LatestOnlyRunner()
     /// User's session-only correction of the detected file type (File ▸ Dataset
     /// Info). Not written to disk and not part of `eva.xml`'s authoritative
     /// `fileType` — this is the escape hatch for a package EVA reads wrongly, so

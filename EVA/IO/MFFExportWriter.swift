@@ -72,6 +72,17 @@ enum MFFExportWriter {
                 for line in auditLogLines {
                     log.append(line)
                 }
+                // What was actually written, checked against what the script
+                // claims. This is the one moment both halves are in hand and
+                // certain — see `PayloadConsistency` for the observation that
+                // made it worth recording (ROADMAP RW-1 item 4).
+                for line in PayloadConsistency.auditLogLines(
+                    script: script,
+                    hasICAPayload: icaPayload != nil,
+                    hasArtifactPayload: artifactPayload != nil
+                ) {
+                    log.append(line)
+                }
                 try? log.write(toPackage: url)
                 try Task.checkCancellation()
                 return Result<URL, Error>.success(url)

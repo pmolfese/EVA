@@ -44,6 +44,7 @@ extension WaveformView {
             isHidden: channels.hidden.contains(index),
             isBad: channels.bad.contains(index),
             isInterpolated: channels.interpolated[index] != nil,
+            interpolationLostReason: channels.interpolationLost[index],
             color: channelColor(index),
             rowHeight: channelRowHeight,
             healthResult: channels.healthResults[index],

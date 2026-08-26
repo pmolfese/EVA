@@ -178,7 +178,10 @@ struct ContentView: View {
             // that assumption from mattering.
             if let fork = PendingWindowForks.shared.claim() {
                 claimedForkSeed = fork
-                recording = MFFRecording(packageURL: fork.packageURL)
+                recording = MFFRecording(
+                    packageURL: fork.packageURL,
+                    securityScopedURLs: fork.securityScopedURLs
+                )
             } else if let urls = PendingWindowOpens.shared.claim() {
                 _ = openSelectedURLs(urls)
             }

@@ -31,10 +31,21 @@
 //  one, and it should be made on purpose rather than as a side effect of finally
 //  writing them down.
 //
-//  One consequence worth knowing: because they do not replay, **their position in
-//  the script is presentational today**. That matters when someone makes them
-//  replayable, because the position below is not obviously right —
-//  see `inserted(into:…)`.
+//  ## Position is presentational; application order is not (RW-1 item 3)
+//
+//  Both steps are written where `inserted(into:…)` puts them, which is chosen
+//  for *history stability* rather than for chain order — see that method. The
+//  order they are **applied** in is a separate, settled question: bad marks are
+//  ambient state that wavelet reduction, referencing, and PSA all consult, so
+//  `ProcessingCore` applies every `markBad` before the first step of the walk,
+//  and `markBad` carries `scope: ambient` so the file says as much rather than
+//  leaving a reader to infer it from position.
+//
+//  The alternative — writing the step at the front of the script — is literally
+//  truthful for a naive replayer and bad for everything else: a channel marked
+//  bad mid-session would change the *first* node, so the whole content-addressed
+//  lineage re-hashes and the previous chain is discarded as an abandoned future,
+//  taking its snapshots with it. Settled 2026-08-26.
 //
 //  ## Channel numbering
 //
@@ -48,6 +59,11 @@ import Foundation
 nonisolated enum ChannelDecisionSteps {
 
     static let methodParameterValue = "sphericalSpline"
+
+    /// Value of `markBad`'s `scope` parameter: this mark describes the whole
+    /// recording, not the point in the chain where the step is written. A
+    /// replay engine must apply it before any step that consults bad channels.
+    static let ambientScopeValue = "ambient"
 
     /// The steps describing `badChannels` and `interpolatedChannels`. Either may
     /// be absent; an empty set produces no step rather than a step with an empty
@@ -66,7 +82,10 @@ nonisolated enum ChannelDecisionSteps {
         if !badChannels.isEmpty {
             steps.append(EVAProcessingStep(
                 operation: .markBad,
-                parameters: ["channels": channelList(badChannels)],
+                parameters: [
+                    "channels": channelList(badChannels),
+                    "scope": ambientScopeValue
+                ],
                 replayable: false,
                 note: "Bad-channel marks are judgements about this recording's electrodes."
             ))
@@ -95,14 +114,15 @@ nonisolated enum ChannelDecisionSteps {
     /// - It is right for `interpolateChannels`. `currentMFFExportSnapshot()`
     ///   applies interpolation to the continuous signal after every cleaning
     ///   stage and before epoching, which is exactly here.
-    /// - It is **not obviously right for `markBad`**, and this is the thing to
-    ///   revisit before making these replayable. Bad marks are ambient state, not
-    ///   a positioned transform: wavelet reduction reads `channels.bad` as its
-    ///   excluded set, and that runs *upstream* of this position. A truthful
-    ///   linear script would need bad marks before the first stage that consults
-    ///   them. Recording them here is honest as provenance — the export did have
-    ///   these channels marked — but a replay engine that trusted the position
-    ///   would exclude nothing from a wavelet pass it should have.
+    /// - It is **not chain order for `markBad`**, and that is deliberate rather
+    ///   than unresolved (RW-1 item 3, settled 2026-08-26). Bad marks are ambient
+    ///   state, not a positioned transform: wavelet reduction reads
+    ///   `channels.bad` as its excluded set, and that runs *upstream* of this
+    ///   position. Rather than move the step — which would re-hash the entire
+    ///   history every time a channel is marked bad mid-session — the step
+    ///   carries `scope: ambient` and `ProcessingCore` applies every `markBad`
+    ///   before the walk begins. The recorded position stays where the operator
+    ///   would look for it; the recorded bytes stay reproducible.
     ///
     /// Idempotent: a script that already carries these steps is returned with the
     /// old ones dropped first, so passing a script through twice does not

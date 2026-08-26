@@ -141,6 +141,11 @@ struct ChannelLabelRow: View, Equatable {
     let isHidden: Bool
     let isBad: Bool
     let isInterpolated: Bool
+    /// Set when a repair this file's own record claims could not be re-solved
+    /// here — the reason, ready to show. The channel is bad again; this is what
+    /// keeps that from looking like an ordinary bad channel nobody ever tried
+    /// to fix (ROADMAP RW-1 item 3).
+    let interpolationLostReason: String?
     let color: Color
     let rowHeight: CGFloat
     let healthResult: ChannelHealthResult?
@@ -167,6 +172,7 @@ struct ChannelLabelRow: View, Equatable {
             && lhs.isHidden == rhs.isHidden
             && lhs.isBad == rhs.isBad
             && lhs.isInterpolated == rhs.isInterpolated
+            && lhs.interpolationLostReason == rhs.interpolationLostReason
             && lhs.color == rhs.color
             && lhs.rowHeight == rhs.rowHeight
             && lhs.healthResult == rhs.healthResult
@@ -188,6 +194,13 @@ struct ChannelLabelRow: View, Equatable {
                 } else if isInterpolated {
                     Image(systemName: "wand.and.stars")
                         .font(.caption2)
+                } else if let interpolationLostReason {
+                    // Distinct from a plain bad channel: this one was repaired
+                    // in the record and is not repaired here.
+                    Image(systemName: "wand.and.stars.inverse")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .help("Interpolation lost — \(interpolationLostReason)")
                 } else if isBad {
                     Image(systemName: "xmark.circle")
                         .font(.caption2)
@@ -216,6 +229,12 @@ struct ChannelLabelRow: View, Equatable {
 
             if isInterpolated {
                 Button("Remove Interpolation", action: onRemoveInterpolation)
+            } else if interpolationLostReason != nil {
+                // Offer the retry directly: the usual reason a lost repair can
+                // succeed on a second attempt is that the ambient state changed
+                // (another channel unmarked, geometry loaded).
+                Button("Interpolate", action: onInterpolate)
+                    .disabled(!canInterpolate)
             } else {
                 Button("Interpolate", action: onInterpolate)
                     .disabled(!canInterpolate)

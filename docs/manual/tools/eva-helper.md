@@ -5,14 +5,11 @@ average-artifact-subtraction gradient correction followed by carbon-wire-loop
 (CWL) regression, writing a new MFF package. It exists for batch processing and
 for benchmarking the CWL backends against each other.
 
-!!! warning "Currently does not build"
-    `Tools/EVAHelper/build.sh` lists `EVA/Gradient/GradientRemover.swift` among
-    its sources, and that file no longer exists — the `Gradient` directory was
-    reorganized. The build fails immediately with `error opening input file`.
-    Fixing it means pointing the script at whichever file replaced it, or
-    dropping the line if the dependency is gone. `Tools/EVASimulate/build.sh`
-    and `Tools/EVABIDS/build.sh` are both current and make good models for the
-    file list.
+!!! note "Build script was repaired 2026-08-21"
+    The script had gone stale — it listed `EVA/Gradient/GradientRemover.swift`,
+    a file removed when the `Gradient` directory was reorganized, and failed
+    immediately with `error opening input file`. It now compiles against the
+    current gradient sources and builds cleanly.
 
 It is described in the source as a proof of concept, and the flags reflect that
 — several exist for comparing implementations rather than for routine use.
@@ -42,13 +39,20 @@ The input must be **continuous** — segmented and averaged MFF files are reject
 
 ## Common options
 
-| Option | Notes |
-| --- | --- |
-| `--prefix <text>` | Prefix for the output package name. |
-| `--tr-code <code>` | Skip the interactive TR prompt. |
-| `--downsample <hz>` | Downsample after AAS, before CWL. |
-| `--overwrite` | Replace an existing output package. |
-| `--verbose` | Print CPU/GPU preparation and submission detail. |
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--prefix <text>` | *required* | Prefix for the output package name. |
+| `--tr-code <code>` | — | Skip the interactive TR prompt. |
+| `--downsample <hz>` | — | Downsample after AAS, before CWL. |
+| `--overwrite` | off | Replace an existing output package. |
+| `--verbose` | off | Print CPU/GPU preparation and submission detail. |
+
+## Gradient correction
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--window-before <n>` | `4` | AAS template TRs taken before the current one. |
+| `--window-after <n>` | `4` | AAS template TRs taken after it. |
 
 ## CWL regression parameters
 
@@ -79,9 +83,9 @@ the GPU port was validated.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `--cwl-backend <name>` | — | `compare` runs both Metal and CPU/LAPACK and reports timing and numerical difference. |
-| `--cwl-gpu-kernel serial` | — | Use the older serial Metal kernel. |
-| `--gpu-batch-windows <n>` | — | Submit several CWL windows per command buffer. |
+| `--cwl-backend <name>` | `metal` | `metal`, `cpu`, or `compare` — the last runs both and reports timing and numerical difference. |
+| `--cwl-gpu-kernel <name>` | `sample-parallel` | `serial` selects the older Metal kernel. |
+| `--gpu-batch-windows <n>` | `1` | Submit several CWL windows per command buffer. |
 | `--compare-max-diff <x>` | `1e-2` | Absolute max-difference tolerance. |
 | `--compare-rms-diff <x>` | `1e-3` | RMS difference tolerance. |
 | `--compare-relative-max-diff <x>` | `5e-2` | Max difference relative to correction magnitude. |

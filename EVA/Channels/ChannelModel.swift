@@ -138,6 +138,8 @@ final class ChannelModel {
         sourceIndices: [Int],
         sourceWeights: [Float]
     ) {
+        // A successful repair answers any earlier loss for this channel.
+        interpolationLost[target] = nil
         var next = interpolationState
         next.replacements[target] = replacement
         next.sources[target] = (sourceIndices, sourceWeights)
@@ -155,6 +157,44 @@ final class ChannelModel {
         next.sources = sources
         next.revision &+= 1
         interpolationState = next
+    }
+
+    // MARK: - Interpolation lost
+
+    /// Channels whose recorded repair could not be re-solved on this file,
+    /// with the reason — ROADMAP RW-1 item 3's "interpolation lost" state.
+    ///
+    /// The state exists because the alternative is worse than an error. A
+    /// re-solve can fail on a package with no electrode geometry, or a montage
+    /// missing that electrode's coordinates; if the pipeline simply carried on,
+    /// the channel would keep whatever replacement samples happened to be in
+    /// memory — samples derived from a *different* recording's donors — and
+    /// nothing on screen would say so. Instead the channel goes back to bad, the
+    /// loss is remembered here, and it is shown in the channel row, the status
+    /// history, and the processing audit log.
+    ///
+    /// Cleared by a later successful repair of the same channel, or by the
+    /// operator marking it good again.
+    private(set) var interpolationLost: [Int: String] = [:]
+
+    /// Records a failed repair: the channel returns to bad, any stale
+    /// replacement is dropped, and the reason is kept for display.
+    ///
+    /// Dropping the replacement is the part that matters. Leaving it would
+    /// leave the waveform showing a repair the file no longer claims to have.
+    func recordInterpolationLoss(target: Int, reason: String) {
+        removeInterpolation(target: target)
+        bad.insert(target)
+        interpolationLost[target] = reason
+    }
+
+    func clearInterpolationLoss(target: Int) {
+        interpolationLost[target] = nil
+    }
+
+    func clearAllInterpolationLosses() {
+        guard !interpolationLost.isEmpty else { return }
+        interpolationLost.removeAll()
     }
 
     func removeInterpolation(target: Int) {
@@ -229,6 +269,7 @@ final class ChannelModel {
         clone.hidden = hidden
         clone.bad = bad
         clone.replaceInterpolations(interpolated, sources: interpolationSources)
+        clone.interpolationLost = interpolationLost
         return clone
     }
 }

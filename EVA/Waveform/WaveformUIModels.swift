@@ -162,4 +162,12 @@ final class RecordingStatusModel {
     /// `ProcessingStatusPopover.swift`.
     var statusPopoverTab: ProcessingStatusTab = .queue
     var showsRecentProcessingHistory = false
+
+    /// The replayed channel decision currently being asked about, and which of
+    /// its channels the operator has kept. Lives here rather than in
+    /// `WaveformView`'s `@State` for the same reason the rest of this model
+    /// does: menu commands and the sheet host both reach it, and it must not be
+    /// copied with the view struct. See `ChannelDecisionReplaySheet`.
+    var replayChannelDecision: ChannelDecisionReplayRequest?
+    var replayChannelDecisionSelection: Set<Int> = []
 }

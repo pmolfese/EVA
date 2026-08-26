@@ -710,6 +710,49 @@ extension WaveformView {
                 let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
                 await applyWaveletReduction(to: processed)
 
+            case .markBad, .interpolateChannels:
+                // A channel decision from *another* recording. Ask which of its
+                // channels apply here rather than silently carrying an
+                // electrode judgement across subjects — and rather than the old
+                // split where headless batch applied it and windowed replay did
+                // not (ROADMAP RW-1 item 6).
+                let carried = ChannelDecisionSteps.channelIndices(
+                    from: params["channels"] ?? ""
+                ).sorted()
+                guard !carried.isEmpty else { continue loop }
+                let request = ChannelDecisionReplayRequest.make(
+                    operation: action.operation,
+                    channels: carried,
+                    signal: continuousProcessedSignal ?? rawSignal,
+                    positions: electrodeGeometry?.positions ?? [:],
+                    channelNames: replayChannelNames(for: rawSignal)
+                )
+                guard !request.applicableIndices.isEmpty else {
+                    channelStatusMessage = "None of \(ReplayStepDisplay.label(for: action.operation))'s channels apply to this recording."
+                    channelStatusIsError = false
+                    continue loop
+                }
+                recordingStore.status.replayChannelDecisionSelection =
+                    Set(request.applicableIndices)
+                channelDecisionReplayRequest = request
+                let decision = await replay.gate(
+                    .awaitingDecision(index: action.stepIndex),
+                    banner: .init(
+                        title: action.operation == .markBad
+                            ? "Confirm Bad Channels" : "Confirm Interpolation",
+                        detail: "Choose which of the source's channels apply to this recording.",
+                        showsSkip: true, progress: nil
+                    )
+                )
+                let kept = recordingStore.status.replayChannelDecisionSelection
+                channelDecisionReplayRequest = nil
+                switch decision {
+                case .cancel: break loop
+                case .skip: continue loop
+                case .proceed:
+                    applyReplayedChannelDecision(action.operation, channels: kept, in: rawSignal)
+                }
+
             case .segment:
                 // Automate PSA: segment (+ baseline / average per params), then
                 // open the butterfly plot when an average was produced.
@@ -744,6 +787,72 @@ extension WaveformView {
         // Advance the batch only after export has fully completed above.
         if batch.isActive, batch.matches(recording: recording) {
             batch.completeCurrent(.done)
+        }
+    }
+
+    /// The replayed channel decision currently being asked about — the sheet
+    /// host presents it, the loop sets and clears it.
+    var channelDecisionReplayRequest: ChannelDecisionReplayRequest? {
+        get { recordingStore.status.replayChannelDecision }
+        nonmutating set { recordingStore.status.replayChannelDecision = newValue }
+    }
+
+    /// Resolves the channel-decision gate from the sheet (Apply, Skip, or a
+    /// dismissal, which counts as Skip). Clearing the request first is what
+    /// takes the sheet down before the loop moves on.
+    func resolveChannelDecisionReplay(_ resolution: ReplayController.Resolution) {
+        channelDecisionReplayRequest = nil
+        replay.resume(resolution)
+    }
+
+    /// This file's own channel names, so the confirmation sheet says `E45` when
+    /// the montage does rather than only `Ch 45`.
+    func replayChannelNames(for signal: MFFSignalData) -> [Int: String] {
+        guard let names = signal.channelNames else { return [:] }
+        var result: [Int: String] = [:]
+        for (index, name) in names.enumerated() where !name.isEmpty {
+            result[index] = name
+        }
+        return result
+    }
+
+    /// Applies the channels the operator kept, through the same paths a click
+    /// would take — `channels.bad` for a mark, `interpolate(_:in:)` (and so
+    /// `ChannelInterpolationSolver`) for a repair.
+    ///
+    /// Absolute for `markBad`, matching `ProcessingCore`: the step carries the
+    /// whole set, so the kept channels *are* the bad set afterwards rather than
+    /// being unioned into whatever this file already had.
+    func applyReplayedChannelDecision(
+        _ operation: EVAProcessingStep.Operation,
+        channels kept: Set<Int>,
+        in rawSignal: MFFSignalData
+    ) {
+        switch operation {
+        case .markBad:
+            channels.bad = kept
+            channelStatusMessage = kept.isEmpty
+                ? "No channels marked bad."
+                : "Marked \(kept.count) channel\(kept.count == 1 ? "" : "s") bad from \(replay.sourceName)."
+            channelStatusIsError = false
+        case .interpolateChannels:
+            let signal = continuousProcessedSignal ?? rawSignal
+            var failures: [String] = []
+            for index in kept.sorted() {
+                let outcome = interpolate(
+                    index, in: signal, updatesStatus: false, recordsLossOnFailure: true
+                )
+                if outcome.isError { failures.append(outcome.message) }
+            }
+            if failures.isEmpty {
+                channelStatusMessage = "Interpolated \(kept.count) channel\(kept.count == 1 ? "" : "s") from \(replay.sourceName)."
+                channelStatusIsError = false
+            } else {
+                channelStatusMessage = failures.joined(separator: " ")
+                channelStatusIsError = true
+            }
+        default:
+            break
         }
     }
 
