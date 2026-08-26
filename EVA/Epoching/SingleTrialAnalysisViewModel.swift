@@ -83,7 +83,7 @@ final class SingleTrialAnalysisViewModel {
     var splitCount = 2
     var outlierThresholdSD = 3.0
     var distributionChunkCount = 2
-    // Trial diagnostics (TRIALWISE.md phase 2).
+    // Trial diagnostics (ROADMAP.md, Trial-wise project).
     var similarityResults: [TrialSimilarityAnalyzer.CategoryResult]?
     var diagnosticsRows: [TrialDiagnosticsCategory] = []
     var diagnosticsAxis = TrialDiagnosticsAxis.trialIndex
@@ -152,23 +152,41 @@ final class SingleTrialAnalysisViewModel {
         setWindows(current, for: mode)
     }
 
-    /// Adds a window over the middle of the current analysis span, so a new one
-    /// lands somewhere visible rather than at zero width.
-    func addWindow(for mode: SingleTrialAnalysisMode) {
+    /// Adds a window, preferring the exact span the user just dragged.
+    ///
+    /// When a drag selection is active, the new window is placed at EXACTLY
+    /// that span — dragging then pressing Add is how you place a window
+    /// on purpose, and a window that lands somewhere other than where you
+    /// dragged would defeat the point of dragging first. With no drag active,
+    /// a window lands over the middle third of the current analysis span
+    /// instead, so it appears somewhere visible rather than at zero width.
+    @discardableResult
+    func addWindow(for mode: SingleTrialAnalysisMode) -> Bool {
         var current = windows(for: mode)
-        guard current.count < maximumWindows(for: mode) else { return }
-        let spanStart = windowStartMs ?? 0
-        let spanEnd = windowEndMs ?? (spanStart + 400)
-        let span = max(spanEnd - spanStart, 50)
-        let start = spanStart + span * 0.35
+        guard current.count < maximumWindows(for: mode) else { return false }
+
+        let start: Double
+        let end: Double
+        if let dragStart = windowStartMs, let dragEnd = windowEndMs, dragEnd > dragStart {
+            start = dragStart
+            end = dragEnd
+        } else {
+            let spanStart = windowStartMs ?? 0
+            let spanEnd = windowEndMs ?? (spanStart + 400)
+            let span = max(spanEnd - spanStart, 50)
+            start = spanStart + span * 0.35
+            end = start + span * 0.3
+        }
+
         current.append(
             TrialAlignmentMetrics.AnalysisWindow(
                 name: "W\(current.count + 1)",
                 startMs: start,
-                endMs: start + span * 0.3
+                endMs: end
             )
         )
         setWindows(current, for: mode)
+        return true
     }
 
     func removeWindow(_ id: UUID, for mode: SingleTrialAnalysisMode) {

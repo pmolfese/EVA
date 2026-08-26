@@ -262,7 +262,7 @@ struct ChannelsCommands: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button("Define Channel Sets…") {
+        Button("Channels…") {
             openWindow(id: EVAApp.channelSetsWindowID)
         }
 

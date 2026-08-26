@@ -87,6 +87,7 @@ struct TrialDiagnosticsDashboard: View {
             if let category {
                 summary(for: category)
                 TrialShapeMagnitudeScatter(rows: category.rows, selectedTrial: $selectedTrial)
+                TrialClassificationLegend()
             }
             Divider()
             TrialSelectionCriteriaControls(criteria: $criteria)
@@ -245,6 +246,49 @@ struct TrialDiagnosticsDashboard: View {
 
     private func measures(in category: TrialDiagnosticsCategory) -> [String] {
         Array(Set(category.rows.flatMap(\.measures.keys))).sorted()
+    }
+}
+
+// MARK: - Classification legend
+
+/// A standing key for the four classification colours plus the dot/cross
+/// symbol distinction, always visible in the rail rather than only surfacing
+/// on hover. The scatter's `?` still carries the full explanation of what each
+/// quadrant means; this is the quick "what does that colour mean" reference —
+/// dropping the count badges in `summary(for:)` do not answer that on their own
+/// once nothing of a given kind is present in the current category.
+struct TrialClassificationLegend: View {
+    private static let descriptions: [TrialSimilarityAnalyzer.Classification: String] = [
+        .typical: "ordinary trial",
+        .attenuated: "shape intact, size gone",
+        .inverted: "runs opposite the average",
+        .divergent: "shares little with the average"
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(TrialSimilarityAnalyzer.Classification.allCases, id: \.self) { classification in
+                HStack(spacing: 5) {
+                    Circle().fill(classification.color).frame(width: 7, height: 7)
+                    Text(classification.displayName).font(.caption2).fontWeight(.medium)
+                    Text(Self.descriptions[classification] ?? "")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            HStack(spacing: 12) {
+                HStack(spacing: 4) {
+                    Image(systemName: "circle.fill").font(.system(size: 6))
+                    Text("own pool").font(.caption2)
+                }
+                HStack(spacing: 4) {
+                    Image(systemName: "multiply").font(.system(size: 8, weight: .bold))
+                    Text("outside pool").font(.caption2)
+                }
+            }
+            .foregroundStyle(.secondary)
+            .padding(.top, 1)
+        }
     }
 }
 

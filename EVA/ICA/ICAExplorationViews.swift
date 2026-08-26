@@ -670,6 +670,8 @@ extension WaveformView {
         let restoredFilterHighPassCutoffText = filter.highPassCutoffText
         let restoredFilterLowPassCutoffText = filter.lowPassCutoffText
         let restoredNotch60HzEnabled = filter.notch60HzEnabled
+        let restoredAverageReference = filter.averageReference
+        let restoredReferenceExclusions = channels.bad
         let restoredAmplitudeScale = amplitudeScale
         let restoredTimeScale = timeScale
         let restoredScrollPosition = horizontalScrollPosition
@@ -756,17 +758,10 @@ extension WaveformView {
                         }
                     )
 
-                    restoredFilteredSignal = MFFSignalData(
-                        signalURL: cleaned.signalURL,
-                        signalType: cleaned.signalType,
-                        numberOfChannels: cleaned.numberOfChannels,
-                        samplingRate: cleaned.samplingRate,
-                        duration: cleaned.duration,
-                        recordingStartTime: cleaned.recordingStartTime,
-                        events: cleaned.events,
-                        data: filteredData,
-                        channelNames: cleaned.channelNames
-                    )
+                    let filtered = cleaned.replacingSamples(filteredData)
+                    restoredFilteredSignal = restoredAverageReference
+                        ? Rereferencing.applied(filtered, excluding: restoredReferenceExclusions)
+                        : filtered
                 } catch {
                     filter.statusMessage = error.localizedDescription
                     filter.statusIsError = true

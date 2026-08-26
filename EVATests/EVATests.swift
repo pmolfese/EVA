@@ -495,6 +495,9 @@ struct EVATests {
         #expect(names.first == "E1")
         #expect(names.last == "VREF")
         #expect(Set(names).count == names.count)
+        #expect(signal.acquisitionReference?.name == "VREF")
+        #expect(signal.acquisitionReference?.isRecorded == true)
+        #expect(signal.referenceState == .acquisition)
     }
 
     @Test func mffReaderTreatsSingleFullSpanCategoryAsContinuous() throws {

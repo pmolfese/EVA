@@ -35,6 +35,22 @@ nonisolated struct MFFAntiAliasTimingCorrection: Sendable, Equatable {
     }
 }
 
+/// The physical reference declared by the acquisition metadata. `isRecorded`
+/// distinguishes a real sample row from the common EGI convention where the
+/// reference exists in `sensorLayout.xml` but was omitted from `signal1.bin`.
+nonisolated struct EEGAcquisitionReference: Sendable, Equatable {
+    let channelIndex: Int
+    let name: String
+    let isRecorded: Bool
+}
+
+/// The voltage convention of the samples currently carried by a signal.
+nonisolated enum EEGReferenceState: String, Sendable, Equatable {
+    case unknown
+    case acquisition
+    case average
+}
+
 nonisolated struct MFFSignalData: Sendable {
     /// Identity of this exact sample-data version. Copies preserve the revision;
     /// constructing/replacing sample data creates a new one. Derived-signal
@@ -73,6 +89,11 @@ nonisolated struct MFFSignalData: Sendable {
     /// negative-up. `nil` when the signal has no PNS sensor metadata (e.g. EEG,
     /// or PNS imported from a non-MFF source).
     let positiveUpFlags: [Bool]?
+    /// Immutable provenance for the physical acquisition reference, when the
+    /// source format declares it.
+    let acquisitionReference: EEGAcquisitionReference?
+    /// Reference convention of this exact sample-data version.
+    let referenceState: EEGReferenceState
 
     init(
         dataRevision: UUID = UUID(),
@@ -90,7 +111,9 @@ nonisolated struct MFFSignalData: Sendable {
         isAveraged: Bool = false,
         isGrandAverage: Bool = false,
         impedancesKOhm: [Float]? = nil,
-        positiveUpFlags: [Bool]? = nil
+        positiveUpFlags: [Bool]? = nil,
+        acquisitionReference: EEGAcquisitionReference? = nil,
+        referenceState: EEGReferenceState = .unknown
     ) {
         self.dataRevision = dataRevision
         self.signalURL = signalURL
@@ -108,6 +131,8 @@ nonisolated struct MFFSignalData: Sendable {
         self.isGrandAverage = isGrandAverage
         self.impedancesKOhm = impedancesKOhm
         self.positiveUpFlags = positiveUpFlags
+        self.acquisitionReference = acquisitionReference
+        self.referenceState = referenceState
     }
 
     /// Replaces samples on the same timeline. Shape changes are programming
@@ -137,7 +162,9 @@ nonisolated struct MFFSignalData: Sendable {
             isAveraged: isAveraged,
             isGrandAverage: isGrandAverage,
             impedancesKOhm: impedancesKOhm,
-            positiveUpFlags: positiveUpFlags
+            positiveUpFlags: positiveUpFlags,
+            acquisitionReference: acquisitionReference,
+            referenceState: referenceState
         )
     }
 
@@ -162,7 +189,9 @@ nonisolated struct MFFSignalData: Sendable {
             isAveraged: isAveraged,
             isGrandAverage: isGrandAverage,
             impedancesKOhm: impedancesKOhm,
-            positiveUpFlags: positiveUpFlags
+            positiveUpFlags: positiveUpFlags,
+            acquisitionReference: acquisitionReference,
+            referenceState: referenceState
         )
     }
 
@@ -201,7 +230,79 @@ nonisolated struct MFFSignalData: Sendable {
             isAveraged: newIsAveraged,
             isGrandAverage: newIsGrandAverage,
             impedancesKOhm: impedancesKOhm,
-            positiveUpFlags: positiveUpFlags
+            positiveUpFlags: positiveUpFlags,
+            acquisitionReference: acquisitionReference,
+            referenceState: referenceState
+        )
+    }
+
+    /// Restores an acquisition-reference channel that the source metadata
+    /// declares immediately after the recorded rows. In the original-reference
+    /// voltage space that electrode is identically zero; adding the row before
+    /// common-average subtraction reconstructs its average-referenced waveform.
+    func restoringOmittedAcquisitionReference() -> MFFSignalData {
+        guard let reference = acquisitionReference,
+              !reference.isRecorded,
+              reference.channelIndex == data.count,
+              let sampleCount = data.first?.count,
+              data.allSatisfy({ $0.count == sampleCount }) else {
+            return self
+        }
+
+        var restoredData = data
+        restoredData.append([Float](repeating: 0, count: sampleCount))
+        var restoredNames = channelNames ?? data.indices.map { "E\($0 + 1)" }
+        restoredNames.append(reference.name)
+        var restoredImpedances = impedancesKOhm
+        restoredImpedances?.append(.nan)
+        var restoredPositiveUp = positiveUpFlags
+        restoredPositiveUp?.append(true)
+
+        return MFFSignalData(
+            signalURL: signalURL,
+            signalType: signalType,
+            numberOfChannels: restoredData.count,
+            samplingRate: samplingRate,
+            duration: duration,
+            recordingStartTime: recordingStartTime,
+            events: events,
+            data: restoredData,
+            channelNames: restoredNames,
+            epochSegments: epochSegments,
+            isSegmented: isSegmented,
+            isAveraged: isAveraged,
+            isGrandAverage: isGrandAverage,
+            impedancesKOhm: restoredImpedances,
+            positiveUpFlags: restoredPositiveUp,
+            acquisitionReference: EEGAcquisitionReference(
+                channelIndex: reference.channelIndex,
+                name: reference.name,
+                isRecorded: false
+            ),
+            referenceState: referenceState
+        )
+    }
+
+    func markingReference(_ state: EEGReferenceState) -> MFFSignalData {
+        MFFSignalData(
+            dataRevision: dataRevision,
+            signalURL: signalURL,
+            signalType: signalType,
+            numberOfChannels: numberOfChannels,
+            samplingRate: samplingRate,
+            duration: duration,
+            recordingStartTime: recordingStartTime,
+            events: events,
+            data: data,
+            channelNames: channelNames,
+            epochSegments: epochSegments,
+            isSegmented: isSegmented,
+            isAveraged: isAveraged,
+            isGrandAverage: isGrandAverage,
+            impedancesKOhm: impedancesKOhm,
+            positiveUpFlags: positiveUpFlags,
+            acquisitionReference: acquisitionReference,
+            referenceState: state
         )
     }
 }
@@ -520,6 +621,16 @@ nonisolated final class MFFReader {
         let events = try parseEvents(in: packageURL)
         progress?(0.96)
         let channelNames = try parseChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
+        let layout = SensorLayout.load(fromPackageContaining: signalDescriptor.signalURL)
+        let acquisitionReference = layout?.reference.map { reference in
+            EEGAcquisitionReference(
+                channelIndex: reference.channelIndex,
+                name: channelNames?.indices.contains(reference.channelIndex) == true
+                    ? (channelNames?[reference.channelIndex] ?? reference.name)
+                    : reference.name,
+                isRecorded: reference.channelIndex < signalData.numberOfChannels
+            )
+        }
 
         // Detect on-disk segmentation/averaging (epochs.xml + categories.xml).
         // When present, the concatenated blocks are discrete epochs rather than
@@ -549,7 +660,9 @@ nonisolated final class MFFReader {
             isSegmented: epochInfo != nil,
             isAveraged: epochInfo?.isAveraged ?? false,
             isGrandAverage: epochInfo?.isGrandAverage ?? false,
-            impedancesKOhm: impedances
+            impedancesKOhm: impedances,
+            acquisitionReference: acquisitionReference,
+            referenceState: acquisitionReference == nil ? .unknown : .acquisition
         )
     }
 

@@ -750,7 +750,15 @@ nonisolated enum ArtifactCleaner {
             recordingStartTime: signal.recordingStartTime,
             events: signal.events,
             data: data,
-            channelNames: signal.channelNames
+            channelNames: signal.channelNames,
+            epochSegments: signal.epochSegments,
+            isSegmented: signal.isSegmented,
+            isAveraged: signal.isAveraged,
+            isGrandAverage: signal.isGrandAverage,
+            impedancesKOhm: signal.impedancesKOhm,
+            positiveUpFlags: signal.positiveUpFlags,
+            acquisitionReference: signal.acquisitionReference,
+            referenceState: signal.referenceState
         )
         return (cleaned, summaries)
     }

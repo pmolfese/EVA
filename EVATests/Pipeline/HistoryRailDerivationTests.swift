@@ -153,13 +153,10 @@ struct HistoryRailDerivationTests {
         #expect(model.history == first)
     }
 
-    // MARK: - Accumulation
+    // MARK: - Linear replacement policy
 
-    /// The property that separates a history from a readout: changing a stage
-    /// forks, and the branch you came from is still there. The old rebuild threw
-    /// the tree away each time, which made branches impossible by construction.
     @MainActor
-    @Test func changingAStageForksAndKeepsTheOldBranch() {
+    @Test func changingAStageReplacesTheOldFuture() {
         let model = RecordingHistoryModel()
         model.record(recordingKey: "r", script: script([
             step(.mriGradientCorrection, ["method": "FASTR"]),
@@ -175,9 +172,9 @@ struct HistoryRailDerivationTests {
         let narrow = model.history.currentID
 
         #expect(wide != narrow)
-        #expect(model.history.node(wide) != nil, "the branch we came from must survive")
+        #expect(model.history.node(wide) == nil, "the replaced filter must leave no abandoned sibling")
         #expect(model.history.currentID == narrow, "and the pointer follows the new chain")
-        #expect(branchPoint.map { model.history.children(of: $0).count } == 2)
+        #expect(branchPoint.map { model.history.children(of: $0).count } == 1)
     }
 
     /// Annotations ride along, because nothing is discarded any more.
@@ -213,6 +210,46 @@ struct HistoryRailDerivationTests {
 
         #expect(model.history.currentID == filterNode)
         #expect(model.history.count == countWithSegment, "the segment node is kept, not recreated")
+        #expect(model.canStepForward, "removal remains redoable until another action replaces it")
+    }
+
+    @MainActor
+    @Test func applyingANewFilterAfterRemovalDiscardsTheUndoneFilter() {
+        let model = RecordingHistoryModel()
+        model.record(recordingKey: "r", script: script([
+            step(.filter, ["highPassHz": "0.1", "lowPassHz": "40"]),
+            step(.reference, ["scheme": "average"])
+        ]))
+        let oldFilter = try! #require(model.history.currentPath.first { $0.step?.operation == .filter }?.id)
+        let oldReference = model.history.currentID
+
+        model.record(recordingKey: "r", script: script([]))
+        #expect(model.history.node(oldFilter) != nil)
+        #expect(model.history.node(oldReference) != nil)
+        #expect(model.canStepForward)
+
+        model.record(recordingKey: "r", script: script([
+            step(.filter, ["highPassHz": "1", "lowPassHz": "30"])
+        ]))
+
+        #expect(model.history.node(oldFilter) == nil)
+        #expect(model.history.node(oldReference) == nil)
+        #expect(model.history.count == 2, "raw plus only the replacement filter")
+        #expect(!model.canStepForward)
+    }
+
+    @MainActor
+    @Test func reapplyingTheExactUndoneFilterUsesRedoInsteadOfDeletingIt() {
+        let model = RecordingHistoryModel()
+        let filtered = script([step(.filter, ["highPassHz": "0.1", "lowPassHz": "40"])])
+        model.record(recordingKey: "r", script: filtered)
+        let original = model.history.currentID
+        model.record(recordingKey: "r", script: script([]))
+
+        model.record(recordingKey: "r", script: filtered)
+
+        #expect(model.history.currentID == original)
+        #expect(model.history.count == 2)
     }
 
     /// Opening a different recording must not inherit the previous one's tree.
@@ -242,7 +279,8 @@ struct HistoryRailDerivationTests {
         let second = model.history.currentID
 
         #expect(first != second)
-        #expect(model.history.children(of: model.history.rootID).count == 2)
+        #expect(model.history.node(first) == nil)
+        #expect(model.history.children(of: model.history.rootID).count == 1)
     }
 
     // MARK: - Subtitles

@@ -550,7 +550,15 @@ final class FilterViewModel {
         activeRequestID = requestID
         activeWorker?.cancel()
 
-        let sourceData = signal.data
+        // Restore an acquisition-reference row only for average reference. In
+        // the recorded convention the omitted reference is exactly zero, so it
+        // must be present before the channel mean is computed. Keeping the raw
+        // signal untouched avoids presenting a synthetic flat channel before a
+        // re-reference actually makes it informative.
+        let preparedSignal = self.averageReference
+            ? signal.restoringOmittedAcquisitionReference()
+            : signal
+        let sourceData = preparedSignal.data
         let samplingRate = signal.samplingRate
         let highPassCutoff = cutoffs.highPassHz
         let lowPassCutoff = cutoffs.lowPassHz
@@ -692,7 +700,9 @@ final class FilterViewModel {
 
                 updateFinalizingProgress(averageReference: averageReference)
 
-                output = signal.replacingSamples(result.0)
+                output = preparedSignal
+                    .replacingSamples(result.0)
+                    .markingReference(averageReference ? .average : preparedSignal.referenceState)
                 if let pnsInput, let filteredPNSData = result.1 {
                     pnsOutput = MFFSignalData(
                         signalURL: pnsInput.signalURL,

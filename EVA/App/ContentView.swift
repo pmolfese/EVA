@@ -206,9 +206,15 @@ struct ContentView: View {
     private func publishChannelSetContextForThisWindow() {
         ChannelSetStore.shared.activeSensorLayout = recording?.sensorLayout
         ChannelSetStore.shared.activeChannelNames = recording?.signal?.channelNames
+        if let recording {
+            ChannelsWindowModel.shared.activateRecording(id: recording.id)
+        }
     }
 
     private func closeRecording() {
+        if let recording {
+            ChannelsWindowModel.shared.removeRecording(id: recording.id)
+        }
         recording?.tearDownForClose()
         recording = nil
         claimedForkSeed = nil

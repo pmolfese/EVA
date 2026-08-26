@@ -365,6 +365,72 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
         }
     }
 
+    /// Adopts the canonical script using ordinary linear undo/redo semantics.
+    ///
+    /// Moving to a strict prefix is an undo: descendants remain available for
+    /// redo. If the next script then diverges from that retained future, the
+    /// abandoned descendants are deleted before the replacement is applied.
+    /// Re-applying the exact retained child is redo and preserves it.
+    ///
+    /// The lower-level `adopt`/`apply` APIs remain non-destructive so an
+    /// explicitly forked window or a decoded legacy tree can still represent
+    /// branches. This is the policy used by a normal recording window now that
+    /// "Fork to New Window" is the deliberate way to preserve an experiment.
+    /// Returns every deleted node ID so the owner can discard matching cached
+    /// snapshots.
+    @discardableResult
+    mutating func adoptReplacingAbandonedFuture(
+        _ script: EVAProcessingScript,
+        payloadDigests: [EVAProcessingStep.Operation: String] = [:]
+    ) -> Set<EVAHistoryNodeID> {
+        var desiredIDs = [rootID]
+        var parent = rootID
+        for step in script.steps {
+            let id = idFor(
+                step: step,
+                parent: parent,
+                payloadDigest: payloadDigests[step.operation]
+            )
+            desiredIDs.append(id)
+            parent = id
+        }
+
+        let currentIDs = currentPath.map(\.id)
+        guard desiredIDs != currentIDs else { return [] }
+
+        // A strict prefix is undo. Keep its descendants so redo remains a
+        // round-trip until a genuinely different action replaces them.
+        if desiredIDs.count < currentIDs.count,
+           Array(currentIDs.prefix(desiredIDs.count)) == desiredIDs,
+           let destination = desiredIDs.last {
+            _ = navigate(to: destination)
+            return []
+        }
+
+        // Walk the whole desired lineage, not merely the portion shared with
+        // `currentPath`. After a multi-step undo the desired script may reuse
+        // the first retained child and diverge farther down (A/B/D -> undo to A
+        // -> A/B/C). Pruning only at A would incorrectly leave C and D as
+        // siblings under B.
+        currentID = rootID
+        var removed = Set<EVAHistoryNodeID>()
+        for step in script.steps {
+            let desiredChild = idFor(
+                step: step,
+                parent: currentID,
+                payloadDigest: payloadDigests[step.operation]
+            )
+            let abandonedChildren = (nodesByID[currentID]?.children ?? []).filter {
+                $0 != desiredChild
+            }
+            for child in abandonedChildren {
+                removed.formUnion(removeSubtree(child))
+            }
+            apply(step, payloadDigest: payloadDigests[step.operation])
+        }
+        return removed
+    }
+
     /// Moves the current pointer. Returns `false` for an unknown node.
     ///
     /// Records the descent through every edge on the path, so a later
@@ -417,9 +483,9 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
     /// Refuses on the root, on the current node, and on any ancestor of the
     /// current node — pruning the ground you are standing on has no sensible
     /// answer, so it is disallowed rather than silently relocating the user.
-    /// Navigate away first. `REWIND.md` also asks for lazy pruning ("change it
-    /// and move on" stays undoable for a while); that is a *policy* on top of
-    /// this, and belongs with the cache in work item 2, not here.
+    /// Navigate away first. Normal recording replacement does that internally
+    /// and then prunes immediately; this public operation remains available for
+    /// decoded legacy trees and explicit tree maintenance.
     @discardableResult
     mutating func deleteBranch(_ id: EVAHistoryNodeID) -> Bool {
         guard id != rootID,
@@ -427,22 +493,27 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
               nodesByID[id] != nil,
               !isAncestor(id, of: currentID) else { return false }
 
+        _ = removeSubtree(id)
+        return true
+    }
+
+    private mutating func removeSubtree(_ id: EVAHistoryNodeID) -> Set<EVAHistoryNodeID> {
+        guard nodesByID[id] != nil else { return [] }
         let parentID = nodesByID[id]?.parent
-        let doomed = [id] + descendants(of: id)
+        let doomed = Set([id] + descendants(of: id))
         for victim in doomed {
             nodesByID.removeValue(forKey: victim)
             lastVisitedChild.removeValue(forKey: victim)
         }
         // Also drop remembered edges *pointing into* the pruned subtree, or
         // `stepForward()` would try to descend into a node that no longer exists.
-        let doomedSet = Set(doomed)
-        for (key, value) in lastVisitedChild where doomedSet.contains(value) {
+        for key in lastVisitedChild.compactMap({ doomed.contains($0.value) ? $0.key : nil }) {
             lastVisitedChild.removeValue(forKey: key)
         }
         if let parentID {
             nodesByID[parentID]?.children.removeAll { $0 == id }
         }
-        return true
+        return doomed
     }
 
     // MARK: - Annotations

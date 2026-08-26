@@ -116,6 +116,65 @@ struct EVAHistoryTests {
         #expect(history.node(wide) != nil, "the old branch survives — fork is non-destructive")
     }
 
+    @Test func linearAdoptionKeepsRedoUntilADifferentActionReplacesIt() {
+        var history = EVAHistory(recordingKey: "r")
+        let wideScript = EVAProcessingScript(steps: [filterStep(high: "0.1", low: "40")])
+        history.adoptReplacingAbandonedFuture(wideScript)
+        let wide = history.currentID
+
+        history.adoptReplacingAbandonedFuture(EVAProcessingScript())
+        #expect(history.currentID == history.rootID)
+        #expect(history.node(wide) != nil)
+        #expect(history.forwardChild == wide)
+
+        let narrowScript = EVAProcessingScript(steps: [filterStep(high: "1", low: "30")])
+        let removed = history.adoptReplacingAbandonedFuture(narrowScript)
+        #expect(removed.contains(wide))
+        #expect(history.node(wide) == nil)
+        #expect(history.children(of: history.rootID).count == 1)
+        #expect(history.current.step?.parameters["highPassHz"] == "1")
+    }
+
+    @Test func linearAdoptionReusesTheExactRedoChild() {
+        var history = EVAHistory(recordingKey: "r")
+        let script = EVAProcessingScript(steps: [filterStep()])
+        history.adoptReplacingAbandonedFuture(script)
+        let original = history.currentID
+        history.adoptReplacingAbandonedFuture(EVAProcessingScript())
+
+        let removed = history.adoptReplacingAbandonedFuture(script)
+
+        #expect(removed.isEmpty)
+        #expect(history.currentID == original)
+        #expect(history.count == 2)
+    }
+
+    @Test func linearAdoptionPrunesAtADeeperDivergenceAfterMultiStepUndo() {
+        var history = EVAHistory(recordingKey: "r")
+        let filter = filterStep()
+        let average = step(.reference, ["scheme": "average"])
+        let oldSegment = step(.segment, ["eventCodes": "old"])
+        history.adoptReplacingAbandonedFuture(
+            EVAProcessingScript(steps: [filter, average, oldSegment])
+        )
+        let oldSegmentID = history.currentID
+
+        // Undo all the way to raw, then reuse the old filter/reference prefix
+        // while replacing the third step. The old segment must not survive as
+        // a sibling merely because divergence occurred below the current node.
+        history.adoptReplacingAbandonedFuture(EVAProcessingScript())
+        let replacement = step(.segment, ["eventCodes": "new"])
+        let removed = history.adoptReplacingAbandonedFuture(
+            EVAProcessingScript(steps: [filter, average, replacement])
+        )
+
+        #expect(removed.contains(oldSegmentID))
+        #expect(history.node(oldSegmentID) == nil)
+        #expect(history.count == 4)
+        #expect(history.current.step?.parameters["eventCodes"] == "new")
+        #expect(history.current.parent.map { history.children(of: $0).count } == 1)
+    }
+
     @Test func parameterOrderDoesNotAffectIdentity() {
         var a = EVAHistory(recordingKey: "r")
         var b = EVAHistory(recordingKey: "r")

@@ -1933,18 +1933,7 @@ extension WaveformView {
     /// into the epoched signal, the reference correctly uses their reconstructed
     /// values and excludes bad channels.
     func averageReferencedEpochs(_ result: PSABuildResult) -> PSABuildResult {
-        let referencedData = Rereferencing.applied(result.signal.data, excluding: channels.bad)
-        let referenced = MFFSignalData(
-            signalURL: result.signal.signalURL,
-            signalType: result.signal.signalType,
-            numberOfChannels: result.signal.numberOfChannels,
-            samplingRate: result.signal.samplingRate,
-            duration: result.signal.duration,
-            recordingStartTime: result.signal.recordingStartTime,
-            events: result.signal.events,
-            data: referencedData,
-            channelNames: result.signal.channelNames
-        )
+        let referenced = Rereferencing.applied(result.signal, excluding: channels.bad)
         return PSABuildResult(signal: referenced, segments: result.segments, message: result.message)
     }
 

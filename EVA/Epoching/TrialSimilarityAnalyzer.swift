@@ -30,7 +30,7 @@
 //  These thresholds and classifications are heuristics, not established
 //  criteria. They are meant to triage trials for a human to look at, and the
 //  cross-category match below is the only one that makes a directly checkable
-//  claim. See TRIALWISE.md.
+//  claim. See ROADMAP.md, Trial-wise similarity, drift, and reviewed exclusion.
 //
 
 import Foundation

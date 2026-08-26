@@ -755,11 +755,7 @@ nonisolated struct PSABuildResult {
     }
 
     private func withAverageReference(excluding bad: Set<Int>) -> PSABuildResult {
-        let referencedData = Rereferencing.applied(signal.data, excluding: bad)
-        let s = MFFSignalData(signalURL: signal.signalURL, signalType: signal.signalType,
-                              numberOfChannels: signal.numberOfChannels, samplingRate: signal.samplingRate,
-                              duration: signal.duration, recordingStartTime: signal.recordingStartTime,
-                              events: signal.events, data: referencedData, channelNames: signal.channelNames)
+        let s = Rereferencing.applied(signal, excluding: bad)
         return PSABuildResult(signal: s, segments: segments, message: message)
     }
 
@@ -781,10 +777,7 @@ nonisolated struct PSABuildResult {
                 }
             }
         }
-        let s = MFFSignalData(signalURL: signal.signalURL, signalType: signal.signalType,
-                              numberOfChannels: signal.numberOfChannels, samplingRate: signal.samplingRate,
-                              duration: signal.duration, recordingStartTime: signal.recordingStartTime,
-                              events: signal.events, data: data, channelNames: signal.channelNames)
+        let s = signal.replacingSamples(data)
         return PSABuildResult(signal: s, segments: segments, message: message)
     }
 }

@@ -276,7 +276,9 @@ final class MFFRecording: Identifiable {
             isSegmented: currentSignal.isSegmented,
             isAveraged: currentSignal.isAveraged,
             isGrandAverage: currentSignal.isGrandAverage,
-            impedancesKOhm: impedances
+            impedancesKOhm: impedances,
+            acquisitionReference: currentSignal.acquisitionReference?.removingChannel(index),
+            referenceState: currentSignal.referenceState
         )
 
         signal = updatedSignal
@@ -333,7 +335,9 @@ final class MFFRecording: Identifiable {
             isSegmented: currentSignal.isSegmented,
             isAveraged: currentSignal.isAveraged,
             isGrandAverage: currentSignal.isGrandAverage,
-            impedancesKOhm: impedances
+            impedancesKOhm: impedances,
+            acquisitionReference: currentSignal.acquisitionReference,
+            referenceState: currentSignal.referenceState
         )
 
         let updatedPNS: MFFSignalData?
@@ -365,7 +369,8 @@ final class MFFRecording: Identifiable {
             let restored = SensorPosition(channelIndex: newIndex, x: origin.x, y: origin.y)
             sensorLayout = SensorLayout(
                 name: sensorLayout?.name ?? "",
-                positions: (sensorLayout?.positions ?? []) + [restored]
+                positions: (sensorLayout?.positions ?? []) + [restored],
+                reference: sensorLayout?.reference
             )
         }
         if let origin = physioOriginGeometry[movedName] {
@@ -569,7 +574,29 @@ private extension SensorLayout {
             return SensorPosition(channelIndex: shiftedIndex, x: position.x, y: position.y)
         }
         .sorted { $0.channelIndex < $1.channelIndex }
-        return SensorLayout(name: name, positions: shiftedPositions)
+        let shiftedReference = reference.flatMap { reference -> SensorReference? in
+            guard reference.channelIndex != removedIndex else { return nil }
+            return SensorReference(
+                channelIndex: reference.channelIndex > removedIndex
+                    ? reference.channelIndex - 1
+                    : reference.channelIndex,
+                name: reference.name,
+                x: reference.x,
+                y: reference.y
+            )
+        }
+        return SensorLayout(name: name, positions: shiftedPositions, reference: shiftedReference)
+    }
+}
+
+private extension EEGAcquisitionReference {
+    func removingChannel(_ removedIndex: Int) -> EEGAcquisitionReference? {
+        guard channelIndex != removedIndex else { return nil }
+        return EEGAcquisitionReference(
+            channelIndex: channelIndex > removedIndex ? channelIndex - 1 : channelIndex,
+            name: name,
+            isRecorded: isRecorded
+        )
     }
 }
 

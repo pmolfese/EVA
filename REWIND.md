@@ -1,16 +1,31 @@
 # EVA — REWIND
 
-Design for a **history tree**: git-style navigation over a recording's processing
-history, with real undo/redo, branching, and step-by-step scrubbing.
+Design for **processing history**: linear undo/redo and step-by-step scrubbing
+inside each recording window, with deliberate experimentation performed by
+forking to a second window.
 
 Written 2026-08-11.
 
-**Where this stands after 2026-08-13.** Undo and redo work: the History tab in
-the status popover shows the processing tree, clicking a node restores that point
-instantly, and back/forward transport is live. Items 1, 4, and 9 are built;
-5 and 8 have had a substantial first pass. What is *not* built is forking as a
-deliberate act, A/B compare, session persistence, and re-derivation for nodes
-whose snapshot has been evicted.
+**Where this stands after 2026-08-25.** Undo and redo work: the History tab in
+the status popover shows the processing lineage, clicking a node restores that
+point instantly, and back/forward transport is live. Fork to New Window is also
+built. Items 1, 4, and 9 are built; 5 and 8 have had a substantial first pass.
+What is *not* built is A/B compare, session persistence, and re-derivation for
+nodes whose snapshot has been evicted.
+
+**Behavior correction 2026-08-25.** A normal recording window no longer keeps
+every replaced processing choice as a persistent sibling branch. Removing a
+stage keeps its descendants temporarily so Forward is a real redo. Once a new,
+different action is applied from that earlier point, EVA deletes the abandoned
+future and its cached snapshots—standard linear undo semantics. Re-applying the
+exact undone action follows the retained node instead of recreating it.
+
+The underlying `EVAHistory` value remains branch-capable for decoding older
+trees and copying state, but preserving an alternative is now an explicit user
+action: **Fork to New Window**. Each fork receives a value-copy of the current
+lineage and snapshots and then evolves independently. This resolves the open
+question at the bottom of this document: the branch tree did not earn its
+complexity as the default one-window behavior.
 
 **Read `Open threads` at the bottom first** if you are picking this up — it
 carries the unresolved items and two things that are verified only by reasoning.
@@ -222,14 +237,14 @@ than written.
 
 ---
 
-## What it looks like
+## Original visual prototype
 
 ![History sidebar beside the waveform view](docs/figures/REWIND_FIG_1.png)
 
-The sidebar sits left of the waveform. A linear trunk from `raw`, a fork after
-ICA (0.1–40 Hz applied, a dimmed 1–30 Hz branch below), the current node
-highlighted, and transport controls at the bottom. Node subtitles carry the
-parameters that define them plus cache state.
+This figure records the original sidebar/tree proposal. The shipped UI moved
+History into the processing-status popover, and the 2026-08-25 policy correction
+removed ordinary sibling accumulation. The visual language—lineage, current-node
+highlight, parameter subtitles, and transport—still applies.
 
 Figures are generated from the HTML sources beside them:
 
@@ -376,31 +391,29 @@ windowed replay for no reason.
 
 ---
 
-## Navigation semantics: replay, recompute, fork
+## Navigation semantics: undo/redo, replace, fork
 
-Three user intents, but **fork is the only primitive**. Because a node ID hashes
-`(parent, operation, params, payload)`, changing a step's parameters *always*
-produces a new node — the old one still exists and its cache is still valid. The
-only difference between the three is what happens to the old subtree.
+The data structure can represent branches, but the recording window applies a
+linear policy over it. Node identity still makes exact redo and cache reuse
+cheap; it no longer implies that every superseded choice remains visible.
 
 | Intent | Mechanism | Old subtree | Cost |
 |---|---|---|---|
-| **Replay** — click back, click forward | navigate; node ID unchanged so the cache is still valid | untouched | free if cached |
-| **Recompute** — "change it and move on" | fork, then prune the orphaned branch | discarded | re-derive descendants |
-| **Fork** — "try it the other way" | fork, stay branched | kept and cached | re-derive new branch only |
+| **Undo/redo** — click back, click forward | navigate; node ID unchanged so the cache is still valid | retained until replacement | free if cached |
+| **Replace** — undo or remove, then apply something different | prune the abandoned future, then append the replacement | discarded immediately, including snapshots | compute the replacement only |
+| **Fork** — "try it the other way" | Fork to New Window, then edit independently | retained in the other window | no initial recompute; copy-on-write state |
 
 Consequences worth designing around:
 
-- Build fork; recompute is fork plus a cleanup pass. The **destructive path is the
-  derived one**, so the non-destructive behavior is the default — which is what
-  you want while someone is exploring.
-- **Prune lazily.** Keep the orphaned subtree until memory pressure or session
-  close. "Change it and move on" stays silently undoable for a while at no
-  design cost.
+- Undo does not destroy redo. Destruction happens only when the operator makes a
+  new choice from an earlier point, which is the familiar document-editor rule.
+- Replacement pruning is immediate, not memory-pressure policy. Otherwise the
+  History rail continues to imply that superseded processing remains part of the
+  active work.
 - Replay must never recompute when a valid cache exists. Node identity is what
   guarantees this: if the ID matches, the bytes match.
-- The A/B case ("with and without ICA") is just two sibling nodes with the user
-  alternating between them. See ping-pong pinning below.
+- The A/B case ("with and without ICA") belongs in two forked recording windows,
+  where both alternatives are visible and neither silently changes the other.
 
 ---
 
@@ -452,13 +465,12 @@ Rough thresholds, subject to the measured numbers:
 | ~100 ms – ~2 s | let cost-per-byte decide |
 | > ~2 s | always try to cache; auto-pin |
 
-**3. Speculate on neighbors.** Sitting at node N, background-compute its
-children so click-forward is instant. And detect **ping-ponging** specifically:
-a user alternating between two siblings is the A/B comparison use case, and both
-nodes should be auto-pinned once it is clear that is what is happening (three
-alternations is a reasonable trigger). Cancel speculation when the user moves
-elsewhere — `ProcessingQueue` and the existing cancellation checks
-(`try Task.checkCancellation()`) already support this.
+**3. Speculate on the retained redo child.** Sitting at node N after undo,
+background-compute its retained child so click-forward is instant. Alternatives
+that must coexist belong in forked windows; each window can pin its own current
+state. Cancel speculation when the user moves elsewhere — `ProcessingQueue` and
+the existing cancellation checks (`try Task.checkCancellation()`) already
+support this.
 
 ---
 
@@ -570,23 +582,24 @@ the parent is undo, clicking back down is redo. No separate undo stack.
 
 | Item | Behavior |
 |---|---|
-| Branch from here | fork: creates a sibling and makes it current |
+| Fork to New Window | copies this point into a second independently editable window |
 | Pin / unpin | force the signal resident, exempt from eviction |
 | Rename… | user label, replacing the default step rendering |
-| Compare with current | A/B against the current node (see below) |
+| Compare with Fork… | future A/B view against a related forked window |
 | Export from here… | export the package at this node, not at the tip |
 | Report from here… | generate an `EVAReport` for this node (see `REPORTS.md`) |
-| Delete branch | prune this node and its descendants; disabled on ancestors of current |
+| Delete future | prune this redo node and its descendants; disabled on ancestors of current |
 
 **Hover a node** — show the cost hint (cached / fast / needs a gradient re-run)
 and the measured `computeCost` from when it was first computed.
 
 **Double-click a step's parameters** — reopen that stage's sheet with its recorded
-parameters loaded. Applying with changes forks; applying unchanged is a no-op
-because the node hash is unchanged.
+parameters loaded. Applying with changes replaces the redo chain in this window;
+applying unchanged follows the retained node or is a no-op.
 
-**Transport controls** — step back, step forward, replay to tip. Forward along
-the branch last visited, so back-then-forward is always a round trip.
+**Transport controls** — step back, step forward, replay to tip. Forward follows
+the retained redo child, so back-then-forward is always a round trip until a
+different action deliberately replaces that future.
 
 **Keyboard** — `⌘Z` / `⇧⌘Z` map to step back and step forward, so the feature is
 reachable without the sidebar open and behaves the way every other Mac app does.
@@ -594,16 +607,17 @@ reachable without the sidebar open and behaves the way every other Mac app does.
 ### A/B compare
 
 The payoff of the whole design, and worth building explicitly rather than leaving
-users to click back and forth. Selecting two nodes offers:
+users to align two windows by eye. Selecting two related forked states offers:
 
 - overlay both signals in `WaveformView` in contrasting colors
 - difference trace (A − B)
 - side-by-side SNR / channel-health metrics for the two nodes
 - for epoched nodes, butterfly plots side by side
 
-"What did ICA actually buy me?" becomes a two-click question. This also feeds
-`REPORTS.md`: a comparison report between two branches of one recording is a
-genuinely novel artifact to offer.
+"What did ICA actually buy me?" becomes a two-window question: fork before the
+choice, apply the alternative independently, then compare the windows. This also
+feeds `REPORTS.md`: a comparison report between two explicitly forked states of
+one recording is a genuinely novel artifact to offer.
 
 ---
 
@@ -677,12 +691,12 @@ pointed at a node's ancestry instead of an imported script.
    navigation. Clicking a node does nothing yet, and navigation is what forces
    the cache design.
 
-   Not built here, deliberately: branching has no separate primitive because it
-   does not need one — navigate to a node, apply a different step, and the fork
-   is the ordinary result of content addressing.
+   The low-level value remains branch-capable, but ordinary recording history
+   now prunes a divergent redo chain. Deliberate branching is the separate
+   Fork-to-New-Window action, not an accidental consequence of changing a field.
 2. **Signal cache** — two tiers (decimated preview, full-rate), pinning,
    cost-per-byte eviction, scratch-disk spill, measured `computeCost` per node,
-   neighbor speculation, and ping-pong detection.
+   and retained-redo speculation.
 
    **Partly superseded 2026-08-13, and the design had a false premise.** This
    document's model — *the step list is the truth, the signal is a cache* — reads
@@ -805,9 +819,9 @@ pointed at a node's ancestry instead of an imported script.
 7. **Queue integration** — node lifecycle states, the three work classes with
    preemptible speculation, and enqueueing user actions against a pending
    full-rate rebuild instead of reading a partial buffer.
-8. **UI** — the left sidebar: Queue / History tab view, tree rail, current-node
+8. **UI** — the Queue / History status popover: lineage rail, current-node
    highlight, stale-descendant rendering, transport controls, per-node cost hint,
-   pin toggle, branch labels, and the right-click menu.
+   pin toggle, labels, and the right-click menu.
 
    **Navigation landed 2026-08-13.** Rail rows are clickable and the History tab
    has working back/forward transport; clicking restores that node's snapshot.
@@ -815,12 +829,11 @@ pointed at a node's ancestry instead of an imported script.
    disabled with a tooltip saying why, which is `REWIND.md`'s "surface that
    before the click, not after" at the coarsest useful resolution.
 
-   **The next real gap is branches.** The rail renders `history.currentPath`, so
-   siblings are invisible: fork a filter and the branch you left is in the tree,
-   reachable by nothing. Drawing the tree instead of the path — the indented
-   rendering in `REWIND_FIG_1.png` — is what makes forking usable, and it is the
-   prerequisite for A/B compare (item 10) since you cannot select two nodes you
-   cannot see.
+   **The branch-rendering pass landed before the policy was simplified.** The
+   rail can still decode and display older branch-capable histories, but a normal
+   window now presents one lineage plus a retained redo path. New alternatives
+   are created through Fork to New Window rather than accumulating siblings in
+   this rail.
 
    **Read-only first pass done 2026-08-13**, and it lives in **the status
    popover as a Queue / History tab view** — the layout in
@@ -849,13 +862,12 @@ pointed at a node's ancestry instead of an imported script.
    scrollback came across — and the popover opens on Queue when something is
    running, History when nothing is.
 
-   **The tree accumulates as of 2026-08-13** — `EVAHistory.adopt` folds the
-   canonical chain in on every change, and content addressing resolves the
-   unchanged prefix to the nodes that already exist while forking at the stage
-   that differs. Widen a filter after narrowing it and both nodes exist, with the
-   branch you came from still carrying its pin and its label. The earlier version
-   rebuilt the tree from scratch each time, which made branches impossible by
-   construction.
+   **Linear replacement correction, 2026-08-25.** The canonical chain is still
+   folded on every change and the unchanged prefix still resolves to existing
+   nodes. A strict prefix move retains descendants for Forward; a later divergent
+   chain prunes those descendants and their snapshots before applying the new
+   steps. Widening a filter after undoing a narrower filter therefore leaves one
+   filter in this window's History, not two siblings.
 
    **Driven from the chain, not from each apply site — and that is the correct
    choice, not a shortcut.** Applying a stage upstream of one already applied,
@@ -939,11 +951,10 @@ Everything else falls out of that rather than needing its own mechanism:
   chain but makes *unmarking* inexpressible: an inverse step does not deduplicate
   (see the toggle rule above), and `stepBack()` only works if the mark was the
   last thing you did. Absolute keeps unmark trivial — a node with a smaller set.
-- **The cost is sibling fan-out.** Under `adopt`, `markBad{8}` and `markBad{8,16}`
-  differ in parameters and so fork at the same parent, leaving the earlier set as
-  an abandoned branch. That is a *display* problem — collapse consecutive sibling
-  `markBad` nodes in the rail — not a correctness one, and it is the right trade
-  against making a real operation impossible to express.
+- **Replacement stays linear.** Under the recording model, changing
+  `markBad{8}` to `markBad{8,16}` at the same point replaces the earlier redo
+  future. Sets separated by a stage remain separate ancestors because they
+  describe genuinely different stage inputs; that is not branch fan-out.
 
 **Prerequisite:** `currentProcessingScript()` builds from current state and
 cannot reconstruct what was bad when the filter ran. Each stage has to record the
@@ -1134,15 +1145,17 @@ above is what makes the third state necessary.
 
 ## Interactions with existing features
 
-**Copy processing from…** becomes "graft this script as a branch from the current
-node". Same engine.
+**Copy processing from…** replaces the current window's redo future with the
+copied script. Fork first when both the existing and copied alternatives need to
+remain available.
 
 **Batch processing** gains a natural definition of "process these 40 files to the
 same node" — the chain hash from `REPORTS.md` §3 identifies the target state.
 
 **Reports** get better: a report can name the exact node it describes, and a
-comparison report between two branches of the same recording becomes possible —
-which is a genuinely novel thing to offer ("what did ICA actually buy me?").
+comparison report between two forked states of the same recording becomes
+possible—which is a genuinely novel thing to offer ("what did ICA actually buy
+me?").
 
 **Multi-recording combine** needs thought: combining N recordings means N history
 trees converging on one node. Probably the combined output starts a fresh tree
@@ -1380,15 +1393,12 @@ user). **Do not guess a fourth — instrument it.**
 
 ### Next, in order
 
-1. **Forking as a deliberate act.** The tree already forks and the rail now draws
-   branches, so what is missing is intent: a "branch from here" affordance, and
-   deciding what happens to the branch you left. Decided 2026-08-15: this means
-   two things, not one — see *Forking to a new window* below, which is now the
-   design for the second of them. Its prerequisite, *EVA as a multi-window
-   app*, **is built** (2026-08-15) — forking itself is the next thing to
-   implement, not blocked on anything further.
-2. **A/B compare** (item 10). Needs two selected nodes, which needs the branch
-   rendering that just landed.
+1. ~~**Forking as a deliberate act.**~~ **Built 2026-08-15.** Fork to New
+   Window preserves the chosen state and gives each alternative an independent
+   future. The 2026-08-25 linear-history correction makes this the sole normal
+   way to preserve divergent processing choices.
+2. **A/B compare** (item 10). Its inputs are two explicitly forked windows, not
+   sibling nodes accumulated by ordinary editing.
 3. **Re-derivation** for evicted snapshots, plus the memory preference. Nodes
    without a snapshot are currently disabled rather than slow.
 4. **The `markBad` carry-through work**, designed but unbuilt — see *Channel
@@ -1521,21 +1531,16 @@ sense against a different signal. For a fork the signal starts identical, so
 it *could* be preserved, but consistency with the existing restore behavior
 argues for not special-casing it, at least at first.
 
-### Why alongside, not instead of, in-window branching
+### Why a window fork is the branch operation
 
-This does not replace clicking an earlier rail node and continuing from there
-(the in-window branching item 1 above already mostly built). It sits next to
-it as a second gesture: "New Branch Here" stays in this window; "Fork to New
-Window" spawns a second one. The window version's actual selling point is
-real side-by-side comparison — two live `WaveformView`s on screen at once,
-independently scrollable and independently scaled — which the single-rail
-model cannot offer without building a whole separate split-view feature. This
-is arguably the *cheap* way to get that comparison, since it reuses the
-entire existing view rather than building a new one. It is also the
-resolution to *A/B compare*'s open question below about whether comparison
-means two tree nodes viewed one at a time or two actual windows: **windows**,
-for the visual case; the tree still holds both regardless of how they are
-viewed.
+Clicking an earlier rail node and continuing with a different action replaces
+that window's redo chain. **Fork to New Window** is the explicit gesture for
+preserving both alternatives. Its selling point is real side-by-side comparison
+— two live `WaveformView`s on screen at once, independently scrollable and
+independently scaled — which the single-rail model cannot offer without a whole
+separate split-view feature. It also resolves *A/B compare*'s visual question:
+the compared states live in two windows, while each window keeps ordinary linear
+undo/redo.
 
 **Hard dependency: this cannot be built before EVA is a multi-window app.**
 There is currently only one `recording` in the whole process to fork *from*.
@@ -1574,8 +1579,8 @@ anything meant to leave the app: exports, and anything another tool or a
 collaborator might open. But it has a ceiling this document is now close to.
 MFF's schema belongs to EGI, not EVA; every sidecar is EVA quietly annexing
 territory in someone else's directory. Fine for a handful of small XML/JSON
-files. Not fine for what this section is actually for: a branching tree with
-a snapshot cache that today exists only in RAM, which is not a sidecar-sized
+files. Not fine for what this section is actually for: multiple window lineages
+with snapshot caches that today exist only in RAM, which is not a sidecar-sized
 problem, and non-MFF imports (BrainVision, EDF, Persyst, BESA), which have no
 package directory to annex at all — there is nowhere to *put* a sidecar for a
 recording that is three loose files in a folder the user did not intend to
@@ -1969,13 +1974,13 @@ step 6 used to be — every remaining item has a known shape.
 
 ## Open questions
 
-- **Does the branch tree earn its complexity, or is linear undo/redo enough?**
-  Branching is the expensive part of both the model and the UI. Worth prototyping
-  linear-only first and seeing whether the fork is missed. The node model above
-  supports branching without requiring the UI to expose it on day one.
-- **What happens to a branch when the user edits an ancestor's parameters?**
-  Git's answer is rebase. Ours might be "invalidate descendants and offer to
-  re-apply", which is a cheaper promise.
+- ~~**Does the branch tree earn its complexity, or is linear undo/redo enough?**~~
+  **Answered 2026-08-25:** linear undo/redo is the one-window behavior. Explicit
+  Fork to New Window preserves an alternative when the operator actually wants
+  one; ordinary replacement truncates redo.
+- ~~**What happens when the user edits an ancestor's parameters?**~~ **Answered
+  2026-08-25:** it replaces that window's redo descendants. Fork first to retain
+  the old version.
 - **Should nodes survive export?** A package written from node N — does it carry
   the whole tree or just its own lineage? Leaning toward whole tree, since it is
   small (steps + payloads, no signals) and makes a package self-documenting.

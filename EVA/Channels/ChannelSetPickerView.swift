@@ -74,6 +74,7 @@ struct ChannelSetPickerView: View {
             .labelsHidden()
 
             Button("Define…") {
+                ChannelsWindowModel.shared.present(tab: .channelSets)
                 openWindow(id: EVAApp.channelSetsWindowID)
             }
             .buttonStyle(.borderless)

@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Phase 2 of TRIALWISE.md: the trial-order plots. Kept in their own file rather
+//  Trial-wise Phase 2: the trial-order plots. Kept in their own file rather
 //  than added to SingleTrialAnalysisViews.swift, which is already ~4,000 lines.
 //
 //  Panels, in the order they answer questions:

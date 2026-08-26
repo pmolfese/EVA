@@ -128,17 +128,14 @@ nonisolated enum Rereferencing {
         scheme: ReferenceScheme = .average,
         excluding excluded: Set<Int> = []
     ) -> MFFSignalData {
-        MFFSignalData(
-            signalURL: signal.signalURL,
-            signalType: signal.signalType,
-            numberOfChannels: signal.numberOfChannels,
-            samplingRate: signal.samplingRate,
-            duration: signal.duration,
-            recordingStartTime: signal.recordingStartTime,
-            events: signal.events,
-            data: applied(signal.data, scheme: scheme, excluding: excluded),
-            channelNames: signal.channelNames
-        )
+        // A physical reference omitted from the file is zero in the recorded
+        // voltage convention. It must join the matrix *before* computing the
+        // average, both to reconstruct its waveform and to use the mathematically
+        // complete electrode set as the denominator.
+        let prepared = signal.restoringOmittedAcquisitionReference()
+        return prepared
+            .replacingSamples(applied(prepared.data, scheme: scheme, excluding: excluded))
+            .markingReference(.average)
     }
 
     // MARK: - Step parameters

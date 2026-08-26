@@ -948,9 +948,40 @@ struct WaveformView: View {
     /// multi-window requirement; the first two are what make it correct
     /// within one window regardless of focus.
     func publishChannelSetContext() {
-        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
-        ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
+        let channelsSignal = recordingStore.channelsWindowSignal ?? recording.signal
+        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout?
+            .includingReference(forChannelCount: channelsSignal?.data.count ?? 0)
+        ChannelSetStore.shared.activeChannelNames = channelsSignal?.channelNames
         ChannelSetStore.shared.activeIsMFFSource = recording.packageURL.pathExtension.lowercased() == "mff"
+        let channelModel = channels
+        ChannelsWindowModel.shared.publishRecording(
+            id: recording.id,
+            name: recording.packageName,
+            signal: channelsSignal,
+            acquisitionSignal: recording.signal,
+            layout: recording.sensorLayout,
+            channelNames: channelsSignal?.channelNames,
+            healthResults: channelModel.healthResults,
+            isAnalyzingHealth: channelModel.isAnalyzingHealth,
+            healthProgress: channelModel.healthProgress,
+            refreshHealth: { [weak channelModel] in
+                channelModel?.showsHealth = true
+                channelModel?.healthRefreshToken += 1
+            }
+        )
+    }
+
+    /// Updates this recording's registered diagnostics without making it the
+    /// active context when another recording window currently has focus.
+    func publishChannelsWindowLiveContext(signal: MFFSignalData) {
+        recordingStore.channelsWindowSignal = signal
+        ChannelsWindowModel.shared.updateActiveRecording(
+            id: recording.id,
+            signal: signal,
+            healthResults: channels.healthResults,
+            isAnalyzingHealth: channels.isAnalyzingHealth,
+            healthProgress: channels.healthProgress
+        )
     }
 
     /// Applies a fork's captured state on top of ordinary load-time seeding —
@@ -1383,10 +1414,11 @@ struct WaveformView: View {
             await updateArtifactEvents(for: continuousSignal)
         }
         .task(id: channelHealthSignature(for: continuousSignal)) {
-            // Channel health is now run on demand (tap a badge). A major state
-            // change (new filter/gradient/ICA/artifact repair/interpolation)
-            // changes the signature and resets the badges to empty; the user
-            // re-runs when ready.
+            // A major state change (new filter/gradient/ICA/artifact
+            // repair/interpolation) changes the signature and resets the
+            // badges. Health otherwise remains demand-driven in the waveform;
+            // opening the Channels utility window now supplies that demand
+            // automatically for its active signal.
             resetChannelHealthForStateChange()
         }
         .onChange(of: chanHealth.detailsRequest) { _, _ in
@@ -1401,6 +1433,18 @@ struct WaveformView: View {
             // Interpolating (or un-interpolating) a channel updates only that
             // channel's badge; the rest of the run is preserved.
             recomputeChannelHealthForInterpolation(oldKeys: oldKeys, newKeys: newKeys, signal: continuousSignal)
+        }
+        .onChange(of: continuousSignal.dataRevision, initial: true) { _, _ in
+            publishChannelsWindowLiveContext(signal: continuousSignal)
+        }
+        .onChange(of: channels.healthResults, initial: true) { _, _ in
+            publishChannelsWindowLiveContext(signal: continuousSignal)
+        }
+        .onChange(of: channels.isAnalyzingHealth) { _, _ in
+            publishChannelsWindowLiveContext(signal: continuousSignal)
+        }
+        .onChange(of: channels.healthProgress) { _, _ in
+            publishChannelsWindowLiveContext(signal: continuousSignal)
         }
         .task(id: segmentHealthRequestID(for: signal)) {
             refreshSegmentHealthIfNeeded(for: signal)
@@ -1697,7 +1741,7 @@ struct WaveformView: View {
                     }
                     .disabled(!canUndoSegmentation)
                     .help(canUndoSegmentation
-                          ? "Return to the state the epochs were built from. The segmented branch stays in History."
+                          ? "Return to the state the epochs were built from. Segmentation remains available for redo until different processing replaces it."
                           : "These epochs came with the file, so there is no earlier state in this session to return to.")
                 }
             } label: {

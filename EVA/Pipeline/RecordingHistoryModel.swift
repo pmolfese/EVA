@@ -11,14 +11,14 @@
 //
 //  Owns the recording window's `EVAHistory` and the rail's display state.
 //
-//  ## Accumulated from the chain, not appended per apply
+//  ## Derived from the chain, with linear undo inside one window
 //
 //  Every time the pipeline chain moves, the canonical script is folded into the
-//  tree with `EVAHistory.adopt`. Content addressing makes that cheap and makes it
-//  *accumulate*: the unchanged prefix resolves to the nodes that already exist,
-//  and a changed stage forks at exactly that stage while the branch you came from
-//  survives with its cache, pin, and label. The tree therefore remembers states
-//  you have left, which is the property that separates a history from a readout.
+//  history. Content addressing makes the unchanged prefix resolve to existing
+//  nodes. Moving to a prefix retains descendants for redo; applying a different
+//  action after that discards the abandoned future, matching standard Mac undo
+//  semantics. Deliberate experiments survive by using Fork to New Window, where
+//  each window receives its own value-copy of the history and snapshots.
 //
 //  It is driven from the chain rather than from each apply site on purpose.
 //  Applying a stage upstream of one already applied — gradient after filter —
@@ -56,14 +56,10 @@ final class RecordingHistoryModel {
     /// Folds the current processing chain into the tree and moves the pointer to
     /// its tip.
     ///
-    /// **Accumulates rather than rebuilds.** The previous version discarded the
-    /// tree and derived a fresh one every time the chain moved, which made
-    /// branches impossible by construction — every state you left was thrown
-    /// away. `EVAHistory.adopt` re-walks the canonical chain from the root
-    /// instead, and content addressing turns that into a no-op for the part that
-    /// has not changed and a fork at exactly the stage that has. Widen a filter
-    /// after narrowing it and both nodes now exist, with the branch you came from
-    /// still carrying its pin and its label.
+    /// **Preserves redo, replaces abandoned futures.** Removing the current
+    /// stage moves to its existing parent and keeps the removed chain reachable
+    /// by Forward. Applying a different filter (or any other divergent action)
+    /// then deletes that retained future before recording the replacement.
     ///
     /// It is still driven from the chain rather than from each apply site, and
     /// that is on purpose — see `EVAHistory.adopt` for why application order is
@@ -142,7 +138,7 @@ final class RecordingHistoryModel {
         payloadDigests: [EVAProcessingStep.Operation: String] = [:]
     ) {
         var updated = history
-        updated.adopt(
+        let removed = updated.adoptReplacingAbandonedFuture(
             EVAProcessingScript(steps: onDiskPrefix + liveSteps),
             payloadDigests: onDiskPayloadDigests.merging(payloadDigests) { _, live in live }
         )
@@ -151,6 +147,7 @@ final class RecordingHistoryModel {
         // write would cause every time the chain signature moves.
         guard updated != history else { return }
         history = updated
+        discardSnapshots(for: removed)
     }
 
     // MARK: - Snapshots
@@ -220,6 +217,14 @@ final class RecordingHistoryModel {
     }
 
     func snapshot(for id: EVAHistoryNodeID) -> PipelineSnapshot? { snapshots[id] }
+
+    private func discardSnapshots(for removed: Set<EVAHistoryNodeID>) {
+        guard !removed.isEmpty else { return }
+        for id in removed {
+            snapshots.removeValue(forKey: id)
+        }
+        snapshotOrder.removeAll { removed.contains($0) }
+    }
 
     private func evictSnapshotsBeyondBudget() {
         var total = snapshotBytes

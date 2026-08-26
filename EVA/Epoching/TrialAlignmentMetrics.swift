@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Similarity that survives a multi-peak ERP. TRIALWISE.md phase 4.
+//  Similarity that survives a multi-peak ERP. See ROADMAP.md milestone TW-4.
 //
 //  A single correlation across a whole epoch is dominated by the largest
 //  deflection: a trial with a textbook P1 and no P3 at all still scores well,

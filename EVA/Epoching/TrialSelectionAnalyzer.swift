@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Phase 3 of TRIALWISE.md: turning trial scores into a proposed exclusion set,
+//  Trial-wise Phase 3: turning trial scores into a proposed exclusion set,
 //  and being honest about what excluding them buys.
 //
 //  The honesty is the hard part. Selecting trials by their similarity to the

@@ -65,6 +65,10 @@ final class RecordingStore {
     /// Cached composition of the current processed signal with channel
     /// interpolation recipes. Kept per recording window.
     var interpolatedSignalResolver = InterpolatedSignalResolver()
+    /// Latest continuous signal at the end of this window's processing
+    /// pipeline. The Channels utility reads this when focus moves between
+    /// recording windows, so becoming main does not republish raw data.
+    @ObservationIgnored var channelsWindowSignal: MFFSignalData?
 
     // MARK: Viewport
     var amplitudeScale: Double = 100

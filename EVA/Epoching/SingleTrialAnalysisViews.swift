@@ -159,9 +159,11 @@ struct SingleTrialAnalysisSheet: View {
             if !windows.allSatisfy({ $0.endMs > $0.startMs }) { return "A RIDE component window has no width." }
         }
         if viewModel.analysisMode == .trialDiagnostics, diagnosticsAnalysisSpan == nil {
-            return "Add a window above, or drag on the trace, to say what to score."
+            return "Add a window above to say what to score."
         }
-        if !viewModel.hasWindow { return "Drag on the trace above to select the analysis window." }
+        if primaryAnalysisSpan(for: viewModel.analysisMode) == nil {
+            return "Drag on the trace above, or add a window, to select the analysis span."
+        }
         return "Not ready to run."
     }
 
@@ -173,24 +175,45 @@ struct SingleTrialAnalysisSheet: View {
             let windows = activeRIDEComponentWindows
             return !windows.isEmpty && windows.allSatisfy { $0.endMs > $0.startMs }
         }
-        // Trial Diagnostics is driven by added windows, not by dragging a span
-        // on the trace: adding W1 IS the setup. Either satisfies it.
-        if viewModel.analysisMode == .trialDiagnostics, diagnosticsAnalysisSpan != nil {
-            return true
+        // Trial Diagnostics is driven ENTIRELY by added windows — dragging a
+        // span on the trace plays no role here, unlike Measurements/CWT/Woody.
+        // Adding W1 is the whole of setup.
+        if viewModel.analysisMode == .trialDiagnostics {
+            return diagnosticsAnalysisSpan != nil
         }
-        guard viewModel.hasWindow else { return false }
-        return true
+        return primaryAnalysisSpan(for: viewModel.analysisMode) != nil
     }
 
-    /// The span Trial Diagnostics scores over: the dragged analysis window when
-    /// there is one, otherwise the extent of the added windows.
+    /// The span Trial Diagnostics scores over: the extent of its added windows.
+    /// The dragged trace-selection window (`viewModel.windowStartMs/EndMs`) is
+    /// deliberately NOT consulted — that binding is shared across modes and
+    /// drives the trace-drag interaction, but Trial Diagnostics has its own
+    /// window list and should not silently inherit a leftover drag from
+    /// another mode.
     private var diagnosticsAnalysisSpan: (startMs: Double, endMs: Double)? {
-        if let start = viewModel.windowStartMs, let end = viewModel.windowEndMs, end > start {
-            return (start, end)
+        analysisSpan(fromWindows: viewModel.windows(for: .trialDiagnostics))
+    }
+
+    /// The span Measurements/CWT/Woody run over: their own added window when one
+    /// exists, otherwise the dragged trace selection.
+    ///
+    /// Unlike Trial Diagnostics, these three still fall back to the drag,
+    /// because until a window is added the drag IS how the analysis span is set
+    /// for them — that predates windows existing at all. Once a window is
+    /// added, though, it takes over, which is what lets `addWindow` clear the
+    /// drag highlight without leaving the mode with nothing to run on.
+    private func primaryAnalysisSpan(for mode: SingleTrialAnalysisMode) -> (startMs: Double, endMs: Double)? {
+        if let fromWindows = analysisSpan(fromWindows: viewModel.windows(for: mode)) {
+            return fromWindows
         }
-        let windows = viewModel.windows(for: .trialDiagnostics).filter { $0.endMs > $0.startMs }
-        guard let start = windows.map(\.startMs).min(),
-              let end = windows.map(\.endMs).max(), end > start else { return nil }
+        guard let start = viewModel.windowStartMs, let end = viewModel.windowEndMs, end > start else { return nil }
+        return (start, end)
+    }
+
+    private func analysisSpan(fromWindows windows: [TrialAlignmentMetrics.AnalysisWindow]) -> (startMs: Double, endMs: Double)? {
+        let valid = windows.filter { $0.endMs > $0.startMs }
+        guard let start = valid.map(\.startMs).min(),
+              let end = valid.map(\.endMs).max(), end > start else { return nil }
         return (start, end)
     }
 
@@ -598,7 +621,9 @@ struct SingleTrialAnalysisSheet: View {
         if let signal = averagedSignal, let segment = averagedSegment {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Drag on the trace to select the analysis window")
+                    Text(viewModel.analysisMode == .trialDiagnostics
+                         ? "Add a window below to select what to score"
+                         : "Drag on the trace to select the analysis window")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Toggle("Show all conditions", isOn: $viewModel.showsAllConditionsInButterfly)
@@ -705,6 +730,7 @@ struct SingleTrialAnalysisSheet: View {
                     selectedCategory: viewModel.selectedCategory,
                     windowStartMs: viewModel.windowStartMs,
                     windowEndMs: viewModel.windowEndMs,
+                    componentWindows: activeWindowSelections,
                     woodyLatencyShiftSamples: currentWoodyLatencyShiftSamples,
                     showsWoodyAlignedOverlay: viewModel.showsWoodyAlignedOverlay,
                     woodyAlignmentProgress: viewModel.woodyAlignmentAnimationProgress,
@@ -736,6 +762,7 @@ struct SingleTrialAnalysisSheet: View {
                             selectedCategory: viewModel.selectedCategory,
                             windowStartMs: viewModel.windowStartMs,
                             windowEndMs: viewModel.windowEndMs,
+                            componentWindows: activeWindowSelections,
                             woodyLatencyShiftSamples: currentWoodyLatencyShiftSamples,
                             showsWoodyAlignedOverlay: viewModel.showsWoodyAlignedOverlay,
                             woodyAlignmentProgress: viewModel.woodyAlignmentAnimationProgress,
@@ -1058,7 +1085,16 @@ struct SingleTrialAnalysisSheet: View {
 
             let limit = viewModel.maximumWindows(for: mode)
             Button {
-                viewModel.addWindow(for: mode)
+                // Placing the window at the exact drag span is the whole point
+                // of dragging first, so once it is placed the drag highlight
+                // has done its job — clear it rather than leaving it sitting
+                // on top of (and indistinguishable from) the window it just
+                // became. A fresh drag afterward writes right back into the
+                // same binding, so nothing about that interaction is lost.
+                if viewModel.addWindow(for: mode) {
+                    viewModel.windowStartMs = nil
+                    viewModel.windowEndMs = nil
+                }
             } label: {
                 Label("Add", systemImage: "plus")
             }
@@ -1068,6 +1104,8 @@ struct SingleTrialAnalysisSheet: View {
                   ? (limit == 1
                      ? "Woody estimates one rigid shift per trial, so it aligns on a single window."
                      : "Window limit reached.")
+                  : viewModel.hasWindow
+                  ? "Add a window at the highlighted span."
                   : "Add a window, then drag it or its edges on the plot above.")
 
             if windows.isEmpty {
@@ -1436,7 +1474,8 @@ struct SingleTrialAnalysisSheet: View {
               let averageSignal = averagedSignal,
               let averageSegment = averagedSegment,
               let rawSignal,
-              !selectedChannelIndices.isEmpty else { return }
+              !selectedChannelIndices.isEmpty,
+              let span = primaryAnalysisSpan(for: .measurements) else { return }
 
         let averageSamples = channelResolvedSamples(
             signal: averageSignal, startSample: averageSegment.startSample,
@@ -1450,8 +1489,8 @@ struct SingleTrialAnalysisSheet: View {
             averageStimulusOffsetSamples: averageSegment.stimulusOffsetSamples,
             samplingRate: averageSignal.samplingRate,
             trials: trials,
-            windowStartMs: viewModel.windowStartMs ?? 0,
-            windowEndMs: viewModel.windowEndMs ?? 0,
+            windowStartMs: span.startMs,
+            windowEndMs: span.endMs,
             adaptiveHalfWidthMs: viewModel.adaptiveHalfWidthMs,
             splitCount: viewModel.splitCount,
             outlierThresholdSD: viewModel.outlierThresholdSD,
@@ -1488,7 +1527,7 @@ struct SingleTrialAnalysisSheet: View {
 
         guard let span = diagnosticsAnalysisSpan else {
             viewModel.diagnosticsRows = []
-            viewModel.statusMessage = "Add a window, or drag on the trace, to say what to score."
+            viewModel.statusMessage = "Add a window above to say what to score."
             viewModel.setupIsExpanded = true
             return
         }
@@ -1696,7 +1735,8 @@ struct SingleTrialAnalysisSheet: View {
     private func runWoodyAlignment() {
         guard let category = viewModel.selectedCategory,
               let rawSignal,
-              !selectedChannelIndices.isEmpty else { return }
+              !selectedChannelIndices.isEmpty,
+              let span = primaryAnalysisSpan(for: .woody) else { return }
 
         latencyAnalysisTask?.cancel()
         viewModel.isRunning = true
@@ -1718,8 +1758,8 @@ struct SingleTrialAnalysisSheet: View {
             averageReference: averageReference,
             baselineCorrected: baselineCorrected,
             badChannels: badChannels,
-            windowStartMs: viewModel.windowStartMs ?? 0,
-            windowEndMs: viewModel.windowEndMs ?? 0,
+            windowStartMs: span.startMs,
+            windowEndMs: span.endMs,
             maxLagMs: viewModel.woodyMaxLagMs,
             maxIterations: viewModel.woodyMaxIterations,
             convergenceToleranceSamples: viewModel.woodyConvergenceToleranceSamples,
@@ -1818,7 +1858,8 @@ struct SingleTrialAnalysisSheet: View {
     private func runCWTRidge() {
         guard let category = viewModel.selectedCategory,
               let rawSignal,
-              !selectedChannelIndices.isEmpty else { return }
+              !selectedChannelIndices.isEmpty,
+              primaryAnalysisSpan(for: .cwtRidge) != nil else { return }
 
         latencyAnalysisTask?.cancel()
         viewModel.isRunning = true
@@ -1875,8 +1916,9 @@ struct SingleTrialAnalysisSheet: View {
         config.appliesDenoising = viewModel.cwtAppliesDenoising
         config.peakSource = viewModel.cwtPeakSource
         config.engine = viewModel.cwtEngine
-        config.windowStartMs = viewModel.windowStartMs
-        config.windowEndMs = viewModel.windowEndMs
+        let span = primaryAnalysisSpan(for: .cwtRidge)
+        config.windowStartMs = span?.startMs
+        config.windowEndMs = span?.endMs
         config.sakoeChibaBand = max(2, viewModel.cwtSakoeChibaBand)
         config.maxShiftSamples = max(1, Int((viewModel.cwtMaxShiftMs / 1000.0 * samplingRate).rounded()))
         config.priorSigmaSamples = max(1, viewModel.cwtPriorSigmaMs / 1000.0 * samplingRate)
@@ -4058,6 +4100,11 @@ private struct SingleTrialChannelInspectorPlot: View {
     let selectedCategory: String?
     let windowStartMs: Double?
     let windowEndMs: Double?
+    /// The placed, named windows (RIDE's S/C/R, or the free-form ones added
+    /// elsewhere) — drawn here too, not just on the butterfly, so a window's
+    /// span is visible wherever a trace is. Independent of `windowStartMs/EndMs`,
+    /// which is only ever the transient drag highlight.
+    var componentWindows: [TrialWindowSelection] = []
     let woodyLatencyShiftSamples: [Int]?
     let showsWoodyAlignedOverlay: Bool
     let woodyAlignmentProgress: Double
@@ -4107,6 +4154,7 @@ private struct SingleTrialChannelInspectorPlot: View {
 
                 drawReferenceLines(first: first.segment, length: length, size: size, midY: midY, in: &context)
                 drawWindowSelection(first: first.segment, length: length, size: size, in: &context)
+                drawComponentWindows(first: first.segment, length: length, size: size, in: &context)
 
                 let orderedBundles = ordered(bundles)
                 for bundle in orderedBundles where bundle.length == length {
@@ -4289,6 +4337,39 @@ private struct SingleTrialChannelInspectorPlot: View {
         let x1 = CGFloat(max(start, end)) / CGFloat(length - 1) * size.width
         let rect = CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: size.height)
         context.fill(Path(rect), with: .color(.accentColor.opacity(0.10)))
+    }
+
+    /// Draws each placed window as a tinted band with a label, matching the
+    /// treatment on the butterfly plot above it — this view previously showed
+    /// only the transient drag highlight, so a window you had already placed
+    /// was invisible here even though it was the thing about to be scored.
+    private func drawComponentWindows(
+        first: EpochSegment,
+        length: Int,
+        size: CGSize,
+        in context: inout GraphicsContext
+    ) {
+        guard averagedSignal.samplingRate > 0, length > 1 else { return }
+        for window in componentWindows {
+            let start = relativeSample(forMs: window.startMs, segment: first, length: length)
+            let end = relativeSample(forMs: window.endMs, segment: first, length: length)
+            guard end > start else { continue }
+            let x0 = CGFloat(start) / CGFloat(length - 1) * size.width
+            let x1 = CGFloat(end) / CGFloat(length - 1) * size.width
+            let color = window.color
+            let rect = CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: size.height)
+            context.fill(Path(rect), with: .color(color.opacity(0.12)))
+
+            var border = Path()
+            border.move(to: CGPoint(x: x0, y: 0))
+            border.addLine(to: CGPoint(x: x0, y: size.height))
+            border.move(to: CGPoint(x: x1, y: 0))
+            border.addLine(to: CGPoint(x: x1, y: size.height))
+            context.stroke(border, with: .color(color.opacity(0.75)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+
+            let label = context.resolve(Text(window.label).font(.caption2).foregroundStyle(color))
+            context.draw(label, at: CGPoint(x: (x0 + x1) / 2, y: 8), anchor: .top)
+        }
     }
 
     private func relativeSample(forMs ms: Double, segment: EpochSegment, length: Int) -> Int {

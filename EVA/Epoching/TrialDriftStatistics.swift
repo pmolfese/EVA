@@ -13,7 +13,7 @@
 //  run, how noisy is each split group, and when does the average stop moving?
 //
 //  Kept separate from the views so the numbers can be tested without a window —
-//  see TRIALWISE.md, Phase 2.
+//  See ROADMAP.md, Trial-wise similarity, drift, and reviewed exclusion.
 //
 
 import Foundation

@@ -177,6 +177,7 @@ extension WaveformView {
                 chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
                     ? "No wavelet channel-goodness metrics available."
                     : "Wavelet channel goodness updated \(analysis.resultsByChannel.count) channels."
+                refreshRelationshipsAfterChannelHealth(for: signal)
             }
         }
     }
@@ -256,7 +257,8 @@ extension WaveformView {
     }
 
     /// Resets the channel-health badges to their empty state after a major
-    /// processing change. Does not auto-run; the user taps a badge to re-run.
+    /// processing change. The waveform remains demand-driven; an open Channels
+    /// utility window automatically makes the first request for the new state.
     @MainActor
     func resetChannelHealthForStateChange() {
         chanHealth.task?.cancel()
@@ -468,8 +470,21 @@ extension WaveformView {
                 chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
                     ? "No channel health metrics available."
                     : "Channel health scored \(analysis.resultsByChannel.count) channels."
+                refreshRelationshipsAfterChannelHealth(for: sourceSignal)
             }
         }
+    }
+
+    /// Relationship diagnostics are pair-level context for Channel Health.
+    /// They do not affect the per-channel goodness percentage, but every full
+    /// health run refreshes them against the exact same signal and the newly
+    /// calculated neighbor/RANSAC metrics.
+    @MainActor
+    private func refreshRelationshipsAfterChannelHealth(for signal: MFFSignalData) {
+        publishChannelsWindowLiveContext(signal: signal)
+        let model = ChannelsWindowModel.shared
+        guard model.activeRecordingID == recording.id else { return }
+        model.refreshDiagnostics(force: true)
     }
 
     /// Starts the shared toolbar progress row for a Channel Health scan, with

@@ -23,6 +23,12 @@ import UniformTypeIdentifiers
 struct ChannelSetEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
+    /// The standalone editor historically owned its Done button. The unified
+    /// Channels window owns that button at the window level, so its embedded
+    /// Channel Sets tab turns this one off while previews/legacy callers keep
+    /// the old behavior by default.
+    var showsDismissButton = true
+
     private var layout: SensorLayout? { ChannelSetStore.shared.activeSensorLayout }
     private var channelNames: [String]? { ChannelSetStore.shared.activeChannelNames }
 
@@ -71,14 +77,19 @@ struct ChannelSetEditorView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        HSplitView {
             sidebarList
-        } detail: {
-            detailPane
+                .frame(minWidth: 210, idealWidth: 230, maxWidth: 280)
+
+            centerPane
+                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+
+            inspectorPane
+                .frame(minWidth: 240, idealWidth: 270, maxWidth: 320, maxHeight: .infinity)
         }
         .safeAreaInset(edge: .top, spacing: 0) { unsavedNetBanner }
         .navigationTitle("Channel Sets")
-        .frame(minWidth: 760, minHeight: 540)
+        .frame(minWidth: 900, minHeight: 560)
         .toolbar { toolbarContent }
         .fileExporter(
             isPresented: $showsExportPanel,
@@ -185,17 +196,9 @@ struct ChannelSetEditorView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .cancellationAction) {
-            Button("Done") { dismiss() }
-        }
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button("Manage Nets…") { showsManageNets = true }
-            Button("Import…") { showsImportPanel = true }
-            Button("Export All…") { prepareExport(sets: store.allSets) }
-            Button {
-                beginNewSet()
-            } label: {
-                Label("New Channel Set", systemImage: "plus")
+        if showsDismissButton {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }
             }
         }
     }
@@ -219,7 +222,7 @@ struct ChannelSetEditorView: View {
                     }
                 }
                 if !userDefined.isEmpty {
-                    Section("User-Defined") {
+                    Section("My Sets") {
                         ForEach(userDefined) { set in
                             channelSetRow(set)
                                 .tag(set.id)
@@ -233,6 +236,9 @@ struct ChannelSetEditorView: View {
                 }
             }
             .listStyle(.sidebar)
+
+            Divider()
+            sidebarFooter
         }
         .onChange(of: sidebarSelection) { _, id in
             if let id, let set = store.allSets.first(where: { $0.id == id }) {
@@ -245,9 +251,9 @@ struct ChannelSetEditorView: View {
     /// out to a specific net still shows "Any Net"-tagged sets — see
     /// `matchesFilter`.
     private var netFilterControl: some View {
-        HStack {
-            Text("Net")
-                .font(.caption)
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Show sets for")
+                .font(.caption2)
                 .foregroundStyle(.secondary)
             Picker("Net", selection: $netFilter) {
                 Text("All Nets").tag(String?.none)
@@ -260,63 +266,86 @@ struct ChannelSetEditorView: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+
+    private var sidebarFooter: some View {
+        HStack(spacing: 0) {
+            Button {
+                beginNewSet()
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 34, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("New Channel Set")
+
+            Divider()
+                .frame(height: 30)
+
+            Menu {
+                Button("Import Channel Sets…") { showsImportPanel = true }
+                Button("Export All Channel Sets…") { prepareExport(sets: store.allSets) }
+                Divider()
+                Button("Manage Saved Nets…") { showsManageNets = true }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 38, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Channel Set Actions")
+
+            Spacer()
+        }
+        .frame(height: 31)
     }
 
     @ViewBuilder
     private func channelSetRow(_ set: ChannelSet) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(set.name)
-                .lineLimit(1)
-            HStack(spacing: 4) {
-                Text("\(set.channelIndices.count) ch")
+        HStack(spacing: 8) {
+            Image(systemName: store.isBuiltIn(set) ? "circle.grid.3x3.fill" : "circle.grid.3x3")
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(set.name)
+                    .lineLimit(1)
                 if let net = set.netType {
-                    Text("·")
                     Text(net)
+                        .lineLimit(1)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+
+            Spacer(minLength: 4)
+            Text("\(set.channelIndices.count)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
     }
 
-    // MARK: - Detail pane
+    // MARK: - Center pane
 
     @ViewBuilder
-    private var detailPane: some View {
+    private var centerPane: some View {
         if sidebarSelection == nil && editingSet == nil && !isCreatingNew {
             ContentUnavailableView(
                 "No Channel Set Selected",
                 systemImage: "antenna.radiowaves.left.and.right",
-                description: Text("Choose a set from the sidebar, or tap \(Image(systemName: "plus")) to create one.")
+                description: Text("Choose a set from the sidebar, or click \(Image(systemName: "plus")) to create one.")
             )
         } else {
             VStack(spacing: 0) {
-                // Name row
-                HStack(spacing: 8) {
-                    TextField("Channel Set Name", text: $editingName)
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(isViewingBuiltIn)
-                    if isViewingBuiltIn {
-                        if let netType = editingSet?.netType {
-                            Text(netType)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    } else {
-                        netTypeControl
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
+                mapToolbar
 
-                Divider()
-
-                // Map or fallback
                 if let layout {
                     VStack(spacing: 10) {
                         ChannelSetMapView(
@@ -334,65 +363,215 @@ struct ChannelSetEditorView: View {
                             unpositionedChannelsView(unpositionedChannelIndices(in: layout))
                         }
                     }
-                    .padding(12)
+                    .padding(16)
                 } else {
                     noLayoutFallback
-                        .padding(12)
+                        .padding(16)
                 }
 
                 Divider()
-
-                // Status + action bar
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("\(selectedIndices.count) channel\(selectedIndices.count == 1 ? "" : "s") selected")
-                        if !selectedIndices.isEmpty {
-                            Text(selectedChannelSummary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                    if !isViewingBuiltIn, layout != nil {
-                        Toggle("Force symmetry", isOn: $forceSymmetry)
-                            .toggleStyle(.checkbox)
-                            .font(.caption)
-                            .help("Toggling an electrode also toggles its mirror-image partner in the opposite hemisphere. Turning this on mirrors the current selection.")
-                            .onChange(of: forceSymmetry) { _, on in
-                                if on, let layout { mirrorEntireSelection(layout: layout) }
-                            }
-                    }
-
-                    Spacer()
-
-                    if !isViewingBuiltIn {
-                        Button("Reset") { resetEdits() }
-
-                        Button("Delete", role: .destructive) {
-                            showsDeleteConfirmation = true
-                        }
-                        .disabled(editingSet == nil)
-
-                        Button("Export…") { exportCurrentSet() }
-
-                        Button("Save as New…") {
-                            saveAsName = editingName + " Copy"
-                            showsSaveAsAlert = true
-                        }
-
-                        Button("Save") { commitSave(asNew: false) }
-                            .disabled(editingName.trimmingCharacters(in: .whitespaces).isEmpty)
-                            .keyboardShortcut("s", modifiers: .command)
-                    } else {
-                        Button("Export…") { exportCurrentSet() }
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                mapFooter
             }
         }
+    }
+
+    private var mapToolbar: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(editingName.isEmpty ? "New Channel Set" : editingName)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("\(selectedIndices.count) channel\(selectedIndices.count == 1 ? "" : "s") · \(editingNetType ?? "Any Net")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Button("Select All") {
+                selectedIndices = allAvailableChannelIndices
+                if forceSymmetry, let layout { mirrorEntireSelection(layout: layout) }
+            }
+            .disabled(isViewingBuiltIn || allAvailableChannelIndices.isEmpty)
+
+            Button("Clear") { selectedIndices.removeAll() }
+                .disabled(isViewingBuiltIn || selectedIndices.isEmpty)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var mapFooter: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(.blue.opacity(0.28))
+                .frame(width: 11, height: 11)
+                .overlay(Circle().stroke(.blue, lineWidth: 1))
+            Text("Included in set")
+            Text(isViewingBuiltIn ? "Built-in sets are read-only" : "Click electrodes to add or remove them")
+                .foregroundStyle(.secondary)
+            Spacer()
+            if !selectedChannelSummary.isEmpty {
+                Text(selectedChannelSummary)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 250, alignment: .trailing)
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 16)
+        .frame(height: 38)
+        .background(.bar)
+    }
+
+    // MARK: - Inspector
+
+    @ViewBuilder
+    private var inspectorPane: some View {
+        if sidebarSelection == nil && editingSet == nil && !isCreatingNew {
+            VStack(spacing: 0) {
+                inspectorTitle
+                Spacer()
+            }
+            .background(.bar)
+        } else {
+            VStack(spacing: 0) {
+                inspectorTitle
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        inspectorIdentity
+                        Divider()
+                        inspectorSelection
+                        Divider()
+                        inspectorActions
+                    }
+                    .padding(14)
+                }
+
+                if !isViewingBuiltIn {
+                    Divider()
+                    inspectorSaveBar
+                }
+            }
+            .background(.bar)
+        }
+    }
+
+    private var inspectorTitle: some View {
+        HStack {
+            Text("Channel Set")
+                .font(.headline)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 44)
+    }
+
+    private var inspectorIdentity: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Name")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if isViewingBuiltIn {
+                    Text(editingName)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    TextField("Channel Set Name", text: $editingName)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Applies to")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if isViewingBuiltIn {
+                    Text(editingNetType ?? "Any Net")
+                } else {
+                    netTypeControl
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private var inspectorSelection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Channels")
+                Spacer()
+                Text("\(selectedIndices.count)")
+                    .font(.title2.monospacedDigit())
+            }
+
+            if !isViewingBuiltIn, layout != nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Keep selection symmetric", isOn: $forceSymmetry)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: forceSymmetry) { _, on in
+                            if on, let layout { mirrorEntireSelection(layout: layout) }
+                        }
+                    Text("Selecting a channel also selects its partner in the opposite hemisphere.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 20)
+                }
+            }
+        }
+    }
+
+    private var inspectorActions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                saveAsName = editingName + " Copy"
+                showsSaveAsAlert = true
+            } label: {
+                Label("Duplicate Set…", systemImage: "plus.square.on.square")
+            }
+            .buttonStyle(.plain)
+            .disabled(editingSet == nil)
+
+            Button(action: exportCurrentSet) {
+                Label("Export Set…", systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(.plain)
+            .disabled(editingSet == nil)
+
+            if !isViewingBuiltIn {
+                Button(role: .destructive) {
+                    showsDeleteConfirmation = true
+                } label: {
+                    Label("Delete Set…", systemImage: "trash")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.red)
+                .disabled(editingSet == nil)
+            }
+        }
+        .foregroundStyle(Color.accentColor)
+    }
+
+    private var inspectorSaveBar: some View {
+        HStack(spacing: 8) {
+            Text(hasUnsavedChanges ? "Unsaved changes" : "Saved")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Revert") { resetEdits() }
+                .disabled(!hasUnsavedChanges)
+            Button("Save") { commitSave(asNew: false) }
+                .buttonStyle(.borderedProminent)
+                .disabled(editingName.trimmingCharacters(in: .whitespaces).isEmpty || !hasUnsavedChanges)
+                .keyboardShortcut("s", modifiers: .command)
+        }
+        .padding(10)
     }
 
     /// Which net this set applies to — editable for new and existing sets
@@ -533,6 +712,23 @@ struct ChannelSetEditorView: View {
 
     private var isViewingBuiltIn: Bool {
         editingSet.map { store.isBuiltIn($0) } ?? false
+    }
+
+    private var allAvailableChannelIndices: Set<Int> {
+        if let channelNames, !channelNames.isEmpty {
+            return Set(channelNames.indices)
+        }
+        if let layout {
+            return Set(layout.positions.map(\.channelIndex))
+        }
+        return []
+    }
+
+    private var hasUnsavedChanges: Bool {
+        guard let set = editingSet else { return isCreatingNew }
+        return editingName != set.name
+            || editingNetType != set.netType
+            || selectedIndices != Set(set.channelIndices)
     }
 
     private var selectedChannelSummary: String {

@@ -35,7 +35,7 @@ is what gets read instead of scrolling 1,800 lines.
 | 2.4 Scenario files | ✅ Complete | 2026-08-21, versioned catalog with override tests. |
 | 3.1 Multi-subject simulation | ✅ Complete | 2026-08-25. `generate-group`, explicit component-wise ERP estimands + between-subject variance, prefix-stable cohorts. |
 | 3.2 Comparison harness | Open | No longer blocked — 4.9 fixed the event-precision bug. Mostly a reporting layer over Tier 7 now. |
-| 3.3 Measured template library | Partial | Gradient-template import exists; curated library and BCG import do not. Load-bearing for 5.4/Tier 8. |
+| 3.3 Measured template library | Partial | Gradient-template import exists; curated library and BCG import do not. Load-bearing for real-data validation of 5.4/Tier 8. |
 | 3.4 Clinical patterns | Not started | Interictal spikes first. |
 | 4.1 BCG geometric topography | ✅ Closed by 5.1 | 2026-08-21, superseded rather than fixed separately. |
 | 4.2 BCG spatial rank | ✅ Closed by 5.1 | 2026-08-21, rank 4 emerges from four generators. |
@@ -47,40 +47,51 @@ is what gets read instead of scrolling 1,800 lines.
 | 4.8 Declare ERP overlap | ✅ Complete | 2026-08-21, directional flags and non-overlap scoring. |
 | 4.9 Sub-millisecond MFF event times | ✅ Complete | 2026-08-21. Reader *and* writer were quantizing; 1024 Hz now exact. |
 | 5.1 Multi-generator BCG | ✅ Complete | 2026-08-21, four physical generators, spatial rank 4. |
-| 5.2 Surrogate spatial filter | ✅ PCA-S complete | 2026-08-25. Paper and iterative pattern searches are explicit; ICA-S remains open, see 5.4. |
+| 5.2 Surrogate spatial filter | ✅ PCA-S complete | 2026-08-25. Paper/iterative searches are explicit, correction uses recording geometry and truth head parameters, and PNS is preserved; ICA-S remains open, see 5.4. |
 | 5.3 The evaluation | ✅ Complete except localization | 2026-08-25. Completed averages are filtered per paper and all outcomes are in JSON; dipole localization needs 6.1-6.2. |
-| 5.4 Simulator-trained BCG labeller | Not started | Pilot for Tier 8. Do 8.1 first. |
+| 5.4 Simulator-trained BCG labeller | ✅ Pilot complete | 2026-08-25. Beat-locked + ECG logistic model composes with ICLabel, is fitted on two simulator configurations, and improves correction on a held-out third configuration. Real-data validation remains explicitly open. |
 | 6.x Distributed inverse methods | Not started | Deferred; 6.1 worth pulling forward if 5.2 needs a source grid. |
-| 7.1-7.2 Pipeline regression | ✅ First slice complete | 2026-08-25. Locked-clock gradient case, floor + 2%-tolerance analytic ceiling + watermark; focused test green. |
-| 7.3-7.5 Corpus and CI | Not started | Clean control next; then GitHub Actions staging. |
-| 8.x Component labelling | Not started | Start with 8.1, a benchmark rather than a model. |
+| 7.1-7.2 Pipeline regression | ✅ Complete | 2026-08-25. Headless harness, assertion policy, analytic gradient case, and watermark. |
+| 7.3 Corpus | ✅ Complete | 2026-08-25. Six generated, watermarked cases cover locked/drifting gradient, QRS-driven BCG, oddball ERP, recording defects, and a clean control. |
+| User-facing recording diagnostics | ✅ Pilot complete | 2026-08-25. The unified Channels window exposes Channel Sets, Health, Impedance, review-only relationships, and reference-aware common-mode context. Channel Health automatically evaluates relationships and distinguishes analyzing, no-finding, and flagged states. MFF reference metadata, before/after average-reference checks, and omitted-reference reconstruction are complete; real-recording threshold calibration remains open. |
+| 7.4-7.5 Execution and CI | Not started | Establish cross-machine tolerances, then GitHub Actions staging. |
+| 8.1 Existing-labeller benchmark | ✅ Complete | 2026-08-25. ICLabel and the independent `ICAComponentAutoLabeler` heuristic path are scored per class against graded topographic truth. |
+| 8.2-8.4 Component labelling | Heart/BCG pilot complete | 5.4 proves the narrow workflow; the remaining classes and broader dataset/model-card work are open. |
 
 ### 2026-08-25 implementation-audit follow-up
 
 | Finding | Status | Resolution or remaining work |
 | --- | --- | --- |
-| Correction assumes the standard montage/head and needs an explicit PNS-preservation test | Open | Reconstruct the actual montage and head from recording/truth metadata; prove ECG and motion PNS channels survive `correct`. |
+| Correction assumes the standard montage/head and needs an explicit PNS-preservation test | ✅ Fixed | `correct` resolves an explicit `--coordinates` XML/MFF override, then input MFF geometry, then truth-referenced geometry; missing geometry fails unless `--assume-standard-montage` is explicit. Truth shell radii/series terms are reused, real data declares the classic approximation, and ECG/motion PNS round-trip exactly. |
 | ERP evaluation omitted the paper's filter on the completed average | ✅ Fixed | Accepted epochs are averaged, then zero-phase filtered 0.3-30 Hz before baseline and scoring; a 100 Hz regression test pins the order. |
 | PCA-S used only the iterative pattern-search extension | ✅ Fixed | `paper` and `iterative` are separate modes. Paper mode accepts an operator-selected representative beat or deterministic unattended stand-in; reports preserve the choice. |
-| Measured-template scenarios depend on mutable external paths | Open | Package/embed templates or record a content digest and copied provenance so a scenario remains regenerable. |
+| Measured-template scenarios depend on mutable external paths | Deferred by owner | **SHA-256/content-digest work is not a priority.** Do not add digest or template-embedding infrastructure unless the owner explicitly reopens it; the attempted approach was intentionally backed out on 2026-08-25. |
 | Multi-component group truth collapsed peaks into one scalar | ✅ Fixed | `group_truth.json` and subject draws now preserve each component ID, latency, units, and contrast; no cross-latency scalar sum. |
 | Pipeline ceiling was too permissive to catch information leakage | ✅ Fixed | Ceiling is the analytic `sqrt(N+1)` bound with only 2% numerical tolerance; focused pipeline regression passes. |
 | `evaluate-surrogate --json` omitted most evaluation outcomes | ✅ Fixed | Versioned JSON now contains configuration, per-seed values, mean/SD, correction diagnostics, and every ERP criterion. |
-| Determinism checker exists only in the untracked `scripts/` tree | Open | Decide whether it belongs to this repository and, if so, land it with the roadmap work so CI can actually call it. |
+| Determinism checker exists only in the untracked `scripts/` tree | Deferred by owner | Leave the existing checker unchanged. Do not prioritize new SHA-256/hash infrastructure or couple it to unrelated roadmap work. |
+
+### Owner priority guardrail
+
+**SHA-256 is not a project priority.** Do not propose content digests, hash
+manifests, template hashing, or expanded hash-based reproducibility work as a
+next step. The existing determinism check may remain unchanged, but it should
+not drive the roadmap or become a prerequisite for other features. Revisit this
+only if the owner explicitly asks to reopen it.
 
 ### Next, in order
 
-1. **Close the correction input contract** — use the recording's actual
-   montage/head metadata and add a PNS round-trip test. This is the most direct
-   correctness issue still open from the audit.
-2. **Make measured templates portable** — package the bytes or pin their digest
-   and provenance; otherwise a reviewed scenario is not independently
-   regenerable. Land the determinism checker at the same time if it belongs here.
-3. **7.3 clean control** — assert that a pipeline does not damage a recording
-   needing no correction, then add representative BCG/ERP corpus cases.
-4. **8.1** — benchmark ICLabel and `ICAComponentAutoLabeler` against graded
-   truth. Its result decides how much of 5.4/Tier 8 is warranted.
-5. **5.4**, then **7.4-7.5**, **8.2-8.4**, **3.2**, and **ICA-S**.
+1. **Calibrate the new bridge and reference diagnostics** — the review-only
+   Channels window and Channel Health deep-link are implemented. Validate
+   thresholds on real recordings, then add pair overlay/difference previews and
+   explicit mark/exclude actions before considering automated intervention.
+   Reference identity, processing convention, and before/after rereference
+   context are already implemented.
+2. **7.4-7.5** — establish cross-machine score tolerances, then stage the nine-case
+   corpus in GitHub Actions.
+3. **ICA-S**, then **8.2-8.4** and **3.2**. 5.4 now supplies ICA-S component
+   selection; every additional label class still needs the provenance discipline
+   in 8.2.
 
 The full reasoning behind this order is in [Suggested order](#suggested-order) at
 the end of the document; this list is the short form and should agree with it.
@@ -107,7 +118,9 @@ Implemented, tested, and documented in `Tools/EVASimulate/README.md`:
 - **Recording defects**: five bad-channel kinds, mains noise, per-electrode
   impedance tied to the defect, Johnson-Nyquist contact noise, and
   impedance-scaled mains pickup.
-- **Montage**: 10-20 positions with `sensorLayout.xml` and `coordinates.xml`.
+- **Montage**: built-in 10-20 positions or an imported standalone
+  `coordinates.xml`/MFF package, with matching `sensorLayout.xml` and
+  `coordinates.xml` written to every generated MFF.
 - **Source space**: deterministic neural dipoles, three-shell forward model,
   difficult separability scenarios, moving sources, ocular dipoles, and
   localization/component-recovery scoring.
@@ -122,7 +135,7 @@ Implemented, tested, and documented in `Tools/EVASimulate/README.md`:
   timing/ROC metrics; and ERP amplitude/latency recovery metrics.
 - **Scenarios**: versioned JSON configuration files, explicit flag precedence,
   config-only export, and eight reviewed configurations in a shipped catalog.
-- **88 passing self-test outcomes** on the model's own behaviour, and byte-level
+- **90 passing self-test outcomes** on the model's own behaviour, and byte-level
   determinism.
 
 ## Principles to hold onto
@@ -436,7 +449,7 @@ between-subject SD for a quantity that is identically zero.
 `eva-bids to-bids` call per subject. Keeping the tools composable beats coupling
 them.
 
-**Self-tests (88 total, 0 failures):** prefix stability; realized
+**Self-tests (90 total, 0 failures):** prefix stability; realized
 between-subject SD within 0.05 of the request over 400 subjects; `--homogeneous`
 fixing every parameter at 1 while leaving each subject its own seed; effect
 scaling moving the contrast and giving exactly zero when conditions are
@@ -984,12 +997,12 @@ suppressed, `paper-default` reproduces the recorded pre-5.1 directory hash
 byte-identical. The only change is one added `bcgSpatialModel` key in
 `sim_truth.json`.
 
-The three new configuration fields are **Optional with `effective…`
+The four generator configuration fields are **Optional with `effective…`
 accessors**, following the `recordingReference` precedent. Swift's synthesized
 `Decodable` does not fall back to a property's default for a missing key, and
 every scenario file carries the complete configuration — so non-optional
 additions would have broken every scenario a user already had. A self-test now
-pins that contract by decoding a configuration with all three keys removed.
+pins that contract by decoding a configuration with all four keys removed.
 
 **New scenario:** `scenarios/bcg-generators.json`, the paper configuration with
 the generator BCG substituted.
@@ -1105,7 +1118,7 @@ minimum in the runs above). A surrogate basis sitting on top of the simulated
 sources would fit the brain activity perfectly and rig the comparison; the number
 is printed so a reader can check rather than trust.
 
-**Self-tests (88 total, 0 failures):** the eigensolver reconstructs its
+**Self-tests (90 total, 0 failures):** the eigensolver reconstructs its
 input and returns orthonormal vectors; the brain model reproduces real dipole
 topographies (1.000 unregularized, 0.995 at 2%); a whole artifact-free recording
 survives the filter at residual SNR 21.9 — measured as SNR, not correlation,
@@ -1113,6 +1126,11 @@ because correlation is scale-invariant and cannot see a filter that preserves
 shape while shrinking amplitude; and end-to-end separation improves SNR by at
 least 1.8x at the artifact's true rank. A separate check pins both pattern modes,
 the paper representative candidate, and deterministic repeatability.
+The correction-contract regression additionally proves that PCA-S reconstructs
+the input MFF montage, reuses truth shell radii and lead-field truncation, copies
+the exact `coordinates.xml`, and preserves ECG/motion PNS samples, names, rate,
+and polarity convention. A geometry-free input is rejected unless the caller
+explicitly opts into the built-in standard-montage approximation.
 
 **Still open:** **ICA-S**. It differs from PCA-S only in where the artifact
 topographies come from, so the filter machinery is already in place — and the
@@ -1274,7 +1292,7 @@ Read with the spreads, not past them:
   its grand average.
 - **ICA-S**, per 5.2.
 
-**Self-tests (88 total, 0 failures):** explained variance is exactly 1.0
+**Self-tests (90 total, 0 failures):** explained variance is exactly 1.0
 for data built from the model topographies and falls below 0.7 once a foreign
 topography is added — both halves, since a metric that always returned 1 would
 pass the first alone; and epoch rejection drops exactly the one trial carrying a
@@ -1316,6 +1334,36 @@ their dipole model cannot be entered without it.
 machinery.
 
 ## 5.4 A simulator-trained BCG component labeller
+
+**Status (2026-08-25): pilot complete.** `BCGComponentLabeller` now extracts five
+named, inspectable features from each recovered component: beat-template energy,
+beat-to-beat template consistency, post-QRS prominence, lagged ECG relationship,
+and the existing Heart result as a weak prior. It requires at least eight
+*detected* `R Wave` events. Simulator beat truth is used only by tests, never by
+the app. Scores compose with ICLabel in `ICAComponentSuggestion`; low scores
+leave its label intact, while high scores produce a review-only `Heart BCG`
+suggestion with the feature values in the explanation. Nothing is selected for
+removal automatically.
+
+The target is the specified graded projection onto the full BCG-generator span
+versus the neural-source span, with redundant topographies removed by modified
+Gram-Schmidt. The committed five-coefficient logistic model is regenerated and
+pinned by the test suite from two training corpora spanning 1.5 T/20 channels
+and 3 T/32 channels, different BCG amplitudes, physical-generator mixes,
+morphology variability, neural source counts and seeds. A 7 T/24-channel
+configuration with an unseen generator mix is held out entirely.
+On that held-out case, the generic Heart prior's graded ranking concordance is
+**0.2373**, versus **0.7797** for the beat-locked model. Feeding suggestions back
+through EVA's ICA reconstruction improves broadband SNR from **0.9347** to
+**1.8785**; because the residual is measured against the untouched clean EEG,
+this score penalizes removal of neural signal as well as residual BCG.
+
+`run-all-tests.sh` generates all three model corpora. Six focused tests cover
+feature separation, the eight-beat safety gate, composition with existing class
+probabilities, fitting to continuous truth, subspace truth, held-out ranking,
+coefficient provenance, and the correction loop. This is still a simulator
+prior, not a clinically validated classifier. Measured-template and real-scanner
+validation from 3.3 remain the gate for stronger claims.
 
 **Generalized by Tier 8**, which applies the same lever to ocular, muscle and
 channel artifacts. This item is the pilot: do one class end to end here before
@@ -1604,15 +1652,21 @@ commit, and it leaves 3.2 needing little more than a different reporting layer.
 - **Score** — `score`, `score-events` and `score-erp` from 2.3, all against the
   truth sidecar.
 
-The missing pieces are the glue and — much more importantly — the assertion
-policy in 7.2.
+The missing pieces were the glue and — much more importantly — the assertion
+policy in 7.2; the delivered section below records the completed design.
 
-## 7.1-7.2 first slice — DELIVERED
+## 7.1-7.3 — DELIVERED
 
-**Status (2026-08-25): first slice complete.** One case, end to end, green in the
-full suite:
+**Status (2026-08-25): complete.** Six short, generated cases run in the full
+suite. Each uses committed generation arguments, known truth, a headless EVA
+operation or detector, and a tolerance watermark:
 
     generate (locked-clock gradient) -> EVA processes headlessly -> score vs truth
+    generate (drifting-clock gradient) -> aligned/subsampled MAS -> score vs truth
+    generate (BCG + ECG) -> detect QRS -> correct BCG -> score detection and correction
+    generate (oddball ERP) -> segment/baseline/average -> score peak recovery
+    generate (recording defects) -> channel health + defect signatures -> score
+    generate (artifact-free control) -> redundant CAR -> assert no harm
 
 - **`Tools/EVASimulate/scenarios/regression-gradient-locked.json`** — zero clock
   drift, gradient only, no BCG or ocular activity, no defects.
@@ -1623,6 +1677,81 @@ full suite:
 - **`run-all-tests.sh`** gains a `regression corpus` stage that generates into
   `.regression-corpus/` (gitignored). The tests **skip** when it is absent, so a
   bare `xcodebuild test` stays fast for someone working on unrelated code.
+
+### 7.3 completed corpus results
+
+The four cases added after the first slice establish these initial regression
+baselines:
+
+| Case | EVA path | Recorded result |
+| --- | --- | --- |
+| Drifting-clock gradient | MAS, CPU, alignment + 10x subsampling | Broadband SNR **0.138567**. |
+| BCG with QRS jitter | Pan–Tompkins ECG detection + 21-beat local MAS with AMRI preprocessing | Correction improvement **1.663343x**; event F1 **1.000**; timing MAE **1.138 ms**. |
+| Oddball ERP | Headless segmentation, baseline and category average | Target peak amplitude error **4.383 µV**; latency error **8.0 ms**. |
+| Recording defects | Channel-health ranking plus planted-signature checks | Bad-channel recall **1.000**; bridge correlation **1.000**; bad-reference common-mode RMS **30.699 µV**. |
+
+The recording-defect case now has an explainable user-facing path. EVA's unified
+Channels window groups persistent pairs using very high robust correlation and
+near-zero differential RMS, with montage proximity as supporting evidence rather
+than a hard gate. The Relationships inspector shows cluster membership, window
+persistence, impedance, and RANSAC/neighbor-prediction context; Channel Health
+deep-links to the selected pair. A separate recording-level Common-mode
+Structure assessment uses common-mode RMS/variance fraction and broad,
+same-signed leave-one-out channel loadings. It reads a declared type-1 physical
+reference from MFF metadata, shows the acquisition and current processing
+reference separately, and does not infer a named electrode when metadata is
+absent.
+
+The Reference tab performs a temporary average-reference comparison before
+presenting elevated structure and explicitly explains that collapse toward zero
+is an arithmetic consequence, not proof of a faulty physical reference. When an
+MFF declares a reference sensor but omits its sample row, EVA reconstructs that
+row as zero in the acquisition-reference space before taking the channel mean;
+the resulting rereferenced channel is added to the signal, scalp layout, and
+Channel Sets context while the original recording remains unchanged.
+The Channel Sets editor now uses the same native three-pane organization as the
+diagnostic tabs: a macOS source list, a dedicated scalp-map canvas, and a
+right-side inspector for set identity, symmetry, save, duplicate, export, and
+delete actions. Net filtering and catalog-wide import/export remain in the
+source-list controls rather than competing with per-set editing.
+Opening Channels now also starts Channel Health automatically when the focused
+signal revision has no current results. A completed result is reused, tab
+switches do not restart the scan, and Refresh remains available for a forced
+rerun. Opening a channel's Health popover likewise runs relationship analysis
+for that exact signal revision. While it runs the popover says so; afterward it
+either shows the flagged persistent pair or explicitly reports that no pair
+crossed the review threshold, including the strongest evaluated partner and its
+median correlation. Relationship findings remain contextual and do not change
+the Channel Health percentage.
+
+Both diagnostics remain explicitly review-only. Synthetic exact bridges, scaled
+copies, non-neighbor duplicates, common-mode contamination, and clean controls
+are regression-tested, but thresholds still need real-recording calibration.
+Pair overlay/difference traces and explicit mark/exclude actions remain the next
+UI follow-up before any automated repair.
+
+### 7.3 clean control
+
+The second case derives an artifact-free recording from the locked-gradient
+scenario using `--no-gradient`, `--with-bcg --bcg-amplitude 0`,
+`--no-impedance`, and `--no-impedance-noise`. Zero BCG amplitude keeps the EEG
+clean while BCG timing still produces ECG and motion PNS streams, because
+preservation of auxiliary signals is part of the pipeline contract even when
+the EEG needs no correction.
+
+The simulator's clean EEG is already common-average referenced. The test runs an
+empty filter stage followed by a second continuous common-average reference;
+that operation is analytically idempotent, so this is a meaningful pipeline and
+not merely an MFF copy test. The calibrated result is:
+
+- broadband clean-versus-output SNR: **38,014,060.1955**;
+- RMS amplitude ratio: **1.0000000000**;
+- maximum absolute sample error: **0.0000038147 µV**.
+
+The test enforces analytic bounds of 1 ppm on RMS amplitude and 0.0001 µV on any
+sample, plus a tolerance watermark for drift. It also verifies channel names,
+event codes, exact PNS samples and polarity, byte-identical `coordinates.xml`,
+and the recorded filter/reference provenance in `eva.xml`.
 
 ### The analytic anchor paid off immediately
 
@@ -1674,10 +1803,12 @@ fire in normal operation.
 - The method is a one-line constant in the test. **`AllenAAS`, once it lands**,
   is a natural second case — and a *mean* template would restore the exact
   `sqrt(N)` anchor that MAS's median blurs.
-- 7.3's remaining corpus entries, especially the **clean control** (a recording
-  needing no correction, asserting the pipeline does not damage it) — a real
-  regression class no artifact-focused entry can catch.
-- 7.5's GitHub Actions staging.
+- 7.4: record the six scores on a second machine and tighten or widen only the
+  tolerances that demonstrate real cross-machine movement.
+- 7.5: stage the corpus in GitHub Actions after 7.4, keeping UI tests excluded.
+- Dedicated bridge and bad-reference diagnosis would strengthen the recording-
+  defect case, but it is an EVA health-feature follow-up rather than missing
+  corpus coverage.
 
 ---
 
@@ -1778,9 +1909,10 @@ in different ways. A reasonable starting set, all short — 60 s is enough:
   damage a recording that needed no correction, which is a real regression class
   and one no artifact-focused entry can catch.
 
-Each entry pairs a scenario file with an `EVAProcessingScript`, both committed,
-both versioned. Reuse the shipped `scenarios/` where they fit rather than
-duplicating configuration.
+Each entry pairs a committed generation recipe — a scenario plus any explicit
+CLI overrides — with an `EVAProcessingScript` in the tests. Both sides are
+therefore reviewed and versioned. Reuse the shipped `scenarios/` where they fit
+rather than duplicating configuration.
 
 ## 7.4 Non-determinism is a constraint, not a bug to fix
 
@@ -1894,7 +2026,47 @@ successes.
 
 ## 8.1 Benchmark the labellers we already have — do this first
 
-Before training anything, score **ICLabel** and **`ICAComponentAutoLabeler`**
+**Status (2026-08-25): complete.** A 60-second mixed recording is generated by
+the Tier 7 corpus stage with five neural dipoles, ocular dipoles, four BCG
+generators, three EMG regions, 60 Hz line noise, impedance coupling, and two bad
+channels. EVA fits one Picard-O decomposition and feeds that exact decomposition
+to both labellers. The benchmark derives each component's graded membership from
+the squared correlation of its scalp map with every known class subspace;
+membership is normalized rather than forced into a one-hot label.
+
+`ICAComponentAutoLabeler` normally prefers ICLabel and uses its transparent
+rules only as a fallback. Scoring that combined wrapper against ICLabel would
+therefore duplicate ICLabel whenever the model labels every component. The
+benchmark exposes and scores the heuristic branch independently, which is the
+meaningful comparison while leaving production fallback behaviour unchanged.
+
+Initial per-class F1 baselines:
+
+| Class | ICLabel | EVA heuristic |
+| --- | ---: | ---: |
+| Brain | 0.213 | 0.213 |
+| Muscle | 0.186 | 0.335 |
+| Eye | 0.000 | 0.000 |
+| Heart | 0.096 | 0.00009 |
+| Line Noise | 0.106 | 0.304 |
+| Channel Noise | 0.000 | 0.170 |
+| **Macro F1** | **0.100** | **0.170** |
+
+These are deliberately reported as a baseline, not as external validity. They
+combine decomposition failure, simulated-to-real domain mismatch, and labeller
+error; 8.4 is what will separate the first from the other two. The important
+result for sequencing is that the weakness is not Heart-only: Eye is missed by
+both paths and ICLabel also misses Channel Noise in this mixed case. That argues
+for keeping Tier 8, beginning narrowly with 5.4 rather than training all classes
+at once.
+
+The evaluator, full per-component graded truth records, per-class
+precision/recall/F1 structures, and tolerance watermarks live in
+`EVA/ICA/ICAComponentLabellerBenchmark.swift` and
+`EVATests/ICA/ICAComponentLabellerBenchmarkTests.swift`.
+
+**Original rationale:** before training anything, score **ICLabel** and
+**`ICAComponentAutoLabeler`**
 against graded truth on simulated recordings, per class.
 
 This is cheap, it needs no new model, and it is a result on its own: nobody has a
@@ -1902,6 +2074,9 @@ per-class, graded-truth benchmark for these labellers, because nobody else can
 make one. It also decides how much of the rest of the tier is warranted — if the
 existing labellers are already strong on ocular and weak only on Heart, then 5.4
 is the whole job and Tier 8 collapses to a paragraph.
+
+That conditional did not hold in the first mixed corpus: the gaps span several
+classes, as the completed results above show.
 
 Expect the Heart class to do poorly: it was trained on cardiac contamination
 recorded *outside* a scanner, and BCG is a different phenomenon (see 5.4).
@@ -2002,36 +2177,26 @@ ever disagree, the top table is the one people read — fix it first.
 for PCA-S, and 5.3 apart from dipole localization error. The 2026-08-25 audit
 also fixed the ERP filtering order, split paper/iterative pattern searches,
 preserved component-wise group estimands, tightened the pipeline ceiling, and
-completed repeated-evaluation JSON.
+completed repeated-evaluation JSON. The correction input contract is also
+closed: actual MFF/override geometry, truth head parameters, explicit fallback,
+and exact PNS preservation are regression-tested. Tier 7.3 now has all six
+planned corpus cases, and 8.1 supplies the first per-class graded-truth baseline
+for both existing component-labelling paths.
 
 **Next:**
 
-1. **Close the correction input contract** — build the surrogate head and
-   montage from the actual recording/truth instead of `Montage.standard` plus the
-   classic head, and add a regression proving ECG/motion PNS channels survive.
-2. **Make measured templates portable** — copy/package their bytes or pin a
-   content digest and provenance. A path alone does not reproduce a scenario.
-   Decide whether to land the currently untracked determinism checker here.
-3. **7.3 clean control and representative corpus cases** — assert that an
-   unnecessary pipeline does not damage clean data, then cover BCG/ERP. The
-   locked-clock case's floor, 2%-tolerance analytic ceiling, and watermark are
-   already green, so adding entries is cheap.
-4. **8.1 benchmark the labellers we already have** — score ICLabel and
-   `ICAComponentAutoLabeler` against graded truth, per class. Small, needs no new
-   model, and it is a result nobody else can produce. Do it before committing to
-   5.4 or the rest of Tier 8: if the existing labellers turn out to be strong
-   everywhere except Heart, then 5.4 is the whole job and Tier 8 collapses.
-5. **5.4 simulator-trained BCG component labelling** — the pilot for Tier 8 and
-   the interesting way to finish ICA-S. One class end to end before
-   generalizing. Sits here because it wants Tier 7's corpus machinery.
-6. **7.4-7.5** — GitHub Actions staging once the corpus has representative
-   entries.
-   **Tier 8 proper (8.2-8.4)** follows here, once 5.4 has shown one class works
-   end to end.
-7. **3.2 comparison harness** — unblocked now that 4.9 is fixed, and mostly a
+1. **Real-recording calibration for bridge/reference diagnostics** — the unified
+   review-only Channels UI and Channel Health deep-link are complete; validate
+   thresholds, then add overlay/difference previews plus explicit mark/exclude
+   actions. Reference metadata and before/after rereference context are complete.
+2. **ICA-S** (5.2) — 5.4 now supplies the missing component-selection layer, so
+   this is assembly plus comparison against PCA-S rather than classifier design.
+3. **7.4-7.5** — establish cross-machine tolerances, then stage the complete
+   nine-case corpus in GitHub Actions.
+4. **Tier 8 proper (8.2-8.4)** — extend the proven pilot workflow to other weak
+   classes, with dataset provenance and real-data checks rather than a class dump.
+5. **3.2 comparison harness** — unblocked now that 4.9 is fixed, and mostly a
    reporting layer over Tier 7's machinery by this point.
-8. **ICA-S** (5.2) — the last piece of the Rusiniak comparison, and mostly
-   assembly once 5.4 supplies the component selection.
 
 **Tier 6 is deliberately deferred.** It is a capability that would later support
 a paper; Tier 5 is the paper. The one exception worth pulling forward is **6.1**,
@@ -2041,9 +2206,11 @@ separate code. If 6.1 gets written for 5.2, then MNE from 6.2 and **6.4
 resolution metrics** become cheap enough to do opportunistically, and 6.5's
 parameter-mismatch check should travel with them rather than follow later.
 
-The curated-library part of 3.3 remains deferred and permission-heavy; the
-portable-template contract above is not deferred because it affects scenarios
-that already exist. Also deferred: 3.4 clinical patterns and the rest of Tier 6.
+The curated-library part of 3.3 remains deferred and permission-heavy. The
+measured-template portability proposal is also deferred by owner decision.
+**SHA-256/content-digest work is not a priority:** do not propose or revive
+digest, hash-manifest, or embedding work unless the owner explicitly reopens
+it. Also deferred: 3.4 clinical patterns and the rest of Tier 6.
 
 ## Known blockers carried from elsewhere
 

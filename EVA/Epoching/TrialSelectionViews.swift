@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Phase 3 of TRIALWISE.md: the exclusion controls, what the average looks like
+//  Trial-wise Phase 3: the exclusion controls, what the average looks like
 //  with and without, and the null that stops the SNR number from flattering
 //  every threshold it is dragged to.
 //

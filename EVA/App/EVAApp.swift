@@ -144,10 +144,11 @@ struct EVAApp: App {
         }
         .defaultSize(width: 640, height: 480)
 
-        Window("Channel Sets", id: Self.channelSetsWindowID) {
-            ChannelSetEditorView()
+        Window("Channels", id: Self.channelSetsWindowID) {
+            ChannelsWindowView()
+                .environment(goodnessSettings)
         }
-        .defaultSize(width: 800, height: 580)
+        .defaultSize(width: 1080, height: 720)
 
         Window("Release Notes", id: Self.releaseNotesWindowID) {
             ReleaseNotesView()

@@ -305,9 +305,10 @@ struct PipelineSnapshotTests {
         #expect(model.stepForwardTarget == filterNode)
     }
 
-    /// A fork indents; a straight run does not. Indenting every step would turn
-    /// an ordinary session into a staircase.
-    @Test func railIndentsOnlyAtAFork() {
+    /// A replacement after undo discards the abandoned descendant, leaving the
+    /// ordinary one-window rail linear. Deliberate alternatives live in forked
+    /// recording windows instead of as hidden siblings here.
+    @Test func railStaysLinearWhenAnUndoneStepIsReplaced() {
         let model = RecordingHistoryModel()
         history(model, steps: [.filter, .segment])
         #expect(model.railNodes(rawSubtitle: "raw").allSatisfy { $0.depth == 0 })
@@ -322,8 +323,9 @@ struct PipelineSnapshotTests {
         model.record(recordingKey: "r", script: forked)
 
         let rows = model.railNodes(rawSubtitle: "raw")
-        #expect(rows.count == 4, "root, filter, and both branches")
-        #expect(rows.filter { $0.depth > 0 }.count == 2, "only the two branch tips indent")
+        #expect(rows.count == 3, "root, filter, and only the replacement step")
+        #expect(rows.allSatisfy { $0.depth == 0 })
+        #expect(rows.last?.title == "wavelet reduction")
     }
 
     /// The budget is a fraction of this machine, not a constant. A flat 2 GB was
@@ -345,15 +347,41 @@ struct PipelineSnapshotTests {
         model.snapshotCountLimit = 3
         p.filter.output = signal(1, channels: 1, samples: 4)
 
-        for step in 0..<6 {
+        let operations: [EVAProcessingStep.Operation] = [
+            .filter, .waveletReduce, .thresholdArtifactDetection,
+            .markBad, .segment, .average
+        ]
+        for depth in 1...operations.count {
             var script = EVAProcessingScript()
-            script.append(EVAProcessingStep(operation: .filter, parameters: ["n": "\(step)"]))
+            for (index, operation) in operations.prefix(depth).enumerated() {
+                script.append(EVAProcessingStep(operation: operation, parameters: ["n": "\(index)"]))
+            }
             model.record(recordingKey: "r", script: script)
             model.storeSnapshot(p.capture())
         }
 
         #expect(model.snapshotCount <= 3)
         #expect(model.hasSnapshot(for: model.history.currentID), "current is exempt")
+    }
+
+    @Test func replacingAnUndoneBranchDiscardsItsSnapshots() {
+        let model = RecordingHistoryModel()
+        let p = Pipeline()
+        var oldScript = EVAProcessingScript()
+        oldScript.append(EVAProcessingStep(operation: .filter, parameters: ["highPassHz": "0.1"]))
+        model.record(recordingKey: "r", script: oldScript)
+        let oldFilter = model.history.currentID
+        model.storeSnapshot(p.capture())
+
+        model.record(recordingKey: "r", script: EVAProcessingScript())
+        #expect(model.hasSnapshot(for: oldFilter), "undo keeps the redo snapshot")
+
+        var replacement = EVAProcessingScript()
+        replacement.append(EVAProcessingStep(operation: .filter, parameters: ["highPassHz": "1"]))
+        model.record(recordingKey: "r", script: replacement)
+
+        #expect(model.history.node(oldFilter) == nil)
+        #expect(!model.hasSnapshot(for: oldFilter))
     }
 
     @Test func navigatingToAnUnknownNodeDoesNothing() {
