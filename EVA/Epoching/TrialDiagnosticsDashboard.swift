@@ -38,6 +38,21 @@ struct TrialDiagnosticsDashboard: View {
     let averageKept: [Double]
     @Binding var criteria: TrialSelectionAnalyzer.Criteria
 
+    // MARK: Commit (ROADMAP TW-5)
+    /// The category under review — the one a commit writes. Distinct from
+    /// `categories`, which is what the panels draw.
+    var reviewedCategory: String?
+    var committedSummary: String?
+    var isCategoryCommitted: Bool = false
+    var hasOverrides: Bool = false
+    /// Nil leaves the whole panel read-only: the criteria still preview, and
+    /// nothing can be committed. That is the correct state before there are
+    /// segments to commit against.
+    var onSetExcluded: ((Int, Bool) -> Void)?
+    var onResetOverrides: (() -> Void)?
+    var onCommit: (() -> Void)?
+    var onClear: (() -> Void)?
+
     @State private var tab: Tab = .windows
     @State private var selectedTrial: Int?
 
@@ -92,7 +107,25 @@ struct TrialDiagnosticsDashboard: View {
             Divider()
             TrialSelectionCriteriaControls(criteria: $criteria)
             if !exclusions.isEmpty {
-                TrialExclusionList(exclusions: exclusions, selectedTrial: $selectedTrial)
+                TrialExclusionList(
+                    exclusions: exclusions,
+                    selectedTrial: $selectedTrial,
+                    onSetExcluded: onSetExcluded
+                )
+            }
+            if let onSetExcluded, let onResetOverrides, let onCommit, let onClear {
+                TrialExclusionCommitBar(
+                    category: reviewedCategory,
+                    exclusions: exclusions,
+                    selectedTrial: selectedTrial,
+                    committedSummary: committedSummary,
+                    isCategoryCommitted: isCategoryCommitted,
+                    hasOverrides: hasOverrides,
+                    onSetExcluded: onSetExcluded,
+                    onResetOverrides: onResetOverrides,
+                    onCommit: onCommit,
+                    onClear: onClear
+                )
             }
         }
     }

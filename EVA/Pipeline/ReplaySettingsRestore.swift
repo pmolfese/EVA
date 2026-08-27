@@ -84,6 +84,21 @@ nonisolated enum ReplaySettingsRestore {
         // segment window `segment`'s own step already carries, so there is
         // nothing to disambiguate. See `MFFExportFlowViews.currentProcessingScript()`.
         var baselineCorrection = false
+
+        // `trialExclusion` — the committed reviewed exclusion, or nil when the
+        // path names none (ROADMAP TW-5).
+        //
+        // Unlike every other light here this is not a `Bool` but the step
+        // itself, because the decision *is* the payload: two nodes can both
+        // "have an exclusion" and exclude different trials, and restoring a
+        // mere on/off would leave whichever trial list happened to be loaded.
+        //
+        // It belongs here for the reason in the file header, though: an absent
+        // step cannot say it is absent. `committedTrialExclusion` gates whether
+        // `currentProcessingScript()` emits the step, so navigating back to a
+        // node before the commit while it stays set re-derives a script that
+        // still contains it — the blink-detection bug, one payload larger.
+        var trialExclusion: EVAProcessingStep?
     }
 
     /// What `steps` implies. Absent by default: see the file header for why the
@@ -106,6 +121,12 @@ nonisolated enum ReplaySettingsRestore {
 
             case .baseline:
                 result.baselineCorrection = true
+
+            case .trialExclusion:
+                // Last one wins, matching how a path carries one current-state
+                // decision per stage — and how `seedProcessingHistoryFromDisk`
+                // reads the same step back out of `eva.xml`.
+                result.trialExclusion = step
 
             default:
                 continue

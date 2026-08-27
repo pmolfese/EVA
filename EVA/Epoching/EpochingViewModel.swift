@@ -247,6 +247,20 @@ final class EpochingViewModel {
     /// Segments omitted from averaging because the user manually labeled them bad.
     var skippedLabeledBadSegmentsSummary: [String] = []
 
+    // MARK: Reviewed trial exclusion (ROADMAP TW-5)
+    /// The committed `trialExclusion` step, or nil when no reviewed exclusion is
+    /// part of this recording's current processing.
+    ///
+    /// Deliberately the *step*, not a set of indices. The step is what
+    /// `eva.xml` writes, what the history node hashes, and what a headless run
+    /// is handed — holding indices here would put this back where Segment
+    /// Health's labels still are: session state a batch run cannot reproduce.
+    var committedTrialExclusion: EVAProcessingStep?
+    /// What the last resolution of `committedTrialExclusion` against real
+    /// segments found. Non-empty `unresolved` means the average on screen is not
+    /// the one that was reviewed, and the status line has to say so.
+    var trialExclusionResolution: TrialExclusionResolver.Resolution?
+
     // MARK: Run state
     var statusMessage: String?
     var isApplying = false
@@ -760,6 +774,45 @@ final class EpochingViewModel {
         let built: PSABuildResult
         let finalResult: PSABuildResult
         let wasAveraged: Bool
+        /// Every segment position dropped from the average — the caller's own
+        /// manual exclusions unioned with the resolved reviewed exclusion.
+        var excludedSegmentIndices: Set<Int> = []
+        /// How `committedTrialExclusion` resolved against these segments, or
+        /// nil when there is no committed exclusion. Carried out so the caller
+        /// can attribute the counts and report an incomplete resolution.
+        var trialExclusion: TrialExclusionResolver.Resolution?
+    }
+
+    /// Resolves the committed reviewed exclusion against a real set of segments.
+    ///
+    /// The one entry point for it, called from inside `buildAndPostProcess` so
+    /// interactive and headless cannot diverge — the divergence this method
+    /// exists to prevent is precisely the one Segment Health's session-only
+    /// labels still have.
+    func resolvedTrialExclusion(for segments: [EpochSegment]) -> TrialExclusionResolver.Resolution? {
+        guard let step = committedTrialExclusion else { return nil }
+        return TrialExclusionResolver.resolve(step: step, segments: segments)
+    }
+
+    /// Attributes a resolved exclusion into an exclusion summary, so the
+    /// per-category retention story reaches `eva.xml`, QuickLook, and combine.
+    func foldTrialExclusion(
+        _ resolution: TrialExclusionResolver.Resolution?,
+        step: EVAProcessingStep?,
+        segments: [EpochSegment],
+        into summary: inout PSAExclusionSummary
+    ) {
+        // Always stated, including as "nothing" — `recordExclusions` sets this
+        // reason rather than adding to it, so clearing a committed exclusion has
+        // to reach it with empty counts or the removed decision would go on
+        // being reported by a summary nobody updated.
+        var counts: [String: Int] = [:]
+        if let resolution, let step {
+            counts = TrialExclusionResolver.excludedCountsByCategory(
+                step: step, segments: segments, resolution: resolution
+            )
+        }
+        summary.recordExclusions(counts, reason: TrialExclusionResolver.reasonLabel)
     }
 
     /// Build epochs → optionally average → post-process.
@@ -779,6 +832,9 @@ final class EpochingViewModel {
     /// - **`excludedSegmentIndices`.** Interactive supplies segments the user
     ///   labelled bad in Segment Health. Those labels are session state that a
     ///   batch run has no equivalent of, so headless legitimately passes none.
+    ///   The committed reviewed exclusion (TW-5) is deliberately NOT routed
+    ///   through this argument: it is recorded in `eva.xml`, so both paths owe
+    ///   the same answer, and it is resolved once inside this method.
     ///
     /// `isCurrent` is the interactive session guard: the view can outlive a run
     /// (same-window "Close Recording" mid-flight), so it re-checks between
@@ -828,11 +884,21 @@ final class EpochingViewModel {
 
         let finalResult: PSABuildResult
         let wasAveraged: Bool
+        var appliedExclusions = Set<Int>()
+        var resolution: TrialExclusionResolver.Resolution?
 
         if shouldAverage {
             phaseMessage = "Averaging…"
             let colorIndices = Self.colorIndices(for: built.segments.map(\.category))
+            // Two sources, unioned here rather than in either caller: the
+            // caller's own manual exclusions (Segment Health labels, which only
+            // the interactive path has) and the committed reviewed exclusion,
+            // which both paths must apply identically or a batch run reproduces
+            // a different average than the one that was reviewed.
+            resolution = resolvedTrialExclusion(for: built.segments)
             let excluded = excludedSegmentIndices(built.segments)
+                .union(resolution?.excludedIndices ?? [])
+            appliedExclusions = excluded
             let averageWorker = Task.detached(priority: .userInitiated) {
                 built.average(colorIndices: colorIndices, excludedIndices: excluded)
             }
@@ -878,7 +944,16 @@ final class EpochingViewModel {
             finishApplying()
             return nil
         }
-        return PSAApplyOutcome(built: built, finalResult: finalResult, wasAveraged: wasAveraged)
+        // Only meaningful when averaging: an exclusion removes a trial from an
+        // average, and there is no average to remove it from otherwise.
+        trialExclusionResolution = wasAveraged ? resolution : nil
+        return PSAApplyOutcome(
+            built: built,
+            finalResult: finalResult,
+            wasAveraged: wasAveraged,
+            excludedSegmentIndices: appliedExclusions,
+            trialExclusion: resolution
+        )
     }
 
     /// Clears the in-progress flags. Every early exit from the PSA sequence has
@@ -903,7 +978,11 @@ final class EpochingViewModel {
             baselineCorrect: baselineCorrect,
             badChannels: badChannels
             // No `excludedSegmentIndices`: Segment Health quality labels are a
-            // manual, session-only decision that a batch run has no equivalent of.
+            // manual, session-only decision that a batch run has no equivalent
+            // of. A *committed* reviewed exclusion is the opposite — it is on
+            // disk precisely so this path can apply it — and
+            // `buildAndPostProcess` resolves it for both paths rather than
+            // taking it through this argument.
         ) else {
             return nil
         }
@@ -917,7 +996,12 @@ final class EpochingViewModel {
         // interactive path, which backgrounds it) because the caller is about to
         // export and the metrics belong in that package's audit log.
         if outcome.wasAveraged {
-            let snrWorker = Task.detached(priority: .userInitiated) { built.categorySNR() }
+            // SNR must be measured on the trials that made the average, or a
+            // batch export reports the SNR of trials the operator excluded.
+            let excluded = outcome.excludedSegmentIndices
+            let snrWorker = Task.detached(priority: .userInitiated) {
+                built.categorySNR(excludedIndices: excluded)
+            }
             averageSNRByCategory = await withTaskCancellationHandler(
                 operation: { await snrWorker.value },
                 onCancel: { snrWorker.cancel() }
@@ -936,6 +1020,12 @@ final class EpochingViewModel {
         isAveraged = outcome.wasAveraged
 
         var exclusionSummary = built.exclusionSummary
+        foldTrialExclusion(
+            outcome.trialExclusion,
+            step: committedTrialExclusion,
+            segments: built.segments,
+            into: &exclusionSummary
+        )
         exclusionSummary.outputSegments = finalResult.segments.count
         exclusionSummary.badChannelCount = epochBadChannelCounts.count
         psaExclusionSummary = exclusionSummary
@@ -1006,6 +1096,8 @@ final class EpochingViewModel {
         epochBadChannelAllSegmentsSummary.removeAll()
         interpolatedChannelsBySegmentSummary.removeAll()
         skippedLabeledBadSegmentsSummary.removeAll()
+        committedTrialExclusion = nil
+        trialExclusionResolution = nil
         statusMessage = nil
         isApplying = false
         phaseMessage = nil

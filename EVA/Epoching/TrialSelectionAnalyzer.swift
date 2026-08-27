@@ -58,6 +58,75 @@ nonisolated enum TrialSelectionAnalyzer {
         var id: Int { trialIndex }
         var trialIndex: Int
         var reasons: [String]
+        /// Who decided. `.rule` until an operator overrules it — the same three
+        /// origins the committed record carries, deliberately reusing
+        /// `ExcludedTrial.Origin` rather than a parallel enum that would have to
+        /// be mapped and kept in step.
+        var origin: ExcludedTrial.Origin = .rule
+
+        /// Whether this row removes a trial from the average. A `.restored` row
+        /// is listed so the operator can see the rule was overruled, and see it
+        /// well enough to change their mind again.
+        var isExcluded: Bool { origin != .restored }
+    }
+
+    /// An operator's overrides on top of whatever the criteria proposed, held
+    /// per category by trial index.
+    ///
+    /// Kept as two sets rather than baked into the proposals because the
+    /// criteria are still live: a slider drag re-proposes from scratch, and an
+    /// override has to survive that. Nothing here is pruned when a re-tune makes
+    /// it moot — see `reviewed(proposals:review:)`, which decides what an
+    /// override *means* against the current proposal without destroying it, so
+    /// dragging a threshold back restores the operator's decision rather than
+    /// having silently discarded it.
+    struct Review: Sendable, Equatable {
+        /// Rule-flagged trials the operator put back.
+        var restored: Set<Int> = []
+        /// Trials the rule did not flag, excluded by hand.
+        var manual: Set<Int> = []
+
+        static let none = Review()
+
+        var isEmpty: Bool { restored.isEmpty && manual.isEmpty }
+    }
+
+    /// The proposals as reviewed: what committing right now would write.
+    ///
+    /// Precedence, in order:
+    ///
+    /// 1. **A restored trial the rule still flags** is listed as `.restored` and
+    ///    excludes nothing. This is the only override that can contradict the
+    ///    rule, so it wins outright.
+    /// 2. **A rule-flagged trial** is `.rule`. Note this absorbs a hand-excluded
+    ///    trial the criteria have since caught up with: the rule now accounts
+    ///    for it, and recording it as a manual override would credit the
+    ///    operator with a decision the rule makes on its own.
+    /// 3. **A hand-excluded trial the rule does not flag** is `.manual` — the
+    ///    case no threshold can express, and the reason the committed record
+    ///    stores a trial list at all.
+    ///
+    /// A restoration of a trial the rule no longer flags drops out silently: it
+    /// excludes nothing and undoes nothing, so there is nothing to show.
+    static func reviewed(
+        proposals: [Exclusion],
+        review: Review
+    ) -> [Exclusion] {
+        let flagged = Dictionary(uniqueKeysWithValues: proposals.map { ($0.trialIndex, $0) })
+
+        var out: [Exclusion] = proposals.map { proposal in
+            var row = proposal
+            row.origin = review.restored.contains(proposal.trialIndex) ? .restored : .rule
+            return row
+        }
+        for index in review.manual.sorted() where flagged[index] == nil {
+            out.append(Exclusion(
+                trialIndex: index,
+                reasons: ["excluded by operator"],
+                origin: .manual
+            ))
+        }
+        return out.sorted { $0.trialIndex < $1.trialIndex }
     }
 
     static func exclusions(

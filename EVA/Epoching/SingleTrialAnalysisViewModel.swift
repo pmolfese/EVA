@@ -195,7 +195,62 @@ final class SingleTrialAnalysisViewModel {
     // Phase 3: exclusion criteria and what they buy.
     var selectionCriteria = TrialSelectionAnalyzer.Criteria.none
     var selectionOutcome: TrialSelectionAnalyzer.Outcome?
+    /// The reviewed set: the criteria's proposals with the operator's overrides
+    /// folded in. This is what the preview shows and what a commit would write —
+    /// deliberately the same list, so the two can never describe different
+    /// decisions.
     var selectionExclusions: [TrialSelectionAnalyzer.Exclusion] = []
+    /// Operator overrides, per category. Session state until committed.
+    ///
+    /// Per category because Phase 3 reviews one at a time, and switching the
+    /// category picker must not carry `LC++`'s hand-restored trial #4 onto
+    /// `RC++`'s trial #4, which is a different trial entirely.
+    var selectionReviews: [String: TrialSelectionAnalyzer.Review] = [:]
+
+    /// The overrides for the category under review.
+    var selectionReview: TrialSelectionAnalyzer.Review {
+        get { selectedCategory.flatMap { selectionReviews[$0] } ?? .none }
+        set {
+            guard let category = selectedCategory else { return }
+            if newValue.isEmpty {
+                selectionReviews.removeValue(forKey: category)
+            } else {
+                selectionReviews[category] = newValue
+            }
+        }
+    }
+
+    /// Flips one trial between excluded and kept, for the row checkboxes.
+    ///
+    /// Expressed against the *displayed* origin rather than against the raw
+    /// sets, so the control means what it looks like it means: unchecking a
+    /// rule-flagged row restores it, unchecking a hand-excluded row simply
+    /// forgets it, and checking anything else excludes it by hand.
+    func setTrialExcluded(_ isExcluded: Bool, trialIndex: Int) {
+        guard selectedCategory != nil else { return }
+        var review = selectionReview
+        let wasProposedByRule = ruleProposedTrials.contains(trialIndex)
+
+        if isExcluded {
+            review.restored.remove(trialIndex)
+            if !wasProposedByRule { review.manual.insert(trialIndex) }
+        } else {
+            review.manual.remove(trialIndex)
+            if wasProposedByRule { review.restored.insert(trialIndex) }
+        }
+        selectionReview = review
+    }
+
+    /// Trials the criteria proposed for the category under review, before any
+    /// override. Kept alongside the reviewed list because `setTrialExcluded`
+    /// has to know whether a trial is the rule's idea or the operator's.
+    var ruleProposedTrials: Set<Int> = []
+
+    /// Drops the operator's overrides for the category under review, returning
+    /// the display to whatever the criteria alone propose.
+    func clearSelectionReview() {
+        selectionReview = .none
+    }
     /// Channel-resolved averages for the before/after overlay.
     var selectionAverageAll: [Double] = []
     var selectionAverageKept: [Double] = []

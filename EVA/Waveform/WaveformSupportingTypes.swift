@@ -561,6 +561,39 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
         excludedEpochs > 0
     }
 
+    /// Records what one named reason excluded, per category, after the build.
+    ///
+    /// Trial exclusion happens at *averaging* time, after `accepted` has already
+    /// counted every epoch that survived the build, so a trial removed here has
+    /// to be debited from `accepted` as well as attributed to a reason. Without
+    /// the debit, `categoryRejections` would report the trial as `included` and
+    /// the retention bars would claim a trial the average never saw.
+    ///
+    /// **Idempotent per reason**, and it has to be: a post-processing toggle
+    /// re-averages from a summary that already carries this reason's counts, and
+    /// an incrementing version would grow them on every toggle until the file
+    /// claimed more exclusions than it had trials. So this *sets* the reason to
+    /// `countsByCategory` — restoring whatever it debited last time first —
+    /// rather than adding to it. A category dropping to zero has the reason
+    /// removed, not left at 0, since a reason that excluded nothing is noise in
+    /// the retention story.
+    mutating func recordExclusions(_ countsByCategory: [String: Int], reason: String) {
+        for category in Set(perCategory.keys).union(countsByCategory.keys) {
+            var tally = perCategory[category] ?? CategoryTally()
+            let previous = tally.reasons[reason] ?? 0
+            let now = countsByCategory[category] ?? 0
+            guard previous != 0 || now != 0 else { continue }
+
+            tally.accepted = max(tally.accepted + previous - now, 0)
+            if now > 0 {
+                tally.reasons[reason] = now
+            } else {
+                tally.reasons.removeValue(forKey: reason)
+            }
+            perCategory[category] = tally
+        }
+    }
+
     /// The per-category tallies as the record `eva.xml` already knows how to
     /// write. Without this a segmented export keeps only its survivors, and
     /// nothing downstream — a reload, a QuickLook preview, `RecordingCombiner` —

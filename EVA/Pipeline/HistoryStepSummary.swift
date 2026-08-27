@@ -43,6 +43,7 @@ nonisolated enum HistoryStepSummary {
         case .markBad: return "mark bad"
         case .segment: return "segment"
         case .baseline: return "baseline"
+        case .trialExclusion: return "exclude trials"
         case .average: return "average"
         case .combine: return "combine"
         case .combineBadChannelPolicy: return "combine bad channels"
@@ -138,6 +139,19 @@ nonisolated enum HistoryStepSummary {
         case .baseline:
             break // No parameters — the title alone ("baseline") says it all.
 
+        case .trialExclusion:
+            // The count comes from `excludedTrials`, not `parameters`: the
+            // trial list is this step's payload, and it is on the recorded step
+            // for exactly the same reason the parameters are.
+            let excluded = step.excludedTrials.filter(\.isExcluded).count
+            parts.append("\(excluded) \(excluded == 1 ? "trial" : "trials")")
+            if let rule = criteriaSummary(for: step) { parts.append(rule) }
+            // A restoration is the operator overruling the rule. It is the one
+            // thing about this step a threshold cannot express, so it earns its
+            // place in a 260 pt rail.
+            let restored = step.excludedTrials.count - excluded
+            if restored > 0 { parts.append("\(restored) restored") }
+
         case .average, .combine, .combineBadChannelPolicy, .split:
             break
         }
@@ -148,6 +162,51 @@ nonisolated enum HistoryStepSummary {
             parts.append("\(p.count) \(p.count == 1 ? "setting" : "settings")")
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// `r<0.3 · β<0.4` — the active similarity bounds, trimmed of the trailing
+    /// zeros `%.4f` serialization leaves behind. Returns nil when the exclusion
+    /// was entirely by hand and no rule was active.
+    /// The rule this step recorded, in ~20 characters.
+    ///
+    /// Criteria are keyed per category (`LC++.minCorrelation`), because each
+    /// category is reviewed with its own thresholds. When every category was
+    /// reviewed the same way — the common case — the rail shows the one rule.
+    /// When they differ it says how many there are rather than picking one to
+    /// display, which would attribute the wrong thresholds to a decision.
+    private static func criteriaSummary(for step: EVAProcessingStep) -> String? {
+        let categories = TrialExclusionResolver.categories(in: step)
+        guard !categories.isEmpty else { return criteriaSummary(from: step.parameters) }
+
+        let summaries = categories.compactMap { category in
+            criteriaSummary(from: TrialExclusionResolver.parameters(
+                for: TrialExclusionResolver.criteria(from: step.parameters, category: category)
+            ))
+        }
+        let distinct = Set(summaries)
+        if distinct.count == 1, let only = distinct.first { return only }
+        if distinct.isEmpty { return nil }
+        return "\(distinct.count) rules"
+    }
+
+    private static func criteriaSummary(from p: [String: String]) -> String? {
+        var bounds: [String] = []
+        func bound(_ key: String, _ symbol: String, _ comparison: String) {
+            guard let raw = p[key], let value = Double(raw) else { return }
+            var text = String(format: "%.2f", value)
+            while text.hasSuffix("0") { text.removeLast() }
+            if text.hasSuffix(".") { text.removeLast() }
+            bounds.append("\(symbol)\(comparison)\(text)")
+        }
+        bound("minCorrelation", "r", "<")
+        bound("minSlope", "β", "<")
+        bound("maxResidualRMS", "res", ">")
+        bound("maxRobustDistance", "dist", ">")
+        if let classifications = p["excludedClassifications"], !classifications.isEmpty {
+            bounds.append(contentsOf: classifications.split(separator: ",").map(String.init))
+        }
+        if p["excludesMislabels"] == "true" { bounds.append("mislabels") }
+        return bounds.isEmpty ? nil : bounds.joined(separator: ", ")
     }
 
     /// `4 ch` — the count, not the list. The rail is ~260 pt wide and a 40-channel

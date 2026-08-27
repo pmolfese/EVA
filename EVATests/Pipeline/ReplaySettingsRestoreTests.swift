@@ -198,4 +198,112 @@ struct ReplaySettingsRestoreTests {
         // Two nodes off the root would mean the second artifact was created.
         #expect(model.history.node(model.history.rootID)?.children.count == 1)
     }
+
+    // MARK: - Reviewed trial exclusion (ROADMAP TW-5)
+
+    private func segmentStep() -> EVAProcessingStep {
+        EVAProcessingStep(operation: .segment, parameters: ["eventCodes": "stim", "average": "true"])
+    }
+
+    private func exclusionStep(times: [Double], category: String = "stim") -> EVAProcessingStep {
+        EVAProcessingStep(
+            operation: .trialExclusion,
+            parameters: ["\(category).minCorrelation": "0.3000"],
+            excludedTrials: times.enumerated().map { index, time in
+                ExcludedTrial(
+                    category: category,
+                    sourceCode: "DIN1",
+                    sourceTimeSeconds: time,
+                    recordedIndex: index,
+                    reasons: ["r < 0.30"]
+                )
+            }
+        )
+    }
+
+    @Test("A path without a trialExclusion step derives no exclusion")
+    func aPathWithoutAnExclusionDerivesNone() {
+        let lights = ReplaySettingsRestore.settings(for: [filterStep(), segmentStep()])
+        #expect(lights.trialExclusion == nil)
+    }
+
+    /// Not a Bool: the decision *is* the payload, and two nodes can both "have
+    /// an exclusion" while excluding different trials.
+    @Test("A path naming the step derives the recorded trial list, not merely that there was one")
+    func aPathNamingTheStepDerivesItsTrials() {
+        let lights = ReplaySettingsRestore.settings(
+            for: [segmentStep(), exclusionStep(times: [2, 6])]
+        )
+        let step = lights.trialExclusion
+        #expect(step?.excludedTrials.count == 2)
+        #expect(step?.excludedTrials.map(\.sourceTimeSeconds) == [2, 6])
+        #expect(step?.parameters["stim.minCorrelation"] == "0.3000")
+    }
+
+    @Test("Re-committing along a path leaves the later decision in force")
+    func theLastExclusionOnThePathWins() {
+        let lights = ReplaySettingsRestore.settings(for: [
+            segmentStep(),
+            exclusionStep(times: [2]),
+            exclusionStep(times: [2, 6, 8]),
+        ])
+        #expect(lights.trialExclusion?.excludedTrials.count == 3)
+    }
+
+    /// The generalising test, in the shape of the blink bug one payload larger:
+    /// `committedTrialExclusion` gates whether `currentProcessingScript()` emits
+    /// the step, so navigating back to a node before the commit while it stays
+    /// set re-derives a script that still contains it — and the pointer walks off
+    /// the node just clicked.
+    @MainActor
+    @Test("Stepping back before a commit does not walk forward onto it again")
+    func steppingBackBeforeACommitStays() {
+        let model = RecordingHistoryModel()
+        let key = "fixture.mff"
+
+        func digests(_ step: EVAProcessingStep?) -> [EVAProcessingStep.Operation: String] {
+            guard let step else { return [:] }
+            return [.trialExclusion: EVAHistory.digest([
+                step.trialExclusionIdentityBytes.base64EncodedString()
+            ])]
+        }
+
+        // raw -> segment -> commit an exclusion.
+        model.record(recordingKey: key, script: EVAProcessingScript(steps: [segmentStep()]))
+        let segmentNode = model.history.currentID
+        let committed = exclusionStep(times: [2, 6])
+        model.record(
+            recordingKey: key,
+            script: EVAProcessingScript(steps: [segmentStep(), committed]),
+            payloadDigests: digests(committed)
+        )
+        #expect(model.history.currentID != segmentNode)
+
+        // Click back to the pre-commit node, restore, and re-derive the way the
+        // chain-signature observer does.
+        _ = model.beginNavigation(to: segmentNode)
+        let lights = ReplaySettingsRestore.settings(for: model.history.currentPath.compactMap(\.step))
+        model.endNavigation()
+        #expect(lights.trialExclusion == nil, "the exclusion is not on this path")
+
+        var derived = [segmentStep()]
+        if let exclusion = lights.trialExclusion { derived.append(exclusion) }
+        model.record(
+            recordingKey: key,
+            script: EVAProcessingScript(steps: derived),
+            payloadDigests: digests(lights.trialExclusion)
+        )
+        #expect(model.history.currentID == segmentNode, "re-derivation walked off the clicked node")
+
+        // …and back to the root, where a leftover exclusion would hang a second
+        // node off a different ancestry.
+        _ = model.beginNavigation(to: model.history.rootID)
+        let rootLights = ReplaySettingsRestore.settings(for: model.history.currentPath.compactMap(\.step))
+        model.endNavigation()
+        #expect(rootLights.trialExclusion == nil)
+
+        model.record(recordingKey: key, script: EVAProcessingScript(steps: []))
+        #expect(model.history.currentID == model.history.rootID)
+        #expect(model.history.node(model.history.rootID)?.children.count == 1)
+    }
 }

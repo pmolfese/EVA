@@ -31,6 +31,66 @@ nonisolated struct CategoryRejection: Codable, Sendable, Hashable {
     var excluded: Int { max(total - included, 0) }
 }
 
+/// One trial removed from (or deliberately kept in) a category average by a
+/// reviewed exclusion — the payload of a `trialExclusion` step.
+///
+/// ## Why a source event key and not a trial index
+///
+/// The index the analyzer and the Phase 3 UI speak is positional. Any upstream
+/// change that drops or reorders an epoch — a re-segment with different bounds,
+/// a newly marked bad channel escalating an epoch out — silently re-points that
+/// index at a *different* trial, and the exclusion would then be applied to a
+/// trial nobody reviewed. `category + sourceCode + sourceTimeSeconds` names the
+/// source event instead, all three already carried on `EpochSegment`, and is
+/// stable across every one of those changes. The index is recorded beside it as
+/// a human-readable cross-check, never as the thing matched on.
+///
+/// This is also the join key TW-6 needs for trial covariates.
+nonisolated struct ExcludedTrial: Codable, Sendable, Hashable {
+    /// Where this decision came from, which the file has to keep distinct: a
+    /// rule can be re-tuned, an override cannot be inferred from any threshold.
+    enum Origin: String, Codable, Sendable, CaseIterable {
+        /// Proposed by the criteria and left excluded.
+        case rule
+        /// Not proposed by the criteria; excluded by the operator.
+        case manual
+        /// Proposed by the criteria and put back by the operator. Recorded
+        /// precisely because it is NOT excluded — without it the file cannot
+        /// show that the rule was overridden rather than merely re-tuned.
+        case restored
+    }
+
+    // MARK: The key
+    var category: String
+    var sourceCode: String
+    var sourceTimeSeconds: Double
+
+    /// Position within the category at commit time. Cross-check and display
+    /// only — `resolve` never matches on it.
+    var recordedIndex: Int
+    /// The per-trial reasons `TrialSelectionAnalyzer.Exclusion` produced, e.g.
+    /// `["r < 0.30", "β < 0.40"]`. Free text by design: they are shown to a
+    /// person, and the machine-readable half is the criteria on the step.
+    var reasons: [String] = []
+    var origin: Origin = .rule
+
+    /// Whether this record removes a trial from the average. `.restored` is
+    /// carried for provenance and excludes nothing.
+    var isExcluded: Bool { origin != .restored }
+
+    /// Two records name the same trial when their keys agree. `sourceTimeSeconds`
+    /// survives a `%.6f` round-trip through `eva.xml`, so compare it with a
+    /// tolerance far below any realistic inter-trial spacing rather than for
+    /// exact equality.
+    static let timeToleranceSeconds = 1e-4
+
+    func matches(category: String, sourceCode: String, sourceTimeSeconds time: Double) -> Bool {
+        self.category == category
+            && self.sourceCode == sourceCode
+            && abs(self.sourceTimeSeconds - time) <= Self.timeToleranceSeconds
+    }
+}
+
 /// One processing operation with typed string parameters.
 nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable {
     enum Operation: String, Codable, Sendable, CaseIterable {
@@ -47,6 +107,7 @@ nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable 
         case markBad
         case segment
         case baseline
+        case trialExclusion
         case average
         case combine
         case combineBadChannelPolicy
@@ -65,6 +126,16 @@ nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable 
     var note: String?
     /// Per-category trial rejection, for `average` steps. Empty otherwise.
     var rejections: [CategoryRejection] = []
+    /// Reviewed per-trial exclusions, for `trialExclusion` steps. Empty
+    /// otherwise.
+    ///
+    /// Unlike `rejections` — which is a *result* of averaging and is excluded
+    /// from history node identity — this is an **input** to the computation, so
+    /// it must reach `EVAHistory.apply(_:payloadDigest:)` as the step's payload
+    /// digest via `trialExclusionIdentityBytes`. Two different reviewed sets
+    /// that hash to the same node would silently serve one average for the
+    /// other out of the snapshot cache.
+    var excludedTrials: [ExcludedTrial] = []
     var appliedAt: Date = Date()
 }
 
@@ -109,6 +180,18 @@ nonisolated struct ReplayPayloadAvailability: Equatable, Sendable {
     /// This file has electrode coordinates, so a recorded interpolation can be
     /// re-solved for it (`ChannelInterpolationSolver`).
     var hasElectrodeGeometry = false
+    /// IDs of `trialExclusion` steps whose every excluded trial resolves to a
+    /// segment in *this* file, per `TrialExclusionResolver.resolve`.
+    ///
+    /// Membership is the whole question for a reviewed exclusion. The same file
+    /// resolves every key and the recorded decision is simply re-applied; a
+    /// script copied from another subject resolves none of them, because the
+    /// keys name that subject's events — and one subject's reviewed trial list
+    /// must never be applied to another's data. A partial resolution is the
+    /// interesting case (a re-segment moved the epoch bounds) and is
+    /// deliberately NOT membership: it becomes a decision, not a silent
+    /// application of the half that still matched.
+    var resolvedTrialExclusionStepIDs: Set<UUID> = []
 
     /// What a plain script read tells you: nothing about any file.
     static let none = ReplayPayloadAvailability()
@@ -133,6 +216,10 @@ extension EVAProcessingStep {
              .reference, .baseline: return .auto
         case .mriGradientCorrection: return .review
         case .icaClean, .artifactClean: return .decision
+        // Knowing nothing about the file, the recorded trial keys cannot be
+        // assumed to name events it has. The portable half — the criteria — is
+        // re-proposed for review instead.
+        case .trialExclusion: return .decision
         default: return .skip
         }
     }
@@ -166,9 +253,52 @@ extension EVAProcessingStep {
             return .decision
         case .interpolateChannels:
             return availability.hasElectrodeGeometry ? .decision : .skip
+        case .trialExclusion where availability.resolvedTrialExclusionStepIDs.contains(id):
+            return .resolvedFromPayload
         default:
             return replayInteraction
         }
+    }
+}
+
+extension EVAProcessingStep {
+    /// Canonical bytes of the reviewed exclusion set, for the content-addressed
+    /// history node ID — the `trialExclusion` counterpart to
+    /// `ICAReplayPayload.replayIdentityBytes`.
+    ///
+    /// Included: the key and origin of every trial this step actually removes,
+    /// sorted, so the digest does not depend on review order.
+    ///
+    /// Excluded, on the same rule the ICA payload follows — two records that
+    /// produce identical samples must produce identical digests:
+    ///
+    /// - **`.restored` entries.** A restoration removes nothing. It is real
+    ///   provenance and belongs in `eva.xml`, but a node that excludes trials
+    ///   {3, 9} is the same average whether or not the operator also put trial
+    ///   7 back, and forking the tree for it would recompute identical samples.
+    /// - **`reasons` and `recordedIndex`.** Prose for a person, and a
+    ///   cross-check that is never matched on. Neither is an input.
+    ///
+    /// The criteria are deliberately NOT handled here: they live in
+    /// `parameters`, which `EVAHistory` already hashes. Re-tuning a threshold
+    /// therefore forks the tree even when the surviving trial set is unchanged.
+    /// That is the intended trade — one recomputed average buys a history rail
+    /// that shows the thresholds actually used, instead of silently serving the
+    /// first set of thresholds that happened to reach this trial list.
+    var trialExclusionIdentityBytes: Data {
+        var out = Data()
+        func put(_ string: String) {
+            out.append(contentsOf: string.utf8)
+            out.append(0x1F)  // unit separator — no field can swallow the next
+        }
+        put("trialExclusion.v1")
+        let applied = excludedTrials
+            .filter(\.isExcluded)
+            .map { "\($0.category)\u{1E}\($0.sourceCode)\u{1E}\(String(format: "%.6f", $0.sourceTimeSeconds))\u{1E}\($0.origin.rawValue)" }
+            .sorted()
+        put("count=\(applied.count)")
+        for trial in applied { put(trial) }
+        return out
     }
 }
 
@@ -245,6 +375,20 @@ nonisolated enum EVAProcessingScriptXML {
                 }
                 xml += "    </category>\n"
             }
+            for trial in step.excludedTrials {
+                xml += "    <trial category=\"\(escape(trial.category))\" code=\"\(escape(trial.sourceCode))\""
+                xml += " t=\"\(String(format: "%.6f", trial.sourceTimeSeconds))\" index=\"\(trial.recordedIndex)\""
+                xml += " origin=\"\(trial.origin.rawValue)\""
+                if trial.reasons.isEmpty {
+                    xml += "/>\n"
+                } else {
+                    xml += ">\n"
+                    for reason in trial.reasons {
+                        xml += "      <reason>\(escape(reason))</reason>\n"
+                    }
+                    xml += "    </trial>\n"
+                }
+            }
             xml += "  </step>\n"
         }
         xml += "</evaProcessing>\n"
@@ -311,12 +455,30 @@ nonisolated enum EVAProcessingScriptXML {
                 rejections.append(CategoryRejection(category: name, total: total, included: included, reasons: reasons))
             }
 
+            var excludedTrials: [ExcludedTrial] = []
+            for trialNode in node.elements(forName: "trial") {
+                guard let category = trialNode.attribute(forName: "category")?.stringValue,
+                      let time = Double(trialNode.attribute(forName: "t")?.stringValue ?? "") else { continue }
+                let originRaw = trialNode.attribute(forName: "origin")?.stringValue ?? ""
+                excludedTrials.append(ExcludedTrial(
+                    category: category,
+                    sourceCode: trialNode.attribute(forName: "code")?.stringValue ?? "",
+                    sourceTimeSeconds: time,
+                    recordedIndex: Int(trialNode.attribute(forName: "index")?.stringValue ?? "") ?? -1,
+                    reasons: trialNode.elements(forName: "reason").compactMap(\.stringValue),
+                    // An unreadable origin must not silently become `.restored`,
+                    // which would un-exclude a trial the operator excluded.
+                    origin: ExcludedTrial.Origin(rawValue: originRaw) ?? .rule
+                ))
+            }
+
             script.append(EVAProcessingStep(
                 operation: op,
                 parameters: params,
                 replayable: replayable,
                 note: note,
-                rejections: rejections
+                rejections: rejections,
+                excludedTrials: excludedTrials
             ))
         }
         return script

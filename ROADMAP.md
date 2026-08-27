@@ -29,7 +29,7 @@ when it is an independent bug fix required for safe use.
 | 8 | **MRI-1 — FASTR reliability and motion semantics** | Finish motion policy, unreliable-epoch provenance, PSA overlap behavior, and attenuation analysis. | **NOT STARTED** |
 | 9 | **SI-5 — Ocular MSEC/PCA-S** | Reuse the validated engine for blink, vertical, and horizontal ocular topographies. | **NOT STARTED** |
 | 10 | **TW-4 — Multi-peak trial diagnostics** | Finish the UI and scoring integrations for already-tested alignment metrics. | **IN PROGRESS** |
-| 11 | **TW-5 — Persist trial exclusions** | Commit reviewed exclusions as replayable, provenance-bearing processing decisions. | **NOT STARTED** |
+| 11 | **TW-5 — Persist trial exclusions** | Commit reviewed exclusions as replayable, provenance-bearing processing decisions. | **IN PROGRESS** |
 | 12 | **TW-6 — Trial covariates** | Join eye tracking and other trial-level covariates for validation and visualization. | **DEFERRED** |
 | 13 | **SI-6 — SSP–SIR comparator** | Add an independently named projection-and-reconstruction comparator. | **NOT STARTED** |
 | 14 | **SI-7 — SOUND channel-health experiment** | Evaluate source-informed channel noise estimation against EVA Health. | **NOT STARTED** |
@@ -681,21 +681,219 @@ per-window panels, and the two-column diagnostics dashboard are also complete.
 **Exit:** multi-peak morphology, latency, amplitude, and channel-local failures
 are visible without letting unconstrained alignment explain every trial away.
 
-### TW-5 — Persist reviewed exclusions — **NOT STARTED**
+### TW-5 — Persist reviewed exclusions — **IN PROGRESS**
 
 Phase 3 deliberately previews but does not alter data. Committing must use the
 same provenance and replay machinery as other category rejections.
 
-- [ ] Commit a reviewed exclusion set as a processing step carrying
-  `CategoryRejection(reason: "Low similarity")`.
-- [ ] Serialize it in `eva.xml`, display it in history and QuickLook retention
-  bars, and reload/replay it without changing the decision.
-- [ ] Preserve per-trial reasons and distinguish an operator-reviewed decision
-  from the analyzer's proposed set.
-- [ ] Verify interactive, headless, history-restored, and exported outcomes.
+#### Why this is not just another parameter step
+
+Every other step in the script has the property that its settings *are* its
+result: re-running `filter highPassHz=0.1 lowPassHz=30` reproduces the samples.
+A similarity threshold does not. Re-running `r < 0.3` after any upstream change
+proposes a *different* set of trials, and no threshold value can express an
+operator putting one flagged trial back. So the committed step records **both**:
+the thresholds, because they say why and are the only portable half, and the
+resolved trial set, because it is the decision. Replay applies the recorded set
+verbatim and never silently re-derives it.
+
+#### Canonical decisions (2026-08-26)
+
+1. **A new operation, `trialExclusion`, positioned before `average`.** Not an
+   extension of the `average` step's `rejections`: `EVAHistory` deliberately
+   excludes `rejections` from node identity as "a result of the step", so
+   attaching the decision there would produce no distinct node — committing
+   could not be navigated to, forked from, or undone with `stepBack()`. As its
+   own operation it hashes into the lineage like everything else, and
+   re-committing an identical set at the same parent deduplicates for free.
+2. **Trials are identified by source event key, not by index.** `category +
+   sourceCode + sourceTimeSeconds`, all already carried on `EpochSegment`. The
+   trial index the analyzer and UI speak is positional and silently re-points at
+   a different trial after any upstream change that drops or reorders an epoch.
+   The index is recorded alongside the key as a human-readable cross-check, so a
+   mismatch can be *reported* rather than applied. This is the same join key
+   TW-6 needs for covariates.
+3. **Exclusion removes a trial from the average, not from the data.** Excluded
+   trials stay in the segmented signal and stay visible — flagged, not gone — in
+   Single Trial Analysis, using the existing `excludedSegmentIndices` path in
+   `EpochingViewModel.buildAndPostProcess`. This keeps "previewing alone never
+   removes a trial" true of committing as well, and keeps the decision
+   reversible without a re-segment.
+4. **No new sidecar.** The thresholds and the trial list both live in `eva.xml`
+   under the step, consistent with RW-1 item 3's interpolation ruling: a record
+   that is a pure function of things the package already carries does not earn a
+   file of its own.
+
+#### Work
+
+- [x] Add `EVAProcessingStep.Operation.trialExclusion` and its `eva.xml`
+  element: `<param>`s for the criteria (`minCorrelation`, `minSlope`,
+  `maxResidualRMS`, `maxRobustDistance`, excluded classifications,
+  `excludesMislabels`) plus a `<trial>` child list carrying the source event
+  key, the recorded index, the per-trial reason strings
+  `TrialSelectionAnalyzer.Exclusion` already produces, and an `origin` of
+  `rule` or `operator`.
+- [x] Record the scoring context the scores are meaningless without: category,
+  `SingleTrialChannelScope` (the single channel, or the ROI membership),
+  the scoring window, and the leave-one-out premise. A reader must be able to
+  tell what the `r` and `β` in the reasons were computed on.
+- [x] Distinguish the reviewed decision from the proposal in both directions.
+  An `origin=operator` trial is one the rule did not flag; a rule-flagged trial
+  the operator restored is recorded as a restoration rather than vanishing, so
+  the file shows the rule was overridden and not merely re-tuned.
+- [x] Resolve keys to segment indices in one place, shared by the interactive
+  and headless paths, and feed the existing `excludedSegmentIndices` closure.
+  This is the first thing to close the session-only gap documented at
+  `EpochingViewModel.applyBuildJob` — a batch run currently has no equivalent of
+  a manual exclusion because there was nothing on disk to give it.
+- [x] Never apply a partially-resolved set silently. Every recorded key resolves
+  → apply. Some or none resolve → surface the count that did not and require a
+  decision; a re-segment that changes the epoch window is the expected cause.
+- [x] Feed the aggregate counts downstream: a `"Low similarity"` reason in
+  `PSAExclusionSummary.CategoryTally.reasons`, so the existing
+  `categoryRejections` bridge carries it into the `average` step's
+  `CategoryRejection` and from there into QuickLook retention bars,
+  `RecordingCombiner`, and the export audit log with no new plumbing.
+- [x] Classify replay by whether *this* file can resolve the keys, extending the
+  `replayInteraction(given:)` split RW-1 item 6 established. Same file, all keys
+  resolve → `.resolvedFromPayload`, applied with no prompt. A script copied to
+  another subject resolves nothing → `.decision`: the thresholds are re-proposed
+  in the Phase 3 UI for review, and one subject's trial list never crosses into
+  another's. The step stays `replayable: true` — the portable half is real.
+- [x] A history row that reads as the decision it is —
+  `HistoryStepSummary` renders `exclude trials · 2 trials · r<0.3, β<0.4 ·
+  1 restored`, with the count read from the step's payload rather than its
+  parameters.
+#### Remaining: the commit control (planned 2026-08-26)
+
+**Nothing in the UI yet produces a `trialExclusion` step.** Everything under it
+— resolution, averaging, attribution, `eva.xml`, history, replay — is built and
+tested against steps constructed directly. Two decisions settled before starting:
+**commit re-averages immediately**, and **the first version supports both
+restoring a flagged trial and excluding one by hand.**
+
+Two properties of the existing machinery shape the sequence below:
+
+- Committing needs no new history plumbing. `recordProcessingHistory()` already
+  builds from `currentProcessingScript()` and `currentPayloadDigests()`, both of
+  which now carry the step and its digest, and a re-average moves
+  `ProcessingChainSignature.epoched`. Re-averaging on commit is therefore also
+  what makes the node appear — the two decisions reinforce each other.
+- `ReplaySettingsRestore.Settings` carries no exclusion term, so navigating to a
+  node *before* a commit would leave the exclusion applied. That is the exact
+  case that file's header is about: the absence has to be derived, not left
+  alone.
+
+- [x] **Per-category merge — done 2026-08-26.**
+  `TrialExclusionResolver.merged(reviewed:for:criteria:context:into:segments:)`
+  replaces one category and leaves the others standing, keeping the step's `id`
+  so a merge edits the decision rather than starting a new one (a fresh id would
+  invalidate `resolvedTrialExclusionStepIDs` and turn a resolvable exclusion back
+  into a prompt). Criteria *and* scoring context are keyed per category —
+  `LC++.minCorrelation`, `LC++.channels` — parsed on the last dot so a category
+  named `stim.1` still resolves, with unkeyed keys still reading as a rule that
+  applied to everything. A bound switched off during re-review is removed rather
+  than left stale. `removing(category:from:)` returns nil when the last category
+  goes, since an empty step would persist as a decision that excludes nothing.
+  `HistoryStepSummary` reads the keyed form and says `2 rules` when categories
+  disagree instead of attributing one category's thresholds to another's
+  decision.
+- [x] **Review state — done 2026-08-26.** `TrialSelectionAnalyzer.Review`
+  (`restored`/`manual` trial indices) held per category in
+  `selectionReviews`, with `selectionReview` addressing the category under
+  review. `TrialSelectionAnalyzer.reviewed(proposals:review:)` applies it, and
+  `TrialSelectionAnalyzer.Exclusion` gained an `origin` reusing
+  `ExcludedTrial.Origin` rather than a parallel enum needing a mapping.
+  `refreshTrialSelection()` folds the overrides on the one path that also feeds
+  the overlay and the null, so the preview and a commit cannot describe
+  different decisions.
+
+  Overrides are **never pruned** when a re-tune makes them moot — a slider drag
+  must not destroy a decision — so precedence decides what one *means* against
+  the current proposal: a restoration beats everything, a rule-flagged trial
+  absorbs a hand exclusion the criteria have caught up with (recording it as
+  manual would credit the operator with the rule's own decision), and a
+  restoration of a trial nothing flags drops out silently. Dragging the
+  threshold back restores the operator's decision intact.
+- [x] **The control — done 2026-08-26.** A checkbox per row in
+  `TrialExclusionList`, an "Exclude #N by hand" action offered only for a
+  scatter-selected trial *not already listed* (two controls for one decision is
+  how they end up disagreeing), and `TrialExclusionCommitBar` — commit behind a
+  confirmation naming its counts, reset, and clear. Committing is never a side
+  effect of dragging a threshold. The plan said the control would be shared by
+  the dashboard rail and the Phase 3 section; there is only one host, because
+  the Phase 3 section *is* the dashboard.
+- [x] **The action — done 2026-08-26.** `commitTrialExclusion()` merges the
+  category under review into whatever is committed, refusing outright when any
+  reviewed trial cannot be matched to a segment rather than writing a record
+  that silently fails to resolve. The sheet reaches the pipeline through an
+  `onCommitTrialExclusion` closure rather than `EpochingViewModel` directly, so
+  it stays presentable from a context with no pipeline — where the panel
+  correctly previews and commits nothing. Committing re-averages through
+  `refreshEpochDisplay()`, which is also what mints the history node.
+  The overrides deliberately survive a commit: clearing them would snap the
+  list back to the rule's raw proposal, showing something other than what was
+  just committed.
+- [x] **Re-average safety — found while wiring the above.**
+  `refreshEpochDisplay()` (any post-processing toggle) did not apply the
+  committed exclusion, so a toggle after a commit would silently restore every
+  excluded trial. It now resolves and applies it, keeping Segment Health's
+  labels counted separately so reviewed exclusions are not attributed to a
+  control the operator never touched. `PSAExclusionSummary.recordExclusions` was
+  made **idempotent per reason** in the same pass: it previously incremented,
+  and re-averaging from an already-folded summary would have grown the counts on
+  every toggle until the file claimed more exclusions than the category had
+  trials.
+- [x] **Restore on navigate — done 2026-08-26.**
+  `ReplaySettingsRestore.Settings.trialExclusion` carries the *step*, not a
+  `Bool`, because the decision is the payload: two nodes can both "have an
+  exclusion" and exclude different trials, so restoring a mere on/off would
+  leave whichever trial list happened to be loaded. Set totally from the path —
+  nil included — in both `restoreStageSettings` and the `ProcessingCore` walk.
+  This is the blink-detection bug one payload larger, and it has a third
+  instance the navigation case does not cover: a batch reuses one
+  `ProcessingCore`, so a file whose script names no exclusion must *clear* the
+  previous file's rather than inherit it — silently, as "0 excluded, 2
+  unresolved" rather than as an error. Both directions are pinned.
+
+#### Tests
+
+- [x] `eva.xml` round-trip of criteria, keys, indices, reasons, origins, and
+  restorations.
+- [x] Key resolution survives a re-segment that changes epoch bounds, and an
+  unresolvable key is reported rather than dropped.
+- [x] A test proving the exclusion is observable in the samples at all, so the
+  count-based tests cannot pass vacuously
+  (`anExcludedTrialActuallyChangesTheAverage`), plus end-to-end application
+  through `ProcessingCore` — the path a headless batch takes.
+- [ ] Paired *interactive* vs headless sample equality in
+  `PairedValidationTests`. Both paths now resolve inside the one
+  `buildAndPostProcess`, so they agree by construction; the comparison is still
+  owed, on the RW-1 item 4 principle that construction arguments are not
+  evidence.
+- [x] History: committing forks a node, committing the identical set at the same
+  parent deduplicates, review order and restorations do not move the node, and
+  re-tuned thresholds fork even when the trial set matches.
+- [x] Navigating back before a commit restores the full-trial average, and does
+  not walk the pointer forward onto the commit again
+  (`steppingBackBeforeACommitStays`, driving the real tree the way the
+  chain-signature observer does).
+- [ ] QuickLook summary and `RecordingCombiner` see the new reason code.
+  Structurally they must — both read `categoryRejections`, which now carries it
+  — but neither is asserted on directly.
 
 **Exit:** exclusions survive the file and remain attributable to both the rule
-and the human decision; previewing alone never removes a trial.
+and the human decision; previewing alone never removes a trial; and the same
+recording produces the same average interactively, headlessly, after reload, and
+after replay.
+
+#### Deliberately out of scope
+
+Segment Health's manual quality labels stay session-only in this milestone. They
+are a different judgement (a bad *segment*, not a trial unlike its category) and
+folding them into the same persisted step would widen TW-5 into a rewrite of
+Segment Health's semantics. Both feed the one key-resolution path added here, so
+promoting them later is a small step — carried in F-1.
 
 ### TW-6 — Eye tracking and other trial covariates — **DEFERRED**
 

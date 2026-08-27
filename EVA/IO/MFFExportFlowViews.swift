@@ -473,6 +473,12 @@ extension WaveformView {
             if epoching.baselineCorrected {
                 script.append(EVAProcessingStep(operation: .baseline))
             }
+            // The reviewed exclusion, before `segment` for the same reason
+            // `reference` and `baseline` are: it is a decision the segment/
+            // average fold consumes, not a pass performable from outside.
+            if let exclusion = epoching.committedTrialExclusion {
+                script.append(exclusion)
+            }
             // Record what segmentation threw away, per category. An MFF holds
             // only the surviving segments, so without this the retention story
             // is lost the moment the file is written.

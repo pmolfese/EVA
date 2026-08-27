@@ -1076,6 +1076,15 @@ struct WaveformView: View {
                 payload.replayIdentityBytes.base64EncodedString()
             ])
         }
+        // The committed reviewed exclusion this package already carries. Taken
+        // as the last such step: a file records one current-state exclusion,
+        // the way `eva.xml` records one current-state everything else.
+        if let step = script.steps.last(where: { $0.operation == .trialExclusion }) {
+            epoching.committedTrialExclusion = step
+            payloadDigests[.trialExclusion] = EVAHistory.digest([
+                step.trialExclusionIdentityBytes.base64EncodedString()
+            ])
+        }
         recordingStore.processingHistory.seedOnDiskPrefix(
             recordingKey: recording.packageName,
             steps: script.steps,

@@ -98,20 +98,64 @@ struct TrialSelectionCriteriaControls: View {
 struct TrialExclusionList: View {
     let exclusions: [TrialSelectionAnalyzer.Exclusion]
     @Binding var selectedTrial: Int?
+    /// Flips one row between excluded and kept. Nil leaves the list read-only,
+    /// which is what a host with nothing to commit into should pass.
+    var onSetExcluded: ((Int, Bool) -> Void)?
+
+    /// Rows that actually remove a trial. A `.restored` row is listed so the
+    /// operator can see the rule was overruled, but counting it as excluded
+    /// would claim a trial the average still contains.
+    private var excludedCount: Int {
+        exclusions.filter(\.isExcluded).count
+    }
+
+    private var restoredCount: Int {
+        exclusions.count - excludedCount
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Excluded (\(exclusions.count))").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text("Excluded (\(excludedCount))").font(.caption).foregroundStyle(.secondary)
+                if restoredCount > 0 {
+                    Text("· \(restoredCount) restored")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(exclusions) { exclusion in
                         HStack(alignment: .top, spacing: 6) {
+                            if let onSetExcluded {
+                                // The checkbox *is* the override: checked means
+                                // this trial leaves the average. Reading it as
+                                // "excluded" rather than "keep" matches the
+                                // list's own title, so the two cannot disagree.
+                                Toggle("", isOn: Binding(
+                                    get: { exclusion.isExcluded },
+                                    set: { onSetExcluded(exclusion.trialIndex, $0) }
+                                ))
+                                .toggleStyle(.checkbox)
+                                .labelsHidden()
+                                .help(exclusion.isExcluded
+                                      ? "Keep this trial in the average"
+                                      : "Exclude this trial again")
+                            }
                             Text("#\(exclusion.trialIndex)")
                                 .font(.caption.monospacedDigit())
                                 .frame(width: 30, alignment: .leading)
+                                .foregroundStyle(exclusion.isExcluded ? .primary : .secondary)
                             Text(exclusion.reasons.joined(separator: ", "))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                                .strikethrough(!exclusion.isExcluded)
+                            if exclusion.origin == .manual {
+                                Image(systemName: "hand.point.up.left")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .help("Excluded by hand — the criteria did not flag this trial.")
+                            }
                             Spacer()
                         }
                         .padding(.vertical, 1)
@@ -199,6 +243,134 @@ struct TrialNullDistribution: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+// MARK: - Commit
+
+/// Turning a preview into a decision (ROADMAP TW-5).
+///
+/// Phase 3 previews without altering data, and that has to stay true of the
+/// controls too: every path that changes what is excluded is an explicit click
+/// here, never a side effect of dragging a threshold. The criteria sliders go
+/// on re-proposing forever and commit nothing.
+///
+/// The bar also has to be honest about three different states that look alike
+/// at a glance — what the rule proposes, what the operator changed, and what is
+/// already committed to the file — because "3 excluded" means something
+/// different in each.
+struct TrialExclusionCommitBar: View {
+    let category: String?
+    let exclusions: [TrialSelectionAnalyzer.Exclusion]
+    let selectedTrial: Int?
+    /// What the file already carries, rendered for a person: nil when nothing
+    /// is committed.
+    let committedSummary: String?
+    /// Whether the committed record covers the category under review, which is
+    /// what makes committing an empty set meaningful (it clears that category).
+    let isCategoryCommitted: Bool
+    let hasOverrides: Bool
+
+    var onSetExcluded: (Int, Bool) -> Void
+    var onResetOverrides: () -> Void
+    var onCommit: () -> Void
+    var onClear: () -> Void
+
+    @State private var confirmingCommit = false
+    @State private var confirmingClear = false
+
+    private var excludedCount: Int { exclusions.filter(\.isExcluded).count }
+    private var restoredCount: Int { exclusions.count - excludedCount }
+    private var manualCount: Int { exclusions.filter { $0.origin == .manual }.count }
+
+    /// The selected trial is only offered as a hand exclusion when it is not
+    /// already in the list — the list's own checkbox handles the rest, and two
+    /// controls for one decision is how they end up disagreeing.
+    private var selectableTrial: Int? {
+        guard let selectedTrial,
+              !exclusions.contains(where: { $0.trialIndex == selectedTrial }) else { return nil }
+        return selectedTrial
+    }
+
+    private var canCommit: Bool {
+        category != nil && (excludedCount > 0 || isCategoryCommitted)
+    }
+
+    private var commitDescription: String {
+        guard let category else { return "" }
+        var parts = ["\(excludedCount) trial\(excludedCount == 1 ? "" : "s") excluded from \(category)"]
+        if manualCount > 0 { parts.append("\(manualCount) by hand") }
+        if restoredCount > 0 { parts.append("\(restoredCount) restored from the rule") }
+        return parts.joined(separator: ", ") + "."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+
+            if let committedSummary {
+                Label(committedSummary, systemImage: "checkmark.seal")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let selectableTrial {
+                Button("Exclude #\(selectableTrial) by hand") {
+                    onSetExcluded(selectableTrial, true)
+                }
+                .font(.caption)
+                .buttonStyle(.link)
+                .help("The criteria did not flag this trial. Excluding it here is recorded as your decision, not the rule's.")
+            }
+
+            HStack(spacing: 8) {
+                Button("Commit…") { confirmingCommit = true }
+                    .disabled(!canCommit)
+                    .help(canCommit
+                          ? "Record this exclusion in the file and rebuild the average."
+                          : "Nothing to commit for this category.")
+
+                if hasOverrides {
+                    Button("Reset", action: onResetOverrides)
+                        .help("Discard your changes and go back to what the criteria alone propose.")
+                }
+                Spacer()
+                if committedSummary != nil {
+                    Button("Clear…") { confirmingClear = true }
+                        .help("Remove the committed exclusion entirely and restore every trial.")
+                }
+            }
+            .controlSize(.small)
+
+            // Said at the point of decision rather than in a help bubble: the
+            // whole panel is built to make a selection look like an improvement,
+            // and this is the last moment it can be qualified.
+            Text("Committing rebuilds the average and records the decision in the file. A cleaner average is not evidence the excluded trials were bad.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .confirmationDialog(
+            "Commit this exclusion?",
+            isPresented: $confirmingCommit,
+            titleVisibility: .visible
+        ) {
+            Button("Commit") { onCommit() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(commitDescription)
+        }
+        .confirmationDialog(
+            "Clear the committed exclusion?",
+            isPresented: $confirmingClear,
+            titleVisibility: .visible
+        ) {
+            Button("Clear", role: .destructive) { onClear() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every trial returns to the average, in every category. The decision is removed from the file on the next export.")
         }
     }
 }

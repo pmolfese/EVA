@@ -171,6 +171,13 @@ extension WaveformView {
         filter.averageReference = lights.continuousReference != nil
         epoching.averageReference = lights.epochReference != nil
         epoching.baselineCorrected = lights.baselineCorrection
+        // Set from the path totally, nil included: leaving a commit in place
+        // while standing on a node before it is what makes the re-derived script
+        // walk the pointer past the node just clicked. The epoch caches the
+        // snapshot restores already hold the right samples, so this only has to
+        // make the *decision* agree with them.
+        epoching.committedTrialExclusion = lights.trialExclusion
+        epoching.trialExclusionResolution = nil
 
         for node in path {
             guard let step = node.step else { continue }
@@ -549,11 +556,23 @@ extension WaveformView {
     /// another subject arrives with none of this, so every subject-specific step
     /// correctly stays a decision (ROADMAP RW-1 item 6).
     func currentReplayPayloadAvailability() -> ReplayPayloadAvailability {
-        ReplayPayloadAvailability(
+        var availability = ReplayPayloadAvailability(
             hasICAPayload: ICAReplayPayload.read(fromPackage: recording.packageURL) != nil,
             hasArtifactPayload: ArtifactReplayPayload.read(fromPackage: recording.packageURL) != nil,
             hasElectrodeGeometry: !(electrodeGeometry?.positions.isEmpty ?? true)
         )
+        // A recorded reviewed exclusion is "resolved from this file's own
+        // record" exactly when this file's segments still answer to its keys —
+        // which is a question about the segments in hand, not about a sidecar.
+        if let script = EVAProcessingScriptXML.read(fromPackage: recording.packageURL) {
+            availability.resolvedTrialExclusionStepIDs = TrialExclusionResolver.resolvableStepIDs(
+                in: script,
+                segments: epoching.segmentedEpochSegments.isEmpty
+                    ? epoching.epochSegments
+                    : epoching.segmentedEpochSegments
+            )
+        }
+        return availability
     }
 
     /// Subject-specific identity for the steps whose portable parameters do not
@@ -565,9 +584,19 @@ extension WaveformView {
     /// collapse to one node, and navigating to it would serve one removal's
     /// cached signal for the other's.
     private func currentPayloadDigests() -> [EVAProcessingStep.Operation: String] {
-        guard ica.cleanedSignal != nil,
-              let payload = ICAComponentRemoval.stagedPayload(ica) else { return [:] }
-        return [.icaClean: EVAHistory.digest([payload.replayIdentityBytes.base64EncodedString()])]
+        var digests: [EVAProcessingStep.Operation: String] = [:]
+        if ica.cleanedSignal != nil, let payload = ICAComponentRemoval.stagedPayload(ica) {
+            digests[.icaClean] = EVAHistory.digest([payload.replayIdentityBytes.base64EncodedString()])
+        }
+        // Same reason as ICA, one level down: two reviewed exclusions can carry
+        // identical criteria and remove different trials. The trial set is the
+        // input, so it has to be in the hash (ROADMAP TW-5).
+        if let step = epoching.committedTrialExclusion {
+            digests[.trialExclusion] = EVAHistory.digest([
+                step.trialExclusionIdentityBytes.base64EncodedString()
+            ])
+        }
+        return digests
     }
 
     /// Rail rows, with the root's subtitle describing the recording itself the

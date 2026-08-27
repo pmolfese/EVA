@@ -176,6 +176,10 @@ final class ProcessingCore {
         filter.averageReference = lights.continuousReference != nil
         epoching.averageReference = lights.epochReference != nil
         epoching.baselineCorrected = lights.baselineCorrection
+        // Off before the walk like the rest, so a script naming no exclusion
+        // cannot inherit one from a previous file in the same batch. The
+        // `.trialExclusion` case below sets it again for a script that does.
+        epoching.committedTrialExclusion = lights.trialExclusion
 
         for (index, step) in steps.enumerated() {
             let stepName = ReplayStepDisplay.label(for: step.operation)
@@ -397,6 +401,19 @@ final class ProcessingCore {
                     )
                 }
                 current = wavelet.reducedSignal ?? current
+
+            case .trialExclusion:
+                // Stashed, not applied: an exclusion removes trials from an
+                // average that does not exist yet. `buildAndPostProcess`
+                // resolves it against the segments the following `segment` step
+                // actually builds.
+                //
+                // Safe to stash unconditionally, on the same structural argument
+                // the ICA payload rests on: the recorded keys name one subject's
+                // source events, so a script copied from another subject
+                // resolves none of them, excludes nothing, and says so. Nothing
+                // here has to check whose file this is.
+                epoching.committedTrialExclusion = step
 
             case .segment:
                 epoching.apply(parameters: step.parameters)

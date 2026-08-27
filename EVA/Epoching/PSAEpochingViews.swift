@@ -1425,6 +1425,21 @@ extension WaveformView {
         }
 
         var clauses: [String] = []
+        if let resolution = epoching.trialExclusionResolution {
+            let count = resolution.excludedIndices.count
+            if count > 0 {
+                clauses.append("\(count) reviewed trial\(count == 1 ? "" : "s") excluded")
+            }
+            // Loud, and not merely a count: the average on screen is not the one
+            // that was reviewed, and the operator is the only one who can decide
+            // whether that matters.
+            if !resolution.unresolved.isEmpty {
+                clauses.append("\(resolution.unresolved.count) reviewed exclusion\(resolution.unresolved.count == 1 ? "" : "s") no longer match any trial — re-review before trusting this average")
+            }
+            if !resolution.movedIndices.isEmpty {
+                clauses.append("\(resolution.movedIndices.count) reviewed trial\(resolution.movedIndices.count == 1 ? "" : "s") renumbered since review")
+            }
+        }
         if !epoching.skippedLabeledBadSegmentsSummary.isEmpty {
             clauses.append("skipped labeled bad segments: \(epoching.skippedLabeledBadSegmentsSummary.joined(separator: ", "))")
         }
@@ -1474,6 +1489,12 @@ extension WaveformView {
         let rejectedForTooManyBadChannels = built.rejectedForTooManyBadChannels
         let skippedBadIndices = excludedBadSegmentIndices(built.segments)
         var exclusionSummary = built.exclusionSummary
+        epoching.foldTrialExclusion(
+            outcome.trialExclusion,
+            step: epoching.committedTrialExclusion,
+            segments: built.segments,
+            into: &exclusionSummary
+        )
 
         // Keep raw epochs as source so post-processing can be toggled later.
         segmentedEpochSignal = built.signal
@@ -1485,7 +1506,10 @@ extension WaveformView {
             // Averages workspace shows a spinner until SNR lands.
             computeAverageSNRInBackground(
                 from: built,
-                excludedIndices: skippedBadIndices,
+                // Every trial the average dropped, reviewed exclusions
+                // included — SNR measured over trials that are not in the
+                // average describes an average nobody has.
+                excludedIndices: outcome.excludedSegmentIndices,
                 sessionID: sessionID
             )
         } else {
@@ -1960,7 +1984,16 @@ extension WaveformView {
         )
         let isAveraged = epoching.isAveraged
         let colorIndices = categoryColorIndices(for: base.segments.map(\.category))
-        let excludedIndices = excludedBadSegmentIndices(base.segments, requiresOptIn: !isAveraged)
+        // Segment Health labels and the committed reviewed exclusion are kept
+        // apart on purpose: they average together, but `skippedLabeledBadSegments`
+        // below counts only the labels, and folding the two would attribute
+        // reviewed exclusions to a control the operator never touched.
+        let labeledBadIndices = excludedBadSegmentIndices(base.segments, requiresOptIn: !isAveraged)
+        let trialExclusion = epoching.resolvedTrialExclusion(for: base.segments)
+        epoching.trialExclusionResolution = isAveraged ? trialExclusion : nil
+        let excludedIndices = isAveraged
+            ? labeledBadIndices.union(trialExclusion?.excludedIndices ?? [])
+            : labeledBadIndices
         psaTask?.cancel()
         let sessionID = recordingSessionID
         psaTask = Task {
@@ -2005,13 +2038,22 @@ extension WaveformView {
             epoching.epochedSignal = display.signal
             epoching.epochSegments = display.segments
             var exclusionSummary = epoching.psaExclusionSummary
-            exclusionSummary.skippedLabeledBadSegments = isAveraged ? excludedIndices.count : 0
+            // Idempotent by construction — see `recordExclusions` — so a
+            // toggle-driven re-average restates this reason rather than adding
+            // to what the last one recorded.
+            epoching.foldTrialExclusion(
+                isAveraged ? trialExclusion : Optional<TrialExclusionResolver.Resolution>.none,
+                step: epoching.committedTrialExclusion,
+                segments: base.segments,
+                into: &exclusionSummary
+            )
+            exclusionSummary.skippedLabeledBadSegments = isAveraged ? labeledBadIndices.count : 0
             exclusionSummary.outputSegments = display.segments.count
             epoching.psaExclusionSummary = exclusionSummary
             epoching.statusMessage = appendPSAEpochDiagnostics(
                 to: result.message + suffix,
                 sourceSegments: base.segments,
-                skippedIndices: excludedIndices,
+                skippedIndices: labeledBadIndices,
                 includeSkippedLabeledBadSegments: isAveraged
             )
             psaTask = nil

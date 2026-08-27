@@ -69,7 +69,16 @@ extension WaveformView {
                 self.figureFileName(title)
             },
             isEmbedded: isEmbedded,
-            onClose: onClose
+            onClose: onClose,
+            committedTrialExclusion: epoching.committedTrialExclusion,
+            onCommitTrialExclusion: { [epoching] step in
+                epoching.committedTrialExclusion = step
+                // Rebuild now rather than marking the average stale: the new
+                // `epochedSignal` is also what moves `ProcessingChainSignature`
+                // and mints the history node, so committing and recording the
+                // commit are the same act.
+                refreshEpochDisplay()
+            }
         )
     }
 }
@@ -94,6 +103,20 @@ struct SingleTrialAnalysisSheet: View {
     let figureFileName: (String) -> String
     let isEmbedded: Bool
     let onClose: (() -> Void)?
+
+    // MARK: Reviewed exclusion (ROADMAP TW-5)
+    /// What the recording already carries, so the bar can say so and a commit
+    /// can merge into it rather than replacing other categories' decisions.
+    var committedTrialExclusion: EVAProcessingStep? = nil
+    /// Hands a newly merged step (or nil, to clear) to the pipeline, which
+    /// stores it and rebuilds the average.
+    ///
+    /// A closure rather than direct access to `EpochingViewModel`: this sheet
+    /// knows how to turn a review into a step and nothing about how epochs are
+    /// rebuilt, and keeping it that way is what lets it be presented from a
+    /// context with no pipeline at all — where nil correctly leaves the panel
+    /// previewing and uncommittable.
+    var onCommitTrialExclusion: ((EVAProcessingStep?) -> Void)? = nil
 
     private enum ResultTab: String, CaseIterable, Identifiable {
         case trials = "Per-Trial Values"
@@ -330,7 +353,21 @@ struct SingleTrialAnalysisSheet: View {
                                 outcome: viewModel.selectionOutcome,
                                 averageAll: viewModel.selectionAverageAll,
                                 averageKept: viewModel.selectionAverageKept,
-                                criteria: $viewModel.selectionCriteria
+                                criteria: $viewModel.selectionCriteria,
+                                reviewedCategory: viewModel.selectedCategory,
+                                committedSummary: committedExclusionSummary,
+                                isCategoryCommitted: isSelectedCategoryCommitted,
+                                hasOverrides: !viewModel.selectionReview.isEmpty,
+                                onSetExcluded: canCommitTrialExclusion ? { index, isExcluded in
+                                    viewModel.setTrialExcluded(isExcluded, trialIndex: index)
+                                    refreshTrialSelection()
+                                } : nil,
+                                onResetOverrides: canCommitTrialExclusion ? {
+                                    viewModel.clearSelectionReview()
+                                    refreshTrialSelection()
+                                } : nil,
+                                onCommit: canCommitTrialExclusion ? { commitTrialExclusion() } : nil,
+                                onClear: canCommitTrialExclusion ? { onCommitTrialExclusion?(nil) } : nil
                             )
                             .onChange(of: viewModel.selectionCriteria) { _, _ in
                                 refreshTrialSelection()
@@ -1624,23 +1661,136 @@ struct SingleTrialAnalysisSheet: View {
         withAnimation(.easeInOut(duration: 0.18)) { viewModel.setupIsExpanded = false }
     }
 
-    /// Re-applies the exclusion criteria to the scores already computed. Cheap
-    /// enough to run on every slider drag except the null, which dominates.
+    // MARK: - Committing the review (ROADMAP TW-5)
+
+    /// Committing needs somewhere to put the decision and real segments to name
+    /// trials in. Without both, the panel previews and commits nothing — which
+    /// is the correct state, not a degraded one.
+    private var canCommitTrialExclusion: Bool {
+        onCommitTrialExclusion != nil && !rawSegments.isEmpty
+    }
+
+    private var isSelectedCategoryCommitted: Bool {
+        guard let category = viewModel.selectedCategory, let step = committedTrialExclusion else { return false }
+        return step.excludedTrials.contains { $0.category == category }
+    }
+
+    /// What the file already carries, for the bar to show. Counts the categories
+    /// rather than listing them: the point is that a commit here does not
+    /// disturb the others.
+    private var committedExclusionSummary: String? {
+        guard let step = committedTrialExclusion else { return nil }
+        let excluded = step.excludedTrials.filter(\.isExcluded)
+        guard !excluded.isEmpty else { return nil }
+        let categories = Set(excluded.map(\.category)).count
+        return "Committed: \(excluded.count) trial\(excluded.count == 1 ? "" : "s") "
+            + "in \(categories) categor\(categories == 1 ? "y" : "ies")"
+    }
+
+    /// The scoring context the recorded `r`/`β` are only interpretable against.
+    private var trialExclusionScoringContext: TrialExclusionResolver.ScoringContext {
+        let span = diagnosticsAnalysisSpan
+        return TrialExclusionResolver.ScoringContext(
+            channelScope: viewModel.channelScope.rawValue,
+            channels: selectedChannelIndices.map(channelName),
+            windowStartMs: span?.startMs,
+            windowEndMs: span?.endMs
+        )
+    }
+
+    /// Turns the reviewed list into decisions the resolver can key to segments.
+    ///
+    /// Joins on the scored trials rather than on segment order, because a trial
+    /// index means "position among this category's scores" and only
+    /// `TrialSimilarity` knows the source time behind it.
+    private func reviewedExclusions(for category: String) -> [TrialExclusionResolver.ReviewedExclusion] {
+        guard let scored = viewModel.similarityResults?.first(where: { $0.name == category }) else { return [] }
+        let timeByIndex = Dictionary(
+            scored.trials.map { ($0.trialIndex, $0.sourceTimeSeconds) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        return viewModel.selectionExclusions.compactMap { exclusion in
+            guard let time = timeByIndex[exclusion.trialIndex] else { return nil }
+            return TrialExclusionResolver.ReviewedExclusion(
+                category: category,
+                trialIndex: exclusion.trialIndex,
+                sourceTimeSeconds: time,
+                reasons: exclusion.reasons,
+                origin: exclusion.origin
+            )
+        }
+    }
+
+    /// Commits the category under review, merging into whatever is already
+    /// committed for the others.
+    ///
+    /// Refuses outright when any reviewed trial cannot be matched to a segment.
+    /// The alternative is writing a record that silently fails to resolve on the
+    /// next load — an exclusion that looks committed and excludes nothing.
+    func commitTrialExclusion() {
+        guard let category = viewModel.selectedCategory, let onCommitTrialExclusion else { return }
+
+        let result = TrialExclusionResolver.merged(
+            reviewed: reviewedExclusions(for: category),
+            for: category,
+            criteria: viewModel.selectionCriteria,
+            context: trialExclusionScoringContext,
+            into: committedTrialExclusion,
+            segments: rawSegments
+        )
+
+        guard result.isComplete else {
+            viewModel.statusMessage = "\(result.unmatched.count) reviewed trial"
+                + "\(result.unmatched.count == 1 ? "" : "s") could not be matched to a segment. "
+                + "Re-run the analysis against the current epochs before committing."
+            return
+        }
+
+        // An exclusion that now removes nothing is not a decision to record.
+        onCommitTrialExclusion(result.step.excludedTrials.contains(where: \.isExcluded) ? result.step : nil)
+
+        // The overrides deliberately stay: they are what the committed record
+        // now says, and clearing them would snap the list back to the rule's raw
+        // proposal — showing something other than what was just committed.
+        let excluded = result.step.excludedTrials.filter { $0.category == category && $0.isExcluded }.count
+        viewModel.statusMessage = "Committed \(excluded) excluded trial"
+            + "\(excluded == 1 ? "" : "s") for \(category)."
+    }
+
+    /// Re-applies the exclusion criteria to the scores already computed, then
+    /// folds in the operator's overrides. Cheap enough to run on every slider
+    /// drag except the null, which dominates.
+    ///
+    /// The overrides are applied *here*, on the one path that also feeds the
+    /// before/after overlay and the null, so the preview cannot show one set of
+    /// trials while a commit would write another. Everything downstream reads
+    /// `selectionExclusions`, which is now the reviewed set rather than the
+    /// criteria's raw proposal.
     func refreshTrialSelection() {
         guard let selected = viewModel.selectedCategory,
               let scored = viewModel.similarityResults?.first(where: { $0.name == selected }) else {
             viewModel.selectionExclusions = []
+            viewModel.ruleProposedTrials = []
             viewModel.selectionOutcome = nil
             return
         }
 
-        let exclusions = TrialSelectionAnalyzer.exclusions(
+        let proposals = TrialSelectionAnalyzer.exclusions(
             from: scored.trials,
             criteria: viewModel.selectionCriteria
         )
+        viewModel.ruleProposedTrials = Set(proposals.map(\.trialIndex))
+
+        let exclusions = TrialSelectionAnalyzer.reviewed(
+            proposals: proposals,
+            review: viewModel.selectionReview
+        )
         viewModel.selectionExclusions = exclusions
 
-        let excludedIndices = Set(exclusions.map(\.trialIndex))
+        // A restored trial is listed but not excluded, so the average, the null,
+        // and the counts all have to read `isExcluded` rather than the row count.
+        let excludedIndices = Set(exclusions.filter(\.isExcluded).map(\.trialIndex))
 
         viewModel.selectionOutcome = TrialSelectionAnalyzer.evaluate(
             trials: viewModel.selectionTrialMatrices,
