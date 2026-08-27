@@ -270,15 +270,28 @@ struct TrialExclusionCommitBar: View {
     /// Whether the committed record covers the category under review, which is
     /// what makes committing an empty set meaningful (it clears that category).
     let isCategoryCommitted: Bool
+    /// How many categories the committed record covers. Decides whether
+    /// clearing needs to ask *which* — with one committed category, "this
+    /// category" and "all categories" are the same act, and offering both is
+    /// two names for one button.
+    let committedCategoryCount: Int
     let hasOverrides: Bool
 
     var onSetExcluded: (Int, Bool) -> Void
     var onResetOverrides: () -> Void
     var onCommit: () -> Void
     var onClear: () -> Void
+    var onClearCategory: () -> Void
 
     @State private var confirmingCommit = false
     @State private var confirmingClear = false
+    @State private var confirmingClearCategory = false
+
+    /// Clearing is only worth splitting when there is more than one category to
+    /// split it between, and the one under review is actually in the record.
+    private var offersPerCategoryClear: Bool {
+        isCategoryCommitted && committedCategoryCount > 1
+    }
 
     private var excludedCount: Int { exclusions.filter(\.isExcluded).count }
     private var restoredCount: Int { exclusions.count - excludedCount }
@@ -338,8 +351,17 @@ struct TrialExclusionCommitBar: View {
                 }
                 Spacer()
                 if committedSummary != nil {
-                    Button("Clear…") { confirmingClear = true }
-                        .help("Remove the committed exclusion entirely and restore every trial.")
+                    if offersPerCategoryClear, let category {
+                        Menu("Clear…") {
+                            Button("Only \(category)") { confirmingClearCategory = true }
+                            Button("All \(committedCategoryCount) categories") { confirmingClear = true }
+                        }
+                        .fixedSize()
+                        .help("Remove the committed exclusion for this category, or for all of them.")
+                    } else {
+                        Button("Clear…") { confirmingClear = true }
+                            .help("Remove the committed exclusion entirely and restore every trial.")
+                    }
                 }
             }
             .controlSize(.small)
@@ -371,6 +393,16 @@ struct TrialExclusionCommitBar: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Every trial returns to the average, in every category. The decision is removed from the file on the next export.")
+        }
+        .confirmationDialog(
+            "Clear the committed exclusion for \(category ?? "this category")?",
+            isPresented: $confirmingClearCategory,
+            titleVisibility: .visible
+        ) {
+            Button("Clear", role: .destructive) { onClearCategory() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This category's trials return to the average. Every other category keeps the exclusion it was reviewed with.")
         }
     }
 }

@@ -123,12 +123,19 @@ nonisolated enum TrialExclusionResolver {
         )
     }
 
-    /// Removes one category from a committed step, returning nil when that
-    /// leaves nothing — an empty step would otherwise persist as a decision that
-    /// excludes nothing.
+    /// Removes one category from a committed step, leaving every other
+    /// category's decision standing — the counterpart to committing one
+    /// category at a time.
+    ///
+    /// Returns nil when what remains excludes nothing. Note the test is for a
+    /// remaining *exclusion*, not for remaining trials: a step left carrying
+    /// only restorations records that the rule was overruled everywhere and
+    /// removes no trial at all, which is not a decision worth persisting. The
+    /// commit path applies the same rule, and the two must agree or clearing
+    /// down to nothing would leave a record committing could never have made.
     static func removing(category: String, from existing: EVAProcessingStep) -> EVAProcessingStep? {
         let trials = existing.excludedTrials.filter { $0.category != category }
-        guard !trials.isEmpty else { return nil }
+        guard trials.contains(where: \.isExcluded) else { return nil }
         return step(
             trials: trials,
             parameters: existing.parameters.filter { parameterName($0.key).category != category },

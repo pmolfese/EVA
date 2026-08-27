@@ -357,6 +357,7 @@ struct SingleTrialAnalysisSheet: View {
                                 reviewedCategory: viewModel.selectedCategory,
                                 committedSummary: committedExclusionSummary,
                                 isCategoryCommitted: isSelectedCategoryCommitted,
+                                committedCategoryCount: committedExclusionCategoryCount,
                                 hasOverrides: !viewModel.selectionReview.isEmpty,
                                 onSetExcluded: canCommitTrialExclusion ? { index, isExcluded in
                                     viewModel.setTrialExcluded(isExcluded, trialIndex: index)
@@ -367,7 +368,8 @@ struct SingleTrialAnalysisSheet: View {
                                     refreshTrialSelection()
                                 } : nil,
                                 onCommit: canCommitTrialExclusion ? { commitTrialExclusion() } : nil,
-                                onClear: canCommitTrialExclusion ? { onCommitTrialExclusion?(nil) } : nil
+                                onClear: canCommitTrialExclusion ? { onCommitTrialExclusion?(nil) } : nil,
+                                onClearCategory: canCommitTrialExclusion ? { clearCommittedCategory() } : nil
                             )
                             .onChange(of: viewModel.selectionCriteria) { _, _ in
                                 refreshTrialSelection()
@@ -1685,6 +1687,32 @@ struct SingleTrialAnalysisSheet: View {
         let categories = Set(excluded.map(\.category)).count
         return "Committed: \(excluded.count) trial\(excluded.count == 1 ? "" : "s") "
             + "in \(categories) categor\(categories == 1 ? "y" : "ies")"
+    }
+
+    /// Categories the committed record actually excludes something in. Drives
+    /// whether clearing has to ask *which*.
+    private var committedExclusionCategoryCount: Int {
+        guard let step = committedTrialExclusion else { return 0 }
+        return Set(step.excludedTrials.filter(\.isExcluded).map(\.category)).count
+    }
+
+    /// Removes the category under review from the committed record, leaving
+    /// every other category's decision standing — the counterpart to committing
+    /// one category at a time.
+    ///
+    /// The session review is deliberately left alone. Clearing withdraws the
+    /// *committed* decision; what the panel is showing is unsaved work, and
+    /// discarding it as a side effect of clearing would lose a review nobody
+    /// asked to throw away.
+    private func clearCommittedCategory() {
+        guard let category = viewModel.selectedCategory,
+              let step = committedTrialExclusion,
+              let onCommitTrialExclusion else { return }
+
+        // Nil when that was the last category — an exclusion record that
+        // excludes nothing is not a decision worth keeping.
+        onCommitTrialExclusion(TrialExclusionResolver.removing(category: category, from: step))
+        viewModel.statusMessage = "Cleared the committed exclusion for \(category)."
     }
 
     /// The scoring context the recorded `r`/`β` are only interpretable against.

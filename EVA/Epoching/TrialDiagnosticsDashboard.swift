@@ -44,6 +44,7 @@ struct TrialDiagnosticsDashboard: View {
     var reviewedCategory: String?
     var committedSummary: String?
     var isCategoryCommitted: Bool = false
+    var committedCategoryCount: Int = 0
     var hasOverrides: Bool = false
     /// Nil leaves the whole panel read-only: the criteria still preview, and
     /// nothing can be committed. That is the correct state before there are
@@ -52,6 +53,7 @@ struct TrialDiagnosticsDashboard: View {
     var onResetOverrides: (() -> Void)?
     var onCommit: (() -> Void)?
     var onClear: (() -> Void)?
+    var onClearCategory: (() -> Void)?
 
     @State private var tab: Tab = .windows
     @State private var selectedTrial: Int?
@@ -113,18 +115,20 @@ struct TrialDiagnosticsDashboard: View {
                     onSetExcluded: onSetExcluded
                 )
             }
-            if let onSetExcluded, let onResetOverrides, let onCommit, let onClear {
+            if let onSetExcluded, let onResetOverrides, let onCommit, let onClear, let onClearCategory {
                 TrialExclusionCommitBar(
                     category: reviewedCategory,
                     exclusions: exclusions,
                     selectedTrial: selectedTrial,
                     committedSummary: committedSummary,
                     isCategoryCommitted: isCategoryCommitted,
+                    committedCategoryCount: committedCategoryCount,
                     hasOverrides: hasOverrides,
                     onSetExcluded: onSetExcluded,
                     onResetOverrides: onResetOverrides,
                     onCommit: onCommit,
-                    onClear: onClear
+                    onClear: onClear,
+                    onClearCategory: onClearCategory
                 )
             }
         }

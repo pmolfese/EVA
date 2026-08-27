@@ -834,6 +834,16 @@ Two properties of the existing machinery shape the sequence below:
   The overrides deliberately survive a commit: clearing them would snap the
   list back to the rule's raw proposal, showing something other than what was
   just committed.
+- [x] **Per-category clearing — done 2026-08-27.** Clearing splits into "only
+  this category" and "all N categories" *only* when more than one category is
+  committed and the one under review is in the record; with one committed
+  category the two are the same act and offering both is two names for one
+  button. `removing(category:from:)` now returns nil when what remains excludes
+  nothing — tested for a remaining *exclusion*, not for remaining trials, so
+  clearing down to restorations-only cannot leave a record committing could
+  never have produced. The session review survives a clear: it is unsaved work,
+  and discarding it as a side effect would lose a review nobody asked to throw
+  away.
 - [x] **Re-average safety — found while wiring the above.**
   `refreshEpochDisplay()` (any post-processing toggle) did not apply the
   committed exclusion, so a toggle after a commit would silently restore every
