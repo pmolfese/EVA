@@ -255,8 +255,16 @@ nonisolated enum NonlinearAligner {
 
         var bestShift = 0
         var bestPosterior = -Double.infinity
+        // Require most of the template to actually overlap; otherwise a
+        // boundary shift with only a handful of samples can win on a
+        // spuriously small sum of squared errors.
+        let minimumOverlap = max(n / 2, 1)
         for shift in (-maxShift)...maxShift {
-            // Gaussian log-likelihood of the shifted trial under the template.
+            // Gaussian log-likelihood of the shifted trial under the template,
+            // normalized to mean squared error so shifts are compared on a
+            // per-sample basis rather than by raw summed error — a raw sum
+            // shrinks (and so looks more likely) simply because a large
+            // shift discards more edge samples.
             var sse = 0.0
             var count = 0
             for i in 0..<n {
@@ -266,8 +274,9 @@ nonisolated enum NonlinearAligner {
                 sse += diff * diff
                 count += 1
             }
-            guard count > 0 else { continue }
-            let logLikelihood = -sse / (2.0 * noiseVariance)
+            guard count >= minimumOverlap else { continue }
+            let meanSSE = sse / Double(count)
+            let logLikelihood = -meanSSE / (2.0 * noiseVariance)
             let logPrior = -Double(shift * shift) / (2.0 * sigma2)
             let posterior = logLikelihood + logPrior
             if posterior > bestPosterior {

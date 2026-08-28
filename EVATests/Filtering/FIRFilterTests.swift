@@ -94,6 +94,55 @@ struct FIRFilterTests {
         }
     }
 
+    @Test func kaiserKernelIsSymmetricAndDiffersFromHamming() {
+        let hamming = EEGSignalFilter.firKernel(
+            cutoff: 30, samplingRate: samplingRate, edge: .lowPass,
+            transitionHz: 5, maxChannelLength: count, window: .hamming
+        )
+        let kaiser = EEGSignalFilter.firKernel(
+            cutoff: 30, samplingRate: samplingRate, edge: .lowPass,
+            transitionHz: 5, maxChannelLength: count, window: .kaiser,
+            kaiserAttenuationDB: 60
+        )
+        #expect(kaiser.count % 2 == 1)
+        #expect(kaiser != hamming)
+        for i in 0..<(kaiser.count / 2) {
+            #expect(abs(kaiser[i] - kaiser[kaiser.count - 1 - i]) < 1e-9)
+        }
+        #expect(abs(kaiser.reduce(0, +) - 1) < 1e-9)
+    }
+
+    // MARK: - One-pass application modes
+
+    @Test func forwardFIRRetainsDelayWhileCompensatedModeRemovesIt() async throws {
+        let impulseIndex = 600
+        var impulse = [Float](repeating: 0, count: count)
+        impulse[impulseIndex] = 1
+        let kernel = EEGSignalFilter.firKernel(
+            cutoff: 30, samplingRate: samplingRate, edge: .lowPass,
+            transitionHz: nil, maxChannelLength: count
+        )
+        let expectedDelay = (kernel.count - 1) / 2
+
+        let forward = try await EEGSignalFilter.bandPass(
+            channels: [impulse], samplingRate: samplingRate,
+            lowCutoff: nil, highCutoff: 30,
+            highPassFamily: .fir, lowPassFamily: .fir,
+            firApplication: .forward
+        )[0]
+        let compensated = try await EEGSignalFilter.bandPass(
+            channels: [impulse], samplingRate: samplingRate,
+            lowCutoff: nil, highCutoff: 30,
+            highPassFamily: .fir, lowPassFamily: .fir,
+            firApplication: .delayCompensated
+        )[0]
+
+        let forwardPeak = forward.indices.max { abs(forward[$0]) < abs(forward[$1]) }
+        let compensatedPeak = compensated.indices.max { abs(compensated[$0]) < abs(compensated[$1]) }
+        #expect(forwardPeak == impulseIndex + expectedDelay)
+        #expect(compensatedPeak == impulseIndex)
+    }
+
     // MARK: - Auto (Net Station hybrid) routing
 
     @Test func autoRoutesLowHighPassToIIRAndLowPassToFIR() {
@@ -105,6 +154,13 @@ struct FIRFilterTests {
         #expect(EEGSignalFilter.resolvedFamily(
             .auto, edge: .highPass, cutoff: 2.0,
             crossoverHz: EEGSignalFilter.defaultFIRCrossoverHz) == .fir)
+        // Historical EVA excludes the exact boundary; Net Station includes it.
+        #expect(EEGSignalFilter.resolvedFamily(
+            .auto, edge: .highPass, cutoff: 1.0,
+            crossoverHz: 1.0, crossoverRule: .below) == .fir)
+        #expect(EEGSignalFilter.resolvedFamily(
+            .auto, edge: .highPass, cutoff: 1.0,
+            crossoverHz: 1.0, crossoverRule: .through) == .iir)
         // Low-pass is always FIR under auto.
         #expect(EEGSignalFilter.resolvedFamily(
             .auto, edge: .lowPass, cutoff: 30,

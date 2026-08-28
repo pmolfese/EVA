@@ -42,18 +42,27 @@ nonisolated enum EEGAnalysisEngine {
             for: signal,
             lengthSeconds: request.segmentLengthSeconds
         )
-        let artifactIntervals = artifactIntervals(
-            for: request.artifactSources,
-            selectedSourceIDs: request.selectedArtifactSourceIDs,
-            signal: signal
-        )
+        // Assessed means a source was actually included in this run. With no
+        // source selected — none offered, or all unticked — nothing has looked
+        // at artifacts, and the segment score says so rather than scoring the
+        // absence as clean (ROADMAP RW-1 item 16).
+        let selectedSources = request.artifactSources.filter {
+            request.selectedArtifactSourceIDs.contains($0.id)
+        }
+        let artifacts: SegmentHealthArtifactAssessment = selectedSources.isEmpty
+            ? .notAssessed
+            : .assessed(artifactIntervals(
+                for: request.artifactSources,
+                selectedSourceIDs: request.selectedArtifactSourceIDs,
+                signal: signal
+            ))
         progress?(0.04)
 
         let health = SegmentHealthAnalyzer.analyze(
             signal: signal,
             segments: segments,
             excludedChannelIndices: request.excludedChannelIndices,
-            artifactIntervals: artifactIntervals,
+            artifacts: artifacts,
             base: request.segmentGoodnessBase,
             progress: { fraction in
                 progress?(0.04 + 0.24 * fraction)
@@ -299,15 +308,19 @@ nonisolated enum EEGAnalysisEngine {
         artifactThreshold: Double
     ) -> [EEGAnalysisSegmentDecision] {
         healthResults.map { result in
-            let artifactOverlap = featuresBySegmentID[result.segmentID]?.artifactOverlapFraction ?? 0
-            let artifactCount = featuresBySegmentID[result.segmentID]?.artifactCount ?? 0
+            // `nil` overlap means artifacts were not assessed. A segment cannot
+            // be rejected for exceeding a threshold nobody measured, so the
+            // artifact test passes — but the decision records the absence
+            // rather than reporting 0% overlap, which would read as measured.
+            let artifactOverlap = featuresBySegmentID[result.segmentID]?.artifactOverlapFraction
+            let artifactCount = featuresBySegmentID[result.segmentID]?.artifactCount
             let healthOK = keptGrades.contains(result.grade)
-            let artifactOK = artifactOverlap <= artifactThreshold
+            let artifactOK = (artifactOverlap ?? 0) <= artifactThreshold
             var reasons: [String] = []
             if !healthOK {
                 reasons.append("health:\(result.grade.rawValue)")
             }
-            if !artifactOK {
+            if !artifactOK, let artifactOverlap {
                 reasons.append(String(format: "artifact_overlap:%.1f%%", artifactOverlap * 100))
             }
             return EEGAnalysisSegmentDecision(
@@ -356,8 +369,11 @@ nonisolated enum EEGAnalysisEngine {
             let windowSeconds = max(source.windowSizeSeconds, 0.001)
             for event in source.events {
                 let halfWindow = windowSeconds / 2
-                let startSeconds = event.beginTimeSeconds - halfWindow
-                let endSeconds = event.beginTimeSeconds + halfWindow
+                // Centred on the event's own centre, which for an onset-stamped
+                // source is not `beginTimeSeconds` — that put the flagged
+                // interval half a window early for Topography/Continuous events.
+                let startSeconds = event.centerTimeSeconds - halfWindow
+                let endSeconds = event.centerTimeSeconds + halfWindow
                 let start = min(max(Int((startSeconds * signal.samplingRate).rounded(.down)), 0), sampleCount - 1)
                 let end = min(max(Int((endSeconds * signal.samplingRate).rounded(.up)), start), sampleCount - 1)
                 intervals.append(
@@ -710,9 +726,14 @@ nonisolated enum EEGAnalysisEngine {
         var sumPyy = 0.0
         var crossRe = 0.0
         var crossIm = 0.0
-        var plvRe = 0.0
-        var plvIm = 0.0
-        var plvCount = 0
+        // PLV is accumulated per frequency bin (summed only across windows,
+        // never across bins) because phase difference varies with frequency
+        // for any fixed time delay; summing raw phase vectors across bins
+        // before taking one magnitude would let genuine phase locking at
+        // different frequencies cancel out.
+        var plvBinRe: [Double] = []
+        var plvBinIm: [Double] = []
+        var plvBinCounts: [Int] = []
         var absImagCross = 0.0
         var ampA: [Double] = []
         var ampB: [Double] = []
@@ -744,9 +765,14 @@ nonisolated enum EEGAnalysisEngine {
                 windowAmpB += pyy
                 let magnitude = sqrt(re * re + im * im)
                 if magnitude > 1e-12 {
-                    plvRe += re / magnitude
-                    plvIm += im / magnitude
-                    plvCount += 1
+                    if plvBinRe.count <= bin {
+                        plvBinRe.append(contentsOf: repeatElement(0, count: bin - plvBinRe.count + 1))
+                        plvBinIm.append(contentsOf: repeatElement(0, count: bin - plvBinIm.count + 1))
+                        plvBinCounts.append(contentsOf: repeatElement(0, count: bin - plvBinCounts.count + 1))
+                    }
+                    plvBinRe[bin] += re / magnitude
+                    plvBinIm[bin] += im / magnitude
+                    plvBinCounts[bin] += 1
                 }
             }
             ampA.append(sqrt(max(windowAmpA, 0)))
@@ -764,9 +790,14 @@ nonisolated enum EEGAnalysisEngine {
             case .imaginaryCoherence:
                 value = abs(crossIm) / denom
             case .phaseLockingValue:
-                value = plvCount > 0
-                    ? sqrt(plvRe * plvRe + plvIm * plvIm) / Double(plvCount)
-                    : 0
+                var bandPLV = 0.0
+                var contributingBins = 0
+                for bin in plvBinRe.indices where plvBinCounts[bin] > 0 {
+                    let re = plvBinRe[bin], im = plvBinIm[bin]
+                    bandPLV += sqrt(re * re + im * im) / Double(plvBinCounts[bin])
+                    contributingBins += 1
+                }
+                value = contributingBins > 0 ? bandPLV / Double(contributingBins) : 0
             case .weightedPhaseLagIndex:
                 value = absImagCross > 1e-12 ? abs(crossIm) / absImagCross : 0
             case .amplitudeEnvelopeCorrelation:

@@ -37,14 +37,23 @@ struct ChannelSetPickerView: View {
     /// When true, adds a "Custom" entry (tagged `customSentinel`) for callers
     /// that fall back to a manual channel-list field.
     var includesCustom: Bool = false
+    /// The active recording's net name, if the caller has one handy — sets
+    /// tagged for a *different* net are hidden. A set tagged "Any Net"
+    /// (`netType == nil`) always stays, same reasoning as the Channel Sets
+    /// editor's own filter: it's explicitly meant to apply regardless.
+    /// `nil` (the default) disables this filter — every existing call site
+    /// predates this parameter and passes nothing, so behavior is unchanged
+    /// unless a caller opts in.
+    var filterNetType: String? = nil
 
     @Environment(\.openWindow) private var openWindow
     private var store: ChannelSetStore { .shared }
 
     private var filteredSets: [ChannelSet] {
         store.allSets.filter { set in
-            guard channelCount > 0 else { return true }
-            return (set.channelIndices.max() ?? -1) < channelCount
+            if channelCount > 0, (set.channelIndices.max() ?? -1) >= channelCount { return false }
+            if let filterNetType, let netType = set.netType, netType != filterNetType { return false }
+            return true
         }
     }
 
@@ -65,6 +74,7 @@ struct ChannelSetPickerView: View {
             .labelsHidden()
 
             Button("Define…") {
+                ChannelsWindowModel.shared.present(tab: .channelSets)
                 openWindow(id: EVAApp.channelSetsWindowID)
             }
             .buttonStyle(.borderless)

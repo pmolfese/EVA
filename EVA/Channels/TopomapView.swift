@@ -15,6 +15,7 @@
 //
 
 import SwiftUI
+import CoreGraphics
 
 enum TopomapColorBarPlacement {
     case bottom
@@ -44,6 +45,9 @@ struct TopomapView: View {
     /// Overrides both `colorRange` and `fixedScale`.
     let zScaling: TopomapZScaling?
     let unitLabel: String
+    /// Uses a zero-to-maximum sequential scale for intrinsically non-negative
+    /// quantities such as omnibus F statistics.
+    let usesPositiveSequentialScale: Bool
     let showsHeader: Bool
     /// When false, the net-layout name is omitted from the header (the latency is
     /// still shown) — used for exported figures.
@@ -57,8 +61,41 @@ struct TopomapView: View {
     /// Called when the user clicks a channel on the map (nearest electrode
     /// within the hit-test radius). Nil disables tap handling entirely.
     let onTapChannel: ((Int) -> Void)?
+    /// Optional emphasis ring, used by cluster-statistics maps to identify the
+    /// sensors that participate in the selected corrected cluster.
+    let highlightedChannels: Set<Int>
 
     @State private var hoveredChannel: Int?
+    /// The expensive part — cached at a FIXED raster resolution, independent of
+    /// the view's on-screen size. Resizing the pane (as with the Averages
+    /// workspace's draggable Topography divider) changes only how big this
+    /// cached image is drawn, which is a near-free blit; without this, every
+    /// pixel of a live resize re-ran the full inverse-distance-weighted field
+    /// over the whole canvas at the new size and stuttered badly. See
+    /// `fieldCacheKey` for what actually invalidates it — container size is
+    /// deliberately not part of that key.
+    @State private var fieldRaster: FieldRaster?
+
+    private struct FieldRaster {
+        let key: FieldCacheKey
+        let image: CGImage
+    }
+
+    private struct FieldCacheKey: Equatable {
+        let layout: SensorLayout
+        let values: [Double]
+        let scale: Double
+        let colorRange: ClosedRange<Double>?
+        let zScaling: TopomapZScaling?
+        let usesPositiveSequentialScale: Bool
+    }
+
+    /// Resolution of the cached field raster, in pixels per side. Independent
+    /// of the view's displayed size — 96 is comfortably finer than the 4pt grid
+    /// the old per-frame draw used at any size this view is actually shown at,
+    /// and the cost of generating it only matters once per data change, not
+    /// once per frame.
+    static let fieldRasterResolution = 96
 
     init(
         layout: SensorLayout,
@@ -68,13 +105,15 @@ struct TopomapView: View {
         colorRange: ClosedRange<Double>? = nil,
         zScaling: TopomapZScaling? = nil,
         unitLabel: String = "µV",
+        usesPositiveSequentialScale: Bool = false,
         showsHeader: Bool = true,
         showsLayoutName: Bool = true,
         colorBarPlacement: TopomapColorBarPlacement = .bottom,
         minimumMapHeight: CGFloat = 260,
         contentPadding: CGFloat = 16,
         channelName: ((Int) -> String)? = nil,
-        onTapChannel: ((Int) -> Void)? = nil
+        onTapChannel: ((Int) -> Void)? = nil,
+        highlightedChannels: Set<Int> = []
     ) {
         self.layout = layout
         self.values = values
@@ -83,10 +122,12 @@ struct TopomapView: View {
         self.colorRange = colorRange
         self.zScaling = zScaling
         self.unitLabel = unitLabel
+        self.usesPositiveSequentialScale = usesPositiveSequentialScale
         self.showsHeader = showsHeader
         self.showsLayoutName = showsLayoutName
         self.channelName = channelName
         self.onTapChannel = onTapChannel
+        self.highlightedChannels = highlightedChannels
         self.colorBarPlacement = colorBarPlacement
         self.minimumMapHeight = minimumMapHeight
         self.contentPadding = contentPadding
@@ -125,6 +166,31 @@ struct TopomapView: View {
         .padding(contentPadding)
     }
 
+    private var fieldCacheKey: FieldCacheKey {
+        FieldCacheKey(
+            layout: layout,
+            values: values,
+            scale: scale,
+            colorRange: colorRange,
+            zScaling: zScaling,
+            usesPositiveSequentialScale: usesPositiveSequentialScale
+        )
+    }
+
+    /// Recomputes the field raster only when its key actually changed —
+    /// resizing calls this on every layout pass via `onChange`, but the key
+    /// does not depend on size, so almost every call here is a no-op equality
+    /// check rather than a fresh render.
+    private func refreshFieldRasterIfNeeded() {
+        let key = fieldCacheKey
+        if fieldRaster?.key == key { return }
+        guard let image = renderFieldImage() else {
+            fieldRaster = nil
+            return
+        }
+        fieldRaster = FieldRaster(key: key, image: image)
+    }
+
     private var mapCanvas: some View {
         GeometryReader { proxy in
             let side = min(proxy.size.width, proxy.size.height)
@@ -133,6 +199,8 @@ struct TopomapView: View {
             }
             .frame(width: side, height: side)
             .contentShape(Rectangle())
+            .onAppear { refreshFieldRasterIfNeeded() }
+            .onChange(of: fieldCacheKey) { refreshFieldRasterIfNeeded() }
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let location):
@@ -193,7 +261,7 @@ struct TopomapView: View {
                 Text(name)
                     .font(.caption.weight(.semibold))
                 if let v = value(for: sensor) {
-                    Text(String(format: "%.1f µV", v))
+                    Text("\(String(format: "%.1f", v)) \(unitLabel)")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -213,6 +281,9 @@ struct TopomapView: View {
     /// tighter limit saturates that color faster. With `zScaling`, the map is
     /// linear and centered on the mean (white = mean, ±1 = ±sigma·sd).
     private func normalized(_ value: Double) -> Double {
+        if usesPositiveSequentialScale {
+            return Swift.max(Swift.min(value / scale, 1), 0)
+        }
         if let z = zScaling, z.sd > 0, z.sigma > 0 {
             return Swift.max(Swift.min((value - z.mean) / (z.sigma * z.sd), 1), -1)
         }
@@ -265,13 +336,22 @@ struct TopomapView: View {
             return (p, v)
         }
 
-        drawInterpolatedField(
-            in: &context,
-            center: center,
-            radius: radius,
-            points: points,
-            scale: currentScale
-        )
+        if let image = fieldRaster?.key == fieldCacheKey ? fieldRaster?.image : nil {
+            let headRect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
+            context.draw(Image(decorative: image, scale: 1, orientation: .up), in: headRect)
+        } else {
+            // First frame before `onAppear` has run, or a data change that
+            // hasn't been picked up yet — falls back to the direct per-pixel
+            // draw so the map is never blank, at the size actually on screen
+            // right now (not the cheap path, but a rare one).
+            drawInterpolatedField(
+                in: &context,
+                center: center,
+                radius: radius,
+                points: points,
+                scale: currentScale
+            )
+        }
 
         // Clip the head circle outline on top of the field.
         let headRect = CGRect(
@@ -284,8 +364,18 @@ struct TopomapView: View {
 
         drawNoseAndEars(in: &context, center: center, radius: radius)
 
-        // Electrode markers.
-        for (point, _) in points {
+        // Electrode markers. Cluster members receive a high-contrast ring;
+        // ordinary topomaps pass the default empty set and remain unchanged.
+        for sensor in sensors {
+            let point = CGPoint(
+                x: center.x + CGFloat(sensor.x) * radius,
+                y: center.y - CGFloat(sensor.y) * radius
+            )
+            if highlightedChannels.contains(sensor.channelIndex) {
+                let ring = CGRect(x: point.x - 4.5, y: point.y - 4.5, width: 9, height: 9)
+                context.fill(Path(ellipseIn: ring), with: .color(.yellow.opacity(0.95)))
+                context.stroke(Path(ellipseIn: ring), with: .color(.black.opacity(0.85)), lineWidth: 1.2)
+            }
             let dot = CGRect(x: point.x - 1.6, y: point.y - 1.6, width: 3.2, height: 3.2)
             context.fill(Path(ellipseIn: dot), with: .color(.black.opacity(0.55)))
         }
@@ -319,6 +409,68 @@ struct TopomapView: View {
             }
             x += step
         }
+    }
+
+    /// Renders the interpolated field into a fixed-resolution bitmap, in the
+    /// SAME coordinate convention `draw(in:size:)` uses on screen (origin
+    /// top-left, y down, +y-anterior sensors flipped to match). Everything
+    /// about the appearance is decided here — resizing the pane afterward only
+    /// stretches this image.
+    ///
+    /// Not private: exercised directly by `TopomapFieldRasterTests` so the
+    /// resize-smoothness fix can be checked without standing up a live view.
+    func renderFieldImage() -> CGImage? {
+        let sensors = activeSensors
+        let points: [(point: CGPoint, value: Double)] = sensors.compactMap { sensor in
+            guard let v = value(for: sensor) else { return nil }
+            return (CGPoint(x: CGFloat(sensor.x), y: CGFloat(sensor.y)), v)
+        }
+        guard !points.isEmpty else { return nil }
+
+        let resolution = Self.fieldRasterResolution
+        guard let context = CGContext(
+            data: nil,
+            width: resolution,
+            height: resolution,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        // Top-left origin, y down — matches SwiftUI's GraphicsContext, so the
+        // same point math used on screen applies here unchanged.
+        context.translateBy(x: 0, y: CGFloat(resolution))
+        context.scaleBy(x: 1, y: -1)
+        context.clear(CGRect(x: 0, y: 0, width: resolution, height: resolution))
+
+        let radius = CGFloat(resolution) / 2
+        let center = CGPoint(x: radius, y: radius)
+        let radiusSquared = radius * radius
+
+        let rasterPoints: [(point: CGPoint, value: Double)] = points.map { entry in
+            // +y is anterior; y grows downward in this coordinate system, so
+            // flip, exactly as the live on-screen draw does.
+            let px = center.x + entry.point.x * radius
+            let py = center.y - entry.point.y * radius
+            return (CGPoint(x: px, y: py), entry.value)
+        }
+
+        for row in 0 ..< resolution {
+            let py = CGFloat(row) + 0.5
+            for column in 0 ..< resolution {
+                let px = CGFloat(column) + 0.5
+                let dx = px - center.x
+                let dy = py - center.y
+                guard dx * dx + dy * dy <= radiusSquared else { continue }
+                let interpolated = idwValue(at: CGPoint(x: px, y: py), points: rasterPoints)
+                let (r, g, b) = colorComponents(forNormalized: normalized(interpolated))
+                context.setFillColor(red: r, green: g, blue: b, alpha: 1)
+                context.fill(CGRect(x: column, y: row, width: 1, height: 1))
+            }
+        }
+
+        return context.makeImage()
     }
 
     private func idwValue(at location: CGPoint, points: [(point: CGPoint, value: Double)]) -> Double {
@@ -377,6 +529,9 @@ struct TopomapView: View {
     /// giving the SD-equivalent µV value at each end (mean ± sigma·sd) so the
     /// colorbar still reads in physical units even while scaled by SD.
     private var barLabels: (low: String, high: String, unit: String, lowMicrovolts: String?, highMicrovolts: String?) {
+        if usesPositiveSequentialScale {
+            return ("0.0", String(format: "%.1f", scale), unitLabel, nil, nil)
+        }
         if let z = zScaling {
             let span = z.sigma * z.sd
             return (
@@ -406,7 +561,9 @@ struct TopomapView: View {
             }
 
             LinearGradient(
-                colors: stride(from: -1.0, through: 1.0, by: 0.1).map { divergingColor(forNormalized: $0) },
+                colors: usesPositiveSequentialScale
+                    ? stride(from: 0.0, through: 1.0, by: 0.1).map { divergingColor(forNormalized: $0) }
+                    : stride(from: -1.0, through: 1.0, by: 0.1).map { divergingColor(forNormalized: $0) },
                 startPoint: .leading,
                 endPoint: .trailing
             )
@@ -441,7 +598,9 @@ struct TopomapView: View {
             }
 
             LinearGradient(
-                colors: stride(from: 1.0, through: -1.0, by: -0.1).map { divergingColor(forNormalized: $0) },
+                colors: usesPositiveSequentialScale
+                    ? stride(from: 1.0, through: 0.0, by: -0.1).map { divergingColor(forNormalized: $0) }
+                    : stride(from: 1.0, through: -1.0, by: -0.1).map { divergingColor(forNormalized: $0) },
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -467,10 +626,14 @@ struct TopomapView: View {
     }
 
     /// Diverging blue–white–red map. `normalized` is expected in roughly -1...1.
-    private func divergingColor(forNormalized normalized: Double) -> Color {
-        guard normalized.isFinite else {
-            return Color(red: 0.96, green: 0.96, blue: 0.96)
-        }
+    /// The diverging colormap's RGB components at a given -1…1 value, shared by
+    /// the live `Color`-returning path (unused now that the field itself is
+    /// rasterized, kept for anything reaching for a single sample colour, e.g.
+    /// a colorbar) and `renderFieldImage`'s per-pixel bitmap fill, which wants
+    /// raw components rather than `Color`/`CGColor` objects at 9,216 pixels a
+    /// call.
+    private func colorComponents(forNormalized normalized: Double) -> (red: Double, green: Double, blue: Double) {
+        guard normalized.isFinite else { return (0.96, 0.96, 0.96) }
         let t = max(-1, min(1, normalized))
         let cold = (red: 0.23, green: 0.30, blue: 0.75)
         let mid = (red: 0.96, green: 0.96, blue: 0.96)
@@ -478,17 +641,22 @@ struct TopomapView: View {
 
         if t < 0 {
             let f = t + 1 // 0 at -1, 1 at 0
-            return Color(
-                red: cold.red + (mid.red - cold.red) * f,
-                green: cold.green + (mid.green - cold.green) * f,
-                blue: cold.blue + (mid.blue - cold.blue) * f
+            return (
+                cold.red + (mid.red - cold.red) * f,
+                cold.green + (mid.green - cold.green) * f,
+                cold.blue + (mid.blue - cold.blue) * f
             )
         } else {
-            return Color(
-                red: mid.red + (warm.red - mid.red) * t,
-                green: mid.green + (warm.green - mid.green) * t,
-                blue: mid.blue + (warm.blue - mid.blue) * t
+            return (
+                mid.red + (warm.red - mid.red) * t,
+                mid.green + (warm.green - mid.green) * t,
+                mid.blue + (warm.blue - mid.blue) * t
             )
         }
+    }
+
+    private func divergingColor(forNormalized normalized: Double) -> Color {
+        let (r, g, b) = colorComponents(forNormalized: normalized)
+        return Color(red: r, green: g, blue: b)
     }
 }

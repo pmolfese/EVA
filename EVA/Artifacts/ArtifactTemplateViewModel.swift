@@ -42,12 +42,12 @@ final class ArtifactTemplateViewModel {
     var confirmedSource: ArtifactDefinitionResultSource?
 
     // MARK: Matching parameters
-    var channelScope = ArtifactTemplateChannelScope.clickedChannel
+    var channelScope = ArtifactTemplateChannelScope.ocularChannels
     var customChannels = ""
-    var threshold = 0.70
-    var windowSeconds = 0.40
+    var threshold = 0.85
+    var windowSeconds = 0.50
     var downsampleRate = 250.0
-    var mergeWindowSeconds = 0.25
+    var mergeWindowSeconds = 0.35
     var mergeBehavior = ArtifactTemplateMergeBehavior.discard
     var waveformStretchRange = 0.0
     var polarity = ArtifactTemplatePolarity.same

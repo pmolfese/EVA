@@ -34,6 +34,7 @@ final class ProcessingDefaults {
         static let filterNotch60 = "filterNotch60"
         static let filterAverageReference = "filterAverageReference"
         static let filterDefaultFamily = "filterDefaultFamily"
+        static let filterDefaultPreset = "filterDefaultPreset"
         static let icaMethod = "icaMethod"
         static let icaComponentCount = "icaComponentCount"
         static let bcgAutoSelectProxySet = "bcgAutoSelectProxySet"
@@ -42,8 +43,15 @@ final class ProcessingDefaults {
         static let ocularBlinkThresholdConfig = "ocularBlinkThresholdConfig"
         static let ocularMovementThresholdConfig = "ocularMovementThresholdConfig"
         static let ocularTopologyDefaultMigrationV2 = "ocularTopologyDefaultMigrationV2"
+        static let gradientDefaultCategoryRaw = "gradientDefaultCategoryRaw"
+        static let gradientDefaultTemplateMethodRaw = "gradientDefaultTemplateMethodRaw"
+        static let gradientDefaultFASTRMethodRaw = "gradientDefaultFASTRMethodRaw"
+        static let gradientComputeBackendRaw = "gradientComputeBackendRaw"
+        static let waveletUsesGPU = "waveletUsesGPU"
         static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
         static let autoRunSegmentHealthAfterSegmentation = "autoRunSegmentHealthAfterSegmentation"
+        static let autoSaveNewNetGeometries = "autoSaveNewNetGeometries"
+        static let autoSaveNewNetGeometriesFromNonMFF = "autoSaveNewNetGeometriesFromNonMFF"
     }
 
     private enum Defaults {
@@ -52,6 +60,9 @@ final class ProcessingDefaults {
         static let filterNotch60 = false
         static let filterAverageReference = false
         static let filterDefaultFamily = FilterFamily.iir.rawValue
+        /// Empty means "no preset" — a newly-opened recording keeps EVA's own
+        /// per-field defaults rather than being configured like another package.
+        static let filterDefaultPreset = ""
         static let icaMethod = ICAMethod.picard
         static let icaComponentCount = 20
         static let bcgAutoSelectProxySet = false
@@ -59,8 +70,15 @@ final class ProcessingDefaults {
         static let artifactDetectionDefaultMethodRaw = ArtifactDetectionMethod.threshold.rawValue
         static let ocularBlinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
         static let ocularMovementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
+        static let gradientDefaultCategoryRaw = MRIGradientCategory.template.rawValue
+        static let gradientDefaultTemplateMethodRaw = MRIGradientMethod.allenIAR.rawValue
+        static let gradientDefaultFASTRMethodRaw = MRIGradientMethod.fastr.rawValue
+        static let gradientComputeBackendRaw = GradientComputeBackend.cpu.rawValue
+        static let waveletUsesGPU = true
         static let interpolatedHealthFromNeighbors = true
         static let autoRunSegmentHealthAfterSegmentation = true
+        static let autoSaveNewNetGeometries = false
+        static let autoSaveNewNetGeometriesFromNonMFF = false
     }
 
     // MARK: Filter defaults
@@ -87,6 +105,14 @@ final class ProcessingDefaults {
         set { UserDefaults.standard.set(newValue, forKey: Keys.filterDefaultFamily) }
     }
 
+    /// `FilterApproximationPreset.rawValue` applied to each newly-opened
+    /// recording, or empty for none. A lab that always filters the EEGLAB way
+    /// should not have to pick it per file.
+    var filterDefaultPreset: String {
+        get { UserDefaults.standard.string(forKey: Keys.filterDefaultPreset) ?? Defaults.filterDefaultPreset }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.filterDefaultPreset) }
+    }
+
     // MARK: ICA defaults
     var icaMethod: ICAMethod {
         get { UserDefaults.standard.string(forKey: Keys.icaMethod).flatMap(ICAMethod.init(rawValue:)) ?? .picard }
@@ -111,6 +137,86 @@ final class ProcessingDefaults {
     var bcgDefaultMethod: BCGDetectionMethod {
         get { BCGDetectionMethod(rawValue: bcgDefaultMethodRaw) ?? .spatialPCA }
         set { bcgDefaultMethodRaw = newValue.rawValue }
+    }
+
+    // MARK: MRI gradient defaults
+
+    /// Which family the MRI gradient sheet opens on.
+    var gradientDefaultCategory: MRIGradientCategory {
+        get {
+            UserDefaults.standard.string(forKey: Keys.gradientDefaultCategoryRaw)
+                .flatMap(MRIGradientCategory.init(rawValue:)) ?? .template
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Keys.gradientDefaultCategoryRaw) }
+    }
+
+    /// Preferred method within the Template family. Held per family so switching
+    /// tabs lands on the user's choice for that family rather than its first entry.
+    var gradientDefaultTemplateMethod: MRIGradientMethod {
+        get {
+            let stored = UserDefaults.standard.string(forKey: Keys.gradientDefaultTemplateMethodRaw)
+                .flatMap(MRIGradientMethod.init(rawValue:))
+            // Guard against a stored value from the other family, and against
+            // one that has since been retired — a preference should not keep
+            // steering new work onto a withdrawn method.
+            guard let stored, stored.category == .template, !stored.isDeprecated else { return .allenIAR }
+            return stored
+        }
+        set {
+            guard newValue.category == .template, !newValue.isDeprecated else { return }
+            UserDefaults.standard.set(newValue.rawValue, forKey: Keys.gradientDefaultTemplateMethodRaw)
+        }
+    }
+
+    /// Preferred method within the FASTR family.
+    var gradientDefaultFASTRMethod: MRIGradientMethod {
+        get {
+            let stored = UserDefaults.standard.string(forKey: Keys.gradientDefaultFASTRMethodRaw)
+                .flatMap(MRIGradientMethod.init(rawValue:))
+            return stored?.category == .fastr ? stored! : .fastr
+        }
+        set {
+            guard newValue.category == .fastr else { return }
+            UserDefaults.standard.set(newValue.rawValue, forKey: Keys.gradientDefaultFASTRMethodRaw)
+        }
+    }
+
+    /// The method a newly-opened recording starts on.
+    var gradientDefaultMethod: MRIGradientMethod {
+        gradientDefaultCategory == .template
+            ? gradientDefaultTemplateMethod
+            : gradientDefaultFASTRMethod
+    }
+
+    /// Compute backend for gradient correction. A global preference rather than
+    /// a per-run control: it changes how fast a run is, never what it produces,
+    /// so making the user choose it every time is asking a question that has one
+    /// right answer for their machine.
+    var gradientComputeBackend: GradientComputeBackend {
+        get {
+            UserDefaults.standard.string(forKey: Keys.gradientComputeBackendRaw)
+                .flatMap(GradientComputeBackend.init(rawValue:)) ?? .cpu
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Keys.gradientComputeBackendRaw) }
+    }
+
+    // MARK: Wavelet defaults
+
+    /// Whether wavelet reduction runs on the GPU.
+    ///
+    /// A global preference for the same reason as the gradient backend: it
+    /// changes how fast a run is, not what it means, and both paths fall back to
+    /// the CPU on their own when no Metal device is present. Defaults on — the
+    /// GPU wins on any realistic high-density recording, and the fallback makes
+    /// the choice safe on a machine that cannot honour it.
+    ///
+    /// The GPU computes in 32-bit floats where the CPU uses 64-bit, so results
+    /// agree closely but not to the last bit. The chosen value is still recorded
+    /// per run in the replay parameters, so an eva.xml reproduces the path it
+    /// actually took rather than whatever this preference says later.
+    var waveletUsesGPU: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.waveletUsesGPU) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.waveletUsesGPU) }
     }
 
     // MARK: Artifact-detection defaults
@@ -159,6 +265,26 @@ final class ProcessingDefaults {
         set { UserDefaults.standard.set(newValue, forKey: Keys.autoRunSegmentHealthAfterSegmentation) }
     }
 
+    // MARK: Net-geometry catalog defaults
+    /// When on, `ChannelSetEditorView`'s "save this net" banner (see
+    /// `ChannelSetStore`'s header) saves automatically under the recording's
+    /// own reported net name instead of waiting for a click — off by default
+    /// since it's a silent write to the shared catalog the first time any new
+    /// net name is seen (2026-08-16, "auto save for new nets").
+    var autoSaveNewNetGeometries: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.autoSaveNewNetGeometries) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.autoSaveNewNetGeometries) }
+    }
+    /// Gates `autoSaveNewNetGeometries` to MFF-sourced recordings only, unless
+    /// this is also on. Non-MFF geometry (BrainVision, etc.) is more likely to
+    /// be reconstructed or approximate rather than the vendor's own file, so
+    /// auto-saving it into the shared catalog needed a second, explicit opt-in
+    /// rather than being covered by the first toggle.
+    var autoSaveNewNetGeometriesFromNonMFF: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.autoSaveNewNetGeometriesFromNonMFF) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.autoSaveNewNetGeometriesFromNonMFF) }
+    }
+
     /// Legacy single-blob key from before the per-key UserDefaults refactor.
     private static let legacyKey = "ProcessingDefaults.v1"
 
@@ -171,12 +297,19 @@ final class ProcessingDefaults {
             Keys.icaMethod: Defaults.icaMethod.rawValue,
             Keys.icaComponentCount: Defaults.icaComponentCount,
             Keys.bcgAutoSelectProxySet: Defaults.bcgAutoSelectProxySet,
+            Keys.gradientDefaultCategoryRaw: Defaults.gradientDefaultCategoryRaw,
+            Keys.gradientDefaultTemplateMethodRaw: Defaults.gradientDefaultTemplateMethodRaw,
+            Keys.gradientDefaultFASTRMethodRaw: Defaults.gradientDefaultFASTRMethodRaw,
+            Keys.gradientComputeBackendRaw: Defaults.gradientComputeBackendRaw,
+            Keys.waveletUsesGPU: Defaults.waveletUsesGPU,
             Keys.bcgDefaultMethodRaw: Defaults.bcgDefaultMethodRaw,
             Keys.artifactDetectionDefaultMethodRaw: Defaults.artifactDetectionDefaultMethodRaw,
             Keys.ocularBlinkThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularBlinkThresholdConfig),
             Keys.ocularMovementThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularMovementThresholdConfig),
             Keys.interpolatedHealthFromNeighbors: Defaults.interpolatedHealthFromNeighbors,
             Keys.autoRunSegmentHealthAfterSegmentation: Defaults.autoRunSegmentHealthAfterSegmentation,
+            Keys.autoSaveNewNetGeometries: Defaults.autoSaveNewNetGeometries,
+            Keys.autoSaveNewNetGeometriesFromNonMFF: Defaults.autoSaveNewNetGeometriesFromNonMFF,
         ])
         migrateLegacyBlobIfNeeded()
         migrateOcularTopologyDefaultsIfNeeded()
@@ -232,6 +365,8 @@ final class ProcessingDefaults {
         ocularMovementThresholdConfig = Defaults.ocularMovementThresholdConfig
         interpolatedHealthFromNeighbors = Defaults.interpolatedHealthFromNeighbors
         autoRunSegmentHealthAfterSegmentation = Defaults.autoRunSegmentHealthAfterSegmentation
+        autoSaveNewNetGeometries = Defaults.autoSaveNewNetGeometries
+        autoSaveNewNetGeometriesFromNonMFF = Defaults.autoSaveNewNetGeometriesFromNonMFF
     }
 
     private func ocularThresholdConfig(

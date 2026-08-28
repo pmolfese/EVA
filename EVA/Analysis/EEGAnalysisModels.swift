@@ -107,8 +107,11 @@ nonisolated struct EEGAnalysisSegmentDecision: Codable, Identifiable, Sendable {
     var durationSeconds: Double
     var healthGrade: ChannelHealthGrade
     var healthGoodPercentage: Int
-    var artifactOverlapFraction: Double
-    var artifactCount: Int
+    /// `nil` when labeled artifacts were not assessed for this run — no
+    /// artifact source was included — as opposed to `0`, meaning a source looked
+    /// and the segment was clean.
+    var artifactOverlapFraction: Double?
+    var artifactCount: Int?
     var isIncluded: Bool
     var rejectionReasons: [String]
 

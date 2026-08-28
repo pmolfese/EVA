@@ -24,6 +24,9 @@ struct BatchSetupSheet: View {
     let onStart: () -> Void
 
     @State private var files: [URL] = []
+    /// Beat/event codes shared by every selected file — see
+    /// `refreshSharedBeatEventCodes`.
+    @State private var sharedBeatEventCodes: Set<String> = []
     @State private var outputFolder: URL?
     @State private var sourceName = ""
     @State private var script: EVAProcessingScript?
@@ -85,6 +88,9 @@ struct BatchSetupSheet: View {
             .padding(20)
         }
         .frame(width: 520)
+        .onChange(of: files, initial: true) { _, _ in
+            refreshSharedBeatEventCodes()
+        }
     }
 
     // MARK: Sections
@@ -213,6 +219,15 @@ struct BatchSetupSheet: View {
                     .toggleStyle(.checkbox)
                     .font(.caption)
                     .disabled(!step.wrappedValue.included)
+            } else if isChannelDecision(step.wrappedValue.step.operation) {
+                // Classified `.decision` because *windowed* replay pauses to ask
+                // about it. A batch cannot ask, so the tick in this row is the
+                // answer — and the label says whose channels it would carry
+                // rather than promising a pause that will not happen.
+                Label("carries the source's channels", systemImage: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .help("These channel numbers come from the recording the script was copied from, not from each input file. Tick it only if the same electrodes are bad in every file.")
             } else if kind == .decision {
                 Label("Pauses", systemImage: "hand.raised")
                     .font(.caption2)
@@ -221,9 +236,41 @@ struct BatchSetupSheet: View {
                 Label("not replayable", systemImage: "nosign")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .help("Specific to the recording it came from, so it is recorded for provenance and not applied to other files.")
+            } else if kind == .resolvedFromPayload {
+                // The third state between "portable" and "subject-specific",
+                // now decided once in `EVAProcessingStep.replayInteraction(given:)`
+                // rather than privately here (ROADMAP RW-1 item 6).
+                Label("from this file's own record", systemImage: "checkmark.seal")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                    .help("Every selected file carries its own saved settings for this step, so it re-applies exactly without needing a decision.")
             }
         }
         .opacity(kind == .skip ? 0.5 : 1)
+    }
+
+    private func isChannelDecision(_ operation: EVAProcessingStep.Operation) -> Bool {
+        operation == .markBad || operation == .interpolateChannels
+    }
+
+    /// What every selected file carries, as one value the shared classification
+    /// can be asked with. All-or-nothing across the batch: a step is only
+    /// "resolved from this file's own record" if that is true of *each* file, so
+    /// one file without a sidecar keeps the step a decision for the whole run.
+    private var batchPayloadAvailability: ReplayPayloadAvailability {
+        ReplayPayloadAvailability(
+            hasICAPayload: everyFileHasItsOwn(ICAReplayPayload.read),
+            hasArtifactPayload: everyFileHasItsOwn(ArtifactReplayPayload.read),
+            hasElectrodeGeometry: everyFileHasItsOwn { url in
+                ElectrodeGeometry.load(from: url).flatMap { $0.positions.isEmpty ? nil : $0 }
+            },
+            // Beat codes present in *every* selected file, on the same
+            // all-or-nothing rule as the payloads: one file with no beats keeps
+            // a recorded PCA-S step a decision for the whole run rather than
+            // letting it fail partway through (ROADMAP SI-3).
+            beatEventCodes: sharedBeatEventCodes
+        )
     }
 
     private func settingsPopoverBinding(for id: Int) -> Binding<Bool> {
@@ -294,9 +341,55 @@ struct BatchSetupSheet: View {
     /// no window opened for any file. See `BatchController.startHeadless`.
     private var canRunHeadless: Bool {
         guard config.mode == .fullAuto else { return false }
-        return !config.steps.contains {
-            $0.included && ($0.kind == .decision || ($0.kind == .review && $0.pauseToReview))
+        return !config.steps.contains { step in
+            guard step.included else { return false }
+            if step.kind == .review, step.pauseToReview { return true }
+            guard step.kind == .decision else { return false }
+            // A decision step is a decision only while the decision is unmade.
+            // When every input package carries its own payload — the ICA
+            // operator, the drawn artifact definitions — the answer is already
+            // recorded and re-applying it asks nobody anything, so it stops
+            // being a reason to open a window.
+            // Channel decisions are `.decision` because windowed replay pauses
+            // to ask about them. A batch does not ask — the operator already
+            // answered by ticking the step in this sheet — so they do not force
+            // a window; `ProcessingCore` applies exactly the ones left checked.
+            if isChannelDecision(step.step.operation) { return false }
+            return true
         }
+    }
+
+    /// Whether every selected file carries its own payload of the given kind.
+    ///
+    /// Checked per *file*, not per script, and deliberately so: an ICA operator
+    /// belongs to one subject's electrodes and a drawn template to one subject's
+    /// blink, so "this script contains ICA" says nothing about whether any given
+    /// file can re-apply it. A file without a sidecar needs a human, which is
+    /// exactly the window this gate exists to open. Reading a few tens of KB of
+    /// JSON per file at setup is cheap next to being wrong about it.
+    /// Event codes every selected file carries, read from each package's own
+    /// `Events*.xml` — no sample data, and recomputed only when the selection
+    /// changes rather than on every body evaluation.
+    private func refreshSharedBeatEventCodes() {
+        guard !files.isEmpty else {
+            sharedBeatEventCodes = []
+            return
+        }
+        var shared: Set<String>?
+        let reader = MFFReader()
+        for url in files {
+            guard let events = try? reader.loadEvents(from: url) else {
+                sharedBeatEventCodes = []
+                return
+            }
+            let codes = Set(events.map(\.code))
+            shared = shared.map { $0.intersection(codes) } ?? codes
+        }
+        sharedBeatEventCodes = shared ?? []
+    }
+
+    private func everyFileHasItsOwn<Payload>(_ read: (URL) -> Payload?) -> Bool {
+        !files.isEmpty && files.allSatisfy { read($0) != nil }
     }
 
     private func start() {
@@ -304,10 +397,33 @@ struct BatchSetupSheet: View {
         var scoped = files
         scoped.append(outputFolder)
         if canRunHeadless {
+            // Only the steps the user left checked. The windowed path has always
+            // honoured `included` (it takes `config.steps`); headless received the
+            // whole script and applied every auto step regardless, so unchecking
+            // one did nothing there. Filtering here makes the two agree — and it
+            // is what lets a *checked* provenance step, like `markBad`, mean
+            // "yes, apply this" rather than being indistinguishable from one the
+            // user deliberately left off.
+            //
+            // **Only steps the user could actually uncheck are dropped.** A
+            // `.skip`-classified step is forced to `included = false` and its
+            // toggle is `.disabled`, so its inclusion state is not a decision —
+            // it is a default nobody can change. Honouring it stripped `icaClean`
+            // and `artifactClean` out of the headless script, which meant neither
+            // ran even when the file carried its own payload, and the batch
+            // output silently described a chain that had not happened. Whether a
+            // provenance step runs is decided by payload presence in
+            // `ProcessingCore`, not by a checkbox that cannot be ticked.
+            var includedScript = script
+            let toggleable = Set(config.steps.filter { $0.kind != .skip }.map(\.id))
+            let excluded = Set(config.steps.filter { !$0.included }.map(\.id))
+            includedScript.steps = script.steps.enumerated()
+                .filter { index, _ in !(toggleable.contains(index) && excluded.contains(index)) }
+                .map(\.element)
             Task {
                 await batch.startHeadless(
                     files: files,
-                    script: script,
+                    script: includedScript,
                     sourceName: sourceName,
                     outputFolder: outputFolder,
                     scopedURLs: scoped
@@ -349,7 +465,26 @@ struct BatchSetupSheet: View {
         } else {
             inputDropMessage = nil
         }
+        // Availability is a property of the *files*, so adding one can change
+        // how a step classifies (a file with no ICA sidecar turns "from this
+        // file's own record" back into a decision). Re-classify rather than
+        // leaving a label that was true of the earlier selection.
+        reclassifySteps()
         return true
+    }
+
+    /// Re-runs the shared classification against the current file selection,
+    /// preserving the include/review ticks the operator has already made.
+    private func reclassifySteps() {
+        guard let script else { return }
+        let previous = config.steps
+        config.configure(
+            script: script, sourceName: sourceName, availability: batchPayloadAvailability
+        )
+        for index in config.steps.indices where previous.indices.contains(index) {
+            config.steps[index].included = previous[index].included
+            config.steps[index].pauseToReview = previous[index].pauseToReview
+        }
     }
 
     private func handleProcessingSourceDrop(_ urls: [URL]) -> Bool {
@@ -385,7 +520,9 @@ struct BatchSetupSheet: View {
         sourceName = url.lastPathComponent
         settingsPopoverStepID = nil
         sourceDropMessage = nil
-        config.configure(script: read, sourceName: sourceName)
+        config.configure(
+            script: read, sourceName: sourceName, availability: batchPayloadAvailability
+        )
         config.showsConfigPane = false
         return true
     }

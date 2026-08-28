@@ -162,17 +162,31 @@ nonisolated enum DSP {
         return h
     }
 
-    /// Windowed-sinc (Hamming) low-pass FIR, gain `gain`, cutoff in normalized
-    /// frequency (1.0 == Nyquist). `numtaps` should be odd for linear phase.
-    static func windowedSincLowPass(numtaps: Int, cutoff: Double, gain: Double = 1) -> [Double] {
+    /// Windowed-sinc low-pass FIR, gain `gain`, cutoff in normalized frequency
+    /// (1.0 == Nyquist). `numtaps` should be odd for linear phase. A nil
+    /// `kaiserBeta` selects the historical Hamming window; a value selects a
+    /// Kaiser window with that beta.
+    static func windowedSincLowPass(
+        numtaps: Int,
+        cutoff: Double,
+        gain: Double = 1,
+        kaiserBeta: Double? = nil
+    ) -> [Double] {
         let n = numtaps % 2 == 1 ? numtaps : numtaps + 1
         let mid = (n - 1) / 2
         var h = [Double](repeating: 0, count: n)
         var sum = 0.0
+        let kaiserDenominator = kaiserBeta.map(modifiedBesselI0)
         for i in 0..<n {
             let k = Double(i - mid)
             let sinc: Double = k == 0 ? cutoff : sin(Double.pi * cutoff * k) / (Double.pi * k)
-            let window = 0.54 - 0.46 * cos(2 * Double.pi * Double(i) / Double(n - 1))
+            let window: Double
+            if let beta = kaiserBeta, let denominator = kaiserDenominator {
+                let ratio = 2 * Double(i) / Double(n - 1) - 1
+                window = modifiedBesselI0(beta * sqrt(max(0, 1 - ratio * ratio))) / denominator
+            } else {
+                window = 0.54 - 0.46 * cos(2 * Double.pi * Double(i) / Double(n - 1))
+            }
             h[i] = sinc * window
             sum += h[i]
         }
@@ -180,6 +194,20 @@ nonisolated enum DSP {
         let scale = gain / sum
         for i in 0..<n { h[i] *= scale }
         return h
+    }
+
+    /// Modified Bessel function I0 used by the Kaiser window. This convergent
+    /// power series is accurate well beyond the beta range used for FIR design.
+    private static func modifiedBesselI0(_ x: Double) -> Double {
+        let quarterXSquared = x * x / 4
+        var term = 1.0
+        var sum = 1.0
+        for k in 1...100 {
+            term *= quarterXSquared / Double(k * k)
+            sum += term
+            if term <= sum * 1e-16 { break }
+        }
+        return sum
     }
 
     // MARK: - FIR filtering
@@ -199,6 +227,21 @@ nonisolated enum DSP {
             vDSP_convD(xPad, 1, bBuf.baseAddress! + (nb - 1), -1, &y, 1, vDSP_Length(nx), vDSP_Length(nb))
         }
         return y
+    }
+
+    /// One linear-phase FIR pass with its constant group delay removed. Odd
+    /// reflection supplies the context consumed by the shift, so the returned
+    /// samples remain aligned without the squared response of `filtfiltFIR`.
+    static func delayCompensatedFIR(_ b: [Double], _ x: [Double]) -> [Double] {
+        let nb = b.count
+        guard nb > 1, x.count > 1 else { return x }
+        let delay = (nb - 1) / 2
+        let pad = min(max(nb - 1, delay), x.count - 1)
+        let ext = oddReflected(x, count: pad)
+        let y = firFilter(b, ext)
+        let start = pad + delay
+        guard start + x.count <= y.count else { return convolveSame(b, x) }
+        return Array(y[start..<(start + x.count)])
     }
 
     /// Zero-phase FIR filtering for a linear-phase (symmetric) kernel: full
@@ -232,18 +275,24 @@ nonisolated enum DSP {
         }
         let pad = 3 * (nb - 1)
         // Odd (point-symmetric) reflection padding, like scipy's default.
-        var ext = [Double]()
-        ext.reserveCapacity(x.count + 2 * pad)
-        for i in stride(from: pad, through: 1, by: -1) { ext.append(2 * x[0] - x[i]) }
-        ext.append(contentsOf: x)
-        let last = x.count - 1
-        for i in 1...pad { ext.append(2 * x[last] - x[last - i]) }
+        var ext = oddReflected(x, count: pad)
 
         var y = firFilter(b, ext)
         y.reverse()
         y = firFilter(b, y)
         y.reverse()
         return Array(y[pad..<(pad + x.count)])
+    }
+
+    private static func oddReflected(_ x: [Double], count: Int) -> [Double] {
+        guard count > 0, x.count > count else { return x }
+        var ext = [Double]()
+        ext.reserveCapacity(x.count + 2 * count)
+        for i in stride(from: count, through: 1, by: -1) { ext.append(2 * x[0] - x[i]) }
+        ext.append(contentsOf: x)
+        let last = x.count - 1
+        for i in 1...count { ext.append(2 * x[last] - x[last - i]) }
+        return ext
     }
 
     // MARK: - Integer resampling

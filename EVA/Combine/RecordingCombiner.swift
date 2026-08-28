@@ -23,7 +23,65 @@ nonisolated struct CombineInput: Sendable {
     let signal: MFFSignalData
     let segments: [EpochSegment]
     let badChannels: Set<Int>
+    let alreadyInterpolatedChannels: Set<Int>
     let geometry: ElectrodeGeometry?
+
+    init(
+        url: URL,
+        signal: MFFSignalData,
+        segments: [EpochSegment],
+        badChannels: Set<Int>,
+        alreadyInterpolatedChannels: Set<Int> = [],
+        geometry: ElectrodeGeometry?
+    ) {
+        self.url = url
+        self.signal = signal
+        self.segments = segments
+        self.badChannels = badChannels
+        self.alreadyInterpolatedChannels = alreadyInterpolatedChannels
+        self.geometry = geometry
+    }
+}
+
+nonisolated struct RestoredBadChannelState: Sendable, Equatable {
+    let bad: Set<Int>
+    let alreadyInterpolated: Set<Int>
+}
+
+nonisolated enum CombineError: LocalizedError, Equatable {
+    case noInputs
+    case noUsableCategories
+    case channelMapping(url: URL, failure: ChannelMappingFailure)
+    case samplingRateMismatch(url: URL, actual: Double, expected: Double)
+    case epochLengthMismatch(url: URL, actual: Int, expected: Int)
+    case malformedSignal(url: URL, reason: String)
+    case interpolationUnavailable(url: URL, reason: InterpolationFailureReason)
+
+    enum InterpolationFailureReason: Equatable {
+        case missingGeometry
+        case insufficientDonors(Set<Int>)
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case .noInputs:
+            return "No recordings were supplied for combining."
+        case .noUsableCategories:
+            return "The recordings have no usable categories to combine."
+        case .channelMapping(let url, let failure):
+            return "\(url.lastPathComponent): \(failure.message)."
+        case .samplingRateMismatch(let url, let actual, let expected):
+            return "\(url.lastPathComponent): sampling rate \(actual) Hz does not match \(expected) Hz."
+        case .epochLengthMismatch(let url, let actual, let expected):
+            return "\(url.lastPathComponent): epoch length \(actual) samples does not match \(expected) samples."
+        case .malformedSignal(let url, let reason):
+            return "\(url.lastPathComponent): \(reason)."
+        case .interpolationUnavailable(let url, .missingGeometry):
+            return "\(url.lastPathComponent): interpolation requested but no electrode geometry is available."
+        case .interpolationUnavailable(let url, .insufficientDonors(let channels)):
+            return "\(url.lastPathComponent): unable to interpolate channels \(ChannelDecisionSteps.channelList(channels)); their positions or sufficient good donors are unavailable."
+        }
+    }
 }
 
 nonisolated enum RecordingCombiner {
@@ -79,10 +137,10 @@ nonisolated enum RecordingCombiner {
         let epochLen = input.segments.map { $0.endSample - $0.startSample + 1 }.min() ?? 0
         let snr = pooledSNR(input: input, baselineSampleCount: baseline)
 
-        return RecordingSummary(
+        var summary = RecordingSummary(
             url: input.url,
             fileName: input.url.lastPathComponent,
-            netName: signal.channelNames?.count == signal.numberOfChannels ? "" : "",
+            netName: input.geometry?.name ?? "",
             channelCount: signal.numberOfChannels,
             samplingRate: signal.samplingRate,
             epochLengthSamples: epochLen,
@@ -92,6 +150,127 @@ nonisolated enum RecordingCombiner {
             psaArtifactThresholds: psaArtifactThresholds,
             snr: snr
         )
+        summary.channelLayout = ChannelLayoutSignature(
+            channelNames: signal.channelNames,
+            expectedCount: signal.numberOfChannels
+        )
+        return summary
+    }
+
+    static func restoredBadChannelState(fromPackage url: URL) -> RestoredBadChannelState {
+        guard let script = EVAProcessingScriptXML.read(fromPackage: url) else {
+            return RestoredBadChannelState(bad: [], alreadyInterpolated: [])
+        }
+        let bad = script.steps.last(where: { $0.operation == .markBad })?
+            .parameters["channels"]
+            .map(ChannelDecisionSteps.channelIndices(from:)) ?? []
+        let interpolated = script.steps.last(where: { $0.operation == .interpolateChannels })?
+            .parameters["channels"]
+            .map(ChannelDecisionSteps.channelIndices(from:)) ?? []
+        return RestoredBadChannelState(bad: bad, alreadyInterpolated: interpolated)
+    }
+
+    /// Identity of one contributor to a combined output: the package, the tip of
+    /// *its* processing history, and how many steps produced it.
+    ///
+    /// The node ID is derived the same way a recording window derives it — the
+    /// content-addressed chain from the file's own `eva.xml`, keyed by package
+    /// name — so the value recorded here is the node the contributor's own
+    /// History rail would show as current when the file is opened. A file with
+    /// no `eva.xml` has no lineage to name, and reports its root.
+    static func contributorIdentity(ofPackage url: URL) -> (node: String, stepCount: Int) {
+        let name = url.lastPathComponent
+        let script = EVAProcessingScriptXML.read(fromPackage: url) ?? EVAProcessingScript()
+        let history = EVAHistory(recordingKey: name, script: script)
+        return (history.current.id.short, script.steps.count)
+    }
+
+    /// One `combineInput` step per contributor, for the combined package's own
+    /// `eva.xml`.
+    ///
+    /// **A combined output starts a fresh history** (ROADMAP RW-1 item 15). The
+    /// alternative — splicing the contributors' histories into the new file's
+    /// lineage — would claim something untrue: undo in a recording window is
+    /// linear, and there is no single "step before" a grand average of six
+    /// files. Navigating such a chain could not reproduce the bytes at any node,
+    /// which is the one promise a node ID makes.
+    ///
+    /// So the inputs are recorded as *provenance at the root* instead of as
+    /// ancestry: which files, at which point in each file's own history. That is
+    /// enough to find every contributor's processed state and to notice when one
+    /// of them has moved on since; it just does not pretend the result can be
+    /// undone back into them.
+    static func contributorProvenanceSteps(for inputs: [CombineInput]) -> [EVAProcessingStep] {
+        inputs.map { input in
+            let identity = contributorIdentity(ofPackage: input.url)
+            return EVAProcessingStep(
+                operation: .combineInput,
+                parameters: [
+                    "file": input.url.lastPathComponent,
+                    "sourceNode": identity.node,
+                    "sourceSteps": "\(identity.stepCount)"
+                ],
+                replayable: false,
+                note: "Contributor to this combined recording, at that point in its own history."
+            )
+        }
+    }
+
+    static func badChannelProvenanceSteps(
+        for inputs: [CombineInput],
+        policy: BadChannelPolicy
+    ) -> [EVAProcessingStep] {
+        inputs.map { input in
+            let appliedChannels: Set<Int>
+            switch policy {
+            case .interpolatePerFile:
+                appliedChannels = input.badChannels.subtracting(input.alreadyInterpolatedChannels)
+            case .excludePerChannel:
+                appliedChannels = input.badChannels
+            }
+            return EVAProcessingStep(
+                operation: .combineBadChannelPolicy,
+                parameters: [
+                    "file": input.url.lastPathComponent,
+                    "policy": policy.rawValue,
+                    "channels": ChannelDecisionSteps.channelList(appliedChannels),
+                    "alreadyInterpolatedChannels": ChannelDecisionSteps.channelList(input.alreadyInterpolatedChannels)
+                ],
+                replayable: false,
+                note: "Per-contributor bad-channel handling used by grand average."
+            )
+        }
+    }
+
+    static func channelMapping(
+        of summary: RecordingSummary,
+        reference: RecordingSummary
+    ) -> ChannelMappingResult {
+        channelMapping(source: summary.channelLayout, reference: reference.channelLayout)
+    }
+
+    private static func channelMapping(
+        source: ChannelLayoutSignature,
+        reference: ChannelLayoutSignature
+    ) -> ChannelMappingResult {
+        guard !source.namesInOrder.isEmpty, !reference.namesInOrder.isEmpty else {
+            return .unresolved(.missingNames)
+        }
+        let duplicates = source.duplicateNames.union(reference.duplicateNames)
+        guard source.hasUniqueNames, reference.hasUniqueNames else {
+            return duplicates.isEmpty ? .unresolved(.missingNames) : .unresolved(.duplicateNames(duplicates))
+        }
+        if source.namesInOrder == reference.namesInOrder { return .identity }
+        let sourceSet = Set(source.namesInOrder)
+        let referenceSet = Set(reference.namesInOrder)
+        guard sourceSet == referenceSet else {
+            return .unresolved(.setMismatch(
+                missing: referenceSet.subtracting(sourceSet),
+                extra: sourceSet.subtracting(referenceSet)
+            ))
+        }
+        let sourceIndex = Dictionary(uniqueKeysWithValues: source.namesInOrder.enumerated().map { ($1, $0) })
+        return .remapped(sourceIndexByReferenceIndex: reference.namesInOrder.map { sourceIndex[$0]! })
     }
 
     /// Per-file SNR from pooling every category's single trials (noise is
@@ -138,8 +317,19 @@ nonisolated enum RecordingCombiner {
         if summary.channelCount != reference.channelCount {
             flags.append(.channelCountMismatch(summary.channelCount, expected: reference.channelCount))
         }
-        if abs(summary.samplingRate - reference.samplingRate) > 0.5 {
+        if abs(summary.samplingRate - reference.samplingRate) >= 1e-9 {
             flags.append(.samplingRateMismatch(summary.samplingRate, expected: reference.samplingRate))
+        }
+        if summary.epochLengthSamples > 0,
+           reference.epochLengthSamples > 0,
+           summary.epochLengthSamples != reference.epochLengthSamples {
+            flags.append(.epochLengthMismatch(
+                summary.epochLengthSamples,
+                expected: reference.epochLengthSamples
+            ))
+        }
+        if case .unresolved(let failure) = channelMapping(of: summary, reference: reference) {
+            flags.append(.channelIdentityUnresolved(failure))
         }
         return flags
     }
@@ -149,18 +339,34 @@ nonisolated enum RecordingCombiner {
     static func append(
         _ inputs: [CombineInput],
         log: EVAProcessLog
-    ) -> (signal: MFFSignalData, segments: [EpochSegment]) {
-        precondition(!inputs.isEmpty)
+    ) throws -> (signal: MFFSignalData, segments: [EpochSegment]) {
+        let inputs = try validatedAndRemappedInputs(inputs)
         let channelCount = inputs[0].signal.numberOfChannels
         var combined = [[Float]](repeating: [], count: channelCount)
         var segments: [EpochSegment] = []
+        var events: [MFFEvent] = []
         var sampleOffset = 0
 
         for input in inputs {
             let len = input.signal.data.first?.count ?? 0
-            for c in 0..<channelCount where c < input.signal.data.count {
+            for c in 0..<channelCount {
                 combined[c].append(contentsOf: input.signal.data[c])
             }
+            let offsetSeconds = Double(sampleOffset) / input.signal.samplingRate
+            events.append(contentsOf: input.signal.events.map { event in
+                MFFEvent(
+                    id: "\(input.url.lastPathComponent)-\(event.id)",
+                    code: event.code,
+                    label: event.label,
+                    eventDescription: event.eventDescription,
+                    cell: event.cell,
+                    beginTimeSeconds: event.beginTimeSeconds + offsetSeconds,
+                    rawBeginTime: event.rawBeginTime,
+                    sourceFile: input.url.lastPathComponent,
+                    durationSeconds: event.durationSeconds,
+                    timeAnchor: event.timeAnchor
+                )
+            })
             for seg in input.segments {
                 segments.append(EpochSegment(
                     startSample: seg.startSample + sampleOffset,
@@ -178,7 +384,15 @@ nonisolated enum RecordingCombiner {
         }
 
         let base = inputs[0].signal
-        let signal = base.replacingData(combined, signalTypeSuffix: "combined-append")
+        let signal = base.reconstructingTimeline(
+            data: combined,
+            events: events,
+            epochSegments: segments,
+            isSegmented: true,
+            isAveraged: false,
+            isGrandAverage: false,
+            signalTypeSuffix: "combined-append"
+        )
         return (signal, segments)
     }
 
@@ -199,8 +413,8 @@ nonisolated enum RecordingCombiner {
         badChannelPolicy: BadChannelPolicy,
         rebaseline: Bool,
         log: EVAProcessLog
-    ) -> GrandAverageOutput? {
-        precondition(!inputs.isEmpty)
+    ) throws -> GrandAverageOutput {
+        let inputs = try validatedAndRemappedInputs(inputs)
         let channelCount = inputs[0].signal.numberOfChannels
 
         // Gather each file's per-canonical-category average, stimulus-aligned.
@@ -212,7 +426,12 @@ nonisolated enum RecordingCombiner {
             let map = categoryMap[input.url] ?? [:]
             let grouped = Dictionary(grouping: input.segments, by: { map[$0.category] ?? $0.category })
             for (canonical, segs) in grouped {
-                guard let avg = fileCategoryAverage(input: input, segments: segs, rebaseline: rebaseline) else { continue }
+                guard let avg = try fileCategoryAverage(
+                    input: input,
+                    segments: segs,
+                    rebaseline: rebaseline,
+                    badChannelPolicy: badChannelPolicy
+                ) else { continue }
                 let weight: Double
                 switch weighting {
                 case .equalPerFile:      weight = 1
@@ -232,7 +451,7 @@ nonisolated enum RecordingCombiner {
             }
         }
 
-        guard !byCategory.isEmpty else { return nil }
+        guard !byCategory.isEmpty else { throw CombineError.noUsableCategories }
 
         // Combine each category to a common stimulus-locked window.
         var outSegments: [EpochSegment] = []
@@ -313,7 +532,15 @@ nonisolated enum RecordingCombiner {
         if totalWeight > 0 { for (url, w) in rawWeightByFile { weightByFile[url] = w / totalWeight } }
 
         let base = inputs[0].signal
-        let signal = base.replacingData(outData, signalTypeSuffix: "grand-average")
+        let signal = base.reconstructingTimeline(
+            data: outData,
+            events: [],
+            epochSegments: outSegments,
+            isSegmented: true,
+            isAveraged: true,
+            isGrandAverage: true,
+            signalTypeSuffix: "grand-average"
+        )
         return GrandAverageOutput(signal: signal, segments: outSegments,
                                   noiseByCategory: noiseByCategory, weightByFile: weightByFile)
     }
@@ -325,12 +552,32 @@ nonisolated enum RecordingCombiner {
     private static func fileCategoryAverage(
         input: CombineInput,
         segments: [EpochSegment],
-        rebaseline: Bool
-    ) -> (waveform: [[Float]], singleTrials: [[[Float]]], pre: Int, post: Int, trials: Int)? {
+        rebaseline: Bool,
+        badChannelPolicy: BadChannelPolicy
+    ) throws -> (waveform: [[Float]], singleTrials: [[[Float]]], pre: Int, post: Int, trials: Int)? {
         guard !segments.isEmpty else { return nil }
+
+        let unresolvedBad = input.badChannels.subtracting(input.alreadyInterpolatedChannels)
+        var interpolationWeights: [Int: (indices: [Int], weights: [Double])] = [:]
+        if badChannelPolicy == .interpolatePerFile, !unresolvedBad.isEmpty {
+            guard let geometry = input.geometry else {
+                throw CombineError.interpolationUnavailable(url: input.url, reason: .missingGeometry)
+            }
+            let good = (0..<input.signal.numberOfChannels).filter { !unresolvedBad.contains($0) }
+            interpolationWeights = SphericalSpline.interpolationWeightsBatch(
+                targets: unresolvedBad.sorted(),
+                good: good,
+                positions: geometry.positions
+            )
+            let failed = unresolvedBad.subtracting(interpolationWeights.keys)
+            guard failed.isEmpty else {
+                throw CombineError.interpolationUnavailable(url: input.url, reason: .insufficientDonors(failed))
+            }
+        }
 
         if input.signal.isAveraged, segments.count == 1, let seg = segments.first,
            var wave = slice(signal: input.signal, segment: seg) {
+            applyInterpolation(interpolationWeights, to: &wave)
             let pre = seg.stimulusOffsetSamples
             let post = (seg.endSample - seg.startSample) - pre
             if rebaseline, pre > 0 { baselineCorrect(&wave, baselineSampleCount: pre) }
@@ -349,12 +596,138 @@ nonisolated enum RecordingCombiner {
             let lo = stim - pre, hi = stim + post
             guard lo >= 0, hi < (input.signal.data.first?.count ?? 0) else { continue }
             var trial = input.signal.data.map { Array($0[lo...hi]) }
+            applyInterpolation(interpolationWeights, to: &trial)
             if rebaseline, pre > 0 { baselineCorrect(&trial, baselineSampleCount: pre) }
             trials.append(trial)
         }
         guard !trials.isEmpty else { return nil }
         let avg = EpochSNR.averageTrials(trials, channels: channelCount, samples: window)
         return (avg, trials, pre, post, trials.count)
+    }
+
+    private static func applyInterpolation(
+        _ recipes: [Int: (indices: [Int], weights: [Double])],
+        to channels: inout [[Float]]
+    ) {
+        guard let sampleCount = channels.first?.count else { return }
+        let source = channels
+        for (target, recipe) in recipes where channels.indices.contains(target) {
+            var replacement = [Float](repeating: 0, count: sampleCount)
+            for (index, weight) in zip(recipe.indices, recipe.weights)
+                where source.indices.contains(index) && source[index].count == sampleCount {
+                let w = Float(weight)
+                for sample in 0..<sampleCount { replacement[sample] += w * source[index][sample] }
+            }
+            channels[target] = replacement
+        }
+    }
+
+    private static func validatedAndRemappedInputs(_ inputs: [CombineInput]) throws -> [CombineInput] {
+        guard let reference = inputs.first else { throw CombineError.noInputs }
+        let referenceRate = reference.signal.samplingRate
+        let referenceEpochLength = reference.segments.map { $0.endSample - $0.startSample + 1 }.min() ?? 0
+        let referenceLayout = ChannelLayoutSignature(
+            channelNames: reference.signal.channelNames,
+            expectedCount: reference.signal.numberOfChannels
+        )
+
+        return try inputs.map { input in
+            guard input.signal.data.count == input.signal.numberOfChannels,
+                  let sampleCount = input.signal.data.first?.count,
+                  input.signal.data.allSatisfy({ $0.count == sampleCount }) else {
+                throw CombineError.malformedSignal(url: input.url, reason: "channel data are empty or ragged")
+            }
+            guard input.signal.samplingRate.isFinite, input.signal.samplingRate > 0,
+                  referenceRate.isFinite, referenceRate > 0 else {
+                throw CombineError.malformedSignal(url: input.url, reason: "sampling rate is not finite and positive")
+            }
+            guard !input.segments.isEmpty else {
+                throw CombineError.malformedSignal(url: input.url, reason: "recording has no epoch segments")
+            }
+            guard abs(input.signal.samplingRate - referenceRate) < 1e-9 else {
+                throw CombineError.samplingRateMismatch(
+                    url: input.url,
+                    actual: input.signal.samplingRate,
+                    expected: referenceRate
+                )
+            }
+            let epochLength = input.segments.map { $0.endSample - $0.startSample + 1 }.min() ?? 0
+            if epochLength > 0, referenceEpochLength > 0, epochLength != referenceEpochLength {
+                throw CombineError.epochLengthMismatch(
+                    url: input.url,
+                    actual: epochLength,
+                    expected: referenceEpochLength
+                )
+            }
+            guard input.segments.allSatisfy({
+                $0.startSample >= 0 && $0.endSample >= $0.startSample && $0.endSample < sampleCount
+            }) else {
+                throw CombineError.malformedSignal(url: input.url, reason: "epoch segments are outside the signal bounds")
+            }
+            let channelIndices = input.badChannels.union(input.alreadyInterpolatedChannels)
+            guard channelIndices.allSatisfy({ (0..<input.signal.numberOfChannels).contains($0) }) else {
+                throw CombineError.malformedSignal(url: input.url, reason: "bad-channel provenance contains an invalid channel index")
+            }
+            guard input.signal.impedancesKOhm.map({ $0.count == input.signal.numberOfChannels }) ?? true,
+                  input.signal.positiveUpFlags.map({ $0.count == input.signal.numberOfChannels }) ?? true else {
+                throw CombineError.malformedSignal(url: input.url, reason: "channel metadata do not match the signal channel count")
+            }
+            let sourceLayout = ChannelLayoutSignature(
+                channelNames: input.signal.channelNames,
+                expectedCount: input.signal.numberOfChannels
+            )
+            let mapping = channelMapping(source: sourceLayout, reference: referenceLayout)
+            switch mapping {
+            case .identity:
+                return input
+            case .unresolved(let failure):
+                throw CombineError.channelMapping(url: input.url, failure: failure)
+            case .remapped(let sourceIndexByReferenceIndex):
+                let remappedData = sourceIndexByReferenceIndex.map { input.signal.data[$0] }
+                let remappedImpedances = input.signal.impedancesKOhm.map { values in
+                    sourceIndexByReferenceIndex.map { values.indices.contains($0) ? values[$0] : .nan }
+                }
+                let remappedPositiveUp = input.signal.positiveUpFlags.map { values in
+                    sourceIndexByReferenceIndex.map { values.indices.contains($0) ? values[$0] : true }
+                }
+                let sourceToReference = Dictionary(
+                    uniqueKeysWithValues: sourceIndexByReferenceIndex.enumerated().map { ($1, $0) }
+                )
+                let remapSet: (Set<Int>) -> Set<Int> = { sourceSet in
+                    Set(sourceSet.compactMap { sourceToReference[$0] })
+                }
+                let positions = input.geometry.map { geometry in
+                    Dictionary(uniqueKeysWithValues: geometry.positions.compactMap { sourceIndex, position in
+                        sourceToReference[sourceIndex].map { ($0, position) }
+                    })
+                }
+                let signal = MFFSignalData(
+                    signalURL: input.signal.signalURL,
+                    signalType: input.signal.signalType,
+                    numberOfChannels: reference.signal.numberOfChannels,
+                    samplingRate: input.signal.samplingRate,
+                    duration: input.signal.duration,
+                    recordingStartTime: input.signal.recordingStartTime,
+                    events: input.signal.events,
+                    data: remappedData,
+                    channelNames: reference.signal.channelNames,
+                    epochSegments: input.signal.epochSegments,
+                    isSegmented: input.signal.isSegmented,
+                    isAveraged: input.signal.isAveraged,
+                    isGrandAverage: input.signal.isGrandAverage,
+                    impedancesKOhm: remappedImpedances,
+                    positiveUpFlags: remappedPositiveUp
+                )
+                return CombineInput(
+                    url: input.url,
+                    signal: signal,
+                    segments: input.segments,
+                    badChannels: remapSet(input.badChannels),
+                    alreadyInterpolatedChannels: remapSet(input.alreadyInterpolatedChannels),
+                    geometry: positions.map { ElectrodeGeometry(name: input.geometry?.name ?? "", positions: $0) }
+                )
+            }
+        }
     }
 
     /// Subtracts each channel's mean over the leading `baselineSampleCount`

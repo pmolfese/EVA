@@ -35,4 +35,15 @@ struct ElectrodeGeometryTests {
         let signalURL = Fixtures.url("example_4.mff").appendingPathComponent("signal1.bin")
         #expect(ElectrodeGeometry.load(fromPackageContaining: signalURL) == nil)
     }
+
+    @Test func loadsFromMFFDirectoryOrStandaloneXML() throws {
+        let package = Fixtures.url("example_1.mff")
+        let standalone = package.appendingPathComponent("coordinates.xml")
+        let fromPackage = try #require(ElectrodeGeometry.load(from: package))
+        let fromXML = try #require(ElectrodeGeometry.load(from: standalone))
+
+        #expect(fromPackage.name == fromXML.name)
+        #expect(fromPackage.positions == fromXML.positions)
+        #expect(fromPackage.channelNames == fromXML.channelNames)
+    }
 }

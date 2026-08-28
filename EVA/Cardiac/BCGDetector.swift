@@ -9,13 +9,15 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Four independent approaches to detecting ballistocardiogram (BCG) artifact events
+//  Five independent approaches to detecting ballistocardiogram (BCG) artifact events
 //  in simultaneous EEG/fMRI. Each method exploits a different signature of BCG:
 //
-//  1. GFP Periodicity   — BCG repeats at the cardiac rate; bandpass + GFP peak-find.
-//  2. Spatial PCA       — BCG dominates the top spatial PCs of an exemplar window.
-//  3. Cardiac Power Map — channels loaded with cardiac-band power drive a weighted GFP.
-//  4. QRS Locking       — BCG lags the R-wave by a fixed mechanical delay (~300 ms).
+//  1. GFP Periodicity      — BCG repeats at the cardiac rate; bandpass + GFP peak-find.
+//  2. Spatial PCA          — BCG dominates the top spatial PCs of an exemplar window.
+//  3. Cardiac Power Map    — channels loaded with cardiac-band power drive a weighted GFP.
+//  4. QRS Locking          — BCG lags the R-wave by a fixed mechanical delay (~300 ms).
+//  5. Hemispheric Topography — BCG has a strong, opposite-polarity field over left vs.
+//     right anterior-temporal/facial electrodes; peak-detect their difference trace.
 //
 //  Spatial PCA improvements implemented here:
 //   • Multi-component subspace (top N eigenvectors, RSS-combined score)
@@ -23,8 +25,8 @@
 //   • Spatial whitening (suppresses dominant non-BCG directions before PCA)
 //   • Respiratory-envelope adaptive normalization (5-10 s window, tracks ~0.2 Hz modulation)
 //
-//  The spatial-PCA detector is an original Swift implementation in the spirit of
-//  PCA / optimal-basis-set (OBS) BCG modeling; no upstream code was copied.
+//  The spatial-PCA and hemispheric-topography detectors are original Swift
+//  implementations in the spirit of the cited techniques; no upstream code was copied.
 //
 //  References:
 //    * Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith,
@@ -36,6 +38,10 @@
 //      event-related potentials recorded simultaneously with 3-T fMRI:
 //      Removal of the ballistocardiogram artefact. NeuroImage, 34(2), 587-597.
 //      https://doi.org/10.1016/j.neuroimage.2006.09.031
+//    * Iannotti, G. R., Pittau, F., Michel, C. M., Vulliemoz, S., & Grouiller, F.
+//      (2015). Pulse artifact detection in simultaneous EEG-fMRI recording based
+//      on EEG map topography. Brain Topography, 28(1), 21-32.
+//      https://doi.org/10.1007/s10548-014-0409-z
 //
 
 import Accelerate
@@ -438,6 +444,45 @@ nonisolated enum BCGDetector {
             .filter { $0 >= 0 && $0 < recordingDuration }
     }
 
+    // MARK: - Method 5: Hemispheric Topography
+
+    /// Detects BCG peaks from the characteristic left/right polarity reversal of the
+    /// scalp pulse-artifact topography over anterior-temporal/facial electrodes
+    /// (Iannotti et al. 2015): estimate the artifact as `BCG(t) = mean(right) −
+    /// mean(left)` across two hemisphere channel groups, then peak-detect the
+    /// magnitude of that single trace. Requires no ECG and is cheap to compute; it
+    /// depends on the right/left groups actually straddling the asymmetric field
+    /// (temporal/facial coverage with clear inter-hemispheric voltage gradient).
+    static func hemisphericTopographyEvents(
+        rightChannels: [[Float]],
+        leftChannels: [[Float]],
+        samplingRate: Double,
+        minHR: Double = 40,
+        maxHR: Double = 120,
+        thresholdSD: Double = 2.5
+    ) async -> [Double] {
+        guard !rightChannels.isEmpty, !leftChannels.isEmpty,
+              let n = rightChannels.first?.count, n > Int(samplingRate * 4),
+              leftChannels.first?.count == n,
+              samplingRate > 0
+        else { return [] }
+
+        let muR = channelMean(rightChannels)
+        let muL = channelMean(leftChannels)
+        guard muR.count == n, muL.count == n else { return [] }
+
+        var diff = [Float](repeating: 0, count: n)
+        vDSP_vsub(muL, 1, muR, 1, &diff, 1, vDSP_Length(n))   // right − left
+
+        let absDiff    = vDSP.absolute(diff)
+        let smoothW    = max(1, Int(samplingRate * 0.05))
+        let smoothed   = boxCarSmooth(absDiff, window: smoothW)
+        let maxHz      = max(maxHR / 60.0, 0.1)
+        let minSpacing = Int(samplingRate / maxHz * 0.6)
+        return findPeaks(in: smoothed, samplingRate: samplingRate,
+                         thresholdSD: thresholdSD, minSpacingSamples: max(minSpacing, 1))
+    }
+
     // MARK: - Virtual ECG (PCA across the proxy channel group)
 
     /// Collapses a BCG-proxy channel group into a single "virtual ECG" trace:
@@ -535,25 +580,55 @@ nonisolated enum BCGDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.4f", time),
                 sourceFile: sourceFile,
-                durationSeconds: duration
+                durationSeconds: duration,
+                timeAnchor: .peak
             )
         }
     }
 
     // MARK: - Shared internals
 
+    /// Global field power: spatial standard deviation across channels at each
+    /// sample, i.e. `sqrt(mean(x^2) - mean(x)^2)` after removing the
+    /// instantaneous cross-channel mean (average reference).
     static func computeGFP(channels: [[Float]]) -> [Float] {
         guard let first = channels.first else { return [] }
         let n = first.count
+        let nCh = channels.count
+        var sum1 = [Float](repeating: 0, count: n)
         var sum2 = [Float](repeating: 0, count: n)
         for ch in channels {
+            vDSP.add(ch, sum1, result: &sum1)
             vDSP.add(multiplication: (ch, ch), sum2, result: &sum2)
         }
-        var invCh = 1.0 / Float(channels.count)
-        vDSP_vsmul(sum2, 1, &invCh, &sum2, 1, vDSP_Length(n))
+        var invCh = 1.0 / Float(nCh)
+        var mean1 = [Float](repeating: 0, count: n)
+        vDSP_vsmul(sum1, 1, &invCh, &mean1, 1, vDSP_Length(n))
+        var mean2 = [Float](repeating: 0, count: n)
+        vDSP_vsmul(sum2, 1, &invCh, &mean2, 1, vDSP_Length(n))
+        var mean1Squared = [Float](repeating: 0, count: n)
+        vDSP_vsq(mean1, 1, &mean1Squared, 1, vDSP_Length(n))
+        var variance = [Float](repeating: 0, count: n)
+        vDSP_vsub(mean1Squared, 1, mean2, 1, &variance, 1, vDSP_Length(n))
+        var zero: Float = 0
+        vDSP_vthr(variance, 1, &zero, &variance, 1, vDSP_Length(n))
         var len = Int32(n)
-        vvsqrtf(&sum2, sum2, &len)
-        return sum2
+        vvsqrtf(&variance, variance, &len)
+        return variance
+    }
+
+    /// Per-sample average across a channel group.
+    static func channelMean(_ channels: [[Float]]) -> [Float] {
+        guard let first = channels.first, !first.isEmpty else { return [] }
+        let n = first.count
+        var sum = [Float](repeating: 0, count: n)
+        for ch in channels where ch.count == n {
+            vDSP.add(ch, sum, result: &sum)
+        }
+        var scale = 1.0 / Float(channels.count)
+        var mean = [Float](repeating: 0, count: n)
+        vDSP_vsmul(sum, 1, &scale, &mean, 1, vDSP_Length(n))
+        return mean
     }
 
     /// Non-maximum suppression peak finder.
@@ -594,7 +669,17 @@ nonisolated enum BCGDetector {
     // MARK: - Eigenvector computation
 
     /// Returns the top `k` eigenvectors of the exemplar covariance matrix,
-    /// computed via deflated power iteration (orthogonal deflation after each PC).
+    /// largest eigenvalue first, via LAPACK's exact symmetric eigensolver
+    /// (`ssyev_`, the same routine `applyWhitening` below uses).
+    ///
+    /// An earlier version used deflated power iteration seeded from the
+    /// all-ones vector. That fails whenever the target eigenvector is
+    /// orthogonal to the seed — which zero-sum dipolar spatial patterns
+    /// commonly are — and no small fixed set of seeds can rule that out for
+    /// every possible pattern (e.g. `[1, 1, -1, -1]` is orthogonal to both
+    /// the all-ones and alternating-sign seeds). An exact eigendecomposition
+    /// has no seed to be unlucky with, and `nCh` is small enough (tens of
+    /// channels) that the full solve is cheap.
     private static func topEigenvectors(exemplar: [[Float]], k: Int) -> [[Float]] {
         let nCh = exemplar.count
         guard nCh > 0, let firstCh = exemplar.first, firstCh.count > 0, k >= 1 else {
@@ -602,6 +687,7 @@ nonisolated enum BCGDetector {
         }
         let nT   = firstCh.count
         let flat = exemplar.flatMap { $0 }   // row-major (nCh × nT)
+        let wanted = min(k, nCh)
 
         // Symmetric covariance C = flat * flat^T / nT (upper triangle).
         var cov = [Float](repeating: 0, count: nCh * nCh)
@@ -615,40 +701,33 @@ nonisolated enum BCGDetector {
             for j in (i+1) ..< nCh { cov[j * nCh + i] = cov[i * nCh + j] }
         }
 
+        var jobz: Int8 = Int8(UInt8(ascii: "V"))
+        var uplo: Int8 = Int8(UInt8(ascii: "U"))
+        var n32   = Int32(nCh)
+        var lda   = Int32(nCh)
+        var eigenvalues = [Float](repeating: 0, count: nCh)
+        var lwork = Int32(3 * nCh + 64)
+        var work  = [Float](repeating: 0, count: Int(lwork))
+        var info  = Int32(0)
+        ssyev_(&jobz, &uplo, &n32, &cov, &lda, &eigenvalues, &work, &lwork, &info)
+        guard info == 0 else {
+            // Degenerate fallback: the standard basis, so callers still get
+            // `k` orthonormal (if arbitrary) directions rather than crashing.
+            return (0..<wanted).map { index in
+                var v = [Float](repeating: 0, count: nCh)
+                v[index] = 1
+                return v
+            }
+        }
+
+        // ssyev_ (Fortran column-major) returns eigenvectors as its columns; viewed
+        // from Swift (row-major) those columns become rows: cov[i, :] = eigenvector i.
+        // Eigenvalues come back ascending, so the largest are the last rows.
         var eigvecs = [[Float]]()
-        eigvecs.reserveCapacity(k)
-        var workCov = cov   // deflated copy
-
-        for _ in 0 ..< k {
-            var v  = [Float](repeating: 1.0 / sqrt(Float(nCh)), count: nCh)
-            var Cv = [Float](repeating: 0, count: nCh)
-            for _ in 0 ..< 120 {
-                cblas_sgemv(CblasRowMajor, CblasNoTrans,
-                            Int32(nCh), Int32(nCh),
-                            1.0, workCov, Int32(nCh),
-                            v, 1, 0.0, &Cv, 1)
-                var norm: Float = 0
-                vDSP_svesq(Cv, 1, &norm, vDSP_Length(nCh))
-                norm = sqrt(norm)
-                if norm < 1e-12 { break }
-                var invN = 1.0 / norm
-                vDSP_vsmul(Cv, 1, &invN, &v, 1, vDSP_Length(nCh))
-            }
-            eigvecs.append(v)
-
-            // Deflate: workCov -= lambda * v * v^T   (lambda = v^T C v)
-            cblas_sgemv(CblasRowMajor, CblasNoTrans,
-                        Int32(nCh), Int32(nCh),
-                        1.0, workCov, Int32(nCh),
-                        v, 1, 0.0, &Cv, 1)
-            var lambda: Float = 0
-            vDSP_dotpr(v, 1, Cv, 1, &lambda, vDSP_Length(nCh))
-            let negLambda = -lambda
-            cblas_ssyr(CblasRowMajor, CblasUpper,
-                       Int32(nCh), negLambda, v, 1, &workCov, Int32(nCh))
-            for i in 0 ..< nCh {
-                for j in (i+1) ..< nCh { workCov[j * nCh + i] = workCov[i * nCh + j] }
-            }
+        eigvecs.reserveCapacity(wanted)
+        for offset in stride(from: nCh - 1, through: nCh - wanted, by: -1) {
+            let base = offset * nCh
+            eigvecs.append(Array(cov[base..<(base + nCh)]))
         }
         return eigvecs
     }

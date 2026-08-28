@@ -39,7 +39,10 @@ struct ProcessingStoreTests {
         let p = vm.parameters
         #expect(p["preStimulusMs"] == "100")
         #expect(p["postStimulusMs"] == "500")
-        #expect(p["baselineCorrected"] == "true")
+        // Deliberately absent: baseline correction moved out to its own
+        // `baseline` step, for the same reason average reference did — see
+        // `ReplaySettingsRestore`.
+        #expect(p["baselineCorrected"] == nil)
     }
 
     @MainActor

@@ -9,10 +9,10 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Compatibility pre-flight (TODO.md Priority 1): checks one recorded step
+//  Compatibility pre-flight (ROADMAP.md (completed batch suite)): checks one recorded step
 //  against a target signal's actual sampling rate / channel count / events,
 //  so an incompatible step is auto-flagged and unchecked in the replay config
-//  pane instead of silently no-oping (or throwing deep inside `GradientRemover`/
+//  pane instead of silently no-oping (or throwing deep inside the gradient/
 //  `EEGSignalFilter`) partway through a run. Same shape as
 //  `RecordingCombiner.compatibility(of:reference:)` (build flags, surface them
 //  in a sanity list), scoped to "does this one step fit this one file" rather
@@ -25,6 +25,7 @@ nonisolated enum ReplayCompatibilityFlag: Equatable {
     case missingTRMarkers(code: String, found: Int)
     case channelIndicesOutOfRange(field: String, indices: [Int], channelCount: Int)
     case missingEventCodes([String])
+    case missingBeatEvents(code: String)
 
     var message: String {
         switch self {
@@ -37,6 +38,8 @@ nonisolated enum ReplayCompatibilityFlag: Equatable {
             return "\(field) channel\(oneBased.count == 1 ? "" : "s") \(oneBased) out of range for this file's \(channelCount) channels."
         case .missingEventCodes(let codes):
             return "None of these event codes were found: \(codes.sorted().joined(separator: ", "))."
+        case .missingBeatEvents(let code):
+            return "No \"\(code)\" beats in this file. PCA-S corrects using beats another step detected; it cannot run without them."
         }
     }
 }
@@ -62,6 +65,15 @@ nonisolated enum ReplayCompatibility {
             }
             guard !outOfRange.isEmpty else { return nil }
             return .channelIndicesOutOfRange(field: "Threshold override", indices: outOfRange, channelCount: signal.numberOfChannels)
+
+        case .bcgCorrection:
+            // The settings travel; the beats do not. A file with no beats
+            // cannot be corrected by a method that locks to them, and saying so
+            // in the pre-flight is better than failing halfway through a batch.
+            let code = step.parameters["beatEventCode"] ?? EVAProcessingStep.defaultBeatEventCode
+            return signal.events.contains { $0.code == code }
+                ? nil
+                : .missingBeatEvents(code: code)
 
         case .segment:
             guard let codesParam = step.parameters["eventCodes"] else { return nil }

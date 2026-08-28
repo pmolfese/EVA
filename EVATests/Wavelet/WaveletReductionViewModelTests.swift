@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Round-trip + headless-apply coverage for wavelet reduction (TODO.md
+//  Round-trip + headless-apply coverage for wavelet reduction (ROADMAP.md
 //  "Round out replayable steps"): `parameters`/`apply(parameters:)` must carry
 //  the full `WaveletReductionConfiguration`, not just `mode`, and `apply(to:
 //  excludedChannels:analysisBand:onApplied:)` must actually run the reduction

@@ -23,12 +23,24 @@ import UniformTypeIdentifiers
 struct ChannelSetEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
+    /// The standalone editor historically owned its Done button. The unified
+    /// Channels window owns that button at the window level, so its embedded
+    /// Channel Sets tab turns this one off while previews/legacy callers keep
+    /// the old behavior by default.
+    var showsDismissButton = true
+
     private var layout: SensorLayout? { ChannelSetStore.shared.activeSensorLayout }
     private var channelNames: [String]? { ChannelSetStore.shared.activeChannelNames }
 
     @State private var sidebarSelection: ChannelSet.ID? = nil
     @State private var editingSet: ChannelSet? = nil
     @State private var editingName: String = ""
+    /// `nil` means "any net" (`ChannelSet.netType == nil`). Editable for both
+    /// new and existing sets — see `netTypeControl`.
+    @State private var editingNetType: String? = nil
+    /// Backs the "Other…" free-text entry in `netTypeControl`.
+    @State private var netTypeTextEntry: String = ""
+    @State private var showsNetTypeTextField = false
     @State private var selectedIndices: Set<Int> = []
     /// True while editing a brand-new, not-yet-saved set (the detail pane is
     /// active even though nothing is selected in the sidebar).
@@ -44,17 +56,40 @@ struct ChannelSetEditorView: View {
     @State private var exportDocument: ChannelSetDocument? = nil
     @State private var showsImportPanel = false
     @State private var errorMessage: String? = nil
+    /// Which net's "save this geometry?" banner was last dismissed with
+    /// "Not Now" — so switching away and back to the *same* still-unsaved
+    /// net doesn't keep re-asking, while a genuinely different novel net
+    /// still prompts. Session-only, not persisted; reset when the window
+    /// reopens.
+    @State private var dismissedNetPrompt: String? = nil
+    @State private var saveNetNameEntry: String = ""
+    @State private var showsManageNets = false
+    /// `nil` = show every set. Sets tagged "Any Net" (`netType == nil`) stay
+    /// visible under every filter, including a specific one — they are
+    /// explicitly meant to apply regardless of net, so a filter hiding them
+    /// would hide sets that are perfectly valid for whatever's selected.
+    @State private var netFilter: String? = nil
 
     private var store: ChannelSetStore { .shared }
 
+    private func matchesFilter(_ set: ChannelSet) -> Bool {
+        netFilter == nil || set.netType == nil || set.netType == netFilter
+    }
+
     var body: some View {
-        NavigationSplitView {
+        HSplitView {
             sidebarList
-        } detail: {
-            detailPane
+                .frame(minWidth: 210, idealWidth: 230, maxWidth: 280)
+
+            centerPane
+                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+
+            inspectorPane
+                .frame(minWidth: 240, idealWidth: 270, maxWidth: 320, maxHeight: .infinity)
         }
+        .safeAreaInset(edge: .top, spacing: 0) { unsavedNetBanner }
         .navigationTitle("Channel Sets")
-        .frame(minWidth: 760, minHeight: 540)
+        .frame(minWidth: 900, minHeight: 560)
         .toolbar { toolbarContent }
         .fileExporter(
             isPresented: $showsExportPanel,
@@ -89,22 +124,81 @@ struct ChannelSetEditorView: View {
             Button("Save") { commitSave(asNew: true, name: saveAsName) }
             Button("Cancel", role: .cancel) {}
         }
+        .sheet(isPresented: $showsManageNets) {
+            ManageNetGeometriesSheet()
+        }
+    }
+
+    /// Offers to save the *focused recording's own* geometry into the
+    /// catalog, the first time this editor sees a net it doesn't already
+    /// know about — see `ChannelSetStore`'s file header: this is the whole
+    /// mechanism by which the catalog grows, deliberately in place of
+    /// bundling guessed positions.
+    @ViewBuilder
+    private var unsavedNetBanner: some View {
+        if let layout, store.geometry(named: layout.name) == nil, dismissedNetPrompt != layout.name {
+            HStack(spacing: 10) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("This recording's net (\"\(layout.name)\") hasn't been saved yet.")
+                        .font(.callout)
+                    Text("Save it so sets can be created for it without this file open.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                TextField("Name", text: $saveNetNameEntry)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                Button("Save") {
+                    store.saveGeometry(name: saveNetNameEntry, positions: layout.positions)
+                    dismissedNetPrompt = layout.name
+                }
+                .disabled(saveNetNameEntry.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("Not Now") { dismissedNetPrompt = layout.name }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(10)
+            .background(.regularMaterial)
+            .overlay(alignment: .bottom) { Divider() }
+            .onAppear {
+                saveNetNameEntry = layout.name
+                maybeAutoSaveNet(layout)
+            }
+            .onChange(of: layout.name) { _, new in
+                saveNetNameEntry = new
+                maybeAutoSaveNet(layout)
+            }
+        }
+    }
+
+    /// `Preferences ▸ Channel Sets ▸ "Auto-save nets I haven't seen before"`
+    /// (2026-08-16) — saves under the recording's own reported name instead
+    /// of waiting on the banner's "Save" click. Gated to MFF-sourced
+    /// recordings unless the second preference is also on; see
+    /// `ChannelSetStore.activeIsMFFSource`'s doc comment for why. Setting
+    /// `dismissedNetPrompt` here (not just saving) is what keeps the banner
+    /// itself from ever actually appearing — its guard already checks
+    /// `store.geometry(named:) == nil`, which becomes false the instant this
+    /// saves.
+    private func maybeAutoSaveNet(_ layout: SensorLayout) {
+        let defaults = ProcessingDefaults.shared
+        guard defaults.autoSaveNewNetGeometries else { return }
+        guard store.activeIsMFFSource || defaults.autoSaveNewNetGeometriesFromNonMFF else { return }
+        guard store.geometry(named: layout.name) == nil else { return }
+        store.saveGeometry(name: layout.name, positions: layout.positions)
+        dismissedNetPrompt = layout.name
     }
 
     // MARK: - Toolbar
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .cancellationAction) {
-            Button("Done") { dismiss() }
-        }
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button("Import…") { showsImportPanel = true }
-            Button("Export All…") { prepareExport(sets: store.allSets) }
-            Button {
-                beginNewSet()
-            } label: {
-                Label("New Channel Set", systemImage: "plus")
+        if showsDismissButton {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }
             }
         }
     }
@@ -112,23 +206,40 @@ struct ChannelSetEditorView: View {
     // MARK: - Sidebar
 
     private var sidebarList: some View {
-        List(selection: $sidebarSelection) {
-            Section("Built-In") {
-                ForEach(ChannelSetStore.builtInSets) { set in
-                    channelSetRow(set)
-                        .tag(set.id)
-                }
-            }
-            if !store.userSets.isEmpty {
-                Section("User-Defined") {
-                    ForEach(store.userSets) { set in
-                        channelSetRow(set)
-                            .tag(set.id)
+        VStack(spacing: 0) {
+            netFilterControl
+            Divider()
+            List(selection: $sidebarSelection) {
+                let builtIn = ChannelSetStore.builtInSets.filter(matchesFilter)
+                let userDefined = store.userSets.filter(matchesFilter)
+
+                if !builtIn.isEmpty {
+                    Section("Built-In") {
+                        ForEach(builtIn) { set in
+                            channelSetRow(set)
+                                .tag(set.id)
+                        }
                     }
                 }
+                if !userDefined.isEmpty {
+                    Section("My Sets") {
+                        ForEach(userDefined) { set in
+                            channelSetRow(set)
+                                .tag(set.id)
+                        }
+                    }
+                }
+                if builtIn.isEmpty && userDefined.isEmpty {
+                    Text("No sets for this net.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .listStyle(.sidebar)
+
+            Divider()
+            sidebarFooter
         }
-        .listStyle(.sidebar)
         .onChange(of: sidebarSelection) { _, id in
             if let id, let set = store.allSets.first(where: { $0.id == id }) {
                 loadSet(set)
@@ -136,54 +247,105 @@ struct ChannelSetEditorView: View {
         }
     }
 
-    @ViewBuilder
-    private func channelSetRow(_ set: ChannelSet) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(set.name)
-                .lineLimit(1)
-            HStack(spacing: 4) {
-                Text("\(set.channelIndices.count) ch")
-                if let net = set.netType {
-                    Text("·")
-                    Text(net)
+    /// "All Nets" plus every name `store.knownNetNames` offers. Filtering
+    /// out to a specific net still shows "Any Net"-tagged sets — see
+    /// `matchesFilter`.
+    private var netFilterControl: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Show sets for")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Picker("Net", selection: $netFilter) {
+                Text("All Nets").tag(String?.none)
+                if !store.knownNetNames.isEmpty {
+                    Divider()
+                    ForEach(store.knownNetNames, id: \.self) { name in
+                        Text(name).tag(String?.some(name))
+                    }
                 }
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+
+    private var sidebarFooter: some View {
+        HStack(spacing: 0) {
+            Button {
+                beginNewSet()
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 34, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("New Channel Set")
+
+            Divider()
+                .frame(height: 30)
+
+            Menu {
+                Button("Import Channel Sets…") { showsImportPanel = true }
+                Button("Export All Channel Sets…") { prepareExport(sets: store.allSets) }
+                Divider()
+                Button("Manage Saved Nets…") { showsManageNets = true }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 38, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Channel Set Actions")
+
+            Spacer()
+        }
+        .frame(height: 31)
+    }
+
+    @ViewBuilder
+    private func channelSetRow(_ set: ChannelSet) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: store.isBuiltIn(set) ? "circle.grid.3x3.fill" : "circle.grid.3x3")
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(set.name)
+                    .lineLimit(1)
+                if let net = set.netType {
+                    Text(net)
+                        .lineLimit(1)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer(minLength: 4)
+            Text("\(set.channelIndices.count)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
     }
 
-    // MARK: - Detail pane
+    // MARK: - Center pane
 
     @ViewBuilder
-    private var detailPane: some View {
+    private var centerPane: some View {
         if sidebarSelection == nil && editingSet == nil && !isCreatingNew {
             ContentUnavailableView(
                 "No Channel Set Selected",
                 systemImage: "antenna.radiowaves.left.and.right",
-                description: Text("Choose a set from the sidebar, or tap \(Image(systemName: "plus")) to create one.")
+                description: Text("Choose a set from the sidebar, or click \(Image(systemName: "plus")) to create one.")
             )
         } else {
             VStack(spacing: 0) {
-                // Name row
-                HStack(spacing: 8) {
-                    TextField("Channel Set Name", text: $editingName)
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(isViewingBuiltIn)
-                    if let netType = editingSet?.netType {
-                        Text(netType)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
+                mapToolbar
 
-                Divider()
-
-                // Map or fallback
                 if let layout {
                     VStack(spacing: 10) {
                         ChannelSetMapView(
@@ -201,65 +363,270 @@ struct ChannelSetEditorView: View {
                             unpositionedChannelsView(unpositionedChannelIndices(in: layout))
                         }
                     }
-                    .padding(12)
+                    .padding(16)
                 } else {
                     noLayoutFallback
-                        .padding(12)
+                        .padding(16)
                 }
 
                 Divider()
-
-                // Status + action bar
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("\(selectedIndices.count) channel\(selectedIndices.count == 1 ? "" : "s") selected")
-                        if !selectedIndices.isEmpty {
-                            Text(selectedChannelSummary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                    if !isViewingBuiltIn, layout != nil {
-                        Toggle("Force symmetry", isOn: $forceSymmetry)
-                            .toggleStyle(.checkbox)
-                            .font(.caption)
-                            .help("Toggling an electrode also toggles its mirror-image partner in the opposite hemisphere. Turning this on mirrors the current selection.")
-                            .onChange(of: forceSymmetry) { _, on in
-                                if on, let layout { mirrorEntireSelection(layout: layout) }
-                            }
-                    }
-
-                    Spacer()
-
-                    if !isViewingBuiltIn {
-                        Button("Reset") { resetEdits() }
-
-                        Button("Delete", role: .destructive) {
-                            showsDeleteConfirmation = true
-                        }
-                        .disabled(editingSet == nil)
-
-                        Button("Export…") { exportCurrentSet() }
-
-                        Button("Save as New…") {
-                            saveAsName = editingName + " Copy"
-                            showsSaveAsAlert = true
-                        }
-
-                        Button("Save") { commitSave(asNew: false) }
-                            .disabled(editingName.trimmingCharacters(in: .whitespaces).isEmpty)
-                            .keyboardShortcut("s", modifiers: .command)
-                    } else {
-                        Button("Export…") { exportCurrentSet() }
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                mapFooter
             }
         }
+    }
+
+    private var mapToolbar: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(editingName.isEmpty ? "New Channel Set" : editingName)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("\(selectedIndices.count) channel\(selectedIndices.count == 1 ? "" : "s") · \(editingNetType ?? "Any Net")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Button("Select All") {
+                selectedIndices = allAvailableChannelIndices
+                if forceSymmetry, let layout { mirrorEntireSelection(layout: layout) }
+            }
+            .disabled(isViewingBuiltIn || allAvailableChannelIndices.isEmpty)
+
+            Button("Clear") { selectedIndices.removeAll() }
+                .disabled(isViewingBuiltIn || selectedIndices.isEmpty)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var mapFooter: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(.blue.opacity(0.28))
+                .frame(width: 11, height: 11)
+                .overlay(Circle().stroke(.blue, lineWidth: 1))
+            Text("Included in set")
+            Text(isViewingBuiltIn ? "Built-in sets are read-only" : "Click electrodes to add or remove them")
+                .foregroundStyle(.secondary)
+            Spacer()
+            if !selectedChannelSummary.isEmpty {
+                Text(selectedChannelSummary)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 250, alignment: .trailing)
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 16)
+        .frame(height: 38)
+        .background(.bar)
+    }
+
+    // MARK: - Inspector
+
+    @ViewBuilder
+    private var inspectorPane: some View {
+        if sidebarSelection == nil && editingSet == nil && !isCreatingNew {
+            VStack(spacing: 0) {
+                inspectorTitle
+                Spacer()
+            }
+            .background(.bar)
+        } else {
+            VStack(spacing: 0) {
+                inspectorTitle
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        inspectorIdentity
+                        Divider()
+                        inspectorSelection
+                        Divider()
+                        inspectorActions
+                    }
+                    .padding(14)
+                }
+
+                if !isViewingBuiltIn {
+                    Divider()
+                    inspectorSaveBar
+                }
+            }
+            .background(.bar)
+        }
+    }
+
+    private var inspectorTitle: some View {
+        HStack {
+            Text("Channel Set")
+                .font(.headline)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 44)
+    }
+
+    private var inspectorIdentity: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Name")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if isViewingBuiltIn {
+                    Text(editingName)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    TextField("Channel Set Name", text: $editingName)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Applies to")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if isViewingBuiltIn {
+                    Text(editingNetType ?? "Any Net")
+                } else {
+                    netTypeControl
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private var inspectorSelection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Channels")
+                Spacer()
+                Text("\(selectedIndices.count)")
+                    .font(.title2.monospacedDigit())
+            }
+
+            if !isViewingBuiltIn, layout != nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Keep selection symmetric", isOn: $forceSymmetry)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: forceSymmetry) { _, on in
+                            if on, let layout { mirrorEntireSelection(layout: layout) }
+                        }
+                    Text("Selecting a channel also selects its partner in the opposite hemisphere.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 20)
+                }
+            }
+        }
+    }
+
+    private var inspectorActions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                saveAsName = editingName + " Copy"
+                showsSaveAsAlert = true
+            } label: {
+                Label("Duplicate Set…", systemImage: "plus.square.on.square")
+            }
+            .buttonStyle(.plain)
+            .disabled(editingSet == nil)
+
+            Button(action: exportCurrentSet) {
+                Label("Export Set…", systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(.plain)
+            .disabled(editingSet == nil)
+
+            if !isViewingBuiltIn {
+                Button(role: .destructive) {
+                    showsDeleteConfirmation = true
+                } label: {
+                    Label("Delete Set…", systemImage: "trash")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.red)
+                .disabled(editingSet == nil)
+            }
+        }
+        .foregroundStyle(Color.accentColor)
+    }
+
+    private var inspectorSaveBar: some View {
+        HStack(spacing: 8) {
+            Text(hasUnsavedChanges ? "Unsaved changes" : "Saved")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Revert") { resetEdits() }
+                .disabled(!hasUnsavedChanges)
+            Button("Save") { commitSave(asNew: false) }
+                .buttonStyle(.borderedProminent)
+                .disabled(editingName.trimmingCharacters(in: .whitespaces).isEmpty || !hasUnsavedChanges)
+                .keyboardShortcut("s", modifiers: .command)
+        }
+        .padding(10)
+    }
+
+    /// Which net this set applies to — editable for new and existing sets
+    /// alike, backed by `editingNetType`. Options come from
+    /// `store.knownNetNames` (saved geometries plus any net name already
+    /// used by another set), with "Other…" for typing one that isn't there
+    /// yet. Typing a brand-new name here does not by itself save a
+    /// geometry — a set can be tagged for a net EVA has never seen positions
+    /// for; `unsavedNetPrompt` is the separate, geometry-specific offer.
+    @ViewBuilder
+    private var netTypeControl: some View {
+        if showsNetTypeTextField {
+            HStack(spacing: 4) {
+                TextField("Net name", text: $netTypeTextEntry)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 160)
+                    .onSubmit { commitNetTypeTextEntry() }
+                Button("Set") { commitNetTypeTextEntry() }
+                Button("Cancel") {
+                    showsNetTypeTextField = false
+                    netTypeTextEntry = ""
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+        } else {
+            Menu {
+                Button("Any Net") { editingNetType = nil }
+                if !store.knownNetNames.isEmpty {
+                    Divider()
+                    ForEach(store.knownNetNames, id: \.self) { name in
+                        Button(name) { editingNetType = name }
+                    }
+                }
+                Divider()
+                Button("Other…") {
+                    netTypeTextEntry = editingNetType ?? ""
+                    showsNetTypeTextField = true
+                }
+            } label: {
+                Text(editingNetType ?? "Any Net")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .foregroundStyle(.secondary)
+            .help("Which net this set applies to. \"Any Net\" means it's offered regardless of which recording is open.")
+        }
+    }
+
+    private func commitNetTypeTextEntry() {
+        let trimmed = netTypeTextEntry.trimmingCharacters(in: .whitespaces)
+        editingNetType = trimmed.isEmpty ? nil : trimmed
+        showsNetTypeTextField = false
+        netTypeTextEntry = ""
     }
 
     private var noLayoutFallback: some View {
@@ -347,6 +714,23 @@ struct ChannelSetEditorView: View {
         editingSet.map { store.isBuiltIn($0) } ?? false
     }
 
+    private var allAvailableChannelIndices: Set<Int> {
+        if let channelNames, !channelNames.isEmpty {
+            return Set(channelNames.indices)
+        }
+        if let layout {
+            return Set(layout.positions.map(\.channelIndex))
+        }
+        return []
+    }
+
+    private var hasUnsavedChanges: Bool {
+        guard let set = editingSet else { return isCreatingNew }
+        return editingName != set.name
+            || editingNetType != set.netType
+            || selectedIndices != Set(set.channelIndices)
+    }
+
     private var selectedChannelSummary: String {
         let labels = selectedIndices.sorted().map(channelDisplayLabel)
         guard !labels.isEmpty else { return "" }
@@ -375,6 +759,8 @@ struct ChannelSetEditorView: View {
     private func loadSet(_ set: ChannelSet) {
         editingSet = set
         editingName = set.name
+        editingNetType = set.netType
+        showsNetTypeTextField = false
         selectedIndices = Set(set.channelIndices)
         isCreatingNew = false
     }
@@ -383,6 +769,12 @@ struct ChannelSetEditorView: View {
         sidebarSelection = nil
         editingSet = nil
         editingName = ""
+        // Defaults to whichever net is actually focused, when there is one —
+        // the common case is "I have this file open, I want a set for it,"
+        // and defaulting to "Any net" would make that the extra step instead
+        // of the free action.
+        editingNetType = layout?.name
+        showsNetTypeTextField = false
         selectedIndices = []
         forceSymmetry = false
         isCreatingNew = true
@@ -393,6 +785,7 @@ struct ChannelSetEditorView: View {
             loadSet(set)
         } else {
             editingName = ""
+            editingNetType = layout?.name
             selectedIndices = []
         }
     }
@@ -404,7 +797,7 @@ struct ChannelSetEditorView: View {
             id: asNew ? UUID() : (editingSet?.id ?? UUID()),
             name: finalName,
             channelIndices: selectedIndices.sorted(),
-            netType: editingSet?.netType
+            netType: editingNetType
         )
         store.save(newSet)
         editingSet = newSet
@@ -518,5 +911,139 @@ struct ChannelSetDocument: FileDocument {
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: data)
+    }
+}
+
+// MARK: - Manage Nets
+
+/// Rename (with merge-on-collision, via `ChannelSetStore.renameGeometry`) and
+/// delete for the saved net-geometry catalog. The scenario this exists for:
+/// "typed '64 channel' two ways and now has two entries that mean the same
+/// net" — renaming one onto the other's name consolidates them.
+private struct ManageNetGeometriesSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    private var store: ChannelSetStore { .shared }
+
+    @State private var renamingID: KnownNetGeometry.ID?
+    @State private var renameText = ""
+
+    private var sortedGeometries: [KnownNetGeometry] {
+        store.knownGeometries.sorted { $0.name < $1.name }
+    }
+
+    /// Net names that are still "known" (still offered by the filter and the
+    /// "+" picker, via `ChannelSetStore.knownNetNames`) purely because a
+    /// channel set is still tagged with them — not because there's a saved
+    /// geometry to manage here. `deleteGeometry` deliberately leaves those
+    /// tags alone (see its doc comment), which used to mean a name someone
+    /// just deleted looked like it had simply vanished from this sheet while
+    /// still showing up in the filter, with no way back in from here
+    /// (2026-08-16, manual test finding: "I can't re-add it since the list
+    /// is empty"). Listed separately, read-only, so it's clear these aren't
+    /// missing rows — there's nothing to rename or delete, only a real
+    /// recording's own geometry to save under the same name again.
+    private var tagOnlyNetNames: [String] {
+        let geometryNames = Set(store.knownGeometries.map(\.name))
+        return store.knownNetNames.filter { !geometryNames.contains($0) }.sorted()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Saved Net Geometries")
+                    .font(.headline)
+                Spacer()
+                Button("Done") { dismiss() }
+            }
+            .padding(14)
+
+            Divider()
+
+            if sortedGeometries.isEmpty, tagOnlyNetNames.isEmpty {
+                ContentUnavailableView(
+                    "No Saved Nets",
+                    systemImage: "antenna.radiowaves.left.and.right.slash",
+                    description: Text("Save a recording's net from the Channel Sets editor's banner to see it here.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    if !sortedGeometries.isEmpty {
+                        Section {
+                            ForEach(sortedGeometries) { geometry in
+                                row(for: geometry)
+                            }
+                        }
+                    }
+                    if !tagOnlyNetNames.isEmpty {
+                        Section {
+                            ForEach(tagOnlyNetNames, id: \.self) { name in
+                                HStack {
+                                    Text(name)
+                                    Spacer()
+                                    Text("No saved geometry")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        } header: {
+                            Text("Used by channel sets, no geometry saved")
+                        } footer: {
+                            Text("Open a recording with this net and type this exact name into the Channel Sets editor's banner to attach geometry again.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 440, height: 380)
+    }
+
+    @ViewBuilder
+    private func row(for geometry: KnownNetGeometry) -> some View {
+        HStack(spacing: 10) {
+            if renamingID == geometry.id {
+                TextField("Net name", text: $renameText)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { commitRename(geometry) }
+            } else {
+                Text(geometry.name)
+                Spacer()
+                Text("\(geometry.positions.count) ch")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                if renamingID == geometry.id {
+                    commitRename(geometry)
+                } else {
+                    renameText = geometry.name
+                    renamingID = geometry.id
+                }
+            } label: {
+                Image(systemName: renamingID == geometry.id ? "checkmark" : "pencil")
+            }
+            .buttonStyle(.plain)
+            .help(renamingID == geometry.id ? "Save name" : "Rename")
+
+            Button(role: .destructive) {
+                if renamingID == geometry.id { renamingID = nil }
+                store.deleteGeometry(geometry)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .help("Delete")
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func commitRename(_ geometry: KnownNetGeometry) {
+        store.renameGeometry(geometry, to: renameText)
+        renamingID = nil
+        renameText = ""
     }
 }

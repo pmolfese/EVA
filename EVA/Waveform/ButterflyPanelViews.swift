@@ -91,7 +91,8 @@ extension WaveformView {
                                 .contextMenu {
                                     figureSaveMenu(title: "Butterfly Overlay",
                                                    legend: overlayLegendItems(),
-                                                   size: CGSize(width: 820, height: 300)) {
+                                                   size: CGSize(width: 820, height: 300),
+                                                   seconds: figureSeconds(overlaySegments, samplingRate: signal.samplingRate)) {
                                         OverlayButterflyPlot(
                                             data: signal.data,
                                             segments: overlaySegments,
@@ -163,7 +164,8 @@ extension WaveformView {
                                     .contextMenu {
                                         figureSaveMenu(title: "\(epoching.displayCategory(segment.category)) Butterfly",
                                                        legend: [(epoching.displayCategory(segment.category), epochColor(for: segment.colorIndex))],
-                                                       size: CGSize(width: 820, height: 300)) {
+                                                       size: CGSize(width: 820, height: 300),
+                                                       seconds: figureSeconds([segment], samplingRate: signal.samplingRate)) {
                                             ButterflyConditionPlot(
                                                 data: signal.data,
                                                 segment: segment,
@@ -281,7 +283,8 @@ extension WaveformView {
                                     .contextMenu {
                                         figureSaveMenu(title: "Ch \(channelIndex + 1) Overlay",
                                                        legend: overlayLegendItems(),
-                                                       size: CGSize(width: 820, height: 220)) {
+                                                       size: CGSize(width: 820, height: 220),
+                                                       seconds: figureSeconds(overlaySegments, samplingRate: signal.samplingRate)) {
                                             OverlaidCategoryChannelPlot(
                                                 data: signal.data,
                                                 channelIndex: channelIndex,
@@ -369,7 +372,7 @@ extension WaveformView {
                         .contextMenu {
                             figureSaveMenu(
                                 title: "Average Topographies",
-                                legend: [],
+                                legend: topomapLegendItems(samples),
                                 size: CGSize(width: CGFloat(max(samples.count, 1)) * 300, height: 330)
                             ) {
                                 topomapsFigure(samples: samples, layout: layout, scale: autoScale, colorRange: colorRange, zScaling: zScaling, signal: signal)
@@ -532,7 +535,8 @@ extension WaveformView {
         scale: Double?,
         colorRange: ClosedRange<Double>?,
         zScaling: TopomapZScaling?,
-        signal: MFFSignalData
+        signal: MFFSignalData,
+        tileScale: CGFloat = 1
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if let first = samples.first {
@@ -560,9 +564,9 @@ extension WaveformView {
                             showsHeader: false,
                             showsLayoutName: false,
                             colorBarPlacement: showsSharedScale ? .trailing : .none,
-                            minimumMapHeight: 220
+                            minimumMapHeight: 220 * tileScale
                         )
-                        .frame(width: showsSharedScale ? 300 : 250, height: 250)
+                        .frame(width: (showsSharedScale ? 300 : 250) * tileScale, height: 250 * tileScale)
                     }
                 }
             }
@@ -627,6 +631,19 @@ extension WaveformView {
         return epoching.epochSegments.filter { selected.contains($0.category) }
     }
 
+    /// Legend for a topomap composite (one entry per distinct condition among
+    /// `samples`, deduped, renamed) — the topomap equivalent of
+    /// `overlayLegendItems()`, since `AveragedTopomapSample` isn't an
+    /// `EpochSegment`.
+    func topomapLegendItems(_ samples: [AveragedTopomapSample]) -> [(String, Color)] {
+        var seen = Set<String>()
+        var items: [(String, Color)] = []
+        for sample in samples where seen.insert(sample.category).inserted {
+            items.append((epoching.displayCategory(sample.category), epochColor(for: sample.colorIndex)))
+        }
+        return items
+    }
+
     /// Legend: one entry per selected category (deduped, renamed), in order.
     func overlayLegendItems() -> [(String, Color)] {
         let available = overlayAvailableCategories()
@@ -667,19 +684,66 @@ extension WaveformView {
         title: String,
         legend: [(String, Color)],
         size: CGSize,
+        /// Seconds of signal spanning `size.width`, so the caption can state a
+        /// sweep speed. Omitted rather than guessed when the caller does not
+        /// know — see `FigureScale`.
+        seconds: Double? = nil,
+        /// The waveform-only portion's size, when `size` is a taller composite
+        /// (e.g. Joint Plot's topomap row + butterfly). Defaults to `size`.
+        /// Needed because µV/mm is computed from the trace's own pixel height,
+        /// not the whole exported card's height.
+        scaleSize: CGSize? = nil,
         @ViewBuilder figure: @escaping () -> Figure
     ) -> some View {
         Menu("Save Figure As…") {
             ForEach(FigureFormat.allCases) { format in
                 Button(format.label) {
                     FigureExporter.save(
-                        FigureCard(title: title, legend: legend, size: size, content: figure),
+                        figureCard(title: title, legend: legend, size: size, seconds: seconds, scaleSize: scaleSize, figure: figure),
                         defaultName: figureFileName(title),
                         format: format
                     )
                 }
             }
         }
+        Button {
+            FigureExportBasket.shared.add(
+                figureCard(title: title, legend: legend, size: size, seconds: seconds, scaleSize: scaleSize, figure: figure),
+                title: title,
+                legend: legend,
+                size: size
+            )
+        } label: {
+            Label("Add to Export", systemImage: "tray.and.arrow.down")
+        }
+    }
+
+    private func figureCard<Figure: View>(
+        title: String,
+        legend: [(String, Color)],
+        size: CGSize,
+        seconds: Double?,
+        scaleSize: CGSize?,
+        @ViewBuilder figure: @escaping () -> Figure
+    ) -> FigureCard<Figure> {
+        FigureCard(
+            title: title, legend: legend, size: size,
+            scale: FigureScale(
+                amplitudeScale: amplitudeScale, plotSize: scaleSize ?? size, seconds: seconds
+            ),
+            content: figure
+        )
+    }
+
+
+    /// Seconds of signal an epoch figure spans, for the exported scale caption.
+    /// Nil when there is nothing to measure, so the caption omits the sweep
+    /// speed rather than inventing one.
+    func figureSeconds(_ segments: [EpochSegment], samplingRate: Double) -> Double? {
+        guard let segment = segments.first, samplingRate > 0 else { return nil }
+        let samples = segment.endSample - segment.startSample + 1
+        guard samples > 0 else { return nil }
+        return Double(samples) / samplingRate
     }
 
     func figureFileName(_ title: String) -> String {
@@ -690,12 +754,7 @@ extension WaveformView {
     }
 
     func categoryColorIndices(for categories: [String]) -> [String: Int] {
-        let uniqueCategories = Array(Set(categories)).sorted {
-            $0.localizedStandardCompare($1) == .orderedAscending
-        }
-        return Dictionary(uniqueKeysWithValues: uniqueCategories.enumerated().map { index, category in
-            (category, index)
-        })
+        EpochingViewModel.colorIndices(for: categories)
     }
 
 }

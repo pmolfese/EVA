@@ -54,7 +54,10 @@ struct FilterReplayTests {
         vm.apply(parameters: [:])
 
         #expect(vm.activeLineNoiseMode == .off)
-        #expect(vm.averageReference == false)
+        // Unchanged by an empty `filter` step: the `reference` step owns this
+        // now, and `ReplaySettingsRestore` is what turns it off when the script
+        // does not name one. A `filter` step cannot speak for it either way.
+        #expect(vm.averageReference == true)
         #expect(vm.parameters["highPassHz"] == nil)
         #expect(vm.parameters["lowPassHz"] == nil)
     }

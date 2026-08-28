@@ -56,7 +56,20 @@ final class MFFRecording: Identifiable {
     let id = UUID()
     let packageURL: URL
     let packageName: String
-    private let securityScopedURLs: [URL]
+    /// Sidecar/folder URLs whose security scope this recording was opened with.
+    ///
+    /// Readable because a **fork** needs them: the second window re-reads the
+    /// file for itself (`MFFRecording` cannot be shared — see
+    /// `WaveformView.forkToNewWindow`), and a format whose data lives beside the
+    /// header rather than inside a package — BrainVision's `.vmrk`/`.eeg`, EDF,
+    /// Persyst, BESA — cannot be re-read without the same scope the original
+    /// open was granted. Forks used to drop them and fail to load
+    /// (ROADMAP RW-1 item 12).
+    ///
+    /// Scopes are process-wide and refcounted, so handing the same URLs to a
+    /// second window in this process is enough; no bookmark round-trip and no
+    /// normalized copy of the file are needed.
+    private(set) var securityScopedURLs: [URL]
 
     private(set) var signal: MFFSignalData?
     /// Peripheral/physiological channels (ECG, EMG, …), shown alongside the EEG.
@@ -72,6 +85,19 @@ final class MFFRecording: Identifiable {
     private(set) var loadProgress: Double?
     private(set) var loadStatusMessage = "Preparing to read recording"
     private(set) var loadDetailMessage: String?
+
+    /// Where a channel was plotted before `moveEEGChannelToPhysio` sent it to
+    /// Physio, keyed by its stable name rather than index — index shifts on
+    /// every move, name doesn't. `movePhysioChannelToEEG` was appending the
+    /// returning channel's data back onto the EEG signal but never restoring
+    /// its `sensorLayout`/`electrodeGeometry` entry, so a channel moved back
+    /// stayed permanently stuck in the editor's "No plotted location" bucket
+    /// — and repeated round trips could put two different channels' data
+    /// under one fallback-generated display name ("Ch 241" appearing twice),
+    /// since the fallback in `channelName(at:in:fallbackPrefix:)` names by
+    /// current index, not identity (2026-08-16, manual test finding).
+    @ObservationIgnored private var physioOriginPositions: [String: SensorPosition] = [:]
+    @ObservationIgnored private var physioOriginGeometry: [String: SIMD3<Double>] = [:]
 
     @ObservationIgnored private var activeLoadRequestID = UUID()
     @ObservationIgnored private var loadTask: Task<LoadResult, Never>?
@@ -139,7 +165,10 @@ final class MFFRecording: Identifiable {
         }
 
         loadTask = nil
-        signal = result.signal
+        signal = Self.applyingEventAnchorRules(to: result.signal)
+        // Listed for Preferences ▸ Events, which needs the codes present in
+        // real data and a handle to reapply edited rules. Weakly held there.
+        OpenRecordingRegistry.shared.register(self)
         pnsSignal = result.pnsSignal
         sensorLayout = result.layout
         electrodeGeometry = result.geometry
@@ -154,8 +183,43 @@ final class MFFRecording: Identifiable {
         isLoading = false
     }
 
+    /// Re-reads the freshly-loaded signal's imported events under the user's
+    /// event-anchor rules (Preferences ▸ Events).
+    ///
+    /// Applied here, once, rather than lazily wherever an anchor is read. The
+    /// anchor decides cleaning windows, so a lazily-resolved one would make the
+    /// preference a hidden input to every numerical result and let a later edit
+    /// silently change what a replayed run produces. Baking it in at load means
+    /// the events carried into `DefinedArtifact` — and from there into
+    /// `eva_artifacts.json` — describe their own geometry.
+    @MainActor
+    static func applyingEventAnchorRules(to signal: MFFSignalData?) -> MFFSignalData? {
+        guard let signal else { return nil }
+        let ruleSet = EventAnchorSettings.shared.ruleSet
+        guard !ruleSet.isEmpty else { return signal }
+        return signal.replacingEvents(ruleSet.applied(to: signal.events))
+    }
+
+    /// Reapplies the current event-anchor rules to an already-open recording.
+    ///
+    /// Rules are baked in at load, so editing them does not retroactively change
+    /// an open file — this is the explicit action that does, returning a short
+    /// description of what changed for the process log, or `nil` when nothing
+    /// did.
+    @MainActor
+    @discardableResult
+    func reapplyEventAnchorRules() -> String? {
+        guard let current = signal else { return nil }
+        let ruleSet = EventAnchorSettings.shared.ruleSet
+        let updated = ruleSet.applied(to: current.events)
+        guard updated != current.events else { return nil }
+        signal = current.replacingEvents(updated)
+        return ruleSet.appliedSummary(for: updated)
+    }
+
     @MainActor
     func tearDownForClose() {
+        OpenRecordingRegistry.shared.unregister(self)
         isClosed = true
         activeLoadRequestID = UUID()
         loadTask?.cancel()
@@ -188,6 +252,13 @@ final class MFFRecording: Identifiable {
         let movedSamples = currentSignal.data[index]
         let movedName = channelName(at: index, in: currentSignal, fallbackPrefix: "Ch")
 
+        if let position = sensorLayout?.positions.first(where: { $0.channelIndex == index }) {
+            physioOriginPositions[movedName] = position
+        }
+        if let geometryPosition = electrodeGeometry?.positions[index] {
+            physioOriginGeometry[movedName] = geometryPosition
+        }
+
         if let currentPNS = pnsSignal,
            !canAppend(samples: movedSamples, samplingRate: currentSignal.samplingRate, to: currentPNS) {
             throw ChannelRoleEditError.incompatiblePhysioTiming
@@ -218,7 +289,9 @@ final class MFFRecording: Identifiable {
             isSegmented: currentSignal.isSegmented,
             isAveraged: currentSignal.isAveraged,
             isGrandAverage: currentSignal.isGrandAverage,
-            impedancesKOhm: impedances
+            impedancesKOhm: impedances,
+            acquisitionReference: currentSignal.acquisitionReference?.removingChannel(index),
+            referenceState: currentSignal.referenceState
         )
 
         signal = updatedSignal
@@ -275,7 +348,9 @@ final class MFFRecording: Identifiable {
             isSegmented: currentSignal.isSegmented,
             isAveraged: currentSignal.isAveraged,
             isGrandAverage: currentSignal.isGrandAverage,
-            impedancesKOhm: impedances
+            impedancesKOhm: impedances,
+            acquisitionReference: currentSignal.acquisitionReference,
+            referenceState: currentSignal.referenceState
         )
 
         let updatedPNS: MFFSignalData?
@@ -297,6 +372,26 @@ final class MFFRecording: Identifiable {
 
         signal = updatedSignal
         pnsSignal = updatedPNS
+
+        // Restore whatever plotted position this channel had before it was
+        // moved to Physio, if any — see `physioOriginPositions`'s doc
+        // comment. The new index is always the last one: nothing before it
+        // shifted, since this only ever appends.
+        let newIndex = updatedSignal.numberOfChannels - 1
+        if let origin = physioOriginPositions[movedName] {
+            let restored = SensorPosition(channelIndex: newIndex, x: origin.x, y: origin.y)
+            sensorLayout = SensorLayout(
+                name: sensorLayout?.name ?? "",
+                positions: (sensorLayout?.positions ?? []) + [restored],
+                reference: sensorLayout?.reference
+            )
+        }
+        if let origin = physioOriginGeometry[movedName] {
+            var positions = electrodeGeometry?.positions ?? [:]
+            positions[newIndex] = origin
+            electrodeGeometry = ElectrodeGeometry(name: electrodeGeometry?.name ?? "", positions: positions)
+        }
+
         return movedName
     }
 
@@ -492,7 +587,29 @@ private extension SensorLayout {
             return SensorPosition(channelIndex: shiftedIndex, x: position.x, y: position.y)
         }
         .sorted { $0.channelIndex < $1.channelIndex }
-        return SensorLayout(name: name, positions: shiftedPositions)
+        let shiftedReference = reference.flatMap { reference -> SensorReference? in
+            guard reference.channelIndex != removedIndex else { return nil }
+            return SensorReference(
+                channelIndex: reference.channelIndex > removedIndex
+                    ? reference.channelIndex - 1
+                    : reference.channelIndex,
+                name: reference.name,
+                x: reference.x,
+                y: reference.y
+            )
+        }
+        return SensorLayout(name: name, positions: shiftedPositions, reference: shiftedReference)
+    }
+}
+
+private extension EEGAcquisitionReference {
+    func removingChannel(_ removedIndex: Int) -> EEGAcquisitionReference? {
+        guard channelIndex != removedIndex else { return nil }
+        return EEGAcquisitionReference(
+            channelIndex: channelIndex > removedIndex ? channelIndex - 1 : channelIndex,
+            name: name,
+            isRecorded: isRecorded
+        )
     }
 }
 

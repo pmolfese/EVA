@@ -69,4 +69,25 @@ struct MFFPNSReaderTests {
         #expect(imported.pnsSignal != nil)
         #expect(imported.pnsSignal?.channelNames?.first == "ECG")
     }
+
+    @Test func writerPreservesPNSValuesNamesAndPolarityConvention() throws {
+        let source = Fixtures.url("example_3.mff")
+        let reader = MFFReader()
+        let eeg = try reader.loadSignal(from: source)
+        let pns = try #require(try reader.loadPNSSignal(from: source))
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-pns-roundtrip-\(UUID().uuidString).mff")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        try MFFWriter.write(
+            signal: eeg, pnsSignal: pns, segments: [], kind: .continuous,
+            to: output, preserveSourceFileInfo: false
+        )
+        let recovered = try #require(try reader.loadPNSSignal(from: output))
+
+        #expect(recovered.samplingRate == pns.samplingRate)
+        #expect(recovered.channelNames == pns.channelNames)
+        #expect(recovered.positiveUpFlags == pns.positiveUpFlags)
+        #expect(recovered.data == pns.data)
+    }
 }

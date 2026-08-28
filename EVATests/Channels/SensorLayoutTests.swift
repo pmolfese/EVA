@@ -39,4 +39,16 @@ struct SensorLayoutTests {
             .appendingPathComponent("signal1.bin")
         #expect(SensorLayout.load(fromPackageContaining: missing) == nil)
     }
+
+    @Test func retainsReferenceMetadataWithoutAddingAPhantomChannel() throws {
+        let signalURL = Fixtures.url("example_2.mff").appendingPathComponent("signal1.bin")
+        let layout = try #require(SensorLayout.load(fromPackageContaining: signalURL))
+        let reference = try #require(layout.reference)
+
+        #expect(reference.name == "VREF")
+        #expect(!layout.positions.contains { $0.channelIndex == reference.channelIndex })
+
+        let expanded = layout.includingReference(forChannelCount: reference.channelIndex + 1)
+        #expect(expanded.positions.contains { $0.channelIndex == reference.channelIndex })
+    }
 }

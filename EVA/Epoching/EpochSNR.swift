@@ -91,16 +91,20 @@ nonisolated enum EpochSNR {
         let average = averageTrials(trials, channels: nCh, samples: nSamp)
 
         // Plus-minus (Schimmel) residual: alternate the sign of each trial.
-        if nTrials >= 2 {
+        // Requires an even, balanced +/- count; drop the trailing unpaired
+        // trial for an odd trial count so the ERP fully cancels.
+        let plusMinusCount = nTrials - (nTrials % 2)
+        if plusMinusCount >= 2 {
             var residual = [[Float]](repeating: [Float](repeating: 0, count: nSamp), count: nCh)
-            for (t, trial) in trials.enumerated() {
+            for t in 0..<plusMinusCount {
+                let trial = trials[t]
                 let sign: Float = (t % 2 == 0) ? 1 : -1
                 for c in 0..<nCh {
                     let ch = trial[c]
                     for s in 0..<nSamp { residual[c][s] += sign * ch[s] }
                 }
             }
-            let invN = 1.0 / Float(nTrials)
+            let invN = 1.0 / Float(plusMinusCount)
             for c in 0..<nCh { for s in 0..<nSamp { residual[c][s] *= invN } }
 
             m.plusMinusNoise = rms(residual)
@@ -215,9 +219,31 @@ nonisolated enum EpochSNR {
         return out
     }
 
+    /// Global field power: spatial standard deviation across channels at each
+    /// sample, i.e. RMS after removing the instantaneous cross-channel mean.
+    /// Unlike `perSampleRMS`, this is reference-independent.
+    private static func perSampleGFP(_ matrix: [[Float]]) -> [Float] {
+        guard let nSamp = matrix.first?.count, nSamp > 0, !matrix.isEmpty else { return [] }
+        var out = [Float](repeating: 0, count: nSamp)
+        let nCh = Float(matrix.count)
+        for s in 0..<nSamp {
+            var sum: Float = 0
+            var sumSq: Float = 0
+            for ch in matrix {
+                let value = ch[s]
+                sum += value
+                sumSq += value * value
+            }
+            let mean = sum / nCh
+            let variance = max(sumSq / nCh - mean * mean, 0)
+            out[s] = variance.squareRoot()
+        }
+        return out
+    }
+
     private static func gfpRatio(signal: [[Float]], noise: [[Float]]) -> Double {
-        let s = perSampleRMS(signal).reduce(0.0) { $0 + Double($1) }
-        let n = perSampleRMS(noise).reduce(0.0) { $0 + Double($1) }
+        let s = perSampleGFP(signal).reduce(0.0) { $0 + Double($1) }
+        let n = perSampleGFP(noise).reduce(0.0) { $0 + Double($1) }
         return n > 1e-12 ? s / n : 0
     }
 
@@ -250,7 +276,20 @@ nonisolated enum EpochSNR {
             trialScalar[t] = acc * invCh
         }
 
-        var rng = SystemRandomNumberGenerator()
+        // Seeded, not `SystemRandomNumberGenerator`. The bootstrap used to draw
+        // from the system generator, so two runs over the *same* epochs reported
+        // different SME — up to ~19% relative apart on categories with few
+        // trials. Nothing else moved: every sample and every other metric already
+        // matched. But `REWIND.md` promises that navigating back to a node
+        // returns you to the same data, and a reported number that changes on
+        // every recomputation weakens that for no benefit. A bootstrap needs
+        // *arbitrary* draws, not *unpredictable* ones.
+        //
+        // The seed is fixed rather than derived from the data: a data-derived
+        // seed would make the estimate depend on the input in a second, hidden
+        // way, and two categories drawing the same resample indices is
+        // statistically harmless — the draws are independent of trial identity.
+        var rng = SeededGenerator(seed: 0x5EED_B007_5712_4D0C)
         let invN = 1.0 / Double(n)
         var estimates = [Double](repeating: 0, count: iterations)
         for i in 0..<iterations {

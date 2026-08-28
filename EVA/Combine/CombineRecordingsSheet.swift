@@ -27,6 +27,7 @@ struct CombineRecordingsSheet: View {
     @State private var summaries: [RecordingSummary] = []
     @State private var isLoading = true
     @State private var loadError: String?
+    @State private var loadFailures: [String] = []
 
     @State private var mode = CombineMode.grandAverage
     @State private var weighting = WeightingMode.byInverseVariance
@@ -54,6 +55,25 @@ struct CombineRecordingsSheet: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
+                        if !loadFailures.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Label("Some files could not be loaded", systemImage: "exclamationmark.triangle.fill")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.orange)
+                                    Spacer()
+                                    Button("Dismiss", systemImage: "xmark") {
+                                        loadFailures.removeAll()
+                                    }
+                                    .labelStyle(.iconOnly)
+                                    .buttonStyle(.plain)
+                                    .help("Dismiss load warnings")
+                                }
+                                ForEach(loadFailures, id: \.self) { Text($0).font(.caption2) }
+                            }
+                            .padding(8)
+                            .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                        }
                         sanityTable
                         Divider()
                         options
@@ -338,7 +358,7 @@ struct CombineRecordingsSheet: View {
                 Task { await build() }
             }
             .keyboardShortcut(.defaultAction)
-            .disabled(isBuilding || summaries.count < 2)
+            .disabled(isBuilding || summaries.count < 2 || !allCompatible)
         }
         .padding(20)
     }
@@ -348,18 +368,25 @@ struct CombineRecordingsSheet: View {
     private func load() async {
         isLoading = true
         let urls = self.urls
-        let loaded: (inputs: [CombineInput], summaries: [RecordingSummary], map: [URL: [String: String]])? =
+        let loaded: (inputs: [CombineInput], summaries: [RecordingSummary], map: [URL: [String: String]], failures: [String])? =
             await Task.detached(priority: .userInitiated) {
                 var inputs: [CombineInput] = []
+                var failures: [String] = []
                 for url in urls {
-                    guard let imported = try? SignalImportReader.load(from: url) else { continue }
-                    inputs.append(CombineInput(
-                        url: url,
-                        signal: imported.signal,
-                        segments: imported.signal.epochSegments,
-                        badChannels: [],
-                        geometry: imported.geometry
-                    ))
+                    do {
+                        let imported = try SignalImportReader.load(from: url)
+                        let restored = RecordingCombiner.restoredBadChannelState(fromPackage: url)
+                        inputs.append(CombineInput(
+                            url: url,
+                            signal: imported.signal,
+                            segments: imported.signal.epochSegments,
+                            badChannels: restored.bad,
+                            alreadyInterpolatedChannels: restored.alreadyInterpolated,
+                            geometry: imported.geometry
+                        ))
+                    } catch {
+                        failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                    }
                 }
                 guard !inputs.isEmpty else { return nil }
                 var summaries = inputs.map { RecordingCombiner.summarize($0) }
@@ -374,13 +401,14 @@ struct CombineRecordingsSheet: View {
                     rawByFile[input.url] = Array(Set(input.segments.map(\.category))).sorted()
                 }
                 let map = CategoryMatcher.autoMap(rawCategoriesByFile: rawByFile).map
-                return (inputs, summaries, map)
+                return (inputs, summaries, map, failures)
             }.value
 
         if let loaded {
             self.inputs = loaded.inputs
             self.summaries = loaded.summaries
             self.categoryMap = loaded.map
+            self.loadFailures = loaded.failures
         } else {
             self.loadError = "None of the dropped files could be read as segmented/averaged recordings."
         }
@@ -398,7 +426,7 @@ struct CombineRecordingsSheet: View {
         let map = self.categoryMap
         let summaries = self.summaries
 
-        let result: URL? = await Task.detached(priority: .userInitiated) {
+        let result: (url: URL?, error: String?) = await Task.detached(priority: .userInitiated) {
             let log = EVAProcessLog(header: "EVA combine — \(inputs.count) files")
             var script = EVAProcessingScript()
 
@@ -408,22 +436,29 @@ struct CombineRecordingsSheet: View {
             var noiseByCategory: [String: [Float]] = [:]
             var weightByFile: [URL: Double] = [:]
 
-            switch mode {
-            case .append:
-                let out = RecordingCombiner.append(inputs, log: log)
-                signal = out.signal; segments = out.segments; kind = .epoched
-                script.append(EVAProcessingStep(operation: .combine, parameters: ["mode": "append", "files": "\(inputs.count)"]))
-            case .grandAverage:
-                guard let out = RecordingCombiner.grandAverage(
-                    inputs, categoryMap: map, weighting: weighting,
-                    badChannelPolicy: policy, rebaseline: rebaseline, log: log
-                ) else { return nil }
-                signal = out.signal; segments = out.segments; kind = .averaged
-                noiseByCategory = out.noiseByCategory
-                weightByFile = out.weightByFile
-                if rebaseline {
-                    script.append(EVAProcessingStep(operation: .baseline, parameters: ["window": "pre-stimulus"]))
-                }
+            do {
+                switch mode {
+                case .append:
+                    let out = try RecordingCombiner.append(inputs, log: log)
+                    signal = out.signal; segments = out.segments; kind = .epoched
+                    script.append(EVAProcessingStep(operation: .combine, parameters: ["mode": "append", "files": "\(inputs.count)"]))
+                    // The combined file starts its own history; the inputs are
+                    // recorded at its root rather than spliced into its lineage
+                    // (ROADMAP RW-1 item 15).
+                    for step in RecordingCombiner.contributorProvenanceSteps(for: inputs) {
+                        script.append(step)
+                    }
+                case .grandAverage:
+                    let out = try RecordingCombiner.grandAverage(
+                        inputs, categoryMap: map, weighting: weighting,
+                        badChannelPolicy: policy, rebaseline: rebaseline, log: log
+                    )
+                    signal = out.signal; segments = out.segments; kind = .averaged
+                    noiseByCategory = out.noiseByCategory
+                    weightByFile = out.weightByFile
+                    if rebaseline {
+                        script.append(EVAProcessingStep(operation: .baseline, parameters: ["window": "pre-stimulus"]))
+                    }
                 // Aggregate per-canonical-category total/included/reasons across
                 // files so the combined package's eva.xml carries it forward.
                 var agg: [String: CategoryRejection] = [:]
@@ -438,16 +473,25 @@ struct CombineRecordingsSheet: View {
                         agg[canonical] = r
                     }
                 }
-                script.append(EVAProcessingStep(
-                    operation: .average,
-                    parameters: ["files": "\(inputs.count)"],
-                    rejections: agg.values.sorted { $0.category < $1.category }
-                ))
-                script.append(EVAProcessingStep(operation: .combine, parameters: [
-                    "mode": "grandAverage", "weighting": weighting.rawValue,
-                    "badChannels": policy.rawValue, "rebaselined": "\(rebaseline)",
-                    "files": "\(inputs.count)"
-                ]))
+                    script.append(EVAProcessingStep(
+                        operation: .average,
+                        parameters: ["files": "\(inputs.count)"],
+                        rejections: agg.values.sorted { $0.category < $1.category }
+                    ))
+                    script.append(EVAProcessingStep(operation: .combine, parameters: [
+                        "mode": "grandAverage", "weighting": weighting.rawValue,
+                        "badChannels": policy.rawValue, "rebaselined": "\(rebaseline)",
+                        "files": "\(inputs.count)"
+                    ]))
+                    for step in RecordingCombiner.contributorProvenanceSteps(for: inputs) {
+                        script.append(step)
+                    }
+                    for step in RecordingCombiner.badChannelProvenanceSteps(for: inputs, policy: policy) {
+                        script.append(step)
+                    }
+                }
+            } catch {
+                return (nil, error.localizedDescription)
             }
 
             // Look up each file's summary (for trial counts + SNR) by URL.
@@ -472,17 +516,21 @@ struct CombineRecordingsSheet: View {
             )
             provenance.logLines().forEach { log.append($0) }
 
-            return try? RecordingCombiner.writeTempPackage(
-                signal: signal, segments: segments, kind: kind,
-                script: script, log: log, noiseByCategory: noiseByCategory, baseName: "combined"
-            )
+            do {
+                return (try RecordingCombiner.writeTempPackage(
+                    signal: signal, segments: segments, kind: kind,
+                    script: script, log: log, noiseByCategory: noiseByCategory, baseName: "combined"
+                ), nil)
+            } catch {
+                return (nil, error.localizedDescription)
+            }
         }.value
 
         isBuilding = false
-        if let result {
-            onComplete(result)
+        if let url = result.url {
+            onComplete(url)
         } else {
-            buildStatus = "Combine failed — check that files share categories and epoch structure."
+            buildStatus = result.error ?? "Combine failed — check that files share categories and epoch structure."
         }
     }
 
@@ -498,6 +546,10 @@ struct CombineRecordingsSheet: View {
             }
             .labelsHidden()
         }
+    }
+
+    private var allCompatible: Bool {
+        summaries.count >= 2 && summaries.allSatisfy(\.isCompatible)
     }
 
     /// "included/total" cell tooltip: excluded count + reasons from eva.xml.

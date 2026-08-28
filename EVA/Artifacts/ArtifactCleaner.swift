@@ -26,28 +26,6 @@
 
 import Foundation
 
-extension MFFEvent {
-    /// This event's true center in time, correcting for the two conventions
-    /// EVA's detectors use for `beginTimeSeconds`: waveform-template matching
-    /// and Trajectory (map-sequence) scanning stamp the *center* sample
-    /// directly; single-map Topography and Continuous-scan topography stamp
-    /// the true *onset* (matching the general Onset+Duration convention used
-    /// everywhere else — see the event detail popover), so their center is
-    /// onset + half their own measured duration, not `beginTimeSeconds` as-is.
-    /// Every place that needs "the middle of this event" (cleaning windows,
-    /// OBS alignment search, averaged-template previews) should read this
-    /// instead of `beginTimeSeconds` directly, or it'll center on the wrong
-    /// sample for onset-tagged events — most visibly wrong for Continuous
-    /// events, whose duration varies per event rather than matching a fixed
-    /// nominal window.
-    var centerTimeSeconds: Double {
-        if sourceFile.hasPrefix("Topography") || sourceFile.hasPrefix("Continuous") {
-            return beginTimeSeconds + (durationSeconds ?? 0) / 2
-        }
-        return beginTimeSeconds
-    }
-}
-
 enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable {
     case ocular = "Ocular Artifact"
     case ecg = "ECG Artifact"
@@ -64,12 +42,13 @@ enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable 
     /// hits closer than that are almost certainly the same beat detected
     /// twice. This errs on the generous side (240 BPM) instead of a typical
     /// resting rate, to avoid ever swallowing a genuine second beat during
-    /// tachycardia. Ocular/Other have no such floor, so they keep a
-    /// conservative generic default.
+    /// tachycardia. Ocular artifacts use a slightly wider window so dense
+    /// waveform scans collapse multiple nearby hits from the same blink.
+    /// Other artifacts keep the conservative generic default.
     var defaultMergeWindowSeconds: Double {
         switch self {
         case .bcg, .ecg: return 0.25
-        case .ocular: return 0.20
+        case .ocular: return 0.35
         case .other: return 0.25
         }
     }
@@ -184,9 +163,22 @@ enum ArtifactOBSStrategy: String, CaseIterable, Identifiable, Codable, Sendable 
             return "Fits a PCA basis over channel-by-time event windows instead of one independent basis per channel."
         }
     }
+
+    /// Published citation for this strategy's underlying method, in APA
+    /// format, or `nil` when the variant is an EVA-specific refinement of OBS
+    /// with no separate published reference of its own — those still build on
+    /// `.standard`'s citation, which the help popover always shows.
+    nonisolated var reference: String? {
+        switch self {
+        case .standard:
+            return "Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. NeuroImage, 28(3), 720–737. https://doi.org/10.1016/j.neuroimage.2005.06.067"
+        case .topographyGated, .topographyAligned, .topographyWeighted, .virtualChannel, .clustered, .spatiotemporal:
+            return nil
+        }
+    }
 }
 
-struct DefinedArtifact: Identifiable, Sendable {
+struct DefinedArtifact: Identifiable, Sendable, Codable {
     nonisolated static let defaultOBSComponentCount = 2
     nonisolated static let maximumOBSComponentCount = 8
     nonisolated static let defaultOBSEdgeTaperSeconds = 0.10
@@ -758,7 +750,15 @@ nonisolated enum ArtifactCleaner {
             recordingStartTime: signal.recordingStartTime,
             events: signal.events,
             data: data,
-            channelNames: signal.channelNames
+            channelNames: signal.channelNames,
+            epochSegments: signal.epochSegments,
+            isSegmented: signal.isSegmented,
+            isAveraged: signal.isAveraged,
+            isGrandAverage: signal.isGrandAverage,
+            impedancesKOhm: signal.impedancesKOhm,
+            positiveUpFlags: signal.positiveUpFlags,
+            acquisitionReference: signal.acquisitionReference,
+            referenceState: signal.referenceState
         )
         return (cleaned, summaries)
     }
@@ -851,7 +851,7 @@ nonisolated enum ArtifactCleaner {
     ///
     /// Each channel is corrected independently (its template only ever draws
     /// on that same channel's own neighboring epochs), so channels are
-    /// processed across all CPU cores, mirroring `GradientRemover.correct`.
+    /// processed across all CPU cores.
     /// The donor-event plan is built per channel because optional AMRI
     /// preprocessing can shift/drop windows differently for each channel.
     private static func applyLocalTemplate(
@@ -888,7 +888,7 @@ nonisolated enum ArtifactCleaner {
 
         data.withUnsafeMutableBufferPointer { out in
             // Each iteration writes a distinct index, so concurrent writes
-            // don't overlap; same pattern as `GradientRemover.correct`.
+            // don't overlap.
             nonisolated(unsafe) let out = out
             evaConcurrentPerform(iterations: channels.count) { index in
                 guard !Task.isCancelled else { return }
@@ -1200,13 +1200,12 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
-    /// Least-squares scalar fit of `template ≈ k · y`: `k = dot(y, template) / dot(y, y)`.
-    /// Matches `amri_eeg_gac.m`/`amri_eeg_cbc.m`'s AAR/MAR/wAAR fit direction.
+    /// Least-squares scalar fit of `y ≈ k · template`: `k = dot(y, template) / dot(template, template)`.
     private static func localRegressionCoefficient(y: [Float], template: [Float]) -> Float {
         var denom: Float = 0
         var numer: Float = 0
         for i in y.indices {
-            denom += y[i] * y[i]
+            denom += template[i] * template[i]
             numer += y[i] * template[i]
         }
         guard denom > 1e-12 else { return 0 }

@@ -1,0 +1,228 @@
+{
+  "schemaVersion": 1,
+  "name": "gradient-methods-v1",
+  "description": "EVA's MRI gradient-correction methods on locked-clock simulated recordings with known ground truth. Every arm sees the identical recording for a given seed, so arms are compared by within-seed difference rather than by their separate averages. Two scenarios differ in one parameter: `gradient-locked` carries the scenario file's 10% slow amplitude modulation, `gradient-steady` sets it to zero. That pair is the experiment: a local donor-neighbourhood template can track drifting artifact amplitude and a global average template cannot, so if the gap between those two engine families collapses when the modulation is removed, the gap is amplitude tracking rather than a defect. Moosmann is deliberately absent: it averages donor volumes by realignment-parameter similarity, and motion parameters are an external file that a headless replay cannot supply, so a Moosmann arm would silently fall back to unweighted averaging and report a number that is not Moosmann's.",
+  "seeds": [
+    20260821,
+    20260822,
+    20260823,
+    20260824,
+    20260825
+  ],
+  "scenarios": [
+    {
+      "id": "gradient-locked",
+      "scenarioFile": "regression-gradient-locked.json",
+      "generateArguments": [],
+      "padSeconds": 2,
+      "description": "Zero EEG/MRI clock drift, gradient artifact only, no BCG, no ocular activity, no recording defects, and the scenario file's 10% slow amplitude modulation left in place. Chosen first because its best attainable score is known analytically rather than merely observed, which gives the harness itself a leakage check."
+    },
+    {
+      "id": "gradient-steady",
+      "scenarioFile": "regression-gradient-locked.json",
+      "generateArguments": [
+        "--slow-modulation",
+        "0"
+      ],
+      "padSeconds": 2,
+      "description": "Identical to gradient-locked with the slow amplitude modulation removed. The only difference between the two scenarios, so any change in the ranking between them is attributable to amplitude drift and nothing else."
+    }
+  ],
+  "methods": [
+    {
+      "id": "no-correction",
+      "label": "No correction",
+      "kind": "uncorrected",
+      "steps": [],
+      "note": "The generated recording, scored unchanged. Every other row in the table is an improvement over this one, and without it none of them can be read."
+    },
+    {
+      "id": "aas",
+      "label": "Fast AAS",
+      "kind": "eva",
+      "citation": "Allen, P. J., Josephs, O., & Turner, R. (2000). A method for removing imaging artifact from continuous EEG recorded during functional MRI. NeuroImage, 12(2), 230-239. https://doi.org/10.1006/nimg.2000.0599",
+      "note": "Deprecated in EVA since 2026-08-09 and retained for exact reproduction of existing files. Included so the table shows what retiring it cost.",
+      "steps": [
+        {
+          "operation": "mriGradientCorrection",
+          "parameters": {
+            "trMarkerCode": "TREV",
+            "method": "AAS",
+            "donorVolumes": "8",
+            "backend": "cpu",
+            "alignment": "false",
+            "subSample": "false",
+            "upsampleFactor": "1"
+          }
+        }
+      ],
+      "ceiling": {
+        "rule": "sqrtDonorVolumesPlusOne",
+        "tolerance": 1.02
+      }
+    },
+    {
+      "id": "mas",
+      "label": "MAS",
+      "kind": "eva",
+      "citation": "Chen, Z., et al. AMRI toolbox, amri_eeg_gac.m (NINDS/NIH). See THIRD_PARTY_NOTICES.md.",
+      "steps": [
+        {
+          "operation": "mriGradientCorrection",
+          "parameters": {
+            "trMarkerCode": "TREV",
+            "method": "MAS",
+            "donorVolumes": "8",
+            "backend": "cpu",
+            "alignment": "false",
+            "subSample": "false",
+            "upsampleFactor": "1"
+          }
+        }
+      ],
+      "ceiling": {
+        "rule": "sqrtDonorVolumesPlusOne",
+        "tolerance": 1.02
+      }
+    },
+    {
+      "id": "mar",
+      "label": "MAR",
+      "kind": "eva",
+      "citation": "Chen, Z., et al. AMRI toolbox, amri_eeg_gac.m (NINDS/NIH). See THIRD_PARTY_NOTICES.md.",
+      "steps": [
+        {
+          "operation": "mriGradientCorrection",
+          "parameters": {
+            "trMarkerCode": "TREV",
+            "method": "MAR",
+            "donorVolumes": "8",
+            "backend": "cpu",
+            "alignment": "false",
+            "subSample": "false",
+            "upsampleFactor": "1"
+          }
+        }
+      ],
+      "ceiling": {
+        "rule": "sqrtDonorVolumesPlusOne",
+        "tolerance": 1.02
+      }
+    },
+    {
+      "id": "waas",
+      "label": "wAAS",
+      "kind": "eva",
+      "citation": "Goldman, R. I., Stern, J. M., Engel, J., & Cohen, M. S. (2000). Acquiring simultaneous EEG and functional MRI. Clinical Neurophysiology, 111(11), 1974-1980. https://doi.org/10.1016/S1388-2457(00)00456-9",
+      "note": "Exponentially distance-weighted donors, so its effective donor count is below the nominal one. sqrt(N+1) remains a valid upper bound, not a target.",
+      "steps": [
+        {
+          "operation": "mriGradientCorrection",
+          "parameters": {
+            "trMarkerCode": "TREV",
+            "method": "wAAS",
+            "donorVolumes": "8",
+            "backend": "cpu",
+            "alignment": "false",
+            "subSample": "false",
+            "upsampleFactor": "1"
+          }
+        }
+      ],
+      "ceiling": {
+        "rule": "sqrtDonorVolumesPlusOne",
+        "tolerance": 1.02
+      }
+    },
+    {
+      "id": "waar",
+      "label": "wAAR",
+      "kind": "eva",
+      "citation": "Goldman et al. (2000) template, least-squares scaled before subtraction.",
+      "steps": [
+        {
+          "operation": "mriGradientCorrection",
+          "parameters": {
+            "trMarkerCode": "TREV",
+            "method": "wAAR",
+            "donorVolumes": "8",
+            "backend": "cpu",
+            "alignment": "false",
+            "subSample": "false",
+            "upsampleFactor": "1"
+          }
+        }
+      ],
+      "ceiling": {
+        "rule": "sqrtDonorVolumesPlusOne",
+        "tolerance": 1.02
+      }
+    },
+    {
+      "id": "fastr",
+      "label": "FASTR",
+      "kind": "eva",
+      "citation": "Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. NeuroImage, 28(3), 720-737. https://doi.org/10.1016/j.neuroimage.2005.06.067",
+      "note": "No analytic ceiling: the OBS residual fit is not an average over a known donor count, so no closed-form best case exists. Stating one would make the leakage check meaningless rather than stricter.",
+      "steps": [
+        {
+          "operation": "mriGradientCorrection",
+          "parameters": {
+            "trMarkerCode": "TREV",
+            "method": "FASTR",
+            "donorVolumes": "8",
+            "slices": "41",
+            "backend": "cpu",
+            "alignment": "false",
+            "subSample": "false",
+            "upsampleFactor": "1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "farm",
+      "label": "FARM",
+      "kind": "eva",
+      "citation": "van der Meer, J. N., Tijssen, M. A. J., Bour, L. J., van Rootselaar, A. F., & Nederveen, A. J. (2010). Robust EMG-fMRI artifact reduction for motion (FARM). Clinical Neurophysiology, 121(5), 766-776. https://doi.org/10.1016/j.clinph.2009.12.035",
+      "steps": [
+        {
+          "operation": "mriGradientCorrection",
+          "parameters": {
+            "trMarkerCode": "TREV",
+            "method": "FARM",
+            "donorVolumes": "8",
+            "slices": "41",
+            "backend": "cpu",
+            "alignment": "false",
+            "subSample": "false",
+            "upsampleFactor": "1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "allen-iar",
+      "label": "Allen IAR",
+      "kind": "eva",
+      "citation": "Allen, P. J., Josephs, O., & Turner, R. (2000). A method for removing imaging artifact from continuous EEG recorded during functional MRI. NeuroImage, 12(2), 230-239. https://doi.org/10.1006/nimg.2000.0599",
+      "note": "Fixed running sections with correlation-gated template updates, so its template is not an N-donor average and has no closed-form ceiling.",
+      "steps": [
+        {
+          "operation": "mriGradientCorrection",
+          "parameters": {
+            "trMarkerCode": "TREV",
+            "method": "Allen IAR",
+            "donorVolumes": "8",
+            "slices": "41",
+            "backend": "cpu",
+            "alignment": "false",
+            "subSample": "false",
+            "upsampleFactor": "1"
+          }
+        }
+      ]
+    }
+  ],
+  "referenceMethod": "mas"
+}

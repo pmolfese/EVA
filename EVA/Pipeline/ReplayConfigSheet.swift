@@ -31,11 +31,15 @@ nonisolated enum ReplayStepDisplay {
         case .markBad: return "Bad-channel Marks"
         case .segment: return "PSA Segmentation / Averaging"
         case .baseline: return "Baseline Correction"
+        case .trialExclusion: return "Reviewed Trial Exclusion"
         case .average: return "Average"
         case .combine: return "Combine"
+        case .combineInput: return "Combined Input"
+        case .combineBadChannelPolicy: return "Combine Bad-channel Policy"
         case .split: return "Split"
         case .reference: return "Reference"
         case .bcgDetection: return "BCG Detection"
+        case .bcgCorrection: return "BCG Correction (PCA-S)"
         case .ecgDetection: return "ECG Detection"
         }
     }
@@ -45,6 +49,7 @@ nonisolated enum ReplayStepDisplay {
         case .auto: return "Runs automatically"
         case .review: return "Review parameters, then runs"
         case .decision: return "Pauses for your decision"
+        case .resolvedFromPayload: return "Re-applies from this file's own record"
         case .skip: return "Recorded for provenance only"
         }
     }
@@ -76,6 +81,18 @@ nonisolated enum ReplayStepDisplay {
             lines.append("Settings:")
             for key in step.parameters.keys.sorted() {
                 lines.append("  \(key): \(step.parameters[key] ?? "")")
+            }
+        }
+        if !step.excludedTrials.isEmpty {
+            let excluded = step.excludedTrials.filter(\.isExcluded)
+            let restored = step.excludedTrials.count - excluded.count
+            lines.append("Reviewed trials: \(excluded.count) excluded" + (restored > 0 ? ", \(restored) restored" : ""))
+            for trial in excluded.prefix(12) {
+                let reasons = trial.reasons.isEmpty ? trial.origin.rawValue : trial.reasons.joined(separator: ", ")
+                lines.append("  \(trial.category) #\(trial.recordedIndex) @\(String(format: "%.3f", trial.sourceTimeSeconds))s — \(reasons)")
+            }
+            if excluded.count > 12 {
+                lines.append("  … \(excluded.count - 12) more")
             }
         }
         if !step.rejections.isEmpty {

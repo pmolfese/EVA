@@ -32,6 +32,13 @@ final class BatchController {
         let id = UUID()
         let url: URL
         var status: JobStatus = .pending
+        /// Where this job's result was written — set only once `status` is
+        /// `.done`, from either export path (`HeadlessBatchProcessor.process`'s
+        /// return value, or `FilteringViews.exportReplayResult`'s own `url`
+        /// via `BatchController.recordOutput(_:)`). Lets the finished-batch
+        /// list (`BatchWindowView`) offer "Show in Finder"/"Open in EVA" per
+        /// file instead of only a pass/fail count.
+        var outputURL: URL?
         var name: String { url.lastPathComponent }
     }
 
@@ -118,6 +125,15 @@ final class BatchController {
         jobs[currentIndex].status = status
     }
 
+    /// Records where the windowed (interactive-replay) path wrote its output
+    /// for the file currently being processed. The headless path doesn't need
+    /// this — it sets `outputURL` directly, since it already has the index in
+    /// hand rather than going through `currentIndex`.
+    func recordOutput(_ url: URL) {
+        guard jobs.indices.contains(currentIndex) else { return }
+        jobs[currentIndex].outputURL = url
+    }
+
     /// Marks the current job's outcome and advances to the next file.
     func completeCurrent(_ status: JobStatus) {
         guard isActive else { return }
@@ -197,7 +213,13 @@ final class BatchController {
             guard isActive else { break } // Stop Batch was pressed mid-run
             headlessIndex = index
             jobs[index].status = .processing
-            updateProgress(stepName: "Loading recording", stepProgress: nil, fileProgress: 0)
+            // Explicit "Loading data" — this is the only message shown for
+            // however long `HeadlessBatchProcessor.process`'s own signal
+            // read takes (`MFFSignalReader.loadSignal` has no progress
+            // callback, so there is nothing finer-grained to report here),
+            // and it was easy to mistake for the progress bar being frozen
+            // rather than genuinely between steps (2026-08-16).
+            updateProgress(stepName: "Loading data…", stepProgress: nil, fileProgress: 0)
             do {
                 switch try await HeadlessBatchProcessor.process(
                     url: jobs[index].url,
@@ -211,8 +233,9 @@ final class BatchController {
                         )
                     }
                 ) {
-                case .completed:
+                case .completed(let outputURL):
                     jobs[index].status = .done
+                    jobs[index].outputURL = outputURL
                 case .needsInput:
                     jobs[index].status = .needsInput
                 }

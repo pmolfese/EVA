@@ -418,19 +418,28 @@ struct SegmentHealthMetricRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Circle()
-                .fill(metric.grade.color)
-                .frame(width: 9, height: 9)
-                .padding(.top, 4)
+            // An unassessed metric gets a hollow marker and no grade: it is not
+            // good, not poor, and not scored. Reading a grade colour here would
+            // be reading a placeholder.
+            Group {
+                if metric.isAssessed {
+                    Circle().fill(metric.grade.color)
+                } else {
+                    Circle().strokeBorder(Color.secondary, lineWidth: 1)
+                }
+            }
+            .frame(width: 9, height: 9)
+            .padding(.top, 4)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(metric.name)
                         .font(.caption.weight(.semibold))
+                        .foregroundStyle(metric.isAssessed ? Color.primary : Color.secondary)
                     Spacer()
-                    Text(metric.grade.displayName)
+                    Text(metric.isAssessed ? metric.grade.displayName : "Not assessed")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(metric.grade.color)
+                        .foregroundStyle(metric.isAssessed ? metric.grade.color : Color.secondary)
                 }
                 Text(metric.detail)
                     .font(.caption2)
@@ -737,7 +746,7 @@ struct WaveletRunPopover: View {
                 GridRow {
                     Text("Cleaning mode")
                     Picker("", selection: $cleaningMode) {
-                        ForEach(WaveletCleaningMode.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(WaveletCleaningMode.allCases) { Text($0.displayName).tag($0) }
                     }
                     .labelsHidden()
                     .frame(width: 160)
@@ -790,6 +799,13 @@ struct WaveletRunPopover: View {
 
 struct ChannelHealthPopover: View {
     let result: ChannelHealthResult
+    @Environment(\.openWindow) private var openWindow
+
+    private var relationshipModel: ChannelsWindowModel { .shared }
+
+    private var relationshipFindings: [ChannelRelationshipFinding] {
+        relationshipModel.relationships(for: result.channelIndex)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -815,6 +831,83 @@ struct ChannelHealthPopover: View {
                         ChannelHealthMetricRow(metric: metric)
                     }
                 }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Relationships")
+                    .font(.caption.weight(.semibold))
+
+                switch relationshipModel.relationshipAnalysisState {
+                case .analyzing:
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Checking channel relationships…")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                case .complete:
+                    if let finding = relationshipFindings.first,
+                       let partner = finding.partner(of: result.channelIndex) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 7) {
+                                Circle()
+                                    .fill(finding.kind == .likelyBridge ? Color.orange : Color.cyan)
+                                    .frame(width: 9, height: 9)
+                                Text("\(finding.kind.displayName) with Ch \(partner + 1)")
+                                    .font(.caption)
+                                Spacer()
+                                Text(String(format: "r %.3f", finding.medianCorrelation))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            if relationshipFindings.count > 1 {
+                                Text("\(relationshipFindings.count) persistent pair findings for this channel.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Label("No persistent pair findings for this channel", systemImage: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                            if let summary = relationshipModel.strongestRelationship(for: result.channelIndex) {
+                                Text("Strongest evaluated partner: Ch \(summary.partner + 1), median r \(summary.medianCorrelation.formatted(.number.precision(.fractionLength(3)))) — below the review threshold.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("No usable channel-pair comparison was available.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                case .notRun:
+                    Text("Relationship analysis has not completed for the current signal.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Button("Open Relationships…") {
+                    let first = relationshipFindings.first
+                    relationshipModel.present(
+                        tab: .relationships,
+                        channel: result.channelIndex,
+                        relationshipID: first?.id
+                    )
+                    if relationshipModel.relationshipAnalysisState == .notRun {
+                        relationshipModel.refreshDiagnostics()
+                    }
+                    openWindow(id: EVAApp.channelSetsWindowID)
+                }
+                .font(.caption)
             }
         }
         .padding(12)

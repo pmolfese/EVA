@@ -145,22 +145,49 @@ nonisolated enum MFFSignalSplitter {
         )
     }
 
+    /// Re-times `event` into a split part running `start..<end`, or `nil` if its
+    /// marked instant falls outside that part.
+    ///
+    /// Clipping works on the event's true span, so it is correct for centered
+    /// and peak-stamped events as well as onset ones. When a span actually has
+    /// to be trimmed the result is emitted as `.onset`: a centered event whose
+    /// tail was cut is no longer centered on its marked sample, and claiming
+    /// otherwise would move the event half the trimmed amount. An untrimmed
+    /// event keeps its original anchor.
     private static func shiftedEvent(_ event: MFFEvent, fromStart start: Double, toEnd end: Double) -> MFFEvent? {
         guard event.beginTimeSeconds >= start, event.beginTimeSeconds < end else { return nil }
-        let shiftedBegin = event.beginTimeSeconds - start
-        let clippedDuration = event.durationSeconds.map {
-            min($0, max(end - event.beginTimeSeconds, 0))
+
+        guard let span = event.spanSeconds else {
+            return MFFEvent(
+                id: event.id,
+                code: event.code,
+                label: event.label,
+                eventDescription: event.eventDescription,
+                cell: event.cell,
+                beginTimeSeconds: event.beginTimeSeconds - start,
+                rawBeginTime: "",
+                sourceFile: event.sourceFile,
+                durationSeconds: event.durationSeconds,
+                timeAnchor: event.timeAnchor
+            )
         }
+
+        let clippedStart = max(span.lowerBound, start)
+        let clippedEnd = min(span.upperBound, end)
+        let wasTrimmed = clippedStart > span.lowerBound || clippedEnd < span.upperBound
+        let clippedDuration = max(clippedEnd - clippedStart, 0)
+
         return MFFEvent(
             id: event.id,
             code: event.code,
             label: event.label,
             eventDescription: event.eventDescription,
             cell: event.cell,
-            beginTimeSeconds: shiftedBegin,
+            beginTimeSeconds: wasTrimmed ? clippedStart - start : event.beginTimeSeconds - start,
             rawBeginTime: "",
             sourceFile: event.sourceFile,
-            durationSeconds: clippedDuration
+            durationSeconds: clippedDuration,
+            timeAnchor: wasTrimmed ? .onset : event.timeAnchor
         )
     }
 

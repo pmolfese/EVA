@@ -22,8 +22,24 @@ enum MFFExportWriter {
         pnsSignal: MFFSignalData?,
         script: EVAProcessingScript,
         to url: URL,
-        auditLogLines: [String] = []
+        auditLogLines: [String] = [],
+        icaPayload: ICAReplayPayload? = nil,
+        artifactPayload: ArtifactReplayPayload? = nil
     ) async -> Result<URL, Error> {
+        // Stamp what we are actually writing, so re-opening this package does not
+        // have to infer it from the EGI structure. The writer is the one place
+        // that knows for certain, and it serves the interactive and headless
+        // paths alike. A grand average is still detected on read (it depends on
+        // the segments' subjects), so only the three authored kinds are stamped.
+        var script = script
+        script.fileType = {
+            switch snapshot.kind {
+            case .continuous: return .continuous
+            case .epoched: return .segmented
+            case .averaged: return .averaged
+            }
+        }()
+
         let worker = Task.detached(priority: .userInitiated) {
             do {
                 try Task.checkCancellation()
@@ -35,12 +51,36 @@ enum MFFExportWriter {
                     to: url
                 )
                 try? EVAProcessingScriptXML.write(script, toPackage: url)
-                let log = EVAProcessLog(header: "EVA export — \(url.lastPathComponent)")
+                // The subject-specific half of the `icaClean` step. `eva.xml`
+                // records that ICA ran and with which portable settings; this
+                // carries the operator and the exclusion decision, which is what
+                // makes the step re-applicable without a refit. See
+                // `ICAReplayPayload`.
+                try? icaPayload?.write(toPackage: url)
+                // The drawn-artifact definitions. Same split as ICA: `eva.xml`
+                // records that cleaning happened and with which portable
+                // settings, this carries the subject-specific definitions that
+                // make it re-appliable.
+                try? artifactPayload?.write(toPackage: url)
+                let log = EVAProcessLog(
+                    header: "EVA \(EVAProcessingScriptXML.currentAppVersion) export — \(url.lastPathComponent)"
+                )
                 for step in script.steps {
                     let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
                     log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
                 }
                 for line in auditLogLines {
+                    log.append(line)
+                }
+                // What was actually written, checked against what the script
+                // claims. This is the one moment both halves are in hand and
+                // certain — see `PayloadConsistency` for the observation that
+                // made it worth recording (ROADMAP RW-1 item 4).
+                for line in PayloadConsistency.auditLogLines(
+                    script: script,
+                    hasICAPayload: icaPayload != nil,
+                    hasArtifactPayload: artifactPayload != nil
+                ) {
                     log.append(line)
                 }
                 try? log.write(toPackage: url)

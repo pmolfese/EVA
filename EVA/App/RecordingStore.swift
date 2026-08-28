@@ -29,9 +29,52 @@ import SwiftUI
 final class RecordingStore {
     /// Per-window channel state (hidden / bad / interpolated).
     var channels = ChannelModel()
+
+    // MARK: Waveform UI state (B4)
+    // Lifted out of `WaveformView`'s `@State` and grouped by lifetime/domain, so
+    // it is no longer copied with the view struct and menu-bar commands can reach
+    // it the same way they reach `channels`. See `WaveformUIModels.swift`.
+
+    /// Time selection, drag tracking, hover, transient highlights.
+    var selection = WaveformSelectionModel()
+    /// Events panel, event-track caches, category-group popover.
+    var events = WaveformEventDisplayModel()
+    /// Physio (PNS) pane display state.
+    var physio = PhysioDisplayModel()
+    /// Toolbar status line and its history.
+    var status = RecordingStatusModel()
+    /// The processing history tree and the History rail's display state. Derived
+    /// from the processing script for now — see `RecordingHistoryModel`.
+    var processingHistory = RecordingHistoryModel()
+    /// What each cleaning stage removed, in the order the stages ran. See
+    /// `CleaningVarianceLedger`.
+    var cleaningVariance = CleaningVarianceLedger()
+    /// Single owner of in-flight operation progress, replacing the per-view-model
+    /// `operationProgress` properties. See `OperationProgressCenter`.
+    var operationProgress = OperationProgressCenter()
+    /// Owns the in-flight MFF export. Needed because both export paths set
+    /// `isExportingMFF = true` *before* cancelling the previous task, so a
+    /// superseded export resuming later would otherwise clear the flag the newer
+    /// one just set. See `LatestOnlyRunner`.
+    @ObservationIgnored let exportRunner = LatestOnlyRunner()
+    /// Owns the in-flight history re-derivation. Rapid clicks down the rail
+    /// start one rebuild each, and without this the *first* one to finish moves
+    /// the window — so the state on screen is whichever rebuild happened to be
+    /// shortest, not the node last clicked. Only the newest may commit
+    /// (ROADMAP RW-1 item 2). See `LatestOnlyRunner`.
+    @ObservationIgnored let historyReDeriveRunner = LatestOnlyRunner()
+    /// User's session-only correction of the detected file type (File ▸ Dataset
+    /// Info). Not written to disk and not part of `eva.xml`'s authoritative
+    /// `fileType` — this is the escape hatch for a package EVA reads wrongly, so
+    /// a bad detection never blocks the work.
+    var fileTypeOverride: MFFFileType?
     /// Cached composition of the current processed signal with channel
     /// interpolation recipes. Kept per recording window.
     var interpolatedSignalResolver = InterpolatedSignalResolver()
+    /// Latest continuous signal at the end of this window's processing
+    /// pipeline. The Channels utility reads this when focus moves between
+    /// recording windows, so becoming main does not republish raw data.
+    @ObservationIgnored var channelsWindowSignal: MFFSignalData?
 
     // MARK: Viewport
     var amplitudeScale: Double = 100

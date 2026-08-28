@@ -61,6 +61,13 @@ nonisolated enum WoodyAlignmentAnalyzer {
         var latencyShiftSamples: Int
         var latencyShiftMs: Double
         var correlation: Double
+        /// Number of samples used for the final correlation estimate. EVA uses
+        /// the same support at every candidate lag so edge lags do not win just
+        /// because they were correlated over fewer samples.
+        var correlationSampleCount: Int
+        /// True when the optimum is exactly at the configured lag boundary.
+        /// These trials may need a wider search window or manual inspection.
+        var reachedLagLimit: Bool
     }
 
     struct IterationSummary: Identifiable, Sendable {
@@ -80,6 +87,12 @@ nonisolated enum WoodyAlignmentAnalyzer {
         var alignedAverage: [Float]
         var iterations: [IterationSummary]
         var converged: Bool
+        /// Number of real (non-padded) trial samples contributing to each point
+        /// in `alignedAverage` and the adaptive template.
+        var alignedSampleCounts: [Int]
+        var medianShiftMs: Double
+        var shiftMADMs: Double
+        var lagLimitHitCount: Int
     }
 
     static func align(
@@ -145,7 +158,7 @@ nonisolated enum WoodyAlignmentAnalyzer {
                     length: length
                 ) else { continue }
                 let searchWindow = compatibleWindow(firstWindow, trialWindow: window)
-                let estimate: (lag: Int, correlation: Double)
+                let estimate: (lag: Int, correlation: Double, sampleCount: Int)
                 switch alignmentMode {
                 case .correlation, .matchedWavelet:
                     estimate = bestLag(
@@ -177,7 +190,11 @@ nonisolated enum WoodyAlignmentAnalyzer {
             // target; correlation/peak modes refit the template to the aligned
             // average each pass.
             if !alignmentMode.usesFixedTemplate {
-                template = average(alignedTrials, length: length)
+                template = averageShifted(
+                    trials.map(\.samples),
+                    shifts: currentShifts,
+                    length: length
+                ).average
             }
             let meanCorrelation = currentCorrelations.isEmpty
                 ? 0
@@ -196,6 +213,28 @@ nonisolated enum WoodyAlignmentAnalyzer {
             previousShifts = currentShifts
         }
 
+        let finalEstimates = trials.enumerated().map { index, trial -> (correlation: Double, sampleCount: Int) in
+            guard let window = sampleRange(
+                startMs: windowStartMs,
+                endMs: windowEndMs,
+                stimulusOffsetSamples: trial.stimulusOffsetSamples,
+                samplingRate: samplingRate,
+                length: length
+            ) else { return (0, 0) }
+            let support = fixedSupportWindow(window, maxLagSamples: maxLagSamples, length: length)
+            let correlation = normalizedCorrelation(
+                trial: trial.samples,
+                template: template,
+                window: support,
+                lag: currentShifts[index]
+            )
+            return (correlation.isFinite ? correlation : 0, support.count)
+        }
+        if !iterations.isEmpty {
+            iterations[iterations.count - 1].meanCorrelation = finalEstimates.isEmpty
+                ? 0
+                : finalEstimates.reduce(0) { $0 + $1.correlation } / Double(finalEstimates.count)
+        }
         let shifts = currentShifts.enumerated().map { index, shift in
             TrialShift(
                 id: index,
@@ -203,9 +242,15 @@ nonisolated enum WoodyAlignmentAnalyzer {
                 sourceTimeSeconds: trials[index].sourceTimeSeconds,
                 latencyShiftSamples: shift,
                 latencyShiftMs: Double(shift) / samplingRate * 1000.0,
-                correlation: currentCorrelations[index]
+                correlation: finalEstimates[index].correlation,
+                correlationSampleCount: finalEstimates[index].sampleCount,
+                reachedLagLimit: maxLagSamples > 0 && abs(shift) == maxLagSamples
             )
         }
+
+        let aligned = averageShifted(trials.map(\.samples), shifts: currentShifts, length: length)
+        let medianShift = median(currentShifts.map(Double.init))
+        let shiftMAD = median(currentShifts.map { abs(Double($0) - medianShift) })
 
         return Result(
             shifts: shifts,
@@ -213,9 +258,13 @@ nonisolated enum WoodyAlignmentAnalyzer {
             initialTemplate: initialTemplate,
             finalTemplate: template,
             unalignedAverage: unalignedAverage,
-            alignedAverage: average(alignedTrials, length: length),
+            alignedAverage: aligned.average,
             iterations: iterations,
-            converged: converged
+            converged: converged,
+            alignedSampleCounts: aligned.counts,
+            medianShiftMs: medianShift / samplingRate * 1000.0,
+            shiftMADMs: shiftMAD / samplingRate * 1000.0,
+            lagLimitHitCount: shifts.filter(\.reachedLagLimit).count
         )
     }
 
@@ -258,12 +307,13 @@ nonisolated enum WoodyAlignmentAnalyzer {
         template: [Float],
         window: Range<Int>,
         maxLagSamples: Int
-    ) -> (lag: Int, correlation: Double) {
+    ) -> (lag: Int, correlation: Double, sampleCount: Int) {
         var bestLag = 0
         var bestCorrelation = -Double.infinity
+        let support = fixedSupportWindow(window, maxLagSamples: maxLagSamples, length: min(trial.count, template.count))
 
         for lag in (-maxLagSamples)...maxLagSamples {
-            let correlation = normalizedCorrelation(trial: trial, template: template, window: window, lag: lag)
+            let correlation = normalizedCorrelation(trial: trial, template: template, window: support, lag: lag)
             if correlation > bestCorrelation {
                 bestCorrelation = correlation
                 bestLag = lag
@@ -271,9 +321,9 @@ nonisolated enum WoodyAlignmentAnalyzer {
         }
 
         if !bestCorrelation.isFinite {
-            return (0, 0)
+            return (0, 0, support.count)
         }
-        return (bestLag, bestCorrelation)
+        return (bestLag, bestCorrelation, support.count)
     }
 
     private static func peakLag(
@@ -282,15 +332,26 @@ nonisolated enum WoodyAlignmentAnalyzer {
         window: Range<Int>,
         maxLagSamples: Int,
         polarity: PeakPolarity
-    ) -> (lag: Int, correlation: Double) {
+    ) -> (lag: Int, correlation: Double, sampleCount: Int) {
         guard let templatePeak = peakSample(in: template, window: window, polarity: polarity),
               let trialPeak = peakSample(in: trial, window: window, polarity: polarity) else {
             return bestLag(trial: trial, template: template, window: window, maxLagSamples: maxLagSamples)
         }
         let rawLag = trialPeak - templatePeak
         let lag = min(max(rawLag, -maxLagSamples), maxLagSamples)
-        let correlation = normalizedCorrelation(trial: trial, template: template, window: window, lag: lag)
-        return (lag, correlation.isFinite ? correlation : 0)
+        let support = fixedSupportWindow(window, maxLagSamples: maxLagSamples, length: min(trial.count, template.count))
+        let correlation = normalizedCorrelation(trial: trial, template: template, window: support, lag: lag)
+        return (lag, correlation.isFinite ? correlation : 0, support.count)
+    }
+
+    private static func fixedSupportWindow(
+        _ window: Range<Int>,
+        maxLagSamples: Int,
+        length: Int
+    ) -> Range<Int> {
+        let lower = max(window.lowerBound, maxLagSamples)
+        let upper = min(window.upperBound, length - maxLagSamples)
+        return upper - lower >= 3 ? lower..<upper : window
     }
 
     private static func peakSample(in trace: [Float], window: Range<Int>, polarity: PeakPolarity) -> Int? {
@@ -387,5 +448,40 @@ nonisolated enum WoodyAlignmentAnalyzer {
         return sums.indices.map { i in
             counts[i] > 0 ? Float(sums[i] / Double(counts[i])) : 0
         }
+    }
+
+    /// Averages shifted trials without treating out-of-epoch padding as measured
+    /// zero voltage. This preserves amplitudes near epoch boundaries.
+    private static func averageShifted(
+        _ traces: [[Float]],
+        shifts: [Int],
+        length: Int
+    ) -> (average: [Float], counts: [Int]) {
+        guard traces.count == shifts.count, length > 0 else { return ([], []) }
+        var sums = [Double](repeating: 0, count: length)
+        var counts = [Int](repeating: 0, count: length)
+        for (trace, shift) in zip(traces, shifts) where trace.count == length {
+            for outputIndex in 0..<length {
+                let sourceIndex = outputIndex + shift
+                guard trace.indices.contains(sourceIndex) else { continue }
+                let value = Double(trace[sourceIndex])
+                guard value.isFinite else { continue }
+                sums[outputIndex] += value
+                counts[outputIndex] += 1
+            }
+        }
+        let values = sums.indices.map { index in
+            counts[index] > 0 ? Float(sums[index] / Double(counts[index])) : 0
+        }
+        return (values, counts)
+    }
+
+    private static func median(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        return sorted.count.isMultiple(of: 2)
+            ? (sorted[middle - 1] + sorted[middle]) / 2
+            : sorted[middle]
     }
 }

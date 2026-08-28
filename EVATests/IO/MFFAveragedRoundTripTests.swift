@@ -133,4 +133,89 @@ struct MFFAveragedRoundTripTests {
         let readback = try MFFReader().loadSignal(from: out)
         #expect(readback.isAveraged)
     }
+
+    @Test func continuousEventMetadataRoundTrips() throws {
+        let source = try MFFReader().loadSignal(from: Fixtures.url("example_2.mff"))
+        let event = MFFEvent(
+            id: "rich-event",
+            code: "TARG",
+            label: "Target",
+            eventDescription: "A semantic description",
+            cell: "cell-7",
+            beginTimeSeconds: 0.125,
+            rawBeginTime: "0.125",
+            sourceFile: "original.vmrk",
+            durationSeconds: 0.250
+        )
+        let signal = MFFSignalData(
+            signalURL: source.signalURL,
+            signalType: source.signalType,
+            numberOfChannels: source.numberOfChannels,
+            samplingRate: source.samplingRate,
+            duration: source.duration,
+            recordingStartTime: source.recordingStartTime,
+            events: [event],
+            data: source.data,
+            channelNames: source.channelNames,
+            impedancesKOhm: source.impedancesKOhm
+        )
+        let out = tempURL()
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        try MFFWriter.write(signal: signal, segments: [], kind: .continuous, to: out)
+        let readback = try MFFReader().loadSignal(from: out)
+        let restored = try #require(readback.events.first { $0.code == "TARG" })
+
+        #expect(restored.label == event.label)
+        #expect(restored.eventDescription == event.eventDescription)
+        #expect(restored.cell == event.cell)
+        #expect(abs(restored.beginTimeSeconds - event.beginTimeSeconds) < 1e-5)
+        #expect(abs((restored.durationSeconds ?? 0) - 0.250) < 1e-9)
+    }
+
+    @MainActor
+    @Test func eventRoundTripProducesIdenticalPSASampleRanges() async throws {
+        let samplingRate = 100.0
+        let event = MFFEvent(
+            id: "boundary", code: "TARG", label: "Target",
+            eventDescription: "sample-boundary sentinel", cell: "7",
+            beginTimeSeconds: 2.0, rawBeginTime: "2.0", sourceFile: "sentinel",
+            durationSeconds: 0.1
+        )
+        let signal = MFFSignalData(
+            signalURL: URL(fileURLWithPath: "/tmp/sentinel.raw"),
+            signalType: "sentinel", numberOfChannels: 1,
+            samplingRate: samplingRate, duration: 5,
+            recordingStartTime: Date(timeIntervalSince1970: 1_700_000_000),
+            events: [event],
+            data: [(0..<500).map(Float.init)],
+            channelNames: ["Fz"]
+        )
+
+        func segments(for candidate: MFFSignalData) async throws -> [EpochSegment] {
+            let vm = EpochingViewModel(store: RecordingStore())
+            vm.selectedEventCodes = ["TARG"]
+            vm.categoryNames = ["TARG": "Target"]
+            vm.preStimulus = 0.1
+            vm.postStimulus = 0.2
+            vm.skipIfContainsArtifact = false
+            vm.interpolatesBadChannelsPerEpoch = false
+            let job = try #require(vm.makeBuildJob(from: candidate, events: candidate.events))
+            return try #require(await job.buildEpochs()).segments
+        }
+
+        let before = try await segments(for: signal)
+        let out = tempURL()
+        defer { try? FileManager.default.removeItem(at: out) }
+        try MFFWriter.write(signal: signal, segments: [], kind: .continuous, to: out)
+        let readback = try MFFReader().loadSignal(from: out)
+        let after = try await segments(for: readback)
+
+        #expect(before.count == 1)
+        #expect(after.count == 1)
+        #expect(after[0].startSample == before[0].startSample)
+        #expect(after[0].endSample == before[0].endSample)
+        #expect(after[0].stimulusOffsetSamples == before[0].stimulusOffsetSamples)
+        #expect(after[0].sourceTimeSeconds == before[0].sourceTimeSeconds)
+    }
 }

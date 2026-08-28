@@ -320,8 +320,17 @@ struct EyeArtifactThresholdSheet: View {
         }
     }
 
+    /// Persists the tuned values as the app-wide defaults *and* commits them to
+    /// this recording's processing history.
+    ///
+    /// Both belong at the same moment and for the same reason: this is where an
+    /// edit stops being a drag in progress and becomes a decision. Every caller
+    /// is a commit point — Done, Restore Defaults, and the sheet going away by
+    /// any other route. Done triggers `onDisappear` too, so this runs twice
+    /// there; the second commit resolves to the node the first one created.
     private func saveThresholdDefaults() {
         ProcessingDefaults.shared.ocularBlinkThresholdConfig = artifactVM.blinkThresholdConfig
         ProcessingDefaults.shared.ocularMovementThresholdConfig = artifactVM.movementThresholdConfig
+        artifactVM.commitThresholdConfiguration()
     }
 }

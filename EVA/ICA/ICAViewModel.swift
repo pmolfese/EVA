@@ -55,6 +55,10 @@ final class ICAViewModel {
     var fitLowCutoff = 1.0
     var fitHighCutoff = 40.0
     var fitNotch60HzEnabled = false
+    /// Family for the fit/activation filter. Independent of the main filter
+    /// popover's family on purpose — the ICA fit band is its own choice, and a
+    /// 1 Hz high-pass has different tradeoffs from a 0.1 Hz display filter.
+    var fitFilterFamily: FilterFamily = .iir
 
     // MARK: Results
     var decomposition: ICADecomposition?
@@ -67,21 +71,59 @@ final class ICAViewModel {
 
     var isActive: Bool { cleanedSignal != nil }
 
+    /// The portable settings that define the *fit*.
+    ///
+    /// This used to carry only method/components/averageReference, while
+    /// `ICAConfiguration` is built from nine more properties that all change the
+    /// decomposition — so a replayed ICA fit silently used the destination's
+    /// defaults for variance retention, decimation, convergence, and the
+    /// activation pre-filter. Found by the REWIND determinism audit
+    /// (2026-08-13); same class as `categoryGroups`.
+    ///
+    /// This describes how to *re-fit*. Reproducing a specific removal exactly
+    /// does not go through here at all — that is `ICAReplayPayload`, which stores
+    /// the fitted operator and the excluded set.
     var parameters: [String: String] {
-        [
+        var p: [String: String] = [
             "method": method.rawValue,
             "components": "\(componentCount)",
-            "averageReference": "\(usesAverageReference)"
+            "averageReference": "\(usesAverageReference)",
+            "varianceThreshold": "\(varianceThreshold)",
+            "downsampleRate": "\(downsampleRate)",
+            "maxIterations": "\(maxIterations)",
+            "minimumIterations": "\(minimumIterations)",
+            "convergenceTolerance": "\(convergenceTolerance)",
+            "fitFilter": "\(usesFitFilter)"
         ]
+        if usesFitFilter {
+            p["fitLowCutoff"] = "\(fitLowCutoff)"
+            p["fitHighCutoff"] = "\(fitHighCutoff)"
+            p["fitNotch60Hz"] = "\(fitNotch60HzEnabled)"
+            p["fitFilterFamily"] = fitFilterFamily.rawValue
+        }
+        return p
     }
 
     /// Deserialization inverse of `parameters` for Copy Processing / replay. The
     /// portable decomposition settings are restored; which components to remove
     /// stays a per-subject decision made in the sheet.
+    ///
+    /// Absent keys leave the current value alone, so a pre-audit `eva.xml`
+    /// replays exactly as it did before the extra keys existed.
     func apply(parameters p: [String: String]) {
         if let m = p["method"].flatMap(ICAMethod.init(rawValue:)) { method = m }
         if let c = p["components"].flatMap(Int.init) { componentCount = c }
         if let a = p["averageReference"] { usesAverageReference = (a == "true") }
+        if let v = p["varianceThreshold"].flatMap(Double.init) { varianceThreshold = v }
+        if let v = p["downsampleRate"].flatMap(Double.init) { downsampleRate = v }
+        if let v = p["maxIterations"].flatMap(Int.init) { maxIterations = v }
+        if let v = p["minimumIterations"].flatMap(Int.init) { minimumIterations = v }
+        if let v = p["convergenceTolerance"].flatMap(Double.init) { convergenceTolerance = v }
+        if let v = p["fitFilter"] { usesFitFilter = (v == "true") }
+        if let v = p["fitLowCutoff"].flatMap(Double.init) { fitLowCutoff = v }
+        if let v = p["fitHighCutoff"].flatMap(Double.init) { fitHighCutoff = v }
+        if let v = p["fitNotch60Hz"] { fitNotch60HzEnabled = (v == "true") }
+        if let v = p["fitFilterFamily"].flatMap(FilterFamily.init(rawValue:)) { fitFilterFamily = v }
     }
 
     func resetForClose() {

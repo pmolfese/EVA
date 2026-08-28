@@ -26,8 +26,24 @@ nonisolated enum ICAComponentAutoLabeler {
             layout: layout
         )
 
+        let heuristic = heuristicSuggestions(for: decomposition, layout: layout)
+        for (component, suggestion) in heuristic where suggestions[component] == nil {
+            suggestions[component] = suggestion
+        }
+        return suggestions
+    }
+
+    /// Runs only EVA's transparent feature rules. Kept separate from
+    /// `suggestions(for:layout:)` so benchmarks can compare the heuristic and
+    /// Core ML paths instead of accidentally measuring the combined fallback
+    /// twice under different names.
+    static func heuristicSuggestions(
+        for decomposition: ICADecomposition,
+        layout: SensorLayout?
+    ) -> [Int: ICAComponentSuggestion] {
+        var suggestions: [Int: ICAComponentSuggestion] = [:]
+
         for component in 0..<decomposition.componentCount {
-            if suggestions[component] != nil { continue }
             let map = decomposition.componentMaps.indices.contains(component)
                 ? normalizedTopography(decomposition.componentMaps[component])
                 : []
@@ -41,7 +57,6 @@ nonisolated enum ICAComponentAutoLabeler {
                 layout: layout
             )
         }
-
         return suggestions
     }
 

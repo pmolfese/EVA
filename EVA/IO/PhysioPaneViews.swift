@@ -156,82 +156,50 @@ extension WaveformView {
         }
     }
 
-    @ViewBuilder
-    func physioPane(_ pns: MFFSignalData, eegSamplingRate: Double) -> some View {
-        let rowHeight: CGFloat = 36
+    func physioPane(_ pns: MFFSignalData, eegSignal: MFFSignalData) -> some View {
+        let eegSamplingRate = eegSignal.samplingRate
+        // User-adjustable via the pane's resize handle; defaults 50% taller
+        // than EEG's 36pt default row.
+        let rowHeight = recordingStore.physio.rowHeight
         let names = pns.channelNames
             ?? (0..<pns.numberOfChannels).map { "PNS \($0 + 1)" }
+        let displayNames = (0..<pns.numberOfChannels).map { physioChannelName(index: $0, names: names) }
 
-        VStack(spacing: 0) {
-            Divider()
-            HStack(alignment: .top, spacing: 12) {
-                // Channel labels, aligned to the trace rows.
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Physio")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(height: 16, alignment: .leading)
-                    ForEach(0..<pns.numberOfChannels, id: \.self) { i in
-                        let name = physioChannelName(index: i, names: names)
-                        HStack(spacing: 5) {
-                            Text(name)
-                                .font(.system(.caption, design: .monospaced))
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-
-                            if let scaleBadge = physioScaleBadge(for: i) {
-                                Text(scaleBadge)
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            if physioFlippedPolarity.contains(i) {
-                                Text("flip")
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .frame(height: rowHeight, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .help("Right-click to adjust physio scaling and polarity.")
-                        .contextMenu {
-                            physioChannelContextMenu(index: i, name: name)
-                        }
-                    }
-                }
-                .frame(width: labelColumnWidth, alignment: .topLeading)
-
+        // B2: rendering lives in `PhysioPaneView`; the state plumbing below
+        // (range recompute, rename alert) stays here deliberately — see that file.
+        return PhysioPaneView(
+            signal: pns,
+            physio: recordingStore.physio,
+            displayNames: displayNames,
+            scaleBadge: { physioScaleBadge(for: $0) },
+            rowHeight: rowHeight,
+            labelColumnWidth: labelColumnWidth,
+            eegSamplingRate: eegSamplingRate,
+            sampleStride: displaySampleStride(for: eegSamplingRate),
+            timeScale: timeScale,
+            contentOffset: horizontalOffset,
+            viewportWidth: horizontalViewportWidth,
+            showsTimeMarkers: showsTimeMarkersAcrossTraces,
+            timeMarkerStyle: waveformTimeMarkerStyle,
+            channelMenu: { index, name in
+                physioChannelContextMenu(index: index, name: name, signal: pns)
+            },
+            trackMenuOverlay: {
+                physioContextMenuOverlay(
+                    channelCount: pns.numberOfChannels,
+                    names: names,
+                    rowHeight: rowHeight,
+                    signal: pns
+                )
+            },
+            trackHighlightOverlay: {
                 ZStack(alignment: .topLeading) {
-                    PhysioTrackView(
-                        signal: pns,
-                        ranges: physioRanges,
-                        scaleFactors: physioScaleFactors,
-                        maxScaledChannels: physioMaxScaledChannels,
-                        flippedPolarity: physioFlippedPolarity,
-                        rowHeight: rowHeight,
-                        eegSamplingRate: eegSamplingRate,
-                        sampleStride: displaySampleStride(for: eegSamplingRate),
-                        timeScale: timeScale,
-                        contentOffset: horizontalOffset,
-                        viewportWidth: horizontalViewportWidth,
-                        showsTimeMarkers: showsTimeMarkersAcrossTraces,
-                        timeMarkerStyle: waveformTimeMarkerStyle,
-                        names: (0..<pns.numberOfChannels).map { physioChannelName(index: $0, names: names) }
-                    )
-                    .padding(.top, 16)   // align below the "Physio" header
-
-                    physioContextMenuOverlay(
-                        channelCount: pns.numberOfChannels,
-                        names: names,
-                        rowHeight: rowHeight
-                    )
-                    .padding(.top, 16)
+                    selectionOverlay(for: eegSignal)
+                    artifactHighlightOverlay(for: eegSignal)
+                    cursorOverlay(for: eegSignal)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 8)
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
+        )
         .task(id: physioRangeTaskID(for: pns)) {
             physioRanges = Self.computePhysioRanges(pns)
             physioScaleFactors = physioScaleFactors.filter { $0.key < pns.numberOfChannels }
@@ -242,7 +210,7 @@ extension WaveformView {
             get: { physioRenameTarget != nil },
             set: { if !$0 { physioRenameTarget = nil } }
         )) {
-            TextField("Channel name", text: $physioRenameText)
+            TextField("Channel name", text: binding(recordingStore.physio, \.renameText))
             Button("Rename") {
                 if let idx = physioRenameTarget, !physioRenameText.trimmingCharacters(in: .whitespaces).isEmpty {
                     applyPhysioRename(index: idx, name: physioRenameText.trimmingCharacters(in: .whitespaces))
@@ -337,7 +305,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
-    func physioChannelContextMenu(index: Int, name: String) -> some View {
+    func physioChannelContextMenu(index: Int, name: String, signal: MFFSignalData) -> some View {
         let realPhysioCount = recording.pnsSignal?.numberOfChannels ?? 0
         let currentScale = physioScaleFactor(for: index)
         let isMaxScaled = physioMaxScaledChannels.contains(index)
@@ -392,9 +360,26 @@ extension WaveformView {
             setPhysioScaleToMax(for: index)
         }
         .disabled(isMaxScaled)
+
+        Divider()
+
+        Menu("Export Channel") {
+            Button("Export as JSON…") {
+                exportChannelAsJSON(index: index, signal: signal)
+            }
+            Button("Export as JSON with Events…") {
+                exportChannelAsJSON(index: index, signal: signal, includeEvents: true)
+            }
+            Button("Export as 1D…") {
+                exportChannelAs1D(index: index, signal: signal)
+            }
+            Button("Export as 1D with Events…") {
+                exportChannelAs1D(index: index, signal: signal, includeEvents: true)
+            }
+        }
     }
 
-    func physioContextMenuOverlay(channelCount: Int, names: [String], rowHeight: CGFloat) -> some View {
+    func physioContextMenuOverlay(channelCount: Int, names: [String], rowHeight: CGFloat, signal: MFFSignalData) -> some View {
         VStack(spacing: 0) {
             ForEach(0..<channelCount, id: \.self) { index in
                 let name = physioChannelName(index: index, names: names)
@@ -402,7 +387,7 @@ extension WaveformView {
                     .frame(height: rowHeight)
                     .contentShape(Rectangle())
                     .contextMenu {
-                        physioChannelContextMenu(index: index, name: name)
+                        physioChannelContextMenu(index: index, name: name, signal: signal)
                     }
             }
         }

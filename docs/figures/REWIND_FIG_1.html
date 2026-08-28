@@ -1,0 +1,117 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>REWIND fig 1 — history sidebar</title>
+<style>
+  :root {
+    --s0:#f1efe8; --s1:#f6f5f0; --s2:#ffffff;
+    --b:rgba(0,0,0,.10); --bs:rgba(0,0,0,.20); --bss:rgba(0,0,0,.38);
+    --tp:#1f1e1d; --ts:#5f5e5a; --tm:#8a8983;
+    --acc:#185fa5; --accfill:#378add; --bgacc:#e6f1fb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; padding:16px; width:760px;
+    background:var(--s0);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
+    color:var(--tp); -webkit-font-smoothing:antialiased;
+  }
+  .wrap { display:flex; gap:12px; align-items:stretch; }
+  .panel { background:var(--s2); border:0.5px solid var(--b); border-radius:12px; }
+  .rail { width:262px; flex:none; display:flex; flex-direction:column; }
+  .hdr { padding:10px 12px; border-bottom:0.5px solid var(--b); display:flex; align-items:center; justify-content:space-between; font-size:13px; font-weight:500; }
+  .mono { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:11px; color:var(--tm); font-weight:400; }
+  .body { padding:10px 12px 12px; font-size:12.5px; }
+  .row { display:flex; gap:9px; align-items:flex-start; }
+  .gut { display:flex; flex-direction:column; align-items:center; padding-top:3px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--tm); flex:none; }
+  .dot.cur { background:var(--accfill); box-shadow:0 0 0 3px var(--bgacc); }
+  .dot.open { background:transparent; border:1.5px solid var(--tm); }
+  .line { width:1.5px; flex:1; background:var(--bs); }
+  .sub { font-size:11px; color:var(--tm); }
+  .pad { padding-bottom:10px; }
+  .fork { width:9px; flex:none; position:relative; }
+  .fork i { position:absolute; left:4px; background:var(--bs); }
+  .chip { background:var(--bgacc); border-radius:8px; padding:5px 9px; margin-top:-3px; }
+  .chip .t { color:var(--acc); font-weight:500; }
+  .chip .s { font-size:11px; color:var(--acc); }
+  .foot { margin-top:auto; padding:9px 12px; border-top:0.5px solid var(--b); display:flex; align-items:center; gap:6px; }
+  .btn { border:0.5px solid var(--bs); background:transparent; border-radius:8px; padding:4px 9px; line-height:0; }
+  .btn svg { width:13px; height:13px; fill:var(--tp); }
+  .main { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+  .mhdr { padding:9px 12px; border-bottom:0.5px solid var(--b); font-size:12.5px; color:var(--ts); }
+  .plot { flex:1; padding:14px 12px; display:flex; align-items:center; }
+</style>
+<div class="wrap">
+
+  <div class="panel rail">
+    <div class="hdr"><span>History</span><span class="mono">a4f1c9</span></div>
+    <div class="body">
+
+      <div class="row">
+        <div class="gut"><div class="dot"></div><div class="line" style="min-height:26px"></div></div>
+        <div class="pad"><div style="color:var(--ts)">raw</div><div class="sub">128 ch · 1000 Hz · 21:04</div></div>
+      </div>
+
+      <div class="row">
+        <div class="gut"><div class="dot"></div><div class="line" style="min-height:26px"></div></div>
+        <div class="pad"><div>gradient correction</div><div class="sub">FASTR · 21 TR · window 30</div></div>
+      </div>
+
+      <div class="row">
+        <div class="gut"><div class="dot"></div><div class="line" style="min-height:22px"></div></div>
+        <div class="pad"><div>mark bad <span class="sub">· 4 ch</span></div></div>
+      </div>
+
+      <div class="row">
+        <div class="gut"><div class="dot"></div><div class="line" style="min-height:34px"></div></div>
+        <div class="pad"><div>ICA <span class="sub">· 5 removed</span></div><div class="sub">pinned · cached · 2m 14s</div></div>
+      </div>
+
+      <div class="row">
+        <div class="fork"><i style="top:0;width:1.5px;height:14px"></i><i style="top:12.5px;width:16px;height:1.5px"></i></div>
+        <div style="flex:1;padding-left:12px">
+          <div class="row">
+            <div class="gut"><div class="dot cur"></div><div class="line" style="min-height:24px"></div></div>
+            <div class="pad"><div>filter <span class="sub">· 0.1–40 Hz</span></div></div>
+          </div>
+          <div class="row">
+            <div class="gut"><div class="dot cur"></div></div>
+            <div class="chip"><div class="t">segment · 4 conditions</div><div class="s">current · 312 trials kept</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:2px">
+        <div class="fork"><i style="top:-46px;width:1.5px;height:52px;background:var(--b)"></i><i style="top:4px;width:16px;height:1.5px;background:var(--b)"></i></div>
+        <div style="flex:1;padding-left:12px;opacity:.72">
+          <div class="row">
+            <div class="gut"><div class="dot open"></div></div>
+            <div><div style="color:var(--ts)">filter <span style="font-size:11px">· 1–30 Hz</span></div><div class="sub">branch b · 2 steps · cached</div></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="foot">
+      <button class="btn"><svg viewBox="0 0 24 24"><path d="M20 5v14l-11-7zM6 5h3v14H6z"/></svg></button>
+      <button class="btn"><svg viewBox="0 0 24 24"><path d="M4 5v14l11-7zM15 5h3v14h-3z"/></svg></button>
+      <button class="btn"><svg viewBox="0 0 24 24"><path d="M4 5v14l12-7zM18 5h2v14h-2z"/></svg></button>
+      <span style="margin-left:auto" class="sub">6 / 6</span>
+    </div>
+  </div>
+
+  <div class="panel main">
+    <div class="mhdr">sub-014_task-oddball.mff</div>
+    <div class="plot">
+      <svg viewBox="0 0 420 150" style="width:100%;height:auto">
+        <g stroke="var(--bss)" fill="none" stroke-width="1">
+          <path d="M0 18 q10 -9 20 0 t20 3 t20 -7 t20 5 t20 -2 t20 4 t20 -6 t20 2 t20 3 t20 -4 t20 1 t20 -3 t20 5 t20 -2 t20 3 t20 -4 t20 2 t20 -1 t20 3 t20 -2"/>
+          <path d="M0 51 q10 6 20 -3 t20 -4 t20 8 t20 -3 t20 1 t20 -6 t20 4 t20 -2 t20 5 t20 -3 t20 2 t20 4 t20 -6 t20 1 t20 -2 t20 3 t20 -1 t20 2 t20 -3"/>
+          <path d="M0 84 q10 -5 20 4 t20 -6 t20 2 t20 6 t20 -4 t20 1 t20 3 t20 -5 t20 2 t20 -1 t20 4 t20 -3 t20 1 t20 2 t20 -4 t20 3 t20 -2 t20 1 t20 2"/>
+          <path d="M0 117 q10 4 20 -2 t20 5 t20 -4 t20 -1 t20 6 t20 -3 t20 2 t20 -5 t20 3 t20 1 t20 -2 t20 4 t20 -3 t20 -1 t20 2 t20 -4 t20 3 t20 -1 t20 2"/>
+        </g>
+      </svg>
+    </div>
+  </div>
+
+</div>

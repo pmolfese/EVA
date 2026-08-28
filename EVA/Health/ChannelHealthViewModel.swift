@@ -32,8 +32,19 @@ final class ChannelHealthViewModel {
     var statusMessage: String?
     var signature: String?
     @ObservationIgnored var task: Task<Void, Never>?
+
     var showsDetails = false
     var detailsRequest = 0
+
+    private static let progressSource = "Channel Health"
+
+    /// Forwards into the shared `OperationProgressCenter` so the toolbar
+    /// status area shows a per-stage progress row while a scan runs — same
+    /// pattern as `FilterViewModel.operationProgress`.
+    var operationProgress: OperationProgress? {
+        get { store.operationProgress.progress(for: Self.progressSource) }
+        set { store.operationProgress.set(newValue, for: Self.progressSource) }
+    }
 
     func resetForClose() {
         task?.cancel()
@@ -41,5 +52,6 @@ final class ChannelHealthViewModel {
         statusMessage = nil
         signature = nil
         showsDetails = false
+        operationProgress = nil
     }
 }

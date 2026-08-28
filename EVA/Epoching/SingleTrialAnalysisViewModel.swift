@@ -32,6 +32,8 @@ enum SingleTrialAnalysisMode: String, CaseIterable, Identifiable {
     case woody = "Woody Alignment"
     case ride = "RIDE"
     case cwtRidge = "CWT Ridge"
+    case clusterStatistics = "Cluster Statistics"
+    case trialDiagnostics = "Trial Diagnostics"
 
     var id: String { rawValue }
 }
@@ -81,6 +83,181 @@ final class SingleTrialAnalysisViewModel {
     var splitCount = 2
     var outlierThresholdSD = 3.0
     var distributionChunkCount = 2
+    // Trial diagnostics (ROADMAP.md, Trial-wise project).
+    var similarityResults: [TrialSimilarityAnalyzer.CategoryResult]?
+    var diagnosticsRows: [TrialDiagnosticsCategory] = []
+    var diagnosticsAxis = TrialDiagnosticsAxis.trialIndex
+    var diagnosticsMeasure = "Peak (own, +)"
+    var diagnosticsSecondaryMeasure = "Slope (β)"
+    var diagnosticsGroupCount = 3
+    /// Comparing every category at once is what makes the cross-category
+    /// mislabel check possible; off, only the selected category is scored.
+    var diagnosticsUsesAllCategories = true
+    /// The plot and its controls fold away once a run has produced results —
+    /// otherwise the answer always starts below the fold. Reopens on demand,
+    /// and whenever a run fails.
+    var setupIsExpanded = true
+
+    // MARK: - Free-form analysis windows
+    //
+    // RIDE has three fixed components with their own stored bounds. Every other
+    // mode gets a list you can add to, so a window can point at whichever peak
+    // is being investigated. Kept per mode, because the windows you want while
+    // measuring are rarely the ones you want while scoring trials.
+    var measurementWindows: [TrialAlignmentMetrics.AnalysisWindow] = []
+    var cwtWindows: [TrialAlignmentMetrics.AnalysisWindow] = []
+    var diagnosticsWindows: [TrialAlignmentMetrics.AnalysisWindow] = []
+    /// Woody aligns on a single window by construction — one rigid shift per
+    /// trial, estimated against one target. Showing it as a window makes that
+    /// visible instead of implied.
+    var woodyWindows: [TrialAlignmentMetrics.AnalysisWindow] = []
+
+    /// How many windows a mode admits. Woody's 1 is a statement about the
+    /// method.
+    func maximumWindows(for mode: SingleTrialAnalysisMode) -> Int {
+        switch mode {
+        case .woody: 1
+        case .measurements, .cwtRidge, .trialDiagnostics: 8
+        case .ride, .clusterStatistics: 0
+        }
+    }
+
+    func windows(for mode: SingleTrialAnalysisMode) -> [TrialAlignmentMetrics.AnalysisWindow] {
+        switch mode {
+        case .measurements: measurementWindows
+        case .cwtRidge: cwtWindows
+        case .trialDiagnostics: diagnosticsWindows
+        case .woody: woodyWindows
+        case .ride, .clusterStatistics: []
+        }
+    }
+
+    func setWindows(_ windows: [TrialAlignmentMetrics.AnalysisWindow], for mode: SingleTrialAnalysisMode) {
+        switch mode {
+        case .measurements: measurementWindows = windows
+        case .cwtRidge: cwtWindows = windows
+        case .trialDiagnostics: diagnosticsWindows = windows
+        // Woody estimates ONE rigid shift per trial, so it gets exactly one
+        // window — the cap is the point, not a limitation to work around.
+        case .woody: woodyWindows = Array(windows.prefix(1))
+        case .ride, .clusterStatistics: break
+        }
+    }
+
+    func updateWindow(_ id: UUID, startMs: Double, endMs: Double, for mode: SingleTrialAnalysisMode) {
+        var current = windows(for: mode)
+        guard let index = current.firstIndex(where: { $0.id == id }) else { return }
+        current[index].startMs = min(startMs, endMs)
+        current[index].endMs = max(startMs, endMs)
+        setWindows(current, for: mode)
+    }
+
+    /// Adds a window, preferring the exact span the user just dragged.
+    ///
+    /// When a drag selection is active, the new window is placed at EXACTLY
+    /// that span — dragging then pressing Add is how you place a window
+    /// on purpose, and a window that lands somewhere other than where you
+    /// dragged would defeat the point of dragging first. With no drag active,
+    /// a window lands over the middle third of the current analysis span
+    /// instead, so it appears somewhere visible rather than at zero width.
+    @discardableResult
+    func addWindow(for mode: SingleTrialAnalysisMode) -> Bool {
+        var current = windows(for: mode)
+        guard current.count < maximumWindows(for: mode) else { return false }
+
+        let start: Double
+        let end: Double
+        if let dragStart = windowStartMs, let dragEnd = windowEndMs, dragEnd > dragStart {
+            start = dragStart
+            end = dragEnd
+        } else {
+            let spanStart = windowStartMs ?? 0
+            let spanEnd = windowEndMs ?? (spanStart + 400)
+            let span = max(spanEnd - spanStart, 50)
+            start = spanStart + span * 0.35
+            end = start + span * 0.3
+        }
+
+        current.append(
+            TrialAlignmentMetrics.AnalysisWindow(
+                name: "W\(current.count + 1)",
+                startMs: start,
+                endMs: end
+            )
+        )
+        setWindows(current, for: mode)
+        return true
+    }
+
+    func removeWindow(_ id: UUID, for mode: SingleTrialAnalysisMode) {
+        setWindows(windows(for: mode).filter { $0.id != id }, for: mode)
+    }
+    // Phase 3: exclusion criteria and what they buy.
+    var selectionCriteria = TrialSelectionAnalyzer.Criteria.none
+    var selectionOutcome: TrialSelectionAnalyzer.Outcome?
+    /// The reviewed set: the criteria's proposals with the operator's overrides
+    /// folded in. This is what the preview shows and what a commit would write —
+    /// deliberately the same list, so the two can never describe different
+    /// decisions.
+    var selectionExclusions: [TrialSelectionAnalyzer.Exclusion] = []
+    /// Operator overrides, per category. Session state until committed.
+    ///
+    /// Per category because Phase 3 reviews one at a time, and switching the
+    /// category picker must not carry `LC++`'s hand-restored trial #4 onto
+    /// `RC++`'s trial #4, which is a different trial entirely.
+    var selectionReviews: [String: TrialSelectionAnalyzer.Review] = [:]
+
+    /// The overrides for the category under review.
+    var selectionReview: TrialSelectionAnalyzer.Review {
+        get { selectedCategory.flatMap { selectionReviews[$0] } ?? .none }
+        set {
+            guard let category = selectedCategory else { return }
+            if newValue.isEmpty {
+                selectionReviews.removeValue(forKey: category)
+            } else {
+                selectionReviews[category] = newValue
+            }
+        }
+    }
+
+    /// Flips one trial between excluded and kept, for the row checkboxes.
+    ///
+    /// Expressed against the *displayed* origin rather than against the raw
+    /// sets, so the control means what it looks like it means: unchecking a
+    /// rule-flagged row restores it, unchecking a hand-excluded row simply
+    /// forgets it, and checking anything else excludes it by hand.
+    func setTrialExcluded(_ isExcluded: Bool, trialIndex: Int) {
+        guard selectedCategory != nil else { return }
+        var review = selectionReview
+        let wasProposedByRule = ruleProposedTrials.contains(trialIndex)
+
+        if isExcluded {
+            review.restored.remove(trialIndex)
+            if !wasProposedByRule { review.manual.insert(trialIndex) }
+        } else {
+            review.manual.remove(trialIndex)
+            if wasProposedByRule { review.restored.insert(trialIndex) }
+        }
+        selectionReview = review
+    }
+
+    /// Trials the criteria proposed for the category under review, before any
+    /// override. Kept alongside the reviewed list because `setTrialExcluded`
+    /// has to know whether a trial is the rule's idea or the operator's.
+    var ruleProposedTrials: Set<Int> = []
+
+    /// Drops the operator's overrides for the category under review, returning
+    /// the display to whatever the criteria alone propose.
+    func clearSelectionReview() {
+        selectionReview = .none
+    }
+    /// Channel-resolved averages for the before/after overlay.
+    var selectionAverageAll: [Double] = []
+    var selectionAverageKept: [Double] = []
+    /// Multichannel trials for the selected category, kept so dragging a
+    /// threshold re-scores without re-slicing the recording.
+    var selectionTrialMatrices: [[[Float]]] = []
+    var selectionBaselineSampleCount = 0
     var usesWoodyAlignedTrialsForMeasurements = false
     var woodyAlignmentMode = WoodyAlignmentAnalyzer.AlignmentMode.correlation
     var woodyPeakPolarity = WoodyAlignmentAnalyzer.PeakPolarity.either
@@ -102,8 +279,9 @@ final class SingleTrialAnalysisViewModel {
     var rideStimulusWindowEndMs = 100.0
     var rideCentralWindowStartMs = 200.0
     var rideCentralWindowEndMs = 500.0
-    var rideResponseWindowStartMs = 300.0
-    var rideResponseWindowEndMs = 700.0
+    // R is relative to the response marker; S and C are stimulus-relative.
+    var rideResponseWindowStartMs = -300.0
+    var rideResponseWindowEndMs = 300.0
     var rideStimulusLatencySource = RIDEAnalyzer.LatencySource.stimulusLocked
     var rideCentralLatencySource = RIDEAnalyzer.LatencySource.estimated
     var rideResponseLatencySource = RIDEAnalyzer.LatencySource.fixed
@@ -137,6 +315,38 @@ final class SingleTrialAnalysisViewModel {
     var cwtComputesFunctionalPCA = true
     var cwtRunsAllCategories = false
     var showsCWTAlignedOverlay = true
+
+    // MARK: Cluster-statistics parameters
+    var clusterStatistic = ClusterStatisticKind.t
+    var clusterConditionA: String?
+    var clusterConditionB: String?
+    var clusterFConditions: Set<String> = []
+    var clusterWindowStartMs = -100.0
+    var clusterWindowEndMs = 800.0
+    var clusterPermutationCount = 1_000
+    var clusterThreshold = 2.0
+    var clusterFThreshold = 4.0
+    var clusterAlpha = 0.05
+    /// Cluster-forming threshold entered as an uncorrected p rather than as a
+    /// raw statistic. On by default: a fixed |t| means a different p at every
+    /// trial count, so the raw form is only comparable within one analysis.
+    var clusterUsesProbabilityThreshold = true
+    var clusterThresholdProbability = 0.05
+    var clusterInference = ClusterInferenceMode.clusterMass
+    var clusterTFCE = TFCEParameters.default
+    /// Treats the conditions as measurements of the same units rather than as
+    /// unrelated trials. Off by default because ordinary single-subject epochs
+    /// have no pairing to exploit.
+    var clusterRepeatedMeasures = false
+    var clusterAdjacency = ClusterAdjacencyConfiguration.default
+    /// Set once per recording from the montage's own sensor spacing, so the
+    /// default neighborhood is not a constant that suits only dense nets.
+    var clusterAdjacencyDistanceInitialized = false
+    var clusterShowsStandardError = true
+    /// Analyze every Nth sample. Explicit because it changes the temporal
+    /// lattice on which clusters are formed, not merely the plot resolution.
+    var clusterSampleStride = 2
+    var clusterOutput: ClusterStatisticsOutput?
 
     // MARK: Result / run state
     var result: SingleTrialAnalyzer.Result?
@@ -193,6 +403,11 @@ final class SingleTrialAnalysisViewModel {
         cwtResultCategory = nil
         cwtResultChannelIndices = []
         cwtResultsByCategory = [:]
+        clusterConditionA = nil
+        clusterConditionB = nil
+        clusterFConditions = []
+        clusterOutput = nil
+        clusterAdjacencyDistanceInitialized = false
         statusMessage = nil
         isRunning = false
         runProgress = nil

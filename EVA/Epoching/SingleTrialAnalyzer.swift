@@ -199,7 +199,10 @@ nonisolated enum SingleTrialAnalyzer {
 
     // MARK: - Sample/ms conversion
 
-    private static func sampleRange(
+    /// Not private: `TrialSimilarityAnalyzer` measures over the same window and
+    /// must resolve it identically, or its correlations would be computed over a
+    /// different span than the measures they sit beside.
+    static func sampleRange(
         startMs: Double, endMs: Double, stimulusOffsetSamples: Int, samplingRate: Double, length: Int
     ) -> Range<Int>? {
         guard length > 0 else { return nil }

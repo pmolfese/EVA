@@ -25,18 +25,30 @@ struct GradientReplayTests {
         let a = GradientViewModel(store: RecordingStore())
         a.method = .fastr
         a.trMarkerCode = "TR"
-        a.windowBefore = 3
-        a.windowAfter = 4
-        a.fastrSlices = 5
-        a.fastrOBSAuto = true
-        a.fastrANC = true
-        a.fastrSubSample = false
-        a.fastrUseFacetWindow = true
-        a.fastrOBSRandomSampling = true
-        a.fastrANCSliceHighPass = true
-        a.fastrUseMetal = true
-        a.fastrDonorSelection = .bergenRSquare
-        a.moosmannMotionMetric = .allParameters
+        a.donorVolumes = 7
+        a.slicesPerVolume = 5
+        a.upsampleFactor = 2
+        a.alignmentEnabled = true
+        a.subSampleAlignment = false
+        a.templateScaling = .leastSquares
+        a.templateScaleSmoothingEpochs = 21
+        a.templateScaleMinimum = 0.25
+        a.templateScaleMaximum = 4
+        a.donorRanking = .squaredCorrelation
+        a.correlationThreshold = 0.85
+        a.minimumCorrelatedDonors = 6
+        a.correlationSearchWindow = 120
+        a.obsSelection = .fixed
+        a.obsFixedComponents = 4
+        a.obsChunkSeconds = 45
+        a.obsMaximumEpochsPerChunk = 128
+        a.obsResidualEnergyFloor = 0.02
+        a.ancEnabled = true
+        a.ancSliceHighPass = true
+        a.ancFilterLength = 48
+        a.ancStepSize = 0.02
+        a.computeBackend = .metal
+        a.motionMetric = .allParameters
         a.excludeHighMotion = true
         a.motionFDThreshold = 0.35
 
@@ -46,29 +58,35 @@ struct GradientReplayTests {
         #expect(b.parameters == a.parameters)
         #expect(b.method == .fastr)
         #expect(b.trMarkerCode == "TR")
-        #expect(b.windowBefore == 3)
-        #expect(b.windowAfter == 4)
-        #expect(b.fastrSlices == 5)
-        #expect(b.fastrOBSAuto)
-        #expect(b.fastrANC == true)
-        #expect(!b.fastrSubSample)
-        #expect(b.fastrUseFacetWindow)
-        #expect(b.fastrOBSRandomSampling)
-        #expect(b.fastrANCSliceHighPass)
-        #expect(b.fastrUseMetal)
-        #expect(b.fastrDonorSelection == .bergenRSquare)
-        #expect(b.moosmannMotionMetric == .allParameters)
-        #expect(b.excludeHighMotion == true)
+        #expect(b.donorVolumes == 7)
+        #expect(b.slicesPerVolume == 5)
+        #expect(b.upsampleFactor == 2)
+        #expect(!b.subSampleAlignment)
+        #expect(b.templateScaling == .leastSquares)
+        #expect(b.templateScaleSmoothingEpochs == 21)
+        #expect(b.donorRanking == .squaredCorrelation)
+        #expect(b.minimumCorrelatedDonors == 6)
+        #expect(b.obsSelection == .fixed)
+        #expect(b.obsFixedComponents == 4)
+        #expect(b.obsMaximumEpochsPerChunk == 128)
+        #expect(b.ancEnabled)
+        #expect(b.ancSliceHighPass)
+        #expect(b.ancFilterLength == 48)
+        #expect(b.computeBackend == .metal)
+        #expect(b.motionMetric == .allParameters)
+        #expect(b.excludeHighMotion)
     }
 
     @MainActor
     @Test func aasGradientOmitsFastrKeysButRoundTrips() {
         let a = GradientViewModel(store: RecordingStore())
         a.method = .aas
-        a.windowBefore = 2
-        a.windowAfter = 2
+        a.donorVolumes = 4
 
-        #expect(a.parameters["slices"] == nil) // FASTR-only keys absent for AAS
+        // FASTR-only and slice-only keys are absent for a volume-level AAS run.
+        #expect(a.parameters["slices"] == nil)
+        #expect(a.parameters["obs"] == nil)
+        #expect(a.parameters["templateScaling"] == nil)
 
         let b = GradientViewModel(store: RecordingStore())
         b.apply(parameters: a.parameters)
@@ -77,17 +95,110 @@ struct GradientReplayTests {
     }
 
     @MainActor
-    @Test func masMetalSelectionRoundTrips() {
-        let source = GradientViewModel(store: RecordingStore())
-        source.method = .mas
-        source.fastrUseMetal = true
+    @Test func allenIARParametersRoundTrip() {
+        let a = GradientViewModel(store: RecordingStore())
+        a.method = .allenIAR
+        a.slicesPerVolume = 30
+        a.allenSectionEpochs = 40   // 0 would mean "let the preset choose"
+        a.allenCorrelationGate = 0.95
+        a.allenInitialEpochs = 3
+        a.ancEnabled = true
 
-        let restored = GradientViewModel(store: RecordingStore())
-        restored.apply(parameters: source.parameters)
+        let b = GradientViewModel(store: RecordingStore())
+        b.apply(parameters: a.parameters)
 
-        #expect(restored.method == .mas)
-        #expect(restored.fastrUseMetal)
-        #expect(restored.parameters == source.parameters)
+        #expect(b.method == .allenIAR)
+        #expect(b.slicesPerVolume == 30)
+        #expect(b.allenSectionEpochs == 40)
+        #expect(b.allenInitialEpochs == 3)
+        #expect(b.ancEnabled)
+        #expect(b.parameters == a.parameters)
+    }
+
+    @MainActor
+    @Test func localTemplateParametersRoundTrip() {
+        let a = GradientViewModel(store: RecordingStore())
+        a.method = .mar
+        a.localMinimumDonorDistance = 250
+        a.localMinimumDonorCount = 3
+        a.localSkipsTargetsWithoutEnoughDonors = true
+
+        let b = GradientViewModel(store: RecordingStore())
+        b.apply(parameters: a.parameters)
+
+        #expect(b.method == .mar)
+        #expect(b.localMinimumDonorDistance == 250)
+        #expect(b.localMinimumDonorCount == 3)
+        #expect(b.localSkipsTargetsWithoutEnoughDonors)
+        #expect(b.parameters == a.parameters)
+    }
+
+    /// A parameter block written by EVA's previous gradient correctors is
+    /// ignored in full rather than half-applied. Those engines had different
+    /// defaults and options that do not map onto the current ones one-to-one, so
+    /// taking the keys that happen to share a name would produce a run the file
+    /// does not describe.
+    @MainActor
+    @Test func parametersFromTheOldEnginesAreRejectedAndReported() {
+        let legacy = [
+            "method": "FASTR",
+            "trMarkerCode": "TR",
+            "windowBefore": "9",
+            "windowAfter": "9",
+            "slices": "30",
+            "obs": "true",
+            "anc": "true",
+            "facetWindow": "true",
+            "obsRandomSampling": "true",
+            "bergenRSquareDonors": "true"
+        ]
+
+        let vm = GradientViewModel(store: RecordingStore())
+        let untouched = vm.method
+        vm.apply(parameters: legacy)
+
+        // Nothing was taken, not even the keys whose names still exist.
+        #expect(vm.method == untouched)
+        #expect(vm.trMarkerCode == "TREV")
+        #expect(vm.donorVolumes == GradientViewModel.defaultDonorVolumes)
+        #expect(vm.slicesPerVolume == 1)
+        #expect(vm.obsSelection == .off)
+        #expect(!vm.ancEnabled)
+        // And the user is told, rather than silently getting a different run.
+        #expect(vm.statusMessage != nil)
+        #expect(vm.statusIsError == false)
+    }
+
+    @MainActor
+    @Test func currentParametersCarryTheEngineToken() {
+        let vm = GradientViewModel(store: RecordingStore())
+        #expect(vm.parameters["engine"] != nil)
+    }
+
+    /// A sparse block is not a legacy block. A hand-written processing script
+    /// that names only the method and the marker code has to keep working —
+    /// rejecting anything without the engine token would break every script
+    /// written by hand rather than by Copy Processing.
+    @MainActor
+    @Test func aSparseHandWrittenBlockStillApplies() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.apply(parameters: ["method": "AAS", "trMarkerCode": "TR"])
+
+        #expect(vm.method == .aas)
+        #expect(vm.trMarkerCode == "TR")
+        #expect(vm.statusMessage == nil)
+    }
+
+    /// The three-way OBS selection replaced a bool, so a bool is itself evidence
+    /// of the old writer even when no other legacy key survived.
+    @MainActor
+    @Test func aBooleanOBSValueMarksTheBlockLegacy() {
+        let vm = GradientViewModel(store: RecordingStore())
+        let untouched = vm.method
+        vm.apply(parameters: ["method": "FASTR", "obs": "true"])
+
+        #expect(vm.method == untouched)
+        #expect(vm.statusMessage != nil)
     }
 
     /// The threshold-detection replay carries each ocular config as JSON in a

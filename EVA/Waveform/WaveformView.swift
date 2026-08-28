@@ -12,6 +12,27 @@
 //  Recording content view: scrolling multi-channel EEG waveforms, an event
 //  track, a double-click-to-open scalp topomap, and an events panel.
 //
+//  ---------------------------------------------------------------------------
+//  ADDING NEW UI HERE? PLEASE DON'T. (ROADMAP Priority 1, B5)
+//
+//  New view code goes in a standalone `View` struct that takes value inputs and
+//  action closures — see `WaveformChannelRows.swift` for the pattern. The
+//  `extension WaveformView` files are legacy: they are functions on one giant
+//  struct, so SwiftUI has no per-child dependency boundary and every
+//  AttributeGraph node that captures `self` copies the whole view. That copy is
+//  a real, measured cost (`initializeWithCopy for WaveformView`, still ~1.5% of
+//  the main thread and spiking during selection drags in `trace2.trace`).
+//
+//  Likewise, new *state* goes on one of the `@Observable` UI models in
+//  `WaveformUIModels.swift` (hung off `RecordingStore`), not in a new `@State`
+//  here. State behind a reference is not copied with the struct, Observation
+//  tracks it per property, and menu-bar commands and the planned REWIND history
+//  tree can reach it without a live view.
+//
+//  This file went 15,400 → ~2,700 lines once, then grew back to 3,014. The
+//  point of the note is to stop that happening a third time.
+//  ---------------------------------------------------------------------------
+//
 
 import Accelerate
 import AppKit
@@ -20,8 +41,58 @@ import SwiftData
 import UniformTypeIdentifiers
 
 /// Selectable MR gradient-artifact removal algorithm.
+/// Which correction engine a method runs on.
+///
+/// EVA has three clean-room gradient engines, all under
+/// `EVA/Gradient/`. They are separate implementations rather than one
+/// configurable pipeline because the families genuinely differ: local-template
+/// averaging, AMRI-style robust reduction, and slice-epoch FASTR with OBS/ANC
+/// each have their own donor rules, guardrails, and diagnostics.
+enum MRIGradientEngine {
+    /// `GradientAAS` — local-neighbour and Allen-style average templates.
+    case averageTemplate
+    /// `LocalTemplateArtifactCorrector` — AMRI-style median/weighted templates.
+    case localTemplate
+    /// `GradientTemplateCorrector` — the FASTR family.
+    case sliceTemplate
+}
+
+/// The top-level split the MRI sheet presents: whole-epoch template methods on
+/// one side, slice-epoch FASTR-family methods on the other.
+///
+/// This is a user-facing grouping, not an engine boundary — the Template tab
+/// spans two engines — because the distinction that matters when choosing is
+/// "one template per volume" versus "subdivide the volume and model the
+/// residual".
+enum MRIGradientCategory: String, CaseIterable, Identifiable {
+    case template = "Template"
+    case fastr = "FASTR"
+
+    var id: String { rawValue }
+
+    /// Methods offered in the picker: everything in this family that is not
+    /// retired. A retired method still exists and still runs — a replay file
+    /// that names one must reproduce, and `MRIGradientMethod(rawValue:)` still
+    /// resolves it — it is only withdrawn from new selections.
+    var methods: [MRIGradientMethod] {
+        MRIGradientMethod.allCases.filter { $0.category == self && !$0.isDeprecated }
+    }
+
+    /// Every method in this family, retired ones included.
+    var allMethods: [MRIGradientMethod] {
+        MRIGradientMethod.allCases.filter { $0.category == self }
+    }
+}
+
 enum MRIGradientMethod: String, CaseIterable, Identifiable {
-    /// Average artifact subtraction — the per-TR template in `GradientRemover`.
+    /// Average artifact subtraction — EVA's local-neighbour volume template.
+    ///
+    /// Retired 2026-08-09. It existed because it was the fast option, and that
+    /// is no longer a distinction: the local-template and FASTR engines are now
+    /// GPU-backed and MAS runs a 64-channel ten-minute recording in about a
+    /// tenth of a second. MAS is the nearer replacement — the same
+    /// local-neighbour template, reduced with a median that resists a single
+    /// contaminated donor.
     case aas = "AAS"
     /// Median artifact subtraction — same per-TR template, elementwise median
     /// instead of a weighted mean across donor TRs. Inspired by `amri_eeg_gac.m`
@@ -36,32 +107,99 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
     case moosmann = "Moosmann"
     /// FASTR with FARM (van der Meer 2010) most-correlated-epoch averaging.
     case farm = "FARM"
+    /// Allen et al. (2000) imaging artifact reduction: fixed running sections,
+    /// correlation-gated template updates, and ANC.
+    case allenIAR = "Allen IAR"
+    /// Weighted average artifact subtraction — the local template family with an
+    /// exponentially weighted reducer, so nearer donors count for more.
+    case waas = "wAAS"
+    /// Weighted average artifact regression — wAAS plus a least-squares fit.
+    case waar = "wAAR"
 
     var id: String { rawValue }
 
+    /// Display name. Kept separate from `rawValue`, which is the persistence key
+    /// and must stay stable across renames.
     var label: String {
         switch self {
-        case .aas: return "AAS"
+        case .aas: return "Fast AAS"
+        case .allenIAR: return "Allen AAS"
         case .mas: return "MAS"
         case .mar: return "MAR"
-        case .fastr: return "FASTR"
+        case .waas: return "wAAS"
+        case .waar: return "wAAR"
+        case .fastr: return "FASTR Original"
         case .moosmann: return "Moosmann"
         case .farm: return "FARM"
         }
     }
 
-    /// Whether this method runs the FASTR pipeline (slice/OBS/ANC options apply).
-    var isFASTR: Bool { self == .fastr || self == .moosmann || self == .farm }
+    var category: MRIGradientCategory {
+        switch self {
+        case .aas, .allenIAR, .mas, .mar, .waas, .waar: return .template
+        case .fastr, .moosmann, .farm: return .fastr
+        }
+    }
 
-    /// Whether this method runs through `GradientRemover`'s per-TR template
-    /// path (as opposed to the FASTR pipeline).
-    var isTemplateBased: Bool { self == .aas || self == .mas || self == .mar }
+    /// Withdrawn from the picker but still resolvable and still runnable, so
+    /// existing eva.xml files keep reproducing.
+    var isDeprecated: Bool { self == .aas }
+
+    /// Why it was retired, and what to use instead. Shown in the sheet when a
+    /// replay selects one.
+    var deprecationNote: String? {
+        switch self {
+        case .aas:
+            return "Fast AAS has been retired: it existed to be the quick option, and the other methods are now GPU-backed and faster. Allen AAS is the default in its place; MAS is the nearer match if you specifically want a local-neighbour template. Existing files that select Fast AAS still reproduce exactly."
+        default:
+            return nil
+        }
+    }
+
+    var engine: MRIGradientEngine {
+        switch self {
+        case .aas, .allenIAR: return .averageTemplate
+        case .mas, .mar, .waas, .waar: return .localTemplate
+        case .fastr, .moosmann, .farm: return .sliceTemplate
+        }
+    }
+
+    /// Whether the template is a least-squares-scaled fit rather than a plain
+    /// subtraction. Only meaningful for the local-template engine.
+    var fitsTemplateScale: Bool { self == .mar || self == .waar }
+
+    /// Whether donors are weighted by temporal distance rather than reduced with
+    /// an unweighted median.
+    var weightsDonorsByDistance: Bool { self == .waas || self == .waar }
+
+    /// Whether this method runs the FASTR pipeline (slice/OBS/ANC options apply).
+    var isFASTR: Bool { engine == .sliceTemplate }
+
+    /// Whether volumes are subdivided into slice epochs, which decides whether
+    /// the slices-per-volume control and the slice-rate ANC cutoff mean anything.
+    var supportsSliceEpochs: Bool { isFASTR || self == .allenIAR }
+
+    /// Whether the method reads motion parameters at all.
+    var usesMotion: Bool { self == .moosmann }
+
+    /// Whether a donor-volume count means anything for this method.
+    ///
+    /// Allen AAS builds a running template over a fixed section of epochs rather
+    /// than a neighbourhood of the target, so it is sized by "Section epochs"
+    /// instead. Showing a donor count there would be offering a control the
+    /// engine never reads.
+    var usesDonorWindow: Bool { self != .allenIAR }
 }
 
 struct WaveformView: View {
     var recording: MFFRecording
+    /// Non-nil only when this window was created by "Fork to New Window" —
+    /// see `PendingWindowForks` and `applyForkSeed()`. `nil` for every
+    /// ordinary open.
+    let forkSeed: PendingWindowForks.Payload?
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openWindow) var openWindow
     @Environment(ChannelGoodnessSettings.self) var goodnessSettings
     @Environment(SegmentGoodnessSettings.self) var segmentGoodnessSettings
     @Environment(ProcessingDefaults.self) var processingDefaults
@@ -79,6 +217,10 @@ struct WaveformView: View {
     @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkersAcrossTracesKey) var showsTimeMarkersAcrossTraces = false
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkerStyleKey) var waveformTimeMarkerStyleData = WaveformTimeMarkerStyle.defaultData
+    @AppStorage(EVAGeneralPreferences.traceOverflowEnabledKey) var allowsTraceOverflow = false
+    @AppStorage(EVAGeneralPreferences.traceOverflowHeightKey)
+    var traceOverflowHeightPreference = EVAGeneralPreferences.defaultTraceOverflowHeight
+    @AppStorage(EVAGeneralPreferences.traceClipIndicatorsKey) var showsTraceClipIndicators = false
 
     @State var recordingStore = RecordingStore()
     var amplitudeScale: Double {
@@ -89,8 +231,11 @@ struct WaveformView: View {
         get { recordingStore.timeScale }
         nonmutating set { recordingStore.timeScale = newValue }
     }
+    /// Read once per channel row in `waveformRow`, so it goes through the memo
+    /// rather than decoding JSON per row per body pass. See
+    /// `WaveformTimeMarkerStyleCache`.
     var waveformTimeMarkerStyle: WaveformTimeMarkerStyle {
-        WaveformTimeMarkerStyle.decoded(from: waveformTimeMarkerStyleData)
+        WaveformTimeMarkerStyleCache.style(for: waveformTimeMarkerStyleData)
     }
     var horizontalOffset: CGFloat {
         get { recordingStore.horizontalOffset }
@@ -108,39 +253,99 @@ struct WaveformView: View {
     @State var isSyncingSliderFromScroll = false
     @State var isOptionKeyPressed = false
     @State private var optionKeyMonitor: Any?
-    @State var showsEventsPanel = false
-    @State var selectedEventID: MFFEvent.ID?
+    // B4: events-panel and selection state now live on `recordingStore.events` /
+    // `recordingStore.selection`. These forwarders keep every existing call site
+    // in the ~20 `extension WaveformView` files working unchanged; they come out
+    // as children start reading the store directly.
+    var showsEventsPanel: Bool {
+        get { recordingStore.events.showsEventsPanel }
+        nonmutating set { recordingStore.events.showsEventsPanel = newValue }
+    }
+    var selectedEventID: MFFEvent.ID? {
+        get { recordingStore.events.selectedEventID }
+        nonmutating set { recordingStore.events.selectedEventID = newValue }
+    }
     /// Artifact event whose window is highlighted in the waveform (tap its flag).
-    @State var highlightedArtifactEvent: MFFEvent?
-    @State var highlightedArtifactColor: Color = .orange
-    @State var selectedEventCodes = Set<String>()
-    @State private var displayedEventsCache = WaveformDisplayedEventsCache.empty
-    @State private var eventTrackSourceSummary = EventTrackSourceSummary.empty
-    @State var topomapSample: Int?
-    @State var selectedSampleRange: ClosedRange<Int>?
-    @State var dragSelectionStartSample: Int?
-    @State var dragSelectionEndSample: Int?
-    @State var eventTrackContextSample: Int?
-    @State var waveformHoverInfo: WaveformHoverInfo?
+    var highlightedArtifactEvent: MFFEvent? {
+        get { recordingStore.selection.highlightedArtifactEvent }
+        nonmutating set { recordingStore.selection.highlightedArtifactEvent = newValue }
+    }
+    var highlightedArtifactColor: Color {
+        get { recordingStore.selection.highlightedArtifactColor }
+        nonmutating set { recordingStore.selection.highlightedArtifactColor = newValue }
+    }
+    var selectedEventCodes: Set<String> {
+        get { recordingStore.events.selectedEventCodes }
+        nonmutating set { recordingStore.events.selectedEventCodes = newValue }
+    }
+    private var displayedEventsCache: WaveformDisplayedEventsCache {
+        get { recordingStore.events.displayedEventsCache }
+        nonmutating set { recordingStore.events.displayedEventsCache = newValue }
+    }
+    private var eventTrackSourceSummary: EventTrackSourceSummary {
+        get { recordingStore.events.eventTrackSourceSummary }
+        nonmutating set { recordingStore.events.eventTrackSourceSummary = newValue }
+    }
+    var topomapSample: Int? {
+        get { recordingStore.selection.topomapSample }
+        nonmutating set { recordingStore.selection.topomapSample = newValue }
+    }
+    var selectedSampleRange: ClosedRange<Int>? {
+        get { recordingStore.selection.selectedSampleRange }
+        nonmutating set { recordingStore.selection.selectedSampleRange = newValue }
+    }
+    var dragSelectionStartSample: Int? {
+        get { recordingStore.selection.dragSelectionStartSample }
+        nonmutating set { recordingStore.selection.dragSelectionStartSample = newValue }
+    }
+    var dragSelectionEndSample: Int? {
+        get { recordingStore.selection.dragSelectionEndSample }
+        nonmutating set { recordingStore.selection.dragSelectionEndSample = newValue }
+    }
+    var eventTrackContextSample: Int? {
+        get { recordingStore.selection.eventTrackContextSample }
+        nonmutating set { recordingStore.selection.eventTrackContextSample = newValue }
+    }
+    var waveformHoverInfo: WaveformHoverInfo? {
+        get { recordingStore.selection.waveformHoverInfo }
+        nonmutating set { recordingStore.selection.waveformHoverInfo = newValue }
+    }
     /// Timestamp of the last stationary click, used to detect a double-click
     /// manually inside the single waveform interaction gesture.
-    @State var lastWaveformClick: (time: Date, x: CGFloat)?
+    var lastWaveformClick: (time: Date, x: CGFloat)? {
+        get { recordingStore.selection.lastWaveformClick }
+        nonmutating set { recordingStore.selection.lastWaveformClick = newValue }
+    }
     /// Live global x of the scrolling waveform content's leading edge. Used to
     /// convert a gesture's global x into a scroll-independent content x.
-    @State var waveformContentMinX: CGFloat = 0
+    var waveformContentMinX: CGFloat {
+        get { recordingStore.selection.waveformContentMinX }
+        nonmutating set { recordingStore.selection.waveformContentMinX = newValue }
+    }
+    /// Physical-unit entry for the scale popover. Text rather than numbers so a
+    /// half-typed value does not re-scale the view on every keystroke.
+    @AppStorage(EVAGeneralPreferences.defaultSensitivityKey)
+    private var defaultSensitivityPreference = EVAGeneralPreferences.defaultSensitivity
+    @AppStorage(EVAGeneralPreferences.defaultSweepKey)
+    private var defaultSweepPreference = EVAGeneralPreferences.defaultSweep
+    /// Load can be re-entered (`loadIfNeeded`), and re-seeding would discard
+    /// scale changes the user made after opening.
+    @State private var hasSeededDisplayScale = false
+    @State private var showsScaleUnitsPopover = false
+    @State private var sensitivityEntry = ""
+    @State private var sweepEntry = ""
     @State var detectsEyeBlinkArtifacts = false
     @State var detectsEyeMovementArtifacts = false
     /// Raw text buffers for the threshold-panel ocular-channel override fields
     /// (kept out of the config so mid-typing doesn't reparse the entry).
-    @State private var blinkChannelOverrideText = ""
-    @State private var movementChannelOverrideText = ""
+    /// Not `private`: bound by the single sheet host in `WaveformSheetHost.swift` (B3).
+    @State var blinkChannelOverrideText = ""
+    @State var movementChannelOverrideText = ""
     // ECG / QRS detection domain, extracted into an L4 store.
     @State var ecg: ECGDetectionViewModel
     // BCG detection
     // BCG detection domain, extracted into an L4 store (REFACTOR.md).
     @State var bcg: BCGDetectionViewModel
-    /// Stable UUID so re-running detection updates the existing DefinedArtifact rather than appending a new one.
-    let bcgDefinedArtifactID = UUID()
     // Artifact detection + cleaning domain, extracted into an L4 store. See
     // REFACTOR.md slice 5.
     @State var artifactVM: ArtifactViewModel
@@ -155,8 +360,16 @@ struct WaveformView: View {
     // PSA epoching / averaging + averaged-data display, extracted into an L4
     // store. See REFACTOR.md slice 4.
     @State var epoching: EpochingViewModel
-    @State var segmentedEpochSignal: MFFSignalData?
-    @State var segmentedEpochSegments: [EpochSegment] = []
+    // Moved to `EpochingViewModel` so the shared invalidation cascade can reach
+    // them headlessly; forwarders keep existing call sites unchanged.
+    var segmentedEpochSignal: MFFSignalData? {
+        get { epoching.segmentedEpochSignal }
+        nonmutating set { epoching.segmentedEpochSignal = newValue }
+    }
+    var segmentedEpochSegments: [EpochSegment] {
+        get { epoching.segmentedEpochSegments }
+        nonmutating set { epoching.segmentedEpochSegments = newValue }
+    }
     // Single Trial Analysis domain, extracted into an L4 store — reads the
     // raw per-trial epochs above (segmentedEpochSignal/segmentedEpochSegments),
     // not epoching's averaged output.
@@ -169,29 +382,62 @@ struct WaveformView: View {
     @State var filter: FilterViewModel
     @State var showsFilterPopover = false
     @State var showsFilterLineNoiseOptions = false
-    // Wavelet artifact reduction (HAPPE-style) pipeline stage.
+    @State var showsFilterAdvanced = false
+    // Wavelet artifact reduction pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
     @State var wavelet: WaveletReductionViewModel
-    @State var channelStatusIsError = false
+    // B4: status and physio display state now live on `recordingStore.status` /
+    // `recordingStore.physio`.
+    var channelStatusIsError: Bool {
+        get { recordingStore.status.channelStatusIsError }
+        nonmutating set { recordingStore.status.channelStatusIsError = newValue }
+    }
     // Scrollable status history (newest first), shown when the status area is clicked.
-    @State private var statusHistory: [StatusHistoryEntry] = []
-    @State private var lastRecordedStatusBySource: [String: String] = [:]
-    @State private var showsStatusHistory = false
-    @State private var showsRecentProcessingHistory = false
+    private var statusHistory: [StatusHistoryEntry] {
+        get { recordingStore.status.statusHistory }
+        nonmutating set { recordingStore.status.statusHistory = newValue }
+    }
+    private var lastRecordedStatusBySource: [String: String] {
+        get { recordingStore.status.lastRecordedStatusBySource }
+        nonmutating set { recordingStore.status.lastRecordedStatusBySource = newValue }
+    }
     // Physio (PNS) channel display. Shown by default when present; pinned below
     // the EEG channels and synced to the EEG time axis.
-    @State var showsPhysioChannels = true
-    @State var physioRanges: [ClosedRange<Float>] = []
-    @State var physioScaleFactors: [Int: Double] = [:]
-    @State var physioMaxScaledChannels = Set<Int>()
-    @State var physioFlippedPolarity = Set<Int>()
+    var showsPhysioChannels: Bool {
+        get { recordingStore.physio.showsPhysioChannels }
+        nonmutating set { recordingStore.physio.showsPhysioChannels = newValue }
+    }
+    var physioRanges: [ClosedRange<Float>] {
+        get { recordingStore.physio.ranges }
+        nonmutating set { recordingStore.physio.ranges = newValue }
+    }
+    var physioScaleFactors: [Int: Double] {
+        get { recordingStore.physio.scaleFactors }
+        nonmutating set { recordingStore.physio.scaleFactors = newValue }
+    }
+    var physioMaxScaledChannels: Set<Int> {
+        get { recordingStore.physio.maxScaledChannels }
+        nonmutating set { recordingStore.physio.maxScaledChannels = newValue }
+    }
+    var physioFlippedPolarity: Set<Int> {
+        get { recordingStore.physio.flippedPolarity }
+        nonmutating set { recordingStore.physio.flippedPolarity = newValue }
+    }
     /// User-assigned renames for physio channels (keyed by merged channel index).
-    @State var physioChannelRenames: [Int: String] = [:]
+    var physioChannelRenames: [Int: String] {
+        get { recordingStore.physio.channelRenames }
+        nonmutating set { recordingStore.physio.channelRenames = newValue }
+    }
     /// Index of the channel currently being renamed (nil when no rename in progress).
-    @State var physioRenameTarget: Int? = nil
-    @State var physioRenameText: String = ""
+    var physioRenameTarget: Int? {
+        get { recordingStore.physio.renameTarget }
+        nonmutating set { recordingStore.physio.renameTarget = newValue }
+    }
     /// Synthetic PNS channels created from ICA components.
-    @State var syntheticPNSChannels: [SyntheticPNSChannel] = []
+    var syntheticPNSChannels: [SyntheticPNSChannel] {
+        get { recordingStore.physio.syntheticPNSChannels }
+        nonmutating set { recordingStore.physio.syntheticPNSChannels = newValue }
+    }
 
 
     // MRI gradient-artifact removal domain (AAS / FASTR / FARM / Moosmann),
@@ -208,11 +454,15 @@ struct WaveformView: View {
     /// that only hold `store` can reach it too.
     var processingQueue: ProcessingQueue { recordingStore.processingQueue }
     @State var electrodeGeometry: ElectrodeGeometry?
-    @State var channelStatusMessage: String?
+    var channelStatusMessage: String? {
+        get { recordingStore.status.channelStatusMessage }
+        nonmutating set { recordingStore.status.channelStatusMessage = newValue }
+    }
     @State private var channelLabelMetricsExportRequest = 0
     // Channel-health coordination, extracted into an L4 store (REFACTOR.md).
     @State var chanHealth: ChannelHealthViewModel
-    @State private var showsChannelGoodnessSettings = false
+    // Not `private`: read by the single sheet host in `WaveformSheetHost.swift` (B3).
+    @State var showsChannelGoodnessSettings = false
     @State private var channelGoodnessSettingsRequest = 0
     // Segment-health domain, extracted into an L4 store (REFACTOR.md).
     @State var segHealth: SegmentHealthViewModel
@@ -220,13 +470,27 @@ struct WaveformView: View {
     @State private var mffExportRequest = 0
     @State private var copyProcessingRequest = 0
     @State private var datasetInfoRequest = 0
-    @State private var showsDatasetInfo = false
+    // Not `private`: read by the single sheet host in `WaveformSheetHost.swift` (B3).
+    @State var showsDatasetInfo = false
     @State private var importPhysioRequest = 0
     @State var showsPhysioImportSheet = false
     /// Set to scroll the channel list to that row (e.g. from a topomap/butterfly
     /// click); `.scrollPosition(id:)` on the vertical channel ScrollView consumes it.
-    @State var scrollToChannelRequest: Int?
+    var scrollToChannelRequest: Int? {
+        get { recordingStore.selection.scrollToChannelRequest }
+        nonmutating set { recordingStore.selection.scrollToChannelRequest = newValue }
+    }
     @State var showsChannelInspector = false
+    /// A/B compare against another open window (ROADMAP RW-1 item 10).
+    @State var showsWindowComparison = false
+    /// Identifies which windows are the *same* experiment. Forking copies the
+    /// parent's, so a window and everything forked from it share one; opening
+    /// the same file again independently gets a new one. See
+    /// `WindowComparisonRegistry`.
+    @State var comparisonGroupID = UUID()
+    /// The node this window was forked at, when it was a fork — shown so a
+    /// comparison says where the two lineages parted.
+    @State var comparisonForkedFromNode: String?
     @State var channelInspectorSelection: ChannelInspectorSelection = .channel(0)
     @State var channelInspectorOverlayEnabled = true
     @State var channelInspectorShowsStandardError = false
@@ -236,15 +500,61 @@ struct WaveformView: View {
     @State var averageSNRSortOrder: [KeyPathComparator<AverageSNRRow>] = [
         KeyPathComparator(\AverageSNRRow.category, order: .forward)
     ]
-    @State var showsCategoryGroupPopover = false
-    @State var categoryGroupMode: CategoryGroupMode = .codes
-    @State var categoryGroupName = ""
-    @State var categoryGroupSelectedCodes = Set<String>()
-    @State var categoryRegexSourceCode = ""
-    @State var categoryRegexPattern = ""
+    // B4: category-group popover state now lives on `recordingStore.events`.
+    var categoryGroupSelectedCodes: Set<String> {
+        get { recordingStore.events.categoryGroupSelectedCodes }
+        nonmutating set { recordingStore.events.categoryGroupSelectedCodes = newValue }
+    }
+    var showsCategoryGroupPopover: Bool {
+        get { recordingStore.events.showsCategoryGroupPopover }
+        nonmutating set { recordingStore.events.showsCategoryGroupPopover = newValue }
+    }
+    var categoryGroupMode: CategoryGroupMode {
+        get { recordingStore.events.categoryGroupMode }
+        nonmutating set { recordingStore.events.categoryGroupMode = newValue }
+    }
+    var categoryGroupName: String {
+        get { recordingStore.events.categoryGroupName }
+        nonmutating set { recordingStore.events.categoryGroupName = newValue }
+    }
+    var categoryRegexSourceCode: String {
+        get { recordingStore.events.categoryRegexSourceCode }
+        nonmutating set { recordingStore.events.categoryRegexSourceCode = newValue }
+    }
+    var categoryRegexPattern: String {
+        get { recordingStore.events.categoryRegexPattern }
+        nonmutating set { recordingStore.events.categoryRegexPattern = newValue }
+    }
+    var categoryRegexMatchField: CategoryRegexMatchField {
+        get { recordingStore.events.categoryRegexMatchField }
+        nonmutating set { recordingStore.events.categoryRegexMatchField = newValue }
+    }
+    var physioRenameText: String {
+        get { recordingStore.physio.renameText }
+        nonmutating set { recordingStore.physio.renameText = newValue }
+    }
+    var showsStatusHistory: Bool {
+        get { recordingStore.status.showsStatusHistory }
+        nonmutating set { recordingStore.status.showsStatusHistory = newValue }
+    }
+    var showsRecentProcessingHistory: Bool {
+        get { recordingStore.status.showsRecentProcessingHistory }
+        nonmutating set { recordingStore.status.showsRecentProcessingHistory = newValue }
+    }
     @State var isExportingMFF = false
     @State var mffExportStatusMessage: String?
     @State var recordingSessionID = UUID()
+    /// True while `reDeriveHistory` is rebuilding an evicted node's pipeline
+    /// state from its steps — drives the "Rebuilding…" overlay so a slow
+    /// re-derivation on a large recording reads as work in progress rather
+    /// than a frozen click.
+    @State var isReDerivingHistory = false
+    /// The in-flight history re-derivation, so a newer click (or closing the
+    /// file) can cancel it rather than leaving minutes of work running for a
+    /// node nobody is waiting on. Publication safety is separate and belongs to
+    /// `RecordingStore.historyReDeriveRunner` — cancellation is cooperative, so
+    /// a cancelled rebuild can still reach its end. See `reDeriveHistory`.
+    @State var historyReDeriveTask: Task<Void, Never>?
     @State var waveletExplorerTask: Task<Void, Never>?
     @State var topographyTask: Task<Void, Never>?
     @State var artifactTemplateTask: Task<Void, Never>?
@@ -266,8 +576,17 @@ struct WaveformView: View {
     /// fixed stride of 5 samples at 1000 Hz displayed about 200 plotted points/s.
     private let referenceDisplaySampleRate = 1_000.0
     private let referenceDisplaySampleStride = 5
-    let channelRowHeight: CGFloat = 70
-    let channelOverflowHeight: CGFloat = 28
+    let channelRowHeight = WaveformScaleUnits.channelRowHeight
+    /// Headroom a trace may travel past its row before the canvas clips it.
+    ///
+    /// The *only* thing the overflow preference changes. Row chrome lives in
+    /// `channelRowBackdrop` either way, so switching the preference moves one
+    /// variable rather than two — off is off, and turning it off cannot leave
+    /// a previously-raised headroom behind, because the canvas is sized from
+    /// this and nothing else.
+    var channelOverflowHeight: CGFloat {
+        allowsTraceOverflow ? max(CGFloat(traceOverflowHeightPreference), 0) : 0
+    }
     private let eventTrackHeight: CGFloat = 64
     let rowSpacing: CGFloat = 12
     let labelColumnWidth: CGFloat = 120
@@ -340,7 +659,7 @@ struct WaveformView: View {
         let realCount = recording.pnsSignal?.numberOfChannels ?? 0
         let total = realCount + syntheticPNSChannels.count
         return PhysioViewControls(
-            showsPhysio: $showsPhysioChannels,
+            showsPhysio: binding(recordingStore.physio, \.showsPhysioChannels),
             hasPhysio: total > 0,
             channelCount: total
         )
@@ -370,9 +689,14 @@ struct WaveformView: View {
     /// Swift only requires explicit assignment for properties whose default
     /// needs to change (here, `store` must be the SAME instance across
     /// `recordingStore` and every VM, not each's own default `RecordingStore()`).
-    init(recording: MFFRecording, userMarkers: [WaveformUserMarkerSignature]) {
+    init(
+        recording: MFFRecording,
+        userMarkers: [WaveformUserMarkerSignature],
+        forkSeed: PendingWindowForks.Payload? = nil
+    ) {
         self.recording = recording
         self.userMarkers = userMarkers
+        self.forkSeed = forkSeed
         let store = RecordingStore()
         _recordingStore = State(initialValue: store)
         _ecg = State(wrappedValue: ECGDetectionViewModel(store: store))
@@ -435,39 +759,43 @@ struct WaveformView: View {
                 // Wavelet reduction stage: computed from `processed`, applied
                 // before interpolation. Toggleable and revertible like cleaning.
                 let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? processed) : processed
+                // `content(...)` is called from exactly ONE call site — not
+                // branched on `interpolationSnapshot.isEmpty` — because an
+                // if/else here would be a structural-identity change the
+                // moment the user interpolates their first channel: SwiftUI
+                // would tear down and remount the whole subtree, causing its
+                // `.task(id: channelHealthSignature(...))` below to fire as a
+                // fresh mount (wiping ALL channel health results) while its
+                // `.onChange(of: channels.interpolated.keys.sorted())` (meant
+                // to selectively patch just the interpolated channel) would
+                // NOT fire, since a fresh mount has no prior value to diff
+                // against. See recomputeChannelHealthForInterpolation.
                 let interpolationSnapshot = channels.interpolationSnapshot
-                if interpolationSnapshot.isEmpty {
-                    content(
-                        for: epoching.epochedSignal ?? waveletStage,
-                        base: base,
-                        cleaningBase: preArtifact,
-                        waveletInput: processed,
-                        continuousSignal: waveletStage
-                    )
-                } else {
-                    let resolutionKey = recordingStore.interpolatedSignalResolver.key(
-                        for: waveletStage,
-                        snapshot: interpolationSnapshot
-                    )
-                    let continuousSignal = recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey)
+                let resolutionKey: InterpolatedSignalResolver.Key? = interpolationSnapshot.isEmpty
+                    ? nil
+                    : recordingStore.interpolatedSignalResolver.key(for: waveletStage, snapshot: interpolationSnapshot)
+                let continuousSignal: MFFSignalData = {
+                    guard let resolutionKey else { return waveletStage }
+                    return recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey)
                         ?? recordingStore.interpolatedSignalResolver.displaySignal(
                             whileResolving: resolutionKey,
                             fallback: waveletStage
                         )
-                    content(
-                        for: epoching.epochedSignal ?? continuousSignal,
-                        base: base,
-                        cleaningBase: preArtifact,
-                        waveletInput: processed,
-                        continuousSignal: continuousSignal
-                    )
-                    .task(id: resolutionKey) {
-                        if recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey) == nil {
-                            await recordingStore.interpolatedSignalResolver.resolve(
-                                signal: waveletStage,
-                                snapshot: interpolationSnapshot
-                            )
-                        }
+                }()
+                content(
+                    for: epoching.epochedSignal ?? continuousSignal,
+                    base: base,
+                    cleaningBase: preArtifact,
+                    waveletInput: processed,
+                    continuousSignal: continuousSignal
+                )
+                .task(id: resolutionKey) {
+                    guard let resolutionKey else { return }
+                    if recordingStore.interpolatedSignalResolver.cachedSignal(for: resolutionKey) == nil {
+                        await recordingStore.interpolatedSignalResolver.resolve(
+                            signal: waveletStage,
+                            snapshot: interpolationSnapshot
+                        )
                     }
                 }
             } else {
@@ -492,6 +820,26 @@ struct WaveformView: View {
         .focusedSceneValue(\.datasetInfoRequest, $datasetInfoRequest)
         .focusedSceneValue(\.importPhysioRequest, $importPhysioRequest)
         .focusedSceneValue(\.physioViewControls, physioViewControls)
+        .focusedSceneValue(\.historyTransportActions, historyTransportActions)
+    }
+
+    /// ⌘Z / ⇧⌘Z for this window — see `HistoryTransportCommands`.
+    ///
+    /// The names come from the nodes themselves, so the menu says "Undo Filter"
+    /// rather than a bare "Undo": stepping back is navigation to the parent
+    /// node, and naming the step it leaves is the difference between a menu item
+    /// the operator can predict and one they have to try.
+    var historyTransportActions: HistoryTransportActions {
+        let model = recordingStore.processingHistory
+        return HistoryTransportActions(
+            undoStepName: model.stepBackTarget == nil
+                ? nil
+                : model.history.current.displayLabel,
+            redoStepName: model.stepForwardTarget
+                .flatMap { model.history.node($0)?.displayLabel },
+            stepBack: { stepHistoryBack() },
+            stepForward: { stepHistoryForward() }
+        )
     }
 
     /// Split out of `body` (and further split below) so each modifier chain stays
@@ -500,16 +848,34 @@ struct WaveformView: View {
         installEpochAndLifecycleHandlers(on: installRequestHandlers(on: content))
     }
 
+    /// Runs `action` after the current SwiftUI update finishes.
+    ///
+    /// Menu commands arrive here as `@State` request counters, so their
+    /// `.onChange` handlers run *inside* SwiftUI's update — which AppKit performs
+    /// within a CoreAnimation transaction commit. `NSSavePanel`/`NSOpenPanel`
+    /// refuse to run there:
+    ///
+    ///     Suppressing invocation of -[NSApplication runModalForWindow:].
+    ///     … cannot run inside a transaction begin/commit pair …
+    ///
+    /// The panel silently never appears — intermittently, because it depends on
+    /// whether the command lands mid-transaction. Hopping to the next main-queue
+    /// turn guarantees the commit has finished. (Same reason the ICA sheet is
+    /// opened via `DispatchQueue.main.async` in `content(for:)`.)
+    private func afterCurrentTransaction(_ action: @escaping () -> Void) {
+        DispatchQueue.main.async(execute: action)
+    }
+
     private func installRequestHandlers(on content: some View) -> some View {
         content
         .onChange(of: resetToOriginalRequest) { _, _ in
             resetToOriginalData()
         }
         .onChange(of: mffExportRequest) { _, _ in
-            exportCurrentSignalToMFF()
+            afterCurrentTransaction { exportCurrentSignalToMFF() }
         }
         .onChange(of: copyProcessingRequest) { _, _ in
-            importProcessingFromOtherFile()
+            afterCurrentTransaction { importProcessingFromOtherFile() }
         }
         .onChange(of: datasetInfoRequest) { _, _ in
             showsDatasetInfo = true
@@ -518,7 +884,7 @@ struct WaveformView: View {
             showsPhysioImportSheet = true
         }
         .onChange(of: channelLabelMetricsExportRequest) { _, _ in
-            saveChannelLabelMetricsJSON()
+            afterCurrentTransaction { saveChannelLabelMetricsJSON() }
         }
         .onChange(of: segHealth.detailsRequest) { _, _ in
             guard segmentHealthIsAvailable else {
@@ -589,11 +955,250 @@ struct WaveformView: View {
         if electrodeGeometry == nil {
             electrodeGeometry = recording.electrodeGeometry
         }
-        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
-        ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
+        publishChannelSetContext()
         seedPhysioPolarityDefaultsIfNeeded()
+        seedDisplayScaleDefaults()
+        seedProcessingHistoryFromDisk()
         adoptOnDiskEpochsIfPresent()
+        applyForkSeed()
         autoStartBatchIfNeeded()
+    }
+
+    /// Publishes this window's electrode layout to `ChannelSetStore`, the
+    /// single-instance Channel Sets editor's data source.
+    ///
+    /// Two call sites, both direct writes rather than routed through
+    /// `@FocusedValue`/`.commands` — a `ChannelSetFocusMirror` living inside
+    /// `.commands` was tried first (2026-08-15) and found broken by manual
+    /// test: the editor read "no sensor layout available" even with a
+    /// recording open, most likely because an invisible, zero-size view
+    /// mounted purely for a `.onChange` side effect does not reliably get
+    /// re-evaluated the way a real, visible command button does — unverified
+    /// beyond that it did not work. This is deliberately the older, plainer
+    /// mechanism instead: call sites write directly, on load
+    /// (`loadRecordingIfNeeded`), on a channel-role edit
+    /// (`finishChannelRoleEdit`), and on this window becoming main
+    /// (`WindowAccessor`'s `onBecomeMain`, wired from `ContentView`) — the
+    /// last one is what makes the editor follow *focus* rather than *load
+    /// order* across multiple recording windows, which is the actual
+    /// multi-window requirement; the first two are what make it correct
+    /// within one window regardless of focus.
+    func publishChannelSetContext() {
+        let channelsSignal = recordingStore.channelsWindowSignal ?? recording.signal
+        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout?
+            .includingReference(forChannelCount: channelsSignal?.data.count ?? 0)
+        ChannelSetStore.shared.activeChannelNames = channelsSignal?.channelNames
+        ChannelSetStore.shared.activeIsMFFSource = recording.packageURL.pathExtension.lowercased() == "mff"
+        let channelModel = channels
+        ChannelsWindowModel.shared.publishRecording(
+            id: recording.id,
+            name: recording.packageName,
+            signal: channelsSignal,
+            acquisitionSignal: recording.signal,
+            layout: recording.sensorLayout,
+            channelNames: channelsSignal?.channelNames,
+            healthResults: channelModel.healthResults,
+            isAnalyzingHealth: channelModel.isAnalyzingHealth,
+            healthProgress: channelModel.healthProgress,
+            refreshHealth: { [weak channelModel] in
+                channelModel?.showsHealth = true
+                channelModel?.healthRefreshToken += 1
+            }
+        )
+    }
+
+    /// Updates this recording's registered diagnostics without making it the
+    /// active context when another recording window currently has focus.
+    func publishChannelsWindowLiveContext(signal: MFFSignalData) {
+        recordingStore.channelsWindowSignal = signal
+        ChannelsWindowModel.shared.updateActiveRecording(
+            id: recording.id,
+            signal: signal,
+            healthResults: channels.healthResults,
+            isAnalyzingHealth: channels.isAnalyzingHealth,
+            healthProgress: channels.healthProgress
+        )
+        publishComparisonContext(signal: signal)
+    }
+
+    /// Publishes what another window's compare sheet needs to know about this
+    /// one: its identity, its place in the fork relation, and the signal it is
+    /// currently showing.
+    ///
+    /// Shares `publishChannelsWindowLiveContext`'s call sites deliberately —
+    /// those already fire on exactly the changes that make a comparison stale
+    /// (a new signal revision, new health results), and the registry drops a
+    /// publish whose snapshot is unchanged.
+    func publishComparisonContext(signal: MFFSignalData) {
+        let history = recordingStore.processingHistory
+        let lineage = history.history.currentPath.compactMap { $0.step?.operation }
+        let summary = lineage.isEmpty
+            ? "raw"
+            : lineage.suffix(3).map { ReplayStepDisplay.label(for: $0) }.joined(separator: " → ")
+        let segmentScores = segHealth.analysis?.results.map(\.goodPercentage) ?? []
+        WindowComparisonRegistry.shared.publish(ComparableWindow(
+            id: recording.id,
+            groupID: comparisonGroupID,
+            packageName: recording.packageName,
+            packageURL: recording.packageURL,
+            currentNode: history.history.currentID.short,
+            lineageSummary: summary,
+            forkedFromNode: comparisonForkedFromNode,
+            signal: signal,
+            badChannelCount: channels.bad.count,
+            interpolatedChannelCount: channels.interpolated.count,
+            segmentHealthMeanGood: segmentScores.isEmpty
+                ? nil
+                : Int((Double(segmentScores.reduce(0, +)) / Double(segmentScores.count)).rounded()),
+            artifactsAssessed: artifactVM.hasAssessedArtifacts
+                || !template.definedArtifacts.isEmpty
+                || !artifactVM.events.isEmpty
+        ))
+    }
+
+    /// Applies a fork's captured state on top of ordinary load-time seeding —
+    /// see `PendingWindowForks` and REWIND.md "Forking to a new window".
+    /// Deliberately runs *after* `seedProcessingHistoryFromDisk()` and
+    /// `adoptOnDiskEpochsIfPresent()`, not instead of them: this window opened
+    /// the same file fresh, so that ordinary seeding runs and is harmlessly
+    /// redundant (same eva.xml), and this call is what makes the fork's
+    /// full — possibly live-edited — history and live pipeline state win over
+    /// it rather than a race depending on call order.
+    ///
+    /// `PipelineSnapshotting.restore` is the exact call ordinary history
+    /// navigation already uses — a fork is "restore this snapshot," just into
+    /// a freshly-constructed set of view models instead of this window's own.
+    ///
+    /// Also replays `restoreStageSettings(along:)` — the other half of what
+    /// ordinary `navigateHistory(to:)` does, and the piece missing here until
+    /// 2026-08-16. Without it, every stage's view-model *parameters* (ICA
+    /// component count, filter cutoffs, …) were left at fresh construction
+    /// defaults rather than the forked node's own recorded values, because
+    /// `PipelineSnapshotting.restore` only ever restores stage *outputs* by
+    /// design (see its own header). A forked window's ICA panel then showed
+    /// `ProcessingDefaults.icaComponentCount` (20) instead of whatever the
+    /// forked node actually used (10, in the manual test that caught this) —
+    /// and content-addressing means re-deriving with the *wrong* parameters
+    /// doesn't land back on the existing node, it forks a genuinely new one,
+    /// which is what the reported "duplicate steps" (an extra ICA + filter
+    /// node appended after the fork point) actually were.
+    private func applyForkSeed() {
+        guard let forkSeed else { return }
+        // A fork continues the source window's experiment, so it joins its
+        // comparison group rather than starting one (ROADMAP RW-1 item 10).
+        comparisonGroupID = forkSeed.comparisonGroupID
+        comparisonForkedFromNode = forkSeed.forkedFromNode
+        recordingStore.processingHistory.seedFork(forkSeed.historySeed)
+        recordingStore.channels = forkSeed.channels
+        PipelineSnapshotting.restore(
+            forkSeed.liveSnapshot,
+            store: recordingStore, gradient: gradient, bcg: bcg, ica: ica,
+            filter: filter, wavelet: wavelet, artifactVM: artifactVM, template: template,
+            segHealth: segHealth, epoching: epoching
+        )
+        restoreStageSettings(along: recordingStore.processingHistory.history.currentPath)
+    }
+
+    /// Seeds the history rail with what `eva.xml` says already happened to this
+    /// file, so a processed recording does not read as "raw" the moment it
+    /// opens.
+    ///
+    /// `currentProcessingChainSignature`-driven recording (`recordProcessingHistory`)
+    /// only ever sees *this session's* pipeline view models, which start empty —
+    /// it has no way to know a previously-applied filter or interpolation is
+    /// already baked into the loaded samples. The package's own `eva.xml` does
+    /// know, so this reads it back with the matching reader
+    /// (`EVAProcessingScriptXML.read`) and hands the steps to
+    /// `RecordingHistoryModel.seedOnDiskPrefix`, which every future `record()`
+    /// call folds in ahead of whatever this session does. See that method for
+    /// why the nodes it creates are shown but not navigable.
+    ///
+    /// Only reads an ICA payload digest, matching what the *live* path
+    /// disambiguates (`currentPayloadDigests()`) — artifact cleaning's step
+    /// parameters are already sufficient on their own, live or on disk.
+    private func seedProcessingHistoryFromDisk() {
+        guard let script = EVAProcessingScriptXML.read(fromPackage: recording.packageURL),
+              !script.steps.isEmpty else { return }
+        var payloadDigests: [EVAProcessingStep.Operation: String] = [:]
+        if script.steps.contains(where: { $0.operation == .icaClean }),
+           let payload = ICAReplayPayload.read(fromPackage: recording.packageURL) {
+            payloadDigests[.icaClean] = EVAHistory.digest([
+                payload.replayIdentityBytes.base64EncodedString()
+            ])
+        }
+        // The committed reviewed exclusion this package already carries. Taken
+        // as the last such step: a file records one current-state exclusion,
+        // the way `eva.xml` records one current-state everything else.
+        if let step = script.steps.last(where: { $0.operation == .trialExclusion }) {
+            epoching.committedTrialExclusion = step
+            payloadDigests[.trialExclusion] = EVAHistory.digest([
+                step.trialExclusionIdentityBytes.base64EncodedString()
+            ])
+        }
+        recordingStore.processingHistory.seedOnDiskPrefix(
+            recordingKey: recording.packageName,
+            steps: script.steps,
+            payloadDigests: payloadDigests
+        )
+        // The tip is what is actually on screen right now — the loaded signal,
+        // with every pipeline view model still empty — so it is free to mark
+        // instant. Matches what `recordProcessingHistory()` does after every
+        // live `record()`: capture immediately follows adopt.
+        recordingStore.processingHistory.storeSnapshot(capturePipelineSnapshot())
+
+        // Does what this package carries agree with what it says happened? The
+        // answer goes into the status history rather than into an alert: it is
+        // a note about the file, not a reason to refuse it. See
+        // `PayloadConsistency` (ROADMAP RW-1 item 4).
+        let findings = PayloadConsistency.findings(
+            script: script,
+            hasICAPayload: ICAReplayPayload.read(fromPackage: recording.packageURL) != nil,
+            hasArtifactPayload: ArtifactReplayPayload.read(fromPackage: recording.packageURL) != nil
+        )
+        // Only the impossible direction is surfaced here. A step whose payload
+        // is absent is ordinary — every package written before the sidecar
+        // existed is in that state, and the batch config pane already says the
+        // step will not re-apply. A payload with no step is the one nobody can
+        // explain.
+        let unexplained = findings.first { finding in
+            if case .payloadWithoutStep = finding { return true }
+            return false
+        }
+        if let unexplained {
+            channelStatusMessage = unexplained.message
+            channelStatusIsError = true
+        }
+    }
+
+    /// Puts the newly-opened recording at the preferred sensitivity and sweep
+    /// speed from Settings.
+    ///
+    /// Converted here rather than stored as raw scales, because the sweep
+    /// conversion needs *this file's* sampling rate: the decimation stride is an
+    /// integer, so a stored `timeScale` would mean a different physical speed in
+    /// a 250 Hz file than in a 1000 Hz one. See
+    /// `WaveformScaleUnits.pointsPerSecond`.
+    ///
+    /// Only on load, never on a settings change — the preference is a starting
+    /// point, and yanking the view out from under someone who has since adjusted
+    /// the sliders would be worse than useless. Clamped to the sliders' ranges so
+    /// a preference outside them lands at the edge rather than somewhere the
+    /// controls cannot represent.
+    private func seedDisplayScaleDefaults() {
+        guard !hasSeededDisplayScale else { return }
+        hasSeededDisplayScale = true
+        amplitudeScale = clampedAmplitudeScale(
+            WaveformScaleUnits.amplitudeScale(
+                forMicrovoltsPerMillimeter: defaultSensitivityPreference,
+                rowHeight: channelRowHeight
+            )
+        )
+        timeScale = clampedTimeScale(
+            WaveformScaleUnits.timeScale(
+                forMillimetersPerSecond: defaultSweepPreference,
+                samplingRate: scaleUnitsSamplingRate
+            )
+        )
     }
 
     /// Honor each PNS sensor's own `<positiveUp>` convention as the initial
@@ -625,7 +1230,10 @@ struct WaveformView: View {
         // files may not be with this one (e.g. missing TR markers), so it's
         // re-checked here even though the batch template already chose which
         // steps to include.
-        replay.configure(fromBatch: batch, script: script, signal: signal)
+        replay.configure(
+            fromBatch: batch, script: script, signal: signal,
+            availability: currentReplayPayloadAvailability()
+        )
         batch.setStatus(.processing)
         startInteractiveReplay()
     }
@@ -636,18 +1244,57 @@ struct WaveformView: View {
     /// epochs (with stimulus-locked markers) instead of a misleading continuous
     /// strip with out-of-place events.
     private func adoptOnDiskEpochsIfPresent() {
-        guard epoching.epochedSignal == nil,
-              let signal = recording.signal,
-              signal.isSegmented,
-              !signal.epochSegments.isEmpty else {
+        guard epoching.epochedSignal == nil else { return }
+        applyFileTypeInterpretation()
+    }
+
+    /// The file kind EVA is working with: the user's session override if they set
+    /// one in Dataset Info, otherwise what the reader detected.
+    var effectiveFileType: MFFFileType? {
+        recordingStore.fileTypeOverride ?? recording.signal?.detectedFileType
+    }
+
+    /// Sets (or clears, with `nil`) the session override and re-interprets the
+    /// recording accordingly.
+    func setFileTypeOverride(_ type: MFFFileType?) {
+        recordingStore.fileTypeOverride = type
+        applyFileTypeInterpretation()
+    }
+
+    /// Brings the epoch state in line with `effectiveFileType`.
+    ///
+    /// Used both on load and when the user corrects the type by hand, so the
+    /// override is a real escape hatch rather than a relabelling: choosing
+    /// "Averaged" on a package EVA misread actually enables the averaged
+    /// workspace, butterfly plots, and the rest.
+    func applyFileTypeInterpretation() {
+        guard let signal = recording.signal else { return }
+        let type = effectiveFileType ?? .continuous
+
+        guard type != .continuous else {
+            // Treat as a continuous strip: drop any adopted on-disk epochs.
+            epoching.epochedSignal = nil
+            epoching.epochSegments = []
+            epoching.isAveraged = false
+            segmentedEpochSignal = nil
+            segmentedEpochSegments = []
+            epoching.statusMessage = nil
             return
         }
+
+        guard !signal.epochSegments.isEmpty else {
+            // Nothing on disk to adopt — say so rather than silently doing nothing.
+            epoching.statusMessage = "This package has no epoch/category structure to read as \(type.displayName.lowercased())."
+            return
+        }
+
+        let averaged = (type == .averaged || type == .grandAverage)
         segmentedEpochSignal = signal
         segmentedEpochSegments = signal.epochSegments
         epoching.epochedSignal = signal
         epoching.epochSegments = signal.epochSegments
-        epoching.isAveraged = signal.isAveraged
-        epoching.statusMessage = signal.isAveraged
+        epoching.isAveraged = averaged
+        epoching.statusMessage = averaged
             ? "Loaded \(signal.epochSegments.count) averaged categories"
             : "Loaded \(signal.epochSegments.count) epochs"
     }
@@ -823,6 +1470,7 @@ struct WaveformView: View {
                 displayMode: displayMode,
                 signal: signal,
                 events: events,
+                eventsKey: eventCacheKey,
                 isShowingEpochs: isShowingEpochs
             )
             .animation(.easeInOut(duration: 0.16), value: displayMode)
@@ -845,116 +1493,27 @@ struct WaveformView: View {
                 key: newKey
             )
         }
-        .sheet(isPresented: $epoching.showsSheet) {
-            psaSheet(for: continuousSignal)
+        // REWIND work item 1: fold the chain into the history tree when it moves.
+        // Keyed on a signature of stage outputs rather than run per body pass —
+        // see `WaveformHistoryRail.swift` for why that is both cheap and correct.
+        .onChange(of: processingChainSignature, initial: true) { _, _ in
+            recordProcessingHistory()
         }
-        .sheet(isPresented: $template.showsSheet) {
-            artifactTemplateSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $artifactVM.showsCleaningSheet) {
-            artifactCleaningSheet(for: cleaningBase)
-        }
-        .sheet(isPresented: $ecg.showsSheet) {
-            ecgDetectionSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $artifactVM.showsThresholdSheet) {
-            EyeArtifactThresholdSheet(
-                signal: continuousSignal,
-                sensorLayoutName: recording.sensorLayout?.name,
-                detectsEyeBlinkArtifacts: $detectsEyeBlinkArtifacts,
-                detectsEyeMovementArtifacts: $detectsEyeMovementArtifacts,
-                blinkChannelOverrideText: $blinkChannelOverrideText,
-                movementChannelOverrideText: $movementChannelOverrideText,
-                artifactVM: artifactVM
-            )
-        }
-        .sheet(isPresented: $bcg.showsSheet) {
-            bcgDetectionSheet(for: continuousSignal, selection: activeSelectionRange(in: continuousSignal))
-                .onAppear {
-                    autoSelectBCGProxySetIfEnabled(for: continuousSignal)
-                    prepareCWLDefaults(pns: displayedPhysioSignal())
-                }
-        }
-        .sheet(isPresented: $waveletExplorer.showsSheet) {
-            waveletArtifactExplorerSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $wavelet.showsSheet) {
-            waveletReductionSheet(input: waveletInput)
-        }
-        .sheet(isPresented: $ica.showsSheet) {
-            icaSheet(for: base)
-        }
-        .sheet(isPresented: $replay.showsConfigPane) {
-            ReplayConfigSheet(
-                controller: replay,
-                onStart: { startInteractiveReplay() },
-                onCancel: { replay.reset() }
-            )
-        }
-        .sheet(isPresented: $showsChannelInspector) {
-            channelInspectorSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $showsDatasetInfo) {
-            DatasetInfoSheet(
-                recording: recording,
-                epoching: epoching,
-                onClose: { showsDatasetInfo = false }
-            )
-        }
-        .sheet(isPresented: $showsPhysioImportSheet) {
-            PhysioImportSheet(
-                recording: recording,
-                onComplete: { showsPhysioImportSheet = false },
-                onCancel: { showsPhysioImportSheet = false }
+        // B3: one `.sheet(item:)` in place of 18 chained `.sheet(isPresented:)`.
+        // Presentation is still driven by the same per-VM booleans — they are
+        // derived into `activeSheet` rather than each owning a modifier. See
+        // `WaveformSheetHost.swift` for why the chain was the measured cost.
+        .sheet(item: activeSheetBinding) { sheet in
+            sheetContent(
+                sheet,
+                base: base,
+                cleaningBase: cleaningBase,
+                waveletInput: waveletInput,
+                continuousSignal: continuousSignal
             )
         }
         .overlay(alignment: .top) { replayBanner() }
-        .sheet(isPresented: $eegAnalysis.showsSheet) {
-            EEGAnalysisSheet(
-                viewModel: eegAnalysis,
-                packageName: recording.packageName,
-                signal: continuousSignal,
-                processing: eegAnalysisProcessingSnapshot(),
-                artifactSources: eegArtifactRejectionSources(),
-                excludedChannelIndices: channels.bad,
-                channelSets: ChannelSetStore.shared.allSets,
-                sensorLayout: recording.sensorLayout,
-                onClose: {
-                    eegAnalysis.showsSheet = false
-                }
-            )
-        }
-        .sheet(isPresented: $chanHealth.showsDetails) {
-            channelHealthDetailsSheet(for: continuousSignal)
-        }
-        .sheet(isPresented: $showsChannelGoodnessSettings) {
-            ChannelGoodnessSettingsView()
-                .environment(goodnessSettings)
-        }
-        .sheet(isPresented: $segHealth.showsDetails) {
-            segmentHealthDetailsSheet()
-        }
-        .sheet(isPresented: $gradient.showsMotionConfig) {
-            MotionConfigView(
-                parameters: $gradient.motionParameters,
-                fileFormat: $gradient.motionFileFormat,
-                fdThreshold: $gradient.motionFDThreshold,
-                radiusMm: $gradient.motionRadiusMm,
-                moosmannMotionMetric: $gradient.moosmannMotionMetric,
-                skipStart: $gradient.skipStart,
-                skipEnd: $gradient.skipEnd,
-                trSeconds: $gradient.trSeconds,
-                trMarkerCode: gradient.trMarkerCode,
-                trMarkerSamples: recording.signal.map { trMarkerSamples(in: $0, code: gradient.trMarkerCode) } ?? [],
-                samplingRate: recording.signal?.samplingRate ?? 0,
-                windowBefore: gradient.windowBefore,
-                windowAfter: gradient.windowAfter,
-                onClose: {
-                    gradient.showsMotionConfig = false
-                    gradient.showsPopover = true
-                }
-            )
-        }
+        .overlay(alignment: .top) { reDerivingBanner }
         .onChange(of: artifactVM.detectionMethod) { _, method in
             if method == .ica {
                 DispatchQueue.main.async {
@@ -966,10 +1525,11 @@ struct WaveformView: View {
             await updateArtifactEvents(for: continuousSignal)
         }
         .task(id: channelHealthSignature(for: continuousSignal)) {
-            // Channel health is now run on demand (tap a badge). A major state
-            // change (new filter/gradient/ICA/artifact repair/interpolation)
-            // changes the signature and resets the badges to empty; the user
-            // re-runs when ready.
+            // A major state change (new filter/gradient/ICA/artifact
+            // repair/interpolation) changes the signature and resets the
+            // badges. Health otherwise remains demand-driven in the waveform;
+            // opening the Channels utility window now supplies that demand
+            // automatically for its active signal.
             resetChannelHealthForStateChange()
         }
         .onChange(of: chanHealth.detailsRequest) { _, _ in
@@ -985,21 +1545,54 @@ struct WaveformView: View {
             // channel's badge; the rest of the run is preserved.
             recomputeChannelHealthForInterpolation(oldKeys: oldKeys, newKeys: newKeys, signal: continuousSignal)
         }
+        .onChange(of: continuousSignal.dataRevision, initial: true) { _, _ in
+            publishChannelsWindowLiveContext(signal: continuousSignal)
+        }
+        .onChange(of: channels.healthResults, initial: true) { _, _ in
+            publishChannelsWindowLiveContext(signal: continuousSignal)
+        }
+        .onChange(of: channels.isAnalyzingHealth) { _, _ in
+            publishChannelsWindowLiveContext(signal: continuousSignal)
+        }
+        .onChange(of: channels.healthProgress) { _, _ in
+            publishChannelsWindowLiveContext(signal: continuousSignal)
+        }
         .task(id: segmentHealthRequestID(for: signal)) {
             refreshSegmentHealthIfNeeded(for: signal)
         }
     }
 
     @ViewBuilder
-    private func waveformWorkspace(for signal: MFFSignalData, events: [MFFEvent], isShowingEpochs: Bool) -> some View {
+    private func waveformWorkspace(
+        for signal: MFFSignalData,
+        events: [MFFEvent],
+        eventsKey: WaveformDisplayedEventsCache.Key,
+        isShowingEpochs: Bool
+    ) -> some View {
         HStack(spacing: 0) {
+            // The processing history is *not* a panel here. It lives in the
+            // status popover's History tab (`ProcessingStatusPopover.swift`), so
+            // it costs no waveform width — see that file for the reasoning.
             waveformArea(for: signal, events: events, isShowingEpochs: isShowingEpochs)
 
             if showsEventsPanel {
                 Divider()
-                eventsPanel(for: signal, events: events)
-                    .frame(width: eventsPanelWidth)
-                    .background(Color(nsColor: .windowBackgroundColor))
+                // B2/C1: a standalone `Equatable` view, so unrelated state
+                // changes (drag ticks, progress ticks) no longer re-run this
+                // body — which is why its derived lists need no cache.
+                EventsPanelView(
+                    events: events,
+                    eventsKey: eventsKey,
+                    selectedEventCodes: selectedEventCodes,
+                    selectedEventID: selectedEventID,
+                    onSelectEvent: { jumpToEvent($0, in: signal) },
+                    onToggleCode: { toggleEventCode($0) },
+                    onClearCodes: { selectedEventCodes.removeAll() },
+                    onClose: { showsEventsPanel = false }
+                )
+                .equatable()
+                .frame(width: eventsPanelWidth)
+                .background(Color(nsColor: .windowBackgroundColor))
             }
 
             if epoching.showsButterflyPlot, epoching.isAveraged {
@@ -1018,9 +1611,16 @@ struct WaveformView: View {
 
             if let topomapSample {
                 Divider()
-                topomapPanel(for: signal, sample: topomapSample)
-                    .frame(width: topomapPanelWidth)
-                    .background(Color(nsColor: .windowBackgroundColor))
+                TopomapPanelView(
+                    layout: recording.sensorLayout,
+                    values: topomapValues(at: topomapSample, in: signal),
+                    timeSeconds: signal.samplingRate > 0 ? Double(topomapSample) / signal.samplingRate : 0,
+                    channelName: { eegChannelDisplayName(index: $0, signal: signal) },
+                    onTapChannel: { openChannelInspector(channel: $0) },
+                    onClose: { self.topomapSample = nil }
+                )
+                .frame(width: topomapPanelWidth)
+                .background(Color(nsColor: .windowBackgroundColor))
             }
 
             if let relSample = epoching.butterflyTopomapRelativeSample, epoching.isAveraged {
@@ -1248,8 +1848,12 @@ struct WaveformView: View {
                 if epoching.epochedSignal != nil {
                     Divider()
                     Button("Undo Segmentation", role: .destructive) {
-                        clearEpochs()
+                        undoSegmentation()
                     }
+                    .disabled(!canUndoSegmentation)
+                    .help(canUndoSegmentation
+                          ? "Return to the state the epochs were built from. Segmentation remains available for redo until different processing replaces it."
+                          : "These epochs came with the file, so there is no earlier state in this session to return to.")
                 }
             } label: {
                 ToolbarIcon(
@@ -1317,9 +1921,9 @@ struct WaveformView: View {
                 Slider(value: amplitudeScaleSliderBinding, in: amplitudeScaleSliderBounds)
                     .frame(width: 170)
                     .help("Lower values make traces taller.")
-                Text("±\(formatAmplitudeScale(amplitudeScale)) µV")
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 86, alignment: .trailing)
+                scaleReadout(WaveformScaleUnits.sensitivityLabel(
+                    amplitudeScale: amplitudeScale, rowHeight: channelRowHeight
+                ))
             }
 
             if showsTimeScale {
@@ -1329,12 +1933,177 @@ struct WaveformView: View {
                         .frame(width: 72, alignment: .leading)
                     Slider(value: Binding(get: { timeScale }, set: { timeScale = $0 }), in: 0.2...8, step: 0.1)
                         .frame(width: 170)
-                    Text(String(format: "%.1fx", timeScale))
-                        .font(.caption.monospacedDigit())
-                        .frame(width: 64, alignment: .trailing)
+                    scaleReadout(WaveformScaleUnits.sweepLabel(
+                        timeScale: timeScale, samplingRate: scaleUnitsSamplingRate
+                    ))
                 }
             }
         }
+        // Once for the whole control. Both readouts open the same sheet, and two
+        // `.popover` modifiers sharing one binding would each try to present it.
+        .popover(isPresented: $showsScaleUnitsPopover, arrowEdge: .bottom) {
+            scaleUnitsPopover()
+        }
+    }
+
+    /// The readout beside a scale slider.
+    ///
+    /// One line, in physical units only, **left**-justified in a fixed frame —
+    /// which is what makes the amplitude and time rows line up with each other.
+    /// The first version stacked the raw value above the physical one and
+    /// right-aligned each in a differently-sized frame (86 pt and 64 pt), so the
+    /// two rows could not agree on an edge in either direction. The raw
+    /// `amplitudeScale` and `timeScale` numbers moved into the popover, where
+    /// they are still available but are not the headline.
+    @ViewBuilder
+    private func scaleReadout(_ label: String) -> some View {
+        Button {
+            showsScaleUnitsPopover = true
+        } label: {
+            Text(label)
+                .font(.caption.monospacedDigit())
+                .frame(width: scaleReadoutWidth, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Click to type an exact sensitivity or sweep speed.")
+    }
+
+    /// Wide enough for the longest reading either row produces — "9.6 µV/mm" —
+    /// so neither truncates and both share one left edge.
+    private var scaleReadoutWidth: CGFloat { 80 }
+
+    /// Typed entry in physical units, plus the clinical preset.
+    ///
+    /// The units are **nominal** — 72 points to the inch — because the true size
+    /// of a point needs the display's physical dimensions, which macOS reports
+    /// from EDID and which is wrong or missing on plenty of external monitors.
+    /// Saying so in the popover is the point: a figure stated with authority and
+    /// quietly false would be worse than no figure at all. See
+    /// `WaveformScaleUnits`.
+    @ViewBuilder
+    private func scaleUnitsPopover() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Display Scale")
+                .font(.headline)
+
+            Text("±\(formatAmplitudeScale(amplitudeScale)) µV per half row  ·  "
+                 + String(format: "%.1f×", timeScale) + " time")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
+                GridRow {
+                    Text("Sensitivity").font(.caption)
+                    TextField("", text: $sensitivityEntry)
+                        .frame(width: 64)
+                        .onSubmit(applySensitivityEntry)
+                    Text("µV/mm").font(.caption).foregroundStyle(.secondary)
+                }
+                GridRow {
+                    Text("Sweep").font(.caption)
+                    TextField("", text: $sweepEntry)
+                        .frame(width: 64)
+                        .onSubmit(applySweepEntry)
+                    Text("mm/s").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 8) {
+                Button("Apply") {
+                    applySensitivityEntry()
+                    applySweepEntry()
+                }
+                .keyboardShortcut(.defaultAction)
+                Button("Clinical") {
+                    amplitudeScale = clampedAmplitudeScale(
+                        WaveformScaleUnits.amplitudeScale(
+                            forMicrovoltsPerMillimeter: WaveformScaleUnits.clinicalMicrovoltsPerMillimeter,
+                            rowHeight: channelRowHeight
+                        )
+                    )
+                    timeScale = clampedTimeScale(
+                        WaveformScaleUnits.timeScale(
+                            forMillimetersPerSecond: WaveformScaleUnits.clinicalMillimetersPerSecond,
+                            samplingRate: scaleUnitsSamplingRate
+                        )
+                    )
+                    syncScaleUnitEntries()
+                }
+                .help("7 µV/mm and 30 mm/s — the standard clinical review settings.")
+            }
+
+            Divider()
+
+            Text("Nominal millimetres, assuming 72 points per inch. EVA does not "
+                 + "yet measure this display, so on-screen size may differ. Exported "
+                 + "PDFs are exact at 100%.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 240, alignment: .leading)
+        }
+        .padding(14)
+        .onAppear(perform: syncScaleUnitEntries)
+    }
+
+    /// The loaded file's rate, because the sweep speed genuinely depends on it —
+    /// see `WaveformScaleUnits.pointsPerSecond`. Falls back to the rate the
+    /// stride was designed around so an empty window still shows a sane number.
+    private var scaleUnitsSamplingRate: Double {
+        let rate = recording.signal?.samplingRate ?? 0
+        return rate > 0 ? rate : referenceDisplaySampleRate
+    }
+
+    private func syncScaleUnitEntries() {
+        sensitivityEntry = WaveformScaleUnits.format(
+            WaveformScaleUnits.microvoltsPerMillimeter(
+                amplitudeScale: amplitudeScale, rowHeight: channelRowHeight
+            )
+        )
+        sweepEntry = WaveformScaleUnits.format(
+            WaveformScaleUnits.millimetersPerSecond(
+                timeScale: timeScale, samplingRate: scaleUnitsSamplingRate
+            )
+        )
+    }
+
+    private func applySensitivityEntry() {
+        guard let value = Double(sensitivityEntry), value > 0 else {
+            syncScaleUnitEntries()
+            return
+        }
+        amplitudeScale = clampedAmplitudeScale(
+            WaveformScaleUnits.amplitudeScale(
+                forMicrovoltsPerMillimeter: value, rowHeight: channelRowHeight
+            )
+        )
+        syncScaleUnitEntries()
+    }
+
+    private func applySweepEntry() {
+        guard let value = Double(sweepEntry), value > 0 else {
+            syncScaleUnitEntries()
+            return
+        }
+        timeScale = clampedTimeScale(
+            WaveformScaleUnits.timeScale(
+                forMillimetersPerSecond: value, samplingRate: scaleUnitsSamplingRate
+            )
+        )
+        syncScaleUnitEntries()
+    }
+
+    /// Both clamps exist so a typed value out of the slider's range lands at the
+    /// edge rather than silently doing nothing — and so the readout that follows
+    /// reports what was actually applied rather than what was asked for.
+    private func clampedAmplitudeScale(_ value: Double) -> Double {
+        min(max(value, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound)
+    }
+
+    private func clampedTimeScale(_ value: Double) -> Double {
+        min(max(value, 0.2), 8)
     }
 
     func averagedModePicker() -> some View {
@@ -1385,60 +2154,61 @@ struct WaveformView: View {
 
     // MARK: - Status log
 
-    /// A single line shown in the toolbar log area.
-    private struct LogLine: Hashable {
-        let source: String
-        let text: String
-        let isError: Bool
-    }
-
-    /// A timestamped entry kept in the scrollable status history.
-    struct StatusHistoryEntry: Identifiable, Hashable {
-        let id = UUID()
-        let source: String
-        let text: String
-        let isError: Bool
-        let date: Date
-    }
+    // `StatusHistoryEntry` moved to `WaveformUIModels.swift` (B4), beside
+    // `RecordingStatusModel`, which now owns the history.
 
     /// Messages currently worth surfacing, gathered from each feature's status.
-    private var activeLogMessages: [LogLine] {
-        var lines: [LogLine] = []
+    private var activeLogMessages: [StatusLogLine] {
+        var lines: [StatusLogLine] = []
         if !gradient.isProcessing, let mriStatus = gradient.statusMessage {
-            lines.append(LogLine(source: "MRI", text: mriStatus, isError: gradient.statusIsError))
+            lines.append(StatusLogLine(source: "MRI", text: mriStatus, isError: gradient.statusIsError))
         }
         if !filter.isFiltering, let filterStatusMessage = filter.statusMessage {
-            lines.append(LogLine(source: "Filter", text: filterStatusMessage, isError: filter.statusIsError))
+            lines.append(StatusLogLine(source: "Filter", text: filterStatusMessage, isError: filter.statusIsError))
         }
         if let psaStatus = epoching.statusMessage {
-            lines.append(LogLine(source: "Segment", text: psaStatus, isError: false))
+            lines.append(StatusLogLine(source: "Segment", text: psaStatus, isError: false))
         }
         if let channelStatusMessage {
-            lines.append(LogLine(source: "Channel", text: channelStatusMessage, isError: channelStatusIsError))
+            lines.append(StatusLogLine(source: "Channel", text: channelStatusMessage, isError: channelStatusIsError))
+        }
+        // A repair the record claims that this session could not re-solve. It
+        // gets its own source line so it lands in the status history and stays
+        // there, rather than living only in the transient channel status that
+        // the next click overwrites (ROADMAP RW-1 item 3).
+        if !channels.interpolationLost.isEmpty {
+            let list = channels.interpolationLost.keys.sorted()
+                .map { "Ch \($0 + 1)" }
+                .joined(separator: ", ")
+            lines.append(StatusLogLine(
+                source: "Interpolation",
+                text: "Interpolation lost for \(list) — those channels are marked bad instead.",
+                isError: true
+            ))
         }
         if let chanStatus = chanHealth.statusMessage {
-            lines.append(LogLine(source: "Channel Health", text: chanStatus, isError: false))
+            lines.append(StatusLogLine(source: "Channel Health", text: chanStatus, isError: false))
         }
         if let segStatus = segHealth.statusMessage {
-            lines.append(LogLine(source: "Segment Health", text: segStatus, isError: false))
+            lines.append(StatusLogLine(source: "Segment Health", text: segStatus, isError: false))
         }
         if let cleaningStatus = artifactVM.cleaningStatusMessage {
-            lines.append(LogLine(source: "Artifact", text: cleaningStatus, isError: false))
+            lines.append(StatusLogLine(source: "Artifact", text: cleaningStatus, isError: false))
         }
         if let explorerStatus = waveletExplorer.statusMessage {
-            lines.append(LogLine(source: "Wavelet", text: explorerStatus, isError: false))
+            lines.append(StatusLogLine(source: "Wavelet", text: explorerStatus, isError: false))
         }
         if let waveletStatus = wavelet.statusMessage {
-            lines.append(LogLine(source: "Wavelet Reduction", text: waveletStatus, isError: false))
+            lines.append(StatusLogLine(source: "Wavelet Reduction", text: waveletStatus, isError: false))
         }
         if let mffExportStatusMessage {
-            lines.append(LogLine(source: "Export", text: mffExportStatusMessage, isError: false))
+            lines.append(StatusLogLine(source: "Export", text: mffExportStatusMessage, isError: false))
         }
         return lines
     }
 
     /// Appends any newly-changed status messages to the scrollable history.
-    private func recordStatusHistory(_ lines: [LogLine]) {
+    private func recordStatusHistory(_ lines: [StatusLogLine]) {
         for line in lines where lastRecordedStatusBySource[line.source] != line.text {
             lastRecordedStatusBySource[line.source] = line.text
             statusHistory.append(StatusHistoryEntry(
@@ -1453,306 +2223,96 @@ struct WaveformView: View {
         }
     }
 
+    /// One source instead of reaching into each view model by name, so a new
+    /// long-running stage appears here by reporting progress rather than by
+    /// editing this property. See `OperationProgressCenter`.
     private var activeOperationProgress: [OperationProgress] {
-        var operations: [OperationProgress] = []
-        if gradient.isProcessing, let progress = gradient.operationProgress {
-            operations.append(progress)
+        recordingStore.operationProgress.operations
+    }
+
+    /// Flattens the eight view models the status area reads into one comparable
+    /// value, so `StatusLogView` re-renders only when the displayed status
+    /// changes. See `StatusLogView.swift` for why this boundary exists.
+    private var statusLogSnapshot: StatusLogSnapshot {
+        var snapshot = StatusLogSnapshot()
+
+        // Rich progress comes from the one center; the fallback bars below are
+        // for stages that only report a bare fraction.
+        snapshot.operations = recordingStore.operationProgress.operations
+        if gradient.isProcessing, gradient.operationProgress == nil {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "MRI", value: gradient.progress))
         }
-        if filter.isFiltering, let progress = filter.operationProgress {
-            operations.append(progress)
+        if filter.isFiltering, filter.operationProgress == nil {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Filter", value: filter.progress))
         }
-        return operations
+        if let cleaningProgress = artifactVM.cleaningProgress {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Artifact", value: cleaningProgress.fraction))
+        }
+        if waveletExplorer.isRunning {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Wavelet", value: waveletExplorer.progress))
+        }
+        if wavelet.isRunning {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Reduction", value: wavelet.progress))
+        }
+        if channels.isAnalyzingHealth, chanHealth.operationProgress == nil {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Health", value: channels.healthProgress))
+        }
+        if segHealth.isAnalyzing {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "Segments", value: segHealth.progress))
+        }
+        if isExportingMFF {
+            snapshot.progressRows.append(StatusLogProgressRow(label: "MFF", value: 0.5))
+        }
+
+        snapshot.messages = activeLogMessages
+        return snapshot
     }
 
     /// Consolidated status/progress area shown at the far right of the toolbar,
     /// so individual buttons no longer push inline messages into the layout.
-    @ViewBuilder
     func statusLog() -> some View {
-        Button {
-            showsStatusHistory = true
-        } label: {
-            VStack(alignment: .leading, spacing: 3) {
-                if gradient.isProcessing {
-                    if let operation = gradient.operationProgress {
-                        operationProgressSummary(operation)
-                    } else {
-                        logProgressRow(label: "MRI", value: gradient.progress)
-                    }
-                }
-                if filter.isFiltering {
-                    if let operation = filter.operationProgress {
-                        operationProgressSummary(operation)
-                    } else {
-                        logProgressRow(label: "Filter", value: filter.progress)
-                    }
-                }
-                if let cleaningProgress = artifactVM.cleaningProgress {
-                    logProgressRow(label: "Artifact", value: cleaningProgress.fraction)
-                }
-                if waveletExplorer.isRunning {
-                    logProgressRow(label: "Wavelet", value: waveletExplorer.progress)
-                }
-                if wavelet.isRunning {
-                    logProgressRow(label: "Reduction", value: wavelet.progress)
-                }
-                if channels.isAnalyzingHealth {
-                    logProgressRow(label: "Health", value: channels.healthProgress)
-                }
-                if segHealth.isAnalyzing {
-                    logProgressRow(label: "Segments", value: segHealth.progress)
-                }
-                if isExportingMFF {
-                    logProgressRow(label: "MFF", value: 0.5)
-                }
-
-                ForEach(activeLogMessages, id: \.self) { line in
-                    StatusLogLineView(line: line)
-                }
-
-                if !gradient.isProcessing,
-                   !filter.isFiltering,
-                   !waveletExplorer.isRunning,
-                   !wavelet.isRunning,
-                   !channels.isAnalyzingHealth,
-                   !segHealth.isAnalyzing,
-                   activeLogMessages.isEmpty {
-                    Text(statusHistory.isEmpty ? "Ready" : "Ready · click for history")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+        StatusLogView(
+            snapshot: statusLogSnapshot,
+            onActivate: {
+                // Open on whichever tab answers the question you probably have:
+                // if something is running, that; otherwise the tree. Preserves
+                // what the old two-popover switch did, without making the other
+                // half unreachable — which is what it used to do.
+                recordingStore.status.statusPopoverTab =
+                    activeOperationProgress.isEmpty ? .history : .queue
+                showsStatusHistory = true
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 0.5)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Click to see the full status history")
+        )
+        .equatable()
         .onChange(of: activeLogMessages) { _, lines in
             recordStatusHistory(lines)
         }
-        .popover(isPresented: $showsStatusHistory, arrowEdge: .bottom) {
-            if activeOperationProgress.isEmpty {
-                statusHistoryPopover()
-            } else {
-                processingStatusPopover(activeOperationProgress)
-            }
-        }
-        .accessibilityLabel("Status log")
-    }
-
-    @ViewBuilder
-    private func statusHistoryPopover() -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Status History")
-                    .font(.headline)
-                Spacer()
-                Button("Clear") {
-                    statusHistory.removeAll()
-                }
-                .disabled(statusHistory.isEmpty)
-            }
-
-            Divider()
-
-            if statusHistory.isEmpty {
-                Text("No status messages yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(statusHistory.reversed()) { entry in
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text(entry.source.uppercased())
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(entry.isError ? Color.red : Color.secondary)
-                                    Spacer()
-                                    Text(entry.date, format: .dateTime.hour().minute().second())
-                                        .font(.caption2.monospacedDigit())
-                                        .foregroundStyle(.tertiary)
-                                }
-                                Text(entry.text)
-                                    .font(.callout)
-                                    .foregroundStyle(entry.isError ? Color.red : Color.primary)
-                                    .textSelection(.enabled)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .padding(12)
-        .frame(width: 420, height: 380, alignment: .topLeading)
-    }
-
-    @ViewBuilder
-    private func processingStatusPopover(_ operations: [OperationProgress]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(operations.enumerated()), id: \.offset) { index, operation in
-                if index > 0 { Divider() }
-                processingOperationView(operation)
-            }
-
-            if !statusHistory.isEmpty {
-                Divider()
-                DisclosureGroup("Recent history", isExpanded: $showsRecentProcessingHistory) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(statusHistory.suffix(3).reversed())) { entry in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(entry.source.uppercased())
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(entry.isError ? Color.red : Color.secondary)
-                                Text(entry.text)
-                                    .font(.caption)
-                                    .lineLimit(2)
-                                    .foregroundStyle(entry.isError ? Color.red : Color.secondary)
-                            }
-                        }
-                    }
-                    .padding(.top, 6)
-                }
-                .font(.caption)
-            }
-        }
-        .padding(14)
-        .frame(width: 460, alignment: .topLeading)
-    }
-
-    private func processingOperationView(_ operation: OperationProgress) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(operation.title)
-                        .font(.headline)
-                    Text(operation.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(elapsedText(since: operation.startedAt, now: context.date))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            HStack(spacing: 8) {
-                ProgressView(value: operation.clampedFraction)
-                    .progressViewStyle(.linear)
-                Text("\(Int((operation.clampedFraction * 100).rounded()))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 38, alignment: .trailing)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(operation.phase)
-                    .font(.callout.weight(.medium))
-                if let detail = operation.detail {
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(operation.stages) { stage in
-                    HStack(spacing: 7) {
-                        Image(systemName: stageIcon(stage.state))
-                            .foregroundStyle(stageColor(stage.state))
-                            .frame(width: 14)
-                        Text(stage.name)
-                            .font(.caption)
-                            .foregroundStyle(stage.state == .pending ? Color.secondary : Color.primary)
-                    }
-                }
-            }
+        .popover(isPresented: binding(recordingStore.status, \.showsStatusHistory), arrowEdge: .bottom) {
+            ProcessingStatusPopoverView(
+                operations: activeOperationProgress,
+                statusHistory: statusHistory,
+                historyNodes: historyRailNodes,
+                historyShortID: recordingStore.processingHistory.currentShortID,
+                canStepBack: recordingStore.processingHistory.canStepBack,
+                canStepForward: recordingStore.processingHistory.canStepForward,
+                tab: binding(recordingStore.status, \.statusPopoverTab),
+                onClearStatusHistory: { statusHistory.removeAll() },
+                onSelectNode: { requestNavigation(to: EVAHistoryNodeID(hex: $0)) },
+                onStepBack: { stepHistoryBack() },
+                onStepForward: { stepHistoryForward() },
+                onFork: { forkToNewWindow() },
+                onForkNode: { forkNode(EVAHistoryNodeID(hex: $0)) },
+                onCompare: { showsWindowComparison = true },
+                comparableWindowCount: WindowComparisonRegistry.shared
+                    .comparisonCandidates(for: recording.id).count,
+                cacheSummary: recordingStore.processingHistory.snapshotBudgetSummary,
+                onTogglePinNode: { togglePin(EVAHistoryNodeID(hex: $0)) },
+                onRenameNode: { beginRenamingHistoryNode(EVAHistoryNodeID(hex: $0)) }
+            )
         }
     }
 
-    private func operationProgressSummary(_ operation: OperationProgress) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(operation.source)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Text(operation.phase)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 4)
-                Text("\(Int((operation.clampedFraction * 100).rounded()))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            ProgressView(value: operation.clampedFraction)
-                .progressViewStyle(.linear)
-        }
-    }
 
-    private func stageIcon(_ state: OperationProgress.StageState) -> String {
-        switch state {
-        case .complete: return "checkmark.circle.fill"
-        case .active: return "circle.inset.filled"
-        case .pending: return "circle"
-        }
-    }
-
-    private func stageColor(_ state: OperationProgress.StageState) -> Color {
-        switch state {
-        case .complete: return .green
-        case .active: return .accentColor
-        case .pending: return .secondary
-        }
-    }
-
-    private func elapsedText(since start: Date, now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(start)))
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
-    }
-
-    private func logProgressRow(label: String, value: Double) -> some View {
-        HStack(spacing: 6) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ProgressView(value: value)
-                .progressViewStyle(.linear)
-            Text("\(Int(value * 100))%")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 36, alignment: .trailing)
-        }
-    }
-
-    private struct StatusLogLineView: View {
-        let line: LogLine
-
-        var body: some View {
-            Text(line.text)
-                .font(.caption)
-                .foregroundStyle(line.isError ? Color.red : Color.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel(line.text)
-        }
-    }
 
     // MARK: - Waveform area
 
@@ -1829,10 +2389,32 @@ struct WaveformView: View {
                     .frame(width: labelColumnWidth, alignment: .topLeading)
 
                     ScrollView(.horizontal, showsIndicators: true) {
-                        LazyVStack(alignment: .leading, spacing: rowSpacing) {
+                        // Plain `VStack`, not `LazyVStack` — deliberate, and measured.
+                        //
+                        // This stack's scroll container is the *horizontal* ScrollView,
+                        // so a lazy stack here re-runs its placement algorithm on every
+                        // horizontal offset change while its laziness (vertical) is
+                        // governed by the outer vertical ScrollView. In `trace3.trace`
+                        // that was ~30% of the wheel-scroll window —
+                        // `LazyStack.place` 10.6%, `resolveIndexAndPosition` 10.5%,
+                        // `StackPlacement.measureBackwards`/`flushBackwards` 9.1% —
+                        // and **absent entirely** from the click-drag window, which is
+                        // what pinned it to scrolling rather than to rendering.
+                        //
+                        // The rows are `.equatable()`, so eagerly building them is cheap
+                        // (`WaveformChannelRow` is 0.55% of the whole trace).
+                        VStack(alignment: .leading, spacing: rowSpacing) {
                             ForEach(channelIndices(in: signal), id: \.self) { index in
                                 waveformRow(index: index, channel: signal.data[index], plotWidth: plotWidth, signal: signal)
                             }
+                        }
+                        // With overflow on, row chrome is drawn here — one layer
+                        // beneath every trace — instead of by each row. That is
+                        // the whole point: a row's own opaque background sits
+                        // above the row before it, so self-drawn chrome covers
+                        // exactly the downward bleed we are trying to reveal.
+                        .background(alignment: .topLeading) {
+                            channelRowBackdrop(for: signal, plotWidth: plotWidth)
                         }
                         // Each overlay is its own independent layer so that the
                         // selection band growing during a drag cannot relayout or
@@ -1881,14 +2463,14 @@ struct WaveformView: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 16)
             }
-            .scrollPosition(id: $scrollToChannelRequest, anchor: .center)
+            .scrollPosition(id: binding(recordingStore.selection, \.scrollToChannelRequest), anchor: .center)
 
             // Pinned physio (PNS) pane: always visible below the EEG channels
             // (separated by a gap), sharing the EEG time axis. Like the events
             // bar, it stays put while the EEG channels scroll vertically.
             if showsPhysioChannels,
                let pns = displayedPhysioSignal(), !pns.data.isEmpty {
-                physioPane(pns, eegSamplingRate: signal.samplingRate)
+                physioPane(pns, eegSignal: signal)
             }
 
             if isOptionKeyPressed || selectedSampleRange != nil || isShowingEpochs {
@@ -1949,6 +2531,7 @@ struct WaveformView: View {
         displayMode: EpochingViewModel.AveragedDisplayMode,
         signal: MFFSignalData,
         events: [MFFEvent],
+        eventsKey: WaveformDisplayedEventsCache.Key,
         isShowingEpochs: Bool
     ) -> some View {
         if displayMode == .averages {
@@ -1958,170 +2541,18 @@ struct WaveformView: View {
             singleTrialAnalysisWorkspace()
                 .transition(.opacity)
         } else {
-            waveformWorkspace(for: signal, events: events, isShowingEpochs: isShowingEpochs)
-                .transition(.opacity)
-        }
-    }
-
-    // MARK: - Topomap panel
-
-    @ViewBuilder
-    private func topomapPanel(for signal: MFFSignalData, sample: Int) -> some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Topography")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    topomapSample = nil
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
-
-            if let layout = recording.sensorLayout {
-                TopomapView(
-                    layout: layout,
-                    values: topomapValues(at: sample, in: signal),
-                    timeSeconds: signal.samplingRate > 0 ? Double(sample) / signal.samplingRate : 0,
-                    fixedScale: nil,
-                    channelName: { eegChannelDisplayName(index: $0, signal: signal) },
-                    onTapChannel: { openChannelInspector(channel: $0) }
-                )
-                Spacer(minLength: 0)
-            } else {
-                ContentUnavailableView(
-                    "No Sensor Layout",
-                    systemImage: "circle.dashed",
-                    description: Text("This package has no readable sensorLayout.xml, so a topographic map can't be drawn.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-    }
-
-    // MARK: - Events panel
-
-    @ViewBuilder
-    private func eventsPanel(for signal: MFFSignalData, events: [MFFEvent]) -> some View {
-        let summaries = groupedEventSummaries(events)
-        let visibleEvents = filteredEvents(events)
-
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Events")
-                        .font(.headline)
-                    Text("\(visibleEvents.count) of \(events.count) markers")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    showsEventsPanel = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
-            .padding(.bottom, 10)
-
-            if !summaries.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        codeChip(title: "All Events", count: events.count, isSelected: selectedEventCodes.isEmpty) {
-                            selectedEventCodes.removeAll()
-                        }
-                        ForEach(summaries) { summary in
-                            codeChip(title: summary.code, count: summary.count, isSelected: selectedEventCodes.contains(summary.code)) {
-                                toggleEventCode(summary.code)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
-                }
-            }
-
-            Divider()
-
-            if events.isEmpty {
-                ContentUnavailableView(
-                    "No Events",
-                    systemImage: "list.bullet.rectangle",
-                    description: Text("This recording has no event markers yet.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                let numberWidth = max(28, CGFloat(String(max(visibleEvents.count, 1)).count) * 8 + 14)
-                List(Array(visibleEvents.enumerated()), id: \.element.id) { offset, event in
-                    Button {
-                        jumpToEvent(event, in: signal)
-                    } label: {
-                        HStack(alignment: .top, spacing: 10) {
-                            Text("\(offset + 1)")
-                                .font(.system(.caption, design: .monospaced).weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .frame(width: numberWidth, alignment: .trailing)
-                                .padding(.top, 2)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(event.code)
-                                    .font(.system(.body, design: .monospaced).weight(.semibold))
-                                ForEach(eventMetadataRows(for: event), id: \.self) { row in
-                                    Text(row)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-                                Text(formattedEventTime(event.beginTimeSeconds))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(event.sourceFile)
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 4)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Event \(offset + 1), \(eventAccessibilitySummary(event)), \(formattedEventTime(event.beginTimeSeconds))")
-                    .listRowBackground(
-                        selectedEventID == event.id ? Color.accentColor.opacity(0.14) : Color.clear
-                    )
-                }
-                .listStyle(.sidebar)
-            }
-        }
-    }
-
-    private func codeChip(title: String, count: Int, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-                Text("\(count)")
-                    .font(.caption2)
-            }
-            .foregroundStyle(isSelected ? Color.accentColor : .primary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(
-                Capsule().fill(isSelected ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08))
+            waveformWorkspace(
+                for: signal,
+                events: events,
+                eventsKey: eventsKey,
+                isShowingEpochs: isShowingEpochs
             )
+            .transition(.opacity)
         }
-        .buttonStyle(.plain)
     }
+
+    // The topomap and events panels moved to `TopomapPanelView.swift` and
+    // `EventsPanelView.swift` (B2).
 
     // MARK: - Channel interpolation
 
@@ -2137,55 +2568,56 @@ struct WaveformView: View {
 
     /// Replaces channel `index` with a spherical-spline interpolation from the
     /// good channels of the currently displayed signal.
+    /// `recordsLossOnFailure` distinguishes the two callers. A fresh click that
+    /// fails is just a refusal — the channel is whatever it was. A *re-solve* of
+    /// a repair the record already claims is different: failing there means the
+    /// file says this channel is repaired and it is not, so the channel goes
+    /// back to bad and the loss is remembered (ROADMAP RW-1 item 3).
     @discardableResult
-    func interpolate(_ index: Int, in signal: MFFSignalData, updatesStatus: Bool = true) -> (message: String, isError: Bool) {
+    func interpolate(
+        _ index: Int,
+        in signal: MFFSignalData,
+        updatesStatus: Bool = true,
+        recordsLossOnFailure: Bool = false
+    ) -> (message: String, isError: Bool) {
         if updatesStatus {
             channelStatusMessage = nil
             channelStatusIsError = false
         }
-        guard let geometry = electrodeGeometry, geometry.positions[index] != nil else {
-            let message = "No 3D coordinates for Ch \(index + 1); can't interpolate."
-            if updatesStatus {
-                channelStatusMessage = message
-                channelStatusIsError = true
-            }
-            return (message, true)
-        }
-
-        let good = signal.data.indices.filter {
-            $0 != index
-                && !channels.bad.contains($0)
-                && channels.interpolated[$0] == nil
-                && geometry.positions[$0] != nil
-        }
-
-        guard let (indices, weights) = SphericalSpline.interpolationWeights(
+        // One solver for the click, replay, batch, and re-derivation — the
+        // parity ROADMAP RW-1 item 3 asks for is a property of there being a
+        // single implementation, not of two being carefully matched.
+        let outcome = ChannelInterpolationSolver.solve(
             target: index,
-            good: good,
-            positions: geometry.positions
-        ) else {
-            let message = "Couldn't compute interpolation weights for Ch \(index + 1)."
+            in: signal,
+            bad: channels.bad,
+            alreadyInterpolated: Set(channels.interpolated.keys),
+            positions: electrodeGeometry?.positions ?? [:]
+        )
+
+        let solution: ChannelInterpolationSolver.Solution
+        switch outcome {
+        case .success(let value):
+            solution = value
+        case .failure(let failure):
+            let message = failure.message
+            if recordsLossOnFailure {
+                channels.recordInterpolationLoss(target: index, reason: message)
+            }
             if updatesStatus {
                 channelStatusMessage = message
                 channelStatusIsError = true
             }
             return (message, true)
         }
-
-        let length = signal.data[index].count
-        var series = [Float](repeating: 0, count: length)
-        for (channelIndex, weight) in zip(indices, weights) {
-            let source = signal.data[channelIndex]
-            guard source.count == length else { continue }
-            // series += Float(weight) * source
-            vDSP.add(multiplication: (source, Float(weight)), series, result: &series)
-        }
+        let indices = solution.indices
+        let weights = solution.weights.map(Double.init)
 
         channels.setInterpolation(
             target: index,
-            replacement: series,
-            sourceIndices: indices,
-            sourceWeights: weights.map(Float.init)
+            replacement: solution.replacement,
+            sourceIndices: solution.indices,
+            sourceWeights: solution.weights
         )
         channels.bad.remove(index)
         let message = "Interpolated Ch \(index + 1) from \(indices.count) neighbors."
@@ -2206,43 +2638,105 @@ struct WaveformView: View {
         // falling through to invalidateEpochsForSignalChange() every time
         // (previously masked; surfaced once something else called interpolate()
         // right after an Apply, e.g. the bad-channel escalation feature).
-        if reinterpolateEpochedSignal(index, indices: indices, weights: weights) {
-            // Averages patched in place — segmentation/averages remain intact.
+        if reinterpolateEpochSignals(index, indices: indices, weights: weights) {
+            // Epoch caches patched in place — segmentation/averages remain intact.
         } else {
             invalidateEpochsForSignalChange()
         }
         return (message, false)
     }
 
-    /// Re-derives channel `index` in the already-averaged `epoching.epochedSignal`
-    /// using the SAME per-source weights just computed for the continuous signal,
-    /// so an interpolation doesn't force re-running PSA. Returns false (no-op) if
-    /// there's no averaged result yet, or the epoched signal doesn't have the
-    /// same channel layout (stale/mismatched — safer to fall back to invalidating).
-    private func reinterpolateEpochedSignal(_ index: Int, indices: [Int], weights: [Double]) -> Bool {
-        guard let epoched = epoching.epochedSignal,
-              epoched.data.indices.contains(index),
-              indices.allSatisfy({ epoched.data.indices.contains($0) })
-        else { return false }
+    /// Re-derives channel `index` in **both** epoch caches — the averaged
+    /// `epochedSignal` and the pre-average `segmentedEpochSignal` — using the
+    /// SAME per-source weights just computed for the continuous signal, so an
+    /// interpolation doesn't force re-running PSA.
+    ///
+    /// All or nothing, deliberately (ROADMAP RW-1 item 3). Patching only the
+    /// averages left the raw-epoch cache holding the *un*-repaired channel, and
+    /// that cache is what Single Trial Analysis reads — so the butterfly plot
+    /// and the per-trial view disagreed about the same channel, with neither
+    /// saying which one had been repaired. Returns false when any existing cache
+    /// cannot be patched (no result yet, or a mismatched channel layout), and
+    /// the caller invalidates instead: recomputing is slow, but a cache that
+    /// half-agrees with the signal is wrong.
+    private func reinterpolateEpochSignals(_ index: Int, indices: [Int], weights: [Double]) -> Bool {
+        guard epoching.epochedSignal != nil || epoching.segmentedEpochSignal != nil else {
+            return false
+        }
 
-        let length = epoched.data[index].count
+        var patchedAverage: MFFSignalData?
+        if let epoched = epoching.epochedSignal {
+            guard let patched = reinterpolating(epoched, channel: index, indices: indices, weights: weights)
+            else { return false }
+            patchedAverage = patched
+        }
+
+        var patchedSegments: MFFSignalData?
+        if let segmented = epoching.segmentedEpochSignal {
+            guard let patched = reinterpolating(segmented, channel: index, indices: indices, weights: weights)
+            else { return false }
+            patchedSegments = patched
+        }
+
+        if let patchedAverage { epoching.epochedSignal = patchedAverage }
+        if let patchedSegments { epoching.segmentedEpochSignal = patchedSegments }
+        return true
+    }
+
+    /// `signal` with channel `index` replaced by the weighted sum of its donors,
+    /// or nil when the layout doesn't match. Pure — the caller decides whether
+    /// to commit, which is what lets the two caches move together.
+    private func reinterpolating(
+        _ signal: MFFSignalData, channel index: Int, indices: [Int], weights: [Double]
+    ) -> MFFSignalData? {
+        guard signal.data.indices.contains(index),
+              indices.allSatisfy({ signal.data.indices.contains($0) })
+        else { return nil }
+
+        let length = signal.data[index].count
         var series = [Float](repeating: 0, count: length)
         for (channelIndex, weight) in zip(indices, weights) {
-            let source = epoched.data[channelIndex]
-            guard source.count == length else { return false }
+            let source = signal.data[channelIndex]
+            guard source.count == length else { return nil }
             vDSP.add(multiplication: (source, Float(weight)), series, result: &series)
         }
-        var newData = epoched.data
+        var newData = signal.data
         newData[index] = series
-        epoching.epochedSignal = epoched.replacingData(newData)
-        return true
+        return signal.replacingSamples(newData)
     }
 
     /// Interpolated channels are derived from the source data, so they go stale
     /// when the gradient/filter pipeline changes.
+    /// Interactive entry point for the shared cascade. See `PipelineInvalidation`.
     func invalidateInterpolations() {
-        channels.removeAllInterpolations()
-        recordingStore.interpolatedSignalResolver.reset()
+        PipelineInvalidation.interpolations(store: recordingStore)
+    }
+
+    /// Interactive entry point for the **base-signal** cascade — the one every
+    /// stage that replaces the signal underneath ICA must use.
+    ///
+    /// Four sites used to assemble this by hand from the primitives (gradient
+    /// apply and clear, CWL apply and disable). They agreed with
+    /// `PipelineInvalidation.downstreamOfBaseSignalChange` on the caches and
+    /// disagreed on the variance ledger: the headless path cleared the
+    /// `icaClean`/`artifactClean` accounts, the interactive one left them, so an
+    /// export after an interactive gradient correction could carry a variance
+    /// line describing cleaning that had just been invalidated. Assembling the
+    /// cascade at a call site is what produces that class of divergence, so
+    /// there is one interactive entry point and no primitives-based recipe.
+    ///
+    /// `clearsICA` is false only when ICA itself is the stage that just ran.
+    func invalidateDownstreamOfBaseSignalChange(clearsICA: Bool = true) {
+        PipelineInvalidation.downstreamOfBaseSignalChange(
+            store: recordingStore,
+            ica: ica,
+            filter: filter,
+            artifactVM: artifactVM,
+            template: template,
+            epoching: epoching,
+            segHealth: segHealth,
+            clearsICA: clearsICA
+        )
     }
 
     private func tearDownRecordingSessionForClose() {
@@ -2250,7 +2744,6 @@ struct WaveformView: View {
         cancelInFlightRecordingTasks()
         clearRecordingStateForClose()
         recording.tearDownForClose()
-        ChannelSetStore.shared.clearActiveRecordingContext()
     }
 
     private func cancelInFlightRecordingTasks() {
@@ -2284,6 +2777,12 @@ struct WaveformView: View {
         bcgRefinementTask = nil
         artifactIdentityRefreshTask?.cancel()
         artifactIdentityRefreshTask = nil
+        historyReDeriveTask?.cancel()
+        historyReDeriveTask = nil
+        // Disown it as well: a rebuild that reaches its end after the file is
+        // gone must not restore itself into the reused view models.
+        recordingStore.historyReDeriveRunner.invalidate()
+        isReDerivingHistory = false
 
         filter.cancelInFlightWork()
         chanHealth.resetForClose()
@@ -2293,6 +2792,10 @@ struct WaveformView: View {
 
     private func clearRecordingStateForClose() {
         removeOptionKeyMonitor()
+        // Another window's compare sheet must not be able to reach a signal
+        // this window is about to release.
+        WindowComparisonRegistry.shared.unregister(id: recording.id)
+        showsWindowComparison = false
 
         filter.resetForClose()
         ica.resetForClose()
@@ -2364,6 +2867,25 @@ struct WaveformView: View {
     /// artifact detections, epochs, interpolations) so the view falls back to the
     /// original recording — without needing to close and reopen the file.
     /// Analysis parameters (cutoffs, ICA settings, template names) are preserved.
+    /// Shown while `reDeriveHistory` rebuilds an evicted node — a slow
+    /// re-derivation on a large recording should read as work, not a hang.
+    @ViewBuilder
+    var reDerivingBanner: some View {
+        if isReDerivingHistory {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Rebuilding this point in the history…")
+                    .font(.callout)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(.separator))
+            .padding(.top, 8)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
     func resetToOriginalData() {
         // Derived signals.
         filter.output = nil
@@ -2433,26 +2955,13 @@ struct WaveformView: View {
         artifactVM.detectionRefreshToken += 1
     }
 
+    /// Interactive entry point for the shared cascade. See `PipelineInvalidation`.
     func invalidateEpochsForSignalChange() {
-        epoching.epochedSignal = nil
-        epoching.epochSegments = []
-        segmentedEpochSignal = nil
-        segmentedEpochSegments = []
-        epoching.isAveraged = false
-        selectedSampleRange = nil
-        dragSelectionStartSample = nil
-        dragSelectionEndSample = nil
-        topomapSample = nil
-        epoching.butterflyTopomapRelativeSample = nil
-        epoching.psaExclusionSummary = PSAExclusionSummary()
-        epoching.averagedDisplayMode = .waveform
-        epoching.showsButterflyPlot = false
-        epoching.showsOverlaidCategories = false
-        epoching.epochBadChannelSummary.removeAll()
-        epoching.epochBadChannelAllSegmentsSummary.removeAll()
-        epoching.interpolatedChannelsBySegmentSummary.removeAll()
-        epoching.skippedLabeledBadSegmentsSummary.removeAll()
-        segHealth.clearAnalysis(hide: true, clearLabels: true)
+        PipelineInvalidation.epochsAndDerived(
+            epoching: epoching,
+            segHealth: segHealth,
+            selection: recordingStore.selection
+        )
     }
 
     // MARK: - SwiftData markers
@@ -2507,9 +3016,13 @@ struct WaveformView: View {
         displaySampleStride(for: signal.samplingRate)
     }
 
+    /// Delegates to `WaveformScaleUnits`, which is also what the µV/mm and mm/s
+    /// readouts use. Two copies of this rounding would let the stated sweep
+    /// speed drift from the drawn one — and because the stride is an integer,
+    /// that drift is up to 25% rather than a rounding wobble.
     func displaySampleStride(for samplingRate: Double) -> Int {
         guard samplingRate > 0 else { return referenceDisplaySampleStride }
-        return max(Int((samplingRate / targetDisplaySamplesPerSecond).rounded()), 1)
+        return WaveformScaleUnits.displaySampleStride(samplingRate: samplingRate)
     }
 
     private func quantizedGeometryValue(_ value: CGFloat) -> CGFloat {
@@ -2612,7 +3125,10 @@ struct WaveformView: View {
     private func jumpToEvent(_ event: MFFEvent, in signal: MFFSignalData) {
         selectedEventID = event.id
         let plotWidth = plotWidth(for: signal)
-        let targetSample = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
+        // Onset, not `beginTimeSeconds`: jumping should land at the start of
+        // the event whichever convention stamped it, rather than mid-event for
+        // centered sources and at the edge for onset ones.
+        let targetSample = Int((event.onsetTimeSeconds * signal.samplingRate).rounded())
         let targetX = contentX(forSample: targetSample, in: signal)
         let viewportCenter = max(horizontalViewportWidth / 2, 1)
         let maxOffset = max(plotWidth - horizontalViewportWidth, 0)
@@ -2632,15 +3148,13 @@ struct WaveformView: View {
         // still goes through `jumpToEvent` directly (see the `List` row
         // button above) and is unaffected by this.
         selectedEventID = event.id
-        // Toggle: selecting the highlighted flag again clears it. Only
-        // artifact-detection events (defined artifacts, eye-artifact threshold
-        // detection) get this band; imported MFF events aren't highlighted this
-        // way. The band centers on `event.centerTimeSeconds`, which accounts
-        // for onset-tagged sources (Topography/Continuous) vs. center-tagged
-        // ones (Template/Trajectory/threshold detection).
+        // Toggle: selecting the highlighted flag again clears it. Any event
+        // carrying a duration gets a band, drawn over the span its own
+        // `timeAnchor` implies — so an onset-stamped event's band runs forward
+        // from the flag and a centered or peak-stamped one's straddles it.
         if highlightedArtifactEvent?.id == event.id {
             highlightedArtifactEvent = nil
-        } else if isCenteredArtifactDetectionEvent(event) {
+        } else if isHighlightableSpanEvent(event) {
             highlightedArtifactEvent = event
             highlightedArtifactColor = color
         } else {
@@ -2674,41 +3188,11 @@ struct WaveformView: View {
         horizontalScrollPosition.scrollTo(x: clampedOffset)
     }
 
+    /// Kept here because `MFFExportFlowViews` and `WaveletArtifactExplorerViews`
+    /// also call it; delegates to the panel's implementation so the two cannot
+    /// drift apart.
     func formattedEventTime(_ seconds: Double) -> String {
-        if seconds >= 60 {
-            let minutes = Int(seconds) / 60
-            let remainingSeconds = seconds.truncatingRemainder(dividingBy: 60)
-            return String(format: "%d:%06.3f", minutes, remainingSeconds)
-        }
-        return String(format: "%.3fs", seconds)
-    }
-
-    private func eventMetadataRows(for event: MFFEvent) -> [String] {
-        var rows: [String] = []
-        if let label = event.label {
-            rows.append("Label: \(label)")
-        }
-        if let description = event.eventDescription {
-            rows.append("Description: \(description)")
-        }
-        if let cell = event.cell {
-            rows.append("Cell: \(cell)")
-        }
-        return rows
-    }
-
-    private func eventAccessibilitySummary(_ event: MFFEvent) -> String {
-        ([event.code] + eventMetadataRows(for: event)).joined(separator: ", ")
-    }
-
-    private func groupedEventSummaries(_ events: [MFFEvent]) -> [EventSummary] {
-        Dictionary(grouping: events, by: \.code)
-            .map { EventSummary(code: $0.key, count: $0.value.count) }
-            .sorted { lhs, rhs in
-                lhs.count == rhs.count
-                    ? lhs.code.localizedStandardCompare(rhs.code) == .orderedAscending
-                    : lhs.count > rhs.count
-            }
+        EventsPanelView.formattedEventTime(seconds)
     }
 
     func groupedPSAEventSummaries(_ events: [MFFEvent]) -> [EventSummary] {
@@ -2862,10 +3346,6 @@ struct WaveformView: View {
         case .artifact:
             return event.code
         }
-    }
-
-    private func filteredEvents(_ events: [MFFEvent]) -> [MFFEvent] {
-        selectedEventCodes.isEmpty ? events : events.filter { selectedEventCodes.contains($0.code) }
     }
 
     private func toggleEventCode(_ code: String) {

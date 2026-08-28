@@ -152,6 +152,47 @@ extension WaveformView {
 
                 GridRow {
                     ArtifactTemplateFieldLabel(
+                        title: "Fit Type",
+                        help: """
+                        Filter family used for the ICA fit copy only — independent of the Filter popover's setting, because the ICA fit band (typically 1 Hz high-pass) has different tradeoffs from a display filter (typically 0.1 Hz).
+
+                        EEGLAB's convention is FIR: `pop_eegfiltnew` designs a linear-phase FIR and the EEGLAB ICA guidance assumes it. MNE-Python likewise defaults to FIR for its `filter()` used ahead of ICA.
+
+                        ICA fit filters use EVA's historical zero-phase application (forward + backward, `filtfilt`), so neither family shifts the ICA fit copy in time. The Filter popover separately offers one-pass and causal FIR application modes for the recording filter.
+
+                        Practical guidance:
+
+                        IIR (Butterworth) is cheap and well behaved at the cutoffs ICA fits at. At very low high-pass cutoffs it is the *better* choice, because an equivalent FIR kernel becomes impractically long — this is exactly why the Auto family in the Filter popover uses IIR below its crossover.
+
+                        FIR gives a more precisely controlled transition band and matches what EEGLAB/MNE pipelines do, which matters if you are reproducing a published pipeline or comparing against results produced by those tools.
+
+                        Either is defensible for a 1 Hz fit high-pass. The choice is recorded in eva.xml and in eva_ica.json, so whichever you pick is reproducible.
+
+                        References
+
+                        Widmann, A., Schröger, E., & Maess, B. (2015). Digital filter design for electrophysiological data — a practical approach. Journal of Neuroscience Methods, 250, 34–46. https://doi.org/10.1016/j.jneumeth.2014.08.002
+
+                        Winkler, I., Debener, S., Müller, K.-R., & Tangermann, M. (2015). On the influence of high-pass filtering on ICA-based artifact reduction in EEG-ERP. In 2015 37th Annual International Conference of the IEEE EMBC (pp. 4101–4105). https://doi.org/10.1109/EMBC.2015.7319296
+                        """
+                    )
+                    Picker("Fit Type", selection: $ica.fitFilterFamily) {
+                        ForEach(FilterFamily.allCases) { family in
+                            Text(family.label).tag(family)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(!ica.usesFitFilter)
+                    .gridCellColumns(2)
+
+                    Text("Zero-phase either way; see the help for the EEGLAB/MNE convention.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .gridCellColumns(2)
+                }
+
+                GridRow {
+                    ArtifactTemplateFieldLabel(
                         title: "Tolerance",
                         help: "MNE-style early stopping threshold for summed squared ICA weight change between iterations. Smaller values may run longer."
                     )
@@ -243,7 +284,7 @@ extension WaveformView {
                     }
                     .padding(.vertical, 2)
                 }
-                .frame(height: 520)
+                .frame(height: 620)
             } else {
                 ContentUnavailableView(
                     "No ICA Yet",
@@ -254,7 +295,7 @@ extension WaveformView {
             }
         }
         .padding(20)
-        .frame(width: 980, height: 760)
+        .frame(width: 980, height: 860)
         .onAppear { autoScaleICAAnalysisRate(samplingRate: signal.samplingRate) }
         .onChange(of: ica.usesFitFilter) { _, _ in autoScaleICAAnalysisRate(samplingRate: signal.samplingRate) }
         .onChange(of: ica.fitNotch60HzEnabled) { _, _ in autoScaleICAAnalysisRate(samplingRate: signal.samplingRate) }
@@ -441,7 +482,8 @@ extension WaveformView {
             fitFilter: ica.usesFitFilter ? ICAFitFilterSettings(
                 lowCutoff: fitLowCutoff,
                 highCutoff: fitHighCutoff,
-                notch60HzEnabled: ica.fitNotch60HzEnabled
+                notch60HzEnabled: ica.fitNotch60HzEnabled,
+                family: ica.fitFilterFamily
             ) : nil,
             convergenceTolerance: max(ica.convergenceTolerance, 0),
             minimumIterations: min(max(ica.minimumIterations, 0), max(ica.maxIterations, 1))
@@ -466,6 +508,8 @@ extension WaveformView {
                             samplingRate: signal.samplingRate,
                             lowCutoff: fitFilter.lowCutoff,
                             highCutoff: fitFilter.highCutoff,
+                            highPassFamily: fitFilter.family,
+                            lowPassFamily: fitFilter.family,
                             notch60HzEnabled: fitFilter.notch60HzEnabled,
                             progress: { fraction in
                                 progressContinuation.yield(
@@ -523,9 +567,20 @@ extension WaveformView {
                 ica.progress = 1
                 ica.progressMessage = "ICA complete"
                 var labeledDecomposition = decomposition
-                let suggestions = ICAComponentAutoLabeler.suggestions(
+                let baseSuggestions = ICAComponentAutoLabeler.suggestions(
                     for: decomposition,
                     layout: recording.sensorLayout
+                )
+                let detectedBeats = signal.events
+                    .filter { $0.code == RWaveDetector.eventCode }
+                    .map(\.beginTimeSeconds)
+                let ecg = BCGComponentLabeller.likelyECG(in: displayedPhysioSignal())
+                let suggestions = BCGComponentLabeller.augmenting(
+                    baseSuggestions,
+                    decomposition: decomposition,
+                    detectedBeatTimes: detectedBeats,
+                    ecg: ecg?.samples,
+                    ecgSamplingRate: ecg?.samplingRate
                 )
                 labeledDecomposition.labelSuggestions = suggestions
                 for (component, suggestion) in suggestions {
@@ -543,10 +598,13 @@ extension WaveformView {
                     )
                 } else if decomposition.finalChange.isFinite {
                     ica.statusMessage = String(
-                        format: "ICA finished in %d iterations. Auto-labeled %d components. Final change %.2g.",
+                        format: "ICA finished in %d iterations. Auto-labeled %d components. Final change %.2g.%@",
                         decomposition.iterations,
                         suggestions.count,
-                        decomposition.finalChange
+                        decomposition.finalChange,
+                        detectedBeats.count >= BCGComponentLabeller.minimumBeatCount
+                            ? " BCG evidence used \(detectedBeats.count) detected R waves."
+                            : " Detect at least \(BCGComponentLabeller.minimumBeatCount) R waves to add BCG-specific labels."
                     )
                 } else {
                     ica.statusMessage = "ICA finished in \(decomposition.iterations) iterations after learning-rate backoff."
@@ -612,6 +670,8 @@ extension WaveformView {
         let restoredFilterHighPassCutoffText = filter.highPassCutoffText
         let restoredFilterLowPassCutoffText = filter.lowPassCutoffText
         let restoredNotch60HzEnabled = filter.notch60HzEnabled
+        let restoredAverageReference = filter.averageReference
+        let restoredReferenceExclusions = channels.bad
         let restoredAmplitudeScale = amplitudeScale
         let restoredTimeScale = timeScale
         let restoredScrollPosition = horizontalScrollPosition
@@ -629,32 +689,31 @@ extension WaveformView {
         let sessionID = recordingSessionID
         icaRemovalTask = Task {
           await processingQueue.run("ICA Component Removal") { [self] in
+            // Shared with headless replay (`ICAReplay.activationSignal`) so the
+            // interactive and re-applied reconstructions cannot drift.
+            //
+            // This used to swallow a filter failure and carry on with a `nil`
+            // activation — which does not fail, it reconstructs the sources from
+            // the *unfiltered* base signal and returns different samples than the
+            // fit implies. Silently different data is worse than no removal, so
+            // the removal now aborts and says why.
             var reconstructionActivationSignal: MFFSignalData?
-            if let fitFilter = decomposition.fitFilter {
+            if decomposition.fitFilter != nil {
+                ica.statusMessage = "Filtering ICA activation copy..."
                 do {
-                    ica.statusMessage = "Filtering ICA activation copy..."
-                    let activationData = try await EEGSignalFilter.bandPass(
-                        channels: signal.data,
-                        samplingRate: signal.samplingRate,
-                        lowCutoff: fitFilter.lowCutoff,
-                        highCutoff: fitFilter.highCutoff,
-                        notch60HzEnabled: fitFilter.notch60HzEnabled
-                    )
-
-                    reconstructionActivationSignal = MFFSignalData(
-                        signalURL: signal.signalURL,
-                        signalType: "\(signal.signalType) ICA Activation Filtered",
-                        numberOfChannels: signal.numberOfChannels,
-                        samplingRate: signal.samplingRate,
-                        duration: signal.duration,
-                        recordingStartTime: signal.recordingStartTime,
-                        events: signal.events,
-                        data: activationData,
-                        channelNames: signal.channelNames
+                    reconstructionActivationSignal = try await ICAReplay.activationSignal(
+                        for: signal,
+                        fitFilter: decomposition.fitFilter
                     )
                 } catch {
+                    ica.statusMessage = error.localizedDescription
+                    ica.isRemovingComponents = false
                     filter.statusMessage = error.localizedDescription
                     filter.statusIsError = true
+                    icaRemovalTask = nil
+                    // Sheet stays open: nothing was applied, so the components
+                    // are still selected and the user can retry.
+                    return
                 }
             }
 
@@ -699,17 +758,10 @@ extension WaveformView {
                         }
                     )
 
-                    restoredFilteredSignal = MFFSignalData(
-                        signalURL: cleaned.signalURL,
-                        signalType: cleaned.signalType,
-                        numberOfChannels: cleaned.numberOfChannels,
-                        samplingRate: cleaned.samplingRate,
-                        duration: cleaned.duration,
-                        recordingStartTime: cleaned.recordingStartTime,
-                        events: cleaned.events,
-                        data: filteredData,
-                        channelNames: cleaned.channelNames
-                    )
+                    let filtered = cleaned.replacingSamples(filteredData)
+                    restoredFilteredSignal = restoredAverageReference
+                        ? Rereferencing.applied(filtered, excluding: restoredReferenceExclusions)
+                        : filtered
                 } catch {
                     filter.statusMessage = error.localizedDescription
                     filter.statusIsError = true
@@ -717,9 +769,21 @@ extension WaveformView {
             }
 
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
-            ica.cleanedSignal = cleaned
+            // The pipeline half of the commit is shared with the headless path
+            // (`ProcessingCore`'s `.icaClean` case) so the two cannot drift.
+            // Everything below it — filter restoration, the debug report, the
+            // viewport, the sheet, the replay gate — is view and session state
+            // that only this caller has.
+            ICAComponentRemoval.commit(
+                cleaned: cleaned,
+                ica: ica,
+                artifactVM: artifactVM,
+                template: template,
+                epoching: epoching,
+                segHealth: segHealth,
+                store: recordingStore
+            )
             filter.output = restoredFilteredSignal
-            clearAppliedArtifactCleaning()
             ica.lastReconstructionDebugReport = icaReconstructionDebugReport(
                 beforeBase: signal,
                 beforeDisplay: beforeDisplaySignal,
@@ -735,11 +799,7 @@ extension WaveformView {
             amplitudeScale = restoredAmplitudeScale
             timeScale = restoredTimeScale
             horizontalScrollPosition = restoredScrollPosition
-            artifactVM.events = []
             artifactVM.statusMessage = "Removed \(excludedComponents.count) ICA components."
-            artifactVM.detectionRefreshToken += 1
-            invalidateEpochsForSignalChange()
-            invalidateInterpolations()
             ica.isRemovingComponents = false
             ica.showsSheet = false
             icaRemovalTask = nil

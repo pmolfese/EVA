@@ -13,21 +13,28 @@
 //  metrics model first: the feature/result shape can later feed a trained Core
 //  ML ranker, while today's UI already has useful reasons for every score.
 //
-//  Several channel-quality features (variance, correlation with neighbors,
-//  Hurst exponent, heavy-tailed/kurtosis pops) follow the channel statistics
-//  used by FASTER. They are original Swift implementations of the published
-//  metrics.
+//  Several channel-quality features (amplitude/variance typicality, neighbor
+//  agreement, heavy-tailed/kurtosis pops) are conceptually aligned with
+//  bad-channel statistics described by FASTER. They are original Swift
+//  implementations from paper/spec-level metric definitions; local FASTER
+//  source under resources/HAPPE/... is reference material only and is not
+//  incorporated here.
 //
 //  Reference: Nolan, H., Whelan, R., & Reilly, R. B. (2010). FASTER: Fully
 //  Automated Statistical Thresholding for EEG artifact Rejection. Journal of
 //  Neuroscience Methods, 192(1), 152-162.
 //  https://doi.org/10.1016/j.jneumeth.2010.07.015
 //
+//  Some UI-facing presets mirror HAPPE/EEGLAB/clean_rawdata behavior. HAPPE and
+//  clean_rawdata reference copies carry GPL-3.0 terms; this analyzer should
+//  remain an independently implemented metric model with paper/spec-level
+//  references only. See docs/provenance/copyleft-plan.md.
+//
 
 import Accelerate
 import Foundation
 
-nonisolated enum ChannelHealthGrade: String, Codable, Sendable {
+nonisolated enum ChannelHealthGrade: String, Codable, Sendable, Equatable {
     case good
     case watch
     case poor
@@ -41,7 +48,7 @@ nonisolated enum ChannelHealthGrade: String, Codable, Sendable {
     }
 }
 
-nonisolated struct ChannelHealthMetric: Codable, Identifiable, Sendable {
+nonisolated struct ChannelHealthMetric: Codable, Identifiable, Sendable, Equatable {
     var name: String
     var score: Double
     var grade: ChannelHealthGrade
@@ -51,7 +58,7 @@ nonisolated struct ChannelHealthMetric: Codable, Identifiable, Sendable {
     var id: String { name }
 }
 
-nonisolated struct ChannelHealthResult: Codable, Identifiable, Sendable {
+nonisolated struct ChannelHealthResult: Codable, Identifiable, Sendable, Equatable {
     var channelIndex: Int
     var goodPercentage: Int
     var grade: ChannelHealthGrade
@@ -188,8 +195,8 @@ nonisolated struct ChannelImpedanceSettings: Codable, Sendable {
     var goodMaxKOhm: Double = 60
     var goodScore: Double = 0.78
     /// Impedance (kΩ) marking the "fair" band edge (score interpolates from
-    /// `goodScore` down to `fairScore` here).
-    var fairMaxKOhm: Double = 70
+    /// `goodScore` down to `fairScore` here). Anything above this counts as bad.
+    var fairMaxKOhm: Double = 100
     var fairScore: Double = 0.50
     /// Impedance (kΩ) at or above which a channel scores fully poor (0.0).
     /// Score interpolates from `fairScore` down to 0.0 between `fairMaxKOhm`
@@ -276,6 +283,21 @@ nonisolated struct ChannelBaseMetricSettings: Codable, Sendable {
     static let defaults = ChannelBaseMetricSettings()
 }
 
+/// Thread-safe completed-count for reporting progress out of a
+/// `DispatchQueue.concurrentPerform` loop, where multiple worker threads
+/// finish iterations in an unpredictable order.
+private final class ConcurrentProgressCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+        return count
+    }
+}
+
 nonisolated enum ChannelHealthAnalyzer {
     static func analyze(
         signal: MFFSignalData,
@@ -315,11 +337,13 @@ nonisolated enum ChannelHealthAnalyzer {
             progress?(0.60 + 0.30 * fraction)
         }
 
-        var results: [Int: ChannelHealthResult] = [:]
-        var features: [Int: ChannelHealthFeatures] = [:]
-        results.reserveCapacity(summaries.count)
-        features.reserveCapacity(summaries.count)
-        for summary in summaries {
+        // Results/features build (0.90 -> 0.92 of overall progress): cheap
+        // per-channel work, parallelized mainly for consistency with the
+        // stages below rather than for its own sake.
+        let resultChannelIndices = summaries.map(\.channelIndex)
+        let resultCounter = ConcurrentProgressCounter()
+        let resultPairs = concurrentMap(count: resultChannelIndices.count) { position -> (Int, ChannelHealthResult, ChannelHealthFeatures) in
+            let summary = summaries[position]
             let neighborScore = neighborScores[summary.channelIndex]
             let impedanceKOhm = impedances.flatMap { values in
                 values.indices.contains(summary.channelIndex) ? values[summary.channelIndex] : nil
@@ -332,12 +356,22 @@ nonisolated enum ChannelHealthAnalyzer {
                 neighborScore: neighborScore,
                 impedanceKOhm: impedanceKOhm
             )
-            results[summary.channelIndex] = result
-            features[summary.channelIndex] = channelFeatures(
+            let features = channelFeatures(
                 for: summary,
                 baselines: baselines,
                 neighborScore: neighborScore
             )
+            let completed = resultCounter.increment()
+            progress?(0.90 + 0.02 * Double(completed) / Double(max(resultChannelIndices.count, 1)))
+            return (summary.channelIndex, result, features)
+        }
+        var results: [Int: ChannelHealthResult] = [:]
+        var features: [Int: ChannelHealthFeatures] = [:]
+        results.reserveCapacity(resultPairs.count)
+        features.reserveCapacity(resultPairs.count)
+        for (channelIndex, result, feature) in resultPairs {
+            results[channelIndex] = result
+            features[channelIndex] = feature
         }
         var analysis = ChannelHealthAnalysis(
             resultsByChannel: results,
@@ -349,23 +383,52 @@ nonisolated enum ChannelHealthAnalyzer {
         )
 
         if let spectral, spectral.isEnabled {
-            let spectralResults = spectralDetection(signal: signal, configuration: spectral)
+            let spectralResults = spectralDetection(signal: signal, configuration: spectral) { fraction in
+                progress?(0.92 + 0.03 * fraction)
+            }
             analysis = addingSpectralMetrics(to: analysis, spectralResults: spectralResults, weight: spectral.weight)
         }
         if let ransac, ransac.isEnabled {
-            let ransacResults = ransacDetection(signal: signal, layout: layout, configuration: ransac)
+            let ransacResults = ransacDetection(signal: signal, layout: layout, configuration: ransac) { fraction in
+                progress?(0.95 + 0.04 * fraction)
+            }
             analysis = addingRansacMetrics(to: analysis, ransacResults: ransacResults, weight: ransac.weight)
         }
 
         // Spectral-shape metrics (aperiodic slope, muscle band, line harmonics)
         // always run — they are cheap once the periodogram is computed and need
         // no cross-channel baseline or layout.
-        let advanced = advancedSpectralMetrics(signal: signal)
+        let advanced = advancedSpectralMetrics(signal: signal) { fraction in
+            progress?(0.99 + 0.01 * fraction)
+        }
         analysis = adding(metricsByChannel: advanced, to: analysis)
 
         progress?(1)
 
         return analysis
+    }
+
+    /// Runs `body` for each index in `0..<count` on GCD's concurrent worker
+    /// threads (`DispatchQueue.concurrentPerform`) instead of a single
+    /// sequential loop, and gathers the per-index results back into an
+    /// index-ordered array — the "gather" side of a map/reduce split, so
+    /// callers never write into a shared `Dictionary` from multiple threads.
+    /// Safe for any per-index work with no cross-index dependency (each
+    /// index reads only already-fully-built inputs and writes only its own
+    /// output), which is the shape of every stage below.
+    private static func concurrentMap<T: Sendable>(count: Int, _ body: @Sendable (Int) -> T) -> [T] {
+        guard count > 0 else { return [] }
+        guard count > 1 else { return [body(0)] }
+        let storage = UnsafeMutablePointer<T?>.allocate(capacity: count)
+        storage.initialize(repeating: nil, count: count)
+        defer {
+            storage.deinitialize(count: count)
+            storage.deallocate()
+        }
+        DispatchQueue.concurrentPerform(iterations: count) { index in
+            storage[index] = body(index)
+        }
+        return (0..<count).map { storage[$0]! }
     }
 
     static func addingWaveletMetrics(
@@ -418,15 +481,21 @@ nonisolated enum ChannelHealthAnalyzer {
         let high = min(configuration.highFrequencyHz, nyquist * 0.95)
         guard high > low else { return [:] }
 
+        if Task.isCancelled { return [:] }
+        let counter = ConcurrentProgressCounter()
+        let channelCount = signal.data.count
+        let logPowerEntries: [(index: Int, logPower: Double)?] = concurrentMap(count: channelCount) { index in
+            let power = welchBandPower(signal.data[index], samplingRate: signal.samplingRate, low: low, high: high)
+            let completed = counter.increment()
+            progress?(0.9 * Double(completed) / Double(max(channelCount, 1)))
+            guard power > 0 else { return nil }
+            return (index, log10(power))
+        }
+        if Task.isCancelled { return [:] }
         var logPowers: [Int: Double] = [:]
-        logPowers.reserveCapacity(signal.data.count)
-        for (index, channel) in signal.data.enumerated() {
-            if Task.isCancelled { return [:] }
-            let power = welchBandPower(channel, samplingRate: signal.samplingRate, low: low, high: high)
-            if power > 0 {
-                logPowers[index] = log10(power)
-            }
-            progress?(0.9 * Double(index + 1) / Double(max(signal.data.count, 1)))
+        logPowers.reserveCapacity(channelCount)
+        for entry in logPowerEntries.compactMap({ $0 }) {
+            logPowers[entry.index] = entry.logPower
         }
 
         let values = Array(logPowers.values)
@@ -499,14 +568,17 @@ nonisolated enum ChannelHealthAnalyzer {
         }
 
         let nyquist = signal.samplingRate / 2
-        var output: [Int: [ChannelHealthMetric]] = [:]
-        output.reserveCapacity(signal.data.count)
-
-        for (index, channel) in signal.data.enumerated() {
-            if Task.isCancelled { return output }
-            defer { progress?(Double(index + 1) / Double(max(signal.data.count, 1))) }
+        if Task.isCancelled { return [:] }
+        let counter = ConcurrentProgressCounter()
+        let channelCount = signal.data.count
+        let entries: [(index: Int, metrics: [ChannelHealthMetric])?] = concurrentMap(count: channelCount) { index in
+            defer {
+                let completed = counter.increment()
+                progress?(Double(completed) / Double(max(channelCount, 1)))
+            }
+            let channel = signal.data[index]
             guard let (spectrum, binHz) = averagedPowerSpectrum(channel, samplingRate: signal.samplingRate) else {
-                continue
+                return nil
             }
 
             var metrics: [ChannelHealthMetric] = []
@@ -558,7 +630,13 @@ nonisolated enum ChannelHealthAnalyzer {
                 ))
             }
 
-            if !metrics.isEmpty { output[index] = metrics }
+            return metrics.isEmpty ? nil : (index, metrics)
+        }
+        if Task.isCancelled { return [:] }
+        var output: [Int: [ChannelHealthMetric]] = [:]
+        output.reserveCapacity(channelCount)
+        for entry in entries.compactMap({ $0 }) {
+            output[entry.index] = entry.metrics
         }
         return output
     }
@@ -777,11 +855,16 @@ nonisolated enum ChannelHealthAnalyzer {
         let windowSamples = max(Int((configuration.windowSeconds * effectiveRate).rounded()), 16)
         let neighborCount = max(configuration.neighborCount, 1)
 
-        var results: [Int: ChannelRansacResult] = [:]
-        results.reserveCapacity(positions.count)
-        for (offset, position) in positions.enumerated() {
-            if Task.isCancelled { return results }
-            guard let actual = seriesByChannel[position.channelIndex] else { continue }
+        if Task.isCancelled { return [:] }
+        let counter = ConcurrentProgressCounter()
+        let positionCount = positions.count
+        let entries: [(channelIndex: Int, result: ChannelRansacResult)?] = concurrentMap(count: positionCount) { offset in
+            defer {
+                let completed = counter.increment()
+                progress?(Double(completed) / Double(max(positionCount, 1)))
+            }
+            let position = positions[offset]
+            guard let actual = seriesByChannel[position.channelIndex] else { return nil }
 
             let neighbors = positions
                 .filter { $0.channelIndex != position.channelIndex }
@@ -793,7 +876,7 @@ nonisolated enum ChannelHealthAnalyzer {
                 let distance = sqrt(squaredDistance(neighbor, position))
                 return (series, 1.0 / max(distance, 1e-6))
             }
-            guard !weightedNeighbors.isEmpty else { continue }
+            guard !weightedNeighbors.isEmpty else { return nil }
 
             let predicted = reconstruct(from: weightedNeighbors, length: actual.count)
             let correlations = windowedCorrelations(
@@ -801,12 +884,12 @@ nonisolated enum ChannelHealthAnalyzer {
                 predicted,
                 windowSamples: windowSamples
             )
-            guard !correlations.isEmpty else { continue }
+            guard !correlations.isEmpty else { return nil }
 
             let medianCorrelation = median(correlations.map { max($0, 0) })
             let badWindows = correlations.filter { $0 < configuration.minimumCorrelation }.count
             let badFraction = Double(badWindows) / Double(correlations.count)
-            results[position.channelIndex] = ChannelRansacResult(
+            let result = ChannelRansacResult(
                 channelIndex: position.channelIndex,
                 medianCorrelation: medianCorrelation,
                 badWindowFraction: badFraction,
@@ -818,7 +901,13 @@ nonisolated enum ChannelHealthAnalyzer {
                     red: configuration.minimumCorrelation
                 )
             )
-            progress?(Double(offset + 1) / Double(max(positions.count, 1)))
+            return (position.channelIndex, result)
+        }
+        if Task.isCancelled { return [:] }
+        var results: [Int: ChannelRansacResult] = [:]
+        results.reserveCapacity(positionCount)
+        for entry in entries.compactMap({ $0 }) {
+            results[entry.channelIndex] = entry.result
         }
         return results
     }

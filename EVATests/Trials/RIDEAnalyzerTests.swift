@@ -103,9 +103,9 @@ struct RIDEAnalyzerTests {
     @Test func includesResponseComponentWhenRequested() throws {
         let result = try #require(RIDEAnalyzer.decompose(
             trials: [
-                trial(centralShift: -8, responseLatencyMs: 360, time: 1),
-                trial(centralShift: 5, responseLatencyMs: 420, time: 2),
-                trial(centralShift: 16, responseLatencyMs: 480, time: 3)
+                trial(centralShift: -8, responseLatencyMs: 140, time: 1),
+                trial(centralShift: 5, responseLatencyMs: 200, time: 2),
+                trial(centralShift: 16, responseLatencyMs: 250, time: 3)
             ],
             samplingRate: samplingRate,
             configuration: RIDEAnalyzer.Configuration(
@@ -113,6 +113,7 @@ struct RIDEAnalyzerTests {
                 includesCentralComponent: true,
                 includesResponseComponent: true,
                 centralWindow: RIDEAnalyzer.ComponentWindow(startMs: 80, endMs: 190),
+                responseLatencySource: .estimated,
                 centralMaxLagMs: 35,
                 defaultResponseLatencyMs: 400,
                 maxIterations: 6,
@@ -121,7 +122,8 @@ struct RIDEAnalyzerTests {
         ))
 
         #expect(result.component(.response) != nil)
-        #expect(result.trialLatencies.compactMap(\.responseLatencyMs).map { Int($0.rounded()) } == [360, 420, 480])
+        #expect((result.component(.response)?.rms ?? 0) > 0.01)
+        #expect(result.trialLatencies.compactMap(\.responseLatencyMs).map { Int($0.rounded()) } == [140, 200, 250])
         #expect(result.centralAlignedAverage != nil)
         #expect(result.responseAlignedAverage != nil)
     }
@@ -152,5 +154,72 @@ struct RIDEAnalyzerTests {
             )
         )
         #expect(result == nil)
+    }
+
+    @Test func responseMarkersAreRequiredForPerTrialLocking() {
+        let missingMarker = RIDEAnalyzer.TrialInput(
+            sourceTimeSeconds: 0,
+            stimulusOffsetSamples: stimulusOffsetSamples,
+            responseLatencyMs: nil,
+            samples: trial(centralShift: 0).samples
+        )
+        let result = RIDEAnalyzer.decompose(
+            trials: [missingMarker],
+            samplingRate: samplingRate,
+            configuration: RIDEAnalyzer.Configuration(
+                includesStimulusComponent: false,
+                includesCentralComponent: false,
+                includesResponseComponent: true,
+                centralWindow: RIDEAnalyzer.ComponentWindow(startMs: 80, endMs: 190),
+                responseLatencySource: .estimated
+            )
+        )
+        #expect(result == nil)
+    }
+
+    @Test func fixedResponseMarkerIsExplicitlyDiagnosed() throws {
+        let result = try #require(RIDEAnalyzer.decompose(
+            trials: [trial(centralShift: 0), trial(centralShift: 8)],
+            samplingRate: samplingRate,
+            configuration: RIDEAnalyzer.Configuration(
+                includesStimulusComponent: true,
+                includesCentralComponent: true,
+                includesResponseComponent: true,
+                centralWindow: RIDEAnalyzer.ComponentWindow(startMs: 80, endMs: 190),
+                responseLatencySource: .fixed,
+                defaultResponseLatencyMs: 400
+            )
+        ))
+        #expect(result.trialLatencies.compactMap(\.responseLatencyMs) == [400, 400])
+        #expect(result.warnings.contains { $0.contains("one fixed marker") })
+    }
+
+    @Test func componentEstimationUsesRobustPointwiseMedian() throws {
+        let normal = trial(centralShift: 0).samples
+        var outlier = normal
+        for index in outlier.indices { outlier[index] *= 100 }
+        let inputs = [normal, normal, outlier].enumerated().map { index, samples in
+            RIDEAnalyzer.TrialInput(
+                sourceTimeSeconds: Double(index),
+                stimulusOffsetSamples: stimulusOffsetSamples,
+                responseLatencyMs: nil,
+                samples: samples
+            )
+        }
+        let result = try #require(RIDEAnalyzer.decompose(
+            trials: inputs,
+            samplingRate: samplingRate,
+            configuration: RIDEAnalyzer.Configuration(
+                includesStimulusComponent: false,
+                includesCentralComponent: true,
+                includesResponseComponent: false,
+                centralWindow: RIDEAnalyzer.ComponentWindow(startMs: 80, endMs: 190),
+                centralLatencySource: .stimulusLocked,
+                maxIterations: 2
+            )
+        ))
+        let peak = result.component(.central)?.lockedTemplate.map { abs(Double($0)) }.max() ?? 0
+        let normalPeak = normal.map { abs(Double($0)) }.max() ?? 0
+        #expect(abs(peak - normalPeak) < 0.01)
     }
 }

@@ -57,7 +57,7 @@ nonisolated struct ChannelInterpolationSnapshot: Sendable {
             }
         }
 
-        return signal.replacingData(data)
+        return signal.replacingSamples(data)
     }
 }
 
@@ -74,6 +74,14 @@ final class ChannelModel {
     }
 
     private var interpolationState = InterpolationState()
+
+    /// Memo for `interpolationSnapshot`, keyed by `interpolationState.revision`.
+    ///
+    /// `@ObservationIgnored` is required, not cosmetic: the snapshot is built
+    /// lazily inside a getter that view bodies call, so a *tracked* cache would
+    /// register a mutation during view update and re-invalidate the reader that
+    /// just read it.
+    @ObservationIgnored private var cachedInterpolationSnapshot: ChannelInterpolationSnapshot?
 
     /// Channels whose trace is not drawn (row stays in place).
     var hidden = Set<Int>()
@@ -130,6 +138,8 @@ final class ChannelModel {
         sourceIndices: [Int],
         sourceWeights: [Float]
     ) {
+        // A successful repair answers any earlier loss for this channel.
+        interpolationLost[target] = nil
         var next = interpolationState
         next.replacements[target] = replacement
         next.sources[target] = (sourceIndices, sourceWeights)
@@ -147,6 +157,44 @@ final class ChannelModel {
         next.sources = sources
         next.revision &+= 1
         interpolationState = next
+    }
+
+    // MARK: - Interpolation lost
+
+    /// Channels whose recorded repair could not be re-solved on this file,
+    /// with the reason — ROADMAP RW-1 item 3's "interpolation lost" state.
+    ///
+    /// The state exists because the alternative is worse than an error. A
+    /// re-solve can fail on a package with no electrode geometry, or a montage
+    /// missing that electrode's coordinates; if the pipeline simply carried on,
+    /// the channel would keep whatever replacement samples happened to be in
+    /// memory — samples derived from a *different* recording's donors — and
+    /// nothing on screen would say so. Instead the channel goes back to bad, the
+    /// loss is remembered here, and it is shown in the channel row, the status
+    /// history, and the processing audit log.
+    ///
+    /// Cleared by a later successful repair of the same channel, or by the
+    /// operator marking it good again.
+    private(set) var interpolationLost: [Int: String] = [:]
+
+    /// Records a failed repair: the channel returns to bad, any stale
+    /// replacement is dropped, and the reason is kept for display.
+    ///
+    /// Dropping the replacement is the part that matters. Leaving it would
+    /// leave the waveform showing a repair the file no longer claims to have.
+    func recordInterpolationLoss(target: Int, reason: String) {
+        removeInterpolation(target: target)
+        bad.insert(target)
+        interpolationLost[target] = reason
+    }
+
+    func clearInterpolationLoss(target: Int) {
+        interpolationLost[target] = nil
+    }
+
+    func clearAllInterpolationLosses() {
+        guard !interpolationLost.isEmpty else { return }
+        interpolationLost.removeAll()
     }
 
     func removeInterpolation(target: Int) {
@@ -173,18 +221,56 @@ final class ChannelModel {
     /// the end of the processing pipeline. The donor weights are persistent;
     /// the replacement samples are re-derived so filtering, OBS, wavelets, and
     /// other upstream transforms cannot reveal the original target channel.
+    /// Cached on `revision` (ROADMAP C4). Rebuilding this `mapValues`-ed a fresh
+    /// recipe dictionary on every access, and it is read on every `WaveformView`
+    /// body pass — twice on the interpolating path. Every mutation of
+    /// `interpolationState` bumps `revision`, and the state is never reset to a
+    /// fresh value, so the revision is a monotonic key that cannot go stale.
+    ///
+    /// Reading `interpolationState` here still registers the observation
+    /// dependency, so views refresh exactly as before when interpolation changes.
     var interpolationSnapshot: ChannelInterpolationSnapshot {
-        ChannelInterpolationSnapshot(
-            revision: interpolationRevision,
-            cachedReplacements: interpolated,
-            recipes: interpolationSources.mapValues {
+        let state = interpolationState
+        if let cachedInterpolationSnapshot,
+           cachedInterpolationSnapshot.revision == state.revision {
+            return cachedInterpolationSnapshot
+        }
+
+        let snapshot = ChannelInterpolationSnapshot(
+            revision: state.revision,
+            cachedReplacements: state.replacements,
+            recipes: state.sources.mapValues {
                 ChannelInterpolationRecipe(indices: $0.indices, weights: $0.weights)
             }
         )
+        cachedInterpolationSnapshot = snapshot
+        return snapshot
     }
 
     func applyingInterpolations(to signal: MFFSignalData) -> MFFSignalData {
         interpolationSnapshot.applying(to: signal)
+    }
+
+    /// A fresh, independent `ChannelModel` holding the same bad/interpolated/
+    /// hidden state — needed because this class is a reference type.
+    ///
+    /// That matters specifically for forking a window (REWIND.md "Two
+    /// hazards, both concrete rather than hypothetical"): a naive fork would
+    /// leave the new window's `RecordingStore` pointing at *this exact*
+    /// instance, so marking a channel bad in one window would silently mark
+    /// it bad in the other. This is what makes the copy a real, independent
+    /// object instead.
+    ///
+    /// Health results are not copied — a scan result is session-only derived
+    /// state, the same category `PipelineSnapshotting.restore` already
+    /// declines to carry over (selection, viewport, sheet visibility).
+    func copy() -> ChannelModel {
+        let clone = ChannelModel()
+        clone.hidden = hidden
+        clone.bad = bad
+        clone.replaceInterpolations(interpolated, sources: interpolationSources)
+        clone.interpolationLost = interpolationLost
+        return clone
     }
 }
 
@@ -217,7 +303,7 @@ struct ChannelsCommands: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button("Define Channel Sets…") {
+        Button("Channels…") {
             openWindow(id: EVAApp.channelSetsWindowID)
         }
 

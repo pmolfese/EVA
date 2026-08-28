@@ -64,11 +64,43 @@ enum FigureExporter {
         try? data.write(to: url)
     }
 
+    /// Points per inch a raster export is rendered at. `ImageRenderer.scale = 2`
+    /// against the nominal 72 pt/inch.
+    nonisolated static let rasterScale: CGFloat = 2
+    nonisolated static var rasterDPI: Double { Double(WaveformScaleUnits.nominalPointsPerInch) * Double(rasterScale) }
+
+    /// Renders `view` to PDF data without prompting for a save location —
+    /// used by `FigureExportBasket` to snapshot a figure at "Add to Export"
+    /// time, and by `save` itself for the `.pdf` save-panel path.
+    static func pdfData<V: View>(_ view: V) -> Data? { pdf(view) }
+
+    /// Renders `view` to PNG data without prompting — used for the basket's
+    /// list thumbnails.
+    static func pngData<V: View>(_ view: V) -> Data? { raster(view, format: .png) }
+
     private static func raster<V: View>(_ view: V, format: FigureFormat) -> Data? {
         let renderer = ImageRenderer(content: view)
-        renderer.scale = 2 // higher DPI for print
+        renderer.scale = rasterScale // higher DPI for print
         guard let cgImage = renderer.cgImage else { return nil }
         let rep = NSBitmapImageRep(cgImage: cgImage)
+
+        // Declare the physical size, or the file lies about it.
+        //
+        // `NSBitmapImageRep(cgImage:)` takes its `size` from the pixel dimensions,
+        // so a 2× render came out claiming to be twice as large as it was drawn.
+        // Nothing writes a resolution into the PNG in that state, so every viewer
+        // and every layout program falls back to 72 dpi and places the figure at
+        // double size — which silently doubles any sensitivity printed on it.
+        //
+        // Setting `size` back to the rendered *point* extent is what makes the
+        // PNG carry a `pHYs` chunk (and the JPEG its JFIF density) saying 144 dpi.
+        // The figure then drops onto a page at the size it was composed at, and
+        // the µV/mm in its caption is the µV/mm you can measure with a ruler.
+        rep.size = NSSize(
+            width: CGFloat(cgImage.width) / rasterScale,
+            height: CGFloat(cgImage.height) / rasterScale
+        )
+
         let type: NSBitmapImageRep.FileType = (format == .png) ? .png : .jpeg
         let properties: [NSBitmapImageRep.PropertyKey: Any] = (format == .jpeg)
             ? [.compressionFactor: 0.95] : [:]
@@ -93,12 +125,60 @@ enum FigureExporter {
     }
 }
 
+/// The physical scale of an exported figure, in the units the EEG literature
+/// uses.
+///
+/// **Exact, unlike the on-screen readout.** A PDF point is 1/72 inch by
+/// definition and a raster export now declares its resolution, so a figure
+/// placed at 100% really is drawn at the sensitivity printed on it — no display
+/// calibration involved, because no display is. That is why the units reach
+/// figures before they reach the screen honestly.
+///
+/// Computed from each plot's own geometry rather than from the toolbar, because
+/// the panel plots use a different fraction of their height than the main
+/// waveform does (`WaveformScaleUnits.traceRowFraction` versus
+/// `channelRowFraction`) and fit a whole epoch to a fixed width instead of
+/// scrolling at `timeScale`.
+struct FigureScale: Equatable {
+    var amplitudeScale: Double
+    var plotSize: CGSize
+    /// Seconds of signal spanning `plotSize.width`. Nil when the plot is not a
+    /// time series — the caption then states sensitivity alone rather than
+    /// inventing a sweep speed.
+    var seconds: Double?
+
+    var microvoltsPerMillimeter: Double {
+        WaveformScaleUnits.microvoltsPerMillimeter(
+            amplitudeScale: amplitudeScale,
+            plotHeight: plotSize.height
+        )
+    }
+
+    var millimetersPerSecond: Double? {
+        guard let seconds, seconds > 0 else { return nil }
+        return WaveformScaleUnits.millimetersPerSecond(
+            plotWidth: plotSize.width, seconds: seconds
+        )
+    }
+
+    var caption: String {
+        var parts = ["\(WaveformScaleUnits.format(microvoltsPerMillimeter)) µV/mm"]
+        if let sweep = millimetersPerSecond {
+            parts.append("\(WaveformScaleUnits.format(sweep)) mm/s")
+        }
+        return parts.joined(separator: " · ") + " at 100% size"
+    }
+}
+
 /// A self-contained, white-background figure wrapper (title + plot + legend) sized
 /// for export, independent of the app's scroll/selection chrome.
 struct FigureCard<Content: View>: View {
     let title: String
     let legend: [(String, Color)]
     let size: CGSize
+    /// Optional so a caller that cannot state its geometry honestly omits the
+    /// caption rather than printing a number it cannot stand behind.
+    var scale: FigureScale?
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -112,6 +192,11 @@ struct FigureCard<Content: View>: View {
                 .frame(width: size.width, height: size.height)
             if !legend.isEmpty {
                 FlowLegend(items: legend)
+            }
+            if let scale {
+                Text(scale.caption)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.black.opacity(0.55))
             }
         }
         .padding(18)

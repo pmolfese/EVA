@@ -67,7 +67,12 @@ extension WaveformView {
             interpolationSignature,
             epochSignature,
             definedArtifactSignature,
-            artifactEventSignature
+            artifactEventSignature,
+            // A detection run that finds nothing changes no event and no
+            // template, but it does change the answer: the artifact metric goes
+            // from not-assessed to assessed-and-clean. Without this term that
+            // transition would leave the previous analysis in place.
+            "\(artifactVM.hasAssessedArtifacts)"
         ].joined(separator: "|")
     }
 
@@ -77,6 +82,30 @@ extension WaveformView {
             for: signal,
             epochSegments: epoching.epochedSignal == nil ? [] : epoching.epochSegments
         )
+    }
+
+    /// Whether anything has assessed labeled artifacts for the current signal,
+    /// and the intervals if so.
+    ///
+    /// Three things count as an assessment, and the empty interval list is not
+    /// one of them (ROADMAP RW-1 item 16):
+    ///
+    /// - a threshold/ECG detection run that finished and published, which is a
+    ///   verdict even when it found nothing (`hasAssessedArtifacts`);
+    /// - defined artifact templates, whose matches are the assessment;
+    /// - events already on the signal — carried in from the file, or written by
+    ///   the BCG and wavelet detectors, which publish events without going
+    ///   through the ocular detector.
+    ///
+    /// If none of those hold, nothing has looked, and the segment score must not
+    /// count "no artifacts found" as a clean result.
+    func segmentHealthArtifactAssessment(for signal: MFFSignalData) -> SegmentHealthArtifactAssessment {
+        guard artifactVM.hasAssessedArtifacts
+                || !template.definedArtifacts.isEmpty
+                || !artifactVM.events.isEmpty else {
+            return .notAssessed
+        }
+        return .assessed(segmentHealthArtifactIntervals(for: signal))
     }
 
     func segmentHealthArtifactIntervals(for signal: MFFSignalData) -> [SegmentHealthArtifactInterval] {
@@ -121,12 +150,15 @@ extension WaveformView {
             for event in artifact.events {
                 definedEvents.insert(event)
                 let halfWindow = windowSeconds / 2
+                // `centerTimeSeconds`, not `beginTimeSeconds`: the window is
+                // centred on the event, and an onset-stamped one is not centred
+                // on its own mark.
                 windows.append((
                     id: "\(artifact.id.uuidString)-\(event.id)",
                     code: event.code,
                     sourceFile: artifact.name,
-                    startSeconds: event.beginTimeSeconds - halfWindow,
-                    endSeconds: event.beginTimeSeconds + halfWindow
+                    startSeconds: event.centerTimeSeconds - halfWindow,
+                    endSeconds: event.centerTimeSeconds + halfWindow
                 ))
             }
         }
@@ -137,8 +169,8 @@ extension WaveformView {
                 id: event.id,
                 code: event.code,
                 sourceFile: event.sourceFile,
-                startSeconds: event.beginTimeSeconds - halfWindow,
-                endSeconds: event.beginTimeSeconds + halfWindow
+                startSeconds: event.centerTimeSeconds - halfWindow,
+                endSeconds: event.centerTimeSeconds + halfWindow
             ))
         }
 
@@ -242,7 +274,7 @@ extension WaveformView {
         segHealth.statusMessage = nil
 
         let excludedChannels = channels.bad
-        let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
+        let artifactAssessment = segmentHealthArtifactAssessment(for: signal)
         let sourceSignal = signal
         let goodnessBase = segmentGoodnessSettings.base
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
@@ -256,7 +288,7 @@ extension WaveformView {
                         signal: sourceSignal,
                         segments: segments,
                         excludedChannelIndices: excludedChannels,
-                        artifactIntervals: artifactIntervals,
+                        artifacts: artifactAssessment,
                         base: goodnessBase,
                         progress: { fraction in
                             progressContinuation.yield(fraction)
@@ -277,6 +309,12 @@ extension WaveformView {
                 progressContinuation.finish()
                 progressTask.cancel()
 
+                // Clear the spinner *before* the publish guard, not after: a
+                // scan that is cancelled, superseded, or whose results are no
+                // longer wanted still has to release `isAnalyzing`. Clearing it
+                // only on the success path left the progress row stuck on.
+                segHealth.isAnalyzing = false
+
                 guard !Task.isCancelled,
                       segHealth.shows,
                       segHealth.signature == signature else {
@@ -284,7 +322,6 @@ extension WaveformView {
                 }
 
                 segHealth.analysis = analysis
-                segHealth.isAnalyzing = false
                 segHealth.progress = 1
                 segHealth.statusMessage = analysis.results.isEmpty
                     ? "No segment health metrics available."
@@ -346,7 +383,7 @@ extension WaveformView {
         let packageName = recording.packageName
         let processing = segmentHealthProcessingSnapshot()
         let excludedChannels = channels.bad
-        let artifactIntervals = segmentHealthArtifactIntervals(for: signal)
+        let artifactAssessment = segmentHealthArtifactAssessment(for: signal)
         let goodnessBase = segmentGoodnessSettings.base
 
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
@@ -366,7 +403,7 @@ extension WaveformView {
                                 signal: signal,
                                 segments: segments,
                                 excludedChannelIndices: excludedChannels,
-                                artifactIntervals: artifactIntervals,
+                                artifacts: artifactAssessment,
                                 base: goodnessBase,
                                 progress: { fraction in
                                     progressContinuation.yield(0.85 * fraction)

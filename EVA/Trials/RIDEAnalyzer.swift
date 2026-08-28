@@ -49,8 +49,8 @@ nonisolated enum RIDEAnalyzer {
 
     enum LatencySource: String, CaseIterable, Identifiable, Sendable {
         case stimulusLocked = "Stimulus-locked"
-        case estimated = "Estimate from data"
-        case fixed = "Fixed latency"
+        case estimated = "Per-trial marker"
+        case fixed = "Same latency each trial"
 
         var id: String { rawValue }
     }
@@ -80,7 +80,9 @@ nonisolated enum RIDEAnalyzer {
         var includesResponseComponent = false
         var stimulusWindow = ComponentWindow(startMs: -100, endMs: 100)
         var centralWindow: ComponentWindow
-        var responseWindow = ComponentWindow(startMs: 300, endMs: 700)
+        /// S and C windows are relative to stimulus onset. The R window is
+        /// relative to each trial's response marker.
+        var responseWindow = ComponentWindow(startMs: -300, endMs: 300)
         var stimulusLatencySource = LatencySource.stimulusLocked
         var centralLatencySource = LatencySource.estimated
         var responseLatencySource = LatencySource.fixed
@@ -101,14 +103,23 @@ nonisolated enum RIDEAnalyzer {
         var lockedTemplate: [Float]
         /// Component averaged back in the stimulus-locked epoch frame.
         var stimulusLockedAverage: [Float]
+        /// RMS energy of the component in its locking frame.
+        var rms: Double
     }
 
     struct TrialLatency: Identifiable, Sendable {
         var id: Int
         var trialIndex: Int
         var sourceTimeSeconds: Double
+        var stimulusLatencySamples: Int?
+        var stimulusLatencyMs: Double?
         var centralLatencyShiftSamples: Int?
         var centralLatencyShiftMs: Double?
+        /// Interpretable C marker latency relative to stimulus onset. The
+        /// internal shift above is the trial's adjustment around this common
+        /// template reference.
+        var centralMarkerLatencySamples: Int?
+        var centralMarkerLatencyMs: Double?
         var centralCorrelation: Double?
         var responseLatencySamples: Int?
         var responseLatencyMs: Double?
@@ -136,6 +147,10 @@ nonisolated enum RIDEAnalyzer {
         var residualTrials: [[Float]]
         var iterations: [IterationSummary]
         var converged: Bool
+        var centralReferenceLatencyMs: Double?
+        var residualRMS: Double
+        var explainedVariance: Double
+        var warnings: [String]
 
         func component(_ component: Component) -> ComponentWaveform? {
             components.first { $0.component == component }
@@ -165,8 +180,11 @@ nonisolated enum RIDEAnalyzer {
             switch configuration.responseLatencySource {
             case .stimulusLocked:
                 latencyMs = 0
-            case .estimated, .fixed:
-                latencyMs = trial.responseLatencyMs ?? configuration.defaultResponseLatencyMs
+            case .estimated:
+                guard let marker = trial.responseLatencyMs else { return nil }
+                latencyMs = marker
+            case .fixed:
+                latencyMs = configuration.defaultResponseLatencyMs
             }
             guard latencyMs.isFinite else { return nil }
             return Int((latencyMs / 1000.0 * samplingRate).rounded())
@@ -342,6 +360,79 @@ nonisolated enum RIDEAnalyzer {
             previousCentralLatencies = centralLatencies
         }
 
+        // The latency update occurs after each component update. Refit once at
+        // the final latency solution so exported components and reconstruction
+        // are never one iteration behind the reported markers.
+        if configuration.includesStimulusComponent {
+            sTemplate = estimateTemplate(
+                trials: trials, length: length, targetLatencies: stimulusLatencies,
+                stimulusLatencies: stimulusLatencies, centralLatencies: centralLatencies,
+                responseLatencies: responseLatencies,
+                includeCentral: configuration.includesCentralComponent,
+                includeResponse: configuration.includesResponseComponent,
+                excluding: .stimulus, sTemplate: sTemplate, cTemplate: cTemplate,
+                rTemplate: rTemplate, componentWindow: configuration.stimulusWindow,
+                samplingRate: samplingRate
+            )
+        }
+        if configuration.includesCentralComponent {
+            cTemplate = estimateTemplate(
+                trials: trials, length: length, targetLatencies: centralLatencies,
+                stimulusLatencies: stimulusLatencies, centralLatencies: centralLatencies,
+                responseLatencies: responseLatencies, includeCentral: true,
+                includeResponse: configuration.includesResponseComponent,
+                excluding: .central, sTemplate: sTemplate, cTemplate: cTemplate,
+                rTemplate: rTemplate, componentWindow: configuration.centralWindow,
+                samplingRate: samplingRate
+            )
+        }
+        if configuration.includesResponseComponent {
+            rTemplate = estimateTemplate(
+                trials: trials, length: length,
+                targetLatencies: responseLatencies.map { $0 ?? 0 },
+                stimulusLatencies: stimulusLatencies, centralLatencies: centralLatencies,
+                responseLatencies: responseLatencies,
+                includeCentral: configuration.includesCentralComponent, includeResponse: true,
+                excluding: .response, sTemplate: sTemplate, cTemplate: cTemplate,
+                rTemplate: rTemplate, componentWindow: configuration.responseWindow,
+                samplingRate: samplingRate
+            )
+        }
+
+        // Report correlations against the final, mutually adjusted templates,
+        // not the provisional template from the preceding latency update.
+        if configuration.includesCentralComponent {
+            for index in trials.indices {
+                guard let window = sampleRange(
+                    startMs: configuration.centralWindow.startMs,
+                    endMs: configuration.centralWindow.endMs,
+                    stimulusOffsetSamples: trials[index].stimulusOffsetSamples,
+                    samplingRate: samplingRate,
+                    length: length
+                ) else { continue }
+                var residual = trials[index].samples
+                if configuration.includesStimulusComponent {
+                    subtractInPlace(&residual, shiftLater(sTemplate, by: stimulusLatencies[index]))
+                }
+                if configuration.includesResponseComponent, let responseLatency = responseLatencies[index] {
+                    subtractInPlace(&residual, shiftLater(rTemplate, by: responseLatency))
+                }
+                let support = fixedSupportWindow(window, maxLagSamples: maxLagSamples, length: length)
+                let correlation = normalizedCorrelation(
+                    trial: residual,
+                    template: cTemplate,
+                    window: support,
+                    lag: centralLatencies[index]
+                )
+                centralCorrelations[index] = correlation.isFinite ? correlation : 0
+            }
+            if !iterations.isEmpty {
+                iterations[iterations.count - 1].meanCentralCorrelation = centralCorrelations.isEmpty
+                    ? 0
+                    : centralCorrelations.reduce(0, +) / Double(centralCorrelations.count)
+            }
+        }
+
         let reconstructedTrials = trials.indices.map { index in
             reconstruct(
                 length: length,
@@ -370,7 +461,8 @@ nonisolated enum RIDEAnalyzer {
                         shiftLater(template, by: latency)
                     },
                     length: length
-                )
+                ),
+                rms: rms(sTemplate)
             ))
         }
         if configuration.includesCentralComponent {
@@ -382,7 +474,8 @@ nonisolated enum RIDEAnalyzer {
                         shiftLater(template, by: latency)
                     },
                     length: length
-                )
+                ),
+                rms: rms(cTemplate)
             ))
         }
         if configuration.includesResponseComponent {
@@ -395,23 +488,62 @@ nonisolated enum RIDEAnalyzer {
                         shiftLater(template, by: latency)
                     },
                     length: length
-                )
+                ),
+                rms: rms(rTemplate)
             ))
         }
+
+        let centralReferenceSample = configuration.includesCentralComponent
+            ? dominantSample(
+                in: cTemplate,
+                window: sampleRange(
+                    startMs: configuration.centralWindow.startMs,
+                    endMs: configuration.centralWindow.endMs,
+                    stimulusOffsetSamples: first.stimulusOffsetSamples
+                        - Int(median(centralLatencies.map(Double.init)).rounded()),
+                    samplingRate: samplingRate,
+                    length: length
+                )
+            )
+            : nil
+        let centralReferenceLatencySamples = centralReferenceSample.map { $0 - first.stimulusOffsetSamples }
 
         let trialLatencies = trials.indices.map { index in
             TrialLatency(
                 id: index,
                 trialIndex: index,
                 sourceTimeSeconds: trials[index].sourceTimeSeconds,
+                stimulusLatencySamples: configuration.includesStimulusComponent ? stimulusLatencies[index] : nil,
+                stimulusLatencyMs: configuration.includesStimulusComponent
+                    ? Double(stimulusLatencies[index]) / samplingRate * 1000.0
+                    : nil,
                 centralLatencyShiftSamples: configuration.includesCentralComponent ? centralLatencies[index] : nil,
                 centralLatencyShiftMs: configuration.includesCentralComponent
                     ? Double(centralLatencies[index]) / samplingRate * 1000.0
                     : nil,
+                centralMarkerLatencySamples: centralReferenceLatencySamples.map { $0 + centralLatencies[index] },
+                centralMarkerLatencyMs: centralReferenceLatencySamples.map {
+                    Double($0 + centralLatencies[index]) / samplingRate * 1000.0
+                },
                 centralCorrelation: configuration.includesCentralComponent ? centralCorrelations[index] : nil,
                 responseLatencySamples: responseLatencies[index],
                 responseLatencyMs: responseLatencies[index].map { Double($0) / samplingRate * 1000.0 }
             )
+        }
+
+        let fit = fitDiagnostics(observed: trials.map(\.samples), residuals: residualTrials)
+        var warnings: [String] = []
+        if !converged, configuration.includesCentralComponent,
+           configuration.centralLatencySource == .estimated {
+            warnings.append("C latencies reached the iteration limit before stabilizing.")
+        }
+        let lagLimitHits = centralLatencies.filter { maxLagSamples > 0 && abs($0) == maxLagSamples }.count
+        if lagLimitHits > 0 {
+            warnings.append("\(lagLimitHits) C latency estimate(s) reached the search limit.")
+        }
+        if configuration.includesResponseComponent, configuration.responseLatencySource == .fixed,
+           configuration.includesStimulusComponent {
+            warnings.append("R uses one fixed marker for every trial; without varying response markers, S and R are distinguished only by their windows.")
         }
 
         return Result(
@@ -433,7 +565,11 @@ nonisolated enum RIDEAnalyzer {
             reconstructedTrials: reconstructedTrials,
             residualTrials: residualTrials,
             iterations: iterations,
-            converged: converged
+            converged: converged,
+            centralReferenceLatencyMs: centralReferenceLatencySamples.map { Double($0) / samplingRate * 1000.0 },
+            residualRMS: fit.residualRMS,
+            explainedVariance: fit.explainedVariance,
+            warnings: warnings
         )
     }
 
@@ -455,7 +591,7 @@ nonisolated enum RIDEAnalyzer {
         componentWindow: ComponentWindow,
         samplingRate: Double
     ) -> [Float] {
-        let lockedResiduals = trials.indices.map { index in
+        let residuals = trials.indices.map { index in
             var residual = trials[index].samples
             if excludedComponent != .stimulus {
                 subtractInPlace(&residual, shiftLater(sTemplate, by: stimulusLatencies[index]))
@@ -466,14 +602,23 @@ nonisolated enum RIDEAnalyzer {
             if includeResponse, excludedComponent != .response, let responseLatency = responseLatencies[index] {
                 subtractInPlace(&residual, shiftLater(rTemplate, by: responseLatency))
             }
-            return shiftEarlier(residual, by: targetLatencies[index])
+            return residual
         }
-        let template = average(lockedResiduals, length: length)
+        // RIDE's robust decomposition minimizes L1 error: the pointwise median
+        // is the corresponding estimator and is less distorted by noisy trials
+        // than the arithmetic mean previously used here.
+        let template = medianShifted(residuals, shifts: targetLatencies, length: length)
         return windowedTemplate(
             template,
             componentWindow: componentWindow,
             stimulusOffsetSamples: trials.first?.stimulusOffsetSamples ?? 0,
-            samplingRate: samplingRate
+            samplingRate: samplingRate,
+            // S/C windows are specified in the stimulus frame, so move their
+            // support with the typical alignment applied to the locked
+            // template. R windows are already response-relative.
+            windowOffsetSamples: excludedComponent == .response
+                ? 0
+                : -Int(median(targetLatencies.map(Double.init)).rounded())
         )
     }
 
@@ -481,12 +626,13 @@ nonisolated enum RIDEAnalyzer {
         _ template: [Float],
         componentWindow: ComponentWindow,
         stimulusOffsetSamples: Int,
-        samplingRate: Double
+        samplingRate: Double,
+        windowOffsetSamples: Int = 0
     ) -> [Float] {
         guard let window = sampleRange(
             startMs: componentWindow.startMs,
             endMs: componentWindow.endMs,
-            stimulusOffsetSamples: stimulusOffsetSamples,
+            stimulusOffsetSamples: stimulusOffsetSamples + windowOffsetSamples,
             samplingRate: samplingRate,
             length: template.count
         ) else { return template }
@@ -550,8 +696,9 @@ nonisolated enum RIDEAnalyzer {
     ) -> (lag: Int, correlation: Double) {
         var candidates: [(lag: Int, correlation: Double)] = []
         candidates.reserveCapacity(maxLagSamples * 2 + 1)
+        let support = fixedSupportWindow(window, maxLagSamples: maxLagSamples, length: min(trial.count, template.count))
         for lag in (-maxLagSamples)...maxLagSamples {
-            let correlation = normalizedCorrelation(trial: trial, template: template, window: window, lag: lag)
+            let correlation = normalizedCorrelation(trial: trial, template: template, window: support, lag: lag)
             if correlation.isFinite {
                 candidates.append((lag, correlation))
             }
@@ -572,6 +719,16 @@ nonisolated enum RIDEAnalyzer {
             } ?? candidates.max { lhs, rhs in lhs.correlation < rhs.correlation } ?? (0, 0)
             return best
         }
+    }
+
+    private static func fixedSupportWindow(
+        _ window: Range<Int>,
+        maxLagSamples: Int,
+        length: Int
+    ) -> Range<Int> {
+        let lower = max(window.lowerBound, maxLagSamples)
+        let upper = min(window.upperBound, length - maxLagSamples)
+        return upper - lower >= 3 ? lower..<upper : window
     }
 
     private static func normalizedCorrelation(
@@ -658,5 +815,70 @@ nonisolated enum RIDEAnalyzer {
         return sums.indices.map { i in
             counts[i] > 0 ? Float(sums[i] / Double(counts[i])) : 0
         }
+    }
+
+    private static func medianShifted(
+        _ traces: [[Float]],
+        shifts: [Int],
+        length: Int
+    ) -> [Float] {
+        guard traces.count == shifts.count, length > 0 else { return [] }
+        var values = [[Double]](repeating: [], count: length)
+        for (trace, shift) in zip(traces, shifts) where trace.count == length {
+            for outputIndex in 0..<length {
+                let sourceIndex = outputIndex + shift
+                guard trace.indices.contains(sourceIndex) else { continue }
+                let value = Double(trace[sourceIndex])
+                if value.isFinite { values[outputIndex].append(value) }
+            }
+        }
+        return values.map { samples in
+            guard !samples.isEmpty else { return 0 }
+            let sorted = samples.sorted()
+            let middle = sorted.count / 2
+            let value = sorted.count.isMultiple(of: 2)
+                ? (sorted[middle - 1] + sorted[middle]) / 2
+                : sorted[middle]
+            return Float(value)
+        }
+    }
+
+    private static func median(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        return sorted.count.isMultiple(of: 2)
+            ? (sorted[middle - 1] + sorted[middle]) / 2
+            : sorted[middle]
+    }
+
+    private static func dominantSample(in trace: [Float], window: Range<Int>?) -> Int? {
+        guard let window else { return nil }
+        return window.filter(trace.indices.contains).max { lhs, rhs in
+            abs(Double(trace[lhs])) < abs(Double(trace[rhs]))
+        }
+    }
+
+    private static func rms(_ trace: [Float]) -> Double {
+        let finite = trace.lazy.map(Double.init).filter(\.isFinite)
+        let sum = finite.reduce(into: (squares: 0.0, count: 0)) { partial, value in
+            partial.squares += value * value
+            partial.count += 1
+        }
+        return sum.count > 0 ? sqrt(sum.squares / Double(sum.count)) : 0
+    }
+
+    private static func fitDiagnostics(
+        observed: [[Float]],
+        residuals: [[Float]]
+    ) -> (residualRMS: Double, explainedVariance: Double) {
+        let observedValues = observed.flatMap { $0 }.map(Double.init).filter(\.isFinite)
+        let residualValues = residuals.flatMap { $0 }.map(Double.init).filter(\.isFinite)
+        guard !observedValues.isEmpty, !residualValues.isEmpty else { return (0, 0) }
+        let mean = observedValues.reduce(0, +) / Double(observedValues.count)
+        let totalSS = observedValues.reduce(0) { $0 + ($1 - mean) * ($1 - mean) }
+        let residualSS = residualValues.reduce(0) { $0 + $1 * $1 }
+        let residualRMS = sqrt(residualSS / Double(residualValues.count))
+        return (residualRMS, totalSS > 1e-12 ? 1 - residualSS / totalSS : 0)
     }
 }

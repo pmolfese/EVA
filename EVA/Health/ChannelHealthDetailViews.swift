@@ -100,8 +100,12 @@ extension WaveformView {
         channels.healthProgress = 0
         chanHealth.statusMessage = "Running wavelet channel goodness..."
 
+        let channelCount = signal.data.count
+        beginWaveletHealthOperationProgress(subtitle: "\(channelCount) channels", hasBaseAnalysis: shouldRefreshBase)
+
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
             channels.healthProgress = min(max(fraction, 0), 1)
+            updateWaveletHealthOperationProgress(fraction, hasBaseAnalysis: shouldRefreshBase, channelCount: channelCount)
         }
 
         chanHealth.task = Task { @MainActor in
@@ -155,6 +159,13 @@ extension WaveformView {
                 progressContinuation.finish()
                 progressTask.cancel()
 
+                // Clear the spinner *before* the publish guard, not after: a
+                // scan that is cancelled, superseded, or whose results are no
+                // longer wanted still has to release `isAnalyzing`. Clearing it
+                // only on the success path left the progress row stuck on.
+                channels.isAnalyzingHealth = false
+                chanHealth.operationProgress = nil
+
                 guard !Task.isCancelled,
                       channels.showsHealth,
                       chanHealth.signature == signature else {
@@ -162,13 +173,75 @@ extension WaveformView {
                 }
 
                 channels.healthResults = analysis.resultsByChannel
-                channels.isAnalyzingHealth = false
                 channels.healthProgress = 1
                 chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
                     ? "No wavelet channel-goodness metrics available."
                     : "Wavelet channel goodness updated \(analysis.resultsByChannel.count) channels."
+                refreshRelationshipsAfterChannelHealth(for: signal)
             }
         }
+    }
+
+    /// Starts the shared toolbar progress row for a wavelet channel-goodness
+    /// run. `hasBaseAnalysis` reflects whether this run also has to
+    /// (re-)compute the base metrics (see `shouldRefreshBase` in
+    /// `runWaveletChannelGoodness`), which adds a leading stage.
+    private func beginWaveletHealthOperationProgress(subtitle: String, hasBaseAnalysis: Bool) {
+        var stages: [String] = []
+        if hasBaseAnalysis { stages.append("Base metrics") }
+        stages.append("Wavelet decomposition")
+        stages.append("Finalizing")
+        let initialPhase = hasBaseAnalysis ? "Scoring base channel metrics" : "Preparing wavelet decomposition"
+        chanHealth.operationProgress = .started(
+            source: "Channel Health",
+            title: "Wavelet Channel Goodness",
+            subtitle: subtitle,
+            phase: initialPhase,
+            stages: stages
+        ).updating(
+            fraction: 0.02,
+            phase: initialPhase,
+            activeStage: 0
+        )
+    }
+
+    /// Maps `runWaveletChannelGoodness`'s combined progress fraction (base
+    /// metrics 0...0.42/0.08, wavelet decomposition through 0.98, then
+    /// finalizing) back onto the wavelet operation's named stages.
+    private func updateWaveletHealthOperationProgress(_ fraction: Double, hasBaseAnalysis: Bool, channelCount: Int) {
+        let bounded = min(max(fraction, 0), 1)
+        let baseEnd = hasBaseAnalysis ? 0.42 : 0.08
+        let waveletEnd = 0.98
+        let waveletStage = hasBaseAnalysis ? 1 : 0
+        let finalizingStage = waveletStage + 1
+
+        let activeStage: Int
+        let phase: String
+        let detail: String?
+        if hasBaseAnalysis, bounded < baseEnd {
+            activeStage = 0
+            phase = "Scoring base channel metrics"
+            let local = min(max(bounded / baseEnd, 0), 1)
+            let completed = min(channelCount, max(0, Int((local * Double(channelCount)).rounded())))
+            detail = channelCount > 0 ? "Channels \(completed) of \(channelCount)" : nil
+        } else if bounded < waveletEnd {
+            activeStage = waveletStage
+            phase = "Wavelet decomposition"
+            let local = min(max((bounded - baseEnd) / max(waveletEnd - baseEnd, 0.01), 0), 1)
+            let completed = min(channelCount, max(0, Int((local * Double(channelCount)).rounded())))
+            detail = channelCount > 0 ? "Channels \(completed) of \(channelCount)" : nil
+        } else {
+            activeStage = finalizingStage
+            phase = "Finalizing wavelet metrics"
+            detail = nil
+        }
+
+        chanHealth.operationProgress = chanHealth.operationProgress?.updating(
+            fraction: bounded,
+            phase: phase,
+            detail: detail,
+            activeStage: activeStage
+        )
     }
 
     /// The continuous (non-epoched) processed signal the health badges score,
@@ -184,7 +257,8 @@ extension WaveformView {
     }
 
     /// Resets the channel-health badges to their empty state after a major
-    /// processing change. Does not auto-run; the user taps a badge to re-run.
+    /// processing change. The waveform remains demand-driven; an open Channels
+    /// utility window automatically makes the first request for the new state.
     @MainActor
     func resetChannelHealthForStateChange() {
         chanHealth.task?.cancel()
@@ -193,6 +267,7 @@ extension WaveformView {
         channels.clearHealthResults()
         channels.showsHealth = false
         chanHealth.statusMessage = nil
+        chanHealth.operationProgress = nil
     }
 
     /// Runs channel health for the first time in the current state (tap a badge
@@ -329,8 +404,22 @@ extension WaveformView {
         let impedanceConfig = goodnessSettings.impedance
         let spectralConfig = goodnessSettings.spectral
         let ransacConfig = goodnessSettings.ransac
+        let channelCount = signal.data.count
+
+        beginChannelHealthOperationProgress(
+            subtitle: "\(channelCount) channels",
+            hasSpectral: spectralConfig.isEnabled,
+            hasRansac: ransacConfig.isEnabled
+        )
+
         let (progressContinuation, progressTask) = ProgressBridge.make { fraction in
             channels.healthProgress = min(max(fraction, 0), 1)
+            updateChannelHealthOperationProgress(
+                fraction,
+                hasSpectral: spectralConfig.isEnabled,
+                hasRansac: ransacConfig.isEnabled,
+                channelCount: channelCount
+            )
         }
 
         chanHealth.task = Task { @MainActor in
@@ -363,6 +452,13 @@ extension WaveformView {
                 progressContinuation.finish()
                 progressTask.cancel()
 
+                // Clear the spinner *before* the publish guard, not after: a
+                // scan that is cancelled, superseded, or whose results are no
+                // longer wanted still has to release `isAnalyzing`. Clearing it
+                // only on the success path left the progress row stuck on.
+                channels.isAnalyzingHealth = false
+                chanHealth.operationProgress = nil
+
                 guard !Task.isCancelled,
                       channels.showsHealth,
                       chanHealth.signature == signature else {
@@ -370,13 +466,99 @@ extension WaveformView {
                 }
 
                 channels.healthResults = analysis.resultsByChannel
-                channels.isAnalyzingHealth = false
                 channels.healthProgress = 1
                 chanHealth.statusMessage = analysis.resultsByChannel.isEmpty
                     ? "No channel health metrics available."
                     : "Channel health scored \(analysis.resultsByChannel.count) channels."
+                refreshRelationshipsAfterChannelHealth(for: sourceSignal)
             }
         }
+    }
+
+    /// Relationship diagnostics are pair-level context for Channel Health.
+    /// They do not affect the per-channel goodness percentage, but every full
+    /// health run refreshes them against the exact same signal and the newly
+    /// calculated neighbor/RANSAC metrics.
+    @MainActor
+    private func refreshRelationshipsAfterChannelHealth(for signal: MFFSignalData) {
+        publishChannelsWindowLiveContext(signal: signal)
+        let model = ChannelsWindowModel.shared
+        guard model.activeRecordingID == recording.id else { return }
+        model.refreshDiagnostics(force: true)
+    }
+
+    /// Starts the shared toolbar progress row for a Channel Health scan, with
+    /// one stage per phase of `ChannelHealthAnalyzer.analyze` — mirrors
+    /// `FilterViewModel.beginOperationProgress`. Spectral/RANSAC are optional
+    /// stages, present only when their detector is enabled in Goodness
+    /// Settings, matching how `analyze` itself skips them.
+    private func beginChannelHealthOperationProgress(subtitle: String, hasSpectral: Bool, hasRansac: Bool) {
+        var stages = ["Summary stats", "Neighbor agreement"]
+        if hasSpectral { stages.append("Spectral detection") }
+        if hasRansac { stages.append("Neighbor prediction") }
+        stages.append("Spectral shape")
+        chanHealth.operationProgress = .started(
+            source: "Channel Health",
+            title: "Channel Health Scan",
+            subtitle: subtitle,
+            phase: "Scoring channel summaries",
+            stages: stages
+        ).updating(
+            fraction: 0.02,
+            phase: "Scoring channel summaries",
+            activeStage: 0
+        )
+    }
+
+    /// Maps `ChannelHealthAnalyzer.analyze`'s single 0...1 progress fraction
+    /// back onto its named stages and a "channels N of M" detail string. The
+    /// fraction breakpoints (0.60 / 0.90 / 0.92 / 0.95 / 0.99) mirror the
+    /// budget `analyze` itself allocates per stage — see
+    /// `ChannelHealthAnalyzer.swift`.
+    private func updateChannelHealthOperationProgress(
+        _ fraction: Double,
+        hasSpectral: Bool,
+        hasRansac: Bool,
+        channelCount: Int
+    ) {
+        let bounded = min(max(fraction, 0), 1)
+        let spectralStage = 2
+        let ransacStage = 2 + (hasSpectral ? 1 : 0)
+        let advancedStage = 2 + (hasSpectral ? 1 : 0) + (hasRansac ? 1 : 0)
+
+        let activeStage: Int
+        let phase: String
+        let localFraction: Double
+        if bounded < 0.60 {
+            activeStage = 0
+            phase = "Scoring channel summaries"
+            localFraction = bounded / 0.60
+        } else if bounded < 0.92 {
+            activeStage = 1
+            phase = "Checking neighbor agreement"
+            localFraction = (bounded - 0.60) / 0.32
+        } else if bounded < 0.95, hasSpectral {
+            activeStage = spectralStage
+            phase = "Detecting spectral outliers"
+            localFraction = (bounded - 0.92) / 0.03
+        } else if bounded < 0.99, hasRansac {
+            activeStage = ransacStage
+            phase = "Predicting from neighbors (RANSAC)"
+            localFraction = (bounded - 0.95) / 0.04
+        } else {
+            activeStage = advancedStage
+            phase = "Scoring spectral shape"
+            localFraction = (bounded - 0.99) / 0.01
+        }
+
+        let clampedLocal = min(max(localFraction, 0), 1)
+        let completed = min(channelCount, max(0, Int((clampedLocal * Double(channelCount)).rounded())))
+        chanHealth.operationProgress = chanHealth.operationProgress?.updating(
+            fraction: bounded,
+            phase: phase,
+            detail: channelCount > 0 ? "Channels \(completed) of \(channelCount)" : nil,
+            activeStage: activeStage
+        )
     }
 
     func saveChannelLabelMetricsJSON() {

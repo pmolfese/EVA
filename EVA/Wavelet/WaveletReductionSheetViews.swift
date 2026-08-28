@@ -31,7 +31,7 @@ extension WaveformView {
     }
 
     /// The mode's defaults, plus the stopband-level count implied by the
-    /// filter step's low-pass cutoff. HAPPE's level table is keyed to the
+    /// filter step's low-pass cutoff. HAPPE's public level defaults are keyed to the
     /// sampling rate alone, which on band-limited data leaves the finest
     /// levels sitting entirely above the cutoff with nothing in them but
     /// roll-off residue — see `WaveletReductionConfiguration.skippedFineLevels`.
@@ -56,24 +56,17 @@ extension WaveformView {
     }
 
     func setWaveletReductionEnabled(_ isEnabled: Bool) {
-        guard wavelet.reducedSignal != nil, wavelet.isEnabled != isEnabled else { return }
-        wavelet.isEnabled = isEnabled
-        invalidateEpochsForSignalChange()
-        invalidateInterpolations()
+        PipelineStageToggles.setWaveletReductionEnabled(
+            isEnabled, wavelet: wavelet, store: recordingStore,
+            epoching: epoching, segHealth: segHealth
+        )
     }
 
     func revertWaveletReduction() {
-        guard wavelet.reducedSignal != nil else { return }
-        wavelet.reducedSignal = nil
-        wavelet.artifact = nil
-        wavelet.result = nil
-        wavelet.bandVarianceRetained = nil
-        wavelet.statusMessage = "Reverted wavelet reduction."
-        wavelet.candidates = []
-        wavelet.selectedCandidateID = nil
-        invalidateEpochsForSignalChange()
-        invalidateInterpolations()
-        artifactVM.detectionRefreshToken += 1
+        PipelineStageToggles.revertWaveletReduction(
+            wavelet: wavelet, artifactVM: artifactVM, store: recordingStore,
+            epoching: epoching, segHealth: segHealth
+        )
     }
 
     func runWaveletReduction(on input: MFFSignalData) {
@@ -104,9 +97,12 @@ extension WaveformView {
         await processingQueue.run("Wavelet Reduction") { [self] in
             await wavelet.apply(to: signal, excludedChannels: excludedChannels, analysisBand: analysisBand) { [self] in
                 guard sessionID == recordingSessionID else { return }
-                invalidateEpochsForSignalChange()
-                invalidateInterpolations()
-                artifactVM.detectionRefreshToken += 1
+                PipelineInvalidation.downstreamOfWaveletChange(
+                    store: recordingStore,
+                    artifactVM: artifactVM,
+                    epoching: epoching,
+                    segHealth: segHealth
+                )
             }
         }
     }
@@ -164,26 +160,20 @@ extension WaveformView {
                     }
                     return
                 }
-                artifactVM.cleanedSignal = outcome.signal
-                artifactVM.cleaningIsEnabled = true
-                artifactVM.cleaningSummaries = outcome.summaries
-                let summariesByID = Dictionary(uniqueKeysWithValues: outcome.summaries.map { ($0.artifactID, $0) })
-                let now = Date()
-                for index in template.definedArtifacts.indices {
-                    if summariesByID[template.definedArtifacts[index].id] != nil,
-                       template.definedArtifacts[index].cleaningMethod.removesArtifact {
-                        template.definedArtifacts[index].appliedMethod = template.definedArtifacts[index].cleaningMethod
-                        template.definedArtifacts[index].cleanedAt = now
-                    } else {
-                        template.definedArtifacts[index].appliedMethod = nil
-                        template.definedArtifacts[index].cleanedAt = nil
-                    }
-                }
-
-                artifactVM.cleaningStatusMessage = artifactCleaningSummaryText(outcome.summaries)
-                artifactVM.statusMessage = artifactVM.cleaningStatusMessage
-                artifactVM.detectionRefreshToken += 1
-                invalidateEpochsForSignalChange()
+                // Pipeline half shared with anything else that lands a cleaning
+                // result; the task handles, progress bridge, session guard,
+                // replay gate, and preview precompute below stay here because
+                // only a caller with a view has them.
+                ArtifactCleaningCore.commit(
+                    cleanedSignal: outcome.signal,
+                    summaries: outcome.summaries,
+                    statusMessage: artifactCleaningSummaryText(outcome.summaries),
+                    artifactVM: artifactVM,
+                    template: template,
+                    epoching: epoching,
+                    segHealth: segHealth,
+                    store: recordingStore
+                )
                 artifactVM.cleaningProgress = nil
                 artifactVM.isCleaning = false
                 artifactCleaningTask = nil
@@ -242,17 +232,12 @@ extension WaveformView {
         artifactVM.statusMessage = artifactVM.cleaningStatusMessage
     }
 
+    /// Interactive entry point for the shared cascade. See `PipelineInvalidation`.
     func clearAppliedArtifactCleaning() {
-        let hadCleaning = artifactVM.cleanedSignal != nil || template.definedArtifacts.contains { $0.appliedMethod != nil }
-        artifactVM.cleanedSignal = nil
-        artifactVM.cleaningIsEnabled = true
-        artifactVM.cleaningSummaries = []
-        artifactVM.cleaningProgress = nil
-        artifactVM.cleaningStatusMessage = nil
-        for index in template.definedArtifacts.indices {
-            template.definedArtifacts[index].appliedMethod = nil
-            template.definedArtifacts[index].cleanedAt = nil
-        }
+        let hadCleaning = PipelineInvalidation.appliedArtifactCleaning(
+            artifactVM: artifactVM,
+            template: template
+        )
         guard hadCleaning else { return }
         artifactVM.detectionRefreshToken += 1
         invalidateEpochsForSignalChange()
@@ -291,7 +276,7 @@ extension WaveformView {
             selectedChannelIndices: artifactTemplateSelectedChannels(in: signal),
             comparisonChannelIndices: Array(signal.data.indices),
             exemplarRange: range,
-            matchThreshold: template.threshold,
+            matchThreshold: min(max(template.threshold, 0.30), 0.98),
             windowSizeSeconds: max(template.windowSeconds, 0.01),
             downsampleRate: min(max(template.downsampleRate, 20), signal.samplingRate),
             mergeWindowSeconds: max(template.mergeWindowSeconds, 0.01),

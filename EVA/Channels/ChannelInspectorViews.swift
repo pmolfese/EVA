@@ -90,7 +90,8 @@ extension WaveformView {
                     figureSaveMenu(
                         title: channelInspectorTitle(for: selection, signal: signal),
                         legend: overlayLegendItems(),
-                        size: CGSize(width: 720, height: 320)
+                        size: CGSize(width: 720, height: 320),
+                        seconds: figureSeconds(segments, samplingRate: signal.samplingRate)
                     ) {
                         ChannelInspectorPlot(
                             signal: signal,
@@ -168,7 +169,8 @@ extension WaveformView {
                         figureSaveMenu(
                             title: channelInspectorTitle(for: selection, signal: signal),
                             legend: overlayLegendItems(),
-                            size: CGSize(width: 720, height: 320)
+                            size: CGSize(width: 720, height: 320),
+                            seconds: figureSeconds(segments, samplingRate: signal.samplingRate)
                         ) {
                             ChannelInspectorPlot(
                                 signal: signal,

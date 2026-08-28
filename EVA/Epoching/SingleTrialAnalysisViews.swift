@@ -42,6 +42,7 @@ extension WaveformView {
             rawSignal: segmentedEpochSignal,
             rawSegments: segmentedEpochSegments,
             categories: overlayAvailableCategories(),
+            sensorLayout: recording.sensorLayout,
             channelSets: ChannelSetStore.shared.allSets,
             hiddenChannels: channels.hidden,
             amplitudeScale: Binding(
@@ -68,7 +69,16 @@ extension WaveformView {
                 self.figureFileName(title)
             },
             isEmbedded: isEmbedded,
-            onClose: onClose
+            onClose: onClose,
+            committedTrialExclusion: epoching.committedTrialExclusion,
+            onCommitTrialExclusion: { [epoching] step in
+                epoching.committedTrialExclusion = step
+                // Rebuild now rather than marking the average stale: the new
+                // `epochedSignal` is also what moves `ProcessingChainSignature`
+                // and mints the history node, so committing and recording the
+                // commit are the same act.
+                refreshEpochDisplay()
+            }
         )
     }
 }
@@ -80,6 +90,7 @@ struct SingleTrialAnalysisSheet: View {
     let rawSignal: MFFSignalData?
     let rawSegments: [EpochSegment]
     let categories: [String]
+    let sensorLayout: SensorLayout?
     let channelSets: [ChannelSet]
     let hiddenChannels: Set<Int>
     @Binding var amplitudeScale: Double
@@ -92,6 +103,20 @@ struct SingleTrialAnalysisSheet: View {
     let figureFileName: (String) -> String
     let isEmbedded: Bool
     let onClose: (() -> Void)?
+
+    // MARK: Reviewed exclusion (ROADMAP TW-5)
+    /// What the recording already carries, so the bar can say so and a commit
+    /// can merge into it rather than replacing other categories' decisions.
+    var committedTrialExclusion: EVAProcessingStep? = nil
+    /// Hands a newly merged step (or nil, to clear) to the pipeline, which
+    /// stores it and rebuilds the average.
+    ///
+    /// A closure rather than direct access to `EpochingViewModel`: this sheet
+    /// knows how to turn a review into a step and nothing about how epochs are
+    /// rebuilt, and keeping it that way is what lets it be presented from a
+    /// context with no pipeline at all — where nil correctly leaves the panel
+    /// previewing and uncommittable.
+    var onCommitTrialExclusion: ((EVAProcessingStep?) -> Void)? = nil
 
     private enum ResultTab: String, CaseIterable, Identifiable {
         case trials = "Per-Trial Values"
@@ -144,6 +169,27 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Names the one thing that is missing, rather than listing everything that
+    /// could be. A generic hint sent the reader looking at a trace that had been
+    /// folded away.
+    private var missingPreconditionHint: String {
+        if averagedSegment == nil { return "Average a category first." }
+        if viewModel.selectedCategory == nil { return "Pick a category." }
+        if selectedChannelIndices.isEmpty { return "Pick a channel or ROI." }
+        if viewModel.analysisMode == .ride {
+            let windows = activeRIDEComponentWindows
+            if windows.isEmpty { return "Turn on at least one RIDE component." }
+            if !windows.allSatisfy({ $0.endMs > $0.startMs }) { return "A RIDE component window has no width." }
+        }
+        if viewModel.analysisMode == .trialDiagnostics, diagnosticsAnalysisSpan == nil {
+            return "Add a window above to say what to score."
+        }
+        if primaryAnalysisSpan(for: viewModel.analysisMode) == nil {
+            return "Drag on the trace above, or add a window, to select the analysis span."
+        }
+        return "Not ready to run."
+    }
+
     private var canRun: Bool {
         guard averagedSegment != nil, !selectedChannelIndices.isEmpty,
               let category = viewModel.selectedCategory,
@@ -152,34 +198,106 @@ struct SingleTrialAnalysisSheet: View {
             let windows = activeRIDEComponentWindows
             return !windows.isEmpty && windows.allSatisfy { $0.endMs > $0.startMs }
         }
-        guard viewModel.hasWindow else { return false }
-        return true
+        // Trial Diagnostics is driven ENTIRELY by added windows — dragging a
+        // span on the trace plays no role here, unlike Measurements/CWT/Woody.
+        // Adding W1 is the whole of setup.
+        if viewModel.analysisMode == .trialDiagnostics {
+            return diagnosticsAnalysisSpan != nil
+        }
+        return primaryAnalysisSpan(for: viewModel.analysisMode) != nil
     }
 
-    private var activeRIDEComponentWindows: [RIDEComponentWindowSelection] {
-        var windows: [RIDEComponentWindowSelection] = []
+    /// The span Trial Diagnostics scores over: the extent of its added windows.
+    /// The dragged trace-selection window (`viewModel.windowStartMs/EndMs`) is
+    /// deliberately NOT consulted — that binding is shared across modes and
+    /// drives the trace-drag interaction, but Trial Diagnostics has its own
+    /// window list and should not silently inherit a leftover drag from
+    /// another mode.
+    private var diagnosticsAnalysisSpan: (startMs: Double, endMs: Double)? {
+        analysisSpan(fromWindows: viewModel.windows(for: .trialDiagnostics))
+    }
+
+    /// The span Measurements/CWT/Woody run over: their own added window when one
+    /// exists, otherwise the dragged trace selection.
+    ///
+    /// Unlike Trial Diagnostics, these three still fall back to the drag,
+    /// because until a window is added the drag IS how the analysis span is set
+    /// for them — that predates windows existing at all. Once a window is
+    /// added, though, it takes over, which is what lets `addWindow` clear the
+    /// drag highlight without leaving the mode with nothing to run on.
+    private func primaryAnalysisSpan(for mode: SingleTrialAnalysisMode) -> (startMs: Double, endMs: Double)? {
+        if let fromWindows = analysisSpan(fromWindows: viewModel.windows(for: mode)) {
+            return fromWindows
+        }
+        guard let start = viewModel.windowStartMs, let end = viewModel.windowEndMs, end > start else { return nil }
+        return (start, end)
+    }
+
+    private func analysisSpan(fromWindows windows: [TrialAlignmentMetrics.AnalysisWindow]) -> (startMs: Double, endMs: Double)? {
+        let valid = windows.filter { $0.endMs > $0.startMs }
+        guard let start = valid.map(\.startMs).min(),
+              let end = valid.map(\.endMs).max(), end > start else { return nil }
+        return (start, end)
+    }
+
+    private var activeRIDEComponentWindows: [TrialWindowSelection] {
+        var windows: [TrialWindowSelection] = []
+        func append(_ component: RIDEAnalyzer.Component, _ startMs: Double, _ endMs: Double, _ colorIndex: Int) {
+            windows.append(
+                TrialWindowSelection(
+                    id: component.rawValue,
+                    label: component.label,
+                    startMs: startMs,
+                    endMs: endMs,
+                    colorIndex: colorIndex
+                )
+            )
+        }
         if viewModel.rideIncludesStimulusComponent {
-            windows.append(RIDEComponentWindowSelection(
-                component: .stimulus,
-                startMs: viewModel.rideStimulusWindowStartMs,
-                endMs: viewModel.rideStimulusWindowEndMs
-            ))
+            append(.stimulus, viewModel.rideStimulusWindowStartMs, viewModel.rideStimulusWindowEndMs, 0)
         }
         if viewModel.rideIncludesCentralComponent {
-            windows.append(RIDEComponentWindowSelection(
-                component: .central,
-                startMs: viewModel.rideCentralWindowStartMs,
-                endMs: viewModel.rideCentralWindowEndMs
-            ))
+            append(.central, viewModel.rideCentralWindowStartMs, viewModel.rideCentralWindowEndMs, 1)
         }
         if viewModel.rideIncludesResponseComponent {
-            windows.append(RIDEComponentWindowSelection(
-                component: .response,
-                startMs: viewModel.rideResponseWindowStartMs,
-                endMs: viewModel.rideResponseWindowEndMs
-            ))
+            let responseAnchor = viewModel.rideResponseLatencySource == .stimulusLocked
+                ? 0
+                : viewModel.rideDefaultResponseLatencyMs
+            append(.response,
+                   viewModel.rideResponseWindowStartMs + responseAnchor,
+                   viewModel.rideResponseWindowEndMs + responseAnchor,
+                   2)
         }
         return windows
+    }
+
+    /// The free-form windows for whichever mode is showing. RIDE keeps its own
+    /// fixed three; every other mode gets a list you can add to.
+    private var activeUserWindows: [TrialWindowSelection] {
+        viewModel.windows(for: viewModel.analysisMode).enumerated().map { index, window in
+            TrialWindowSelection(
+                id: window.id.uuidString,
+                label: window.name,
+                startMs: window.startMs,
+                endMs: window.endMs,
+                colorIndex: index
+            )
+        }
+    }
+
+    /// What the overlay should draw right now.
+    private var activeWindowSelections: [TrialWindowSelection] {
+        viewModel.analysisMode == .ride ? activeRIDEComponentWindows : activeUserWindows
+    }
+
+    private func setWindow(id: String, startMs: Double, endMs: Double) {
+        if viewModel.analysisMode == .ride {
+            guard let component = RIDEAnalyzer.Component(rawValue: id) else { return }
+            setRIDEComponentWindow(component, startMs: startMs, endMs: endMs)
+            return
+        }
+        guard let uuid = UUID(uuidString: id) else { return }
+        viewModel.updateWindow(uuid, startMs: startMs, endMs: endMs, for: viewModel.analysisMode)
     }
 
     var body: some View {
@@ -190,28 +308,77 @@ struct SingleTrialAnalysisSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     modeControls
-                    selectionControls
-                    scaleControls
-                    trialInspectorRow
-                    parameterControls
-                    runBar
+                    if viewModel.analysisMode == .clusterStatistics {
+                        ClusterStatisticsPane(
+                            viewModel: viewModel,
+                            rawSignal: rawSignal,
+                            rawSegments: rawSegments,
+                            categories: categories,
+                            sensorLayout: sensorLayout,
+                            averageReference: averageReference,
+                            baselineCorrected: baselineCorrected,
+                            badChannels: badChannels,
+                            channelName: channelName,
+                            categoryColor: categoryColor,
+                            displayCategory: displayCategory
+                        )
+                    } else {
+                        selectionControls
+                        setupSection
+                        runBar
 
-                    if viewModel.analysisMode == .measurements, let result = viewModel.result {
-                        Divider()
-                        resultsSection(result)
-                    } else if viewModel.analysisMode == .woody, let result = currentWoodyResult {
-                        Divider()
-                        woodyResultsSection(result)
-                    } else if viewModel.analysisMode == .ride, let result = currentRIDEResult {
-                        Divider()
-                        rideResultsSection(result)
-                    } else if viewModel.analysisMode == .cwtRidge, let result = currentCWTResult {
-                        Divider()
-                        cwtResultsSection(result)
-                    } else if let statusMessage = viewModel.statusMessage {
-                        Text(statusMessage)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        if viewModel.analysisMode == .measurements, let result = viewModel.result {
+                            Divider()
+                            resultsSection(result)
+                        } else if viewModel.analysisMode == .woody, let result = currentWoodyResult {
+                            Divider()
+                            woodyResultsSection(result)
+                        } else if viewModel.analysisMode == .ride, let result = currentRIDEResult {
+                            Divider()
+                            rideResultsSection(result)
+                        } else if viewModel.analysisMode == .cwtRidge, let result = currentCWTResult {
+                            Divider()
+                            cwtResultsSection(result)
+                        } else if viewModel.analysisMode == .trialDiagnostics, !viewModel.diagnosticsRows.isEmpty {
+                            Divider()
+                            TrialDiagnosticsDashboard(
+                                categories: viewModel.diagnosticsRows,
+                                axis: $viewModel.diagnosticsAxis,
+                                selectedMeasure: $viewModel.diagnosticsMeasure,
+                                secondaryMeasure: $viewModel.diagnosticsSecondaryMeasure,
+                                groupCount: $viewModel.diagnosticsGroupCount,
+                                similarityTrials: viewModel.similarityResults?
+                                    .first(where: { $0.name == viewModel.selectedCategory })?.trials ?? [],
+                                exclusions: viewModel.selectionExclusions,
+                                outcome: viewModel.selectionOutcome,
+                                averageAll: viewModel.selectionAverageAll,
+                                averageKept: viewModel.selectionAverageKept,
+                                criteria: $viewModel.selectionCriteria,
+                                reviewedCategory: viewModel.selectedCategory,
+                                committedSummary: committedExclusionSummary,
+                                isCategoryCommitted: isSelectedCategoryCommitted,
+                                committedCategoryCount: committedExclusionCategoryCount,
+                                hasOverrides: !viewModel.selectionReview.isEmpty,
+                                onSetExcluded: canCommitTrialExclusion ? { index, isExcluded in
+                                    viewModel.setTrialExcluded(isExcluded, trialIndex: index)
+                                    refreshTrialSelection()
+                                } : nil,
+                                onResetOverrides: canCommitTrialExclusion ? {
+                                    viewModel.clearSelectionReview()
+                                    refreshTrialSelection()
+                                } : nil,
+                                onCommit: canCommitTrialExclusion ? { commitTrialExclusion() } : nil,
+                                onClear: canCommitTrialExclusion ? { onCommitTrialExclusion?(nil) } : nil,
+                                onClearCategory: canCommitTrialExclusion ? { clearCommittedCategory() } : nil
+                            )
+                            .onChange(of: viewModel.selectionCriteria) { _, _ in
+                                refreshTrialSelection()
+                            }
+                        } else if let statusMessage = viewModel.statusMessage {
+                            Text(statusMessage)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 .padding(18)
@@ -256,15 +423,16 @@ struct SingleTrialAnalysisSheet: View {
     // MARK: - Header / footer
 
     private var showsFooter: Bool {
-        viewModel.result != nil || viewModel.woodyResult != nil || viewModel.rideResult != nil || onClose != nil
+        viewModel.result != nil || viewModel.woodyResult != nil || viewModel.rideResult != nil
+            || onClose != nil
     }
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Single Trial Analysis")
+                Text("Trials & Statistics")
                     .font(.title3.weight(.semibold))
-                Text("Measure trial values or estimate latency shifts with Woody alignment")
+                Text("Measure, align, and compare retained single trials")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -318,7 +486,7 @@ struct SingleTrialAnalysisSheet: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 360)
+            .frame(maxWidth: 620)
 
             Button {
                 showsMethodHelp = true
@@ -377,6 +545,15 @@ struct SingleTrialAnalysisSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Cluster Statistics")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Compares segmentation categories across channels and time using either a two-condition t-test or a one-way omnibus F-test. Both permute independent trial labels and control family-wise error with the maximum spatiotemporal cluster mass.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 Divider()
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -388,6 +565,7 @@ struct SingleTrialAnalysisSheet: View {
                     Text("• Du, Kibbe & Lin (2006). Bioinformatics 22(17):2059–2065 (CWT peak detection).")
                     Text("• Sakoe & Chiba (1978). IEEE TASSP 26(1):43–49 (DTW).")
                     Text("• Ramsay & Silverman (2005). Functional Data Analysis, 2nd ed. (curve registration).")
+                    Text("• Maris & Oostenveld (2007). J. Neurosci. Methods 164(1):177–190 (cluster permutation).")
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -482,7 +660,9 @@ struct SingleTrialAnalysisSheet: View {
         if let signal = averagedSignal, let segment = averagedSegment {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Drag on the trace to select the analysis window")
+                    Text(viewModel.analysisMode == .trialDiagnostics
+                         ? "Add a window below to select what to score"
+                         : "Drag on the trace to select the analysis window")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Toggle("Show all conditions", isOn: $viewModel.showsAllConditionsInButterfly)
@@ -509,10 +689,9 @@ struct SingleTrialAnalysisSheet: View {
                     channelName: channelName,
                     windowStartMs: $viewModel.windowStartMs,
                     windowEndMs: $viewModel.windowEndMs,
-                    componentWindows: isRIDEWindowMode ? activeRIDEComponentWindows : [],
-                    colorForComponent: color(forRIDEComponent:),
-                    onComponentWindowChange: { component, startMs, endMs in
-                        setRIDEComponentWindow(component, startMs: startMs, endMs: endMs)
+                    componentWindows: activeWindowSelections,
+                    onComponentWindowChange: { id, startMs, endMs in
+                        setWindow(id: id, startMs: startMs, endMs: endMs)
                     },
                     onTapChannel: { channel in
                         viewModel.channelScope = .singleChannel
@@ -524,7 +703,8 @@ struct SingleTrialAnalysisSheet: View {
                     trialFigureSaveMenu(
                         title: singleTrialButterflyTitle(segments: plottedSegments),
                         legend: legendItems(for: plottedSegments),
-                        size: CGSize(width: 820, height: 300)
+                        size: CGSize(width: 820, height: 300),
+                        seconds: figureSeconds(plottedSegments, samplingRate: signal.samplingRate)
                     ) {
                         SingleTrialWindowPicker(
                             data: signal.data,
@@ -537,8 +717,7 @@ struct SingleTrialAnalysisSheet: View {
                             channelName: channelName,
                             windowStartMs: .constant(viewModel.windowStartMs),
                             windowEndMs: .constant(viewModel.windowEndMs),
-                            componentWindows: isRIDEWindowMode ? activeRIDEComponentWindows : [],
-                            colorForComponent: color(forRIDEComponent:),
+                            componentWindows: activeWindowSelections,
                             onComponentWindowChange: { _, _, _ in },
                             onTapChannel: { _ in }
                         )
@@ -590,6 +769,7 @@ struct SingleTrialAnalysisSheet: View {
                     selectedCategory: viewModel.selectedCategory,
                     windowStartMs: viewModel.windowStartMs,
                     windowEndMs: viewModel.windowEndMs,
+                    componentWindows: activeWindowSelections,
                     woodyLatencyShiftSamples: currentWoodyLatencyShiftSamples,
                     showsWoodyAlignedOverlay: viewModel.showsWoodyAlignedOverlay,
                     woodyAlignmentProgress: viewModel.woodyAlignmentAnimationProgress,
@@ -602,7 +782,8 @@ struct SingleTrialAnalysisSheet: View {
                     trialFigureSaveMenu(
                         title: singleTrialChannelInspectorTitle(channel: selectedChannel),
                         legend: singleChannelLegendItems(),
-                        size: CGSize(width: 820, height: 320)
+                        size: CGSize(width: 820, height: 320),
+                        seconds: figureSeconds(averagedSegments, samplingRate: averageSignal.samplingRate)
                     ) {
                         SingleTrialChannelInspectorPlot(
                             averagedSignal: averageSignal,
@@ -620,6 +801,7 @@ struct SingleTrialAnalysisSheet: View {
                             selectedCategory: viewModel.selectedCategory,
                             windowStartMs: viewModel.windowStartMs,
                             windowEndMs: viewModel.windowEndMs,
+                            componentWindows: activeWindowSelections,
                             woodyLatencyShiftSamples: currentWoodyLatencyShiftSamples,
                             showsWoodyAlignedOverlay: viewModel.showsWoodyAlignedOverlay,
                             woodyAlignmentProgress: viewModel.woodyAlignmentAnimationProgress,
@@ -647,7 +829,7 @@ struct SingleTrialAnalysisSheet: View {
     @ViewBuilder
     private var alignmentInspectorControls: some View {
         switch viewModel.analysisMode {
-        case .measurements:
+        case .measurements, .clusterStatistics, .trialDiagnostics:
             EmptyView()
         case .cwtRidge:
             EmptyView()
@@ -855,17 +1037,38 @@ struct SingleTrialAnalysisSheet: View {
     }
 
     @ViewBuilder
+
+    /// Seconds of signal an epoch figure spans, for the exported scale caption.
+    /// Nil when there is nothing to measure, so the caption omits the sweep
+    /// speed rather than inventing one.
+    private func figureSeconds(_ segments: [EpochSegment], samplingRate: Double) -> Double? {
+        guard let segment = segments.first, samplingRate > 0 else { return nil }
+        let samples = segment.endSample - segment.startSample + 1
+        guard samples > 0 else { return nil }
+        return Double(samples) / samplingRate
+    }
+
     private func trialFigureSaveMenu<Figure: View>(
         title: String,
         legend: [(String, Color)],
         size: CGSize,
+        /// Seconds of signal spanning `size.width`, so the caption can state a
+        /// sweep speed. Omitted rather than guessed when the caller does not
+        /// know — see `FigureScale`.
+        seconds: Double? = nil,
         @ViewBuilder figure: @escaping () -> Figure
     ) -> some View {
         Menu("Save Figure As…") {
             ForEach(FigureFormat.allCases) { format in
                 Button(format.label) {
                     FigureExporter.save(
-                        FigureCard(title: title, legend: legend, size: size, content: figure),
+                        FigureCard(
+                            title: title, legend: legend, size: size,
+                            scale: FigureScale(
+                                amplitudeScale: amplitudeScale, plotSize: size, seconds: seconds
+                            ),
+                            content: figure
+                        ),
                         defaultName: figureFileName(title),
                         format: format
                     )
@@ -876,9 +1079,156 @@ struct SingleTrialAnalysisSheet: View {
 
     // MARK: - Parameters
 
+    /// Add/rename/remove for the free-form windows. Shown in every mode that
+    /// has them, so the overlay is never something you can see but not create.
+    @ViewBuilder
+    private var analysisWindowControls: some View {
+        let mode = viewModel.analysisMode
+        let windows = viewModel.windows(for: mode)
+
+        HStack(spacing: 8) {
+            Text("Windows").font(.caption).foregroundStyle(.secondary)
+
+            ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
+                HStack(spacing: 3) {
+                    Circle()
+                        .fill(TrialWindowPalette.color(at: index))
+                        .frame(width: 7, height: 7)
+                    TextField("Name", text: Binding(
+                        get: { window.name },
+                        set: { newName in
+                            var current = viewModel.windows(for: mode)
+                            guard let position = current.firstIndex(where: { $0.id == window.id }) else { return }
+                            current[position].name = newName
+                            viewModel.setWindows(current, for: mode)
+                        }
+                    ))
+                    .textFieldStyle(.plain)
+                    .frame(width: 46)
+                    .font(.caption)
+                    Text("\(Int(window.startMs))–\(Int(window.endMs))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Button {
+                        viewModel.removeWindow(window.id, for: mode)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 4))
+            }
+
+            let limit = viewModel.maximumWindows(for: mode)
+            Button {
+                // Placing the window at the exact drag span is the whole point
+                // of dragging first, so once it is placed the drag highlight
+                // has done its job — clear it rather than leaving it sitting
+                // on top of (and indistinguishable from) the window it just
+                // became. A fresh drag afterward writes right back into the
+                // same binding, so nothing about that interaction is lost.
+                if viewModel.addWindow(for: mode) {
+                    viewModel.windowStartMs = nil
+                    viewModel.windowEndMs = nil
+                }
+            } label: {
+                Label("Add", systemImage: "plus")
+            }
+            .font(.caption)
+            .disabled(windows.count >= limit)
+            .help(windows.count >= limit
+                  ? (limit == 1
+                     ? "Woody estimates one rigid shift per trial, so it aligns on a single window."
+                     : "Window limit reached.")
+                  : viewModel.hasWindow
+                  ? "Add a window at the highlighted span."
+                  : "Add a window, then drag it or its edges on the plot above.")
+
+            if windows.isEmpty {
+                Text(limit == 1
+                     ? "Add the window Woody should align on — it gets exactly one."
+                     : "Add a window to score a single component instead of the whole epoch.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// The plot and its controls, foldable.
+    ///
+    /// Everything above the results — the butterfly, the scale, the parameters,
+    /// the windows — is setup you touch once per run and then want out of the
+    /// way. Left expanded, the answer always begins below the fold.
+    @ViewBuilder
+    private var setupSection: some View {
+        // Folded only while a run is actually possible. The window that `canRun`
+        // requires is set by dragging on the trace INSIDE this section, so
+        // collapsing it while the precondition is unmet hides the only cure and
+        // leaves the run button disabled with no way to fix it.
+        let isOpen = viewModel.setupIsExpanded || !canRun
+
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { viewModel.setupIsExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                    Text("Setup").font(.subheadline.weight(.semibold))
+                    if !isOpen {
+                        Text(setupSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canRun)
+            .help(canRun ? "Hide the plot and parameters" : "Stays open until a run is possible")
+
+            if isOpen {
+                scaleControls
+                trialInspectorRow
+                parameterControls
+            }
+        }
+    }
+
+    /// What the collapsed header has to say so folding it costs nothing.
+    private var setupSummary: String {
+        var parts: [String] = []
+        if let category = viewModel.selectedCategory { parts.append(category) }
+        if let start = viewModel.windowStartMs, let end = viewModel.windowEndMs {
+            parts.append("\(Int(start))–\(Int(end)) ms")
+        }
+        let windows = viewModel.windows(for: viewModel.analysisMode)
+        if !windows.isEmpty {
+            parts.append(windows.map(\.name).joined(separator: "/"))
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private var parameterControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             switch viewModel.analysisMode {
+            case .clusterStatistics:
+                EmptyView()
+            case .trialDiagnostics:
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 20) {
+                        labeledField("Adaptive ± ms", value: $viewModel.adaptiveHalfWidthMs, width: 70)
+                        Toggle("Compare across all categories", isOn: $viewModel.diagnosticsUsesAllCategories)
+                            .toggleStyle(.checkbox)
+                            .help("Scores every category at once so a trial can be checked against the other conditions' averages — the mislabel test.")
+                    }
+                    analysisWindowControls
+                }
             case .measurements:
                 HStack(spacing: 20) {
                     labeledField("Adaptive ± ms", value: $viewModel.adaptiveHalfWidthMs, width: 70)
@@ -890,7 +1240,9 @@ struct SingleTrialAnalysisSheet: View {
                         .disabled(!hasCurrentWoodyAlignment)
                         .help("Run the measurement table on the most recent Woody-aligned traces for this selection.")
                 }
+                analysisWindowControls
             case .woody:
+                analysisWindowControls
                 HStack(spacing: 20) {
                     Toggle("All categories", isOn: $viewModel.woodyRunsAllCategories)
                         .toggleStyle(.checkbox)
@@ -940,6 +1292,7 @@ struct SingleTrialAnalysisSheet: View {
                     .foregroundStyle(.secondary)
             case .cwtRidge:
                 VStack(alignment: .leading, spacing: 8) {
+                    analysisWindowControls
                     HStack(spacing: 16) {
                         Toggle("All categories", isOn: $viewModel.cwtRunsAllCategories)
                             .toggleStyle(.checkbox)
@@ -1049,7 +1402,7 @@ struct SingleTrialAnalysisSheet: View {
                             }
                         }
                     }
-                    Text("Drag each labeled component window on the butterfly trace. C estimation uses its own window; S and R windows define the component ranges used during decomposition.")
+                    Text("S and C windows are stimulus-relative. R is response-relative and is drawn at the configured response marker. A true RIDE R cluster requires a response marker for every trial; one fixed marker cannot capture reaction-time variability.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1101,6 +1454,7 @@ struct SingleTrialAnalysisSheet: View {
             Button(runButtonTitle) { runCurrentMode() }
                 .disabled(!canRun || viewModel.isRunning)
                 .keyboardShortcut(.defaultAction)
+                .help(canRun ? runButtonTitle : missingPreconditionHint)
             if let progress = viewModel.runProgress, viewModel.isRunning {
                 VStack(alignment: .leading, spacing: 3) {
                     ProgressView(value: min(max(progress.fraction, 0), 1))
@@ -1118,7 +1472,7 @@ struct SingleTrialAnalysisSheet: View {
                 .accessibilityLabel("\(progress.title). \(progress.detail)")
             }
             if !canRun {
-                Text("Pick a category, channel/ROI, and drag a window on the trace above.")
+                Text(missingPreconditionHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1132,6 +1486,8 @@ struct SingleTrialAnalysisSheet: View {
         case .woody: "Run Woody Alignment"
         case .ride: "Run RIDE"
         case .cwtRidge: "Run CWT Ridge"
+        case .clusterStatistics: "Run Cluster Statistics"
+        case .trialDiagnostics: "Score Trials"
         }
     }
 
@@ -1145,6 +1501,10 @@ struct SingleTrialAnalysisSheet: View {
             runRIDE()
         case .cwtRidge:
             runCWTRidge()
+        case .clusterStatistics:
+            break
+        case .trialDiagnostics:
+            runTrialDiagnostics()
         }
     }
 
@@ -1153,7 +1513,8 @@ struct SingleTrialAnalysisSheet: View {
               let averageSignal = averagedSignal,
               let averageSegment = averagedSegment,
               let rawSignal,
-              !selectedChannelIndices.isEmpty else { return }
+              !selectedChannelIndices.isEmpty,
+              let span = primaryAnalysisSpan(for: .measurements) else { return }
 
         let averageSamples = channelResolvedSamples(
             signal: averageSignal, startSample: averageSegment.startSample,
@@ -1167,8 +1528,8 @@ struct SingleTrialAnalysisSheet: View {
             averageStimulusOffsetSamples: averageSegment.stimulusOffsetSamples,
             samplingRate: averageSignal.samplingRate,
             trials: trials,
-            windowStartMs: viewModel.windowStartMs ?? 0,
-            windowEndMs: viewModel.windowEndMs ?? 0,
+            windowStartMs: span.startMs,
+            windowEndMs: span.endMs,
             adaptiveHalfWidthMs: viewModel.adaptiveHalfWidthMs,
             splitCount: viewModel.splitCount,
             outlierThresholdSD: viewModel.outlierThresholdSD,
@@ -1179,10 +1540,387 @@ struct SingleTrialAnalysisSheet: View {
         viewModel.statusMessage = result == nil ? "Could not compute a result for this window." : nil
     }
 
+    /// Scores every trial against its category's leave-one-out average, and —
+    /// when comparing across categories — against the other conditions too, then
+    /// joins the result to the amplitude/latency measures for the panels.
+    private func runTrialDiagnostics() {
+        guard let selected = viewModel.selectedCategory,
+              let rawSignal,
+              !selectedChannelIndices.isEmpty else { return }
+
+        let names = viewModel.diagnosticsUsesAllCategories
+            ? orderedCategoryNames()
+            : [selected]
+
+        let inputs: [TrialSimilarityAnalyzer.CategoryInput] = names.compactMap { name in
+            let trials = measurementTrials(category: name, rawSignal: rawSignal)
+            guard trials.count >= 2 else { return nil }
+            return TrialSimilarityAnalyzer.CategoryInput(name: name, trials: trials)
+        }
+        guard !inputs.isEmpty else {
+            viewModel.diagnosticsRows = []
+            viewModel.statusMessage = "Need at least two trials in a category to compare against."
+            viewModel.setupIsExpanded = true
+            return
+        }
+
+        guard let span = diagnosticsAnalysisSpan else {
+            viewModel.diagnosticsRows = []
+            viewModel.statusMessage = "Add a window above to say what to score."
+            viewModel.setupIsExpanded = true
+            return
+        }
+        let windowStart = span.startMs
+        let windowEnd = span.endMs
+        guard let similarity = TrialSimilarityAnalyzer.analyze(
+            categories: inputs,
+            samplingRate: rawSignal.samplingRate,
+            windowStartMs: windowStart,
+            windowEndMs: windowEnd
+        ) else {
+            viewModel.diagnosticsRows = []
+            viewModel.statusMessage = "Could not score trials for this window."
+            viewModel.setupIsExpanded = true
+            return
+        }
+        viewModel.similarityResults = similarity
+
+        // Only the selected category gets panels; the others were scored so the
+        // cross-category comparison had something to compare against.
+        guard let scored = similarity.first(where: { $0.name == selected }),
+              let input = inputs.first(where: { $0.name == selected }) else {
+            viewModel.diagnosticsRows = []
+            return
+        }
+
+        let reference = TrialSimilarityAnalyzer.average(input.trials, reference: .mean) ?? []
+        let measures = SingleTrialAnalyzer.analyze(
+            averageSamples: reference.map(Float.init),
+            averageStimulusOffsetSamples: input.trials.first?.stimulusOffsetSamples ?? 0,
+            samplingRate: rawSignal.samplingRate,
+            trials: input.trials,
+            windowStartMs: windowStart,
+            windowEndMs: windowEnd,
+            adaptiveHalfWidthMs: viewModel.adaptiveHalfWidthMs,
+            splitCount: viewModel.diagnosticsGroupCount,
+            outlierThresholdSD: viewModel.outlierThresholdSD,
+            distributionChunkCount: viewModel.distributionChunkCount
+        )
+
+        let rows = scored.trials.map { similarity -> TrialDiagnosticsRow in
+            let measured = measures?.trials.first { $0.trialIndex == similarity.trialIndex }
+            return TrialDiagnosticsRow(
+                id: similarity.trialIndex,
+                trialIndex: similarity.trialIndex,
+                sourceTimeSeconds: similarity.sourceTimeSeconds,
+                correlation: similarity.correlation,
+                slope: similarity.slope,
+                normalizedResidualRMS: similarity.normalizedResidualRMS,
+                robustDistance: similarity.robustDistance,
+                classification: similarity.classification,
+                bestMatchingCategory: similarity.bestMatchingCategory,
+                matchesOwnCategory: similarity.matchesOwnCategory,
+                matchesOwnPool: similarity.matchesOwnPool,
+                measures: [
+                    "Peak (own, +)": measured?.peakAmplitudeOwnLatencyPositive ?? 0,
+                    "Peak (own, −)": measured?.peakAmplitudeOwnLatencyNegative ?? 0,
+                    "Peak latency (+) ms": measured?.peakLatencyOwnPositiveMs ?? 0,
+                    "Peak latency (−) ms": measured?.peakLatencyOwnNegativeMs ?? 0,
+                    "Mean amplitude": measured?.meanAmplitude ?? 0,
+                    "Peak-to-peak": measured?.peakToPeakAmplitude ?? 0,
+                    "Correlation (r)": similarity.correlation,
+                    "Slope (β)": similarity.slope,
+                    "Residual RMS": similarity.normalizedResidualRMS
+                ]
+            )
+        }
+
+        let doubles = input.trials.map { $0.samples.map(Double.init) }
+        viewModel.diagnosticsRows = [
+            TrialDiagnosticsCategory(
+                name: selected,
+                rows: rows,
+                residuals: TrialDriftStatistics.residuals(trials: doubles, reference: reference),
+                convergence: TrialDriftStatistics.convergence(trials: doubles),
+                windowSeries: windowSeries(
+                    trials: input.trials,
+                    reference: reference,
+                    samplingRate: rawSignal.samplingRate
+                ),
+                trialWaveforms: Dictionary(
+                    uniqueKeysWithValues: doubles.enumerated().map { ($0.offset, $0.element) }
+                ),
+                averageWaveform: reference,
+                samplingRate: rawSignal.samplingRate,
+                stimulusOffsetSamples: input.trials.first?.stimulusOffsetSamples ?? 0
+            )
+        ]
+
+        // SNR is a multichannel measure, so the selection panel needs the whole
+        // net rather than the channel-resolved series the scores were built on.
+        // Sliced once here; dragging a threshold only re-scores.
+        viewModel.selectionTrialMatrices = multichannelTrials(category: selected, rawSignal: rawSignal)
+        viewModel.selectionBaselineSampleCount = max(
+            Int((-min(windowStart, 0) / 1000 * rawSignal.samplingRate).rounded()),
+            0
+        )
+        refreshTrialSelection()
+        viewModel.statusMessage = nil
+        withAnimation(.easeInOut(duration: 0.18)) { viewModel.setupIsExpanded = false }
+    }
+
+    // MARK: - Committing the review (ROADMAP TW-5)
+
+    /// Committing needs somewhere to put the decision and real segments to name
+    /// trials in. Without both, the panel previews and commits nothing — which
+    /// is the correct state, not a degraded one.
+    private var canCommitTrialExclusion: Bool {
+        onCommitTrialExclusion != nil && !rawSegments.isEmpty
+    }
+
+    private var isSelectedCategoryCommitted: Bool {
+        guard let category = viewModel.selectedCategory, let step = committedTrialExclusion else { return false }
+        return step.excludedTrials.contains { $0.category == category }
+    }
+
+    /// What the file already carries, for the bar to show. Counts the categories
+    /// rather than listing them: the point is that a commit here does not
+    /// disturb the others.
+    private var committedExclusionSummary: String? {
+        guard let step = committedTrialExclusion else { return nil }
+        let excluded = step.excludedTrials.filter(\.isExcluded)
+        guard !excluded.isEmpty else { return nil }
+        let categories = Set(excluded.map(\.category)).count
+        return "Committed: \(excluded.count) trial\(excluded.count == 1 ? "" : "s") "
+            + "in \(categories) categor\(categories == 1 ? "y" : "ies")"
+    }
+
+    /// Categories the committed record actually excludes something in. Drives
+    /// whether clearing has to ask *which*.
+    private var committedExclusionCategoryCount: Int {
+        guard let step = committedTrialExclusion else { return 0 }
+        return Set(step.excludedTrials.filter(\.isExcluded).map(\.category)).count
+    }
+
+    /// Removes the category under review from the committed record, leaving
+    /// every other category's decision standing — the counterpart to committing
+    /// one category at a time.
+    ///
+    /// The session review is deliberately left alone. Clearing withdraws the
+    /// *committed* decision; what the panel is showing is unsaved work, and
+    /// discarding it as a side effect of clearing would lose a review nobody
+    /// asked to throw away.
+    private func clearCommittedCategory() {
+        guard let category = viewModel.selectedCategory,
+              let step = committedTrialExclusion,
+              let onCommitTrialExclusion else { return }
+
+        // Nil when that was the last category — an exclusion record that
+        // excludes nothing is not a decision worth keeping.
+        onCommitTrialExclusion(TrialExclusionResolver.removing(category: category, from: step))
+        viewModel.statusMessage = "Cleared the committed exclusion for \(category)."
+    }
+
+    /// The scoring context the recorded `r`/`β` are only interpretable against.
+    private var trialExclusionScoringContext: TrialExclusionResolver.ScoringContext {
+        let span = diagnosticsAnalysisSpan
+        return TrialExclusionResolver.ScoringContext(
+            channelScope: viewModel.channelScope.rawValue,
+            channels: selectedChannelIndices.map(channelName),
+            windowStartMs: span?.startMs,
+            windowEndMs: span?.endMs
+        )
+    }
+
+    /// Turns the reviewed list into decisions the resolver can key to segments.
+    ///
+    /// Joins on the scored trials rather than on segment order, because a trial
+    /// index means "position among this category's scores" and only
+    /// `TrialSimilarity` knows the source time behind it.
+    private func reviewedExclusions(for category: String) -> [TrialExclusionResolver.ReviewedExclusion] {
+        guard let scored = viewModel.similarityResults?.first(where: { $0.name == category }) else { return [] }
+        let timeByIndex = Dictionary(
+            scored.trials.map { ($0.trialIndex, $0.sourceTimeSeconds) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        return viewModel.selectionExclusions.compactMap { exclusion in
+            guard let time = timeByIndex[exclusion.trialIndex] else { return nil }
+            return TrialExclusionResolver.ReviewedExclusion(
+                category: category,
+                trialIndex: exclusion.trialIndex,
+                sourceTimeSeconds: time,
+                reasons: exclusion.reasons,
+                origin: exclusion.origin
+            )
+        }
+    }
+
+    /// Commits the category under review, merging into whatever is already
+    /// committed for the others.
+    ///
+    /// Refuses outright when any reviewed trial cannot be matched to a segment.
+    /// The alternative is writing a record that silently fails to resolve on the
+    /// next load — an exclusion that looks committed and excludes nothing.
+    func commitTrialExclusion() {
+        guard let category = viewModel.selectedCategory, let onCommitTrialExclusion else { return }
+
+        let result = TrialExclusionResolver.merged(
+            reviewed: reviewedExclusions(for: category),
+            for: category,
+            criteria: viewModel.selectionCriteria,
+            context: trialExclusionScoringContext,
+            into: committedTrialExclusion,
+            segments: rawSegments
+        )
+
+        guard result.isComplete else {
+            viewModel.statusMessage = "\(result.unmatched.count) reviewed trial"
+                + "\(result.unmatched.count == 1 ? "" : "s") could not be matched to a segment. "
+                + "Re-run the analysis against the current epochs before committing."
+            return
+        }
+
+        // An exclusion that now removes nothing is not a decision to record.
+        onCommitTrialExclusion(result.step.excludedTrials.contains(where: \.isExcluded) ? result.step : nil)
+
+        // The overrides deliberately stay: they are what the committed record
+        // now says, and clearing them would snap the list back to the rule's raw
+        // proposal — showing something other than what was just committed.
+        let excluded = result.step.excludedTrials.filter { $0.category == category && $0.isExcluded }.count
+        viewModel.statusMessage = "Committed \(excluded) excluded trial"
+            + "\(excluded == 1 ? "" : "s") for \(category)."
+    }
+
+    /// Re-applies the exclusion criteria to the scores already computed, then
+    /// folds in the operator's overrides. Cheap enough to run on every slider
+    /// drag except the null, which dominates.
+    ///
+    /// The overrides are applied *here*, on the one path that also feeds the
+    /// before/after overlay and the null, so the preview cannot show one set of
+    /// trials while a commit would write another. Everything downstream reads
+    /// `selectionExclusions`, which is now the reviewed set rather than the
+    /// criteria's raw proposal.
+    func refreshTrialSelection() {
+        guard let selected = viewModel.selectedCategory,
+              let scored = viewModel.similarityResults?.first(where: { $0.name == selected }) else {
+            viewModel.selectionExclusions = []
+            viewModel.ruleProposedTrials = []
+            viewModel.selectionOutcome = nil
+            return
+        }
+
+        let proposals = TrialSelectionAnalyzer.exclusions(
+            from: scored.trials,
+            criteria: viewModel.selectionCriteria
+        )
+        viewModel.ruleProposedTrials = Set(proposals.map(\.trialIndex))
+
+        let exclusions = TrialSelectionAnalyzer.reviewed(
+            proposals: proposals,
+            review: viewModel.selectionReview
+        )
+        viewModel.selectionExclusions = exclusions
+
+        // A restored trial is listed but not excluded, so the average, the null,
+        // and the counts all have to read `isExcluded` rather than the row count.
+        let excludedIndices = Set(exclusions.filter(\.isExcluded).map(\.trialIndex))
+
+        viewModel.selectionOutcome = TrialSelectionAnalyzer.evaluate(
+            trials: viewModel.selectionTrialMatrices,
+            excludedIndices: excludedIndices,
+            baselineSampleCount: viewModel.selectionBaselineSampleCount
+        )
+
+        // Channel-resolved averages for the overlay, from the same series the
+        // scores were computed on.
+        guard let rawSignal else { return }
+        let inputs = measurementTrials(category: selected, rawSignal: rawSignal)
+        viewModel.selectionAverageAll = TrialSimilarityAnalyzer.average(inputs, reference: .mean) ?? []
+        let kept = inputs.enumerated().filter { !excludedIndices.contains($0.offset) }.map(\.element)
+        viewModel.selectionAverageKept = kept.count >= 2
+            ? (TrialSimilarityAnalyzer.average(kept, reference: .mean) ?? [])
+            : viewModel.selectionAverageAll
+    }
+
+    /// Every channel of every trial in `category`, as `[trial][channel][sample]`.
+    private func multichannelTrials(category: String, rawSignal: MFFSignalData) -> [[[Float]]] {
+        rawSegments.filter { $0.category == category }.map { segment in
+            rawSignal.data.map { channel in
+                let lower = max(segment.startSample, 0)
+                let upper = min(segment.endSample, channel.count - 1)
+                guard lower <= upper else { return [Float]() }
+                return Array(channel[lower ... upper])
+            }
+        }
+    }
+
+    /// Per-trial numbers inside each highlighted window: the peak in the window,
+    /// and how well the trial matches the average within that window alone.
+    private func windowSeries(
+        trials: [SingleTrialAnalyzer.TrialInput],
+        reference: [Double],
+        samplingRate: Double
+    ) -> [TrialWindowSeries] {
+        let windows = viewModel.windows(for: .trialDiagnostics)
+        guard !windows.isEmpty else { return [] }
+
+        return windows.enumerated().map { colorIndex, window in
+            var peaks: [(trialIndex: Int, value: Double)] = []
+            var scores: [(trialIndex: Int, correlation: Double, slope: Double)] = []
+
+            for (index, trial) in trials.enumerated() {
+                let samples = trial.samples.map(Double.init)
+                guard let range = window.sampleRange(
+                    stimulusOffsetSamples: trial.stimulusOffsetSamples,
+                    samplingRate: samplingRate,
+                    length: samples.count
+                ), range.count > 2 else { continue }
+
+                // Largest absolute deflection in the window, signed — the peak
+                // a reader means when pointing at a component.
+                let slice = Array(samples[range])
+                let peak = slice.max(by: { abs($0) < abs($1) }) ?? 0
+                peaks.append((index, peak))
+
+                let scored = TrialAlignmentMetrics.windowScores(
+                    trial: samples,
+                    reference: reference,
+                    windows: [window],
+                    stimulusOffsetSamples: trial.stimulusOffsetSamples,
+                    samplingRate: samplingRate
+                )
+                if let first = scored.first {
+                    scores.append((index, first.correlation, first.slope))
+                }
+            }
+
+            return TrialWindowSeries(
+                id: window.id,
+                name: window.name,
+                colorIndex: colorIndex,
+                startMs: window.startMs,
+                endMs: window.endMs,
+                peaks: peaks,
+                scores: scores
+            )
+        }
+    }
+
+    /// Category names in a stable order, taken from the raw segments.
+    private func orderedCategoryNames() -> [String] {
+        var seen: [String] = []
+        for segment in rawSegments where !seen.contains(segment.category) {
+            seen.append(segment.category)
+        }
+        return seen
+    }
+
     private func runWoodyAlignment() {
         guard let category = viewModel.selectedCategory,
               let rawSignal,
-              !selectedChannelIndices.isEmpty else { return }
+              !selectedChannelIndices.isEmpty,
+              let span = primaryAnalysisSpan(for: .woody) else { return }
 
         latencyAnalysisTask?.cancel()
         viewModel.isRunning = true
@@ -1204,8 +1942,8 @@ struct SingleTrialAnalysisSheet: View {
             averageReference: averageReference,
             baselineCorrected: baselineCorrected,
             badChannels: badChannels,
-            windowStartMs: viewModel.windowStartMs ?? 0,
-            windowEndMs: viewModel.windowEndMs ?? 0,
+            windowStartMs: span.startMs,
+            windowEndMs: span.endMs,
             maxLagMs: viewModel.woodyMaxLagMs,
             maxIterations: viewModel.woodyMaxIterations,
             convergenceToleranceSamples: viewModel.woodyConvergenceToleranceSamples,
@@ -1304,7 +2042,8 @@ struct SingleTrialAnalysisSheet: View {
     private func runCWTRidge() {
         guard let category = viewModel.selectedCategory,
               let rawSignal,
-              !selectedChannelIndices.isEmpty else { return }
+              !selectedChannelIndices.isEmpty,
+              primaryAnalysisSpan(for: .cwtRidge) != nil else { return }
 
         latencyAnalysisTask?.cancel()
         viewModel.isRunning = true
@@ -1361,8 +2100,9 @@ struct SingleTrialAnalysisSheet: View {
         config.appliesDenoising = viewModel.cwtAppliesDenoising
         config.peakSource = viewModel.cwtPeakSource
         config.engine = viewModel.cwtEngine
-        config.windowStartMs = viewModel.windowStartMs
-        config.windowEndMs = viewModel.windowEndMs
+        let span = primaryAnalysisSpan(for: .cwtRidge)
+        config.windowStartMs = span?.startMs
+        config.windowEndMs = span?.endMs
         config.sakoeChibaBand = max(2, viewModel.cwtSakoeChibaBand)
         config.maxShiftSamples = max(1, Int((viewModel.cwtMaxShiftMs / 1000.0 * samplingRate).rounded()))
         config.priorSigmaSamples = max(1, viewModel.cwtPriorSigmaMs / 1000.0 * samplingRate)
@@ -1648,6 +2388,15 @@ struct SingleTrialAnalysisSheet: View {
                     Text("Iterations: \(last.iteration)")
                         .font(.caption.monospacedDigit())
                 }
+                Text("Median: \(String(format: "%.1f", result.medianShiftMs)) ms")
+                    .font(.caption.monospacedDigit())
+                Text("MAD: \(String(format: "%.1f", result.shiftMADMs)) ms")
+                    .font(.caption.monospacedDigit())
+                if result.lagLimitHitCount > 0 {
+                    Text("\(result.lagLimitHitCount) at limit")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
 
             labeledChart("Original vs Woody-Aligned Averages") {
@@ -1839,6 +2588,8 @@ struct SingleTrialAnalysisSheet: View {
             TableColumn("Shift (ms)", value: \.latencyShiftMs) { Text(String(format: "%.1f", $0.latencyShiftMs)) }.width(86)
             TableColumn("Shift (samples)", value: \.latencyShiftSamples) { Text("\($0.latencyShiftSamples)") }.width(108)
             TableColumn("r", value: \.correlation) { Text(String(format: "%.3f", $0.correlation)) }.width(64)
+            TableColumn("N") { Text("\($0.correlationSampleCount)") }.width(48)
+            TableColumn("Limit") { Text($0.reachedLagLimit ? "Yes" : "") }.width(52)
         }
     }
 
@@ -1889,10 +2640,19 @@ struct SingleTrialAnalysisSheet: View {
                             .font(.caption.monospacedDigit())
                     }
                 }
+                Text("Explained: \(String(format: "%.1f", result.explainedVariance * 100))%")
+                    .font(.caption.monospacedDigit())
+                Text("Residual RMS: \(String(format: "%.3f", result.residualRMS))")
+                    .font(.caption.monospacedDigit())
             }
-            Text("S is stimulus-locked at 0 ms for every trial; C and optional R are the components with trial-specific latency estimates.")
+            Text("C latency is the template's dominant deflection plus each trial's estimated adjustment. R is response-locked only when genuine per-trial response markers are supplied.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            ForEach(result.warnings, id: \.self) { warning in
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
 
             labeledChart("Original vs RIDE-Aligned Averages") {
                 alignedAverageAndButterflyRow(
@@ -2060,8 +2820,11 @@ struct SingleTrialAnalysisSheet: View {
             viewModel.windowStartMs = orderedStart
             viewModel.windowEndMs = orderedEnd
         case .response:
-            viewModel.rideResponseWindowStartMs = orderedStart
-            viewModel.rideResponseWindowEndMs = orderedEnd
+            let responseAnchor = viewModel.rideResponseLatencySource == .stimulusLocked
+                ? 0
+                : viewModel.rideDefaultResponseLatencyMs
+            viewModel.rideResponseWindowStartMs = orderedStart - responseAnchor
+            viewModel.rideResponseWindowEndMs = orderedEnd - responseAnchor
         }
     }
 
@@ -2240,18 +3003,21 @@ struct SingleTrialAnalysisSheet: View {
         Table(sortedRIDELatencies(result), sortOrder: $rideSortOrder) {
             TableColumn("#", value: \.trialIndex) { Text("\($0.trialIndex + 1)") }.width(42)
             TableColumn("Time (s)", value: \.sourceTimeSeconds) { Text(String(format: "%.1f", $0.sourceTimeSeconds)) }.width(74)
-            TableColumn("S lock (ms)") { _ in
-                Text(viewModel.rideIncludesStimulusComponent ? "0.0" : "—")
+            TableColumn("S lock (ms)") { row in
+                Text(row.stimulusLatencyMs.map { String(format: "%.1f", $0) } ?? "—")
             }.width(86)
-            TableColumn("S lock (samples)") { _ in
-                Text(viewModel.rideIncludesStimulusComponent ? "0" : "—")
+            TableColumn("S lock (samples)") { row in
+                Text(row.stimulusLatencySamples.map(String.init) ?? "—")
             }.width(110)
-            TableColumn("C shift (ms)") { row in
+            TableColumn("C latency (ms)") { row in
+                Text(row.centralMarkerLatencyMs.map { String(format: "%.1f", $0) } ?? "—")
+            }.width(102)
+            TableColumn("C adjustment (ms)") { row in
                 Text(row.centralLatencyShiftMs.map { String(format: "%.1f", $0) } ?? "—")
-            }.width(94)
-            TableColumn("C shift (samples)") { row in
-                Text(row.centralLatencyShiftSamples.map(String.init) ?? "—")
             }.width(116)
+            TableColumn("C adjustment (samples)") { row in
+                Text(row.centralLatencyShiftSamples.map(String.init) ?? "—")
+            }.width(144)
             TableColumn("C r") { row in
                 Text(row.centralCorrelation.map { String(format: "%.3f", $0) } ?? "—")
             }.width(64)
@@ -2340,14 +3106,16 @@ struct SingleTrialAnalysisSheet: View {
 
     private func exportWoodyShifts() {
         guard let result = viewModel.woodyResult else { return }
-        var lines = ["Trial\tTimeSeconds\tLatencyShiftMs\tLatencyShiftSamples\tCorrelation"]
+        var lines = ["Trial\tTimeSeconds\tLatencyShiftMs\tLatencyShiftSamples\tCorrelation\tCorrelationSamples\tAtLagLimit"]
         for row in result.shifts {
             lines.append([
                 "\(row.trialIndex + 1)",
                 String(format: "%.3f", row.sourceTimeSeconds),
                 String(format: "%.4f", row.latencyShiftMs),
                 "\(row.latencyShiftSamples)",
-                String(format: "%.6f", row.correlation)
+                String(format: "%.6f", row.correlation),
+                "\(row.correlationSampleCount)",
+                row.reachedLagLimit ? "true" : "false"
             ].joined(separator: "\t"))
         }
         let text = lines.joined(separator: "\n") + "\n"
@@ -2364,14 +3132,16 @@ struct SingleTrialAnalysisSheet: View {
 
     private func exportRIDELatencies() {
         guard let result = viewModel.rideResult else { return }
-        var lines = ["Trial\tTimeSeconds\tStimulusLockMs\tStimulusLockSamples\tCentralShiftMs\tCentralShiftSamples\tCentralCorrelation\tResponseLatencyMs\tResponseLatencySamples"]
+        var lines = ["Trial\tTimeSeconds\tStimulusLockMs\tStimulusLockSamples\tCentralLatencyMs\tCentralLatencySamples\tCentralAdjustmentMs\tCentralAdjustmentSamples\tCentralCorrelation\tResponseLatencyMs\tResponseLatencySamples"]
         for row in result.trialLatencies {
             let trialNumber = String(row.trialIndex + 1)
             let timeSeconds = String(format: "%.3f", row.sourceTimeSeconds)
-            let stimulusLockMs = viewModel.rideIncludesStimulusComponent ? "0.0000" : ""
-            let stimulusLockSamples = viewModel.rideIncludesStimulusComponent ? "0" : ""
+            let stimulusLockMs = row.stimulusLatencyMs.map { String(format: "%.4f", $0) } ?? ""
+            let stimulusLockSamples = row.stimulusLatencySamples.map(String.init) ?? ""
             let centralShiftMs = row.centralLatencyShiftMs.map { String(format: "%.4f", $0) } ?? ""
             let centralShiftSamples = row.centralLatencyShiftSamples.map(String.init) ?? ""
+            let centralLatencyMs = row.centralMarkerLatencyMs.map { String(format: "%.4f", $0) } ?? ""
+            let centralLatencySamples = row.centralMarkerLatencySamples.map(String.init) ?? ""
             let centralCorrelation = row.centralCorrelation.map { String(format: "%.6f", $0) } ?? ""
             let responseLatencyMs = row.responseLatencyMs.map { String(format: "%.4f", $0) } ?? ""
             let responseLatencySamples = row.responseLatencySamples.map(String.init) ?? ""
@@ -2380,6 +3150,8 @@ struct SingleTrialAnalysisSheet: View {
                 timeSeconds,
                 stimulusLockMs,
                 stimulusLockSamples,
+                centralLatencyMs,
+                centralLatencySamples,
                 centralShiftMs,
                 centralShiftSamples,
                 centralCorrelation,
@@ -2439,9 +3211,8 @@ private struct SingleTrialWindowPicker: View {
     let channelName: (Int) -> String
     @Binding var windowStartMs: Double?
     @Binding var windowEndMs: Double?
-    let componentWindows: [RIDEComponentWindowSelection]
-    let colorForComponent: (RIDEAnalyzer.Component) -> Color
-    let onComponentWindowChange: (RIDEAnalyzer.Component, Double, Double) -> Void
+    let componentWindows: [TrialWindowSelection]
+    let onComponentWindowChange: (String, Double, Double) -> Void
     let onTapChannel: (Int) -> Void
 
     @State private var dragStartX: CGFloat?
@@ -2476,7 +3247,7 @@ private struct SingleTrialWindowPicker: View {
                 }
                 ForEach(componentWindows) { window in
                     if let rect = componentSelectionRect(window, in: proxy.size) {
-                        let color = colorForComponent(window.component)
+                        let color = window.color
                         Rectangle()
                             .fill(color.opacity(0.14))
                             .frame(width: rect.width, height: rect.height)
@@ -2490,7 +3261,7 @@ private struct SingleTrialWindowPicker: View {
                         }
                         .stroke(color.opacity(0.75), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                         .allowsHitTesting(false)
-                        Text(window.component.label)
+                        Text(window.label)
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(color)
                             .padding(.horizontal, 4)
@@ -2556,7 +3327,7 @@ private struct SingleTrialWindowPicker: View {
         return CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: size.height)
     }
 
-    private func componentSelectionRect(_ window: RIDEComponentWindowSelection, in size: CGSize) -> CGRect? {
+    private func componentSelectionRect(_ window: TrialWindowSelection, in size: CGSize) -> CGRect? {
         guard size.width > 0 else { return nil }
         let startSample = relativeSample(forMs: window.startMs)
         let endSample = relativeSample(forMs: window.endMs)
@@ -2618,7 +3389,7 @@ private struct SingleTrialWindowPicker: View {
             next = (start, end)
         }
         onComponentWindowChange(
-            drag.component,
+            drag.id,
             msFromRelativeSample(next.start),
             msFromRelativeSample(next.end)
         )
@@ -2626,27 +3397,19 @@ private struct SingleTrialWindowPicker: View {
 
     private func dragTarget(at x: CGFloat, width: CGFloat) -> ComponentWindowDrag? {
         let edgeSlop: CGFloat = 8
-        let candidates = componentWindows.compactMap { window -> (window: RIDEComponentWindowSelection, rect: CGRect)? in
+        let candidates = componentWindows.compactMap { window -> (window: TrialWindowSelection, rect: CGRect)? in
             componentSelectionRect(window, in: CGSize(width: width, height: 1)).map { (window, $0) }
         }
         let edgeHit = candidates.first { _, rect in abs(x - rect.minX) <= edgeSlop || abs(x - rect.maxX) <= edgeSlop }
         if let edgeHit {
             let mode: ComponentWindowDrag.Mode = abs(x - edgeHit.rect.minX) <= abs(x - edgeHit.rect.maxX) ? .resizeStart : .resizeEnd
-            return ComponentWindowDrag(component: edgeHit.window.component, startMs: edgeHit.window.startMs, endMs: edgeHit.window.endMs, mode: mode)
+            return ComponentWindowDrag(id: edgeHit.window.id, startMs: edgeHit.window.startMs, endMs: edgeHit.window.endMs, mode: mode)
         }
         if let bodyHit = candidates.first(where: { $0.rect.contains(CGPoint(x: x, y: 0.5)) }) {
-            return ComponentWindowDrag(component: bodyHit.window.component, startMs: bodyHit.window.startMs, endMs: bodyHit.window.endMs, mode: .move)
+            return ComponentWindowDrag(id: bodyHit.window.id, startMs: bodyHit.window.startMs, endMs: bodyHit.window.endMs, mode: .move)
         }
         return nil
     }
-}
-
-private struct RIDEComponentWindowSelection: Identifiable, Sendable {
-    var component: RIDEAnalyzer.Component
-    var startMs: Double
-    var endMs: Double
-
-    var id: RIDEAnalyzer.Component { component }
 }
 
 private struct ComponentWindowDrag {
@@ -2656,7 +3419,7 @@ private struct ComponentWindowDrag {
         case resizeEnd
     }
 
-    var component: RIDEAnalyzer.Component
+    var id: String
     var startMs: Double
     var endMs: Double
     var mode: Mode
@@ -3521,6 +4284,11 @@ private struct SingleTrialChannelInspectorPlot: View {
     let selectedCategory: String?
     let windowStartMs: Double?
     let windowEndMs: Double?
+    /// The placed, named windows (RIDE's S/C/R, or the free-form ones added
+    /// elsewhere) — drawn here too, not just on the butterfly, so a window's
+    /// span is visible wherever a trace is. Independent of `windowStartMs/EndMs`,
+    /// which is only ever the transient drag highlight.
+    var componentWindows: [TrialWindowSelection] = []
     let woodyLatencyShiftSamples: [Int]?
     let showsWoodyAlignedOverlay: Bool
     let woodyAlignmentProgress: Double
@@ -3570,6 +4338,7 @@ private struct SingleTrialChannelInspectorPlot: View {
 
                 drawReferenceLines(first: first.segment, length: length, size: size, midY: midY, in: &context)
                 drawWindowSelection(first: first.segment, length: length, size: size, in: &context)
+                drawComponentWindows(first: first.segment, length: length, size: size, in: &context)
 
                 let orderedBundles = ordered(bundles)
                 for bundle in orderedBundles where bundle.length == length {
@@ -3752,6 +4521,39 @@ private struct SingleTrialChannelInspectorPlot: View {
         let x1 = CGFloat(max(start, end)) / CGFloat(length - 1) * size.width
         let rect = CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: size.height)
         context.fill(Path(rect), with: .color(.accentColor.opacity(0.10)))
+    }
+
+    /// Draws each placed window as a tinted band with a label, matching the
+    /// treatment on the butterfly plot above it — this view previously showed
+    /// only the transient drag highlight, so a window you had already placed
+    /// was invisible here even though it was the thing about to be scored.
+    private func drawComponentWindows(
+        first: EpochSegment,
+        length: Int,
+        size: CGSize,
+        in context: inout GraphicsContext
+    ) {
+        guard averagedSignal.samplingRate > 0, length > 1 else { return }
+        for window in componentWindows {
+            let start = relativeSample(forMs: window.startMs, segment: first, length: length)
+            let end = relativeSample(forMs: window.endMs, segment: first, length: length)
+            guard end > start else { continue }
+            let x0 = CGFloat(start) / CGFloat(length - 1) * size.width
+            let x1 = CGFloat(end) / CGFloat(length - 1) * size.width
+            let color = window.color
+            let rect = CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: size.height)
+            context.fill(Path(rect), with: .color(color.opacity(0.12)))
+
+            var border = Path()
+            border.move(to: CGPoint(x: x0, y: 0))
+            border.addLine(to: CGPoint(x: x0, y: size.height))
+            border.move(to: CGPoint(x: x1, y: 0))
+            border.addLine(to: CGPoint(x: x1, y: size.height))
+            context.stroke(border, with: .color(color.opacity(0.75)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+
+            let label = context.resolve(Text(window.label).font(.caption2).foregroundStyle(color))
+            context.draw(label, at: CGPoint(x: (x0 + x1) / 2, y: 8), anchor: .top)
+        }
     }
 
     private func relativeSample(forMs ms: Double, segment: EpochSegment, length: Int) -> Int {

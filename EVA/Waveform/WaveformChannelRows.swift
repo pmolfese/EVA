@@ -48,7 +48,12 @@ struct WaveformChannelRow: View, Equatable {
     let visibleRange: ClosedRange<CGFloat>
     let plotWidth: CGFloat
     let rowHeight: CGFloat
+    /// Points of headroom above and below the row that the trace may travel
+    /// into before the canvas clips it. Zero clips exactly at the row edge.
     let overflowHeight: CGFloat
+    /// Mark excursions that left the drawable area — see
+    /// `EVAGeneralPreferences.traceClipIndicatorsKey`.
+    let showsClipIndicators: Bool
     let color: Color
     let usesPixelAdaptiveRendering: Bool
     let showsTimeMarkers: Bool
@@ -72,6 +77,7 @@ struct WaveformChannelRow: View, Equatable {
             && lhs.plotWidth == rhs.plotWidth
             && lhs.rowHeight == rhs.rowHeight
             && lhs.overflowHeight == rhs.overflowHeight
+            && lhs.showsClipIndicators == rhs.showsClipIndicators
             && lhs.color == rhs.color
             && lhs.usesPixelAdaptiveRendering == rhs.usesPixelAdaptiveRendering
             && lhs.showsTimeMarkers == rhs.showsTimeMarkers
@@ -92,19 +98,20 @@ struct WaveformChannelRow: View, Equatable {
             color: color,
             usesPixelAdaptiveRendering: usesPixelAdaptiveRendering,
             showsTimeMarkers: showsTimeMarkers,
-            timeMarkerStyle: timeMarkerStyle
+            timeMarkerStyle: timeMarkerStyle,
+            showsClipIndicators: showsClipIndicators
         )
+        // Trace only — no background, no border. Row chrome is drawn once for
+        // the whole stack by `WaveformView.channelRowBackdrop`, beneath every
+        // trace.
+        //
+        // Not a style choice: a row that paints its own opaque background
+        // paints it *over* whatever the row above bled downward into it, so
+        // self-drawn chrome makes overflow visible upward and invisible
+        // downward — and only by accident of sibling paint order, since every
+        // row carries the same `zIndex`. One shared layer underneath removes
+        // both the asymmetry and the dependence on ordering.
         .frame(width: plotWidth, height: rowHeight + (overflowHeight * 2))
-        .background {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .frame(width: plotWidth, height: rowHeight)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
-                .frame(width: plotWidth, height: rowHeight)
-        }
         .frame(width: plotWidth, height: rowHeight)
         .contentShape(Rectangle())
         .contextMenu {
@@ -122,12 +129,23 @@ struct WaveformChannelRow: View, Equatable {
 /// One label-column row: channel name, state icon (hidden/interpolated/bad),
 /// health badge, and the per-channel context menu. Value inputs + action
 /// closures only — no `WaveformView`/`ChannelModel` capture.
-struct ChannelLabelRow: View {
+///
+/// `Equatable` for the same reason `WaveformChannelRow` is, and it was measured
+/// to matter more: in `trace2.trace` the label column cost ~3× the trace rows
+/// (721 vs 235 inclusive samples) precisely because B1 gave the plot row a skip
+/// boundary and left this one without. Action closures are excluded from `==`;
+/// everything they depend on is represented by the compared value inputs.
+struct ChannelLabelRow: View, Equatable {
     let index: Int
     let label: String
     let isHidden: Bool
     let isBad: Bool
     let isInterpolated: Bool
+    /// Set when a repair this file's own record claims could not be re-solved
+    /// here — the reason, ready to show. The channel is bad again; this is what
+    /// keeps that from looking like an ordinary bad channel nobody ever tried
+    /// to fix (ROADMAP RW-1 item 3).
+    let interpolationLostReason: String?
     let color: Color
     let rowHeight: CGFloat
     let healthResult: ChannelHealthResult?
@@ -148,6 +166,21 @@ struct ChannelLabelRow: View {
     let onExport1D: () -> Void
     let onExport1DWithEvents: () -> Void
 
+    static func == (lhs: ChannelLabelRow, rhs: ChannelLabelRow) -> Bool {
+        lhs.index == rhs.index
+            && lhs.label == rhs.label
+            && lhs.isHidden == rhs.isHidden
+            && lhs.isBad == rhs.isBad
+            && lhs.isInterpolated == rhs.isInterpolated
+            && lhs.interpolationLostReason == rhs.interpolationLostReason
+            && lhs.color == rhs.color
+            && lhs.rowHeight == rhs.rowHeight
+            && lhs.healthResult == rhs.healthResult
+            && lhs.isAnalyzingHealth == rhs.isAnalyzingHealth
+            && lhs.canInterpolate == rhs.canInterpolate
+            && lhs.moveToPhysioTitle == rhs.moveToPhysioTitle
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             HStack(spacing: 4) {
@@ -161,6 +194,13 @@ struct ChannelLabelRow: View {
                 } else if isInterpolated {
                     Image(systemName: "wand.and.stars")
                         .font(.caption2)
+                } else if let interpolationLostReason {
+                    // Distinct from a plain bad channel: this one was repaired
+                    // in the record and is not repaired here.
+                    Image(systemName: "wand.and.stars.inverse")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .help("Interpolation lost — \(interpolationLostReason)")
                 } else if isBad {
                     Image(systemName: "xmark.circle")
                         .font(.caption2)
@@ -189,6 +229,12 @@ struct ChannelLabelRow: View {
 
             if isInterpolated {
                 Button("Remove Interpolation", action: onRemoveInterpolation)
+            } else if interpolationLostReason != nil {
+                // Offer the retry directly: the usual reason a lost repair can
+                // succeed on a second attempt is that the ambient state changed
+                // (another channel unmarked, geometry loaded).
+                Button("Interpolate", action: onInterpolate)
+                    .disabled(!canInterpolate)
             } else {
                 Button("Interpolate", action: onInterpolate)
                     .disabled(!canInterpolate)

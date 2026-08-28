@@ -1,0 +1,129 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>REWIND fig 2 — queue and history tabs</title>
+<style>
+  :root {
+    --s0:#f1efe8; --s2:#ffffff;
+    --b:rgba(0,0,0,.10); --bs:rgba(0,0,0,.20);
+    --tp:#1f1e1d; --ts:#5f5e5a; --tm:#8a8983;
+    --acc:#185fa5; --accfill:#378add; --bgacc:#e6f1fb;
+    --bgwarn:#faeeda; --twarn:#854f0b;
+    --track:#e9e7e0;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:16px; width:720px;
+    background:var(--s0);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
+    color:var(--tp); -webkit-font-smoothing:antialiased;
+  }
+  .wrap { display:flex; gap:12px; align-items:flex-start; }
+  .panel { flex:1; min-width:0; background:var(--s2); border:0.5px solid var(--b); border-radius:12px; }
+  .tabs { display:flex; border-bottom:0.5px solid var(--b); font-size:12.5px; }
+  .tab { flex:1; padding:8px 10px; text-align:center; color:var(--ts); }
+  .tab.on { color:var(--tp); font-weight:500; border-bottom:1.5px solid var(--tp); margin-bottom:-0.5px; }
+  .body { padding:11px 12px; font-size:12.5px; }
+  .sub { font-size:11px; color:var(--tm); }
+  .row { display:flex; gap:9px; align-items:flex-start; }
+  .sep { border-top:0.5px solid var(--b); margin:11px 0; }
+  .track { height:4px; background:var(--track); border-radius:2px; margin:7px 0 5px; }
+  .fill { height:100%; background:var(--accfill); border-radius:2px; }
+  .x { border:0.5px solid var(--bs); background:transparent; border-radius:6px; padding:1px 6px; font-size:11px; color:var(--ts); line-height:1.5; }
+  .banner { background:var(--bgwarn); border-radius:8px; padding:8px 10px; font-size:11.5px; color:var(--twarn); margin-top:11px; }
+  .gut { display:flex; flex-direction:column; align-items:center; padding-top:3px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--tm); flex:none; }
+  .dot.cur { background:var(--accfill); box-shadow:0 0 0 3px var(--bgacc); }
+  .dot.stale { background:transparent; border:1.5px dashed var(--tm); }
+  .line { width:1.5px; flex:1; background:var(--bs); }
+  .fork { width:9px; flex:none; position:relative; }
+  .fork i { position:absolute; left:4px; background:var(--bs); }
+  .spin { width:13px; height:13px; border:2px solid var(--bgacc); border-top-color:var(--accfill); border-radius:50%; flex:none; margin-top:1px; }
+  .clock { width:11px; height:11px; border:1.5px solid var(--tm); border-radius:50%; flex:none; margin-top:2px; }
+</style>
+<div class="wrap">
+
+  <div class="panel">
+    <div class="tabs"><div class="tab on">Queue <span style="color:var(--acc)">3</span></div><div class="tab">History</div></div>
+    <div class="body">
+
+      <div>
+        <div style="display:flex;align-items:center;gap:7px">
+          <div class="spin"></div>
+          <span style="font-weight:500">ICA fit</span>
+          <span class="sub" style="margin-left:auto;font-variant-numeric:tabular-nums">1:12 left</span>
+        </div>
+        <div class="track"><div class="fill" style="width:46%"></div></div>
+        <div style="font-size:11px;color:var(--ts)">picard · iteration 92 / 200</div>
+      </div>
+
+      <div class="sep"></div>
+
+      <div class="row">
+        <div class="clock"></div>
+        <div style="flex:1"><div>filter · 0.1–40 Hz</div><div class="sub">waiting on ICA fit</div></div>
+        <button class="x">✕</button>
+      </div>
+
+      <div class="row" style="margin-top:11px">
+        <div class="clock"></div>
+        <div style="flex:1"><div>segment · 4 conditions</div><div class="sub">queued by you</div></div>
+        <button class="x">✕</button>
+      </div>
+
+      <div class="sep"></div>
+
+      <div class="row" style="opacity:.8">
+        <div class="clock" style="border-style:dashed"></div>
+        <div style="flex:1"><div style="color:var(--ts)">full-rate rebuild · node 4</div><div class="sub">background · preview shown</div></div>
+      </div>
+
+      <div class="banner">Viewing a preview. Edits queue until the full-rate signal is ready.</div>
+
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="tabs"><div class="tab">Queue <span style="color:var(--acc)">3</span></div><div class="tab on">History</div></div>
+    <div class="body">
+
+      <div class="row">
+        <div class="gut"><div class="dot"></div><div class="line" style="min-height:22px"></div></div>
+        <div style="padding-bottom:9px;color:var(--ts)">raw</div>
+      </div>
+
+      <div class="row">
+        <div class="gut"><div class="dot"></div><div class="line" style="min-height:26px"></div></div>
+        <div style="padding-bottom:9px"><div>gradient correction</div><div class="sub">pinned · 48 s</div></div>
+      </div>
+
+      <div class="row">
+        <div class="gut"><div class="dot cur"></div><div class="line" style="min-height:28px"></div></div>
+        <div style="padding-bottom:11px"><div style="font-weight:500">ICA · 5 removed</div><div style="font-size:11px;color:var(--acc)">running · 46%</div></div>
+      </div>
+
+      <div class="row">
+        <div class="fork"><i style="top:0;width:1.5px;height:13px"></i><i style="top:11.5px;width:14px;height:1.5px"></i></div>
+        <div style="flex:1;padding-left:11px">
+          <div class="row">
+            <div class="gut"><div class="dot stale"></div><div class="line" style="min-height:20px;background:var(--b)"></div></div>
+            <div style="padding-bottom:8px"><div style="color:var(--ts)">filter · 0.1–40 Hz</div><div class="sub">stale · queued</div></div>
+          </div>
+          <div class="row">
+            <div class="gut"><div class="dot stale"></div></div>
+            <div><div style="color:var(--ts)">segment · 4 conditions</div><div class="sub">stale · queued</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:4px">
+        <div class="fork"><i style="top:-60px;width:1.5px;height:65px;background:var(--b)"></i><i style="top:3.5px;width:14px;height:1.5px;background:var(--b)"></i></div>
+        <div style="flex:1;padding-left:11px;opacity:.7">
+          <div style="color:var(--ts)">filter · 1–30 Hz</div>
+          <div class="sub">branch b · cached</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>

@@ -50,6 +50,80 @@ struct ArtifactTemplateFieldLabel: View {
     }
 }
 
+/// Explains every `ArtifactOBSStrategy` option in one popover, next to the
+/// "OBS strategy" picker label. Unlike `ArtifactTemplateFieldLabel` (one
+/// short string), this covers all seven strategies plus their published
+/// reference, so it needs a scrollable, multi-section layout instead.
+struct OBSStrategyHelpButton: View {
+    @State private var showsHelp = false
+
+    var body: some View {
+        Button {
+            showsHelp.toggle()
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Explain the OBS strategy options")
+        .popover(isPresented: $showsHelp, arrowEdge: .trailing) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("OBS Strategies")
+                        .font(.headline)
+
+                    Text("Optimal Basis Set (OBS) removes a stereotyped artifact (e.g. BCG, gradient) by fitting a low-rank basis to the detected event windows and subtracting the fitted component. All seven strategies below fit that same basis; they differ in how the fitting window is chosen or how the basis is applied.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    ForEach(ArtifactOBSStrategy.allCases) { strategy in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(strategy.rawValue)
+                                    .font(.caption.weight(.semibold))
+                                if strategy.requiresTopography {
+                                    Text("needs topography")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if strategy.isExperimental {
+                                    Text("Experimental")
+                                        .font(.caption2.weight(.semibold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 1)
+                                        .background(.yellow.opacity(0.25), in: Capsule())
+                                }
+                            }
+                            Text(strategy.helpText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    Divider()
+
+                    Text("Reference")
+                        .font(.caption.weight(.semibold))
+                    Text(ArtifactOBSStrategy.standard.reference ?? "")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("All strategies fit the same OBS basis described above; the topography-gated/-aligned/-weighted, virtual-channel, clustered, and spatiotemporal variants are EVA-specific refinements of it and have no separate published reference of their own.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .frame(width: 340, alignment: .leading)
+            }
+            .frame(maxHeight: 420)
+        }
+    }
+}
+
 struct HoverPinnedPreviewButton<PreviewContent: View>: View {
     let helpText: String
     @ViewBuilder var previewContent: () -> PreviewContent
@@ -1293,8 +1367,11 @@ struct ArtifactOBSOptionsSheet: View {
     @ViewBuilder
     private var obsStrategyControls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("OBS strategy")
-                .font(.callout.weight(.medium))
+            HStack(spacing: 4) {
+                Text("OBS strategy")
+                    .font(.callout.weight(.medium))
+                OBSStrategyHelpButton()
+            }
 
             Picker("OBS strategy", selection: obsStrategyBinding) {
                 ForEach(ArtifactOBSStrategy.allCases) { strategy in

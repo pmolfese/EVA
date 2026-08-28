@@ -40,12 +40,62 @@ final class ArtifactViewModel {
     var statusMessage: String?
     /// Bumped by upstream pipeline stages (filter/gradient) to force a re-detect.
     var detectionRefreshToken = 0
+    /// Owns the in-flight detection run: only the newest may publish, and the
+    /// cancellation path cannot silently skip clearing `isDetecting`.
+    ///
+    /// Replaces a hand-written request-id guard that shipped the intermittent
+    /// "blinks never appear, spinner stuck on" bug. See `LatestOnlyRunner`.
+    ///
+    /// `@ObservationIgnored` because it is bookkeeping: no view reads it, and
+    /// tracking it would invalidate views on every detection start.
+    @ObservationIgnored let detectionRunner = LatestOnlyRunner()
+
+    /// The `detectionRefreshToken` value the last *completed* detection ran at,
+    /// or `nil` if no detector has produced a verdict for this recording.
+    ///
+    /// Kept as a token rather than a `Bool` so it invalidates itself: every
+    /// upstream stage that changes the signal already bumps
+    /// `detectionRefreshToken`, and a verdict about the old signal is not a
+    /// verdict about the new one. See `hasAssessedArtifacts`.
+    private(set) var completedDetectionToken: Int?
+
+    /// Whether artifact detection has produced a verdict describing the signal
+    /// as it stands now.
+    ///
+    /// `events.isEmpty` cannot answer this: it is equally true of "the detectors
+    /// ran and this recording is clean" and "nothing has looked yet". Segment
+    /// Health scored those identically — as perfect — until ROADMAP RW-1 item 16.
+    var hasAssessedArtifacts: Bool { completedDetectionToken == detectionRefreshToken }
+
+    /// Records that a detection run finished and published, whatever it found.
+    func recordCompletedDetection() {
+        completedDetectionToken = detectionRefreshToken
+    }
 
     // MARK: Threshold detector settings
     /// Two-tab config panel for the threshold-based ocular detector.
     var showsThresholdSheet = false
     var blinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
     var movementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
+    /// How many times the threshold configuration has been *committed*.
+    ///
+    /// The sheet's controls are bound live, so detection re-runs as you drag —
+    /// but the processing history must not. Recording every intermediate value
+    /// would mint a node per slider tick, and recording none (what the chain
+    /// signature did, since it carries no parameters and thresholds produce no
+    /// signal of their own) meant a threshold change never reached `eva.xml`'s
+    /// lineage at all. Bumping this once when the sheet commits is the middle
+    /// answer ROADMAP RW-1 item 5 asks for: one history state per deliberate
+    /// edit. A commit whose values did not actually change costs nothing — the
+    /// tree is content-addressed, so the identical script resolves to the node
+    /// already current.
+    var thresholdConfigCommits = 0
+
+    /// Commits the current threshold configuration to the processing history.
+    /// Called when the ocular threshold sheet is dismissed or reset.
+    func commitThresholdConfiguration() {
+        thresholdConfigCommits += 1
+    }
 
     // MARK: Cleaning
     var showsCleaningSheet = false
@@ -63,6 +113,10 @@ final class ArtifactViewModel {
         isDetecting = false
         statusMessage = nil
         detectionRefreshToken += 1
+        completedDetectionToken = nil
+        // Disown any in-flight detection so a run started for the recording being
+        // closed cannot publish its results into the reused view model.
+        detectionRunner.invalidate()
         showsThresholdSheet = false
         showsCleaningSheet = false
         isCleaning = false

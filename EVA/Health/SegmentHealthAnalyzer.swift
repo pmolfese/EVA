@@ -16,14 +16,63 @@
 
 import Foundation
 
+/// Whether a metric was actually measured for this segment.
+///
+/// Separating these is ROADMAP RW-1 item 16. "Labeled Artifacts" used to score
+/// 1.0 whenever no artifact intervals were supplied, which is the same answer
+/// for "the detectors ran and found nothing" and "nothing has ever looked" — so
+/// a recording with artifact detection switched off scored *better* than one
+/// that had been examined, and that number was exported as a training label.
+nonisolated enum SegmentHealthMetricAvailability: String, Codable, Sendable {
+    /// Measured; `score` and `grade` mean what they say.
+    case scored
+    /// Nothing produced a verdict. `score` and `grade` are placeholders and are
+    /// excluded from the segment's weighted total — a consumer that ignores this
+    /// flag reads the metric as bad rather than as good, which is the safe
+    /// direction to be wrong in.
+    case notAssessed
+}
+
 nonisolated struct SegmentHealthMetric: Codable, Identifiable, Sendable {
     var name: String
     var score: Double
     var grade: ChannelHealthGrade
     var detail: String
     var weight: Double
+    /// Defaulted so datasets written before RW-1 item 16 still decode; every
+    /// metric they contain was scored.
+    var availability: SegmentHealthMetricAvailability = .scored
+
+    var isAssessed: Bool { availability == .scored }
 
     var id: String { name }
+}
+
+/// What is known about labeled artifacts when a segment is scored.
+///
+/// A plain `[SegmentHealthArtifactInterval]` cannot express the difference
+/// between "assessed, none found" and "not assessed", and the empty array was
+/// silently read as the first. Call sites must now say which they mean.
+nonisolated enum SegmentHealthArtifactAssessment: Sendable {
+    /// Some artifact source reported for this signal; these are its intervals,
+    /// possibly none.
+    case assessed([SegmentHealthArtifactInterval])
+    /// No detector, template, or carried event has looked at this signal.
+    case notAssessed
+
+    var intervals: [SegmentHealthArtifactInterval] {
+        switch self {
+        case .assessed(let intervals): return intervals
+        case .notAssessed: return []
+        }
+    }
+
+    var isAssessed: Bool {
+        switch self {
+        case .assessed: return true
+        case .notAssessed: return false
+        }
+    }
 }
 
 nonisolated struct SegmentHealthInputSegment: Codable, Identifiable, Sendable {
@@ -79,6 +128,8 @@ nonisolated struct SegmentHealthAnalysis: Sendable {
     var effectiveSamplingRate: Double = 0
     var analyzedSampleCount: Int = 0
     var segmentDefinition: SegmentHealthSegmentDefinition = .continuous
+    /// Whether labeled artifacts were assessed at all for this analysis.
+    var artifactsAssessed: Bool = false
 }
 
 nonisolated enum SegmentHealthSegmentDefinition: String, Codable, Sendable {
@@ -104,8 +155,10 @@ nonisolated struct SegmentHealthFeatures: Codable, Sendable {
     var flatlineFraction: Double
     var clippingFraction: Double
     var driftRMSMicrovolts: Double
-    var artifactOverlapFraction: Double
-    var artifactCount: Int
+    /// `nil` when artifacts were not assessed — distinct from `0`, which means
+    /// a source looked and found none. See `SegmentHealthArtifactAssessment`.
+    var artifactOverlapFraction: Double?
+    var artifactCount: Int?
     var amplitudeTypicality: Double
     var burstTypicality: Double
     var gfpTypicality: Double
@@ -247,11 +300,14 @@ nonisolated enum SegmentHealthAnalyzer {
         return segments
     }
 
+    /// - Parameter artifacts: whether labeled artifacts were assessed, and the
+    ///   intervals if they were. There is deliberately no default: an omitted
+    ///   argument is what made "nobody looked" score as "clean".
     static func analyze(
         signal: MFFSignalData,
         segments: [SegmentHealthInputSegment],
         excludedChannelIndices: Set<Int>,
-        artifactIntervals: [SegmentHealthArtifactInterval] = [],
+        artifacts: SegmentHealthArtifactAssessment,
         base: SegmentHealthMetricSettings = .defaults,
         progress: (@Sendable (Double) -> Void)? = nil
     ) -> SegmentHealthAnalysis {
@@ -284,7 +340,7 @@ nonisolated enum SegmentHealthAnalyzer {
                 channels: includedChannels,
                 sampleStride: sampleStride,
                 baselines: baselines,
-                artifactIntervals: artifactIntervals
+                artifacts: artifacts
             )
             let result = result(for: segment, summary: summary, baselines: baselines, base: base, signal: signal)
             results.append(result)
@@ -299,7 +355,8 @@ nonisolated enum SegmentHealthAnalyzer {
             sampleStride: sampleStride,
             effectiveSamplingRate: signal.samplingRate / Double(max(sampleStride, 1)),
             analyzedSampleCount: max(sampleCount / max(sampleStride, 1), 1),
-            segmentDefinition: segments.contains { $0.sourceCode != nil || $0.stimulusOffsetSamples != nil } ? .epoch : .continuous
+            segmentDefinition: segments.contains { $0.sourceCode != nil || $0.stimulusOffsetSamples != nil } ? .epoch : .continuous,
+            artifactsAssessed: artifacts.isAssessed
         )
     }
 
@@ -340,6 +397,7 @@ nonisolated enum SegmentHealthAnalyzer {
         var differenceCount = 0
 
         for sample in stride(from: 0, to: sampleCount, by: sampleStride) {
+            var sampleSum = 0.0
             var sampleSquares = 0.0
             var sampleFiniteCount = 0
             for channelIndex in channels {
@@ -359,6 +417,7 @@ nonisolated enum SegmentHealthAnalyzer {
 
                 sumSquares += value * value
                 finiteCount += 1
+                sampleSum += value
                 sampleSquares += value * value
                 sampleFiniteCount += 1
 
@@ -371,7 +430,12 @@ nonisolated enum SegmentHealthAnalyzer {
             }
 
             if sampleFiniteCount > 0 {
-                gfpValues.append(sqrt(sampleSquares / Double(sampleFiniteCount)))
+                // GFP is the spatial standard deviation, i.e. mean(x^2) - mean(x)^2
+                // after removing the instantaneous cross-channel mean.
+                let n = Double(sampleFiniteCount)
+                let mean = sampleSum / n
+                let variance = max(sampleSquares / n - mean * mean, 0)
+                gfpValues.append(sqrt(variance))
             }
         }
 
@@ -397,7 +461,7 @@ nonisolated enum SegmentHealthAnalyzer {
         channels: [Int],
         sampleStride: Int,
         baselines: SegmentHealthBaselines,
-        artifactIntervals: [SegmentHealthArtifactInterval]
+        artifacts: SegmentHealthArtifactAssessment
     ) -> SegmentSummary {
         let sampleCount = signal.data.first?.count ?? 0
         let start = min(max(segment.startSample, 0), max(sampleCount - 1, 0))
@@ -405,7 +469,7 @@ nonisolated enum SegmentHealthAnalyzer {
         let segmentSampleCount = max(end - start + 1, 0)
         let artifactOverlap = artifactOverlapSamples(
             in: start...end,
-            artifactIntervals: artifactIntervals
+            artifactIntervals: artifacts.intervals
         )
         let analyzedPoints = max(Int((Double(segmentSampleCount) / Double(max(sampleStride, 1))).rounded(.up)), 1)
         let totalObservations = max(analyzedPoints * max(channels.count, 1), 1)
@@ -434,6 +498,7 @@ nonisolated enum SegmentHealthAnalyzer {
         var flatlineCount = 0
 
         for sample in stride(from: start, through: end, by: sampleStride) {
+            var sampleSum = 0.0
             var sampleSquares = 0.0
             var sampleFiniteCount = 0
 
@@ -459,6 +524,7 @@ nonisolated enum SegmentHealthAnalyzer {
 
                 finiteCount += 1
                 sumSquares += value * value
+                sampleSum += value
                 sampleSquares += value * value
                 sampleFiniteCount += 1
 
@@ -483,7 +549,12 @@ nonisolated enum SegmentHealthAnalyzer {
             }
 
             if sampleFiniteCount > 0 {
-                gfpValues.append(sqrt(sampleSquares / Double(sampleFiniteCount)))
+                // GFP is the spatial standard deviation, i.e. mean(x^2) - mean(x)^2
+                // after removing the instantaneous cross-channel mean.
+                let n = Double(sampleFiniteCount)
+                let mean = sampleSum / n
+                let variance = max(sampleSquares / n - mean * mean, 0)
+                gfpValues.append(sqrt(variance))
             }
         }
 
@@ -523,10 +594,10 @@ nonisolated enum SegmentHealthAnalyzer {
             flatlineFraction: differenceCount > 0 ? Double(flatlineCount) / Double(differenceCount) : 1,
             clippingFraction: clippingFraction,
             driftRMS: SignalStatistics.rootMeanSquare(driftValues),
-            artifactOverlapFraction: segmentSampleCount > 0
+            artifactOverlapFraction: artifacts.isAssessed && segmentSampleCount > 0
                 ? Double(min(artifactOverlap.samples, segmentSampleCount)) / Double(segmentSampleCount)
-                : 0,
-            artifactCount: artifactOverlap.count
+                : (artifacts.isAssessed ? 0 : nil),
+            artifactCount: artifacts.isAssessed ? artifactOverlap.count : nil
         )
     }
 
@@ -626,23 +697,38 @@ nonisolated enum SegmentHealthAnalyzer {
         }
 
         if base.artifactEnabled {
-            let artifactScore = summary.artifactCount == 0 ? 1.0 : 0.0
-            metrics.append(metric(
-                name: "Labeled Artifacts",
-                score: artifactScore,
-                detail: summary.artifactCount == 0
-                    ? "No labeled artifacts in segment"
-                    : "Contains \(summary.artifactCount) labeled artifact\(summary.artifactCount == 1 ? "" : "s")",
-                weight: base.artifactWeight
-            ))
+            if let artifactCount = summary.artifactCount {
+                metrics.append(metric(
+                    name: "Labeled Artifacts",
+                    score: artifactCount == 0 ? 1.0 : 0.0,
+                    detail: artifactCount == 0
+                        ? "No labeled artifacts in segment"
+                        : "Contains \(artifactCount) labeled artifact\(artifactCount == 1 ? "" : "s")",
+                    weight: base.artifactWeight
+                ))
+            } else {
+                metrics.append(metric(
+                    name: "Labeled Artifacts",
+                    score: 0,
+                    detail: "Not assessed — no artifact detection has run on this signal",
+                    weight: base.artifactWeight,
+                    availability: .notAssessed
+                ))
+            }
         }
 
-        let weightedTotal = metrics.reduce(0) { $0 + $1.score * $1.weight }
-        let weightTotal = metrics.reduce(0) { $0 + $1.weight }
+        // Unassessed metrics carry no weight in either half of the ratio, so the
+        // percentage describes what was actually measured. Including the weight
+        // but not the score would report an unexamined segment as worse than a
+        // measured one; including both would report it as perfect, which is the
+        // bug this replaces.
+        let assessed = metrics.filter(\.isAssessed)
+        let weightedTotal = assessed.reduce(0) { $0 + $1.score * $1.weight }
+        let weightTotal = assessed.reduce(0) { $0 + $1.weight }
         let goodFraction = weightTotal > 0 ? weightedTotal / weightTotal : 0
         let percentage = Int((min(max(goodFraction, 0), 1) * 100).rounded())
         let grade = HealthScoring.grade(for: goodFraction)
-        let weakMetrics = metrics
+        let weakMetrics = assessed
             .filter { $0.score < 0.78 }
             .sorted { $0.score < $1.score }
             .prefix(2)
@@ -708,14 +794,21 @@ nonisolated enum SegmentHealthAnalyzer {
         )
     }
 
-    private static func metric(name: String, score: Double, detail: String, weight: Double) -> SegmentHealthMetric {
+    private static func metric(
+        name: String,
+        score: Double,
+        detail: String,
+        weight: Double,
+        availability: SegmentHealthMetricAvailability = .scored
+    ) -> SegmentHealthMetric {
         let boundedScore = min(max(score, 0), 1)
         return SegmentHealthMetric(
             name: name,
             score: boundedScore,
             grade: HealthScoring.grade(for: boundedScore),
             detail: detail,
-            weight: weight
+            weight: weight,
+            availability: availability
         )
     }
 
@@ -755,6 +848,6 @@ private nonisolated struct SegmentSummary: Sendable {
     var flatlineFraction: Double = 1
     var clippingFraction: Double = 0
     var driftRMS: Double = 0
-    var artifactOverlapFraction: Double = 0
-    var artifactCount: Int = 0
+    var artifactOverlapFraction: Double?
+    var artifactCount: Int?
 }

@@ -1,0 +1,204 @@
+{
+  "config": {
+    "alphaCycleSeconds": 40,
+    "alphaHighMicrovolts": 30,
+    "alphaLowMicrovolts": 10,
+    "artifactAntiAliasFraction": 0.9,
+    "artifactOversampleFactor": 64,
+    "badChannels": {},
+    "bcgAmplitudeJitterFraction": 0.15,
+    "bcgAmplitudeMicrovolts": 100,
+    "bcgChannelLatencySDSeconds": 0.015,
+    "bcgEnabled": true,
+    "bcgWaveformSeconds": 0.6,
+    "blinkAmplitudeMicrovolts": 100,
+    "blinkDurationSeconds": 0.6,
+    "blinksPerMinute": 0,
+    "channelCount": 64,
+    "clockOffsetMicrosecondsPerSecond": 152,
+    "dipoleMotionDegrees": 0,
+    "dipoleMotionStartFraction": 0.45,
+    "dipoleMotionTransitionFraction": 0.1,
+    "dipoleNearPairSeparationDegrees": 0,
+    "dipoleOrientationPattern": "mixed",
+    "dipoleReference": "average",
+    "dipoleSourceCorrelation": 0,
+    "dipoleSourceCount": 7,
+    "dipoleSourceRadiusFraction": 0.85,
+    "durationSeconds": 180,
+    "ecgAmplitudeMicrovolts": 1000,
+    "eegBands": [
+      {
+        "amplitudeMicrovolts": 8,
+        "highHz": 4,
+        "lowHz": 1,
+        "name": "delta"
+      },
+      {
+        "amplitudeMicrovolts": 5,
+        "highHz": 8,
+        "lowHz": 4,
+        "name": "theta"
+      },
+      {
+        "highHz": 12,
+        "lowHz": 8,
+        "name": "alpha"
+      },
+      {
+        "amplitudeMicrovolts": 3,
+        "highHz": 20,
+        "lowHz": 12,
+        "name": "beta-low"
+      },
+      {
+        "amplitudeMicrovolts": 2,
+        "highHz": 30,
+        "lowHz": 20,
+        "name": "beta-high"
+      },
+      {
+        "amplitudeMicrovolts": 1.2,
+        "highHz": 45,
+        "lowHz": 30,
+        "name": "gamma-low"
+      },
+      {
+        "amplitudeMicrovolts": 0.8,
+        "highHz": 70,
+        "lowHz": 55,
+        "name": "gamma-high"
+      }
+    ],
+    "eegGenerationModel": "dipole",
+    "eegTargetStdMicrovolts": 10.9,
+    "erp": {
+      "amplitudeJitterFraction": 0.2,
+      "components": [
+        {
+          "amplitudeJitterFraction": 0.15,
+          "id": "AEP-left",
+          "latencyJitterSDSeconds": 0.012,
+          "orientation": {
+            "x": -0.17,
+            "y": -0.25,
+            "z": -0.95
+          },
+          "peakLatencySeconds": 0.101,
+          "positionMillimetres": {
+            "x": -49.0,
+            "y": -14.0,
+            "z": 0.0
+          },
+          "standardAmplitudeRatio": 1.0,
+          "targetAmplitudeMicrovolts": 8,
+          "waveform": "gaussian",
+          "widthSeconds": 0.028
+        },
+        {
+          "amplitudeJitterFraction": 0.15,
+          "id": "AEP-right",
+          "latencyJitterSDSeconds": 0.012,
+          "orientation": {
+            "x": 0.15,
+            "y": -0.24,
+            "z": -0.96
+          },
+          "peakLatencySeconds": 0.103,
+          "positionMillimetres": {
+            "x": 49.0,
+            "y": -11.0,
+            "z": 1.0
+          },
+          "standardAmplitudeRatio": 1.0,
+          "targetAmplitudeMicrovolts": 8,
+          "waveform": "gaussian",
+          "widthSeconds": 0.028
+        }
+      ],
+      "interStimulusIntervalSeconds": 1.5,
+      "interStimulusJitterSeconds": 0.2,
+      "latencyAmplitudeCorrelation": -0.4,
+      "latencyJitterSDSeconds": 0.03,
+      "latencySkew": 0.35,
+      "omissionRate": 0.05,
+      "peakLatencySeconds": 0.3,
+      "standardAmplitudeRatio": 0.5,
+      "startSeconds": 1,
+      "targetAmplitudeMicrovolts": 8,
+      "targetFraction": 0.2,
+      "trialCount": 100,
+      "waveform": "biphasic",
+      "widthSeconds": 0.06
+    },
+    "eyeMovementAmplitudeMicrovolts": 40,
+    "gradientAmplitudeMaxMicrovolts": 7000,
+    "gradientAmplitudeMinMicrovolts": 500,
+    "gradientEnabled": true,
+    "gradientRampSeconds": 0.00015,
+    "gradientReadoutHz": 1000,
+    "heartRateCycleSeconds": 60,
+    "heartRateMaxBPM": 85,
+    "heartRateMinBPM": 65,
+    "heartRateVariability": 0.04,
+    "impedanceNoise": {
+      "lineNoiseImpedanceExponent": 1,
+      "maximumLineNoiseScale": 10,
+      "referenceImpedanceKOhm": 12,
+      "temperatureKelvin": 298.15
+    },
+    "impedanceTypicalKOhm": 12,
+    "includeECG": true,
+    "includeImpedance": true,
+    "includeMotionSensor": true,
+    "leadFieldTerms": 100,
+    "lineNoiseAmplitudeMicrovolts": 8,
+    "lineNoiseHz": 0,
+    "motionSensorSigmoidGain": 0.1,
+    "ocularSpatialModel": "heuristic",
+    "postScanSeconds": 0,
+    "preScanSeconds": 0,
+    "qrsDetectionJitterSDSeconds": 0.025,
+    "recordingReference": "average",
+    "repetitionTimeSeconds": 3,
+    "respirationHz": 0.25,
+    "saccadeTransitionSeconds": 0.04,
+    "saccadesPerMinute": 0,
+    "samplingRate": 1000,
+    "seed": 20260821,
+    "sliceArtifactSeconds": 0.06,
+    "slicesPerVolume": 41,
+    "slowModulationFraction": 0.1,
+    "slowModulationPeriodSeconds": 200,
+    "spatialModel": "circular",
+    "spatialSmoothingChannels": 4,
+    "sphericalHeadModel": {
+      "centerMeters": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "name": "Classic three-shell sphere",
+      "shells": [
+        {
+          "conductivitySiemensPerMeter": 0.33,
+          "name": "brain",
+          "radiusMeters": 0.072
+        },
+        {
+          "conductivitySiemensPerMeter": 0.0042,
+          "name": "skull",
+          "radiusMeters": 0.079
+        },
+        {
+          "conductivitySiemensPerMeter": 0.33,
+          "name": "scalp",
+          "radiusMeters": 0.085
+        }
+      ]
+    }
+  },
+  "description": "Bilateral auditory evoked potential after Rusiniak et al. (2022) Table 1: two dipoles perpendicular to the left and right Sylvian fissure with near-synchronous Cz-negative N100 peaks 2 ms apart. Talairach (-49,-18,12) and (49,-15,13) converted to the simulator frame by ERPComponentConfig.talairachApproximate; relative geometry is preserved far better than absolute anatomical position. Pair with --bcg-model generators to reproduce the paper's evaluation design.",
+  "name": "aep-bilateral",
+  "schemaVersion": 1
+}

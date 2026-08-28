@@ -397,8 +397,8 @@ nonisolated enum EpochedOverlayEventMapper {
 
         if let overlapWindowSeconds, overlapWindowSeconds > 0 {
             let halfWindow = overlapWindowSeconds / 2
-            let eventStartSeconds = event.beginTimeSeconds - halfWindow
-            let eventEndSeconds = event.beginTimeSeconds + halfWindow
+            let eventStartSeconds = event.centerTimeSeconds - halfWindow
+            let eventEndSeconds = event.centerTimeSeconds + halfWindow
             guard eventEndSeconds >= epochStartSeconds,
                   eventStartSeconds <= epochEndSeconds else {
                 return nil
@@ -422,7 +422,8 @@ nonisolated enum EpochedOverlayEventMapper {
             beginTimeSeconds: displayTime,
             rawBeginTime: event.rawBeginTime,
             sourceFile: event.sourceFile,
-            durationSeconds: event.durationSeconds
+            durationSeconds: event.durationSeconds,
+            timeAnchor: event.timeAnchor
         )
     }
 }
@@ -508,6 +509,23 @@ struct AveragedTopomapSample: Identifiable {
 }
 
 nonisolated struct PSAExclusionSummary: Sendable, Equatable {
+    /// What happened to one category's candidate epochs.
+    ///
+    /// Note that these DO NOT sum to the global counters. One event can feed
+    /// several categories at once — its own code plus any pooled group it
+    /// belongs to — so a single dropped event is debited from every category it
+    /// would have contributed to. The global counters count events; these count
+    /// per-category contributions.
+    nonisolated struct CategoryTally: Sendable, Equatable {
+        var candidates = 0
+        var accepted = 0
+        /// Reason label → count, using the same labels as
+        /// `skippedArtifactBreakdown` plus the non-artifact rejection causes.
+        var reasons: [String: Int] = [:]
+
+        var excluded: Int { max(candidates - accepted, 0) }
+    }
+
     var candidateEvents = 0
     var acceptedEpochs = 0
     var outputSegments = 0
@@ -519,6 +537,17 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
     var timingAdjusted = 0
     var rejectedForTooManyBadChannels = 0
     var badChannelCount = 0
+    /// Per-category breakdown. Empty for packages segmented before EVA started
+    /// recording it.
+    var perCategory: [String: CategoryTally] = [:]
+
+    /// True when categories overlap, i.e. some event fed more than one category
+    /// and the per-category candidate counts therefore sum past
+    /// `candidateEvents`. Pooled category groups always cause this, because a
+    /// group only ever pools codes that are themselves selected categories.
+    var categoriesOverlap: Bool {
+        perCategory.values.reduce(0) { $0 + $1.candidates } > candidateEvents
+    }
 
     var keptEpochs: Int {
         max(acceptedEpochs - skippedLabeledBadSegments, 0)
@@ -530,6 +559,57 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
 
     var hasExclusions: Bool {
         excludedEpochs > 0
+    }
+
+    /// Records what one named reason excluded, per category, after the build.
+    ///
+    /// Trial exclusion happens at *averaging* time, after `accepted` has already
+    /// counted every epoch that survived the build, so a trial removed here has
+    /// to be debited from `accepted` as well as attributed to a reason. Without
+    /// the debit, `categoryRejections` would report the trial as `included` and
+    /// the retention bars would claim a trial the average never saw.
+    ///
+    /// **Idempotent per reason**, and it has to be: a post-processing toggle
+    /// re-averages from a summary that already carries this reason's counts, and
+    /// an incrementing version would grow them on every toggle until the file
+    /// claimed more exclusions than it had trials. So this *sets* the reason to
+    /// `countsByCategory` — restoring whatever it debited last time first —
+    /// rather than adding to it. A category dropping to zero has the reason
+    /// removed, not left at 0, since a reason that excluded nothing is noise in
+    /// the retention story.
+    mutating func recordExclusions(_ countsByCategory: [String: Int], reason: String) {
+        for category in Set(perCategory.keys).union(countsByCategory.keys) {
+            var tally = perCategory[category] ?? CategoryTally()
+            let previous = tally.reasons[reason] ?? 0
+            let now = countsByCategory[category] ?? 0
+            guard previous != 0 || now != 0 else { continue }
+
+            tally.accepted = max(tally.accepted + previous - now, 0)
+            if now > 0 {
+                tally.reasons[reason] = now
+            } else {
+                tally.reasons.removeValue(forKey: reason)
+            }
+            perCategory[category] = tally
+        }
+    }
+
+    /// The per-category tallies as the record `eva.xml` already knows how to
+    /// write. Without this a segmented export keeps only its survivors, and
+    /// nothing downstream — a reload, a QuickLook preview, `RecordingCombiner` —
+    /// can say how many trials a category started with.
+    var categoryRejections: [CategoryRejection] {
+        perCategory
+            .filter { $0.value.candidates > 0 }
+            .map { name, tally in
+                CategoryRejection(
+                    category: name,
+                    total: tally.candidates,
+                    included: tally.accepted,
+                    reasons: tally.reasons.filter { $0.value > 0 }
+                )
+            }
+            .sorted { $0.category < $1.category }
     }
 }
 
@@ -708,11 +788,7 @@ nonisolated struct PSABuildResult {
     }
 
     private func withAverageReference(excluding bad: Set<Int>) -> PSABuildResult {
-        let referencedData = EEGSignalFilter.averageReferenced(signal.data, excluding: bad)
-        let s = MFFSignalData(signalURL: signal.signalURL, signalType: signal.signalType,
-                              numberOfChannels: signal.numberOfChannels, samplingRate: signal.samplingRate,
-                              duration: signal.duration, recordingStartTime: signal.recordingStartTime,
-                              events: signal.events, data: referencedData, channelNames: signal.channelNames)
+        let s = Rereferencing.applied(signal, excluding: bad)
         return PSABuildResult(signal: s, segments: segments, message: message)
     }
 
@@ -734,10 +810,7 @@ nonisolated struct PSABuildResult {
                 }
             }
         }
-        let s = MFFSignalData(signalURL: signal.signalURL, signalType: signal.signalType,
-                              numberOfChannels: signal.numberOfChannels, samplingRate: signal.samplingRate,
-                              duration: signal.duration, recordingStartTime: signal.recordingStartTime,
-                              events: signal.events, data: data, channelNames: signal.channelNames)
+        let s = signal.replacingSamples(data)
         return PSABuildResult(signal: s, segments: segments, message: message)
     }
 }
@@ -814,6 +887,15 @@ nonisolated struct PSABuildJob: Sendable {
         var skippedArtifactBreakdown: [String: Int] = [:]
         var skippedTimingMarkers = 0
         var timingAdjusted = 0
+        // Per-category tallies. `categories` is resolved at the top of the loop
+        // below, before every skip site, so each drop can be debited to exactly
+        // the categories it would have fed.
+        var perCategory: [String: PSAExclusionSummary.CategoryTally] = [:]
+        func debit(_ categories: [String], _ reason: String) {
+            for category in categories {
+                perCategory[category, default: .init()].reasons[reason, default: 0] += 1
+            }
+        }
         let artifactRejectionGroups = artifactEventsForRejectionByLabel.isEmpty
             ? (artifactEventsForRejection.isEmpty ? [:] : [artifactRejectionLabel: artifactEventsForRejection])
             : artifactEventsForRejectionByLabel
@@ -831,13 +913,19 @@ nonisolated struct PSABuildJob: Sendable {
 
         for event in events {
             var categories = categoriesBySegmentValue[event.code] ?? categoriesBySegmentValue[event.label ?? ""] ?? []
-            if let description = event.eventDescription, let rules = regexRulesByCode[event.code] {
+            if let rules = regexRulesByCode[event.code] {
                 for entry in rules {
-                    guard let match = description.firstMatch(of: entry.regex) else { continue }
+                    let matchText = entry.rule.matchField == .label ? event.label : event.eventDescription
+                    guard let matchText, let match = matchText.firstMatch(of: entry.regex) else { continue }
                     categories.append(entry.rule.resolvedCategoryName(for: match))
                 }
             }
+            // An event mapping to no category is not a candidate for anything,
+            // so it is counted globally but debited from nobody.
             guard !categories.isEmpty else { continue }
+            for category in categories {
+                perCategory[category, default: .init()].candidates += 1
+            }
             let segmentValue: String = categoriesBySegmentValue[event.code] != nil ? event.code : (event.label ?? event.code)
             let anchorTimeSeconds: Double
             let timingMarkerValue = timingMarkersBySegmentValue[event.code] ?? timingMarkersBySegmentValue[event.label ?? ""]
@@ -845,6 +933,7 @@ nonisolated struct PSABuildJob: Sendable {
                 let candidates = timingEventsBySegmentValue[timingMarkerValue] ?? []
                 guard let timingEvent = nearestEvent(to: event, in: candidates) else {
                     skippedTimingMarkers += 1
+                    debit(categories, "Missing timing marker")
                     continue
                 }
                 anchorTimeSeconds = timingEvent.beginTimeSeconds
@@ -858,6 +947,7 @@ nonisolated struct PSABuildJob: Sendable {
 
             guard startSample >= 0, endSample <= sampleCount else {
                 skippedOutOfBounds += 1
+                debit(categories, "Out of bounds")
                 continue
             }
             if skipIfContainsArtifact, !artifactRejectionGroups.isEmpty {
@@ -883,11 +973,15 @@ nonisolated struct PSABuildJob: Sendable {
                     }
                     let breakdownLabel = sortedLabels.joined(separator: " + ")
                     skippedArtifactBreakdown[breakdownLabel, default: 0] += 1
+                    debit(categories, breakdownLabel)
                     continue
                 }
             }
 
-            guard signal.data.indices.allSatisfy({ signal.data[$0].count >= endSample }) else { continue }
+            guard signal.data.indices.allSatisfy({ signal.data[$0].count >= endSample }) else {
+                debit(categories, "Out of bounds")
+                continue
+            }
 
             // One event can feed multiple categories (its own + any pooled
             // group it belongs to) — one job per category, duplicating the epoch.
@@ -1021,7 +1115,15 @@ nonisolated struct PSABuildJob: Sendable {
         var outputStartSample = 0
 
         for (jobIndex, job) in jobs.enumerated() {
-            guard let slice = slices[jobIndex] else { continue }
+            // Pass 2 leaves a job's slice nil only when it rejected the epoch
+            // for having too many bad channels; jobs carry their category, so
+            // that rejection is attributed here rather than under the lock.
+            guard let slice = slices[jobIndex] else {
+                perCategory[job.category, default: .init()]
+                    .reasons["Too many bad channels", default: 0] += 1
+                continue
+            }
+            perCategory[job.category, default: .init()].accepted += 1
             let acceptedSegmentNumber = segments.count + 1
             if interpolatesBadChannelsPerEpoch, let badSet = jobBadChannels[jobIndex], !badSet.isEmpty {
                 for channel in badSet.sorted() {
@@ -1102,7 +1204,8 @@ nonisolated struct PSABuildJob: Sendable {
                 skippedOutOfBounds: skippedOutOfBounds,
                 timingAdjusted: timingAdjusted,
                 rejectedForTooManyBadChannels: rejectedForTooManyBadChannels,
-                badChannelCount: epochBadChannelCounts.count
+                badChannelCount: epochBadChannelCounts.count,
+                perCategory: perCategory
             )
         )
     }
@@ -1242,7 +1345,9 @@ enum ArtifactDetectionMethod: String, CaseIterable, Identifiable {
     static var selectableCases: [ArtifactDetectionMethod] { [.threshold, .ica] }
 }
 
-enum PSASegmentField: String, CaseIterable, Identifiable {
+/// `nonisolated` so the pipeline layer can read it without a main-actor hop —
+/// `HistoryStepSummary` renders a recorded `segmentField` off the view.
+nonisolated enum PSASegmentField: String, CaseIterable, Identifiable {
     case code = "Code"
     case label = "Label"
     case artifact = "Artifacts"
@@ -1256,10 +1361,12 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
     case periodicity    = "periodicity"
     case spatialPCA     = "spatialPCA"
     case cardiacPowerMap = "cardiacPowerMap"
+    case hemisphericTopography = "hemisphericTopography"
     case virtualECGPCA  = "virtualECGPCA"
     case panTompkinsProxy = "panTompkinsProxy"
     case qrsLocking     = "qrsLocking"
     case cwlRegression  = "cwlRegression"
+    case surrogatePCAS  = "surrogatePCAS"
 
     nonisolated var id: String { rawValue }
 
@@ -1268,7 +1375,17 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
     /// shared event-code/threshold/window controls and swaps the action
     /// button to "Correct" for these.
     nonisolated var isDirectCorrection: Bool {
-        self == .cwlRegression
+        self == .cwlRegression || self == .surrogatePCAS
+    }
+
+    /// True for a correction that consumes beats it did not detect.
+    ///
+    /// PCA-S is a *correction* fed by whatever already found the beats — BCG
+    /// detection here, or ECG/QRS detection — so the sheet keeps the detector
+    /// controls out of its way but must not let it run with nothing to lock to.
+    /// CWL, the other direct correction, needs no beats at all.
+    nonisolated var requiresDetectedBeats: Bool {
+        self == .surrogatePCAS
     }
 
     nonisolated var tabLabel: String {
@@ -1276,10 +1393,12 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
         case .periodicity:      return "Periodicity"
         case .spatialPCA:       return "Spatial PCA"
         case .cardiacPowerMap:  return "Power Map"
+        case .hemisphericTopography: return "L/R Topography"
         case .virtualECGPCA:    return "Virtual ECG"
         case .panTompkinsProxy: return "Pan-Tompkins"
         case .qrsLocking:       return "QRS Lock"
         case .cwlRegression:    return "CWL"
+        case .surrogatePCAS:    return "PCA-S"
         }
     }
 
@@ -1291,14 +1410,67 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
             return "Derive the dominant spatial map of BCG from a highlighted exemplar window (or the first 30 s), project the full recording onto it, and detect peaks. Works even when beat morphology varies."
         case .cardiacPowerMap:
             return "Identify which channels carry the most cardiac-band energy, compute a power-weighted time series, and detect peaks. Good when BCG is focal to a subset of electrodes."
+        case .hemisphericTopography:
+            return "Exploits the characteristic left/right polarity reversal of the pulse artifact over anterior-temporal/facial electrodes: estimate BCG as the difference between right- and left-hemisphere channel-group averages, then detect peaks of that single trace. No ECG required. Select Right and Left channel sets below."
         case .virtualECGPCA:
             return "Collapse the BCG-channel group to a single \u{201C}virtual ECG\u{201D} by taking the first principal component across those channels, then run Pan-Tompkins QRS detection on it. Averages out channel-specific noise — generalizes FMRIB/OBS's best-channel step to a channel group. Select a BCG channel set below."
         case .panTompkinsProxy:
             return "Run the Pan-Tompkins QRS backbone (bandpass → derivative → squaring → moving-window integration → adaptive thresholding) directly on the BCG-channel group. The high-amplitude proxy deflection has a sharp transient the QRS detector locks onto. Select a BCG channel set below."
         case .qrsLocking:
             return "Offset each detected R-wave by a fixed mechanical delay. Requires ECG / QRS detection to be active. The lag from QRS to BCG onset is typically 200–400 ms — adjust to align peaks."
+        case .surrogatePCAS:
+            return "Surrogate-source separation (PCA-S). Models the recording as a fixed brain model plus a small BCG topography dictionary found from the detected beats, fits both at once, and reconstructs only the brain part. The brain block is regularized and the artifact block is not — that asymmetry is what separates them. Unlike template subtraction it removes only what the brain model cannot explain, so evoked responses are distorted less. Needs 3D electrode coordinates and detected beats."
         case .cwlRegression:
             return "Carbon-wire-loop (CWL) correction: no detection step. Each EEG channel is regressed against the selected CWL reference channels at a small range of time lags and the fit is subtracted, in a sliding window that adapts to slowly drifting coupling. Requires CWL leads imported as PNS channels."
         }
     }
+
+    /// Compact author-year form of `reference`, for the inline description
+    /// under the method picker where a full citation would swamp the summary.
+    /// `nil` where the method is a heuristic with no specific source paper.
+    nonisolated var referenceShort: String? {
+        switch self {
+        case .periodicity:      return "GFP: Lehmann & Skrandies (1980)"
+        case .spatialPCA:       return "PCA basis: Niazy et al. (2005)"
+        case .cardiacPowerMap:  return nil
+        case .hemisphericTopography: return "Iannotti et al. (2015)"
+        case .virtualECGPCA:    return "Niazy et al. (2005); Pan & Tompkins (1985)"
+        case .panTompkinsProxy: return "Pan & Tompkins (1985)"
+        case .qrsLocking:       return "Allen et al. (1998)"
+        case .cwlRegression:    return "Masterton et al. (2007)"
+        case .surrogatePCAS:    return "Rusiniak et al. (2022); Berg & Scherg (1994)"
+        }
+    }
+
+    /// Full APA citation(s) for the method this detector builds on, for the
+    /// help popover. These name the source of the *technique* being applied —
+    /// EVA's detectors are original Swift implementations, and several methods
+    /// combine or adapt a published approach rather than reproduce it exactly.
+    /// `nil` where the method is a heuristic with no specific source paper.
+    nonisolated var reference: String? {
+        switch self {
+        case .periodicity:
+            return "Lehmann, D., & Skrandies, W. (1980). Reference-free identification of components of checkerboard-evoked multichannel potential fields. Electroencephalography and Clinical Neurophysiology, 48(6), 609–621. https://doi.org/10.1016/0013-4694(80)90419-8"
+        case .spatialPCA:
+            return "Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. NeuroImage, 28(3), 720–737. https://doi.org/10.1016/j.neuroimage.2005.06.067"
+        case .cardiacPowerMap:
+            return nil
+        case .hemisphericTopography:
+            return "Iannotti, G. R., Pittau, F., Michel, C. M., Vulliemoz, S., & Grouiller, F. (2015). Pulse artifact detection in simultaneous EEG–fMRI recording based on EEG map topography. Brain Topography, 28(1), 21–32. https://doi.org/10.1007/s10548-014-0409-z"
+        case .virtualECGPCA:
+            return "Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. NeuroImage, 28(3), 720–737. https://doi.org/10.1016/j.neuroimage.2005.06.067\n\nPan, J., & Tompkins, W. J. (1985). A real-time QRS detection algorithm. IEEE Transactions on Biomedical Engineering, BME-32(3), 230–236. https://doi.org/10.1109/TBME.1985.325532"
+        case .panTompkinsProxy:
+            return "Pan, J., & Tompkins, W. J. (1985). A real-time QRS detection algorithm. IEEE Transactions on Biomedical Engineering, BME-32(3), 230–236. https://doi.org/10.1109/TBME.1985.325532"
+        case .qrsLocking:
+            return "Allen, P. J., Polizzi, G., Krakow, K., Fish, D. R., & Lemieux, L. (1998). Identification of EEG events in the MR scanner: The problem of pulse artifact and a method for its subtraction. NeuroImage, 8(3), 229–239. https://doi.org/10.1006/nimg.1998.0361"
+        case .surrogatePCAS:
+            return "Rusiniak, M., Bornfleth, H., Cho, J.-H., Wolak, T., Ille, N., Berg, P., & Scherg, M. (2022). EEG-fMRI: Ballistocardiogram artifact reduction by surrogate method for improved source localization. Frontiers in Neuroscience, 16, 842420. https://doi.org/10.3389/fnins.2022.842420\n\nBerg, P., & Scherg, M. (1994). A multiple source approach to the correction of eye artifacts. Electroencephalography and Clinical Neurophysiology, 90(3), 229–241. https://doi.org/10.1016/0013-4694(94)90094-9"
+        case .cwlRegression:
+            return "Masterton, R. A. J., Abbott, D. F., Fleming, S. W., & Jackson, G. D. (2007). Measurement and reduction of motion and ballistocardiogram artefacts from simultaneous EEG and fMRI recordings. NeuroImage, 37(1), 202–211. https://doi.org/10.1016/j.neuroimage.2007.02.060"
+        }
+    }
+
+    /// Cited once in the help popover as shared background: the paper that
+    /// established the BCG/pulse artifact problem these methods all address.
+    nonisolated static let backgroundReference = "Allen, P. J., Polizzi, G., Krakow, K., Fish, D. R., & Lemieux, L. (1998). Identification of EEG events in the MR scanner: The problem of pulse artifact and a method for its subtraction. NeuroImage, 8(3), 229–239. https://doi.org/10.1006/nimg.1998.0361"
 }

@@ -254,7 +254,21 @@ private nonisolated enum BrainVisionSignalReader {
         let markerURL = common["markerfile"].map {
             headerURL.deletingLastPathComponent().appendingPathComponent($0)
         }
-        let events = markerURL.flatMap { try? parseMarkers($0, samplingRate: samplingRate) } ?? []
+        let events: [MFFEvent]
+        if let markerURL {
+            do {
+                events = try parseMarkers(markerURL, samplingRate: samplingRate)
+            } catch let error as SignalImportError {
+                throw error
+            } catch {
+                throw SignalImportError.malformedFile(
+                    headerURL,
+                    "declared MarkerFile \(markerURL.lastPathComponent) could not be read: \(error.localizedDescription)"
+                )
+            }
+        } else {
+            events = []
+        }
         let coordinates = parseCoordinates(ini.section("coordinates"), channelNames: channelNames)
 
         let signal = MFFSignalData(
@@ -337,10 +351,17 @@ private nonisolated enum BrainVisionSignalReader {
             throw SignalImportError.unsupportedVariant(url, "BrainVision BinaryFormat \(format)")
         }
 
-        let inferredSamples = bytes.count / max(valueByteCount * channelCount, 1)
+        let frameByteCount = valueByteCount * channelCount
+        guard frameByteCount > 0, bytes.count % frameByteCount == 0 else {
+            throw SignalImportError.malformedFile(url, "binary data end with a partial sample frame")
+        }
+        let inferredSamples = bytes.count / frameByteCount
         let sampleCount = dataPoints ?? inferredSamples
-        guard sampleCount > 0, bytes.count >= sampleCount * channelCount * valueByteCount else {
+        guard sampleCount > 0 else {
             throw SignalImportError.emptySignal(url)
+        }
+        guard bytes.count == sampleCount * frameByteCount else {
+            throw SignalImportError.malformedFile(url, "DataPoints does not match the binary payload")
         }
 
         var data = Array(repeating: [Float](repeating: 0, count: sampleCount), count: channelCount)
@@ -393,26 +414,39 @@ private nonisolated enum BrainVisionSignalReader {
     }
 
     private static func parseMarkers(_ url: URL, samplingRate: Double) throws -> [MFFEvent] {
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw SignalImportError.missingSidecar(url, url.lastPathComponent)
+        }
         let ini = ImportINI.parse(try ImportText.read(url))
         let markers = ini.section("marker infos") ?? [:]
-        return markers.keys.sorted(by: ImportText.naturalKeySort).compactMap { key in
-            guard key.lowercased().hasPrefix("mk") else { return nil }
+        var events: [MFFEvent] = []
+        for key in markers.keys.sorted(by: ImportText.naturalKeySort) {
+            guard key.lowercased().hasPrefix("mk") else { continue }
             let parts = (markers[key] ?? "")
                 .split(separator: ",", omittingEmptySubsequences: false)
                 .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            guard parts.count >= 3,
-                  !parts[0].localizedCaseInsensitiveContains("new segment"),
-                  let sample = Int(parts[2]) else {
-                return nil
+            guard parts.count >= 3 else {
+                throw SignalImportError.malformedFile(url, "marker \(key) has fewer than three fields")
+            }
+            if parts[0].localizedCaseInsensitiveContains("new segment") { continue }
+            guard let sample = Int(parts[2]), sample > 0 else {
+                throw SignalImportError.malformedFile(url, "marker \(key) has an invalid sample position")
             }
             let type = decodeEscapedComma(parts[0]).nonEmpty ?? "Marker"
             let description = parts.count > 1 ? decodeEscapedComma(parts[1]).nonEmpty : nil
             let code = description.map { "\(type)/\($0)" } ?? type
-            let sizeInSamples = parts.count > 3 ? Int(parts[3]) : nil
+            let sizeInSamples: Int?
+            if parts.count > 3, !parts[3].isEmpty {
+                guard let parsed = Int(parts[3]), parsed > 0 else {
+                    throw SignalImportError.malformedFile(url, "marker \(key) has an invalid duration")
+                }
+                sizeInSamples = parsed
+            } else {
+                sizeInSamples = nil
+            }
             let duration = sizeInSamples.flatMap { $0 > 1 ? Double($0) / samplingRate : nil }
             let onset = Double(max(sample - 1, 0)) / samplingRate
-            return MFFEvent(
+            events.append(MFFEvent(
                 id: "\(url.lastPathComponent)-\(key)",
                 code: code,
                 label: type,
@@ -421,8 +455,9 @@ private nonisolated enum BrainVisionSignalReader {
                 rawBeginTime: "\(sample)",
                 sourceFile: url.lastPathComponent,
                 durationSeconds: duration
-            )
+            ))
         }
+        return events
     }
 
     private static func decodeEscapedComma(_ value: String) -> String {
@@ -485,15 +520,32 @@ private nonisolated enum EDFSignalReader {
         let samplesPerRecord = try readIntArray(bytes, cursor: &cursor, count: signalCount, width: 8)
         _ = try readStringArray(bytes, cursor: &cursor, count: signalCount, width: 32)
 
+        let expectedHeaderBytes = 256 + signalCount * 256
+        guard headerByteCount >= expectedHeaderBytes, bytes.count >= headerByteCount else {
+            throw SignalImportError.malformedFile(url, "declared header size is inconsistent with the signal count")
+        }
+
         let annotationChannels = Set(labels.indices.filter {
             labels[$0].lowercased().contains("edf annotations")
         })
         let dataChannels = labels.indices.filter { !annotationChannels.contains($0) }
         guard let samplesPerDataRecord = dataChannels.map({ samplesPerRecord[$0] }).first,
+              samplesPerDataRecord > 0,
               dataChannels.allSatisfy({ samplesPerRecord[$0] == samplesPerDataRecord }) else {
             throw SignalImportError.unsupportedVariant(url, "mixed EDF sample rates")
         }
         let recordByteCount = samplesPerRecord.reduce(0, +) * 2
+        guard recordByteCount > 0 else {
+            throw SignalImportError.malformedFile(url, "data records contain no samples")
+        }
+        let payloadBytes = bytes.count - headerByteCount
+        if recordCount >= 0 {
+            guard payloadBytes == recordCount * recordByteCount else {
+                throw SignalImportError.malformedFile(url, "declared record count does not match the data payload")
+            }
+        } else if payloadBytes % recordByteCount != 0 {
+            throw SignalImportError.malformedFile(url, "data payload ends with a partial record")
+        }
         let actualRecordCount = recordCount >= 0
             ? recordCount
             : max((bytes.count - headerByteCount) / max(recordByteCount, 1), 0)
@@ -504,14 +556,51 @@ private nonisolated enum EDFSignalReader {
         }
 
         var data = Array(repeating: [Float](repeating: 0, count: sampleCount), count: dataChannels.count)
+        var events: [MFFEvent] = []
         var dataOffset = headerByteCount
         for record in 0..<actualRecordCount {
             if (record & 0x3f) == 0 { try Task.checkCancellation() }
             for signalIndex in 0..<signalCount {
                 let count = samplesPerRecord[signalIndex]
                 let outIndex = dataChannels.firstIndex(of: signalIndex)
+                if annotationChannels.contains(signalIndex) {
+                    let byteCount = count * 2
+                    guard dataOffset + byteCount <= bytes.count else {
+                        throw SignalImportError.malformedFile(url, "truncated EDF+ annotation record")
+                    }
+                    let recordBytes = Array(bytes[dataOffset..<(dataOffset + byteCount)])
+                    let annotations: [EDFAnnotationDecoder.TAL]
+                    do {
+                        annotations = try EDFAnnotationDecoder.decode(recordBytes)
+                    } catch {
+                        throw SignalImportError.malformedFile(
+                            url,
+                            "invalid EDF+ annotation record: \(error.localizedDescription)"
+                        )
+                    }
+                    for (talIndex, tal) in annotations.enumerated() {
+                        for (textIndex, text) in tal.texts.enumerated() {
+                            events.append(MFFEvent(
+                                id: "\(url.lastPathComponent)-tal-\(record)-\(signalIndex)-\(talIndex)-\(textIndex)",
+                                code: text,
+                                label: text,
+                                beginTimeSeconds: tal.onsetSeconds,
+                                rawBeginTime: String(tal.onsetSeconds),
+                                sourceFile: url.lastPathComponent,
+                                durationSeconds: tal.durationSeconds
+                            ))
+                        }
+                    }
+                    dataOffset += byteCount
+                    continue
+                }
                 let scale = UnitScale.microvoltsPerUnit(physicalDimensions[signalIndex])
-                let slope = (physicalMax[signalIndex] - physicalMin[signalIndex]) / (digitalMax[signalIndex] - digitalMin[signalIndex])
+                let denominator = digitalMax[signalIndex] - digitalMin[signalIndex]
+                guard denominator.isFinite, denominator != 0,
+                      physicalMin[signalIndex].isFinite, physicalMax[signalIndex].isFinite else {
+                    throw SignalImportError.malformedFile(url, "invalid calibration range for channel \(signalIndex + 1)")
+                }
+                let slope = (physicalMax[signalIndex] - physicalMin[signalIndex]) / denominator
                 for localSample in 0..<count {
                     let digital = Double(try BinaryImport.int16LE(bytes, at: dataOffset))
                     dataOffset += 2
@@ -530,7 +619,7 @@ private nonisolated enum EDFSignalReader {
             samplingRate: samplingRate,
             duration: Double(sampleCount) / samplingRate,
             recordingStartTime: nil,
-            events: [],
+            events: events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds },
             data: data,
             channelNames: channelNames
         )
@@ -562,6 +651,72 @@ private nonisolated enum EDFSignalReader {
     }
 }
 
+private nonisolated enum EDFAnnotationDecoder {
+    struct TAL {
+        let onsetSeconds: Double
+        let durationSeconds: Double?
+        let texts: [String]
+    }
+
+    static func decode(_ bytes: [UInt8]) throws -> [TAL] {
+        guard bytes.last == 0 else {
+            throw SignalImportError.malformedFile(
+                URL(fileURLWithPath: "EDF"),
+                "annotation record is not NUL-terminated"
+            )
+        }
+        var output: [TAL] = []
+        var start = 0
+        for end in 0...bytes.count where end == bytes.count || bytes[end] == 0 {
+            guard end > start else {
+                start = end + 1
+                continue
+            }
+            let chunk = Array(bytes[start..<end])
+            start = end + 1
+            guard let firstSeparator = chunk.firstIndex(of: 0x14) else {
+                throw SignalImportError.malformedFile(URL(fileURLWithPath: "EDF"), "annotation TAL is missing its text separator")
+            }
+            let timing = Array(chunk[..<firstSeparator])
+            let timingParts = split(timing, separator: 0x15)
+            guard let onsetText = ascii(timingParts.first ?? []),
+                  (onsetText.hasPrefix("+") || onsetText.hasPrefix("-")),
+                  let onset = Double(onsetText) else {
+                throw SignalImportError.malformedFile(URL(fileURLWithPath: "EDF"), "annotation TAL has an invalid onset")
+            }
+            var duration: Double?
+            if timingParts.count > 1 {
+                guard timingParts.count == 2,
+                      let durationText = ascii(timingParts[1]),
+                      let parsed = Double(durationText), parsed >= 0 else {
+                    throw SignalImportError.malformedFile(URL(fileURLWithPath: "EDF"), "annotation TAL has an invalid duration")
+                }
+                duration = parsed > 0 ? parsed : nil
+            }
+            let textBytes = Array(chunk[chunk.index(after: firstSeparator)...])
+            let texts = split(textBytes, separator: 0x14).compactMap { field -> String? in
+                guard !field.isEmpty, let value = String(bytes: field, encoding: .utf8), !value.isEmpty else { return nil }
+                return value
+            }
+            // Empty-text TALs are EDF+ record-timekeeping annotations.
+            if !texts.isEmpty { output.append(TAL(onsetSeconds: onset, durationSeconds: duration, texts: texts)) }
+        }
+        return output
+    }
+
+    private static func split(_ bytes: [UInt8], separator: UInt8) -> [[UInt8]] {
+        var fields: [[UInt8]] = [[]]
+        for byte in bytes {
+            if byte == separator { fields.append([]) } else { fields[fields.count - 1].append(byte) }
+        }
+        return fields
+    }
+
+    private static func ascii(_ bytes: [UInt8]) -> String? {
+        String(bytes: bytes, encoding: .ascii)
+    }
+}
+
 // MARK: - Persyst
 
 private nonisolated enum PersystSignalReader {
@@ -577,7 +732,8 @@ private nonisolated enum PersystSignalReader {
             layURL = sibling
         }
 
-        let sections = parseLAY(try ImportText.read(layURL))
+        let layText = try ImportText.read(layURL)
+        let sections = parseLAY(layText)
         let fileInfo = sections["fileinfo"] ?? [:]
         let channelMap = sections["channelmap"] ?? [:]
         guard let datName = fileInfo["file"]?.nonEmpty else {
@@ -593,11 +749,16 @@ private nonisolated enum PersystSignalReader {
         let calibration = Double(fileInfo["calibration"] ?? "") ?? 1
         let dataType = Int(fileInfo["datatype"] ?? "") ?? 0
         let byteCount = dataType == 7 ? 4 : 2
-        guard channelCount > 0, samplingRate > 0 else {
-            throw SignalImportError.malformedFile(layURL, "invalid waveform count or sampling rate")
+        guard channelCount > 0, samplingRate.isFinite, samplingRate > 0,
+              calibration.isFinite, calibration != 0 else {
+            throw SignalImportError.malformedFile(layURL, "invalid waveform count, sampling rate, or calibration")
         }
 
         let bytes = try Data(contentsOf: datURL)
+        let frameByteCount = channelCount * byteCount
+        guard bytes.count % frameByteCount == 0 else {
+            throw SignalImportError.malformedFile(datURL, "data payload ends with a partial sample frame")
+        }
         let sampleCount = bytes.count / max(channelCount * byteCount, 1)
         guard sampleCount > 0 else { throw SignalImportError.emptySignal(datURL) }
         var data = Array(repeating: [Float](repeating: 0, count: sampleCount), count: channelCount)
@@ -618,7 +779,8 @@ private nonisolated enum PersystSignalReader {
             }
         }
 
-        let channelNames = channelMap.keys.sorted(by: ImportText.naturalKeySort).map {
+        let orderedChannelKeys = channelMapKeysInFileOrder(layText)
+        let channelNames = orderedChannelKeys.map {
             $0.uppercased().replacingOccurrences(of: "-REF", with: "")
         }
         let names = channelNames.count == channelCount
@@ -660,6 +822,25 @@ private nonisolated enum PersystSignalReader {
             }
         }
         return sections
+    }
+
+    /// The channel-major meaning of each binary frame follows the order of the
+    /// ChannelMap entries in the LAY file. A dictionary/sort would silently
+    /// relabel samples when the map is not alphabetic.
+    private static func channelMapKeysInFileOrder(_ text: String) -> [String] {
+        var inChannelMap = false
+        var keys: [String] = []
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("["), line.hasSuffix("]") {
+                inChannelMap = line.dropFirst().dropLast().localizedCaseInsensitiveCompare("ChannelMap") == .orderedSame
+                continue
+            }
+            guard inChannelMap, let equals = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<equals]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty { keys.append(key) }
+        }
+        return keys
     }
 
     private static func parseComments(_ comments: [String: String], source: URL) -> [MFFEvent] {
@@ -715,10 +896,17 @@ private nonisolated enum BESAASCIIReader {
         guard let sampleCount = matrix.first?.count, sampleCount > 0 else {
             throw SignalImportError.emptySignal(url)
         }
+        guard matrix.allSatisfy({ $0.count == sampleCount }) else {
+            throw SignalImportError.malformedFile(url, "AVR rows have inconsistent sample counts")
+        }
+        guard matrix.joined().allSatisfy(\.isFinite) else {
+            throw SignalImportError.malformedFile(url, "AVR data contain a non-finite value")
+        }
         let scale = Double(fields["SB"] ?? "") ?? 1
         let samplingInterval = Double(fields["DI"] ?? "") ?? 0
-        guard samplingInterval > 0 else {
-            throw SignalImportError.malformedFile(url, "missing DI sampling interval")
+        guard samplingInterval.isFinite, samplingInterval > 0,
+              scale.isFinite, scale != 0 else {
+            throw SignalImportError.malformedFile(url, "invalid DI sampling interval or SB scale")
         }
         let data = matrix.map { row in row.map { Float($0 / scale) } }
         let names = channelNames.count == data.count ? channelNames : (0..<data.count).map { "Ch\($0 + 1)" }
@@ -747,14 +935,24 @@ private nonisolated enum BESAASCIIReader {
         guard let sampleCount = rows.count.nonZero, let channelCount = rows.first?.count, channelCount > 0 else {
             throw SignalImportError.emptySignal(url)
         }
-        let samplingInterval = Double(fields["SamplingInterval[ms]"] ?? "") ?? 0
-        guard samplingInterval > 0 else {
-            throw SignalImportError.malformedFile(url, "missing SamplingInterval[ms]")
+        for (rowIndex, row) in rows.enumerated() where row.count != channelCount {
+            throw SignalImportError.malformedFile(
+                url,
+                "MUL row \(rowIndex + 1) has \(row.count) values; expected \(channelCount)"
+            )
         }
+        guard rows.joined().allSatisfy(\.isFinite) else {
+            throw SignalImportError.malformedFile(url, "MUL data contain a non-finite value")
+        }
+        let samplingInterval = Double(fields["SamplingInterval[ms]"] ?? "") ?? 0
         let scale = Double(fields["Bins/uV"] ?? "") ?? 1
+        guard samplingInterval.isFinite, samplingInterval > 0,
+              scale.isFinite, scale != 0 else {
+            throw SignalImportError.malformedFile(url, "invalid SamplingInterval[ms] or Bins/uV scale")
+        }
         var data = Array(repeating: [Float](repeating: 0, count: sampleCount), count: channelCount)
         for sample in rows.indices {
-            for channel in 0..<min(channelCount, rows[sample].count) {
+            for channel in 0..<channelCount {
                 data[channel][sample] = Float(rows[sample][channel] / scale)
             }
         }
@@ -1010,7 +1208,9 @@ with open(os.path.join(outdir, "meta.json"), "w", encoding="utf-8") as f:
                 cell: $0.cell,
                 beginTimeSeconds: $0.beginTimeSeconds,
                 rawBeginTime: $0.rawBeginTime,
-                sourceFile: $0.sourceFile
+                sourceFile: $0.sourceFile,
+                // The MNE bridge reports onsets, as every file format does.
+                timeAnchor: .onset
             )
         }
         return MFFSignalData(

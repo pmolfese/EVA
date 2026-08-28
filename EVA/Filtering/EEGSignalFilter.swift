@@ -68,14 +68,17 @@ enum FilterPrecision: String, CaseIterable, Identifiable, Codable, Sendable {
 }
 
 /// Rolloff slope expressed as dB per octave. Each step is one additional
-/// Butterworth biquad stage (two poles). With zero-phase (filtfilt) the
-/// effective slope is the same as the design slope because filtfilt is used
-/// to cancel phase shift, and we report the *design* order here to match the
-/// convention used by BrainVision Analyzer, EEGLAB, and similar tools.
+/// Butterworth biquad stage (two poles) in the one-pass design. Filtering is
+/// always applied zero-phase (filtfilt), which squares the magnitude
+/// response and therefore *doubles* the actual dB/octave attenuation
+/// relative to a single forward pass. The `rawValue` stores the one-pass
+/// design slope (used to derive `designPoles`); `label` reports the true,
+/// user-facing effective slope actually delivered by the filter.
 ///
-/// Mapping: 12 dB/oct = 2-pole design (1st-order section + filtfilt),
-///          24 dB/oct = 4-pole design (1 biquad), 36 = 6-pole (1 biquad + 1st-order),
-///          48 = 8-pole (2 biquads). All are applied zero-phase.
+/// Mapping: rawValue 12 dB/oct = 2-pole design (1st-order section + filtfilt)
+///          -> effective 24 dB/oct; rawValue 24 = 4-pole design (1 biquad)
+///          -> effective 48 dB/oct; rawValue 36 = 6-pole -> effective 72;
+///          rawValue 48 = 8-pole (2 biquads) -> effective 96.
 enum FilterSlope: Int, CaseIterable, Identifiable, Codable, Sendable {
     case dB12 = 12
     case dB24 = 24
@@ -84,7 +87,8 @@ enum FilterSlope: Int, CaseIterable, Identifiable, Codable, Sendable {
 
     nonisolated var id: Int { rawValue }
 
-    nonisolated var label: String { "\(rawValue) dB/oct" }
+    /// True effective slope after zero-phase (filtfilt) doubling.
+    nonisolated var label: String { "\(rawValue * 2) dB/oct" }
 
     /// Number of poles in the one-sided design (before filtfilt doubling).
     nonisolated var designPoles: Int { rawValue / 6 }
@@ -92,14 +96,13 @@ enum FilterSlope: Int, CaseIterable, Identifiable, Codable, Sendable {
 
 /// Filter implementation family for a given cutoff edge.
 ///
-/// - `iir`: zero-phase Butterworth (the historical behavior). Cheap and works
-///   down to arbitrarily low high-pass cutoffs.
-/// - `fir`: zero-phase linear-phase FIR (`filtfilt` over a symmetric kernel).
-///   Constant group delay across frequency, at the cost of a long kernel for
-///   low cutoffs.
-/// - `auto`: the Net Station (EGI) strategy — use IIR for a high-pass below the
-///   crossover (where an FIR kernel would be impractically long) and FIR for
-///   everything else. See `resolvedFamily(forEdge:cutoff:crossoverHz:)`.
+/// - `iir`: zero-phase recursive filtering. Butterworth is the historical
+///   design; elliptic is available for a steeper transition.
+/// - `fir`: linear-phase FIR with a selectable window and application. A causal
+///   forward pass retains constant group delay; the other modes remove it.
+/// - `auto`: the Net Station (EGI) strategy — use IIR on the low-frequency side
+///   of the crossover (where an FIR kernel would be impractically long) and FIR
+///   elsewhere. See `resolvedFamily(forEdge:cutoff:crossoverHz:)`.
 enum FilterFamily: String, CaseIterable, Identifiable, Codable, Sendable {
     case iir
     case fir
@@ -116,32 +119,151 @@ enum FilterFamily: String, CaseIterable, Identifiable, Codable, Sendable {
     }
 }
 
+enum IIRDesign: String, CaseIterable, Identifiable, Codable, Sendable {
+    case butterworth
+    case elliptic
+
+    nonisolated var id: String { rawValue }
+    nonisolated var label: String {
+        switch self {
+        case .butterworth: return "Butterworth"
+        case .elliptic: return "Elliptic"
+        }
+    }
+}
+
+enum FIRWindow: String, CaseIterable, Identifiable, Codable, Sendable {
+    case hamming
+    case kaiser
+
+    nonisolated var id: String { rawValue }
+    nonisolated var label: String {
+        switch self {
+        case .hamming: return "Hamming"
+        case .kaiser: return "Kaiser"
+        }
+    }
+}
+
+/// How a linear-phase FIR kernel is applied. The historical EVA behavior is
+/// `.zeroPhase`; `.delayCompensated` matches single-pass EEG-toolbox FIRs that
+/// remove their fixed group delay, while `.forward` is genuinely causal.
+enum FIRApplication: String, CaseIterable, Identifiable, Codable, Sendable {
+    case zeroPhase
+    case delayCompensated
+    case forward
+
+    nonisolated var id: String { rawValue }
+    nonisolated var label: String {
+        switch self {
+        case .zeroPhase: return "Zero phase (two pass)"
+        case .delayCompensated: return "Single pass (delay compensated)"
+        case .forward: return "Forward only (causal)"
+        }
+    }
+}
+
 /// Which cutoff edge a family is being resolved for.
 enum FilterEdge: Sendable { case highPass, lowPass }
 
+/// Whether the Auto family's IIR side stops before the crossover or includes
+/// it. Historical EVA behavior is `.below`; Net Station uses `.through` at its
+/// 1-Hz boundary.
+enum AutoCrossoverRule: String, CaseIterable, Identifiable, Codable, Sendable {
+    case below
+    case through
+
+    nonisolated var id: String { rawValue }
+    nonisolated var label: String {
+        switch self {
+        case .below: return "below"
+        case .through: return "at or below"
+        }
+    }
+}
+
+/// How EVA derives a FIR design from a requested cutoff.
+///
+/// The choices below are conventions, not preferences: two packages given the
+/// same "30 Hz low-pass" can build measurably different filters because they
+/// disagree about what the number *means* and how wide the transition should
+/// be. Making the convention explicit is what lets EVA reproduce another
+/// package's filtering, and what lets a published `eva.xml` state which
+/// convention produced its figures rather than leaving a reader to infer it.
+nonisolated enum FIRDesignRule: String, CaseIterable, Identifiable, Sendable {
+    /// EVA's own rule: 25% of the cutoff, floored at 2 Hz and capped at the
+    /// available band, with the requested frequency as the −6 dB point.
+    ///
+    /// The clamps are MNE's and EEGLAB's, adopted because an unfloored 25% at a
+    /// low high-pass produced kernels long enough that the channel-length cap
+    /// silently changed the filter — a 0.1 Hz high-pass asked for 33,001 taps,
+    /// or 132 s of data at 250 Hz. The −6 dB reading of the requested frequency
+    /// is EVA's own and is what distinguishes this from `.eeglabMNE`.
+    case eva
+
+    /// EEGLAB `pop_eegfiltnew` / MNE-Python `firwin`: same clamped transition,
+    /// but the requested frequency is the **passband edge** and the −6 dB point
+    /// falls half a transition beyond it. A band-pass uses one kernel sized by
+    /// the narrower of the two transitions rather than one kernel per edge.
+    ///
+    /// MNE documents its default design as reproducing `pop_eegfiltnew`, so the
+    /// two packages genuinely agree and share this case rather than each having
+    /// their own.
+    case eeglabMNE
+
+    nonisolated var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .eva: return "EVA"
+        case .eeglabMNE: return "EEGLAB / MNE"
+        }
+    }
+
+    /// Whether the requested frequency names the passband edge rather than the
+    /// −6 dB point.
+    var requestedFrequencyIsPassbandEdge: Bool { self == .eeglabMNE }
+
+    /// Whether a band-pass shares one kernel length across both edges.
+    var usesSharedKernelLength: Bool { self == .eeglabMNE }
+}
+
 struct EEGSignalFilter {
+    /// Minimum automatic FIR transition width, in Hz. Matches MNE's and
+    /// EEGLAB's floor.
+    nonisolated static let minimumFIRTransitionHz = 2.0
     /// Default crossover (Hz) below which an `.auto` high-pass stays IIR.
     nonisolated static let defaultFIRCrossoverHz = 1.0
     /// Default FIR transition-band width as a fraction of the cutoff frequency,
     /// used when no explicit transition width is supplied.
     nonisolated static let defaultFIRTransitionFraction = 0.25
+    nonisolated static let defaultEllipticPassbandRippleDB = 0.1
+    nonisolated static let defaultEllipticStopbandAttenuationDB = 60.0
+    nonisolated static let defaultKaiserAttenuationDB = 60.0
 
-    /// Resolves `.auto` to a concrete `.iir` / `.fir` for one edge. IIR wins for
-    /// a high-pass below `crossoverHz`; FIR is used otherwise.
+    /// Resolves `.auto` to a concrete `.iir` / `.fir` for one edge using the
+    /// selected crossover boundary rule.
     nonisolated static func resolvedFamily(
         _ family: FilterFamily,
         edge: FilterEdge,
         cutoff: Double,
-        crossoverHz: Double
+        crossoverHz: Double,
+        crossoverRule: AutoCrossoverRule = .below
     ) -> FilterFamily {
         switch family {
         case .iir, .fir:
             return family
         case .auto:
-            if edge == .highPass, cutoff < crossoverHz {
-                return .iir
+            switch edge {
+            case .highPass:
+                let usesIIR = switch crossoverRule {
+                case .below: cutoff < crossoverHz
+                case .through: cutoff <= crossoverHz
+                }
+                return usesIIR ? .iir : .fir
+            case .lowPass:
+                return .fir
             }
-            return .fir
         }
     }
 
@@ -154,8 +276,16 @@ struct EEGSignalFilter {
         lowPassSlope: FilterSlope = .dB24,
         highPassFamily: FilterFamily = .iir,
         lowPassFamily: FilterFamily = .iir,
+        iirDesign: IIRDesign = .butterworth,
+        ellipticPassbandRippleDB: Double = defaultEllipticPassbandRippleDB,
+        ellipticStopbandAttenuationDB: Double = defaultEllipticStopbandAttenuationDB,
+        firWindow: FIRWindow = .hamming,
+        firKaiserAttenuationDB: Double = defaultKaiserAttenuationDB,
+        firApplication: FIRApplication = .zeroPhase,
         firCrossoverHz: Double = defaultFIRCrossoverHz,
+        firCrossoverRule: AutoCrossoverRule = .below,
         firTransitionHz: Double? = nil,
+        firDesignRule: FIRDesignRule = .eva,
         notch60HzEnabled: Bool = false,
         notchFrequency: Double = 60,
         notchIsFIR: Bool = false,
@@ -184,37 +314,64 @@ struct EEGSignalFilter {
         // the per-channel loop — exactly like the biquad stages.
         let minChannelLength = channels.map(\.count).min() ?? 0
 
+        // EEGLAB/MNE size a band-pass from the *narrower* of the two
+        // transitions and use that one length for both edges, so the pair
+        // behaves as the single kernel those packages build. EVA's own rules
+        // size each edge independently, which is why this is nil for them.
+        let sharedFIRTaps = firDesignRule.usesSharedKernelLength
+            ? sharedBandpassTapCount(
+                lowCutoff: lowCutoff, highCutoff: highCutoff, samplingRate: samplingRate,
+                highPassFamily: highPassFamily, lowPassFamily: lowPassFamily,
+                crossoverHz: firCrossoverHz, crossoverRule: firCrossoverRule,
+                transitionHz: firTransitionHz, maxChannelLength: minChannelLength,
+                window: firWindow, kaiserAttenuationDB: firKaiserAttenuationDB,
+                rule: firDesignRule
+            )
+            : nil
+
         var highPassStages: [BiquadCoefficients] = []
         var highPassFIRKernel: [Double] = []
         if let lowCutoff {
-            switch resolvedFamily(highPassFamily, edge: .highPass, cutoff: lowCutoff, crossoverHz: firCrossoverHz) {
+            switch resolvedFamily(
+                highPassFamily, edge: .highPass, cutoff: lowCutoff,
+                crossoverHz: firCrossoverHz, crossoverRule: firCrossoverRule
+            ) {
             case .fir:
                 highPassFIRKernel = firKernel(
                     cutoff: lowCutoff, samplingRate: samplingRate, edge: .highPass,
-                    transitionHz: firTransitionHz, maxChannelLength: minChannelLength
+                    transitionHz: firTransitionHz, maxChannelLength: minChannelLength,
+                    window: firWindow, kaiserAttenuationDB: firKaiserAttenuationDB,
+                    rule: firDesignRule, tapOverride: sharedFIRTaps
                 )
             case .iir, .auto:
-                highPassStages = BiquadCoefficients.butterworth(
-                    cutoff: lowCutoff, samplingRate: samplingRate,
-                    poles: highPassSlope.designPoles, type: .highPass
-                )
+                highPassStages = BiquadCoefficients.designed(
+                    design: iirDesign, cutoff: lowCutoff, samplingRate: samplingRate,
+                    poles: highPassSlope.designPoles, type: .highPass,
+                    passbandRippleDB: ellipticPassbandRippleDB,
+                    stopbandAttenuationDB: ellipticStopbandAttenuationDB)
             }
         }
 
         var lowPassStages: [BiquadCoefficients] = []
         var lowPassFIRKernel: [Double] = []
         if let highCutoff {
-            switch resolvedFamily(lowPassFamily, edge: .lowPass, cutoff: highCutoff, crossoverHz: firCrossoverHz) {
+            switch resolvedFamily(
+                lowPassFamily, edge: .lowPass, cutoff: highCutoff,
+                crossoverHz: firCrossoverHz, crossoverRule: firCrossoverRule
+            ) {
             case .fir:
                 lowPassFIRKernel = firKernel(
                     cutoff: highCutoff, samplingRate: samplingRate, edge: .lowPass,
-                    transitionHz: firTransitionHz, maxChannelLength: minChannelLength
+                    transitionHz: firTransitionHz, maxChannelLength: minChannelLength,
+                    window: firWindow, kaiserAttenuationDB: firKaiserAttenuationDB,
+                    rule: firDesignRule, tapOverride: sharedFIRTaps
                 )
             case .iir, .auto:
-                lowPassStages = BiquadCoefficients.butterworth(
-                    cutoff: highCutoff, samplingRate: samplingRate,
-                    poles: lowPassSlope.designPoles, type: .lowPass
-                )
+                lowPassStages = BiquadCoefficients.designed(
+                    design: iirDesign, cutoff: highCutoff, samplingRate: samplingRate,
+                    poles: lowPassSlope.designPoles, type: .lowPass,
+                    passbandRippleDB: ellipticPassbandRippleDB,
+                    stopbandAttenuationDB: ellipticStopbandAttenuationDB)
             }
         }
         // The notch runs as either a single zero-phase IIR biquad (cheap, sharp)
@@ -233,7 +390,9 @@ struct EEGSignalFilter {
                 harmonics: notchHarmonics,
                 samplingRate: samplingRate,
                 transitionHz: firTransitionHz,
-                maxChannelLength: minChannelLength
+                maxChannelLength: minChannelLength,
+                window: firWindow,
+                kaiserAttenuationDB: firKaiserAttenuationDB
             )
         }
 
@@ -255,6 +414,11 @@ struct EEGSignalFilter {
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
         nonisolated(unsafe) var firstError: Error?
+        let designedHighPassStages = highPassStages
+        let designedLowPassStages = lowPassStages
+        let designedHighPassFIRKernel = highPassFIRKernel
+        let designedLowPassFIRKernel = lowPassFIRKernel
+        let designedNotchFIRKernel = notchFIRKernel
 
         var filteredChannels = Array(repeating: [Float](), count: channels.count)
         filteredChannels.withUnsafeMutableBufferPointer { out in
@@ -273,13 +437,14 @@ struct EEGSignalFilter {
                         channelIndex: index,
                         requestedPrecision: precision,
                         automaticPrecision: automaticPrecision,
-                        highPassStages: highPassStages,
-                        lowPassStages: lowPassStages,
-                        highPassFIRKernel: highPassFIRKernel,
-                        lowPassFIRKernel: lowPassFIRKernel,
+                        highPassStages: designedHighPassStages,
+                        lowPassStages: designedLowPassStages,
+                        highPassFIRKernel: designedHighPassFIRKernel,
+                        lowPassFIRKernel: designedLowPassFIRKernel,
                         notchFilter: notchFilter,
                         notchEnabled: iirNotchEnabled,
-                        notchFIRKernel: notchFIRKernel,
+                        notchFIRKernel: designedNotchFIRKernel,
+                        firApplication: firApplication,
                         paddingCount: paddingCount
                     )
                 } catch {
@@ -462,6 +627,7 @@ struct EEGSignalFilter {
         notchFilter: BiquadCoefficients,
         notchEnabled: Bool,
         notchFIRKernel: [Double],
+        firApplication: FIRApplication,
         paddingCount: Int
     ) throws -> [Float] {
         let initialPrecision = requestedPrecision == .auto ? automaticPrecision : requestedPrecision
@@ -477,6 +643,7 @@ struct EEGSignalFilter {
                 notchFilter: notchFilter,
                 notchEnabled: notchEnabled,
                 notchFIRKernel: notchFIRKernel,
+                firApplication: firApplication,
                 paddingCount: paddingCount
             )
         } catch {
@@ -494,6 +661,7 @@ struct EEGSignalFilter {
                     notchFilter: notchFilter,
                     notchEnabled: notchEnabled,
                     notchFIRKernel: notchFIRKernel,
+                    firApplication: firApplication,
                     paddingCount: paddingCount
                 )
             }
@@ -512,6 +680,7 @@ struct EEGSignalFilter {
         notchFilter: BiquadCoefficients,
         notchEnabled: Bool,
         notchFIRKernel: [Double],
+        firApplication: FIRApplication,
         paddingCount: Int
     ) throws -> [Float] {
         var result = channel
@@ -523,50 +692,224 @@ struct EEGSignalFilter {
         for stage in lowPassStages {
             result = zeroPhaseFilter(result, coefficients: stage, precision: precision, paddingCount: paddingCount)
         }
-        // Linear-phase FIR edges are applied zero-phase in Double, then written
-        // back to Float. `filtfiltFIR` handles its own reflection padding.
+        // Linear-phase FIR edges use the selected application in Double, then
+        // are written back to Float. Each application owns its edge handling.
         if !highPassFIRKernel.isEmpty {
-            result = applyFIRKernel(highPassFIRKernel, to: result)
+            result = applyFIRKernel(highPassFIRKernel, to: result, application: firApplication)
         }
         if !lowPassFIRKernel.isEmpty {
-            result = applyFIRKernel(lowPassFIRKernel, to: result)
+            result = applyFIRKernel(lowPassFIRKernel, to: result, application: firApplication)
         }
         // Line-noise notch: exactly one of these is populated for a given run.
         if notchEnabled {
             result = zeroPhaseFilter(result, coefficients: notchFilter, precision: precision, paddingCount: paddingCount)
         }
         if !notchFIRKernel.isEmpty {
-            result = applyFIRKernel(notchFIRKernel, to: result)
+            result = applyFIRKernel(notchFIRKernel, to: result, application: firApplication)
         }
         try validateFilteredChannel(result, source: channel, channelIndex: channelIndex)
         return result
     }
 
-    /// Applies a symmetric (linear-phase) FIR kernel zero-phase to a Float
-    /// channel, bridging through Double for the `DSP.filtfiltFIR` core. The
-    /// Float↔Double conversions go through Accelerate (vDSP) rather than scalar
-    /// `map`, so the whole per-channel path stays vectorized.
-    private nonisolated static func applyFIRKernel(_ kernel: [Double], to samples: [Float]) -> [Float] {
+    /// Applies a symmetric (linear-phase) FIR kernel to a Float channel using
+    /// the selected phase/application mode. Float↔Double conversions go through
+    /// Accelerate (vDSP) rather than scalar `map`.
+    private nonisolated static func applyFIRKernel(
+        _ kernel: [Double],
+        to samples: [Float],
+        application: FIRApplication
+    ) -> [Float] {
         guard kernel.count > 1, samples.count > 1 else { return samples }
         let n = vDSP_Length(samples.count)
         var x = [Double](repeating: 0, count: samples.count)
         vDSP_vspdp(samples, 1, &x, 1, n)
-        let y = DSP.filtfiltFIR(kernel, x)
+        let y: [Double]
+        switch application {
+        case .zeroPhase:
+            y = DSP.filtfiltFIR(kernel, x)
+        case .delayCompensated:
+            y = DSP.delayCompensatedFIR(kernel, x)
+        case .forward:
+            y = DSP.firFilter(kernel, x)
+        }
         var out = [Float](repeating: 0, count: y.count)
         vDSP_vdpsp(y, 1, &out, 1, vDSP_Length(y.count))
         return out
     }
 
+    /// The automatic transition width for one edge, in Hz, before any
+    /// length-driven capping.
+    ///
+    /// 25% of the cutoff, subject to MNE's and EEGLAB's clamps: at least
+    /// `minimumFIRTransitionHz`, and never wider than the band actually
+    /// available on that side — the cutoff itself for a high-pass, the distance
+    /// to Nyquist for a low-pass. Without the floor a 0.1 Hz high-pass asks for
+    /// a 0.025 Hz transition, which is a 33,001-tap kernel at 250 Hz.
+    ///
+    /// `rule` is taken even though both current rules clamp identically: the
+    /// width is the rule's to decide, and a future rule that wants a different
+    /// one should not have to change every call site to get it.
+    nonisolated static func automaticTransitionHz(
+        cutoff: Double,
+        samplingRate: Double,
+        edge: FilterEdge,
+        rule: FIRDesignRule
+    ) -> Double {
+        let fraction = cutoff * defaultFIRTransitionFraction
+        let headroom = edge == .highPass ? cutoff : max(samplingRate / 2 - cutoff, 0)
+        let floored = max(fraction, minimumFIRTransitionHz)
+        return max(min(floored, headroom), samplingRate / 10_000)
+    }
+
+    /// What a FIR request resolves to, separating what the settings asked for
+    /// from what the recording could actually accommodate.
+    ///
+    /// The two used to be conflated: the tap count was silently capped to a
+    /// fraction of the channel length, so the *same settings on a shorter
+    /// recording produced a different filter* with nothing said about it. They
+    /// are reported separately now so callers can surface the difference, the
+    /// process log can record it, and `eva.xml` can store the realized tap count
+    /// rather than a length-dependent guess.
+    nonisolated struct FIRDesignReport: Equatable, Sendable {
+        let requestedTransitionHz: Double
+        let requestedTaps: Int
+        let realizedTaps: Int
+        let samplingRate: Double
+
+        /// True when the recording was too short for the requested kernel, so
+        /// the realized filter is wider than asked for.
+        var wasCapped: Bool { realizedTaps < requestedTaps }
+
+        /// The transition width actually achieved, back-derived from the taps
+        /// that survived capping.
+        var realizedTransitionHz: Double {
+            guard realizedTaps > 0 else { return requestedTransitionHz }
+            return requestedTransitionHz * Double(requestedTaps) / Double(realizedTaps)
+        }
+
+        var requestedKernelSeconds: Double {
+            samplingRate > 0 ? Double(requestedTaps) / samplingRate : 0
+        }
+
+        /// Shortest recording, in seconds, that would have carried the
+        /// requested kernel uncapped — the number a user needs in order to know
+        /// what to do about a capped filter.
+        var requiredRecordingSeconds: Double {
+            samplingRate > 0 ? Double((requestedTaps + 1) * 3) / samplingRate : 0
+        }
+
+        var summary: String {
+            let transition = String(format: "%.3g", realizedTransitionHz)
+            guard wasCapped else {
+                return "\(realizedTaps) taps, \(transition) Hz transition"
+            }
+            return "\(realizedTaps) taps (asked \(requestedTaps)), transition widened to \(transition) Hz"
+        }
+    }
+
+    /// One tap count for both edges of a band-pass, taken from the narrower
+    /// transition — EEGLAB's and MNE's behaviour, where a band-pass is a single
+    /// kernel rather than two filters in series.
+    ///
+    /// Returns `nil` unless both edges are actually FIR, since a hybrid run has
+    /// no second FIR edge to share with.
+    private nonisolated static func sharedBandpassTapCount(
+        lowCutoff: Double?,
+        highCutoff: Double?,
+        samplingRate: Double,
+        highPassFamily: FilterFamily,
+        lowPassFamily: FilterFamily,
+        crossoverHz: Double,
+        crossoverRule: AutoCrossoverRule,
+        transitionHz: Double?,
+        maxChannelLength: Int,
+        window: FIRWindow,
+        kaiserAttenuationDB: Double,
+        rule: FIRDesignRule
+    ) -> Int? {
+        var transitions: [Double] = []
+
+        if let lowCutoff, resolvedFamily(
+            highPassFamily, edge: .highPass, cutoff: lowCutoff,
+            crossoverHz: crossoverHz, crossoverRule: crossoverRule
+        ) == .fir {
+            transitions.append(transitionHz ?? automaticTransitionHz(
+                cutoff: lowCutoff, samplingRate: samplingRate, edge: .highPass, rule: rule
+            ))
+        }
+        if let highCutoff, resolvedFamily(
+            lowPassFamily, edge: .lowPass, cutoff: highCutoff,
+            crossoverHz: crossoverHz, crossoverRule: crossoverRule
+        ) == .fir {
+            transitions.append(transitionHz ?? automaticTransitionHz(
+                cutoff: highCutoff, samplingRate: samplingRate, edge: .lowPass, rule: rule
+            ))
+        }
+
+        guard transitions.count == 2, let narrowest = transitions.min() else { return nil }
+        return firTapCount(
+            transition: narrowest, samplingRate: samplingRate,
+            maxChannelLength: maxChannelLength, window: window,
+            kaiserAttenuationDB: kaiserAttenuationDB
+        )
+    }
+
+    /// Resolves one edge's FIR design without building the kernel, for UI
+    /// preview and for the process log.
+    nonisolated static func firDesignReport(
+        cutoff: Double,
+        samplingRate: Double,
+        edge: FilterEdge,
+        transitionHz: Double?,
+        maxChannelLength: Int,
+        window: FIRWindow = .hamming,
+        kaiserAttenuationDB: Double = defaultKaiserAttenuationDB,
+        rule: FIRDesignRule = .eva
+    ) -> FIRDesignReport {
+        let transition = transitionHz ?? automaticTransitionHz(
+            cutoff: cutoff, samplingRate: samplingRate, edge: edge, rule: rule
+        )
+        let requested = firTapCount(
+            transition: transition, samplingRate: samplingRate,
+            maxChannelLength: .max, window: window, kaiserAttenuationDB: kaiserAttenuationDB
+        )
+        let realized = firTapCount(
+            transition: transition, samplingRate: samplingRate,
+            maxChannelLength: maxChannelLength, window: window, kaiserAttenuationDB: kaiserAttenuationDB
+        )
+        return FIRDesignReport(
+            requestedTransitionHz: transition,
+            requestedTaps: requested,
+            realizedTaps: realized,
+            samplingRate: samplingRate
+        )
+    }
+
     /// Odd (Type-I) tap count for a linear-phase FIR with the given transition
     /// width, bounded so `filtfiltFIR` can pad without exceeding the channel
     /// length (short channels widen the effective transition via fewer taps).
+    ///
+    /// Pass `Int.max` for `maxChannelLength` to get the uncapped count the
+    /// settings ask for — `firDesignReport` uses both to tell the two apart.
     private nonisolated static func firTapCount(
         transition: Double,
         samplingRate: Double,
-        maxChannelLength: Int
+        maxChannelLength: Int,
+        window: FIRWindow,
+        kaiserAttenuationDB: Double
     ) -> Int {
-        // Kelley/Hamming rule of thumb: taps ≈ 3.3 · fs / transitionWidth.
-        var taps = Int((3.3 * samplingRate / transition).rounded(.up))
+        let estimate: Double
+        switch window {
+        case .hamming:
+            // Kelley/Hamming rule of thumb: taps ≈ 3.3 · fs / transitionWidth.
+            estimate = 3.3 * samplingRate / transition
+        case .kaiser:
+            // Kaiser order estimate: N ~= (A - 8) / (2.285 * deltaOmega).
+            let attenuation = max(kaiserAttenuationDB, 21)
+            let deltaOmega = 2 * Double.pi * transition / samplingRate
+            estimate = (attenuation - 8) / (2.285 * deltaOmega) + 1
+        }
+        var taps = Int(estimate.rounded(.up))
         if maxChannelLength > 7 {
             let capFromLength = (maxChannelLength / 3) - 1
             taps = min(taps, max(capFromLength, 3))
@@ -576,8 +919,8 @@ struct EEGSignalFilter {
         return taps
     }
 
-    /// Designs a zero-phase-ready linear-phase FIR kernel (odd length, Type-I)
-    /// for one edge using the windowed-sinc (Hamming) method.
+    /// Designs a linear-phase FIR kernel (odd length, Type-I) for one edge using
+    /// the selected windowed-sinc method.
     ///
     /// Windowed-sinc is O(taps) to design, unlike a least-squares (`firls`)
     /// solve, which builds and factors a dense (taps/2)³ system on a single
@@ -590,15 +933,41 @@ struct EEGSignalFilter {
         samplingRate: Double,
         edge: FilterEdge,
         transitionHz: Double?,
-        maxChannelLength: Int
+        maxChannelLength: Int,
+        window: FIRWindow = .hamming,
+        kaiserAttenuationDB: Double = defaultKaiserAttenuationDB,
+        rule: FIRDesignRule = .eva,
+        tapOverride: Int? = nil
     ) -> [Double] {
         let nyquist = samplingRate / 2
         guard nyquist > 0, cutoff > 0, cutoff < nyquist else { return [] }
 
-        let transition = max(transitionHz ?? (cutoff * defaultFIRTransitionFraction), samplingRate / 10_000)
-        let taps = firTapCount(transition: transition, samplingRate: samplingRate, maxChannelLength: maxChannelLength)
-        let normalizedCutoff = cutoff / nyquist
-        let lowPass = DSP.windowedSincLowPass(numtaps: taps, cutoff: normalizedCutoff, gain: 1)
+        let transition = transitionHz ?? automaticTransitionHz(
+            cutoff: cutoff, samplingRate: samplingRate, edge: edge, rule: rule
+        )
+        let taps = tapOverride ?? firTapCount(
+            transition: transition, samplingRate: samplingRate, maxChannelLength: maxChannelLength,
+            window: window, kaiserAttenuationDB: kaiserAttenuationDB)
+
+        // A windowed sinc puts its −6 dB point at the design cutoff. Rules that
+        // read the requested frequency as the *passband edge* therefore have to
+        // move the design cutoff half a transition into the stopband, which is
+        // exactly what MNE reports as its separate "−6 dB cutoff frequency".
+        // Without this shift EVA's 30 Hz low-pass is −6 dB at 30 Hz where MNE
+        // is still in the passband there and −6 dB only at 33.75 Hz.
+        let designCutoff: Double
+        if rule.requestedFrequencyIsPassbandEdge {
+            let shift = transition / 2
+            designCutoff = edge == .lowPass
+                ? min(cutoff + shift, nyquist * 0.999)
+                : max(cutoff - shift, nyquist * 0.0001)
+        } else {
+            designCutoff = cutoff
+        }
+        let normalizedCutoff = designCutoff / nyquist
+        let beta = window == .kaiser ? kaiserBeta(forAttenuationDB: kaiserAttenuationDB) : nil
+        let lowPass = DSP.windowedSincLowPass(
+            numtaps: taps, cutoff: normalizedCutoff, gain: 1, kaiserBeta: beta)
 
         switch edge {
         case .lowPass:
@@ -627,13 +996,18 @@ struct EEGSignalFilter {
         harmonics: Int,
         samplingRate: Double,
         transitionHz: Double?,
-        maxChannelLength: Int
+        maxChannelLength: Int,
+        window: FIRWindow = .hamming,
+        kaiserAttenuationDB: Double = defaultKaiserAttenuationDB
     ) -> [Double] {
         let nyquist = samplingRate / 2
         guard nyquist > 0, frequency > 0, frequency < nyquist else { return [] }
 
         let transition = max(transitionHz ?? 1.0, samplingRate / 10_000)
-        let taps = firTapCount(transition: transition, samplingRate: samplingRate, maxChannelLength: maxChannelLength)
+        let taps = firTapCount(
+            transition: transition, samplingRate: samplingRate, maxChannelLength: maxChannelLength,
+            window: window, kaiserAttenuationDB: kaiserAttenuationDB)
+        let beta = window == .kaiser ? kaiserBeta(forAttenuationDB: kaiserAttenuationDB) : nil
         let stopHalf = firNotchStopbandHz / 2
 
         let centers = (1...max(harmonics, 1))
@@ -648,11 +1022,23 @@ struct EEGSignalFilter {
             let upper = min((center + stopHalf) / nyquist, 1 - 1e-4)
             let lower = max((center - stopHalf) / nyquist, 1e-4)
             guard upper > lower else { continue }
-            let lpUpper = DSP.windowedSincLowPass(numtaps: taps, cutoff: upper, gain: 1)
-            let lpLower = DSP.windowedSincLowPass(numtaps: taps, cutoff: lower, gain: 1)
+            let lpUpper = DSP.windowedSincLowPass(numtaps: taps, cutoff: upper, gain: 1, kaiserBeta: beta)
+            let lpLower = DSP.windowedSincLowPass(numtaps: taps, cutoff: lower, gain: 1, kaiserBeta: beta)
             for i in 0..<taps { kernel[i] -= lpUpper[i] - lpLower[i] }
         }
         return kernel
+    }
+
+    nonisolated static func kaiserBeta(forAttenuationDB attenuationDB: Double) -> Double {
+        let attenuation = max(attenuationDB, 0)
+        if attenuation > 50 {
+            return 0.1102 * (attenuation - 8.7)
+        }
+        if attenuation >= 21 {
+            let delta = attenuation - 21
+            return 0.5842 * pow(delta, 0.4) + 0.07886 * delta
+        }
+        return 0
     }
 
     private nonisolated static func isPrecisionFallbackError(_ error: Error) -> Bool {
@@ -941,6 +1327,37 @@ private struct BiquadCoefficients {
     let a2: Double
 
     enum FilterType { case lowPass, highPass }
+
+    nonisolated static func designed(
+        design: IIRDesign,
+        cutoff: Double,
+        samplingRate: Double,
+        poles: Int,
+        type: FilterType,
+        passbandRippleDB: Double,
+        stopbandAttenuationDB: Double
+    ) -> [BiquadCoefficients] {
+        switch design {
+        case .butterworth:
+            return butterworth(cutoff: cutoff, samplingRate: samplingRate, poles: poles, type: type)
+        case .elliptic:
+            let edge: EllipticFilterDesign.Edge
+            switch type {
+            case .lowPass: edge = .lowPass
+            case .highPass: edge = .highPass
+            }
+            return EllipticFilterDesign.sections(
+                cutoff: cutoff,
+                samplingRate: samplingRate,
+                order: poles,
+                edge: edge,
+                passbandRippleDB: passbandRippleDB,
+                stopbandAttenuationDB: stopbandAttenuationDB
+            ).map {
+                BiquadCoefficients(b0: $0.b0, b1: $0.b1, b2: $0.b2, a1: $0.a1, a2: $0.a2)
+            }
+        }
+    }
 
     /// Returns the cascade of biquad (and optional 1st-order) sections needed
     /// for an N-pole Butterworth filter at `cutoff`.

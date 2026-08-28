@@ -63,6 +63,83 @@ private struct BCGHelpButton: View {
     }
 }
 
+/// All BCG identification methods at a glance, with their sources — the tab
+/// strip only ever shows one method's description at a time, so this is the
+/// one place to compare them side by side before picking.
+private struct BCGMethodOverviewHelpButton: View {
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented = true
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Compare all BCG detection methods")
+        .accessibilityLabel("Compare all BCG detection methods")
+        .popover(isPresented: $isPresented, arrowEdge: .trailing) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("BCG Detection Methods")
+                        .font(.headline)
+
+                    Text("The ballistocardiogram is the heartbeat-driven pulse wave contaminating EEG, most severely inside the scanner. Each method below finds it by a different signature; all but CWL produce beat events you then correct with a cleaning method.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    ForEach(BCGDetectionMethod.allCases) { method in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(method.tabLabel)
+                                    .font(.caption.weight(.semibold))
+                                if method.isDirectCorrection {
+                                    Text("corrects directly — no detection step")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text(method.summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let reference = method.reference {
+                                Text(reference)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("Heuristic — no specific source paper.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Text("Background")
+                        .font(.caption.weight(.semibold))
+                    Text(BCGDetectionMethod.backgroundReference)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Detectors are original Swift implementations. Citations name the source of the technique applied; several methods adapt or combine a published approach rather than reproduce it exactly.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .frame(width: 360, alignment: .leading)
+            }
+            .frame(maxHeight: 460)
+        }
+    }
+}
+
 extension WaveformView {
     // MARK: - BCG Detection sheet
 
@@ -71,8 +148,11 @@ extension WaveformView {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             VStack(alignment: .leading, spacing: 4) {
-                Text("BCG Detection")
-                    .font(.headline)
+                HStack(spacing: 4) {
+                    Text("BCG Detection")
+                        .font(.headline)
+                    BCGMethodOverviewHelpButton()
+                }
                 Text("Ballistocardiogram artifacts are caused by the heartbeat-driven pulse wave. Choose a method below — each exploits a different signature of BCG.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -94,13 +174,23 @@ extension WaveformView {
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
 
-            // Method description
-            Text(bcg.method.summary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 12)
+            // Method description, plus the source of the technique it applies.
+            VStack(alignment: .leading, spacing: 4) {
+                Text(bcg.method.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let source = bcg.method.referenceShort {
+                    Text("Source: \(source)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
 
             Divider()
 
@@ -113,8 +203,10 @@ extension WaveformView {
 
                     bcgMethodOptions(for: signal, selection: selection)
 
-                    // Channel restriction — applies to the GFP-based methods.
-                    if bcg.method != .qrsLocking && bcg.method != .cwlRegression {
+                    // Channel restriction — applies to the GFP-based methods. Hemispheric
+                    // topography has its own Right/Left pickers in bcgMethodOptions instead.
+                    if bcg.method != .qrsLocking && bcg.method != .cwlRegression
+                        && bcg.method != .hemisphericTopography {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 4) {
                                 Text("BCG Channels")
@@ -281,6 +373,13 @@ extension WaveformView {
                             bcg.showsSheet = false
                         }
                     }
+                } else if bcg.method == .surrogatePCAS {
+                    if bcg.correctedSignal != nil, bcg.appliedCorrection == .surrogatePCAS {
+                        Button("Remove PCA-S Correction", role: .destructive) {
+                            disableSurrogateCorrection()
+                            bcg.showsSheet = false
+                        }
+                    }
                 } else if bcg.detectsArtifacts {
                     Button("Disable BCG Detection", role: .destructive) {
                         disableBCGDetection()
@@ -309,7 +408,31 @@ extension WaveformView {
                     }
                     .disabled(bcg.isRefining || bcg.isRunning)
                 }
-                if bcg.method == .cwlRegression {
+                if bcg.method == .surrogatePCAS {
+                    let beats = surrogateBeatTimes()
+                    let missingGeometry = !surrogateMissingGeometryChannels(for: signal).isEmpty
+                        || electrodeGeometry == nil
+                    Button("Correct PCA-S") {
+                        bcgTask?.cancel()
+                        let sessionID = recordingSessionID
+                        bcgTask = Task {
+                            await runSurrogateCorrection(signal: signal)
+                            if !Task.isCancelled, sessionID == recordingSessionID {
+                                bcgTask = nil
+                            }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    // Disabled rather than failing on click: both refusals are
+                    // stated in the panel above, so the button being off is the
+                    // same message rather than a second one.
+                    .disabled(bcg.isRunning || beats.isEmpty || missingGeometry)
+                    .help(missingGeometry
+                          ? "PCA-S needs 3D coordinates for every corrected channel."
+                          : beats.isEmpty
+                            ? "PCA-S needs detected beats. Run BCG or ECG detection first."
+                            : "Fit the surrogate model and remove the BCG.")
+                } else if bcg.method == .cwlRegression {
                     Button("Correct CWL") {
                         bcgTask?.cancel()
                         let sessionID = recordingSessionID
@@ -416,6 +539,7 @@ extension WaveformView {
         switch method {
         case .cwlRegression: return "N/A"
         case .qrsLocking: return "ECG needed"
+        case .hemisphericTopography: return "L/R sets needed"
         default: return "—"
         }
     }
@@ -434,6 +558,8 @@ extension WaveformView {
             "\(signal.data.first?.count ?? 0)",
             "\(signal.samplingRate)",
             bcg.channelSetID?.uuidString ?? "all",
+            bcg.rightChannelSetID?.uuidString ?? "no-right",
+            bcg.leftChannelSetID?.uuidString ?? "no-left",
             selection.map { "\($0.lowerBound)-\($0.upperBound)" } ?? "no-selection",
             String(format: "%.4f", bcg.thresholdSD),
             String(format: "%.4f", bcg.minHR),
@@ -488,6 +614,7 @@ extension WaveformView {
             .map(\.beginTimeSeconds)
         let samplingRate = signal.samplingRate
         let duration = signal.duration
+        let hemisphericChannels = hemisphericPreviewChannels(for: signal)
 
         bcg.isEstimating = true
         bcg.algorithmResults = [:]
@@ -504,7 +631,8 @@ extension WaveformView {
                         duration: duration,
                         exemplarRange: selection,
                         qrsTimes: qrsTimes,
-                        configuration: configuration
+                        configuration: configuration,
+                        hemisphericChannels: hemisphericChannels
                     ) else { return (method, nil) }
                     return (method, BCGDetectionPreviewEstimator.result(from: times))
                 }
@@ -520,6 +648,24 @@ extension WaveformView {
               requestID == bcgDetectionPreviewRequestID(for: signal, selection: selection) else { return }
         bcg.isEstimating = false
         bcg.algorithmResults = results
+    }
+
+    /// Resolves the right/left channel-set selections against the current recording,
+    /// for the hemispheric-topography method (see `BCGDetector.hemisphericTopographyEvents`).
+    /// `nil` when either side is unset or has no channels in range.
+    func hemisphericPreviewChannels(for signal: MFFSignalData) -> (right: [[Float]], left: [[Float]])? {
+        func channels(for id: ChannelSet.ID?) -> [[Float]]? {
+            guard let id,
+                  let set = ChannelSetStore.shared.allSets.first(where: { $0.id == id })
+            else { return nil }
+            let indices = set.channelIndices.filter { signal.data.indices.contains($0) }
+            guard !indices.isEmpty else { return nil }
+            return indices.map { signal.data[$0] }
+        }
+        guard let right = channels(for: bcg.rightChannelSetID),
+              let left = channels(for: bcg.leftChannelSetID)
+        else { return nil }
+        return (right, left)
     }
 
     @ViewBuilder
@@ -670,6 +816,70 @@ extension WaveformView {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Slider(value: $bcg.powerMaxHz, in: 0.8...3.0, step: 0.05)
+                }
+            }
+
+        case .hemisphericTopography:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Right / left channel groups")
+                    .font(.caption.weight(.semibold))
+                if bcg.rightChannelSetID != nil, bcg.leftChannelSetID != nil {
+                    Label("BCG estimated as the difference of the right- and left-set averages.", systemImage: "checkmark.circle")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Label("Pick both a Right and a Left channel set — anterior-temporal/facial electrodes with the clearest inter-hemispheric contrast work best.", systemImage: "exclamationmark.triangle")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 4) {
+                    Text("Right set")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    BCGHelpButton(
+                        title: "Right set",
+                        explanation: "Channel set averaged to estimate the right-hemisphere side of the pulse-artifact topography (μR). Pick anterior-temporal/facial electrodes on the right."
+                    )
+                    ChannelSetPickerView(
+                        label: "Right Channel Set",
+                        selectedSetID: $bcg.rightChannelSetID,
+                        channelCount: signal.numberOfChannels
+                    )
+                }
+                HStack(spacing: 4) {
+                    Text("Left set")
+                        .font(.caption)
+                        .frame(width: 100, alignment: .leading)
+                    BCGHelpButton(
+                        title: "Left set",
+                        explanation: "Channel set averaged to estimate the left-hemisphere side of the pulse-artifact topography (μL). Pick anterior-temporal/facial electrodes on the left."
+                    )
+                    ChannelSetPickerView(
+                        label: "Left Channel Set",
+                        selectedSetID: $bcg.leftChannelSetID,
+                        channelCount: signal.numberOfChannels
+                    )
+                }
+
+                Divider()
+
+                Text("Expected heart rate")
+                    .font(.caption.weight(.semibold))
+                HStack {
+                    BCGParameterLabel(
+                        title: "Max HR",
+                        explanation: "The fastest plausible heart rate. It sets the minimum spacing between detections, rejecting implausibly close duplicate peaks."
+                    )
+                    TextField("BPM", value: $bcg.maxHR, format: .number.precision(.fractionLength(0)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("BPM")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(value: $bcg.maxHR, in: 60...180, step: 1)
                 }
             }
 
@@ -891,6 +1101,151 @@ extension WaveformView {
                 }
                 .disabled(cwlDownsampleSelectionBinding(for: signal.samplingRate).wrappedValue == 0)
             }
+
+        case .surrogatePCAS:
+            surrogateOptions(for: signal)
+        }
+    }
+
+    // MARK: - Surrogate separation (PCA-S)
+
+    /// What PCA-S is about to assume, what it has to work with, and the
+    /// settings that change the answer.
+    ///
+    /// The declarations at the top are not decoration. The brain model is a
+    /// three-shell sphere fitted to nobody, and the coordinates are whatever the
+    /// package carries — an operator reading a corrected recording has to be
+    /// able to see both without opening the audit log (ROADMAP SI-3).
+    @ViewBuilder
+    func surrogateOptions(for signal: MFFSignalData) -> some View {
+        let beats = surrogateBeatTimes()
+        let rows = surrogateCorrectedRows(for: signal)
+        let missingGeometry = surrogateMissingGeometryChannels(for: signal)
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Assumptions")
+                .font(.caption.weight(.semibold))
+            VStack(alignment: .leading, spacing: 3) {
+                Label(
+                    electrodeGeometry.map { "Coordinates: \($0.name)" }
+                        ?? "Coordinates: none loaded",
+                    systemImage: electrodeGeometry == nil ? "xmark.octagon" : "checkmark.circle"
+                )
+                .foregroundStyle(electrodeGeometry == nil ? Color.red : Color.secondary)
+                Label(
+                    "Head model: \(ForwardHeadModel.classicThreeShell.name) — "
+                        + ForwardHeadModel.classicThreeShell.shells
+                            .map { String(format: "%.0f", $0.radiusMeters * 1000) }
+                            .joined(separator: "/") + " mm",
+                    systemImage: "circle.dashed"
+                )
+                .foregroundStyle(.secondary)
+                Label(
+                    "Beats: \(beats.count) \(bcg.beatEventCode) event\(beats.count == 1 ? "" : "s")",
+                    systemImage: beats.isEmpty ? "exclamationmark.triangle" : "heart"
+                )
+                .foregroundStyle(beats.isEmpty ? Color.orange : Color.secondary)
+                Label(
+                    "Channels: \(rows.count) corrected, \(signal.data.count - rows.count) excluded",
+                    systemImage: "waveform"
+                )
+                .foregroundStyle(.secondary)
+            }
+            .font(.caption2)
+
+            if !missingGeometry.isEmpty {
+                Label(
+                    "No coordinates for channel\(missingGeometry.count == 1 ? "" : "s") "
+                        + missingGeometry.prefix(8).map(String.init).joined(separator: ", ")
+                        + (missingGeometry.count > 8 ? ", …" : "")
+                        + ". PCA-S will not run with an approximated montage.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            Text("Separation")
+                .font(.caption.weight(.semibold))
+            HStack {
+                BCGParameterLabel(
+                    title: "Pattern search",
+                    explanation: "How the representative BCG pattern is chosen before beats are averaged. Paper follows the publication: one representative beat, then a single correlation pass. Iterative starts from the all-beat average and refines twice, which judges each beat against the artifact rather than against one noisy example."
+                )
+                Picker("Pattern search", selection: $bcg.surrogateSettings.patternSearch) {
+                    ForEach(BCGArtifactPatternSearch.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 260, alignment: .leading)
+            }
+            HStack {
+                BCGParameterLabel(
+                    title: "Brain regularization",
+                    explanation: "The penalty on the brain block. This is the mechanism, not a tuning knob: the artifact block is unregularized, so any variance the artifact topographies can explain is cheaper to put there. Halve it and the method removes less; raise it and it starts removing brain signal. The published value is 2%."
+                )
+                TextField("", value: $bcg.surrogateSettings.brainRegularization, format: .number.precision(.fractionLength(3)))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                Slider(value: $bcg.surrogateSettings.brainRegularization, in: 0.002...0.1)
+            }
+            HStack {
+                BCGParameterLabel(
+                    title: "Regional sources",
+                    explanation: "How many regional sources make up the brain model. Each is three orthogonal dipoles, so 29 sources give 87 columns — the published configuration. More sources describe brain activity more richly and leave the artifact block less to absorb."
+                )
+                TextField("", value: $bcg.surrogateSettings.regionalSourceCount, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                Stepper("", value: $bcg.surrogateSettings.regionalSourceCount, in: 8...60)
+                    .labelsHidden()
+            }
+            HStack {
+                BCGParameterLabel(
+                    title: "Beat match",
+                    explanation: "Spatio-temporal correlation a beat must reach to join the template. Lower it when few beats are accepted; raise it when the template looks contaminated."
+                )
+                TextField("", value: $bcg.surrogateSettings.correlationThreshold, format: .number.precision(.fractionLength(2)))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                Slider(value: $bcg.surrogateSettings.correlationThreshold, in: 0.2...0.95)
+            }
+            HStack {
+                BCGParameterLabel(
+                    title: "Component reliability",
+                    explanation: "The split-half correlation a template component must reach to be treated as artifact. A real BCG component is the same shape on odd and even beats; ongoing EEG that survived the average is not. Lowering this admits components that cost brain signal — measured on a brain-dominated test recording, dropping it from 0.9 to 0.5 turned a 2.8:1 recording into a 1.7:1 one."
+                )
+                TextField("", value: $bcg.surrogateSettings.minimumComponentReliability, format: .number.precision(.fractionLength(2)))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                Slider(value: $bcg.surrogateSettings.minimumComponentReliability, in: 0.3...0.99)
+            }
+
+            if let report = bcg.surrogateReport {
+                Divider()
+                Text("Last run")
+                    .font(.caption.weight(.semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(report.summary)
+                    Text("Components kept: "
+                         + report.artifactComponentReliabilities
+                            .map { String(format: "r=%.2f", $0) }.joined(separator: ", ")
+                         + (report.reliabilityRejectedComponentCount > 0
+                            ? " · \(report.reliabilityRejectedComponentCount) rejected as unreliable"
+                            : ""))
+                    Text("Brain model: \(report.brainColumnCount) columns from "
+                         + "\(report.regionalSourceCount) regional sources, "
+                         + String(format: "%.1f%% regularization", report.brainRegularization * 100))
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            }
         }
     }
 
@@ -931,11 +1286,7 @@ extension WaveformView {
     }
 
     func disableBCGDetection() {
-        bcg.detectsArtifacts = false
-        artifactVM.events = artifactVM.events.filter { $0.sourceFile != BCGDetector.sourceFile }
-        template.definedArtifacts.removeAll { $0.id == bcgDefinedArtifactID }
-        bcg.refinedTemplate = nil
-        bcg.refinedKeptCount = nil
+        PipelineStageToggles.disableBCGDetection(bcg: bcg, artifactVM: artifactVM, template: template)
     }
 
     /// When the "auto-select proxy set" default is on, pick a compatible
@@ -992,6 +1343,7 @@ extension WaveformView {
         let qrsTimes = artifactVM.events
             .filter { $0.code == RWaveDetector.eventCode }
             .map(\.beginTimeSeconds)
+        let hemisphericChannels = hemisphericPreviewChannels(for: signal)
 
         // With NonisolatedNonsendingByDefault, merely awaiting a nonisolated
         // detector does not guarantee that its CPU work leaves MainActor. Run
@@ -1005,7 +1357,8 @@ extension WaveformView {
                 duration: duration,
                 exemplarRange: selection,
                 qrsTimes: qrsTimes,
-                configuration: configuration
+                configuration: configuration,
+                hemisphericChannels: hemisphericChannels
             ) ?? []
         }
         let times = await withTaskCancellationHandler(
@@ -1120,7 +1473,7 @@ extension WaveformView {
 
     func registerBCGDefinedArtifact(events: [MFFEvent], eventCode: String) {
         let artifact = DefinedArtifact(
-            id: bcgDefinedArtifactID,
+            id: bcg.definedArtifactID,
             type: .bcg,
             name: "BCG",
             eventCode: eventCode,
@@ -1131,14 +1484,14 @@ extension WaveformView {
             topography: nil,
             cleaningMethod: .obs
         )
-        if let index = template.definedArtifacts.firstIndex(where: { $0.id == bcgDefinedArtifactID }) {
+        if let index = template.definedArtifacts.firstIndex(where: { $0.id == bcg.definedArtifactID }) {
             let previous = template.definedArtifacts[index]
             template.definedArtifacts[index] = artifact
             template.definedArtifacts[index].preserveCleaningSettings(from: previous)
         } else {
             template.definedArtifacts.append(artifact)
         }
-        invalidateOBSVarianceCache(for: bcgDefinedArtifactID)
+        invalidateOBSVarianceCache(for: bcg.definedArtifactID)
         clearAppliedArtifactCleaning()
     }
 
@@ -1327,11 +1680,52 @@ extension WaveformView {
             let outputRate = downsampleFactor > 1 && !upsampleToOriginalHz && correctedData.first?.count != sourceData.first?.count
                 ? downsampleEffectiveRate
                 : sr
-            bcg.correctedSignal = signal.replacingData(
-                correctedData,
-                samplingRate: outputRate,
-                signalTypeSuffix: "CWL"
-            )
+            if outputRate == sr, correctedData.first?.count == signal.data.first?.count {
+                bcg.correctedSignal = signal.replacingSamples(correctedData, signalTypeSuffix: "CWL")
+                // Only the rate-preserving branch is accounted. When CWL
+                // downsamples, input and output samples do not correspond, so a
+                // sample-wise difference would not be the removed signal --
+                // it would be the removed signal plus the resampling. Better to
+                // report nothing than to report that as artifact.
+                bcg.store.cleaningVariance.record(
+                    CleaningVarianceAccount.between(
+                        original: signal.data,
+                        cleaned: correctedData,
+                        samplingRate: sr,
+                        epochSeconds: CleaningVarianceAccount.defaultEpochSeconds,
+                        stageName: "cwlCorrection"
+                    )
+                )
+            } else {
+                bcg.store.cleaningVariance.clear(stageName: "cwlCorrection")
+                let ratio = outputRate / sr
+                let segments = signal.epochSegments.compactMap { segment -> EpochSegment? in
+                    let start = Int((Double(segment.startSample) * ratio).rounded())
+                    let endExclusive = Int((Double(segment.endSample + 1) * ratio).rounded())
+                    guard endExclusive > start else { return nil }
+                    return EpochSegment(
+                        startSample: start,
+                        endSample: endExclusive - 1,
+                        stimulusOffsetSamples: Int((Double(segment.stimulusOffsetSamples) * ratio).rounded()),
+                        category: segment.category,
+                        sourceCode: segment.sourceCode,
+                        sourceTimeSeconds: segment.sourceTimeSeconds,
+                        colorIndex: segment.colorIndex,
+                        contributingEpochCount: segment.contributingEpochCount,
+                        subject: segment.subject
+                    )
+                }
+                bcg.correctedSignal = signal.reconstructingTimeline(
+                    data: correctedData,
+                    samplingRate: outputRate,
+                    events: signal.events,
+                    epochSegments: segments,
+                    isSegmented: signal.isSegmented,
+                    isAveraged: signal.isAveraged,
+                    isGrandAverage: signal.isGrandAverage,
+                    signalTypeSuffix: "CWL"
+                )
+            }
             bcg.progress = 1
             let algorithmSummary = " \(cwlAlgorithm.label)."
             let downsampleSummary: String
@@ -1347,16 +1741,10 @@ extension WaveformView {
             // Downstream stages built on the old base are now stale — same
             // cross-domain invalidation as `applyGradientCorrection`, since
             // `bcg.correctedSignal` sits in the same base-signal chain
-            // between gradient correction and ICA.
-            ica.cleanedSignal = nil
-            ica.decomposition = nil
-            filter.output = nil
-            filter.pnsOutput = nil
-            filter.pnsInputSignalType = nil
-            clearAppliedArtifactCleaning()
-            artifactVM.detectionRefreshToken += 1
-            invalidateEpochsForSignalChange()
-            invalidateInterpolations()
+            // between gradient correction and ICA. The `cwlCorrection` variance
+            // account recorded above survives it: the cascade clears only the
+            // stages it invalidates.
+            invalidateDownstreamOfBaseSignalChange()
             bcg.showsSheet = false
         } catch is CancellationError {
             progressContinuation.finish()
@@ -1371,18 +1759,132 @@ extension WaveformView {
         bcg.isRunning = false
     }
 
+    // MARK: - PCA-S correction
+
+    /// Beats PCA-S will lock to: this recording's BCG events, or — when the BCG
+    /// detector has not run — the R-waves an ECG detector found.
+    ///
+    /// Falling back to QRS is not a liberty: the mechanical beat follows the
+    /// R-wave by a fixed delay, the template window starts before zero, and the
+    /// pattern search aligns whatever it is given. What it must never do is
+    /// invent beats.
+    func surrogateBeatTimes() -> [Double] {
+        let code = bcg.beatEventCode
+        let bcgBeats = artifactVM.events
+            .filter { $0.code == code }
+            .map(\.beginTimeSeconds)
+            .sorted()
+        if !bcgBeats.isEmpty { return bcgBeats }
+        return artifactVM.events
+            .filter { $0.code == RWaveDetector.eventCode }
+            .map(\.beginTimeSeconds)
+            .sorted()
+    }
+
+    /// The good EEG subset: every row except the ones marked bad.
+    ///
+    /// Hidden channels stay in — hiding is a display decision and does not make
+    /// a channel's data wrong — while a bad channel would contribute a
+    /// topography the model then has to explain as brain or artifact.
+    func surrogateCorrectedRows(for signal: MFFSignalData) -> [Int] {
+        signal.data.indices.filter { !channels.bad.contains($0) }
+    }
+
+    /// One-based channel numbers in the corrected subset that have no
+    /// coordinates, for the sheet's refusal notice.
+    func surrogateMissingGeometryChannels(for signal: MFFSignalData) -> [Int] {
+        guard let electrodeGeometry else { return [] }
+        return surrogateCorrectedRows(for: signal)
+            .filter { electrodeGeometry.positions[$0] == nil }
+            .map { $0 + 1 }
+    }
+
+    func runSurrogateCorrection(signal: MFFSignalData) async {
+        await processingQueue.run("BCG PCA-S Correction") { [self] in
+            await runSurrogateCorrectionCore(signal: signal)
+        }
+    }
+
+    private func runSurrogateCorrectionCore(signal: MFFSignalData) async {
+        let sessionID = recordingSessionID
+        let beats = surrogateBeatTimes()
+        let rows = surrogateCorrectedRows(for: signal)
+        let geometry = electrodeGeometry
+        let settings = bcg.surrogateSettings
+        let sourceData = signal.data
+        let names = signal.channelNames
+        let samplingRate = signal.samplingRate
+
+        bcg.isRunning = true
+        bcg.progress = nil
+        bcg.status = "Building the surrogate model…"
+
+        do {
+            let worker = Task.detached(priority: .userInitiated) {
+                try await BCGSurrogateCorrection.correct(
+                    data: sourceData,
+                    samplingRate: samplingRate,
+                    correctedRows: rows,
+                    geometry: geometry,
+                    channelNames: names,
+                    beatSeconds: beats,
+                    settings: settings
+                )
+            }
+            let output = try await withTaskCancellationHandler(
+                operation: { try await worker.value },
+                onCancel: { worker.cancel() }
+            )
+            guard !Task.isCancelled, sessionID == recordingSessionID else {
+                bcg.isRunning = false
+                bcg.progress = nil
+                return
+            }
+
+            bcg.correctedSignal = signal.replacingSamples(output.data, signalTypeSuffix: "PCAS")
+            bcg.appliedCorrection = .surrogatePCAS
+            bcg.surrogateReport = output.report
+            bcg.surrogateAuditLogLines = output.report.auditLogLines
+            // The variance account the roadmap names, for the export audit log.
+            recordingStore.cleaningVariance.record(
+                CleaningVarianceAccount.between(
+                    original: sourceData,
+                    cleaned: output.data,
+                    samplingRate: samplingRate,
+                    epochSeconds: CleaningVarianceAccount.defaultEpochSeconds,
+                    stageName: BCGSurrogateCorrection.varianceStageName
+                )
+            )
+            bcg.status = "✓ PCA-S applied — \(output.report.summary)"
+            // Same base-signal slot as CWL and gradient correction, so the same
+            // shared cascade.
+            invalidateDownstreamOfBaseSignalChange()
+            bcg.showsSheet = false
+        } catch {
+            guard sessionID == recordingSessionID else { return }
+            bcg.status = "⚠ \(error.localizedDescription)"
+        }
+        bcg.isRunning = false
+        bcg.progress = nil
+    }
+
+    func disableSurrogateCorrection() {
+        bcg.correctedSignal = nil
+        bcg.appliedCorrection = nil
+        bcg.surrogateReport = nil
+        bcg.surrogateAuditLogLines = []
+        bcg.status = nil
+        recordingStore.cleaningVariance.clear(stageName: BCGSurrogateCorrection.varianceStageName)
+        invalidateDownstreamOfBaseSignalChange()
+    }
+
     func disableCWLCorrection() {
         bcg.correctedSignal = nil
         bcg.progress = nil
         bcg.status = nil
-        ica.cleanedSignal = nil
-        ica.decomposition = nil
-        filter.output = nil
-        filter.pnsOutput = nil
-        filter.pnsInputSignalType = nil
-        clearAppliedArtifactCleaning()
-        artifactVM.detectionRefreshToken += 1
-        invalidateEpochsForSignalChange()
-        invalidateInterpolations()
+        // As in `clearGradientCorrection`: the shared cascade clears the stages
+        // it invalidates, and the stage being removed clears its own account.
+        recordingStore.cleaningVariance.clear(stageName: "cwlCorrection")
+        invalidateDownstreamOfBaseSignalChange()
     }
 }

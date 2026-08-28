@@ -35,6 +35,22 @@ nonisolated struct MFFAntiAliasTimingCorrection: Sendable, Equatable {
     }
 }
 
+/// The physical reference declared by the acquisition metadata. `isRecorded`
+/// distinguishes a real sample row from the common EGI convention where the
+/// reference exists in `sensorLayout.xml` but was omitted from `signal1.bin`.
+nonisolated struct EEGAcquisitionReference: Sendable, Equatable {
+    let channelIndex: Int
+    let name: String
+    let isRecorded: Bool
+}
+
+/// The voltage convention of the samples currently carried by a signal.
+nonisolated enum EEGReferenceState: String, Sendable, Equatable {
+    case unknown
+    case acquisition
+    case average
+}
+
 nonisolated struct MFFSignalData: Sendable {
     /// Identity of this exact sample-data version. Copies preserve the revision;
     /// constructing/replacing sample data creates a new one. Derived-signal
@@ -73,6 +89,11 @@ nonisolated struct MFFSignalData: Sendable {
     /// negative-up. `nil` when the signal has no PNS sensor metadata (e.g. EEG,
     /// or PNS imported from a non-MFF source).
     let positiveUpFlags: [Bool]?
+    /// Immutable provenance for the physical acquisition reference, when the
+    /// source format declares it.
+    let acquisitionReference: EEGAcquisitionReference?
+    /// Reference convention of this exact sample-data version.
+    let referenceState: EEGReferenceState
 
     init(
         dataRevision: UUID = UUID(),
@@ -90,7 +111,9 @@ nonisolated struct MFFSignalData: Sendable {
         isAveraged: Bool = false,
         isGrandAverage: Bool = false,
         impedancesKOhm: [Float]? = nil,
-        positiveUpFlags: [Bool]? = nil
+        positiveUpFlags: [Bool]? = nil,
+        acquisitionReference: EEGAcquisitionReference? = nil,
+        referenceState: EEGReferenceState = .unknown
     ) {
         self.dataRevision = dataRevision
         self.signalURL = signalURL
@@ -108,25 +131,28 @@ nonisolated struct MFFSignalData: Sendable {
         self.isGrandAverage = isGrandAverage
         self.impedancesKOhm = impedancesKOhm
         self.positiveUpFlags = positiveUpFlags
+        self.acquisitionReference = acquisitionReference
+        self.referenceState = referenceState
     }
 
-    /// Returns a copy with the sample data replaced, preserving all metadata.
-    /// Optionally annotates the signal type to record the transform applied.
-    func replacingData(
+    /// Replaces samples on the same timeline. Shape changes are programming
+    /// errors because the preserved events and epoch metadata would become stale.
+    func replacingSamples(
         _ newData: [[Float]],
-        samplingRate newSamplingRate: Double? = nil,
         signalTypeSuffix: String? = nil
     ) -> MFFSignalData {
-        let resolvedSamplingRate = newSamplingRate ?? samplingRate
-        let resolvedDuration = newSamplingRate == nil
-            ? duration
-            : (resolvedSamplingRate > 0 ? Double(newData.first?.count ?? 0) / resolvedSamplingRate : duration)
+        precondition(newData.count == numberOfChannels, "replacingSamples requires the same channel count")
+        let oldSampleCount = data.first?.count ?? 0
+        precondition(
+            newData.allSatisfy { $0.count == oldSampleCount },
+            "replacingSamples requires the same sample count"
+        )
         return MFFSignalData(
             signalURL: signalURL,
             signalType: signalTypeSuffix.map { "\(signalType) \($0)" } ?? signalType,
             numberOfChannels: numberOfChannels,
-            samplingRate: resolvedSamplingRate,
-            duration: resolvedDuration,
+            samplingRate: samplingRate,
+            duration: duration,
             recordingStartTime: recordingStartTime,
             events: events,
             data: newData,
@@ -136,12 +162,209 @@ nonisolated struct MFFSignalData: Sendable {
             isAveraged: isAveraged,
             isGrandAverage: isGrandAverage,
             impedancesKOhm: impedancesKOhm,
-            positiveUpFlags: positiveUpFlags
+            positiveUpFlags: positiveUpFlags,
+            acquisitionReference: acquisitionReference,
+            referenceState: referenceState
+        )
+    }
+
+    /// Replaces the event list on an unchanged timeline.
+    ///
+    /// For re-stamping events without touching samples — applying the user's
+    /// event-anchor rules at load, or reapplying them after the rules change.
+    func replacingEvents(_ newEvents: [MFFEvent]) -> MFFSignalData {
+        MFFSignalData(
+            dataRevision: dataRevision,
+            signalURL: signalURL,
+            signalType: signalType,
+            numberOfChannels: numberOfChannels,
+            samplingRate: samplingRate,
+            duration: duration,
+            recordingStartTime: recordingStartTime,
+            events: newEvents,
+            data: data,
+            channelNames: channelNames,
+            epochSegments: epochSegments,
+            isSegmented: isSegmented,
+            isAveraged: isAveraged,
+            isGrandAverage: isGrandAverage,
+            impedancesKOhm: impedancesKOhm,
+            positiveUpFlags: positiveUpFlags,
+            acquisitionReference: acquisitionReference,
+            referenceState: referenceState
+        )
+    }
+
+    /// Builds a new timeline while retaining only source/channel metadata. Every
+    /// time-dependent field must be supplied explicitly by the caller.
+    func reconstructingTimeline(
+        data newData: [[Float]],
+        samplingRate newSamplingRate: Double? = nil,
+        events newEvents: [MFFEvent],
+        epochSegments newEpochSegments: [EpochSegment],
+        isSegmented newIsSegmented: Bool,
+        isAveraged newIsAveraged: Bool,
+        isGrandAverage newIsGrandAverage: Bool,
+        signalTypeSuffix: String? = nil
+    ) -> MFFSignalData {
+        precondition(newData.count == numberOfChannels, "timeline reconstruction requires the same channel count")
+        let sampleCount = newData.first?.count ?? 0
+        precondition(newData.allSatisfy { $0.count == sampleCount }, "timeline reconstruction requires rectangular data")
+        precondition(newEpochSegments.allSatisfy {
+            $0.startSample >= 0 && $0.endSample >= $0.startSample && $0.endSample < sampleCount
+        }, "timeline reconstruction received out-of-bounds epoch segments")
+        let resolvedRate = newSamplingRate ?? samplingRate
+        precondition(resolvedRate.isFinite && resolvedRate > 0, "timeline reconstruction requires a valid sampling rate")
+        return MFFSignalData(
+            signalURL: signalURL,
+            signalType: signalTypeSuffix.map { "\(signalType) \($0)" } ?? signalType,
+            numberOfChannels: numberOfChannels,
+            samplingRate: resolvedRate,
+            duration: Double(sampleCount) / resolvedRate,
+            recordingStartTime: recordingStartTime,
+            events: newEvents,
+            data: newData,
+            channelNames: channelNames,
+            epochSegments: newEpochSegments,
+            isSegmented: newIsSegmented,
+            isAveraged: newIsAveraged,
+            isGrandAverage: newIsGrandAverage,
+            impedancesKOhm: impedancesKOhm,
+            positiveUpFlags: positiveUpFlags,
+            acquisitionReference: acquisitionReference,
+            referenceState: referenceState
+        )
+    }
+
+    /// Restores an acquisition-reference channel that the source metadata
+    /// declares immediately after the recorded rows. In the original-reference
+    /// voltage space that electrode is identically zero; adding the row before
+    /// common-average subtraction reconstructs its average-referenced waveform.
+    func restoringOmittedAcquisitionReference() -> MFFSignalData {
+        guard let reference = acquisitionReference,
+              !reference.isRecorded,
+              reference.channelIndex == data.count,
+              let sampleCount = data.first?.count,
+              data.allSatisfy({ $0.count == sampleCount }) else {
+            return self
+        }
+
+        var restoredData = data
+        restoredData.append([Float](repeating: 0, count: sampleCount))
+        var restoredNames = channelNames ?? data.indices.map { "E\($0 + 1)" }
+        restoredNames.append(reference.name)
+        var restoredImpedances = impedancesKOhm
+        restoredImpedances?.append(.nan)
+        var restoredPositiveUp = positiveUpFlags
+        restoredPositiveUp?.append(true)
+
+        return MFFSignalData(
+            signalURL: signalURL,
+            signalType: signalType,
+            numberOfChannels: restoredData.count,
+            samplingRate: samplingRate,
+            duration: duration,
+            recordingStartTime: recordingStartTime,
+            events: events,
+            data: restoredData,
+            channelNames: restoredNames,
+            epochSegments: epochSegments,
+            isSegmented: isSegmented,
+            isAveraged: isAveraged,
+            isGrandAverage: isGrandAverage,
+            impedancesKOhm: restoredImpedances,
+            positiveUpFlags: restoredPositiveUp,
+            acquisitionReference: EEGAcquisitionReference(
+                channelIndex: reference.channelIndex,
+                name: reference.name,
+                isRecorded: false
+            ),
+            referenceState: referenceState
+        )
+    }
+
+    func markingReference(_ state: EEGReferenceState) -> MFFSignalData {
+        MFFSignalData(
+            dataRevision: dataRevision,
+            signalURL: signalURL,
+            signalType: signalType,
+            numberOfChannels: numberOfChannels,
+            samplingRate: samplingRate,
+            duration: duration,
+            recordingStartTime: recordingStartTime,
+            events: events,
+            data: data,
+            channelNames: channelNames,
+            epochSegments: epochSegments,
+            isSegmented: isSegmented,
+            isAveraged: isAveraged,
+            isGrandAverage: isGrandAverage,
+            impedancesKOhm: impedancesKOhm,
+            positiveUpFlags: positiveUpFlags,
+            acquisitionReference: acquisitionReference,
+            referenceState: state
         )
     }
 }
 
-nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
+/// Which instant of an event `MFFEvent.beginTimeSeconds` actually names.
+///
+/// EVA's event producers disagree, unavoidably: a file format records an onset,
+/// while a matched-filter or peak detector naturally reports the middle of what
+/// it found. Rather than have each reader guess from context — which is what
+/// EVA used to do, by matching on `sourceFile` prefixes at three separate call
+/// sites — every event now carries the answer, stamped once by whoever created
+/// it. Read the derived `onsetTimeSeconds` / `centerTimeSeconds` / `spanSeconds`
+/// instead of interpreting `beginTimeSeconds` yourself.
+nonisolated enum EventTimeAnchor: String, Codable, Sendable, CaseIterable, Hashable {
+    /// `beginTimeSeconds` is the event's start; its span runs forward from there.
+    /// The convention of every file format EVA reads, and of MFF's own
+    /// onset+duration pair.
+    case onset
+    /// `beginTimeSeconds` is the midpoint of the event's span.
+    case center
+    /// `beginTimeSeconds` is a measured extremum (an R peak, a blink apex) and
+    /// the duration is the deflection's width *around* it. Geometrically
+    /// identical to `.center`; kept distinct so the UI can say "Peak" where
+    /// that is the truer word, and so a rule that means "this detector found a
+    /// peak" is not silently conflated with "this span happens to be centered".
+    case peak
+
+    /// Whether `beginTimeSeconds` sits at the middle of the span rather than its
+    /// start. The only distinction that affects geometry — `.peak` and
+    /// `.center` are the same shape and differ only in what the UI calls them.
+    var isCentered: Bool { self != .onset }
+
+    /// How the event detail popover should label `beginTimeSeconds`.
+    var timeFieldLabel: String {
+        switch self {
+        case .onset: return "Onset"
+        case .center: return "Center"
+        case .peak: return "Peak"
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .onset: return "Onset"
+        case .center: return "Centered"
+        case .peak: return "Peak"
+        }
+    }
+
+    /// A full sentence fragment for the event popover's Anchor row: names the
+    /// anchor and says what it means for the marker, since "Centered" alone
+    /// does not tell you the flag sits at the middle of the span.
+    var detailDescription: String {
+        switch self {
+        case .onset: return "Onset — marker at the start"
+        case .center: return "Centered — marker at the middle"
+        case .peak: return "Peak — marker at the measured peak"
+        }
+    }
+}
+
+nonisolated struct MFFEvent: Identifiable, Hashable, Sendable, Codable {
     let id: String
     let code: String
     let label: String?
@@ -153,6 +376,10 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
     /// Event duration in seconds, when the source records one (MFF `<duration>`
     /// is stored in microseconds). `nil` for instantaneous / unspecified events.
     let durationSeconds: Double?
+    /// Which instant of the event `beginTimeSeconds` names. See
+    /// `EventTimeAnchor`. Defaults to `.onset` — the file-format convention —
+    /// so a producer that does not think about this gets the safe answer.
+    let timeAnchor: EventTimeAnchor
 
     init(
         id: String,
@@ -163,7 +390,8 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
         beginTimeSeconds: Double,
         rawBeginTime: String,
         sourceFile: String,
-        durationSeconds: Double? = nil
+        durationSeconds: Double? = nil,
+        timeAnchor: EventTimeAnchor = .onset
     ) {
         self.id = id
         self.code = code
@@ -174,12 +402,124 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable {
         self.rawBeginTime = rawBeginTime
         self.sourceFile = sourceFile
         self.durationSeconds = durationSeconds
+        self.timeAnchor = timeAnchor
     }
 
     private static func nonEmpty(_ value: String?) -> String? {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             ? value?.trimmingCharacters(in: .whitespacesAndNewlines)
             : nil
+    }
+
+    // MARK: - Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case code
+        case label
+        case eventDescription
+        case cell
+        case beginTimeSeconds
+        case rawBeginTime
+        case sourceFile
+        case durationSeconds
+        case timeAnchor
+    }
+
+    /// Decodes, filling in `timeAnchor` for files written before it existed.
+    ///
+    /// The fill-in deliberately is *not* the `.onset` default the initializer
+    /// uses. `eva_artifacts.json` payloads written by earlier builds contain
+    /// events from center-stamping detectors, and defaulting those to `.onset`
+    /// would move every cleaning window half a duration late on reload — a
+    /// silent numerical regression in replayed results. Instead the legacy sniff
+    /// those builds performed at read time is replayed once here, so an old file
+    /// decodes to exactly the geometry it had before.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let sourceFile = try container.decode(String.self, forKey: .sourceFile)
+        self.init(
+            id: try container.decode(String.self, forKey: .id),
+            code: try container.decode(String.self, forKey: .code),
+            label: try container.decodeIfPresent(String.self, forKey: .label),
+            eventDescription: try container.decodeIfPresent(String.self, forKey: .eventDescription),
+            cell: try container.decodeIfPresent(String.self, forKey: .cell),
+            beginTimeSeconds: try container.decode(Double.self, forKey: .beginTimeSeconds),
+            rawBeginTime: try container.decode(String.self, forKey: .rawBeginTime),
+            sourceFile: sourceFile,
+            durationSeconds: try container.decodeIfPresent(Double.self, forKey: .durationSeconds),
+            timeAnchor: try container.decodeIfPresent(EventTimeAnchor.self, forKey: .timeAnchor)
+                ?? Self.legacyAnchor(forSourceFile: sourceFile)
+        )
+    }
+
+    /// The anchor EVA used to infer from `sourceFile` before `timeAnchor` was
+    /// stored. Exists solely to read payloads written by those builds and must
+    /// never gain a new case — new sources stamp themselves.
+    ///
+    /// The old rule, from `MFFEvent.centerTimeSeconds`: single-map Topography
+    /// and Continuous-scan topography stamped the true onset; every other
+    /// detector stamped the center.
+    private static func legacyAnchor(forSourceFile sourceFile: String) -> EventTimeAnchor {
+        if sourceFile.hasPrefix("Topography") || sourceFile.hasPrefix("Continuous") {
+            return .onset
+        }
+        return .center
+    }
+}
+
+extension MFFEvent {
+    /// The event's start, whatever `beginTimeSeconds` happens to name.
+    ///
+    /// For an anchor-less event (no duration) every instant coincides, so this
+    /// is `beginTimeSeconds` regardless of anchor.
+    var onsetTimeSeconds: Double {
+        guard timeAnchor.isCentered, let duration = durationSeconds else { return beginTimeSeconds }
+        return beginTimeSeconds - duration / 2
+    }
+
+    /// The event's midpoint.
+    ///
+    /// Every place that needs "the middle of this event" — cleaning windows,
+    /// OBS alignment search, averaged-template previews, the waveform highlight
+    /// band — should read this rather than `beginTimeSeconds`, or it will centre
+    /// on the wrong sample for onset-stamped sources.
+    var centerTimeSeconds: Double {
+        guard !timeAnchor.isCentered, let duration = durationSeconds else { return beginTimeSeconds }
+        return beginTimeSeconds + duration / 2
+    }
+
+    /// The event's end.
+    var endTimeSeconds: Double {
+        onsetTimeSeconds + (durationSeconds ?? 0)
+    }
+
+    /// The interval the event covers, or `nil` when it records no duration and
+    /// is therefore a point in time rather than a span.
+    var spanSeconds: ClosedRange<Double>? {
+        guard let duration = durationSeconds, duration > 0 else { return nil }
+        let start = onsetTimeSeconds
+        return start...(start + duration)
+    }
+
+    /// A copy of this event re-anchored, keeping `beginTimeSeconds` where it is.
+    ///
+    /// This *reinterprets* the stored instant rather than moving it, which is
+    /// what applying a user rule means: the sample never changed, only EVA's
+    /// understanding of which part of the event it marks.
+    func reanchored(to anchor: EventTimeAnchor, durationSeconds newDuration: Double? = nil) -> MFFEvent {
+        MFFEvent(
+            id: id,
+            code: code,
+            label: label,
+            eventDescription: eventDescription,
+            cell: cell,
+            beginTimeSeconds: beginTimeSeconds,
+            rawBeginTime: rawBeginTime,
+            sourceFile: sourceFile,
+            durationSeconds: newDuration ?? durationSeconds,
+            timeAnchor: anchor
+        )
     }
 }
 
@@ -281,6 +621,16 @@ nonisolated final class MFFReader {
         let events = try parseEvents(in: packageURL)
         progress?(0.96)
         let channelNames = try parseChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
+        let layout = SensorLayout.load(fromPackageContaining: signalDescriptor.signalURL)
+        let acquisitionReference = layout?.reference.map { reference in
+            EEGAcquisitionReference(
+                channelIndex: reference.channelIndex,
+                name: channelNames?.indices.contains(reference.channelIndex) == true
+                    ? (channelNames?[reference.channelIndex] ?? reference.name)
+                    : reference.name,
+                isRecorded: reference.channelIndex < signalData.numberOfChannels
+            )
+        }
 
         // Detect on-disk segmentation/averaging (epochs.xml + categories.xml).
         // When present, the concatenated blocks are discrete epochs rather than
@@ -310,7 +660,9 @@ nonisolated final class MFFReader {
             isSegmented: epochInfo != nil,
             isAveraged: epochInfo?.isAveraged ?? false,
             isGrandAverage: epochInfo?.isGrandAverage ?? false,
-            impedancesKOhm: impedances
+            impedancesKOhm: impedances,
+            acquisitionReference: acquisitionReference,
+            referenceState: acquisitionReference == nil ? .unknown : .acquisition
         )
     }
 
@@ -717,6 +1069,8 @@ nonisolated final class MFFReader {
         }
 
         var names = Array(repeating: "", count: expectedCount)
+        // Sensor numbers the layout enumerates for signal channels, labelled or not.
+        var numberedChannels = Set<Int>()
         for sensor in descendants(named: "sensor", in: root) {
             let children = (sensor.children ?? []).compactMap { $0 as? XMLElement }
             let number = children
@@ -732,14 +1086,29 @@ nonisolated final class MFFReader {
                 .stringValue?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
-            guard (type == nil || type == 0),
+            // Type 0 is a recording electrode and type 1 the reference (VREF/Cz);
+            // both occupy a signal channel. Higher types are fiducials/COM and
+            // are not in the signal.
+            guard (type == nil || type == 0 || type == 1),
                   let number,
-                  (1...expectedCount).contains(number),
-                  let name,
-                  !name.isEmpty else {
+                  (1...expectedCount).contains(number) else {
                 continue
             }
-            names[number - 1] = name
+            numberedChannels.insert(number)
+            if let name, !name.isEmpty {
+                names[number - 1] = name
+            }
+        }
+
+        // EGI HydroCel layouts identify electrodes by number and leave <name>
+        // blank (only the reference, VREF, is labelled). When the layout still
+        // enumerates every signal channel the identity is well defined, so fill
+        // the blanks with the conventional E{n} labels — combining runs of the
+        // same net depends on names being present and comparable.
+        if numberedChannels.count == expectedCount {
+            return names.enumerated().map { index, name in
+                name.isEmpty ? "E\(index + 1)" : name
+            }
         }
 
         guard names.contains(where: { !$0.isEmpty }) else {
@@ -873,6 +1242,16 @@ nonisolated final class MFFReader {
         }
 
         return sawAnyFlag ? flags : nil
+    }
+
+    /// Reads only the package's events — no sample data.
+    ///
+    /// The batch preflight has to know which beat codes a file carries before
+    /// deciding whether a recorded PCA-S step can run against it (ROADMAP SI-3),
+    /// and loading whole recordings to answer that would make opening the sheet
+    /// cost gigabytes.
+    func loadEvents(from packageURL: URL) throws -> [MFFEvent] {
+        try parseEvents(in: try validatedPackageURL(from: packageURL))
     }
 
     private func parseEvents(in packageURL: URL) throws -> [MFFEvent] {
@@ -1118,18 +1497,26 @@ nonisolated final class MFFReader {
         // singleton category averages use #seg == 1, so the name is the reliable
         // marker). Older EVA exports omitted that name; recover those from the
         // last recorded PSA segment step when its persisted `average` option was on.
-        let legacyEVAAverage = EVAProcessingScriptXML.read(fromPackage: packageURL)?
+        let evaScript = EVAProcessingScriptXML.read(fromPackage: packageURL)
+        let legacyEVAAverage = evaScript?
             .steps
             .last(where: { $0.operation == .segment })?
             .parameters["average"] == "true"
-        let isAveraged = legacyEVAAverage
-            || categorySegments.allSatisfy { $0.contributingEpochCount > 1 || $0.isAverage }
+        // `eva.xml`'s `fileType` is authoritative when present: EVA stamps what it
+        // actually wrote, so there is no need to re-infer it from the EGI
+        // structure. Everything below is the fallback for packages written before
+        // that field, or by another tool.
+        let declaredType = evaScript?.fileType
+        let isAveraged = declaredType.map { $0 == .averaged || $0 == .grandAverage }
+            ?? (legacyEVAAverage
+                || categorySegments.allSatisfy { $0.contributingEpochCount > 1 || $0.isAverage })
         // Grand average = averaged AND the same category is contributed by more
         // than one segment (one per subject/group), or segments carry subject ids.
         let distinctCategories = Set(categorySegments.map(\.category)).count
         let categoriesRepeat = distinctCategories < categorySegments.count
         let hasSubjects = categorySegments.contains { $0.subject != nil }
-        let isGrandAverage = isAveraged && (categoriesRepeat || hasSubjects)
+        let isGrandAverage = declaredType.map { $0 == .grandAverage }
+            ?? (isAveraged && (categoriesRepeat || hasSubjects))
 
         return OnDiskEpochInfo(
             segments: segments,
@@ -1523,26 +1910,50 @@ nonisolated final class MFFReader {
     }
 
     private func parseMFFDate(_ value: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: value) {
-            return date
-        }
+        // Both fractional-second parsers Foundation offers stop at milliseconds:
+        // ISO8601DateFormatter's `.withFractionalSeconds` truncates further
+        // digits, and DateFormatter carries millisecond internal precision. At
+        // 1024 Hz a sample is 976.5625 µs, so millisecond truncation on the read
+        // side alone is enough to displace an event by half a sample and trip
+        // EVA's TR-spacing check — the writer's precision cannot rescue it.
+        //
+        // So split the fraction off, parse only the whole-second instant with
+        // Foundation, and add the fraction back as a Double. `Date` resolves to
+        // about 0.12 µs at present-day epochs, which is 1e-4 samples at 1024 Hz.
+        let (withoutFraction, fractionalSeconds) = Self.splitFractionalSeconds(value)
+        guard let whole = parseWholeSecondMFFDate(withoutFraction) else { return nil }
+        return fractionalSeconds == 0 ? whole : whole.addingTimeInterval(fractionalSeconds)
+    }
 
+    /// Removes `.ffffff` from an ISO-8601 string, returning the remainder and
+    /// the fraction it carried. Digit count is not assumed: MFF files in the
+    /// wild use three, six, and nine.
+    static func splitFractionalSeconds(_ value: String) -> (String, TimeInterval) {
+        guard let dot = value.firstIndex(of: ".") else { return (value, 0) }
+        var digits = ""
+        var index = value.index(after: dot)
+        while index < value.endIndex, value[index].isNumber {
+            digits.append(value[index])
+            index = value.index(after: index)
+        }
+        guard !digits.isEmpty, let scaled = Double(digits) else { return (value, 0) }
+        let fraction = scaled / pow(10, Double(digits.count))
+        return (String(value[value.startIndex..<dot]) + String(value[index...]), fraction)
+    }
+
+    private func parseWholeSecondMFFDate(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         if let date = formatter.date(from: value) {
             return date
         }
 
-        if value.count > 6 {
-            let normalized = String(value.dropLast(3)) + String(value.suffix(2))
-            let fallback = DateFormatter()
-            fallback.locale = Locale(identifier: "en_US_POSIX")
-            fallback.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ"
-            return fallback.date(from: normalized)
-        }
-
-        return nil
+        // A numeric offset without the colon (`-0400`), which ISO8601DateFormatter
+        // rejects. The old code reached this branch by length; match the shape.
+        let fallback = DateFormatter()
+        fallback.locale = Locale(identifier: "en_US_POSIX")
+        fallback.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+        return fallback.date(from: value)
     }
 }
 

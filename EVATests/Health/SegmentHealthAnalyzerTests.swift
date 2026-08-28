@@ -82,7 +82,8 @@ struct SegmentHealthAnalyzerTests {
         #expect(SegmentHealthAnalyzer.analyze(
             signal: signal,
             segments: [forcedInput],
-            excludedChannelIndices: []
+            excludedChannelIndices: [],
+            artifacts: .assessed([])
         ).results.isEmpty)
     }
 
@@ -103,7 +104,8 @@ struct SegmentHealthAnalyzerTests {
         let analysis = SegmentHealthAnalyzer.analyze(
             signal: signal,
             segments: segments,
-            excludedChannelIndices: []
+            excludedChannelIndices: [],
+            artifacts: .assessed([])
         )
 
         #expect(analysis.results.count == segments.count)
@@ -117,7 +119,7 @@ struct SegmentHealthAnalyzerTests {
 
     @Test func emptySegmentsYieldNoResults() {
         let signal = SyntheticSignal.make([cleanChannel(seed: 1)], samplingRate: samplingRate)
-        let analysis = SegmentHealthAnalyzer.analyze(signal: signal, segments: [], excludedChannelIndices: [])
+        let analysis = SegmentHealthAnalyzer.analyze(signal: signal, segments: [], excludedChannelIndices: [], artifacts: .assessed([]))
         #expect(analysis.results.isEmpty)
     }
 
@@ -128,7 +130,8 @@ struct SegmentHealthAnalyzerTests {
         let cleanAnalysis = SegmentHealthAnalyzer.analyze(
             signal: signal,
             segments: [segment],
-            excludedChannelIndices: []
+            excludedChannelIndices: [],
+            artifacts: .assessed([])
         )
         let cleanMetric = try! #require(cleanAnalysis.results.first?.metrics.first { $0.name == "Labeled Artifacts" })
         #expect(cleanMetric.score == 1)
@@ -144,9 +147,152 @@ struct SegmentHealthAnalyzerTests {
             signal: signal,
             segments: [segment],
             excludedChannelIndices: [],
-            artifactIntervals: [pointArtifact]
+            artifacts: .assessed([pointArtifact])
         )
         let artifactMetric = try! #require(artifactAnalysis.results.first?.metrics.first { $0.name == "Labeled Artifacts" })
         #expect(artifactMetric.score == 0)
+    }
+
+    // MARK: - Not assessed vs. clean (ROADMAP RW-1 item 16)
+
+    /// The bug: with no detection run, "Labeled Artifacts" scored 1.0 and
+    /// counted its full weight toward the segment percentage, so an unexamined
+    /// recording scored *at least as well* as an examined clean one — and that
+    /// number was written into the training export.
+    @Test func unassessedArtifactMetricIsNeitherGoodNorScored() {
+        let signal = SyntheticSignal.make([cleanChannel(seed: 1)], samplingRate: samplingRate)
+        let segment = try! #require(SegmentHealthAnalyzer.analysisSegments(for: signal, epochSegments: []).first)
+
+        let analysis = SegmentHealthAnalyzer.analyze(
+            signal: signal,
+            segments: [segment],
+            excludedChannelIndices: [],
+            artifacts: .notAssessed
+        )
+
+        let result = try! #require(analysis.results.first)
+        let metric = try! #require(result.metrics.first { $0.name == "Labeled Artifacts" })
+        #expect(metric.availability == .notAssessed)
+        #expect(!metric.isAssessed)
+        // Not silently good: a consumer that ignores the flag must not read 1.0.
+        #expect(metric.score == 0)
+        #expect(analysis.artifactsAssessed == false)
+
+        // The features that feed the training export are absent, not zero.
+        let features = try! #require(analysis.featuresBySegmentID[segment.segmentID])
+        #expect(features.artifactOverlapFraction == nil)
+        #expect(features.artifactCount == nil)
+    }
+
+    /// The percentage must describe what was measured: excluding the metric from
+    /// *both* halves of the weighted ratio, not just the numerator.
+    @Test func unassessedArtifactsDoNotChangeTheSegmentPercentage() {
+        let signal = SyntheticSignal.make((1...4).map { cleanChannel(seed: UInt64($0)) }, samplingRate: samplingRate)
+        let segments = SegmentHealthAnalyzer.analysisSegments(for: signal, epochSegments: [])
+
+        let assessedClean = SegmentHealthAnalyzer.analyze(
+            signal: signal,
+            segments: segments,
+            excludedChannelIndices: [],
+            artifacts: .assessed([])
+        )
+        let unassessed = SegmentHealthAnalyzer.analyze(
+            signal: signal,
+            segments: segments,
+            excludedChannelIndices: [],
+            artifacts: .notAssessed
+        )
+
+        // Same data, same everything else: a clean verdict and no verdict differ
+        // in what they claim, not in the score of the metrics that were run.
+        let assessedPercentages = assessedClean.results.map(\.goodPercentage)
+        let unassessedPercentages = unassessed.results.map(\.goodPercentage)
+        #expect(assessedPercentages == unassessedPercentages)
+
+        // The premise: the artifact metric really is weighted, so an implementation
+        // that dropped only the numerator would have failed the comparison above.
+        let metric = try! #require(assessedClean.results.first?.metrics.first { $0.name == "Labeled Artifacts" })
+        #expect(metric.weight > 0)
+        #expect(metric.score == 1)
+    }
+
+    /// An unassessed metric must not be reported as a weak one — "needs review"
+    /// is a measurement, and there is no measurement here.
+    @Test func unassessedMetricIsNotNamedInTheSummary() {
+        let signal = SyntheticSignal.make([cleanChannel(seed: 3)], samplingRate: samplingRate)
+        let segment = try! #require(SegmentHealthAnalyzer.analysisSegments(for: signal, epochSegments: []).first)
+
+        let analysis = SegmentHealthAnalyzer.analyze(
+            signal: signal,
+            segments: [segment],
+            excludedChannelIndices: [],
+            artifacts: .notAssessed
+        )
+
+        let result = try! #require(analysis.results.first)
+        #expect(!result.summary.contains("Labeled Artifacts"))
+    }
+
+    /// The training export has to carry the distinction, because that is where
+    /// the number outlives the session that produced it.
+    @Test func trainingExportRecordsWhetherArtifactsWereAssessed() throws {
+        let signal = SyntheticSignal.make([cleanChannel(seed: 5)], samplingRate: samplingRate)
+        let segments = SegmentHealthAnalyzer.analysisSegments(for: signal, epochSegments: [])
+        let processing = SavedSegmentHealthProcessing(
+            gradientCorrected: false,
+            icaCleaned: false,
+            filtered: false,
+            filterLowCutoffHz: nil,
+            filterHighCutoffHz: nil,
+            notch60HzEnabled: nil,
+            averageReferenced: nil,
+            artifactCleaned: false,
+            artifactCleaningVisible: false,
+            epoched: false,
+            psaAveraged: false,
+            psaBaselineCorrected: false,
+            psaAverageReferenced: false,
+            hiddenChannelIndices: [],
+            interpolatedChannelIndices: [],
+            markedBadChannelIndices: []
+        )
+
+        let unassessed = SavedSegmentHealthDataset.make(
+            packageName: "test.mff",
+            signal: signal,
+            processing: processing,
+            analysis: SegmentHealthAnalyzer.analyze(
+                signal: signal,
+                segments: segments,
+                excludedChannelIndices: [],
+                artifacts: .notAssessed
+            )
+        )
+        #expect(unassessed.schemaVersion == 2)
+        #expect(unassessed.analysis.artifactsAssessed == false)
+
+        let assessed = SavedSegmentHealthDataset.make(
+            packageName: "test.mff",
+            signal: signal,
+            processing: processing,
+            analysis: SegmentHealthAnalyzer.analyze(
+                signal: signal,
+                segments: segments,
+                excludedChannelIndices: [],
+                artifacts: .assessed([])
+            )
+        )
+        #expect(assessed.analysis.artifactsAssessed == true)
+
+        // The unassessed feature really is null in the encoded JSON rather than
+        // an omitted-and-defaulted zero on the way back in.
+        let encoder = JSONEncoder()
+        let decoded = try JSONDecoder().decode(
+            SavedSegmentHealthDataset.self,
+            from: encoder.encode(unassessed)
+        )
+        let features = try #require(decoded.segments.first?.features)
+        #expect(features.artifactCount == nil)
+        #expect(decoded.segments.first?.health.metrics.first { $0.name == "Labeled Artifacts" }?.availability == .notAssessed)
     }
 }

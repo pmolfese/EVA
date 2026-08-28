@@ -18,6 +18,42 @@
 
 import SwiftUI
 
+/// How a joint marker box arranges more than one condition's topomap. See
+/// `EpochingViewModel.jointBoxOrientation`.
+enum JointBoxOrientation: String, CaseIterable, Identifiable, Sendable {
+    case vertical = "Vertical"
+    case horizontal = "Horizontal"
+    /// A roughly-square grid (e.g. 4 conditions → 2×2) instead of one long
+    /// row or column — for when there are enough conditions that either of
+    /// those gets unwieldy.
+    case fit = "Fit"
+    var id: String { rawValue }
+}
+
+/// One joint-plot time marker: a shared latency with a linked, draggable
+/// topomap box on every butterfly plot it's shown on (MNE `plot_joint`-style,
+/// but attached to whichever butterfly you right-click rather than a
+/// dedicated tab). `id` is stable across drags so SwiftUI doesn't recreate
+/// the topomap/box views mid-gesture; `relativeSample` is an epoch-relative
+/// sample index, same units as `EpochingViewModel.butterflyTopomapRelativeSample`.
+/// Session-only — not persisted to eva.xml, like the other `showsAverages*`
+/// display toggles.
+struct JointPlotMarker: Identifiable, Hashable, Sendable {
+    let id: UUID
+    var relativeSample: Int
+    /// `nil` inherits the plot-wide auto scale shared across every marker
+    /// (today's default). Set via right-click on the marker's topomap box to
+    /// give this one marker its own independent µV or Z-score scale,
+    /// computed from just its own values instead of every marker's.
+    var scaleMode: EpochingViewModel.TopomapScaleMode?
+
+    init(id: UUID = UUID(), relativeSample: Int, scaleMode: EpochingViewModel.TopomapScaleMode? = nil) {
+        self.id = id
+        self.relativeSample = relativeSample
+        self.scaleMode = scaleMode
+    }
+}
+
 /// Which flow the "Group…" popover is showing — pooling whole codes together,
 /// or sub-selecting one code's events by a regex on their description.
 enum CategoryGroupMode: String, CaseIterable, Identifiable {
@@ -27,13 +63,26 @@ enum CategoryGroupMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Which per-event text field a `CategoryRegexRule`'s pattern is matched
+/// against.
+enum CategoryRegexMatchField: String, CaseIterable, Identifiable, Codable, Sendable {
+    case description = "Description"
+    case label = "Label"
+
+    var id: String { rawValue }
+}
+
 /// One regex sub-selection rule: within `sourceCode`'s events, any whose
-/// `eventDescription` matches `pattern` get filed under `categoryName` in
-/// addition to their normal category. See `EpochingViewModel.categoryRegexRules`.
+/// `eventDescription` or `label` (per `matchField`) matches `pattern` get
+/// filed under `categoryName` in addition to their normal category. See
+/// `EpochingViewModel.categoryRegexRules`.
 struct CategoryRegexRule: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var sourceCode: String
     var pattern: String
+    /// Absent from older saved eva.xml — decodes to `.description` so
+    /// existing rules keep matching against descriptions as before.
+    var matchField: CategoryRegexMatchField = .description
     /// May reference the pattern's capture groups as `$1`, `$2`, … — e.g.
     /// pattern `n2_(\w+)` + this template `n2_$1` resolves per event to
     /// `n2_nov`, `n2_rep`, etc., so one rule can fan out into several
@@ -105,6 +154,20 @@ final class EpochingViewModel {
     var segmentField = PSASegmentField.code
     var eventSearchText = ""
     var selectedEventCodes = Set<String>()
+
+    /// Whether anything is actually selected to segment on — checkbox codes,
+    /// **or** a regex sub-selection rule with none of its source codes ticked.
+    ///
+    /// The second half matters: a regex rule can drive a live PSA build on its
+    /// own (`sourceCode` need not also be in `selectedEventCodes`), so
+    /// `selectedEventCodes.isEmpty` alone reads as "nothing selected" for a
+    /// regex-only session. That mismatch is exactly what let a genuine PSA
+    /// average — segment, per-epoch bad detection, interpolation escalation, SNR
+    /// — leave a `segment` result in the audit log but no `segment` step in
+    /// `eva.xml`: the export builder checked `selectedEventCodes` alone while
+    /// `canApplyPSA` (the actual live gate) already checked both. One property
+    /// for both callers, so they cannot drift apart again.
+    var hasSegmentSelection: Bool { !selectedEventCodes.isEmpty || !categoryRegexRules.isEmpty }
 
     // MARK: Epoch window (portable → eva.xml)
     var preStimulus = 0.2
@@ -184,6 +247,20 @@ final class EpochingViewModel {
     /// Segments omitted from averaging because the user manually labeled them bad.
     var skippedLabeledBadSegmentsSummary: [String] = []
 
+    // MARK: Reviewed trial exclusion (ROADMAP TW-5)
+    /// The committed `trialExclusion` step, or nil when no reviewed exclusion is
+    /// part of this recording's current processing.
+    ///
+    /// Deliberately the *step*, not a set of indices. The step is what
+    /// `eva.xml` writes, what the history node hashes, and what a headless run
+    /// is handed — holding indices here would put this back where Segment
+    /// Health's labels still are: session state a batch run cannot reproduce.
+    var committedTrialExclusion: EVAProcessingStep?
+    /// What the last resolution of `committedTrialExclusion` against real
+    /// segments found. Non-empty `unresolved` means the average on screen is not
+    /// the one that was reviewed, and the status line has to say so.
+    var trialExclusionResolution: TrialExclusionResolver.Resolution?
+
     // MARK: Run state
     var statusMessage: String?
     var isApplying = false
@@ -193,6 +270,12 @@ final class EpochingViewModel {
     var segmentingProgress: Double?
 
     // MARK: Results
+    /// Pre-average raw epochs, cached so PSA options can be re-toggled without
+    /// rebuilding. Lives here (rather than on `WaveformView`) so the shared
+    /// invalidation cascade can clear it without a live view — see
+    /// `PipelineInvalidation`.
+    var segmentedEpochSignal: MFFSignalData?
+    var segmentedEpochSegments: [EpochSegment] = []
     var epochedSignal: MFFSignalData?
     var epochSegments: [EpochSegment] = []
     var isAveraged = false
@@ -216,6 +299,77 @@ final class EpochingViewModel {
     var showsAveragesTopography = true
     var showsAveragesInspector = true
     var showsAveragesLog = true
+    /// Joint-plot time markers: added via right-click "Add Joint" on ANY
+    /// butterfly plot (Butterfly pane, or a Multi-Butterfly row), not a
+    /// separate tab — each marker gets a linked, draggable topomap box on
+    /// every butterfly it's shown on. Shared across hosts so the same marker
+    /// (same latency) appears consistently on all of them.
+    var jointPlotMarkers: [JointPlotMarker] = []
+    /// Transient: set while a joint marker's box is being dragged, so every
+    /// host currently showing that marker (e.g. every Multi-Butterfly row)
+    /// updates live together, not just the row the drag started in. `nil`
+    /// when nothing is being dragged.
+    var jointMarkerLiveDrag: (id: UUID, relativeSample: Int)?
+    /// How the Butterfly pane arranges a joint marker box that holds more
+    /// than one condition's topomap (Multi-Butterfly rows always hold
+    /// exactly one, so this setting doesn't apply there). `.vertical` stacks
+    /// conditions with the label to the left of each map; `.horizontal` puts
+    /// them in a row, each with its own label above, and one time label
+    /// centered over the whole row.
+    var jointBoxOrientation: JointBoxOrientation = .vertical
+    /// Multiplier on the joint marker box's base topomap size — one shared
+    /// setting so it stays consistent everywhere joint boxes appear
+    /// (Butterfly pane, Multi-Butterfly).
+    var jointTopomapScale: Double = 1.0
+    /// Size multiplier for the Topomaps tab's grid (`averagesTopographyPane`)
+    /// — separate from `jointTopomapScale` since it's a different display
+    /// with its own tile size baseline.
+    var topographyTopomapScale: Double = 1.0
+    /// Multi-Butterfly's grid column count ("play with doing two per row" —
+    /// 1 keeps the original single-column stack).
+    var multiButterflyColumns: Int = 2
+    /// Width of the Averages workspace's Topography pane, dragged by its left
+    /// edge. Clamped to `averagesTopographyWidthRange` and further clamped to
+    /// the space actually available, so a width dragged wide on a big display
+    /// cannot push the layout off a smaller one.
+    var averagesTopographyWidth: Double = 430
+
+    static let averagesTopographyWidthRange: ClosedRange<Double> = 280 ... 1000
+
+    /// Adds a joint marker at exactly `relativeSample` — used by "Add Joint"
+    /// in a butterfly's right-click menu, where the click location itself is
+    /// the placement, not a default the user then has to drag into place.
+    func addJointMarker(atRelativeSample relativeSample: Int) {
+        jointPlotMarkers.append(JointPlotMarker(relativeSample: relativeSample))
+    }
+
+    func removeJointMarker(_ id: UUID) {
+        jointPlotMarkers.removeAll { $0.id == id }
+    }
+
+    func updateJointMarker(_ id: UUID, relativeSample: Int, epochLength: Int) {
+        guard let index = jointPlotMarkers.firstIndex(where: { $0.id == id }) else { return }
+        jointPlotMarkers[index].relativeSample = min(max(relativeSample, 0), max(epochLength - 1, 0))
+    }
+
+    /// Sets (or clears, with `nil`) one marker's own independent scale mode.
+    /// `nil` reverts it to inheriting the plot-wide shared scale.
+    func setJointMarkerScaleMode(_ id: UUID, mode: TopomapScaleMode?) {
+        guard let index = jointPlotMarkers.firstIndex(where: { $0.id == id }) else { return }
+        jointPlotMarkers[index].scaleMode = mode
+    }
+
+    var showsAveragesMultiButterfly = false
+    /// Shows a Global Field Power trace under every butterfly plot (Butterfly,
+    /// Multi-Butterfly) — one shared toggle since it's the same display
+    /// decision everywhere it appears.
+    var showsAveragesGFP = true
+    var showsAveragesDifference = false
+    var differenceCategoryA: String?
+    var differenceCategoryB: String?
+    var differenceRelativeSample: Int?
+    var showsAveragesFilmstrip = false
+    var filmstripTileCount = 8
     var psaExclusionSummary = PSAExclusionSummary()
 
     // MARK: Figure labeling (session-only; never mutates EpochSegment.category)
@@ -229,7 +383,7 @@ final class EpochingViewModel {
     }
 
     // MARK: Topomap color scale (Cmd-hold control in the topography pane)
-    enum TopomapScaleMode: String, CaseIterable, Identifiable { case microvolts = "µV", zScore = "Z"; var id: String { rawValue } }
+    enum TopomapScaleMode: String, CaseIterable, Identifiable, Hashable { case microvolts = "µV", zScore = "Z"; var id: String { rawValue } }
     var topomapScaleMode: TopomapScaleMode = .microvolts
 
     /// µV mode: when true, topomaps use the manual min/max below instead of the
@@ -301,11 +455,14 @@ final class EpochingViewModel {
 
     var parameters: [String: String] {
         var p: [String: String] = [
+            // Which field the segmentation reads. Both apply paths branch on it
+            // — `.artifact` segments on detected artifacts instead of on event
+            // codes, an entirely different set of epochs — and it was not
+            // serialized until the REWIND determinism audit (2026-08-13).
+            "segmentField": segmentField.rawValue,
             "preStimulusMs": String(format: "%.0f", preStimulus * 1000),
             "postStimulusMs": String(format: "%.0f", postStimulus * 1000),
             "offsetMs": String(format: "%.0f", offset * 1000),
-            "baselineCorrected": "\(baselineCorrected)",
-            "averageReference": "\(averageReference)",
             "average": "\(averageOnApply)",
             "skipEyeBlinks": "\(skipEyeBlinks)",
             "skipEyeMovements": "\(skipEyeMovements)",
@@ -330,6 +487,26 @@ final class EpochingViewModel {
         for code in selectedEventCodes where (categoryNames[code].map { $0 != code } ?? false) {
             p["category.\(code)"] = categoryNames[code]!
         }
+        // Category groups pool several codes into one extra shared category
+        // (`correct` = {LC++, RC++}), producing segments IN ADDITION to each
+        // code's own. Without these the script is not a complete description of
+        // the processing: a batch or Copy Processing replay silently produced
+        // only the raw codes, which is how an interactive run with groups came
+        // out as 6 categories / 134 evaluated epochs and its headless replay as
+        // 4 / 67 (2026-08-13).
+        for (name, members) in categoryGroups where !members.isEmpty {
+            p["categoryGroup.\(name)"] = members.sorted().joined(separator: ",")
+        }
+        // Regex sub-selection rules, one flattened key per field so a pattern
+        // containing separators cannot corrupt the encoding.
+        for (index, rule) in categoryRegexRules.values
+            .sorted(by: { $0.id.uuidString < $1.id.uuidString })
+            .enumerated() {
+            p["categoryRegex.\(index).source"] = rule.sourceCode
+            p["categoryRegex.\(index).pattern"] = rule.pattern
+            p["categoryRegex.\(index).name"] = rule.categoryName
+            p["categoryRegex.\(index).caseSensitive"] = "\(rule.isCaseSensitive)"
+        }
         // DIN (timing marker) adjustment: which segment values use it, and which
         // marker code each one pairs with. Only emitted when at least one is on,
         // matching the "only non-default state" convention above.
@@ -352,9 +529,14 @@ final class EpochingViewModel {
     /// DIN pairings are portable when the target also has the paired marker
     /// code's events (`makeBuildJob` already validates that at apply time).
     func apply(parameters p: [String: String]) {
+        // Absent means a pre-audit script, which could only have been `.code` —
+        // that was the only value `parameters` was capable of describing.
+        if let v = p["segmentField"].flatMap(PSASegmentField.init(rawValue:)) { segmentField = v }
         if let v = p["preStimulusMs"].flatMap(Double.init) { preStimulus = v / 1000 }
         if let v = p["postStimulusMs"].flatMap(Double.init) { postStimulus = v / 1000 }
         if let v = p["offsetMs"].flatMap(Double.init) { offset = v / 1000 }
+        // Read but no longer written: the `baseline` step owns this now, and a
+        // pre-`baseline` eva.xml still replays correctly from the old key.
         if let v = p["baselineCorrected"] { baselineCorrected = (v == "true") }
         if let v = p["averageReference"] { averageReference = (v == "true") }
         if let v = p["average"] { averageOnApply = (v == "true") }
@@ -383,6 +565,33 @@ final class EpochingViewModel {
         for (key, value) in p where key.hasPrefix("category.") {
             categoryNames[String(key.dropFirst("category.".count))] = value
         }
+        var groups = [String: Set<String>]()
+        for (key, value) in p where key.hasPrefix("categoryGroup.") {
+            let name = String(key.dropFirst("categoryGroup.".count))
+            let members = value.split(separator: ",").map(String.init)
+            if !members.isEmpty { groups[name] = Set(members) }
+        }
+        if !groups.isEmpty { categoryGroups = groups }
+
+        var rules = [String: CategoryRegexRule]()
+        let regexIndices = Set(p.keys.compactMap { key -> Int? in
+            guard key.hasPrefix("categoryRegex.") else { return nil }
+            return Int(key.dropFirst("categoryRegex.".count).prefix(while: \.isNumber))
+        })
+        for index in regexIndices.sorted() {
+            guard let source = p["categoryRegex.\(index).source"],
+                  let pattern = p["categoryRegex.\(index).pattern"],
+                  let name = p["categoryRegex.\(index).name"] else { continue }
+            let rule = CategoryRegexRule(
+                sourceCode: source,
+                pattern: pattern,
+                categoryName: name,
+                isCaseSensitive: p["categoryRegex.\(index).caseSensitive"] == "true"
+            )
+            rules[rule.id.uuidString] = rule
+        }
+        if !rules.isEmpty { categoryRegexRules = rules }
+
         if let v = p["timingTolerance"].flatMap(Double.init) { timingTolerance = v }
         var dinEnabled = Set<String>()
         var dinValues = [String: String]()
@@ -428,10 +637,17 @@ final class EpochingViewModel {
         return categoriesByCode
     }
 
+    /// Eligible for DIN, not just the codes the user checked as their own
+    /// category: also any code that's only present as a `CategoryRegexRule`
+    /// source, since a regex-derived category's epochs come from that code's
+    /// events too and should get the same nearest-marker correction — see
+    /// `psaSegmentEventRow`, which enables the DIN checkbox for both.
     private func selectedTimingMarkersBySegmentValue(events: [MFFEvent]) -> [String: String]? {
         let availableValues = Set(events.map(segmentValue(for:)))
+        let regexSourceCodes = Set(categoryRegexRules.values.map(\.sourceCode))
+        let eligibleValues = selectedEventCodes.union(regexSourceCodes)
         var timingMarkersBySegmentValue = [String: String]()
-        for value in selectedEventCodes where timingMarkerEnabledValues.contains(value) {
+        for value in eligibleValues where timingMarkerEnabledValues.contains(value) {
             guard let timingValue = timingMarkerValuesBySegmentValue[value],
                   availableValues.contains(timingValue), timingValue != value else {
                 return nil
@@ -441,7 +657,14 @@ final class EpochingViewModel {
         return timingMarkersBySegmentValue
     }
 
-    private static func colorIndices(for categories: [String]) -> [String: Int] {
+    /// Stable per-category color index, assigned in localized-sorted order.
+    ///
+    /// Not private: `ButterflyPanelViews` held a verbatim copy, which is exactly
+    /// how two renderings of the same averages drift into different colors.
+    /// (`MFFReader` and `RecordingCombiner` have their own, deliberately
+    /// different, orderings — first-appearance and positional respectively — so
+    /// those are *not* the same function and must not be merged in.)
+    static func colorIndices(for categories: [String]) -> [String: Int] {
         let uniqueCategories = Array(Set(categories)).sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
         }
@@ -542,12 +765,92 @@ final class EpochingViewModel {
     /// `WaveformView.interpolate(_:in:)`, which needs live electrode geometry
     /// and updates view-only status text — a live-view-only feature, not
     /// meaningful for a one-shot headless run).
-    func applyBuildJob(
-        _ job: PSABuildJob,
+    /// Result of the shared PSA sequence: the raw per-trial build and the
+    /// post-processed (optionally averaged) output.
+    struct PSAApplyOutcome {
+        /// Raw single trials, before averaging. SNR and per-epoch bad-channel
+        /// reporting must read this — `average()`/`postProcessed()` build fresh
+        /// results that no longer carry per-trial information.
+        let built: PSABuildResult
+        let finalResult: PSABuildResult
+        let wasAveraged: Bool
+        /// Every segment position dropped from the average — the caller's own
+        /// manual exclusions unioned with the resolved reviewed exclusion.
+        var excludedSegmentIndices: Set<Int> = []
+        /// How `committedTrialExclusion` resolved against these segments, or
+        /// nil when there is no committed exclusion. Carried out so the caller
+        /// can attribute the counts and report an incomplete resolution.
+        var trialExclusion: TrialExclusionResolver.Resolution?
+    }
+
+    /// Resolves the committed reviewed exclusion against a real set of segments.
+    ///
+    /// The one entry point for it, called from inside `buildAndPostProcess` so
+    /// interactive and headless cannot diverge — the divergence this method
+    /// exists to prevent is precisely the one Segment Health's session-only
+    /// labels still have.
+    func resolvedTrialExclusion(for segments: [EpochSegment]) -> TrialExclusionResolver.Resolution? {
+        guard let step = committedTrialExclusion else { return nil }
+        return TrialExclusionResolver.resolve(step: step, segments: segments)
+    }
+
+    /// Attributes a resolved exclusion into an exclusion summary, so the
+    /// per-category retention story reaches `eva.xml`, QuickLook, and combine.
+    func foldTrialExclusion(
+        _ resolution: TrialExclusionResolver.Resolution?,
+        step: EVAProcessingStep?,
+        segments: [EpochSegment],
+        into summary: inout PSAExclusionSummary
+    ) {
+        // Always stated, including as "nothing" — `recordExclusions` sets this
+        // reason rather than adding to it, so clearing a committed exclusion has
+        // to reach it with empty counts or the removed decision would go on
+        // being reported by a summary nobody updated.
+        var counts: [String: Int] = [:]
+        if let resolution, let step {
+            counts = TrialExclusionResolver.excludedCountsByCategory(
+                step: step, segments: segments, resolution: resolution
+            )
+        }
+        summary.recordExclusions(counts, reason: TrialExclusionResolver.reasonLabel)
+    }
+
+    /// Build epochs → optionally average → post-process.
+    ///
+    /// The single implementation of the PSA sequence, shared by the interactive
+    /// path (`WaveformView.applyPSACore`) and the headless one
+    /// (`applyBuildJob`). Those two used to each carry their own copy, and every
+    /// headless/interactive divergence found on 2026-08-13 came from that shape
+    /// of duplication.
+    ///
+    /// What stays with the callers, because it genuinely differs:
+    /// - **SNR scheduling.** Interactive computes it in the background so the
+    ///   sheet can close immediately; headless awaits it inline because it is
+    ///   about to export.
+    /// - **Status composition and UI teardown** (selection reset, sheet
+    ///   dismissal, segment-health enable) — view-only.
+    /// - **`excludedSegmentIndices`.** Interactive supplies segments the user
+    ///   labelled bad in Segment Health. Those labels are session state that a
+    ///   batch run has no equivalent of, so headless legitimately passes none.
+    ///   The committed reviewed exclusion (TW-5) is deliberately NOT routed
+    ///   through this argument: it is recorded in `eva.xml`, so both paths owe
+    ///   the same answer, and it is resolved once inside this method.
+    ///
+    /// `isCurrent` is the interactive session guard: the view can outlive a run
+    /// (same-window "Close Recording" mid-flight), so it re-checks between
+    /// phases. Headless has no such concept and leaves it at the default.
+    ///
+    /// Returns `nil` when cancelled, superseded, or nothing survived — having
+    /// already cleared `isApplying`/`phaseMessage` and set `statusMessage`.
+    func buildAndPostProcess(
+        job: PSABuildJob,
+        shouldAverage: Bool,
         averageReference: Bool,
         baselineCorrect: Bool,
-        badChannels: Set<Int>
-    ) async -> MFFSignalData? {
+        badChannels: Set<Int>,
+        excludedSegmentIndices: ([EpochSegment]) -> Set<Int> = { _ in [] },
+        isCurrent: () -> Bool = { true }
+    ) async -> PSAApplyOutcome? {
         isApplying = true
         phaseMessage = "Segmenting…"
         segmentingProgress = nil
@@ -569,94 +872,169 @@ final class EpochingViewModel {
         progressTask.cancel()
         segmentingProgress = nil
 
-        guard !Task.isCancelled else {
-            isApplying = false
-            phaseMessage = nil
+        guard !Task.isCancelled, isCurrent() else {
+            finishApplying()
             return nil
         }
         guard let built else {
-            isApplying = false
-            phaseMessage = nil
+            finishApplying()
             statusMessage = "No trials survived PSA segmentation. All candidate epochs were rejected, skipped, or out of bounds."
             return nil
         }
 
-        var exclusionSummary = built.exclusionSummary
-        let epochBadChannelCounts = built.epochBadChannelCounts
-        let totalEpochsEvaluated = built.totalEpochsEvaluated
-
         let finalResult: PSABuildResult
         let wasAveraged: Bool
-        if averageOnApply {
+        var appliedExclusions = Set<Int>()
+        var resolution: TrialExclusionResolver.Resolution?
+
+        if shouldAverage {
             phaseMessage = "Averaging…"
             let colorIndices = Self.colorIndices(for: built.segments.map(\.category))
+            // Two sources, unioned here rather than in either caller: the
+            // caller's own manual exclusions (Segment Health labels, which only
+            // the interactive path has) and the committed reviewed exclusion,
+            // which both paths must apply identically or a batch run reproduces
+            // a different average than the one that was reviewed.
+            resolution = resolvedTrialExclusion(for: built.segments)
+            let excluded = excludedSegmentIndices(built.segments)
+                .union(resolution?.excludedIndices ?? [])
+            appliedExclusions = excluded
             let averageWorker = Task.detached(priority: .userInitiated) {
-                built.average(colorIndices: colorIndices)
+                built.average(colorIndices: colorIndices, excludedIndices: excluded)
             }
             let averagedOpt = await withTaskCancellationHandler(
                 operation: { await averageWorker.value },
                 onCancel: { averageWorker.cancel() }
             )
-            guard !Task.isCancelled, let averaged = averagedOpt else {
-                isApplying = false
-                phaseMessage = nil
+            guard !Task.isCancelled, isCurrent(), let averaged = averagedOpt else {
+                finishApplying()
                 statusMessage = "No averages could be computed."
                 return nil
             }
             phaseMessage = "Post-processing…"
-            // SNR is measured from the RAW single trials (`built`), before
-            // post-processing collapses them, so plus-minus/split-half/SME have
-            // the individual trials they need.
-            let snrWorker = Task.detached(priority: .userInitiated) {
-                built.categorySNR()
-            }
             let postWorker = Task.detached(priority: .userInitiated) {
-                averaged.postProcessed(averageReference: averageReference, baselineCorrect: baselineCorrect, badChannels: badChannels)
+                averaged.postProcessed(
+                    averageReference: averageReference,
+                    baselineCorrect: baselineCorrect,
+                    badChannels: badChannels
+                )
             }
             finalResult = await withTaskCancellationHandler(
                 operation: { await postWorker.value },
                 onCancel: { postWorker.cancel() }
-            )
-            averageSNRByCategory = await withTaskCancellationHandler(
-                operation: { await snrWorker.value },
-                onCancel: { snrWorker.cancel() }
             )
             wasAveraged = true
         } else {
             phaseMessage = "Post-processing…"
             let postWorker = Task.detached(priority: .userInitiated) {
-                built.postProcessed(averageReference: averageReference, baselineCorrect: baselineCorrect, badChannels: badChannels)
+                built.postProcessed(
+                    averageReference: averageReference,
+                    baselineCorrect: baselineCorrect,
+                    badChannels: badChannels
+                )
             }
             finalResult = await withTaskCancellationHandler(
                 operation: { await postWorker.value },
                 onCancel: { postWorker.cancel() }
             )
-            averageSNRByCategory = [:]
             wasAveraged = false
         }
 
-        guard !Task.isCancelled else {
-            isApplying = false
-            phaseMessage = nil
+        guard !Task.isCancelled, isCurrent() else {
+            finishApplying()
             return nil
         }
+        // Only meaningful when averaging: an exclusion removes a trial from an
+        // average, and there is no average to remove it from otherwise.
+        trialExclusionResolution = wasAveraged ? resolution : nil
+        return PSAApplyOutcome(
+            built: built,
+            finalResult: finalResult,
+            wasAveraged: wasAveraged,
+            excludedSegmentIndices: appliedExclusions,
+            trialExclusion: resolution
+        )
+    }
+
+    /// Clears the in-progress flags. Every early exit from the PSA sequence has
+    /// to do this — forgetting it is what leaves the spinner stuck on.
+    private func finishApplying() {
+        isApplying = false
+        phaseMessage = nil
+    }
+
+    func applyBuildJob(
+        _ job: PSABuildJob,
+        averageReference: Bool,
+        baselineCorrect: Bool,
+        badChannels: Set<Int>,
+        electrodePositions: [Int: SIMD3<Double>] = [:],
+        continuousSignal: MFFSignalData? = nil
+    ) async -> MFFSignalData? {
+        guard let outcome = await buildAndPostProcess(
+            job: job,
+            shouldAverage: averageOnApply,
+            averageReference: averageReference,
+            baselineCorrect: baselineCorrect,
+            badChannels: badChannels
+            // No `excludedSegmentIndices`: Segment Health quality labels are a
+            // manual, session-only decision that a batch run has no equivalent
+            // of. A *committed* reviewed exclusion is the opposite — it is on
+            // disk precisely so this path can apply it — and
+            // `buildAndPostProcess` resolves it for both paths rather than
+            // taking it through this argument.
+        ) else {
+            return nil
+        }
+
+        let built = outcome.built
+        let finalResult = outcome.finalResult
+        let epochBadChannelCounts = built.epochBadChannelCounts
+        let totalEpochsEvaluated = built.totalEpochsEvaluated
+
+        // SNR from the RAW single trials — awaited inline here (unlike the
+        // interactive path, which backgrounds it) because the caller is about to
+        // export and the metrics belong in that package's audit log.
+        if outcome.wasAveraged {
+            // SNR must be measured on the trials that made the average, or a
+            // batch export reports the SNR of trials the operator excluded.
+            let excluded = outcome.excludedSegmentIndices
+            let snrWorker = Task.detached(priority: .userInitiated) {
+                built.categorySNR(excludedIndices: excluded)
+            }
+            averageSNRByCategory = await withTaskCancellationHandler(
+                operation: { await snrWorker.value },
+                onCancel: { snrWorker.cancel() }
+            )
+        } else {
+            averageSNRByCategory = [:]
+        }
+
+        // Raw epochs cached so post-processing can be re-toggled, matching the
+        // interactive path.
+        segmentedEpochSignal = built.signal
+        segmentedEpochSegments = built.segments
+
         epochedSignal = finalResult.signal
         epochSegments = finalResult.segments
-        isAveraged = wasAveraged
+        isAveraged = outcome.wasAveraged
+
+        var exclusionSummary = built.exclusionSummary
+        foldTrialExclusion(
+            outcome.trialExclusion,
+            step: committedTrialExclusion,
+            segments: built.segments,
+            into: &exclusionSummary
+        )
         exclusionSummary.outputSegments = finalResult.segments.count
         exclusionSummary.badChannelCount = epochBadChannelCounts.count
         psaExclusionSummary = exclusionSummary
-        if wasAveraged {
-            showsButterflyPlot = true
-        } else {
-            showsButterflyPlot = false
+        showsButterflyPlot = outcome.wasAveraged
+        if !outcome.wasAveraged {
             averagedDisplayMode = .waveform
         }
 
-        var parts: [String] = []
-        if averageReference { parts.append("avg ref") }
-        if baselineCorrect { parts.append("baseline corrected") }
-        var statusText = finalResult.message + (parts.isEmpty ? "" : " · " + parts.joined(separator: ", "))
+        var statusText = finalResult.message
         epochBadChannelSummary = []
         if interpolatesBadChannelsPerEpoch, totalEpochsEvaluated > 0, !epochBadChannelCounts.isEmpty {
             let segmentBadChannels = epochBadChannelCounts.keys.sorted().map { "Ch\($0 + 1)" }
@@ -668,10 +1046,38 @@ final class EpochingViewModel {
                 statusText += " · \(built.rejectedForTooManyBadChannels) epoch\(built.rejectedForTooManyBadChannels == 1 ? "" : "s") rejected for too many bad channels"
             }
         }
+
+        // Promote persistently-bad channels to globally bad and interpolate them.
+        var resultSignal = finalResult.signal
+        if let continuousSignal {
+            let escalation = await PSABadChannelEscalation.escalate(
+                counts: epochBadChannelCounts,
+                totalEpochs: totalEpochsEvaluated,
+                isEnabled: escalatesBadChannelsToGlobal,
+                thresholdPercent: escalationThresholdPercent,
+                continuousSignal: continuousSignal,
+                epochedSignal: resultSignal,
+                positions: electrodePositions,
+                channels: store.channels
+            )
+            escalatedChannelSummaries = escalation.summaries
+            if let patched = escalation.patchedEpochedSignal {
+                resultSignal = patched
+                // `epochedSignal` is what callers export
+                // (`HeadlessBatchProcessor` snapshots it, not this return value),
+                // so the patch has to land there too — otherwise the escalation
+                // runs, reports itself in the log, and is silently discarded.
+                epochedSignal = patched
+            }
+            if !escalation.errors.isEmpty {
+                statusText += " · " + escalation.errors.joined(separator: " · ")
+            }
+        }
+
         statusMessage = statusText
         isApplying = false
         phaseMessage = nil
-        return finalResult.signal
+        return resultSignal
     }
 
     func resetForClose() {
@@ -690,6 +1096,8 @@ final class EpochingViewModel {
         epochBadChannelAllSegmentsSummary.removeAll()
         interpolatedChannelsBySegmentSummary.removeAll()
         skippedLabeledBadSegmentsSummary.removeAll()
+        committedTrialExclusion = nil
+        trialExclusionResolution = nil
         statusMessage = nil
         isApplying = false
         phaseMessage = nil
@@ -704,6 +1112,20 @@ final class EpochingViewModel {
         showsAveragesTopography = true
         showsAveragesInspector = true
         showsAveragesLog = true
+        jointPlotMarkers.removeAll()
+        jointMarkerLiveDrag = nil
+        jointBoxOrientation = .vertical
+        jointTopomapScale = 1.0
+        topographyTopomapScale = 1.0
+        multiButterflyColumns = 2
+        showsAveragesMultiButterfly = false
+        showsAveragesGFP = true
+        showsAveragesDifference = false
+        differenceCategoryA = nil
+        differenceCategoryB = nil
+        differenceRelativeSample = nil
+        showsAveragesFilmstrip = false
+        filmstripTileCount = 8
         psaExclusionSummary = PSAExclusionSummary()
         categoryRenames.removeAll()
         overlaySelectedCategories.removeAll()

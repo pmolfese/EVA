@@ -44,6 +44,7 @@ extension WaveformView {
             isHidden: channels.hidden.contains(index),
             isBad: channels.bad.contains(index),
             isInterpolated: channels.interpolated[index] != nil,
+            interpolationLostReason: channels.interpolationLost[index],
             color: channelColor(index),
             rowHeight: channelRowHeight,
             healthResult: channels.healthResults[index],
@@ -66,6 +67,7 @@ extension WaveformView {
             onExport1D: { exportChannelAs1D(index: index, signal: signal) },
             onExport1DWithEvents: { exportChannelAs1D(index: index, signal: signal, includeEvents: true) }
         )
+        .equatable()
     }
 
     func toggleHidden(_ index: Int) {
@@ -112,8 +114,7 @@ extension WaveformView {
         channels.removeAllInterpolations()
         channels.clearHealthResults()
         electrodeGeometry = recording.electrodeGeometry
-        ChannelSetStore.shared.activeSensorLayout = recording.sensorLayout
-        ChannelSetStore.shared.activeChannelNames = recording.signal?.channelNames
+        publishChannelSetContext()
         physioRanges = Self.computePhysioRanges(displayedPhysioSignal())
         channelStatusMessage = message
         channelStatusIsError = false
@@ -208,6 +209,7 @@ extension WaveformView {
             plotWidth: plotWidth,
             rowHeight: channelRowHeight,
             overflowHeight: channelOverflowHeight,
+            showsClipIndicators: showsTraceClipIndicators,
             color: channelColor(index),
             usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering,
             showsTimeMarkers: showsTimeMarkersAcrossTraces,
@@ -218,6 +220,34 @@ extension WaveformView {
             onMoveToPhysio: { moveEEGChannelToPhysio(index: index, in: signal) }
         )
         .equatable()
+    }
+
+    /// Row backgrounds and borders for the whole channel stack, drawn as one
+    /// layer beneath every trace.
+    ///
+    /// Always drawn, whatever the overflow preference says — that is the point.
+    /// If chrome moved between here and the rows when the preference changed,
+    /// the toggle would swap two things at once, and the occlusion it swapped
+    /// would depend on sibling paint order rather than on anything declared.
+    /// Keeping chrome here unconditionally leaves the preference exactly one
+    /// job: how tall the trace canvas is.
+    ///
+    /// Geometry is not computed: this mirrors the content stack's `VStack`
+    /// spacing and row height exactly, so the two lay out identically by
+    /// construction rather than by a formula that could drift from it.
+    func channelRowBackdrop(for signal: MFFSignalData, plotWidth: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: rowSpacing) {
+            ForEach(channelIndices(in: signal), id: \.self) { _ in
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .frame(width: plotWidth, height: channelRowHeight)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+                    }
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -260,14 +290,11 @@ extension WaveformView {
     /// selection band.
     @ViewBuilder
     func cursorOverlay(for signal: MFFSignalData) -> some View {
-        if let topomapSample {
-            Rectangle()
-                .fill(Color.orange)
-                .frame(width: 2)
-                .frame(maxHeight: .infinity)
-                .offset(x: contentX(forSample: topomapSample, in: signal) - 1)
-                .allowsHitTesting(false)
-        }
+        // B2: rendering lives in `WaveformCursorOverlay`; this resolves geometry.
+        WaveformCursorOverlay(
+            positionX: topomapSample.map { contentX(forSample: $0, in: signal) }
+        )
+        .equatable()
     }
 
     /// Highlighted time selection across the full channel stack. Uses a fixed
@@ -275,27 +302,12 @@ extension WaveformView {
     /// topomap cursor, regardless of the user's macOS accent colour.
     @ViewBuilder
     func selectionOverlay(for signal: MFFSignalData) -> some View {
-        if let range = activeSelectionRange(in: signal) {
-            let lowerX = contentX(forSample: range.lowerBound, in: signal)
-            let upperX = contentX(forSample: range.upperBound, in: signal)
-            let selectionColor = Color(nsColor: .systemBlue)
-            Rectangle()
-                .fill(selectionColor.opacity(0.16))
-                .frame(width: max(upperX - lowerX, 2))
-                .frame(maxHeight: .infinity)
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(selectionColor.opacity(0.8))
-                        .frame(width: 1)
-                }
-                .overlay(alignment: .trailing) {
-                    Rectangle()
-                        .fill(selectionColor.opacity(0.8))
-                        .frame(width: 1)
-                }
-                .offset(x: lowerX)
-                .allowsHitTesting(false)
-        }
+        WaveformSelectionOverlay(
+            range: activeSelectionRange(in: signal).map { range in
+                contentX(forSample: range.lowerBound, in: signal)...contentX(forSample: range.upperBound, in: signal)
+            }
+        )
+        .equatable()
     }
 
     /// Translucent band spanning the window of the tapped artifact event, drawn
@@ -303,34 +315,33 @@ extension WaveformView {
     /// window is centered on it using the event's recorded duration.
     @ViewBuilder
     func artifactHighlightOverlay(for signal: MFFSignalData) -> some View {
-        if let event = highlightedArtifactEvent,
-           let duration = event.durationSeconds, duration > 0,
-           signal.samplingRate > 0,
-           let sampleCount = signal.data.first?.count, sampleCount > 0 {
-            // `centerTimeSeconds` (not `beginTimeSeconds`) — Topography/Continuous
-            // events stamp their true onset, not their center, so centering the
-            // band on `beginTimeSeconds` directly would draw it half a duration
-            // too early for those sources.
-            let halfWindow = duration / 2
-            let startSample = Int(((event.centerTimeSeconds - halfWindow) * signal.samplingRate).rounded())
-            let endSample = Int(((event.centerTimeSeconds + halfWindow) * signal.samplingRate).rounded())
-            let lower = min(max(startSample, 0), sampleCount - 1)
-            let upper = min(max(endSample, lower + 1), sampleCount)
-            let lowerX = contentX(forSample: lower, in: signal)
-            let upperX = contentX(forSample: upper, in: signal)
-            Rectangle()
-                .fill(highlightedArtifactColor.opacity(0.18))
-                .frame(width: max(upperX - lowerX, 2))
-                .frame(maxHeight: .infinity)
-                .overlay(alignment: .leading) {
-                    Rectangle().fill(highlightedArtifactColor.opacity(0.7)).frame(width: 1)
-                }
-                .overlay(alignment: .trailing) {
-                    Rectangle().fill(highlightedArtifactColor.opacity(0.7)).frame(width: 1)
-                }
-                .offset(x: lowerX)
-                .allowsHitTesting(false)
+        WaveformArtifactHighlightOverlay(
+            range: artifactHighlightRange(in: signal),
+            color: highlightedArtifactColor
+        )
+        .equatable()
+    }
+
+    /// Content-space x bounds of the tapped artifact's window.
+    ///
+    /// Reads `event.spanSeconds`, which resolves the event's own `timeAnchor`:
+    /// an onset-stamped event's span runs forward from its marked sample, a
+    /// centered or peak-stamped one's straddles it. Deriving the span from
+    /// `beginTimeSeconds` here instead would draw the band half a duration off
+    /// for one convention or the other.
+    private func artifactHighlightRange(in signal: MFFSignalData) -> ClosedRange<CGFloat>? {
+        guard let event = highlightedArtifactEvent,
+              let span = event.spanSeconds,
+              signal.samplingRate > 0,
+              let sampleCount = signal.data.first?.count, sampleCount > 0 else {
+            return nil
         }
+
+        let startSample = Int((span.lowerBound * signal.samplingRate).rounded())
+        let endSample = Int((span.upperBound * signal.samplingRate).rounded())
+        let lower = min(max(startSample, 0), sampleCount - 1)
+        let upper = min(max(endSample, lower + 1), sampleCount)
+        return contentX(forSample: lower, in: signal)...contentX(forSample: upper, in: signal)
     }
 
     func updateWaveformHover(at location: CGPoint, in signal: MFFSignalData) {

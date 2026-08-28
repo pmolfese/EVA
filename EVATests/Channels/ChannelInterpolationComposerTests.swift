@@ -110,7 +110,7 @@ struct ChannelInterpolationComposerTests {
 
         await resolver.resolve(signal: beforeCleaning, snapshot: snapshot)
 
-        let afterCleaning = beforeCleaning.replacingData([
+        let afterCleaning = beforeCleaning.replacingSamples([
             [99, 99],
             [2, 4],
             [6, 8]
@@ -178,7 +178,7 @@ struct ChannelInterpolationComposerTests {
 
         #expect(retained.data[0] == [1, 2])
 
-        let newPipelineSignal = signal.replacingData([
+        let newPipelineSignal = signal.replacingSamples([
             [88, 88],
             [5, 6],
             [7, 8]

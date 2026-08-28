@@ -306,6 +306,11 @@ struct WaveformPlot: View {
     var usesPixelAdaptiveRendering = true
     var showsTimeMarkers = false
     var timeMarkerStyle = WaveformTimeMarkerStyle.defaultValue
+    /// Draw an edge bar wherever the trace left the drawable area, so a
+    /// clipped excursion is visible as *something* rather than as a flat
+    /// stretch that looks like real data. See
+    /// `EVAGeneralPreferences.traceClipIndicatorsKey`.
+    var showsClipIndicators = false
 
     var body: some View {
         Canvas { context, size in
@@ -314,7 +319,7 @@ struct WaveformPlot: View {
 
             let xScale = CGFloat(timeScale)
             let midY = size.height / 2
-            let pointsPerMicrovolt = (nominalHeight / 2) / max(amplitudeScale, 1)
+            let pointsPerMicrovolt = (nominalHeight * WaveformScaleUnits.channelRowFraction) / max(amplitudeScale, 1)
 
             strokeBaseline(in: &context, midY: midY)
             if showsTimeMarkers {
@@ -327,6 +332,8 @@ struct WaveformPlot: View {
                 )
             }
 
+            var clipTally = ClipTally(height: size.height, isEnabled: showsClipIndicators)
+
             if usesPixelAdaptiveRendering, xScale < 1 {
                 drawPixelAdaptiveTrace(
                     in: &context,
@@ -334,7 +341,8 @@ struct WaveformPlot: View {
                     xScale: xScale,
                     sampleStride: safeSampleStride,
                     midY: midY,
-                    pointsPerMicrovolt: pointsPerMicrovolt
+                    pointsPerMicrovolt: pointsPerMicrovolt,
+                    clipTally: &clipTally
                 )
             } else {
                 drawSamplePath(
@@ -342,10 +350,85 @@ struct WaveformPlot: View {
                     xScale: xScale,
                     sampleStride: safeSampleStride,
                     midY: midY,
-                    pointsPerMicrovolt: pointsPerMicrovolt
+                    pointsPerMicrovolt: pointsPerMicrovolt,
+                    clipTally: &clipTally
                 )
             }
+
+            drawClipIndicators(in: &context, size: size, tally: clipTally)
         }
+    }
+
+    /// Accumulates the x spans where the trace left the canvas, merging
+    /// adjacent hits so one excursion produces one mark instead of one per
+    /// pixel column. Both draw paths advance monotonically in x, so a span can
+    /// be extended in place and closed when the gap exceeds `mergeGap`.
+    ///
+    /// Disabled tallies short-circuit every call, keeping the indicator feature
+    /// off the hot path entirely when the preference is off.
+    fileprivate struct ClipTally {
+        let height: CGFloat
+        let isEnabled: Bool
+        var above: [ClosedRange<CGFloat>] = []
+        var below: [ClosedRange<CGFloat>] = []
+
+        /// Points of x separation that end a span. Small enough that two
+        /// genuinely separate excursions stay separate, large enough that the
+        /// one-sample gaps inside a single excursion do not fragment it.
+        private static let mergeGap: CGFloat = 3
+
+        mutating func record(x: CGFloat, y: CGFloat) {
+            guard isEnabled else { return }
+            if y < 0 {
+                Self.append(x: x, to: &above)
+            } else if y > height {
+                Self.append(x: x, to: &below)
+            }
+        }
+
+        /// Records a vertical segment, for the pixel-adaptive path where one
+        /// column carries a min/max pair rather than a single point.
+        mutating func record(x: CGFloat, minY: CGFloat, maxY: CGFloat) {
+            guard isEnabled else { return }
+            record(x: x, y: minY)
+            record(x: x, y: maxY)
+        }
+
+        private static func append(x: CGFloat, to spans: inout [ClosedRange<CGFloat>]) {
+            if let last = spans.last, x - last.upperBound <= mergeGap {
+                spans[spans.count - 1] = last.lowerBound...max(last.upperBound, x)
+            } else {
+                spans.append(x...x)
+            }
+        }
+
+        var isEmpty: Bool { above.isEmpty && below.isEmpty }
+    }
+
+    /// Strokes a short bar hugging the edge the trace exited through, spanning
+    /// the x range where it was outside. A bar rather than a caret per column:
+    /// it reads as one event, and it lands exactly where the data went missing.
+    private func drawClipIndicators(in context: inout GraphicsContext, size: CGSize, tally: ClipTally) {
+        guard tally.isEnabled, !tally.isEmpty else { return }
+
+        let inset: CGFloat = 1.25
+        let lineWidth: CGFloat = 2.5
+        // Minimum drawn length, so a single-column clip is still visible.
+        let minimumLength: CGFloat = 3
+
+        func stroke(_ spans: [ClosedRange<CGFloat>], atY y: CGFloat) {
+            var path = Path()
+            for span in spans {
+                let start = span.lowerBound
+                let end = max(span.upperBound, start + minimumLength)
+                path.move(to: CGPoint(x: start, y: y))
+                path.addLine(to: CGPoint(x: end, y: y))
+            }
+            context.stroke(path, with: .color(.orange), lineWidth: lineWidth)
+        }
+
+        stroke(tally.above, atY: inset)
+        stroke(tally.below, atY: size.height - inset)
     }
 
     private func drawSamplePath(
@@ -353,7 +436,8 @@ struct WaveformPlot: View {
         xScale: CGFloat,
         sampleStride: Int,
         midY: CGFloat,
-        pointsPerMicrovolt: CGFloat
+        pointsPerMicrovolt: CGFloat,
+        clipTally: inout ClipTally
     ) {
         let safeXScale = max(xScale, 0.001)
         let lowerVisibleIndex = max(Int(floor(visibleRange.lowerBound / safeXScale)) - 2, 0)
@@ -365,21 +449,17 @@ struct WaveformPlot: View {
 
         var path = Path()
         let firstPlottedIndex = firstSampleIndex / sampleStride
-        path.move(
-            to: CGPoint(
-                x: CGFloat(firstPlottedIndex) * xScale,
-                y: yPosition(for: samples[firstSampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
-            )
-        )
+        let firstX = CGFloat(firstPlottedIndex) * xScale
+        let firstY = yPosition(for: samples[firstSampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
+        path.move(to: CGPoint(x: firstX, y: firstY))
+        clipTally.record(x: firstX, y: firstY)
 
         for sampleIndex in stride(from: firstSampleIndex + sampleStride, through: lastSampleIndex, by: sampleStride) {
             let plottedIndex = sampleIndex / sampleStride
-            path.addLine(
-                to: CGPoint(
-                    x: CGFloat(plottedIndex) * xScale,
-                    y: yPosition(for: samples[sampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
-                )
-            )
+            let x = CGFloat(plottedIndex) * xScale
+            let y = yPosition(for: samples[sampleIndex], midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
+            path.addLine(to: CGPoint(x: x, y: y))
+            clipTally.record(x: x, y: y)
         }
 
         context.stroke(path, with: .color(color), lineWidth: 1)
@@ -391,7 +471,8 @@ struct WaveformPlot: View {
         xScale: CGFloat,
         sampleStride: Int,
         midY: CGFloat,
-        pointsPerMicrovolt: CGFloat
+        pointsPerMicrovolt: CGFloat,
+        clipTally: inout ClipTally
     ) {
         let safeXScale = max(xScale, 0.001)
         let lastPlottedIndex = max((samples.count - 1) / sampleStride, 0)
@@ -438,6 +519,7 @@ struct WaveformPlot: View {
             let maxY = yPosition(for: maxValue, midY: midY, pointsPerMicrovolt: pointsPerMicrovolt)
             envelope.move(to: CGPoint(x: x, y: min(minY, maxY)))
             envelope.addLine(to: CGPoint(x: x, y: max(minY, maxY)))
+            clipTally.record(x: x, minY: min(minY, maxY), maxY: max(minY, maxY))
         }
 
         context.stroke(envelope, with: .color(color), lineWidth: 1)
@@ -474,7 +556,7 @@ struct OverlaidCategoryChannelPlot: View {
             guard epochLength > 1 else { return }
 
             let midY = size.height / 2
-            let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
+            let pointsPerMicrovolt = (size.height * WaveformScaleUnits.traceRowFraction) / max(amplitudeScale, 1)
             let xScale = size.width / CGFloat(max(epochLength - 1, 1))
             let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
 
@@ -636,7 +718,7 @@ struct ButterflyConditionPlot: View {
             guard epochLength > 1 else { return }
 
             let midY = size.height / 2
-            let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
+            let pointsPerMicrovolt = (size.height * WaveformScaleUnits.traceRowFraction) / max(amplitudeScale, 1)
             let xScale = size.width / CGFloat(max(epochLength - 1, 1))
             let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
 
@@ -743,7 +825,7 @@ private func nearestButterflyTrace(
     guard let first = segments.first, first.endSample > first.startSample, size.width > 0 else { return nil }
     let epochLength = first.endSample - first.startSample + 1
     let midY = size.height / 2
-    let pointsPerMicrovolt = (size.height * 0.42) / CGFloat(max(amplitudeScale, 1))
+    let pointsPerMicrovolt = (size.height * WaveformScaleUnits.traceRowFraction) / CGFloat(max(amplitudeScale, 1))
     let xScale = size.width / CGFloat(max(epochLength - 1, 1))
     let localSample = min(max(Int((location.x / xScale).rounded()), 0), epochLength - 1)
 
@@ -978,7 +1060,7 @@ struct OverlayButterflyPlot: View {
             guard epochLength > 1 else { return }
 
             let midY = size.height / 2
-            let pointsPerMicrovolt = (size.height * 0.42) / max(amplitudeScale, 1)
+            let pointsPerMicrovolt = (size.height * WaveformScaleUnits.traceRowFraction) / max(amplitudeScale, 1)
             let xScale = size.width / CGFloat(max(epochLength - 1, 1))
             let sampleStep = max(epochLength / max(Int(size.width), 1), 1)
 
@@ -1044,7 +1126,7 @@ struct ArtifactTemplateAveragePlot: View {
 
             let midY = size.height / 2
             let maxAbs = max(fixedScaleMicrovolts ?? average.allChannelSamples.flatMap { $0.map(abs) }.max() ?? 1, 1)
-            let yScale = (size.height * 0.42) / CGFloat(maxAbs)
+            let yScale = (size.height * WaveformScaleUnits.traceRowFraction) / CGFloat(maxAbs)
             let xScale = size.width / CGFloat(sampleCount - 1)
             let peakByChannel = Dictionary(uniqueKeysWithValues: average.channelSummaries.map {
                 ($0.channelIndex, $0.peakAbsoluteMicrovolts)
@@ -1167,7 +1249,7 @@ struct ICATimeCoursePlot: View {
 
             let midY = size.height / 2
             let scale = robustScale(samples, in: range)
-            let yScale = (size.height * 0.42) / CGFloat(scale.amplitude)
+            let yScale = (size.height * WaveformScaleUnits.traceRowFraction) / CGFloat(scale.amplitude)
             let binCount = max(Int(size.width.rounded(.down)), 2)
             let visibleCount = range.upperBound - range.lowerBound + 1
 
@@ -1741,12 +1823,22 @@ struct EventTrackView: View {
             eventDetailRow("Label", event.label)
             eventDetailRow("Description", event.eventDescription)
             eventDetailRow("Cell", event.cell)
-            eventDetailRow("Onset", String(format: "%.3f s", event.beginTimeSeconds))
+            // Labelled by the event's own anchor. Calling this "Onset"
+            // unconditionally, as EVA used to, misreported the time of every
+            // centered and peak-stamped event by half its duration.
+            eventDetailRow(event.timeAnchor.timeFieldLabel, String(format: "%.3f s", event.beginTimeSeconds))
             if let duration = event.durationSeconds {
-                eventDetailRow("Duration", duration >= 1
-                    ? String(format: "%.3f s", duration)
-                    : String(format: "%.0f ms", duration * 1000))
+                eventDetailRow("Duration", Self.formattedDuration(duration))
             }
+            if let span = event.spanSeconds {
+                eventDetailRow("Span", String(format: "%.3f – %.3f s", span.lowerBound, span.upperBound))
+            }
+            // Stated outright, not just implied by the time row's label. Which
+            // instant a marker names decides where every window derived from it
+            // sits, and it is the first thing to check when an event looks
+            // misplaced — so it should be readable without having to notice
+            // that the row above says "Peak" rather than "Onset".
+            eventDetailRow("Anchor", event.timeAnchor.detailDescription)
             eventDetailRow("Source", event.sourceFile)
         }
         .padding(14)
@@ -1775,14 +1867,23 @@ struct EventTrackView: View {
         if let label = event.label { lines.append("Label: \(label)") }
         if let description = event.eventDescription { lines.append("Description: \(description)") }
         if let cell = event.cell { lines.append("Cell: \(cell)") }
-        lines.append(String(format: "Onset: %.3f s", event.beginTimeSeconds))
+        lines.append(String(format: "\(event.timeAnchor.timeFieldLabel): %.3f s", event.beginTimeSeconds))
         if let duration = event.durationSeconds {
-            lines.append(duration >= 1
-                ? String(format: "Duration: %.3f s", duration)
-                : String(format: "Duration: %.0f ms", duration * 1000))
+            lines.append("Duration: \(Self.formattedDuration(duration))")
         }
+        if let span = event.spanSeconds {
+            lines.append(String(format: "Span: %.3f – %.3f s", span.lowerBound, span.upperBound))
+        }
+        lines.append("Anchor: \(event.timeAnchor.detailDescription)")
         lines.append("Source: \(event.sourceFile)")
         return lines.joined(separator: "\n")
+    }
+
+    /// Seconds for durations of a second or more, milliseconds below that.
+    private static func formattedDuration(_ duration: Double) -> String {
+        duration >= 1
+            ? String(format: "%.3f s", duration)
+            : String(format: "%.0f ms", duration * 1000)
     }
 
     private func overlapClusters(for markers: [EventTrackMarker]) -> [EventTrackOverlapCluster] {

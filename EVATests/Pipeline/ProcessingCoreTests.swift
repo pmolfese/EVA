@@ -9,8 +9,8 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Coverage for the headless apply-core (TODO.md Priority 1 / REFACTOR.md item
-//  E): applying a script's auto steps with no view must produce the same
+//  Coverage for the headless apply-core (ROADMAP.md, completed batch suite):
+//  applying a script's auto steps with no view must produce the same
 //  output as the interactive VM path, and must stop (not skip) at the first
 //  step it doesn't yet support so chain order is never violated.
 //
@@ -28,10 +28,13 @@ struct ProcessingCoreTests {
             store: store,
             filter: FilterViewModel(store: store),
             gradient: GradientViewModel(store: store),
+            bcg: BCGDetectionViewModel(store: store),
             ica: ICAViewModel(store: store),
             artifactVM: ArtifactViewModel(store: store),
             epoching: EpochingViewModel(store: store),
-            wavelet: WaveletReductionViewModel(store: store)
+            wavelet: WaveletReductionViewModel(store: store),
+            template: ArtifactTemplateViewModel(store: store),
+            segHealth: SegmentHealthViewModel(store: store)
         )
     }
 

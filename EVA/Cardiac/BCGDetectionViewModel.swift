@@ -39,6 +39,20 @@ final class BCGDetectionViewModel {
     var detectsArtifacts = false
     var showsSheet = false
 
+    /// Stable identity for the `DefinedArtifact` this detector contributes, so
+    /// re-running detection updates the existing entry rather than appending a
+    /// new one.
+    ///
+    /// Lives here rather than on `WaveformView`, where it used to be a
+    /// `let bcgDefinedArtifactID = UUID()`. That was fragile as well as
+    /// unreachable: a `let` initialiser on a `View` struct runs whenever SwiftUI
+    /// re-initialises the struct, and if it ever did, the id would change and
+    /// every lookup keyed on it — updating the artifact, removing it on disable,
+    /// invalidating its OBS variance cache — would silently miss the entry it was
+    /// looking for and leave a stale artifact behind. Tied to the view model's
+    /// lifetime, it is stable for exactly as long as the detector's output is.
+    @ObservationIgnored let definedArtifactID = UUID()
+
     // MARK: Method + shared output
     var method = BCGDetectionMethod.periodicity
     var eventCode = "BCG"
@@ -61,6 +75,10 @@ final class BCGDetectionViewModel {
     // MARK: Channel restriction
     var channelSetID: ChannelSet.ID?
 
+    // MARK: Hemispheric topography (right/left channel groups — see BCGDetectionMethod.hemisphericTopography)
+    var rightChannelSetID: ChannelSet.ID?
+    var leftChannelSetID: ChannelSet.ID?
+
     // MARK: CWL regression (direct-correction method — see BCGDetectionMethod.cwlRegression)
     var selectedCWLChannels = Set<Int>()
     var cwlUseEVAFastCWR = false
@@ -73,6 +91,21 @@ final class BCGDetectionViewModel {
     var cwlDownsampleTargetHz = 0.0
     var cwlDownsampleFilter = CWLCorrector.DownsampleFilter.windowedSinc
     var cwlUpsampleToOriginalHz = false
+
+    // MARK: Surrogate separation — PCA-S (ROADMAP SI-3)
+    /// Portable settings. Recorded in `eva.xml` and replayed.
+    var surrogateSettings = BCGSurrogateSettings.default
+    /// What the last PCA-S run actually fitted on *this* recording. Kept
+    /// separate from the settings on purpose: RW-1's rule is that portable
+    /// parameters and subject-specific fitted results never share a home.
+    var surrogateReport: BCGSurrogateReport?
+    /// Audit lines from the last PCA-S run, for `log_eva_*.txt`.
+    var surrogateAuditLogLines: [String] = []
+
+    /// The correction currently published to `correctedSignal`, so the chain
+    /// can record which method produced the signal on screen rather than
+    /// inferring it from whichever method the picker happens to show now.
+    var appliedCorrection: BCGDetectionMethod?
     var correctedSignal: MFFSignalData?
 
     // MARK: Run / refine state
@@ -100,9 +133,32 @@ final class BCGDetectionViewModel {
         isEstimating = false
         algorithmResults = [:]
         correctedSignal = nil
+        appliedCorrection = nil
+        surrogateReport = nil
+        surrogateAuditLogLines = []
     }
 
     // MARK: - eva.xml / log_eva bridge
+
+    /// Portable parameters for the `bcgCorrection` step: the PCA-S settings
+    /// plus the event code naming which beats it locked to.
+    ///
+    /// Deliberately *not* `parameters`: that dictionary describes the detector
+    /// and is recorded for provenance only, while these are replayable settings
+    /// for a correction another file can re-fit from its own beats.
+    var surrogateCorrectionParameters: [String: String] {
+        var params = surrogateSettings.parameters
+        params["method"] = BCGDetectionMethod.surrogatePCAS.rawValue
+        params["beatEventCode"] = beatEventCode
+        return params
+    }
+
+    /// The event code PCA-S locks to: the BCG detector's own code when it has
+    /// one, otherwise the default.
+    var beatEventCode: String {
+        let trimmed = eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? BCGDetector.eventCode : trimmed
+    }
 
     var parameters: [String: String] {
         var params: [String: String] = [
@@ -133,6 +189,12 @@ final class BCGDetectionViewModel {
         ]
         if let channelSetID {
             params["channelSetID"] = channelSetID.uuidString
+        }
+        if let rightChannelSetID {
+            params["rightChannelSetID"] = rightChannelSetID.uuidString
+        }
+        if let leftChannelSetID {
+            params["leftChannelSetID"] = leftChannelSetID.uuidString
         }
         if let kept = refinedKeptCount {
             params["refinedKeptCount"] = "\(kept)"

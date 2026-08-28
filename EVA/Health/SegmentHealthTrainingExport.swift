@@ -63,6 +63,16 @@ nonisolated struct SavedSegmentHealthAnalysisMetadata: Codable, Sendable {
     var effectiveSamplingRate: Double
     var analyzedSampleCount: Int
     var baselines: SegmentHealthBaselines?
+    /// Whether labeled artifacts were assessed for this analysis.
+    ///
+    /// Schema 2. Before it, a dataset written with no artifact detection run
+    /// carried a perfect "Labeled Artifacts" score for every segment, and
+    /// nothing in the file distinguished that from a recording that had been
+    /// examined and was clean — so the metric was training-usable in exactly the
+    /// case where it meant nothing (ROADMAP RW-1 item 16). When this is false,
+    /// each segment's artifact metric is marked `notAssessed` and its
+    /// `artifactOverlapFraction` / `artifactCount` features are null.
+    var artifactsAssessed: Bool = false
 }
 
 nonisolated struct SavedSegmentHealthSegment: Codable, Sendable {
@@ -112,7 +122,7 @@ extension SavedSegmentHealthDataset {
         }
 
         return SavedSegmentHealthDataset(
-            schemaVersion: 1,
+            schemaVersion: 2,
             createdAt: Date(),
             labelSource: "EVA segment-health metrics snapshot: no human good/bad labels assigned yet",
             packageName: packageName,
@@ -130,7 +140,8 @@ extension SavedSegmentHealthDataset {
                 sampleStride: analysis.sampleStride,
                 effectiveSamplingRate: analysis.effectiveSamplingRate,
                 analyzedSampleCount: analysis.analyzedSampleCount,
-                baselines: analysis.baselines
+                baselines: analysis.baselines,
+                artifactsAssessed: analysis.artifactsAssessed
             ),
             segments: segments
         )

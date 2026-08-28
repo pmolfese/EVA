@@ -43,7 +43,16 @@ extension WaveformView {
         // launches `interactiveReplay()` via `startInteractiveReplay()`. Passing
         // the CURRENT recording's signal runs the compatibility pre-flight
         // against the file this script is about to be replayed onto.
-        replay.configure(script: script, sourceName: url.lastPathComponent, signal: recording.signal)
+        replay.configure(
+            script: script,
+            sourceName: url.lastPathComponent,
+            signal: recording.signal,
+            // Classified against *this* recording, not the script's source —
+            // whether ICA re-applies from a sidecar, and whether a recorded
+            // interpolation can be re-solved here, are facts about the file
+            // being replayed onto (ROADMAP RW-1 item 6).
+            availability: currentReplayPayloadAvailability()
+        )
     }
 
     // MARK: - MFF export
@@ -71,19 +80,31 @@ extension WaveformView {
         // Capture the active processing pipeline for eva.xml + the process log.
         let processingScript = currentProcessingScript()
         let auditLogLines = currentProcessingAuditLogLines()
+        let icaPayload = currentICAReplayPayload()
+        let artifactPayload = currentArtifactReplayPayload()
 
         mffExportTask?.cancel()
         let sessionID = recordingSessionID
         mffExportTask = Task {
-            let result = await performMFFExport(
-                snapshot: snapshot,
-                pnsForExport: pnsForExport,
-                script: processingScript,
-                to: url,
-                auditLogLines: auditLogLines
-            )
-            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            let outcome = await recordingStore.exportRunner.run("mffExport") {
+                await performMFFExport(
+                    snapshot: snapshot,
+                    pnsForExport: pnsForExport,
+                    script: processingScript,
+                    to: url,
+                    auditLogLines: auditLogLines,
+                    icaPayload: icaPayload,
+                    artifactPayload: artifactPayload
+                )
+            }
+            // A newer export owns `isExportingMFF` — clearing it here would blank
+            // the indicator for an export still in flight.
+            guard case .completed(let result) = outcome else {
+                if case .cancelled = outcome { isExportingMFF = false }
+                return
+            }
             isExportingMFF = false
+            guard sessionID == recordingSessionID else { return }
             switch result {
             case .success(let outputURL):
                 mffExportStatusMessage = "Exported \(snapshot.kind.statusName) MFF: \(outputURL.lastPathComponent)"
@@ -103,14 +124,18 @@ extension WaveformView {
         pnsForExport: MFFSignalData?,
         script: EVAProcessingScript,
         to url: URL,
-        auditLogLines: [String] = []
+        auditLogLines: [String] = [],
+        icaPayload: ICAReplayPayload? = nil,
+        artifactPayload: ArtifactReplayPayload? = nil
     ) async -> Result<URL, Error> {
         await MFFExportWriter.write(
             snapshot: snapshot,
             pnsSignal: pnsForExport,
             script: script,
             to: url,
-            auditLogLines: auditLogLines
+            auditLogLines: auditLogLines,
+            icaPayload: icaPayload,
+            artifactPayload: artifactPayload
         )
     }
 
@@ -171,6 +196,9 @@ extension WaveformView {
         let pnsForExport = pnsSignalForMFFExport()
         let processingScript = currentProcessingScript()
         let auditLogLines = currentProcessingAuditLogLines()
+        // The ICA operator is channel × component, so it stays valid across a
+        // time split — both halves carry the same removal.
+        let icaPayload = currentICAReplayPayload()
         isExportingMFF = true
         mffExportStatusMessage = "Splitting MFF at \(formattedEventTime(splitTime))..."
 
@@ -211,6 +239,7 @@ extension WaveformView {
                             note: "Created by right-click Split File export."
                         ))
                         try? EVAProcessingScriptXML.write(script, toPackage: output.url)
+                        try? icaPayload?.write(toPackage: output.url)
 
                         let log = EVAProcessLog(header: "EVA split export — \(output.url.lastPathComponent)")
                         for step in script.steps {
@@ -228,16 +257,27 @@ extension WaveformView {
                     return Result<[URL], Error>.failure(error)
                 }
             }
-            let result = await withTaskCancellationHandler(
-                operation: {
-                    await worker.value
-                },
-                onCancel: {
-                    worker.cancel()
-                }
-            )
+            let outcome = await recordingStore.exportRunner.run("mffSplitExport") {
+                await withTaskCancellationHandler(
+                    operation: {
+                        await worker.value
+                    },
+                    onCancel: {
+                        worker.cancel()
+                    }
+                )
+            }
 
-            guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            // Same contract as the full-export path: a superseded run leaves the
+            // spinner to the export that replaced it; a cancelled one releases it.
+            guard case .completed(let result) = outcome else {
+                if case .cancelled = outcome { isExportingMFF = false }
+                return
+            }
+            guard sessionID == recordingSessionID else {
+                isExportingMFF = false
+                return
+            }
             await MainActor.run {
                 isExportingMFF = false
                 switch result {
@@ -337,23 +377,56 @@ extension WaveformView {
             script.append(EVAProcessingStep(operation: .mriGradientCorrection, parameters: gradient.parameters))
         }
         if bcg.correctedSignal != nil {
-            script.append(EVAProcessingStep(
-                operation: .bcgDetection,
-                parameters: bcg.parameters,
-                replayable: false,
-                note: "BCG/CWL correction is subject-specific; parameters are recorded for provenance."
-            ))
+            if bcg.appliedCorrection == .surrogatePCAS {
+                // PCA-S is the one BCG correction whose settings are portable:
+                // another file re-fits the same model from its own beats and
+                // coordinates, so this step is replayable and the fitted result
+                // stays in the audit log where it belongs (ROADMAP SI-3).
+                script.append(EVAProcessingStep(
+                    operation: .bcgCorrection,
+                    parameters: bcg.surrogateCorrectionParameters,
+                    note: "Surrogate-source separation. Settings are portable; the fitted topographies are re-derived per file."
+                ))
+            } else {
+                script.append(EVAProcessingStep(
+                    operation: .bcgDetection,
+                    parameters: bcg.parameters,
+                    replayable: false,
+                    note: "BCG/CWL correction is subject-specific; parameters are recorded for provenance."
+                ))
+            }
         }
         if ica.cleanedSignal != nil {
             script.append(EVAProcessingStep(
                 operation: .icaClean,
-                parameters: ["averageReference": "\(ica.usesAverageReference)"],
+                // `ica.parameters`, not a hand-built dictionary. This used to
+                // emit `averageReference` alone, which quietly defeated the
+                // determinism audit's ICA fix: nine fit inputs were added to
+                // `ICAViewModel.parameters` and none of them reached `eva.xml`,
+                // because this builder never asked for them. The audit checked
+                // that each view model *serializes* what its apply path reads;
+                // it did not check that the script builder *uses* what the view
+                // model serializes. Same bug class, one level up.
+                parameters: ica.parameters,
                 replayable: false,
                 note: "ICA settings are portable; removed component indices are subject-specific."
             ))
         }
         if filter.output != nil {
             script.append(EVAProcessingStep(operation: .filter, parameters: filter.parameters))
+            // Re-referencing is its own step, emitted *after* the filter that
+            // produced the samples it acts on. Interactively the pass still runs
+            // inside `FilterViewModel` on the buffer it already owns; headlessly
+            // it runs here. Same operation, same samples, same point in the
+            // chain — see `Rereferencing` for the parity claim.
+            if filter.averageReference {
+                script.append(EVAProcessingStep(
+                    operation: .reference,
+                    parameters: Rereferencing.parameters(
+                        scheme: .average, domain: .continuous, excluding: channels.bad
+                    )
+                ))
+            }
         }
         if artifactVM.isCleaningActive, artifactVM.cleaningIsEnabled {
             // Artifact cleaning is defined per-subject (drawn templates / events),
@@ -382,10 +455,85 @@ extension WaveformView {
         }
         // PSA: segment (+ optional baseline / average) is portable when the target
         // has the same event codes. Replayable.
-        if epoching.epochedSignal != nil, !epoching.selectedEventCodes.isEmpty {
-            script.append(EVAProcessingStep(operation: .segment, parameters: epoching.parameters))
+        //
+        // Gated on `hasSegmentSelection` — the same condition `canApplyPSA` uses
+        // to decide whether a live build can even run — rather than
+        // `selectedEventCodes` alone. A regex-only session (no source code also
+        // ticked as a plain checkbox) genuinely segments and averages, and
+        // checking only the checkbox set silently dropped the `segment` step
+        // from eva.xml for exactly that session: the audit log recorded a
+        // segment result and an average, but the replayable script did not.
+        if epoching.epochedSignal != nil, epoching.hasSegmentSelection {
+            // Emitted *before* `segment`, unlike the continuous one: epoch
+            // referencing happens inside the PSA fold, after trial rejection and
+            // before baseline correction, so it cannot be performed from
+            // outside. Replaying it configures the segmentation that follows.
+            if epoching.averageReference {
+                script.append(EVAProcessingStep(
+                    operation: .reference,
+                    parameters: Rereferencing.parameters(
+                        scheme: .average, domain: .epoch, excluding: channels.bad
+                    )
+                ))
+            }
+            // Same reasoning, and simpler: baseline correction is the other flag
+            // `applyBuildJob` folds into the same build, so it is a setting the
+            // upcoming `segment` consumes rather than a pass performable from
+            // outside. Unlike `reference` it reads nothing beyond the segment
+            // window `segment`'s own parameters already carry, so there is
+            // nothing to record here but the fact that it happened.
+            if epoching.baselineCorrected {
+                script.append(EVAProcessingStep(operation: .baseline))
+            }
+            // The reviewed exclusion, before `segment` for the same reason
+            // `reference` and `baseline` are: it is a decision the segment/
+            // average fold consumes, not a pass performable from outside.
+            if let exclusion = epoching.committedTrialExclusion {
+                script.append(exclusion)
+            }
+            // Record what segmentation threw away, per category. An MFF holds
+            // only the surviving segments, so without this the retention story
+            // is lost the moment the file is written.
+            script.append(EVAProcessingStep(
+                operation: .segment,
+                parameters: epoching.parameters,
+                rejections: epoching.psaExclusionSummary.categoryRejections
+            ))
         }
-        return script
+        // Bad-channel marks and interpolation, as provenance. Shared with the
+        // headless path so the two cannot drift — `HeadlessBatchProcessor` writes
+        // back the script it was handed, so without this a batch-produced package
+        // would omit decisions its own PSA escalation had made.
+        return ChannelDecisionSteps.inserted(
+            into: script,
+            badChannels: channels.bad,
+            interpolatedChannels: Set(channels.interpolated.keys)
+        )
+    }
+
+    /// The subject-specific ICA payload for `eva_ica.json`, or `nil` when no ICA
+    /// removal is part of the exported state.
+    ///
+    /// Deliberately keyed on `ica.cleanedSignal != nil` rather than on the mere
+    /// presence of a decomposition: a fit the user never applied is not part of
+    /// this package's processing, and writing its operator would describe a step
+    /// that did not happen. Same condition `currentProcessingScript()` uses to
+    /// emit the `icaClean` step, so the sidecar and the script cannot disagree.
+    func currentICAReplayPayload() -> ICAReplayPayload? {
+        guard ica.cleanedSignal != nil else { return nil }
+        return ICAComponentRemoval.stagedPayload(ica)
+    }
+
+    /// The drawn-artifact definitions for `eva_artifacts.json`, or `nil` when no
+    /// cleaning is part of the exported state.
+    ///
+    /// Keyed on the same condition `currentProcessingScript()` uses to emit the
+    /// `artifactClean` step, so the sidecar and the script cannot disagree about
+    /// whether cleaning happened.
+    func currentArtifactReplayPayload() -> ArtifactReplayPayload? {
+        guard artifactVM.isCleaningActive, artifactVM.cleaningIsEnabled,
+              !template.definedArtifacts.isEmpty else { return nil }
+        return ArtifactReplayPayload(artifacts: template.definedArtifacts)
     }
 
     func artifactCleaningParameters() -> [String: String] {
@@ -403,39 +551,10 @@ extension WaveformView {
     /// part of `eva.xml` because Copy Processing should replay the portable
     /// settings, not this file's resulting channel/epoch decisions.
     func currentProcessingAuditLogLines() -> [String] {
-        var lines: [String] = []
-        if !epoching.skippedLabeledBadSegmentsSummary.isEmpty {
-            lines.append("segment result: skippedLabeledBadSegments=\(epoching.skippedLabeledBadSegmentsSummary.joined(separator: "; "))")
-        }
-        if !epoching.epochBadChannelSummary.isEmpty {
-            lines.append("segment result: perEpochBadChannels=\(epoching.epochBadChannelSummary.joined(separator: "; "))")
-        }
-        if !epoching.epochBadChannelAllSegmentsSummary.isEmpty {
-            lines.append("segment result: badChannelsInAllKeptSegments=\(epoching.epochBadChannelAllSegmentsSummary.joined(separator: ", "))")
-        }
-        if !channels.interpolated.isEmpty {
-            var fields = [
-                "channels=\(channels.interpolated.keys.sorted().map { String($0 + 1) }.joined(separator: ","))"
-            ]
-            if !epoching.escalatedChannelSummaries.isEmpty {
-                fields.append("escalatedFromPerEpochDetection=\(epoching.escalatedChannelSummaries.joined(separator: "; "))")
-            }
-            lines.append("interpolateChannels result: \(fields.joined(separator: ", "))")
-        }
-        if !channels.bad.isEmpty {
-            lines.append("markBad result: channels=\(channels.bad.sorted().map { String($0 + 1) }.joined(separator: ","))")
-        }
-        for category in epoching.averageSNRByCategory.keys.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
-            let m = epoching.averageSNRByCategory[category] ?? SNRMetrics()
-            func f(_ v: Double?, _ digits: Int = 2) -> String {
-                guard let v, v.isFinite else { return "n/a" }
-                return String(format: "%.\(digits)f", v)
-            }
-            lines.append(
-                "average SNR [\(category)]: trials=\(m.trialCount), plusMinusSNR=\(f(m.plusMinusSNR)), baselineSNR=\(f(m.baselineSNR)), gfpSNR=\(f(m.gfpSNR)), sme=\(f(m.standardizedMeasurementError, 3)), splitHalfReliability=\(f(m.splitHalfReliability))"
-            )
-        }
-        return lines
+        ProcessingAuditLog.lines(
+            gradient: gradient, bcg: bcg, epoching: epoching, channels: channels,
+            cleaningVariance: recordingStore.cleaningVariance
+        )
     }
 
     func currentMFFExportSnapshot() -> MFFExportSnapshot? {

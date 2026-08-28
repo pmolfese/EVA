@@ -80,9 +80,10 @@ struct EVATests {
     }
 
     @Test func reductionWithUniversalThresholdRetainsMostVariance() {
-        // HAPPE-like behavior: on oscillation + sparse large spikes, the
-        // universal-threshold defaults should remove the spikes while keeping
-        // the bulk of the ongoing signal (variance retained well above half).
+        // Expected wavelet-reduction behavior: on oscillation + sparse large
+        // spikes, the universal-threshold defaults should remove the spikes
+        // while keeping the bulk of the ongoing signal (variance retained well
+        // above half).
         var signal = (0..<4000).map { sin(Double($0) * 0.2) + 0.3 * sin(Double($0) * 0.05) }
         for index in stride(from: 100, to: 4000, by: 500) { signal[index] += 25 }
 
@@ -482,6 +483,21 @@ struct EVATests {
         #expect(Set(signal.events.map(\.code)) == ["A", "B"])
         let aEvent = try #require(signal.events.first(where: { $0.code == "A" }))
         #expect(abs(aEvent.beginTimeSeconds - 0.001) < 1e-9)
+    }
+
+    @Test func mffReaderSynthesizesEGIChannelNamesWhenLayoutLabelsAreBlank() throws {
+        // HydroCel layouts number every electrode but leave <name> blank, except
+        // the reference (type 1). Without synthesized E{n} labels the channel
+        // identity is unknown and combining two runs of the same net fails.
+        let signal = try MFFReader().loadSignal(from: Fixtures.url("example_2.mff"))
+        let names = try #require(signal.channelNames)
+        #expect(names.count == signal.numberOfChannels)
+        #expect(names.first == "E1")
+        #expect(names.last == "VREF")
+        #expect(Set(names).count == names.count)
+        #expect(signal.acquisitionReference?.name == "VREF")
+        #expect(signal.acquisitionReference?.isRecorded == true)
+        #expect(signal.referenceState == .acquisition)
     }
 
     @Test func mffReaderTreatsSingleFullSpanCategoryAsContinuous() throws {

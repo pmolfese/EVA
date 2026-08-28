@@ -140,13 +140,14 @@ extension WaveformView {
                     categoryGroupName = ""
                     categoryRegexSourceCode = ""
                     categoryRegexPattern = ""
+                    categoryRegexMatchField = .description
                     showsCategoryGroupPopover = true
                 } label: {
                     Label("Group…", systemImage: "plus.circle")
                 }
                 .disabled(allSummaries.isEmpty)
                 .help("Combine several event codes/labels into one pooled category, or sub-select one code's events by a regex on their description.")
-                .popover(isPresented: $showsCategoryGroupPopover) {
+                .popover(isPresented: binding(recordingStore.events, \.showsCategoryGroupPopover)) {
                     categoryGroupPopover(events: events, allSummaries: allSummaries)
                 }
             }
@@ -332,6 +333,12 @@ extension WaveformView {
         let timingOptions = psaTimingMarkerOptions(in: allSummaries, excluding: summary.code)
         let isSelected = epoching.selectedEventCodes.contains(summary.code)
         let usesTimingMarker = epoching.timingMarkerEnabledValues.contains(summary.code)
+        // A code doesn't need its own checkbox to be DIN-eligible — a
+        // `CategoryRegexRule` sourced from it needs the same nearest-marker
+        // correction its own events would get, so DIN stays enabled whenever
+        // this code feeds a regex rule too, even with the plain category off.
+        let isRegexSource = epoching.categoryRegexRules.values.contains { $0.sourceCode == summary.code }
+        let isDINEligible = isSelected || isRegexSource
 
         return HStack(spacing: 12) {
             Toggle(isOn: psaEventCodeBinding(summary.code)) {
@@ -360,8 +367,10 @@ extension WaveformView {
 
             Toggle("DIN", isOn: psaTimingMarkerEnabledBinding(summary.code, options: timingOptions))
                 .toggleStyle(.checkbox)
-                .disabled(!isSelected || timingOptions.isEmpty)
-                .help("Use the nearest selected timing marker as this category's onset.")
+                .disabled(!isDINEligible || timingOptions.isEmpty)
+                .help(isSelected || !isRegexSource
+                    ? "Use the nearest selected timing marker as this category's onset."
+                    : "This code isn't selected on its own, but feeds a regex category below — DIN still applies to that category's onset.")
 
             Picker("Timing Marker", selection: psaTimingMarkerSelectionBinding(summary.code, options: timingOptions)) {
                 if timingOptions.isEmpty {
@@ -375,7 +384,7 @@ extension WaveformView {
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(width: 128)
-            .disabled(!isSelected || !usesTimingMarker || timingOptions.isEmpty)
+            .disabled(!isDINEligible || !usesTimingMarker || timingOptions.isEmpty)
             .help("Marker group whose nearest event supplies the true onset time.")
         }
     }
@@ -707,7 +716,7 @@ extension WaveformView {
             Text("New Category")
                 .font(.headline)
 
-            Picker("Mode", selection: $categoryGroupMode) {
+            Picker("Mode", selection: binding(recordingStore.events, \.categoryGroupMode)) {
                 ForEach(CategoryGroupMode.allCases) { mode in
                     Text(mode.rawValue).tag(mode)
                 }
@@ -733,7 +742,7 @@ extension WaveformView {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
-        TextField("Category name (e.g. \"emotional\")", text: $categoryGroupName)
+        TextField("Category name (e.g. \"emotional\")", text: binding(recordingStore.events, \.categoryGroupName))
             .textFieldStyle(.roundedBorder)
 
         ScrollView {
@@ -779,12 +788,13 @@ extension WaveformView {
         let preview = regexMatchPreview(
             sourceCode: categoryRegexSourceCode,
             pattern: categoryRegexPattern,
+            matchField: categoryRegexMatchField,
             categoryNameTemplate: categoryGroupName,
             events: events
         )
         let patternIsValid = !categoryRegexPattern.isEmpty && preview != nil
 
-        Text("Sub-selects the events of ONE code whose description matches a pattern into a new category, in addition to that event's own category.")
+        Text("Sub-selects the events of ONE code whose description or label matches a pattern into a new category, in addition to that event's own category.")
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -793,7 +803,7 @@ extension WaveformView {
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
 
-        Picker("Source code", selection: $categoryRegexSourceCode) {
+        Picker("Source code", selection: binding(recordingStore.events, \.categoryRegexSourceCode)) {
             Text("Choose a code…").tag("")
             ForEach(allSummaries) { summary in
                 Text("\(summary.code) — \(summary.count) events").tag(summary.code)
@@ -802,12 +812,72 @@ extension WaveformView {
         .labelsHidden()
         .pickerStyle(.menu)
 
-        Text("Pattern (applied to description field)")
+        Text("Match against")
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
-        TextField("e.g. cond=(\\d+)_correct", text: $categoryRegexPattern)
+
+        Picker("Match against", selection: binding(recordingStore.events, \.categoryRegexMatchField)) {
+            ForEach(CategoryRegexMatchField.allCases) { field in
+                Text(field.rawValue).tag(field)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+
+        HStack {
+            Text("Pattern (applied to \(categoryRegexMatchField.rawValue.lowercased()) field)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Menu {
+                ForEach(RegexPatternPreset.library) { preset in
+                    Button {
+                        categoryRegexPattern = preset.pattern
+                    } label: {
+                        Text(preset.title)
+                    }
+                    .help("\(preset.pattern) — \(preset.example)")
+                }
+            } label: {
+                Label("Examples", systemImage: "list.bullet.rectangle")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Pick a common pattern shape to start from, then tweak it and check the preview below.")
+        }
+        TextField("e.g. cond=(\\d+)_correct", text: binding(recordingStore.events, \.categoryRegexPattern))
             .textFieldStyle(.roundedBorder)
             .font(.system(.body, design: .monospaced))
+
+        if categoryRegexPattern.isEmpty, !categoryRegexSourceCode.isEmpty,
+           let suggestion = RegexPatternSuggester.suggest(
+               from: regexSourceTexts(sourceCode: categoryRegexSourceCode, matchField: categoryRegexMatchField, events: events)
+           ) {
+            Button {
+                categoryRegexPattern = suggestion.pattern
+            } label: {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "wand.and.stars")
+                        .foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Suggested: \(suggestion.pattern)")
+                            .font(.system(.caption, design: .monospaced))
+                            .fontWeight(.semibold)
+                        Text(suggestion.rationale)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            .help("Inferred from this code's own \(categoryRegexMatchField.rawValue.lowercased())s — tap to use it, then edit as needed.")
+        }
 
         if categoryRegexSourceCode.isEmpty {
             Text("Choose a source code above.")
@@ -868,9 +938,64 @@ extension WaveformView {
             }
         }
 
-        TextField("New category name (e.g. \"emotional\" or \"n2_$1\")", text: $categoryGroupName)
+        let groupCount = captureGroupCount(in: categoryRegexPattern)
+
+        HStack {
+            Text("New category name")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            if groupCount > 0 {
+                HStack(spacing: 4) {
+                    Text("Insert:")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    ForEach(1...groupCount, id: \.self) { index in
+                        Button("$\(index)") {
+                            categoryGroupName += "$\(index)"
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .font(.system(.caption2, design: .monospaced))
+                        .help("Append $\(index) (this pattern's capture group \(index)) to the category name.")
+                    }
+                }
+            }
+        }
+        TextField("e.g. \"emotional\" or \"n2_$1\"", text: binding(recordingStore.events, \.categoryGroupName))
             .textFieldStyle(.roundedBorder)
+            .font(.system(.body, design: .monospaced))
             .help("Use $1, $2, … to reference the pattern's capture groups — one rule then fans out into a category per captured value instead of needing a separate rule for each.")
+
+        if categoryGroupName.isEmpty, !categoryRegexSourceCode.isEmpty, !categoryRegexPattern.isEmpty,
+           let templateSuggestion = CategoryTemplateSuggester.suggest(
+               pattern: categoryRegexPattern,
+               samples: regexSourceTexts(sourceCode: categoryRegexSourceCode, matchField: categoryRegexMatchField, events: events)
+           ) {
+            Button {
+                categoryGroupName = templateSuggestion.template
+            } label: {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "wand.and.stars")
+                        .foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Suggested: \(templateSuggestion.template)")
+                            .font(.system(.caption, design: .monospaced))
+                            .fontWeight(.semibold)
+                        Text(templateSuggestion.rationale)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            .help("Inferred from what this pattern's capture group(s) actually match — tap to use it, then edit as needed.")
+        }
 
         HStack {
             Spacer()
@@ -896,6 +1021,14 @@ extension WaveformView {
         return shown + suffix
     }
 
+    /// Raw description/label values for `sourceCode`'s own events — feeds
+    /// `RegexPatternSuggester`, which diffs these to infer a starting pattern.
+    private func regexSourceTexts(sourceCode: String, matchField: CategoryRegexMatchField, events: [MFFEvent]) -> [String] {
+        events
+            .filter { $0.code == sourceCode }
+            .compactMap { matchField == .label ? $0.label : $0.eventDescription }
+    }
+
     /// `nil` means the pattern doesn't compile as a regex; otherwise the match
     /// count against `sourceCode`'s events, the full distinct set of
     /// categories this rule would actually produce, and ONE example
@@ -908,22 +1041,24 @@ extension WaveformView {
     private func regexMatchPreview(
         sourceCode: String,
         pattern: String,
+        matchField: CategoryRegexMatchField,
         categoryNameTemplate: String,
         events: [MFFEvent]
     ) -> (matched: Int, total: Int, samples: [(description: String, category: String)], categories: [String])? {
         guard !sourceCode.isEmpty, !pattern.isEmpty else { return nil }
         guard let regex = try? Regex(pattern).ignoresCase() else { return nil }
-        let rule = CategoryRegexRule(sourceCode: sourceCode, pattern: pattern, categoryName: categoryNameTemplate)
+        let rule = CategoryRegexRule(sourceCode: sourceCode, pattern: pattern, matchField: matchField, categoryName: categoryNameTemplate)
         let codeEvents = events.filter { $0.code == sourceCode }
         var matchedCount = 0
         var exampleByCategory: [String: String] = [:]
         for event in codeEvents {
-            guard let description = event.eventDescription,
-                  let match = description.firstMatch(of: regex) else { continue }
+            let matchText = matchField == .label ? event.label : event.eventDescription
+            guard let matchText,
+                  let match = matchText.firstMatch(of: regex) else { continue }
             matchedCount += 1
             let category = rule.resolvedCategoryName(for: match)
             if exampleByCategory[category] == nil {
-                exampleByCategory[category] = description
+                exampleByCategory[category] = matchText
             }
         }
         let categories = exampleByCategory.keys.sorted()
@@ -959,11 +1094,12 @@ extension WaveformView {
         let pattern = categoryRegexPattern.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !pattern.isEmpty, !categoryRegexSourceCode.isEmpty,
               (try? Regex(pattern)) != nil else { return }
-        let rule = CategoryRegexRule(sourceCode: categoryRegexSourceCode, pattern: pattern, categoryName: name)
+        let rule = CategoryRegexRule(sourceCode: categoryRegexSourceCode, pattern: pattern, matchField: categoryRegexMatchField, categoryName: name)
         epoching.categoryRegexRules[rule.id.uuidString] = rule
         showsCategoryGroupPopover = false
         categoryRegexSourceCode = ""
         categoryRegexPattern = ""
+        categoryRegexMatchField = .description
         categoryGroupName = ""
     }
 
@@ -1060,6 +1196,7 @@ extension WaveformView {
             regexMatchPreview(
                 sourceCode: $0.sourceCode,
                 pattern: $0.pattern,
+                matchField: $0.matchField,
                 categoryNameTemplate: $0.categoryName,
                 events: events
             )
@@ -1074,7 +1211,7 @@ extension WaveformView {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(rule?.categoryName ?? "")
                         .font(.system(.body, design: .monospaced).weight(.semibold))
-                    Text(rule?.sourceCode ?? "")
+                    Text("\(rule?.sourceCode ?? "") · \(rule?.matchField.rawValue ?? "")")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -1163,7 +1300,7 @@ extension WaveformView {
 
     func canApplyPSA(events: [MFFEvent]) -> Bool {
         !events.isEmpty
-            && (!epoching.selectedEventCodes.isEmpty || !epoching.categoryRegexRules.isEmpty)
+            && epoching.hasSegmentSelection
             && epoching.preStimulus >= 0
             && epoching.postStimulus > 0
             && selectedPSACategoriesByCode() != nil
@@ -1288,6 +1425,21 @@ extension WaveformView {
         }
 
         var clauses: [String] = []
+        if let resolution = epoching.trialExclusionResolution {
+            let count = resolution.excludedIndices.count
+            if count > 0 {
+                clauses.append("\(count) reviewed trial\(count == 1 ? "" : "s") excluded")
+            }
+            // Loud, and not merely a count: the average on screen is not the one
+            // that was reviewed, and the operator is the only one who can decide
+            // whether that matters.
+            if !resolution.unresolved.isEmpty {
+                clauses.append("\(resolution.unresolved.count) reviewed exclusion\(resolution.unresolved.count == 1 ? "" : "s") no longer match any trial — re-review before trusting this average")
+            }
+            if !resolution.movedIndices.isEmpty {
+                clauses.append("\(resolution.movedIndices.count) reviewed trial\(resolution.movedIndices.count == 1 ? "" : "s") renumbered since review")
+            }
+        }
         if !epoching.skippedLabeledBadSegmentsSummary.isEmpty {
             clauses.append("skipped labeled bad segments: \(epoching.skippedLabeledBadSegmentsSummary.joined(separator: ", "))")
         }
@@ -1305,148 +1457,84 @@ extension WaveformView {
         return baseStatus + " · " + clauses.joined(separator: " · ")
     }
 
+    /// Interactive PSA apply.
+    ///
+    /// The build → average → post-process sequence lives in
+    /// `EpochingViewModel.buildAndPostProcess`, shared with the headless path.
+    /// What remains here is what genuinely differs: the session guard, the
+    /// Segment Health label exclusions, background SNR so the sheet can close
+    /// immediately, the richer status line, and the UI teardown.
     private func applyPSACore(to signal: MFFSignalData, job: PSABuildJob) async {
         let sessionID = recordingSessionID
         let shouldAverage = epoching.averageOnApply
-        let shouldAvgRef = epoching.averageReference
-        let shouldBaseline = epoching.baselineCorrected
         let badChannels = channels.bad
         let suffix = psaPostProcessingSuffix()
 
-        epoching.isApplying = true
-        epoching.phaseMessage = "Segmenting…"
-        epoching.segmentingProgress = nil
-
-        let (progressContinuation, progressTask) = ProgressBridge.make { [self] (update: EpochBuildProgress) in
-            epoching.phaseMessage = "Segmenting… (\(update.completed) of \(update.total))"
-            epoching.segmentingProgress = update.fraction
-        }
-
-        let buildWorker = Task.detached(priority: .userInitiated) {
-            await job.buildEpochs { completed, total in
-                progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
-            }
-        }
-        let built = await withTaskCancellationHandler(
-            operation: {
-                await buildWorker.value
-            },
-            onCancel: {
-                buildWorker.cancel()
-            }
-        )
-        progressContinuation.finish()
-        progressTask.cancel()
-        epoching.segmentingProgress = nil
-
-        guard !Task.isCancelled, sessionID == recordingSessionID else {
-            epoching.isApplying = false
-            epoching.phaseMessage = nil
-            return
-        }
-        guard let built else {
-            epoching.isApplying = false
-            epoching.phaseMessage = nil
-            epoching.statusMessage = "No trials survived PSA segmentation. All candidate epochs were rejected, skipped, or out of bounds."
+        guard let outcome = await epoching.buildAndPostProcess(
+            job: job,
+            shouldAverage: shouldAverage,
+            averageReference: epoching.averageReference,
+            baselineCorrect: epoching.baselineCorrected,
+            badChannels: badChannels,
+            excludedSegmentIndices: { [self] segments in excludedBadSegmentIndices(segments) },
+            isCurrent: { [self] in sessionID == recordingSessionID }
+        ) else {
             return
         }
 
-        // Captured from the RAW (pre-average) build — per-trial bad-channel
-        // detection only exists at this stage; `average()`/`postProcessed()`
-        // below construct fresh `PSABuildResult`s that don't carry it, so
-        // relying on `finalResult.message` for this would silently lose it
-        // whenever averaging is on (which `average()` always overwrites with
-        // its own "N categories, N epochs averaged" message).
+        let built = outcome.built
+        let finalResult = outcome.finalResult
         let epochBadChannelCounts = built.epochBadChannelCounts
         let totalEpochsEvaluated = built.totalEpochsEvaluated
         let rejectedForTooManyBadChannels = built.rejectedForTooManyBadChannels
         let skippedBadIndices = excludedBadSegmentIndices(built.segments)
         var exclusionSummary = built.exclusionSummary
+        epoching.foldTrialExclusion(
+            outcome.trialExclusion,
+            step: epoching.committedTrialExclusion,
+            segments: built.segments,
+            into: &exclusionSummary
+        )
 
         // Keep raw epochs as source so post-processing can be toggled later.
         segmentedEpochSignal = built.signal
         segmentedEpochSegments = built.segments
 
-        let finalResult: PSABuildResult
-        let wasAveraged: Bool
-        if shouldAverage {
-            epoching.phaseMessage = "Averaging…"
-            let colorIndices = categoryColorIndices(for: built.segments.map(\.category))
-            let excludedIndices = excludedBadSegmentIndices(built.segments)
-            let averageWorker = Task.detached(priority: .userInitiated) {
-                built.average(colorIndices: colorIndices, excludedIndices: excludedIndices)
-            }
-            let averagedOpt = await withTaskCancellationHandler(
-                operation: {
-                    await averageWorker.value
-                },
-                onCancel: {
-                    averageWorker.cancel()
-                }
+        if outcome.wasAveraged {
+            // SNR is measured from the RAW single trials, but it does NOT block
+            // closing the sheet — the user sees their average right away and the
+            // Averages workspace shows a spinner until SNR lands.
+            computeAverageSNRInBackground(
+                from: built,
+                // Every trial the average dropped, reviewed exclusions
+                // included — SNR measured over trials that are not in the
+                // average describes an average nobody has.
+                excludedIndices: outcome.excludedSegmentIndices,
+                sessionID: sessionID
             )
-            guard !Task.isCancelled, sessionID == recordingSessionID, let averaged = averagedOpt else {
-                epoching.isApplying = false
-                epoching.phaseMessage = nil
-                epoching.statusMessage = "No averages could be computed."
-                return
-            }
-            epoching.phaseMessage = "Post-processing…"
-            let postWorker = Task.detached(priority: .userInitiated) {
-                averaged.postProcessed(averageReference: shouldAvgRef, baselineCorrect: shouldBaseline, badChannels: badChannels)
-            }
-            finalResult = await withTaskCancellationHandler(
-                operation: {
-                    await postWorker.value
-                },
-                onCancel: {
-                    postWorker.cancel()
-                }
-            )
-            // SNR is measured from the RAW single trials (`built`), but it does
-            // NOT block closing the sheet — the user sees their average right
-            // away and the Averages workspace shows a spinner until SNR lands.
-            computeAverageSNRInBackground(from: built, excludedIndices: excludedIndices, sessionID: sessionID)
-            wasAveraged = true
         } else {
-            epoching.phaseMessage = "Post-processing…"
-            let postWorker = Task.detached(priority: .userInitiated) {
-                built.postProcessed(averageReference: shouldAvgRef, baselineCorrect: shouldBaseline, badChannels: badChannels)
-            }
-            finalResult = await withTaskCancellationHandler(
-                operation: {
-                    await postWorker.value
-                },
-                onCancel: {
-                    postWorker.cancel()
-                }
-            )
             snrTask?.cancel()
             snrTask = nil
             epoching.isComputingAverageSNR = false
             epoching.averageSNRByCategory = [:]
-            wasAveraged = false
         }
 
-        guard !Task.isCancelled, sessionID == recordingSessionID else {
-            epoching.isApplying = false
-            epoching.phaseMessage = nil
-            return
-        }
         epoching.epochedSignal = finalResult.signal
         epoching.epochSegments = finalResult.segments
-        epoching.isAveraged = wasAveraged
+        epoching.isAveraged = outcome.wasAveraged
         enableSegmentHealthAfterSegmentationIfNeeded()
         exclusionSummary.skippedLabeledBadSegments = shouldAverage ? skippedBadIndices.count : 0
         exclusionSummary.outputSegments = finalResult.segments.count
         exclusionSummary.badChannelCount = epochBadChannelCounts.count
         epoching.psaExclusionSummary = exclusionSummary
-        if wasAveraged {
+        if outcome.wasAveraged {
             epoching.showsButterflyPlot = true
         } else {
             epoching.showsButterflyPlot = false
             epoching.averagedDisplayMode = .waveform
         }
         refreshPSAEpochDiagnostics(from: built)
+
         // Bad-channel reporting is composed here (not read off finalResult.message)
         // because average()/postProcessed() replace the message wholesale —
         // relying on it would silently drop this whenever averaging is on.
@@ -1461,6 +1549,7 @@ extension WaveformView {
             includeSkippedLabeledBadSegments: shouldAverage
         )
         epoching.statusMessage = statusText
+
         await escalateBadChannelsIfNeeded(
             counts: epochBadChannelCounts,
             totalEpochs: totalEpochsEvaluated,
@@ -1497,111 +1586,59 @@ extension WaveformView {
     /// `segmentedEpochSignal` (the pre-average raw-epoch cache) — toggling
     /// post-processing after an escalation will re-derive from the
     /// pre-escalation raw epochs. A known, narrow gap, not fixed here.
+    /// Interactive wrapper around the shared escalation: adds the session guard
+    /// (this can outlive a same-window "Close Recording") and the status-line
+    /// reporting. The decision logic and interpolation live in
+    /// `PSABadChannelEscalation`, shared with the headless path.
     private func escalateBadChannelsIfNeeded(
         counts: [Int: Int],
         totalEpochs: Int,
         continuousSignal: MFFSignalData
     ) async {
-        guard epoching.escalatesBadChannelsToGlobal, totalEpochs > 0, !counts.isEmpty else {
-            epoching.escalatedChannelSummaries = []
-            return
-        }
-        let thresholdFraction = epoching.escalationThresholdPercent / 100
-        let toEscalate = counts
-            .filter { Double($0.value) / Double(totalEpochs) >= thresholdFraction }
-            .sorted { $0.key < $1.key }
-        guard !toEscalate.isEmpty else {
-            epoching.escalatedChannelSummaries = []
-            return
-        }
+        let sessionID = recordingSessionID
+        epoching.phaseMessage = "Interpolating global bad channels…"
 
-        let summaries = toEscalate.map { channelIndex, count in
-            let percent = Double(count) / Double(totalEpochs) * 100
-            return "Ch\(channelIndex + 1): bad in \(String(format: "%.0f", percent))% of epochs (\(count)/\(totalEpochs))"
-        }
-        guard let geometry = electrodeGeometry else {
-            epoching.escalatedChannelSummaries = summaries
+        let outcome = await PSABadChannelEscalation.escalate(
+            counts: counts,
+            totalEpochs: totalEpochs,
+            isEnabled: epoching.escalatesBadChannelsToGlobal,
+            thresholdPercent: epoching.escalationThresholdPercent,
+            continuousSignal: continuousSignal,
+            epochedSignal: epoching.epochedSignal,
+            positions: electrodeGeometry?.positions ?? [:],
+            channels: channels
+        )
+
+        guard sessionID == recordingSessionID else { return }
+
+        epoching.escalatedChannelSummaries = outcome.summaries
+        guard !outcome.summaries.isEmpty else { return }
+
+        if outcome.lackedGeometry {
             channelStatusMessage = "No electrode geometry is available; can't interpolate escalated channels."
             channelStatusIsError = true
             return
         }
 
-        let sessionID = recordingSessionID
-        let targets = toEscalate.map(\.key)
-        let excludedDonors = channels.bad.union(channels.interpolated.keys)
-        let epochedSignal = epoching.epochedSignal
-        let positions = geometry.positions
-        epoching.phaseMessage = "Interpolating global bad channels…"
-
-        let interpolationWorker = Task.detached(priority: .userInitiated) {
-            PSAGlobalBadChannelInterpolator.interpolate(
-                targets: targets,
-                continuousSignal: continuousSignal,
-                epochedSignal: epochedSignal,
-                excludedDonors: excludedDonors,
-                positions: positions
-            )
-        }
-        let results = await withTaskCancellationHandler(
-            operation: {
-                await interpolationWorker.value
-            },
-            onCancel: {
-                interpolationWorker.cancel()
-            }
-        )
-        guard !Task.isCancelled, sessionID == recordingSessionID else { return }
-
-        epoching.escalatedChannelSummaries = summaries
-        let successful = results.filter(\.succeeded)
-        var interpolated = channels.interpolated
-        var interpolationSources = channels.interpolationSources
-        var globalBadChannels = channels.bad
-        var interpolationMessages: [String] = []
-        let interpolationErrors = results.compactMap(\.errorMessage)
-
-        for result in successful {
-            guard let continuousSeries = result.continuousSeries else { continue }
-            interpolated[result.target] = continuousSeries
-            interpolationSources[result.target] = (
-                result.indices,
-                result.weights.map(Float.init)
-            )
-            globalBadChannels.remove(result.target)
-            interpolationMessages.append(
-                "Interpolated Ch \(result.target + 1) from \(result.indices.count) neighbors."
-            )
-        }
-        if !successful.isEmpty {
-            channels.replaceInterpolations(interpolated, sources: interpolationSources)
-            channels.bad = globalBadChannels
+        if !outcome.messages.isEmpty {
             artifactVM.detectionRefreshToken += 1
-
-            if let epochedSignal,
-               successful.allSatisfy({ $0.epochedSeries != nil }) {
-                var epochedData = epochedSignal.data
-                for result in successful {
-                    if let series = result.epochedSeries,
-                       epochedData.indices.contains(result.target) {
-                        epochedData[result.target] = series
-                    }
-                }
-                epoching.epochedSignal = epochedSignal.replacingData(epochedData)
-            } else {
-                // Preserve the previous safety fallback for a stale or
-                // mismatched epoched layout.
-                invalidateEpochsForSignalChange()
-            }
+        }
+        if let patched = outcome.patchedEpochedSignal {
+            epoching.epochedSignal = patched
+        } else if outcome.requiresEpochInvalidation {
+            invalidateEpochsForSignalChange()
         }
 
-        let escalatedChannels = toEscalate.map { "Ch\($0.key + 1)" }.joined(separator: ", ")
-        if !interpolationMessages.isEmpty || !interpolationErrors.isEmpty {
-            let combined = (interpolationMessages + interpolationErrors).joined(separator: " · ")
-            channelStatusMessage = combined
-            channelStatusIsError = !interpolationErrors.isEmpty
+        if !outcome.messages.isEmpty || !outcome.errors.isEmpty {
+            channelStatusMessage = (outcome.messages + outcome.errors).joined(separator: " · ")
+            channelStatusIsError = !outcome.errors.isEmpty
         }
+
+        let escalatedChannels = outcome.summaries
+            .compactMap { $0.split(separator: ":").first.map(String.init) }
+            .joined(separator: ", ")
         epoching.statusMessage = (epoching.statusMessage ?? "")
-            + " · Escalated \(toEscalate.count) channel\(toEscalate.count == 1 ? "" : "s") to globally bad (\(escalatedChannels))."
+            + " · Escalated \(outcome.summaries.count) channel\(outcome.summaries.count == 1 ? "" : "s") to globally bad (\(escalatedChannels))."
     }
 
     /// Validates PSA inputs on the main actor and packages them into a Sendable job
@@ -1849,29 +1886,19 @@ extension WaveformView {
             )
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             computeAverageSNRInBackground(from: base, excludedIndices: excludedIndices, sessionID: sessionID)
-            epoching.epochedSignal = display.signal
-            epoching.epochSegments = display.segments
-            epoching.isAveraged = true
-            segHealth.clearAnalysis(hide: true, clearLabels: false)
-            selectedSampleRange = nil
-            dragSelectionStartSample = nil
-            dragSelectionEndSample = nil
-            topomapSample = nil
-            epoching.butterflyTopomapRelativeSample = nil
-            selectedEventCodes.removeAll()
-            horizontalScrollPosition.scrollTo(x: 0)
-            var exclusionSummary = epoching.psaExclusionSummary
-            if exclusionSummary.acceptedEpochs == 0 {
-                exclusionSummary.acceptedEpochs = base.segments.count
-            }
-            exclusionSummary.skippedLabeledBadSegments = excludedIndices.count
-            exclusionSummary.outputSegments = display.segments.count
-            epoching.psaExclusionSummary = exclusionSummary
-            epoching.statusMessage = appendPSAEpochDiagnostics(
-                to: averaged.message + suffix,
-                sourceSegments: base.segments,
-                skippedIndices: excludedIndices,
-                includeSkippedLabeledBadSegments: true
+            PSAAveraging.commit(
+                averaged: display,
+                sourceSegmentCount: base.segments.count,
+                excludedSegmentCount: excludedIndices.count,
+                statusMessage: appendPSAEpochDiagnostics(
+                    to: averaged.message + suffix,
+                    sourceSegments: base.segments,
+                    skippedIndices: excludedIndices,
+                    includeSkippedLabeledBadSegments: true
+                ),
+                epoching: epoching,
+                segHealth: segHealth,
+                store: recordingStore
             )
             psaTask = nil
         }
@@ -1930,18 +1957,7 @@ extension WaveformView {
     /// into the epoched signal, the reference correctly uses their reconstructed
     /// values and excludes bad channels.
     func averageReferencedEpochs(_ result: PSABuildResult) -> PSABuildResult {
-        let referencedData = EEGSignalFilter.averageReferenced(result.signal.data, excluding: channels.bad)
-        let referenced = MFFSignalData(
-            signalURL: result.signal.signalURL,
-            signalType: result.signal.signalType,
-            numberOfChannels: result.signal.numberOfChannels,
-            samplingRate: result.signal.samplingRate,
-            duration: result.signal.duration,
-            recordingStartTime: result.signal.recordingStartTime,
-            events: result.signal.events,
-            data: referencedData,
-            channelNames: result.signal.channelNames
-        )
+        let referenced = Rereferencing.applied(result.signal, excluding: channels.bad)
         return PSABuildResult(signal: referenced, segments: result.segments, message: result.message)
     }
 
@@ -1968,7 +1984,16 @@ extension WaveformView {
         )
         let isAveraged = epoching.isAveraged
         let colorIndices = categoryColorIndices(for: base.segments.map(\.category))
-        let excludedIndices = excludedBadSegmentIndices(base.segments, requiresOptIn: !isAveraged)
+        // Segment Health labels and the committed reviewed exclusion are kept
+        // apart on purpose: they average together, but `skippedLabeledBadSegments`
+        // below counts only the labels, and folding the two would attribute
+        // reviewed exclusions to a control the operator never touched.
+        let labeledBadIndices = excludedBadSegmentIndices(base.segments, requiresOptIn: !isAveraged)
+        let trialExclusion = epoching.resolvedTrialExclusion(for: base.segments)
+        epoching.trialExclusionResolution = isAveraged ? trialExclusion : nil
+        let excludedIndices = isAveraged
+            ? labeledBadIndices.union(trialExclusion?.excludedIndices ?? [])
+            : labeledBadIndices
         psaTask?.cancel()
         let sessionID = recordingSessionID
         psaTask = Task {
@@ -2013,45 +2038,26 @@ extension WaveformView {
             epoching.epochedSignal = display.signal
             epoching.epochSegments = display.segments
             var exclusionSummary = epoching.psaExclusionSummary
-            exclusionSummary.skippedLabeledBadSegments = isAveraged ? excludedIndices.count : 0
+            // Idempotent by construction — see `recordExclusions` — so a
+            // toggle-driven re-average restates this reason rather than adding
+            // to what the last one recorded.
+            epoching.foldTrialExclusion(
+                isAveraged ? trialExclusion : Optional<TrialExclusionResolver.Resolution>.none,
+                step: epoching.committedTrialExclusion,
+                segments: base.segments,
+                into: &exclusionSummary
+            )
+            exclusionSummary.skippedLabeledBadSegments = isAveraged ? labeledBadIndices.count : 0
             exclusionSummary.outputSegments = display.segments.count
             epoching.psaExclusionSummary = exclusionSummary
             epoching.statusMessage = appendPSAEpochDiagnostics(
                 to: result.message + suffix,
                 sourceSegments: base.segments,
-                skippedIndices: excludedIndices,
+                skippedIndices: labeledBadIndices,
                 includeSkippedLabeledBadSegments: isAveraged
             )
             psaTask = nil
         }
-    }
-
-    func clearEpochs() {
-        epoching.epochedSignal = nil
-        epoching.epochSegments = []
-        segmentedEpochSignal = nil
-        segmentedEpochSegments = []
-        epoching.isAveraged = false
-        snrTask?.cancel()
-        snrTask = nil
-        epoching.isComputingAverageSNR = false
-        epoching.averageSNRByCategory = [:]
-        selectedSampleRange = nil
-        dragSelectionStartSample = nil
-        dragSelectionEndSample = nil
-        topomapSample = nil
-        epoching.butterflyTopomapRelativeSample = nil
-        epoching.psaExclusionSummary = PSAExclusionSummary()
-        epoching.averagedDisplayMode = .waveform
-        epoching.showsButterflyPlot = false
-        selectedEventCodes.removeAll()
-        epoching.statusMessage = nil
-        epoching.epochBadChannelSummary.removeAll()
-        epoching.epochBadChannelAllSegmentsSummary.removeAll()
-        epoching.interpolatedChannelsBySegmentSummary.removeAll()
-        epoching.skippedLabeledBadSegmentsSummary.removeAll()
-        segHealth.clearAnalysis(hide: true, clearLabels: true)
-        horizontalScrollPosition.scrollTo(x: 0)
     }
 
     func epochCategorySummaries() -> [EpochCategorySummary] {

@@ -226,7 +226,7 @@ struct ArtifactTemplateDetectionResult: Sendable {
 /// The reference scalp topography used for spatial matching, plus the result
 /// of scanning the recording for it.
 /// One display frame sampled from the trajectory reference window.
-struct ArtifactTrajectoryFrame: Sendable, Identifiable {
+struct ArtifactTrajectoryFrame: Sendable, Identifiable, Codable {
     var id: Int { frameIndex }
     /// Index within the full (decimated) trajectory.
     var frameIndex: Int
@@ -241,7 +241,7 @@ struct ArtifactTrajectoryFrame: Sendable, Identifiable {
     var gfp: Float
 }
 
-struct ArtifactTemplateTopography: Sendable {
+struct ArtifactTemplateTopography: Sendable, Codable {
     var mode: ArtifactTopographyMode
     /// Absolute sample whose scalp map was used (window centre, peak GFP sample,
     /// or — for `.average` — the window centre as a nominal time reference).
@@ -274,7 +274,7 @@ struct ArtifactTemplateScopeCount: Identifiable, Sendable {
     var id: String { "\(name)-\(channelCount)-\(matchCount)" }
 }
 
-struct ArtifactTemplateAverage: Sendable {
+struct ArtifactTemplateAverage: Sendable, Codable {
     var samplingRate: Double
     var windowSizeSeconds: Double
     var eventCount: Int
@@ -283,7 +283,7 @@ struct ArtifactTemplateAverage: Sendable {
     var channelSummaries: [ArtifactTemplateChannelSummary]
 }
 
-struct ArtifactTemplateChannelSummary: Identifiable, Sendable {
+struct ArtifactTemplateChannelSummary: Identifiable, Sendable, Codable {
     var channelIndex: Int
     var peakAbsoluteMicrovolts: Float
     var rmsMicrovolts: Float
@@ -685,7 +685,8 @@ nonisolated enum ArtifactTemplateDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Topography %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: Double(hit.durationSamples) / signal.samplingRate
+                durationSeconds: Double(hit.durationSamples) / signal.samplingRate,
+                timeAnchor: .onset
             )
         }
 
@@ -820,28 +821,31 @@ nonisolated enum ArtifactTemplateDetector {
         }
         if let start = activeStart, let end = lastAbove { runs.append(start...end) }
 
-        // Filter by min/max duration.
-        let minD = max(Int((configuration.continuousMinDurationSeconds * decimatedRate).rounded()), 1)
-        let maxD = configuration.continuousMaxDurationSeconds > 0
-            ? max(Int((configuration.continuousMaxDurationSeconds * decimatedRate).rounded()), minD)
-            : Int.max
-        let filtered = runs.filter {
-            let length = $0.upperBound - $0.lowerBound + 1
-            return length >= minD && length <= maxD
-        }
-
-        // Bridge runs within the merge gap into one — the extend/discard
+        // Bridge runs within the merge gap into one first — the extend/discard
         // question from waveform matching doesn't apply here: a contiguous
         // run is already a single measured span by construction, so there's
-        // no "best of several overlapping hits" to choose between.
+        // no "best of several overlapping hits" to choose between. Merging
+        // before the duration filter lets a brief sub-threshold dip that
+        // splits one artifact into short fragments still combine into a
+        // single valid-duration event.
         let mergeGapD = max(Int((configuration.mergeWindowSeconds * decimatedRate).rounded()), 1)
         var merged: [ClosedRange<Int>] = []
-        for run in filtered {
+        for run in runs {
             if let last = merged.last, run.lowerBound - last.upperBound <= mergeGapD {
                 merged[merged.count - 1] = last.lowerBound...run.upperBound
             } else {
                 merged.append(run)
             }
+        }
+
+        // Filter by min/max duration.
+        let minD = max(Int((configuration.continuousMinDurationSeconds * decimatedRate).rounded()), 1)
+        let maxD = configuration.continuousMaxDurationSeconds > 0
+            ? max(Int((configuration.continuousMaxDurationSeconds * decimatedRate).rounded()), minD)
+            : Int.max
+        merged = merged.filter {
+            let length = $0.upperBound - $0.lowerBound + 1
+            return length >= minD && length <= maxD
         }
 
         let events = merged.enumerated().map { index, run -> MFFEvent in
@@ -856,7 +860,8 @@ nonisolated enum ArtifactTemplateDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Continuous %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: duration
+                durationSeconds: duration,
+                timeAnchor: .onset
             )
         }
 
@@ -1201,7 +1206,8 @@ nonisolated enum ArtifactTemplateDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Trajectory %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: Double(hit.durationSamples) / sr
+                durationSeconds: Double(hit.durationSamples) / sr,
+                timeAnchor: .center
             )
         }
 
@@ -1412,7 +1418,7 @@ nonisolated enum ArtifactTemplateDetector {
         let templateLength = templateEnd - templateStart
         guard templateLength >= 3 else { return [] }
 
-        let downsampledChannels = channelIndices.map { Downsampler.strided(signal.data[$0], by: decimation) }
+        let downsampledChannels = channelIndices.map { Downsampler.windowedSincDecimated(signal.data[$0], by: decimation) }
         guard let downsampledCount = downsampledChannels.first?.count,
               downsampledCount >= templateLength else {
             return []
@@ -1541,7 +1547,8 @@ nonisolated enum ArtifactTemplateDetector {
                 beginTimeSeconds: time,
                 rawBeginTime: String(format: "%.6f", time),
                 sourceFile: String(format: "Template %.0f%%", configuration.matchThreshold * 100),
-                durationSeconds: Double(hit.durationSamples) / downsampledRate
+                durationSeconds: Double(hit.durationSamples) / downsampledRate,
+                timeAnchor: .center
             )
         }
     }
@@ -1642,10 +1649,16 @@ nonisolated enum ArtifactTemplateDetector {
             lastAccepted = sample
         }
 
-        if candidates.count < 12 {
-            let fallbackStride = max(templateLength / 4, 1)
-            candidates = Array(stride(from: 0, through: sampleCount - templateLength, by: fallbackStride))
-        }
+        // Always union the peak-based candidates with a dense grid scan —
+        // gating the grid scan on a low peak count let an unrelated
+        // high-amplitude signal (>=12 peaks) suppress evaluation of a
+        // lower-amplitude but highly correlated match entirely. The stride is
+        // templateLength/8 (not /4): correlation falls off quickly away from
+        // the true alignment, so a coarser grid can still step over a valid
+        // low-amplitude match between two grid points.
+        let fallbackStride = max(templateLength / 8, 1)
+        let gridCandidates = stride(from: 0, through: sampleCount - templateLength, by: fallbackStride)
+        candidates.append(contentsOf: gridCandidates)
 
         return Array(Set(candidates)).sorted()
     }
@@ -1688,6 +1701,31 @@ nonisolated enum ArtifactTemplateDetector {
         }
     }
 
+    /// The canonical template average, in window seconds rather than samples.
+    ///
+    /// Exposed so `ArtifactReplayPayload` can re-derive a stored artifact's
+    /// template against the signal it is about to clean, using **this**
+    /// averager. That matters: `ArtifactPreviewViews` has a second averager that
+    /// centres on `centerTimeSeconds` and applies a linear baseline detrend, and
+    /// the two do not agree. This one built `DefinedArtifact.average`, so this
+    /// one has to rebuild it, or regression's output moves for reasons that have
+    /// nothing to do with the data.
+    static func templateAverage(
+        signal: MFFSignalData,
+        events: [MFFEvent],
+        selectedChannelIndices: [Int],
+        windowSizeSeconds: Double
+    ) -> ArtifactTemplateAverage? {
+        guard signal.samplingRate > 0 else { return nil }
+        let windowSamples = max(Int((windowSizeSeconds * signal.samplingRate).rounded()), 3)
+        return average(
+            signal: signal,
+            events: events,
+            selectedChannelIndices: selectedChannelIndices,
+            windowSamples: windowSamples
+        )
+    }
+
     private static func average(
         signal: MFFSignalData,
         events: [MFFEvent],
@@ -1704,6 +1742,16 @@ nonisolated enum ArtifactTemplateDetector {
         var accepted = 0
 
         for event in events {
+            // `beginTimeSeconds`, deliberately — NOT `centerTimeSeconds`.
+            //
+            // This averager built every stored `DefinedArtifact.average`, so it
+            // has to keep building them the same way or replaying a saved
+            // artifact produces a different template than the one it was
+            // defined with. See `templateAverage`'s note on the second,
+            // non-agreeing averager in `ArtifactPreviewViews`. The window is
+            // centred on the marked sample whatever that sample means, which is
+            // a quirk of this function's history rather than a claim about
+            // event geometry.
             let center = Int((event.beginTimeSeconds * signal.samplingRate).rounded())
             let start = center - windowSamples / 2
             let end = start + windowSamples

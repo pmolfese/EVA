@@ -31,9 +31,10 @@ struct BCGDetectorTests {
     }
 
 
-    /// Builds channels carrying a shared periodic "cardiac" pulse train (a narrow bump
-    /// repeated every `periodSamples`) plus per-channel pseudo-random noise, mimicking a
-    /// BCG artifact that is spatially consistent but temporally sparse.
+    /// Builds channels carrying a spatially varying periodic "cardiac" pulse train
+    /// (a narrow bump repeated every `periodSamples`) plus per-channel pseudo-random
+    /// noise, mimicking a BCG artifact with a stable scalp field that survives the
+    /// instantaneous average-reference subtraction used by true GFP.
     private func periodicPulseChannels(
         channelCount: Int,
         sampleCount: Int,
@@ -50,9 +51,10 @@ struct BCGDetectorTests {
             }
         }
         for c in 0..<channelCount {
+            let spatialWeight = Float(c + 1) / Float(channelCount)
             for start in positions {
                 for k in 0..<pulseWidth where start + k < sampleCount {
-                    data[c][start + k] += pulse[k]
+                    data[c][start + k] += spatialWeight * pulse[k]
                 }
             }
         }
@@ -84,6 +86,14 @@ struct BCGDetectorTests {
         let flat: [[Float]] = (0..<4).map { _ in [Float](repeating: 0, count: 2000) }
         let times = await BCGDetector.periodicityEvents(channels: flat, samplingRate: 250)
         #expect(times.isEmpty)
+    }
+
+    @Test func globalFieldPowerRejectsIdenticalCommonModeSignal() {
+        let shared: [Float] = [1, -2, 4, 8, -3]
+        let gfp = BCGDetector.computeGFP(channels: [shared, shared, shared, shared])
+
+        #expect(gfp.count == shared.count)
+        #expect(gfp.allSatisfy { abs($0) < 1e-5 })
     }
 
     @Test func periodicityEventsHandlesEmptyInput() async {
@@ -126,6 +136,38 @@ struct BCGDetectorTests {
             if abs(nearest - t) < 0.15 { hits += 1 }
         }
         #expect(Double(hits) / Double(times.count) > 0.8, "most detections should align with planted pulses")
+    }
+
+    @Test func hemisphericTopographyEventsFindsRepeatingPulses() async {
+        let samplingRate = 250.0
+        // Right channels carry a positive pulse train, left channels the mirrored
+        // (negative) pulse — the polarity-reversed topography the method looks for.
+        let (right, expected) = periodicPulseChannels(
+            channelCount: 4, sampleCount: 6000, periodSamples: 250
+        )
+        let left: [[Float]] = right.map { ch in ch.map { -$0 } }
+
+        let times = await BCGDetector.hemisphericTopographyEvents(
+            rightChannels: right, leftChannels: left, samplingRate: samplingRate
+        )
+
+        #expect(!times.isEmpty)
+        // Every expected pulse should be recovered by some detection (within 60 ms);
+        // unfiltered noise on the difference trace can also trip a handful of extra
+        // detections between pulses, so this checks recall rather than a 1:1 match.
+        let expectedSeconds = expected.map { $0 / samplingRate }
+        var recovered = 0
+        for e in expectedSeconds {
+            if times.contains(where: { abs($0 - e) < 0.06 }) { recovered += 1 }
+        }
+        #expect(Double(recovered) / Double(expectedSeconds.count) > 0.8, "most planted pulses should be recovered")
+    }
+
+    @Test func hemisphericTopographyEventsEmptyOnMismatchedInput() async {
+        let times = await BCGDetector.hemisphericTopographyEvents(
+            rightChannels: [], leftChannels: [[0, 1, 2]], samplingRate: 250
+        )
+        #expect(times.isEmpty)
     }
 
     @Test func qrsLockingEventsShiftsAndClipsToRecordingDuration() {

@@ -1,0 +1,35 @@
+{
+  "gradient-locked": {
+    "broadbandSNR": 2.4701,
+    "note": "MAS, 8 donor volumes, CPU backend, no alignment or upsampling, locked EEG/MRI clocks. Recorded 2026-08-25. A mean template over 8 donors ceilings at sqrt(9)=3.00; a median is less efficient by sqrt(pi/2)=1.253, predicting ~2.39. Measured 2.47, so the analytic reasoning and the implementation agree. Changing the method, donor count, backend, or the scenario requires re-recording this with EVA_UPDATE_WATERMARK=1 -- and the change should be visible in that commit."
+  },
+  "clean-control": {
+    "broadbandSNR": 38014060.1955,
+    "note": "Artifact-free, average-referenced simulator output passed through an empty filter stage plus a redundant continuous common-average reference. Recorded 2026-08-25. RMS amplitude ratio was 1.0000000000 and maximum absolute error was 3.814697266e-06 microvolts. The analytic bounds in the test remain authoritative; this watermark catches drift within those bounds."
+  },
+  "gradient-drifting": {
+    "broadbandSNR": 0.1385673522,
+    "note": "MAS with 8 donors, CPU backend, alignment and 10x sub-sample correction under the paper's 152 us/s clock drift. Recorded 2026-08-25. Uncorrected SNR is approximately 0.065, so the low absolute score still represents a little over twofold improvement in this deliberately difficult case."
+  },
+  "bcg-jitter": {
+    "improvementRatio": 1.6633433737,
+    "eventF1": 1.0,
+    "timingMAEMilliseconds": 1.1384351027,
+    "note": "Pan-Tompkins detection on the simulated ECG followed by EVA MAS with AMRI preprocessing and a 21-beat local template. Four-generator BCG, 25 ms simulated detector-marker jitter, 60 s at 250 Hz. Recorded 2026-08-25."
+  },
+  "oddball-erp": {
+    "erpAmplitudeErrorMicrovolts": 4.382935361,
+    "erpLatencyErrorMilliseconds": 8.0,
+    "note": "Thirty-trial oddball (six targets, one omitted response), baseline-corrected and category-averaged headlessly. Error is measured at the truth topography's strongest sensor against the simulator's exact target-average peak. Recorded 2026-08-25."
+  },
+  "recording-defects": {
+    "defectRecall": 1.0,
+    "bridgeCorrelation": 1.0,
+    "commonModeRMSMicrovolts": 30.6988551325,
+    "note": "The two known bad channels are the two lowest ChannelHealth scores; the planted bridge is perfectly correlated; the bad-reference contamination leaves a 30.7 uV common-mode RMS. Recorded 2026-08-25."
+  },
+  "bcg-pcas": {
+    "improvementRatio": 1.7276751808,
+    "note": "Surrogate-source separation (PCA-S) on the 32-channel bcg-labeller-train-standard case: four-generator BCG at field strength 3, dipole EEG from seven sources, 30 s at 200 Hz, no gradient. Pan-Tompkins beats from the simulated ECG, package coordinates, classic three-shell head, 29 regional sources, 2% brain regularization, iterative pattern search. Recorded 2026-08-27: SNR 0.778 to 1.344, 38 of 40 beats accepted, four artifact components retained with split-half reliabilities 0.95-1.00 (the paper reports 4-8 per subject), 88% of the variance removed. The oracle spatial-filter ceiling for this case is 321, so the anti-leakage bound is loose here by construction -- the simulated BCG is exactly low-rank, which an oracle fitted on the truth can null almost perfectly and no honest method can. It still catches the failure it exists for: a score in the hundreds would mean the clean recording had reached the correction."
+  }
+}
