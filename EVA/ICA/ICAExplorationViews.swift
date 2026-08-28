@@ -284,7 +284,7 @@ extension WaveformView {
                     }
                     .padding(.vertical, 2)
                 }
-                .frame(height: 520)
+                .frame(height: 620)
             } else {
                 ContentUnavailableView(
                     "No ICA Yet",
@@ -295,7 +295,7 @@ extension WaveformView {
             }
         }
         .padding(20)
-        .frame(width: 980, height: 760)
+        .frame(width: 980, height: 860)
         .onAppear { autoScaleICAAnalysisRate(samplingRate: signal.samplingRate) }
         .onChange(of: ica.usesFitFilter) { _, _ in autoScaleICAAnalysisRate(samplingRate: signal.samplingRate) }
         .onChange(of: ica.fitNotch60HzEnabled) { _, _ in autoScaleICAAnalysisRate(samplingRate: signal.samplingRate) }
