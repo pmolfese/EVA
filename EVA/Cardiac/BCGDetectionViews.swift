@@ -462,7 +462,12 @@ extension WaveformView {
             }
             .padding(20)
         }
-        .frame(width: 720)
+        // Wide enough for the method picker's intrinsic width. A `.segmented`
+        // picker neither wraps nor compresses, so its nine labels set a hard
+        // floor on this sheet — at 720 the content overflowed and the sheet
+        // window clipped it symmetrically at both edges. Adding a tenth method
+        // means checking this number again.
+        .frame(width: 860)
         .disabled(bcg.isRunning || bcg.isRefining)
         .task(id: bcgDetectionPreviewRequestID(for: signal, selection: selection)) {
             await refreshBCGDetectionEstimate(for: signal, selection: selection)
