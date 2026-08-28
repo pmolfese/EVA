@@ -1646,7 +1646,13 @@ struct SingleTrialAnalysisSheet: View {
                     trials: input.trials,
                     reference: reference,
                     samplingRate: rawSignal.samplingRate
-                )
+                ),
+                trialWaveforms: Dictionary(
+                    uniqueKeysWithValues: doubles.enumerated().map { ($0.offset, $0.element) }
+                ),
+                averageWaveform: reference,
+                samplingRate: rawSignal.samplingRate,
+                stimulusOffsetSamples: input.trials.first?.stimulusOffsetSamples ?? 0
             )
         ]
 

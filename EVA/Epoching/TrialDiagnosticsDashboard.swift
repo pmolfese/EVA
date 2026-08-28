@@ -103,7 +103,14 @@ struct TrialDiagnosticsDashboard: View {
         VStack(alignment: .leading, spacing: 12) {
             if let category {
                 summary(for: category)
-                TrialShapeMagnitudeScatter(rows: category.rows, selectedTrial: $selectedTrial)
+                TrialShapeMagnitudeScatter(
+                    rows: category.rows,
+                    selectedTrial: $selectedTrial,
+                    trialWaveforms: category.trialWaveforms,
+                    averageWaveform: category.averageWaveform,
+                    samplingRate: category.samplingRate,
+                    stimulusOffsetSamples: category.stimulusOffsetSamples
+                )
                 TrialClassificationLegend()
             }
             Divider()

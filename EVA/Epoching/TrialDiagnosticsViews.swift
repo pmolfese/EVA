@@ -69,6 +69,13 @@ nonisolated struct TrialDiagnosticsCategory: Identifiable, Sendable {
     var convergence: [TrialDriftStatistics.ConvergencePoint] = []
     /// One entry per highlighted window.
     var windowSeries: [TrialWindowSeries] = []
+    /// trialIndex → that trial's samples, for the hover overlay. Empty when the
+    /// caller did not supply them; the overlay then simply does not appear.
+    var trialWaveforms: [Int: [Double]] = [:]
+    /// The category average the trials were scored against.
+    var averageWaveform: [Double] = []
+    var samplingRate: Double = 0
+    var stimulusOffsetSamples: Int = 0
 }
 
 enum TrialDiagnosticsAxis: String, CaseIterable, Identifiable {
@@ -184,6 +191,17 @@ struct TrialShapeMagnitudeScatter: View {
     /// Selecting a trial anywhere rings it here, so the rail and the table stay
     /// tied to the same object.
     var selectedTrial: Binding<Int?> = .constant(nil)
+    /// Waveforms for the hover overlay. Empty leaves the plot exactly as it was:
+    /// hovering still highlights nothing and clicking still selects.
+    var trialWaveforms: [Int: [Double]] = [:]
+    var averageWaveform: [Double] = []
+    var samplingRate: Double = 0
+    var stimulusOffsetSamples: Int = 0
+
+    /// The dot under the pointer, cleared when the pointer leaves.
+    @State private var hoveredTrial: Int?
+    /// A dot that was option+clicked, so the overlay stays up while you read it.
+    @State private var pinnedTrial: Int?
 
     private func symbolSize(for row: TrialDiagnosticsRow) -> CGFloat {
         row.matchesOwnPool ? 45 : 130
@@ -194,6 +212,14 @@ struct TrialShapeMagnitudeScatter: View {
         return min(lowest - 0.05, 0.5) ... 1.05
     }
 
+    /// What the overlay is showing: the pinned trial wins over the hovered one,
+    /// so moving the pointer away to read the card does not dismiss it.
+    private var overlayRow: TrialDiagnosticsRow? {
+        guard !trialWaveforms.isEmpty else { return nil }
+        guard let index = pinnedTrial ?? hoveredTrial else { return nil }
+        return rows.first { $0.trialIndex == index }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             ChartTitle(
@@ -201,7 +227,7 @@ struct TrialShapeMagnitudeScatter: View {
                 help: ChartHelpBadge(
                     title: "Shape vs magnitude",
                     what: "Each trial regressed on the average of the OTHER trials in its category. r is shape similarity, β is amplitude scaling.",
-                    read: "Top right (r high, β near 1) is an ordinary trial. r high with β near 0 means the response is absent — the participant was not engaged. Negative β runs opposite the average. Low r anywhere is noise or an artifact. Crosses matched an average from outside this trial's pool.",
+                    read: "Top right (r high, β near 1) is an ordinary trial. r high with β near 0 means the response is absent — the participant was not engaged. Negative β runs opposite the average. Low r anywhere is noise or an artifact. Crosses matched an average from outside this trial's pool. Hover a dot to see that trial drawn over the average; option+click keeps that card up, and a plain click selects the trial everywhere.",
                     caution: "Single-trial EEG is noisy: r far below 1 is normal, not evidence of a bad trial. Compare trials against each other rather than against an absolute cutoff."
                 )
             )
@@ -238,6 +264,15 @@ struct TrialShapeMagnitudeScatter: View {
                     .symbolSize(260)
                     .symbol(.circle.strokeBorder(lineWidth: 2))
                 }
+                if let row = overlayRow, row.trialIndex != selectedTrial.wrappedValue {
+                    PointMark(
+                        x: .value("Correlation", row.correlation),
+                        y: .value("Slope", row.slope)
+                    )
+                    .foregroundStyle(Color.secondary)
+                    .symbolSize(200)
+                    .symbol(.circle.strokeBorder(lineWidth: 1.5))
+                }
             }
             // Typical trials pile up just below r = 1, so a fixed −1…1 domain
             // spends nearly all its width on empty space and clips the cluster
@@ -246,7 +281,184 @@ struct TrialShapeMagnitudeScatter: View {
             .chartXScale(domain: xDomain)
             .chartXAxisLabel("r")
             .chartYAxisLabel("β")
+            .chartOverlay { proxy in
+                GeometryReader { geometry in
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                hoveredTrial = nearestTrial(to: location, proxy: proxy, geometry: geometry)
+                            case .ended:
+                                hoveredTrial = nil
+                            }
+                        }
+                        // Option+click pins the card, matching the modifier the
+                        // rest of the app uses for "show me more about this".
+                        // Attached ahead of the plain tap so the modified click
+                        // does not fall through to selection.
+                        .gesture(
+                            SpatialTapGesture()
+                                .modifiers(.option)
+                                .onEnded { event in
+                                    guard let index = nearestTrial(to: event.location, proxy: proxy, geometry: geometry) else {
+                                        pinnedTrial = nil
+                                        return
+                                    }
+                                    // Option+clicking the pinned dot lets go of it.
+                                    pinnedTrial = pinnedTrial == index ? nil : index
+                                }
+                        )
+                        .onTapGesture { location in
+                            guard let index = nearestTrial(to: location, proxy: proxy, geometry: geometry) else {
+                                selectedTrial.wrappedValue = nil
+                                return
+                            }
+                            selectedTrial.wrappedValue = selectedTrial.wrappedValue == index ? nil : index
+                        }
+                }
+            }
             .frame(height: 200)
+            .overlay(alignment: overlayAlignment) {
+                if let row = overlayRow {
+                    TrialOverlayCard(
+                        row: row,
+                        trial: trialWaveforms[row.trialIndex] ?? [],
+                        average: averageWaveform,
+                        samplingRate: samplingRate,
+                        stimulusOffsetSamples: stimulusOffsetSamples,
+                        isPinned: pinnedTrial == row.trialIndex
+                    )
+                    .padding(4)
+                    .allowsHitTesting(false)
+                }
+            }
+        }
+    }
+
+    /// Keep the card away from the dot it describes: trials cluster at high r,
+    /// so the card sits on whichever side of the plot that trial is not on.
+    private var overlayAlignment: Alignment {
+        guard let row = overlayRow else { return .topLeading }
+        return row.correlation > (xDomain.lowerBound + xDomain.upperBound) / 2 ? .topLeading : .topTrailing
+    }
+
+    /// Nearest dot in screen space, within a forgiving radius — the cluster near
+    /// r = 1 is dense enough that a value-space search would pick the wrong one.
+    private func nearestTrial(
+        to location: CGPoint,
+        proxy: ChartProxy,
+        geometry: GeometryProxy
+    ) -> Int? {
+        guard let anchor = proxy.plotFrame else { return nil }
+        let plot = geometry[anchor]
+        var best: (index: Int, distance: CGFloat)?
+        for row in rows {
+            guard let x = proxy.position(forX: row.correlation),
+                  let y = proxy.position(forY: row.slope) else { continue }
+            let point = CGPoint(x: plot.minX + x, y: plot.minY + y)
+            let distance = hypot(point.x - location.x, point.y - location.y)
+            if best == nil || distance < best!.distance {
+                best = (row.trialIndex, distance)
+            }
+        }
+        guard let best, best.distance <= 14 else { return nil }
+        return best.index
+    }
+}
+
+// MARK: - Trial vs average overlay
+
+/// The card the scatter raises: one trial drawn over its category average, with
+/// the scores that put the dot where it is. Answers the question the scatter
+/// cannot — *what does this trial actually look like* — without leaving the rail.
+struct TrialOverlayCard: View {
+    let row: TrialDiagnosticsRow
+    let trial: [Double]
+    let average: [Double]
+    let samplingRate: Double
+    let stimulusOffsetSamples: Int
+    var isPinned: Bool = false
+
+    private struct Sample: Identifiable {
+        var id: Int { index * 2 + (isTrial ? 1 : 0) }
+        var index: Int
+        var ms: Double
+        var value: Double
+        var isTrial: Bool
+    }
+
+    private func ms(at index: Int) -> Double {
+        guard samplingRate > 0 else { return Double(index) }
+        return Double(index - stimulusOffsetSamples) / samplingRate * 1000
+    }
+
+    private var samples: [Sample] {
+        var points: [Sample] = []
+        points.reserveCapacity(trial.count + average.count)
+        for (index, value) in average.enumerated() {
+            points.append(Sample(index: index, ms: ms(at: index), value: value, isTrial: false))
+        }
+        for (index, value) in trial.enumerated() {
+            points.append(Sample(index: index, ms: ms(at: index), value: value, isTrial: true))
+        }
+        return points
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Text("Trial \(row.trialIndex + 1)")
+                    .font(.caption.weight(.semibold))
+                Circle().fill(row.classification.color).frame(width: 7, height: 7)
+                Text(row.classification.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Chart(samples) { sample in
+                LineMark(
+                    x: .value("ms", sample.ms),
+                    y: .value("µV", sample.value),
+                    series: .value("Series", sample.isTrial ? "Trial" : "Average")
+                )
+                .foregroundStyle(sample.isTrial ? row.classification.color : Color.secondary)
+                .lineStyle(StrokeStyle(lineWidth: sample.isTrial ? 1.4 : 1.0))
+            }
+            .chartXAxis {
+                AxisMarks { value in
+                    AxisGridLine()
+                    AxisValueLabel { if let ms = value.as(Double.self) { Text("\(Int(ms))") } }
+                        .font(.caption2)
+                }
+            }
+            .chartYAxis {
+                AxisMarks { AxisGridLine(); AxisValueLabel().font(.caption2) }
+            }
+            .frame(width: 210, height: 92)
+
+            HStack(spacing: 8) {
+                metric("r", row.correlation)
+                metric("β", row.slope)
+                metric("RMS", row.normalizedResidualRMS)
+            }
+        }
+        .padding(8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25), lineWidth: 1))
+        .shadow(radius: 4)
+    }
+
+    private func metric(_ name: String, _ value: Double) -> some View {
+        HStack(spacing: 2) {
+            Text(name).font(.caption2).foregroundStyle(.secondary)
+            Text(value.formatted(.number.precision(.fractionLength(2))))
+                .font(.caption2.monospacedDigit())
         }
     }
 }
