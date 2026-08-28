@@ -45,6 +45,12 @@ final class PendingWindowForks {
         var historySeed: RecordingHistoryModel.ForkSeed
         var liveSnapshot: PipelineSnapshot
         var channels: ChannelModel
+        /// The source window's comparison group, so the fork joins the same
+        /// experiment rather than looking like an unrelated window that happens
+        /// to have the file open (ROADMAP RW-1 item 10).
+        var comparisonGroupID: UUID
+        /// Short ID of the node the fork was taken at.
+        var forkedFromNode: String
     }
 
     private var queue: [Payload] = []

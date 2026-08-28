@@ -1366,6 +1366,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
     case panTompkinsProxy = "panTompkinsProxy"
     case qrsLocking     = "qrsLocking"
     case cwlRegression  = "cwlRegression"
+    case surrogatePCAS  = "surrogatePCAS"
 
     nonisolated var id: String { rawValue }
 
@@ -1374,7 +1375,17 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
     /// shared event-code/threshold/window controls and swaps the action
     /// button to "Correct" for these.
     nonisolated var isDirectCorrection: Bool {
-        self == .cwlRegression
+        self == .cwlRegression || self == .surrogatePCAS
+    }
+
+    /// True for a correction that consumes beats it did not detect.
+    ///
+    /// PCA-S is a *correction* fed by whatever already found the beats — BCG
+    /// detection here, or ECG/QRS detection — so the sheet keeps the detector
+    /// controls out of its way but must not let it run with nothing to lock to.
+    /// CWL, the other direct correction, needs no beats at all.
+    nonisolated var requiresDetectedBeats: Bool {
+        self == .surrogatePCAS
     }
 
     nonisolated var tabLabel: String {
@@ -1387,6 +1398,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
         case .panTompkinsProxy: return "Pan-Tompkins"
         case .qrsLocking:       return "QRS Lock"
         case .cwlRegression:    return "CWL"
+        case .surrogatePCAS:    return "PCA-S"
         }
     }
 
@@ -1406,6 +1418,8 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
             return "Run the Pan-Tompkins QRS backbone (bandpass → derivative → squaring → moving-window integration → adaptive thresholding) directly on the BCG-channel group. The high-amplitude proxy deflection has a sharp transient the QRS detector locks onto. Select a BCG channel set below."
         case .qrsLocking:
             return "Offset each detected R-wave by a fixed mechanical delay. Requires ECG / QRS detection to be active. The lag from QRS to BCG onset is typically 200–400 ms — adjust to align peaks."
+        case .surrogatePCAS:
+            return "Surrogate-source separation (PCA-S). Models the recording as a fixed brain model plus a small BCG topography dictionary found from the detected beats, fits both at once, and reconstructs only the brain part. The brain block is regularized and the artifact block is not — that asymmetry is what separates them. Unlike template subtraction it removes only what the brain model cannot explain, so evoked responses are distorted less. Needs 3D electrode coordinates and detected beats."
         case .cwlRegression:
             return "Carbon-wire-loop (CWL) correction: no detection step. Each EEG channel is regressed against the selected CWL reference channels at a small range of time lags and the fit is subtracted, in a sliding window that adapts to slowly drifting coupling. Requires CWL leads imported as PNS channels."
         }
@@ -1424,6 +1438,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
         case .panTompkinsProxy: return "Pan & Tompkins (1985)"
         case .qrsLocking:       return "Allen et al. (1998)"
         case .cwlRegression:    return "Masterton et al. (2007)"
+        case .surrogatePCAS:    return "Rusiniak et al. (2022); Berg & Scherg (1994)"
         }
     }
 
@@ -1448,6 +1463,8 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
             return "Pan, J., & Tompkins, W. J. (1985). A real-time QRS detection algorithm. IEEE Transactions on Biomedical Engineering, BME-32(3), 230–236. https://doi.org/10.1109/TBME.1985.325532"
         case .qrsLocking:
             return "Allen, P. J., Polizzi, G., Krakow, K., Fish, D. R., & Lemieux, L. (1998). Identification of EEG events in the MR scanner: The problem of pulse artifact and a method for its subtraction. NeuroImage, 8(3), 229–239. https://doi.org/10.1006/nimg.1998.0361"
+        case .surrogatePCAS:
+            return "Rusiniak, M., Bornfleth, H., Cho, J.-H., Wolak, T., Ille, N., Berg, P., & Scherg, M. (2022). EEG-fMRI: Ballistocardiogram artifact reduction by surrogate method for improved source localization. Frontiers in Neuroscience, 16, 842420. https://doi.org/10.3389/fnins.2022.842420\n\nBerg, P., & Scherg, M. (1994). A multiple source approach to the correction of eye artifacts. Electroencephalography and Clinical Neurophysiology, 90(3), 229–241. https://doi.org/10.1016/0013-4694(94)90094-9"
         case .cwlRegression:
             return "Masterton, R. A. J., Abbott, D. F., Fleming, S. W., & Jackson, G. D. (2007). Measurement and reduction of motion and ballistocardiogram artefacts from simultaneous EEG and fMRI recordings. NeuroImage, 37(1), 202–211. https://doi.org/10.1016/j.neuroimage.2007.02.060"
         }

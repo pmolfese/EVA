@@ -37,9 +37,23 @@
 //  in the signature — if a new stage needs invalidating, the compiler names every
 //  call site that must supply it.
 //
-//  These are the *mechanical* cascades. `REWIND.md` work item 3 replaces them
-//  with a derived one ("everything after node N is invalid"); until then this is
-//  the single place to edit when a stage is added, instead of two that drift.
+//  ## This is the final design, not a placeholder
+//
+//  `REWIND.md` work item 3 proposed deriving invalidation from the history tree
+//  ("everything after node N is invalid") and retiring these cascades. That
+//  proposal is **closed** (ROADMAP RW-1 item 14, 2026-08-27): the centralized
+//  cascade already serves the interactive, headless, and replay paths from one
+//  definition, and a second invalidation authority would reintroduce exactly the
+//  divergence this file exists to remove. Reopen it only with a concrete bug
+//  that history-derived invalidation would have prevented.
+//
+//  So: this is the single place to edit when a stage is added. A new stage that
+//  replaces the base signal calls `downstreamOfBaseSignalChange` — headlessly
+//  through `ProcessingCore`, interactively through
+//  `WaveformView.invalidateDownstreamOfBaseSignalChange` — and does not
+//  assemble its own recipe out of the primitives below. Four sites did assemble
+//  their own, and all four drifted the same way: they left the variance ledger
+//  holding accounts for the stages they had just invalidated.
 //
 
 import SwiftUI

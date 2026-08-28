@@ -13,15 +13,17 @@ priority. Every execution-relevant decision, gap, proposal, and open question in
 this document is represented there; dated proposals below are not independent
 TODO lists.
 
-**Where this stands after 2026-08-25.** Undo and redo work: the History tab in
-the status popover shows the processing lineage, clicking a cached node restores
-that point instantly, evicted supported nodes can be re-derived, and
-back/forward transport is live. Fork to New Window is also built. Items 1, 4,
-and 9 are built; 5 and 8 have had a substantial first pass. What is *not* built
-is A/B compare, session persistence, the complete interaction menu, or the
-fully hardened re-derivation contract. In particular, processed-file prefix
-navigation and rapid competing rebuilds need the safeguards in ROADMAP RW-1
-items 1–2.
+**Where this stands after 2026-08-27 — RW-1 is complete.** Undo and redo work:
+the History tab shows the processing lineage, clicking a cached node restores
+that point instantly, evicted supported nodes can be re-derived under an exact,
+latest-only, source-valid contract, and back/forward transport is live on ⌘Z /
+⇧⌘Z. Fork to New Window is built, and so is A/B compare between related forked
+windows. Session persistence was **decided against** rather than left pending:
+export carries the current lineage in `eva.xml`, snapshots stay in memory, and
+there is no on-disk cache or history sidecar (RW-1 item 11). The interaction
+menu is settled at three row actions, with delete-future, reopen-stage, and
+per-node export dropped rather than deferred (item 9). The full record of all
+sixteen items is in ROADMAP Part III, C12.
 
 **Behavior correction 2026-08-25.** A normal recording window no longer keeps
 every replaced processing choice as a persistent sibling branch. Removing a
@@ -61,7 +63,7 @@ parity work landed several things this design assumed it would have to create:
 | UI state reachable without a live view | Four `@Observable` models on `RecordingStore` (B4) |
 | **Item 9, progress consolidation** | **Done** — `OperationProgressCenter` owns all in-flight progress; `StatusLogSnapshot` is the aggregation boundary the Queue tab needs |
 | Async work that can be superseded safely | `LatestOnlyRunner` — `.completed` / `.superseded` / `.cancelled`, mutation-tested |
-| One invalidation cascade instead of hand-written per-stage ones | `PipelineInvalidation` — the precursor to item 3 |
+| One invalidation cascade instead of hand-written per-stage ones | `PipelineInvalidation` — the shipped answer to item 3, not a precursor (closed 2026-08-27) |
 | Re-applying a step headlessly and getting the same answer | **Verified byte-identical** (see below) |
 
 **Item 9 (progress consolidation) is complete.** The shipped answer to item 3 is
@@ -443,9 +445,11 @@ Consequences worth designing around:
 
 ## Memory: original cache-policy design
 
-Snapshots and a byte budget shipped; manual pinning, measured cost, disk spill,
-and the preview tier did not. Treat the policy below as rationale for ROADMAP
-RW-1 items 7, 11, and 12, not as current behavior.
+Snapshots, a byte budget, manual pinning, and measured cost shipped (RW-1 item
+7). The **disk spill and preview tiers did not, and are now closed** rather than
+pending: RW-1 item 11 decided that snapshots stay in memory with re-derivation
+as the exact fallback. Treat the policy below as rationale, not as current
+behavior or as a plan.
 
 A cached signal is large. 128 ch × 1000 Hz × 20 min × 4 bytes ≈ **614 MB**.
 256 ch × 60 min ≈ **3.7 GB**. Caching every node is not an option.
@@ -658,20 +662,34 @@ different action deliberately replaces that future.
 **Keyboard** — proposed: `⌘Z` / `⇧⌘Z` map to step back and step forward, so the
 feature is reachable without the popover open and behaves like a Mac document.
 
-### A/B compare
+### A/B compare — **built 2026-08-27** (ROADMAP RW-1 item 10)
 
 The payoff of the whole design, and worth building explicitly rather than leaving
-users to align two windows by eye. Selecting two related forked states offers:
+users to align two windows by eye. "What did ICA actually buy me?" is a
+two-window question: fork before the choice, apply the alternative
+independently, then compare the windows.
 
-- overlay both signals in `WaveformView` in contrasting colors
-- difference trace (A − B)
-- side-by-side SNR / channel-health metrics for the two nodes
-- for epoched nodes, butterfly plots side by side
+What shipped, and where it departs from this original sketch:
 
-"What did ICA actually buy me?" becomes a two-window question: fork before the
-choice, apply the alternative independently, then compare the windows. This also
-feeds `REPORTS.md`: a comparison report between two explicitly forked states of
-one recording is a genuinely novel artifact to offer.
+- **Windows, not sibling nodes.** A window's history is linear — a divergent
+  action deletes the abandoned future — so two siblings only coexist as an
+  unreplaced redo branch, which is not a state anyone can deliberately arrange.
+  Forked windows share a comparison group (`WindowComparisonRegistry`), and that
+  group is the relation A/B compare is built on. The same file opened twice
+  independently is offered too, explicitly labelled as having no shared history.
+- **A compare sheet, not an in-place overlay.** `CompareWindowsSheet` shows the
+  relation, the alignment that was possible, per-channel RMS/max difference,
+  correlation and relative change, and overlay plus A − B traces for the
+  selected channel, with a side-by-side channel/segment-health column.
+  Overlaying inside `WaveformView` itself was not built: viewport, montage and
+  display scale are independent per window, and syncing them is a much larger
+  feature than the measurement.
+- **Alignment is explicit** (`SignalComparison`): channels match by name when
+  both sides have names, samples truncate to the shorter side, a sampling-rate
+  mismatch is refused rather than resampled, and everything left out is named.
+
+Butterfly-plot pairing for epoched nodes was not built, and a comparison
+*report* remains `REPORTS.md`/F-1 work.
 
 ---
 
@@ -779,11 +797,12 @@ TODO ordering is ROADMAP RW-1.
    **Current disposition.** Evicted-node re-derivation is built for supported
    steps. It still needs latest-only/source-valid commits, a safe rule for
    processed-file prefixes, honest supported-step/failure UI, and channel-state
-   carry-through. The memory preference, measured `computeCost`, truthful
-   pin/eviction behavior, and optional preview/disk tiers remain open (ROADMAP
-   RW-1 items 1, 2, 3, 7, 11, and 12).
-3. **Generic invalidation — original proposal, superseded unless evidence
-   reopens it.** The proposal was to derive "everything after node N is invalid"
+   carry-through. All of it, plus the memory budget, measured `computeCost`, and
+   truthful pin/eviction behaviour, closed under ROADMAP RW-1 items 1, 2, 3, 7,
+   11, and 12; the optional preview/disk tiers were closed as *not being built*
+   (item 11).
+3. **Generic invalidation — original proposal, CLOSED 2026-08-27 (ROADMAP RW-1
+   item 14).** The proposal was to derive "everything after node N is invalid"
    from the history tree and collapse stage-specific clears into navigation.
    The shipped architecture instead defines the cascade **once**, in
    `PipelineInvalidation` (`epochsAndDerived`, `interpolations`,
@@ -791,9 +810,19 @@ TODO ordering is ROADMAP RW-1.
    `downstreamOfFilterChange`, `downstreamOfWaveletChange`), used by both the
    interactive and headless paths. This centralized shared cascade is the
    current design; do not create a second invalidation authority without a
-   concrete correctness case (ROADMAP RW-1 item 14). Note the
-   deliberate asymmetry encoded there — filter clears applied artifact cleaning,
-   wavelet does not, because cleaning sits between them in the chain.
+   concrete correctness case. Note the deliberate asymmetry encoded there —
+   filter clears applied artifact cleaning, wavelet does not, because cleaning
+   sits between them in the chain.
+
+   Closing it was not only a labelling change. Four call sites — gradient apply
+   and clear, CWL apply and disable — re-assembled the base-signal cascade from
+   the primitives instead of calling `downstreamOfBaseSignalChange`, and all
+   four had drifted identically: they cleared the caches and left the variance
+   ledger holding accounts for the stages they had just invalidated, while the
+   headless path cleared them. They now go through one interactive entry point
+   (`WaveformView.invalidateDownstreamOfBaseSignalChange`), and
+   `InvalidationAuthorityTests` audits the sources so a second hand-written
+   cascade cannot reappear unnoticed.
 4. **Payload persistence** — **ICA and channel decisions done 2026-08-13.**
    - `ICAReplayPayload` / `eva_ica.json` — see the ICA payload section above.
    - `ChannelDecisionSteps` (`EVA/Pipeline/ChannelDecisionSteps.swift`) closes
@@ -1477,8 +1506,9 @@ a window, an unchecked-by-default tick in a batch.
    Window preserves the chosen state and gives each alternative an independent
    future. The 2026-08-25 linear-history correction makes this the sole normal
    way to preserve divergent processing choices.
-2. **A/B compare** remains open as ROADMAP RW-1 item 10. Its inputs are related
-   forked windows, not sibling nodes accumulated by ordinary editing.
+2. ~~**A/B compare.**~~ **Built 2026-08-27** (ROADMAP RW-1 item 10). Its inputs
+   are related forked windows, not sibling nodes accumulated by ordinary
+   editing — see the A/B compare section above for what shipped.
 3. ~~**Basic re-derivation for evicted snapshots.**~~ **Built.** Its correctness
    hardening is now ROADMAP RW-1 items 1–3 and 7: safe prefix sources,
    latest-only commits, channel carry-through, and truthful cache policy/UI.
@@ -1707,25 +1737,31 @@ from becoming the native-format commitment the section above steers away
 from — it is allowed to be wrong, stale, or missing without ever being the
 thing anyone's data actually lives in.
 
-### Open questions
+### Open questions — **answered 2026-08-27** (ROADMAP RW-1 item 11)
 
-These are retained as cache-design rationale and are consolidated in ROADMAP
-RW-1 items 11–12.
+The decisions, and what is left of the design below them:
 
-- **Eviction policy for the on-disk store**, independent of the in-RAM
-  budget — presumably larger and slower to fill, but not unbounded.
-- **Invalidation**: a normalized import copy is only correct as long as the
-  original file has not changed on disk since. Needs a cheap staleness check
-  (mtime + size, most likely). Expanded SHA-256 manifests or whole-recording
-  hashing are explicitly **not** a project priority or prerequisite.
-- **Does this replace the `eva_history.json` sidecar plan, or sit alongside
-  it?** Leaning toward: the cache holds the *snapshots* (large, disposable,
-  never meant to leave the machine); a slim `eva_history.json` sidecar still
-  travels *with the package* for the tree structure itself (small, meant to
-  survive a copy to another machine — REWIND's original "should nodes
-  survive export?" open question). The cache is what makes the sidecar's
-  tree navigable without a full re-derive; the sidecar is what makes the
-  tree portable at all.
+- **No `eva_history.json`.** Export carries the current lineage in `eva.xml`
+  and nothing else. A second portable history file would be a second source of
+  truth that can disagree with the script, and the only thing it adds is
+  abandoned redo branches — session state, not provenance. Node labels and pins
+  stay machine-local for the same reason. The earlier "leaning toward a slim
+  sidecar alongside the cache" is superseded.
+- **No on-disk snapshot cache exists, and none is planned.** Snapshots live in
+  memory under the byte budget; re-derivation is the exact fallback. The
+  eviction policy and normalized-import questions below therefore stay
+  unbuilt design rather than pending work.
+- **If a disk tier is ever justified by measurement**, its staleness rule is
+  already fixed: cheap source metadata (mtime + size), plus a build and
+  compute-backend stamp so a GPU- or Accelerate-derived snapshot is not trusted
+  on an incompatible machine, and deleting the cache may cost only speed.
+  Expanded SHA-256 manifests or whole-recording hashing remain explicitly **not**
+  a project priority or prerequisite.
+- **External inputs got the rule immediately**, because one already mattered:
+  motion parameters live outside the package, and the gradient step recorded no
+  identity for the file it used. `MotionSourceFingerprint` (name, size,
+  modification time, rows after trim) is now written into the step, compared on
+  restore, and reported in the Motion panel and the export audit log.
 
 ## EVA as a multi-window app
 
@@ -2055,9 +2091,10 @@ step 6 used to be — every remaining item has a known shape.
   natural receiving window to reuse and the menu command does not. See
   "What was actually built" above for why those needed to differ rather
   than share one rule.
-- **Cross-window comparison beyond fork** — the current direction is comparison
-  between related forked windows. A second single-window sibling-node A/B mode
-  is not assumed; ROADMAP RW-1 item 10 owns the product and identity details.
+- ~~**Cross-window comparison beyond fork**~~ — **answered 2026-08-27:**
+  comparison is between related forked windows, and the same file opened twice
+  independently is offered as a labelled, lesser relation rather than warned
+  about or refused. No single-window sibling-node A/B mode was built.
 
 ---
 
@@ -2073,10 +2110,11 @@ RW-1 and the completed milestones.
 - ~~**What happens when the user edits an ancestor's parameters?**~~ **Answered
   2026-08-25:** it replaces that window's redo descendants. Fork first to retain
   the old version.
-- **Should nodes survive export?** A package written from node N — does it carry
-  the whole tree or just its own lineage? Leaning toward whole tree, since it is
-  small (steps + payloads, no signals) and makes a package self-documenting.
-  **Current home:** ROADMAP RW-1 item 11.
+- ~~**Should nodes survive export?**~~ **Answered 2026-08-27 (ROADMAP RW-1 item
+  11): its own lineage, in `eva.xml`, and nothing more.** The earlier lean
+  toward carrying the whole tree was dropped: the extra content is abandoned
+  redo branches, which are session state rather than provenance, and a second
+  history file can disagree with the script that actually produced the bytes.
 - ~~**Interaction with the Priority 1 Observation refactor.**~~ **Resolved:**
   that refactor is complete (ROADMAP C1). Remaining history memory/cache policy
   is ROADMAP RW-1 item 7.

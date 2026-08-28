@@ -57,6 +57,7 @@ nav:
   - Command-Line Tools:
       - Tools Overview: tools/index.md
       - EVA Simulate: tools/eva-simulate.md
+      - Method Comparison: tools/method-comparison.md
       - EVA BIDS: tools/eva-bids.md
       - EVA Helper: tools/eva-helper.md
       - MFF Timing Tool: tools/mff-timing-tool.md

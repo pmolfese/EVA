@@ -22,6 +22,8 @@ swiftc -O \
   "$ROOT/EVA/Core/LinearAlgebra.swift" \
   "$ROOT/EVA/Core/Downsampler.swift" \
   "$ROOT/EVA/Epoching/EpochModel.swift" \
+  "$ROOT/EVA/Channels/SensorLayout.swift" \
+  "$ROOT/EVA/IO/EGISensorXMLParser.swift" \
   "$ROOT/EVA/IO/MFFReader.swift" \
   "$ROOT/EVA/IO/MFFFileType.swift" \
   "$ROOT/EVA/Pipeline/EVAProcessingScript.swift" \

@@ -128,7 +128,9 @@ struct HistorySurfaceTests {
             securityScopedURLs: [header, markers, data, folder],
             historySeed: RecordingHistoryModel().forkSeed(),
             liveSnapshot: PipelineSnapshot(),
-            channels: ChannelModel()
+            channels: ChannelModel(),
+            comparisonGroupID: UUID(),
+            forkedFromNode: "abc12345"
         )
         PendingWindowForks.shared.push(payload)
 

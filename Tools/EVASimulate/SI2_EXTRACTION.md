@@ -103,7 +103,7 @@ Documentation now reflects implemented ownership and verification:
 - `README.md` describes the shared engine and report diagnostics.
 - `SI0_CONTRACTS.md` names the implemented API, expanded explicit failures,
   stable solve, and SI-2 closeout results.
-- `EVAsimulate_ROADMAP.md` records SI-2 as complete and defers sequencing to the
+- the merged `ROADMAP.md` records SI-2 as complete and defers sequencing to the
   authoritative cross-project ROADMAP.
 - `ROADMAP.md` marks SI-2 complete and leaves RW-1 as the next dependency before
   SI-3 app integration.

@@ -196,8 +196,15 @@ extension WaveformView {
                     step.parameters, prefix: "blink", base: artifactVM.blinkThresholdConfig)
                 artifactVM.movementThresholdConfig = .fromFlatParameters(
                     step.parameters, prefix: "movement", base: artifactVM.movementThresholdConfig)
-            // BCG has no `apply(parameters:)` — its step is provenance-only and
-            // its settings are subject-specific, so there is nothing to restore.
+            // PCA-S settings *are* part of the node's identity — the same
+            // recording corrected at 2% and at 5% regularization are different
+            // nodes — so navigating to one restores the values it was built
+            // from, the same way threshold detection does above (ROADMAP SI-3).
+            case .bcgCorrection:
+                bcg.surrogateSettings = BCGSurrogateSettings(parameters: step.parameters)
+                bcg.method = .surrogatePCAS
+            // The other BCG step is provenance-only: its settings are
+            // subject-specific, so there is nothing to restore.
             default: break
             }
         }
@@ -465,6 +472,7 @@ extension WaveformView {
             store: throwStore,
             filter: throwFilter,
             gradient: throwGradient,
+            bcg: throwBCG,
             ica: throwICA,
             artifactVM: throwArtifact,
             epoching: throwEpoching,
@@ -511,7 +519,9 @@ extension WaveformView {
             securityScopedURLs: recording.securityScopedURLs,
             historySeed: historySeed,
             liveSnapshot: liveSnapshot,
-            channels: recordingStore.channels.copy()
+            channels: recordingStore.channels.copy(),
+            comparisonGroupID: comparisonGroupID,
+            forkedFromNode: recordingStore.processingHistory.history.currentID.short
         ))
         openWindow(id: "main")
     }
@@ -561,6 +571,10 @@ extension WaveformView {
             hasArtifactPayload: ArtifactReplayPayload.read(fromPackage: recording.packageURL) != nil,
             hasElectrodeGeometry: !(electrodeGeometry?.positions.isEmpty ?? true)
         )
+        // Which beats this session has found. A recorded `bcgCorrection` is
+        // re-fittable exactly when the beats it names exist here — the settings
+        // travel, the beats do not (ROADMAP SI-3).
+        availability.beatEventCodes = Set(artifactVM.events.map(\.code))
         // A recorded reviewed exclusion is "resolved from this file's own
         // record" exactly when this file's segments still answer to its keys —
         // which is a question about the segments in hand, not about a sidecar.

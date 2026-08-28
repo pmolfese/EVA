@@ -59,6 +59,7 @@ enum ActiveRecordingSheet: String, Identifiable, CaseIterable, Sendable {
     case channelGoodnessSettings
     case segmentHealthDetails
     case motionConfig
+    case windowComparison
     case channelDecisionReplay
 
     var id: String { rawValue }
@@ -91,6 +92,7 @@ extension WaveformView {
         if showsChannelGoodnessSettings { return .channelGoodnessSettings }
         if segHealth.showsDetails { return .segmentHealthDetails }
         if gradient.showsMotionConfig { return .motionConfig }
+        if showsWindowComparison { return .windowComparison }
         // Last, so it cannot pre-empt a stage sheet the replay loop itself
         // opened; it is only ever set while the loop is parked at its gate.
         if channelDecisionReplayRequest != nil { return .channelDecisionReplay }
@@ -134,6 +136,7 @@ extension WaveformView {
         case .channelGoodnessSettings: showsChannelGoodnessSettings = false
         case .segmentHealthDetails: segHealth.showsDetails = false
         case .motionConfig: gradient.showsMotionConfig = false
+        case .windowComparison: showsWindowComparison = false
         // Dismissing by Esc or click-away is a skip: the loop is waiting on the
         // gate, and leaving it waiting would park the whole replay.
         case .channelDecisionReplay: resolveChannelDecisionReplay(.skip)
@@ -256,6 +259,11 @@ extension WaveformView {
         case .segmentHealthDetails:
             segmentHealthDetailsSheet()
 
+        case .windowComparison:
+            CompareWindowsSheet(sourceID: recording.id) {
+                showsWindowComparison = false
+            }
+
         case .motionConfig:
             MotionConfigView(
                 parameters: $gradient.motionParameters,
@@ -266,6 +274,7 @@ extension WaveformView {
                 skipStart: $gradient.skipStart,
                 skipEnd: $gradient.skipEnd,
                 trSeconds: $gradient.trSeconds,
+                sourceMismatch: $gradient.motionSourceMismatch,
                 trMarkerCode: gradient.trMarkerCode,
                 trMarkerSamples: recording.signal.map {
                     trMarkerSamples(in: $0, code: gradient.trMarkerCode)

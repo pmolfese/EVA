@@ -596,6 +596,176 @@ struct PipelineRegressionTests {
         #expect(detection.meanAbsoluteErrorMilliseconds <= recordedTiming + 5)
     }
 
+    /// PCA-S against a generated BCG recording (ROADMAP SI-3).
+    ///
+    /// ## The anti-leakage ceiling
+    ///
+    /// The gradient case has an analytic ceiling (`sqrt(N+1)` for an N-donor
+    /// template). PCA-S needs a different one, because what limits it is not
+    /// averaging noise but that it is **one linear spatial filter**: a single
+    /// channels × channels matrix applied to the whole recording.
+    ///
+    /// So the tightest honest bound is the best such matrix that exists — the
+    /// one fitted *with* the clean recording in hand, by least squares:
+    ///
+    ///     W* = argmin_W ‖clean − W·noisy‖   (an oracle no method may consult)
+    ///
+    /// Any spatial filter, however it was derived, scores at or below the oracle
+    /// filter's SNR. A PCA-S score above it means either the truth leaked into
+    /// the correction or something non-spatial crept in — and both should fail
+    /// this test rather than be celebrated as an improvement.
+    ///
+    /// An earlier version bounded by "what this operator does to the clean
+    /// signal", which is exact only when the artifact lies entirely inside the
+    /// removed subspace. It does not here, the two error terms partly cancel,
+    /// and the bound came out below the achieved score — a false ceiling is
+    /// worse than none.
+    @Test func surrogatePCASCorrectionHoldsItsQuality() async throws {
+        let caseName = "bcg-pcas"
+        let urls = Self.corpusURLs(Self.surrogateCorpusCase)
+        guard FileManager.default.fileExists(atPath: urls.noisy.path),
+              FileManager.default.fileExists(atPath: urls.clean.path) else {
+            print("PipelineRegressionTests: no \(Self.surrogateCorpusCase) corpus — skipping \(caseName).")
+            return
+        }
+
+        let reader = MFFReader()
+        let noisy = try reader.loadSignal(from: urls.noisy)
+        let clean = try reader.loadSignal(from: urls.clean)
+        let pns = try #require(try reader.loadPNSSignal(from: urls.noisy))
+        // Coordinates come from the package, as they must in the app: PCA-S has
+        // no standard-montage fallback, so a corpus without them is a skip
+        // rather than a pass.
+        let geometry = try #require(ElectrodeGeometry.load(from: urls.noisy))
+
+        let names = pns.channelNames ?? []
+        let ecgIndex = try #require(names.firstIndex(of: "ECG"))
+        let detected = RWaveDetector.detect(
+            sources: [ECGDetectionSource(
+                id: "sim-ecg", label: "Simulated ECG", channelLabels: ["ECG"],
+                channels: [pns.data[ecgIndex]], samplingRate: pns.samplingRate,
+                duration: pns.duration
+            )],
+            configuration: ECGDetectionConfiguration(
+                algorithm: .panTompkins, thresholdSD: 2.5,
+                minimumRRSeconds: 0.4, polarity: .positive
+            )
+        )
+        let beats = detected.map(\.beginTimeSeconds)
+        #expect(beats.count > 20, "detection found \(beats.count) beats — not enough to fit on")
+
+        let output = try await BCGSurrogateCorrection.correct(
+            data: noisy.data,
+            samplingRate: noisy.samplingRate,
+            correctedRows: Array(noisy.data.indices),
+            geometry: geometry,
+            channelNames: noisy.channelNames,
+            beatSeconds: beats
+        )
+
+        let baseline = Self.broadbandSNR(clean: clean.data, corrected: noisy.data, padSeconds: 0)
+        let achieved = Self.broadbandSNR(clean: clean.data, corrected: output.data, padSeconds: 0)
+        let improvement = baseline > 0 ? achieved / baseline : 0
+        let ceiling = Self.oracleSpatialFilterSNR(clean: clean.data, noisy: noisy.data)
+
+        if ProcessInfo.processInfo.environment["EVA_UPDATE_WATERMARK"] == "1" {
+            Issue.record("""
+                \(caseName): improvementRatio \(String(format: "%.6f", improvement)), \
+                achieved \(String(format: "%.4f", achieved)), baseline \(String(format: "%.4f", baseline)), \
+                oracle ceiling \(String(format: "%.4f", ceiling)), \
+                components \(output.report.artifactComponentCount), \
+                beats \(output.report.acceptedBeatCount)/\(output.report.candidateBeatCount)
+                """)
+            return
+        }
+
+        // 2% over the oracle, for numerical slack only — the bound itself is
+        // exact, since the oracle minimises the very residual being scored.
+        #expect(achieved <= ceiling * 1.02,
+                "SNR \(achieved) beats the oracle spatial filter (\(ceiling)) — truth is leaking in")
+        #expect(improvement > 1, "PCA-S made this recording worse: \(baseline) → \(achieved)")
+
+        guard let watermark = Self.watermark(for: caseName),
+              let recordedImprovement = watermark.improvementRatio else {
+            Issue.record("""
+                No \(caseName) watermark; improvement \(improvement), achieved \(achieved), \
+                baseline \(baseline), oracle \(ceiling), \
+                components \(output.report.artifactComponentCount), \
+                reliabilities \(output.report.artifactComponentReliabilities), \
+                beats \(output.report.acceptedBeatCount)/\(output.report.candidateBeatCount), \
+                removed \(output.report.removedVarianceFraction)
+                """)
+            return
+        }
+        #expect(improvement >= recordedImprovement * 0.85)
+    }
+
+    /// Which generated case the PCA-S regression runs on.
+    ///
+    /// A 32-channel recording, deliberately: the brain model is a tighter
+    /// description of what brains can produce as channels increase, so a
+    /// 20-channel evaluation understates this method rather than testing it.
+    static let surrogateCorpusCase = "bcg-labeller-train-standard"
+
+    /// SNR of the best possible single spatial filter, fitted with the clean
+    /// recording in hand: `W = C_cn · C_nn⁻¹`, scored against the same truth.
+    ///
+    /// The oracle is what makes this an anti-leakage check rather than a second
+    /// floor — see the test above.
+    static func oracleSpatialFilterSNR(clean: [[Float]], noisy: [[Float]]) -> Double {
+        let channelCount = min(clean.count, noisy.count)
+        let sampleCount = min(clean.first?.count ?? 0, noisy.first?.count ?? 0)
+        guard channelCount > 0, sampleCount > 1 else { return .infinity }
+
+        var noisyCovariance = [[Double]](
+            repeating: [Double](repeating: 0, count: channelCount), count: channelCount
+        )
+        var crossCovariance = noisyCovariance
+        for row in 0..<channelCount {
+            for column in 0..<channelCount {
+                var noisySum = 0.0
+                var crossSum = 0.0
+                for sample in 0..<sampleCount {
+                    let a = Double(noisy[row][sample])
+                    let b = Double(noisy[column][sample])
+                    noisySum += a * b
+                    crossSum += Double(clean[row][sample]) * b
+                }
+                noisyCovariance[row][column] = noisySum
+                crossCovariance[row][column] = crossSum
+            }
+        }
+        // A hair of ridge so the solve is defined even if two channels are
+        // numerically identical; far below anything that would loosen the bound.
+        let trace = (0..<channelCount).reduce(0.0) { $0 + noisyCovariance[$1][$1] }
+        let ridge = max(trace / Double(channelCount) * 1e-12, 1e-30)
+        for index in 0..<channelCount { noisyCovariance[index][index] += ridge }
+
+        guard let factor = LinearAlgebra.factorSymmetricPositiveDefinite(noisyCovariance),
+              let solved = factor.solve(LinearAlgebra.transpose(crossCovariance)) else {
+            return .infinity
+        }
+        // `solved` is C_nn⁻¹ C_cnᵀ, so the filter is its transpose.
+        let filter = LinearAlgebra.transpose(solved)
+
+        var cleanSquares = 0.0
+        var residualSquares = 0.0
+        for sample in 0..<sampleCount {
+            for row in 0..<channelCount {
+                var predicted = 0.0
+                for column in 0..<channelCount {
+                    predicted += filter[row][column] * Double(noisy[column][sample])
+                }
+                let truth = Double(clean[row][sample])
+                cleanSquares += truth * truth
+                let residual = truth - predicted
+                residualSquares += residual * residual
+            }
+        }
+        guard residualSquares > 1e-30 else { return .infinity }
+        return (cleanSquares / residualSquares).squareRoot()
+    }
+
     @Test func oddballAverageRecoversKnownERP() async throws {
         let caseName = "oddball-erp"
         let urls = Self.corpusURLs(caseName)

@@ -105,7 +105,7 @@ simulator-local architecture:
   EVA-owned forward solver.
 - `SI0_CONTRACTS.md` records that its extraction contract was fulfilled without
   changing the existing scenario baseline.
-- `EVAsimulate_ROADMAP.md` records SI-1 under the completed source-space work
+- the merged `ROADMAP.md` records SI-1 under the completed source-space work
   and corrects the self-test count to 99.
 - The authoritative `ROADMAP.md` marks SI-1 complete and promotes SI-2 to NEXT.
 

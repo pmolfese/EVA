@@ -1244,6 +1244,16 @@ nonisolated final class MFFReader {
         return sawAnyFlag ? flags : nil
     }
 
+    /// Reads only the package's events — no sample data.
+    ///
+    /// The batch preflight has to know which beat codes a file carries before
+    /// deciding whether a recorded PCA-S step can run against it (ROADMAP SI-3),
+    /// and loading whole recordings to answer that would make opening the sheet
+    /// cost gigabytes.
+    func loadEvents(from packageURL: URL) throws -> [MFFEvent] {
+        try parseEvents(in: try validatedPackageURL(from: packageURL))
+    }
+
     private func parseEvents(in packageURL: URL) throws -> [MFFEvent] {
         let eventFiles = try xmlFiles(in: packageURL)
             .filter { $0.hasPrefix("Events") }

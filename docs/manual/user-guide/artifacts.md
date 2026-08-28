@@ -66,7 +66,43 @@ All fMRI gradient-removal methods assume regularly spaced scanner markers and a 
 - Load motion parameters before using Moosmann or high-motion donor exclusion.
 - Record method settings in your analysis notes, especially donor windows, motion threshold, OBS, ANC, and template scaling.
 
+## Ballistocardiogram Correction
+
+The pulse artifact is corrected separately from the gradient artifact, in the BCG panel. EVA offers detection-plus-cleaning methods, carbon-wire-loop (CWL) regression, and surrogate-source separation (PCA-S).
+
+### PCA-S: Surrogate-Source Separation
+
+PCA-S models the recording as a fixed brain model plus a small BCG topography dictionary, fits both at once, and reconstructs only the brain part. The brain block is regularized and the artifact block is not — that asymmetry is what separates them, since any variance the artifact topographies can explain is cheaper to place there. Unlike template subtraction, which removes an average artifact along with whatever evoked signal shares its timing, PCA-S removes only what the brain model cannot explain.
+
+It is a *correction*, not a detector: it consumes beats another step already found (BCG detection, or ECG/QRS detection) and never invents them.
+
+**What it needs, and what it refuses:**
+
+- **3D electrode coordinates for every corrected channel.** The brain model is physical, so an approximate montage would build a filter for someone else's head. EVA refuses rather than substituting one, and the panel names the channels it lacks coordinates for.
+- **Detected beats.** With none, the Correct button stays disabled.
+- **A head model, which is always an assumption.** EVA uses a classic three-shell sphere (72/79/85 mm), and states so in the panel and in the export audit log for every corrected recording.
+
+**Settings worth understanding:**
+
+| Setting | Default | What moving it does |
+| --- | --- | --- |
+| Brain regularization | 2% | The mechanism, not a tuning knob. Lower it and less is removed; raise it and the filter starts removing brain signal. |
+| Regional sources | 29 | The size of the brain model — 29 sources of three orthogonal dipoles each, the published configuration. More sources describe brain activity more richly and leave the artifact block less to absorb. |
+| Pattern search | Iterative | Iterative judges each beat against the running average; Paper follows the publication's single representative beat. |
+| Beat match | 0.60 | Spatio-temporal correlation a beat must reach to join the template. |
+| Component reliability | 0.90 | The split-half correlation a template component must reach to be treated as artifact. Components that do not repeat between odd and even beats are residual EEG, and removing them costs brain signal. |
+
+The panel reports what each run fitted: how many beats were accepted, how many components were kept and at what reliability, how many were rejected, and what share of the variance was removed. The same facts go into `log_eva_*.txt`, and the portable settings into `eva.xml`, so a corrected recording can be re-corrected the same way — or checked.
+
+**Channel count matters more than it appears.** The brain model is a tighter description of what brains can produce as electrode count rises, so the artifact block absorbs more of the slack at 20 channels than at 64. A low-density evaluation understates the method.
+
 ### References
+
+Berg, P., & Scherg, M. (1994). A multiple source approach to the correction of eye artifacts. *Electroencephalography and Clinical Neurophysiology, 90*(3), 229-241. https://doi.org/10.1016/0013-4694(94)90094-9
+
+Rusiniak, M., Bornfleth, H., Cho, J.-H., Wolak, T., Ille, N., Berg, P., & Scherg, M. (2022). EEG-fMRI: Ballistocardiogram artifact reduction by surrogate method for improved source localization. *Frontiers in Neuroscience, 16*, 842420. https://doi.org/10.3389/fnins.2022.842420
+
+Masterton, R. A. J., Abbott, D. F., Fleming, S. W., & Jackson, G. D. (2007). Measurement and reduction of motion and ballistocardiogram artefacts from simultaneous EEG and fMRI recordings. *NeuroImage, 37*(1), 202-211. https://doi.org/10.1016/j.neuroimage.2007.02.060
 
 Allen, P. J., Josephs, O., & Turner, R. (2000). A method for removing imaging artifact from continuous EEG recorded during functional MRI. *NeuroImage, 12*(2), 230-239. https://doi.org/10.1006/nimg.2000.0599
 

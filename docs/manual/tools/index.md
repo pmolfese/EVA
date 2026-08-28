@@ -13,6 +13,7 @@ script, and each writes its binary into its own `.build` directory.
 | Tool | Use it when you want to |
 | --- | --- |
 | [EVA Simulate](eva-simulate.md) | Generate synthetic EEG with known ground truth — for teaching, for testing a correction method, or for benchmarking. |
+| [Method Comparison](method-comparison.md) | Measure every correction method EVA offers against simulated ground truth and get a table — which method is better, and by how much. |
 | [EVA BIDS](eva-bids.md) | Convert recordings between MFF and BIDS-EEG, or check a BIDS-EEG dataset before importing it. |
 | [EVA Helper](eva-helper.md) | Batch-apply gradient and carbon-wire-loop correction to simultaneous EEG/fMRI recordings without opening the app. |
 | [MFF Timing Tool](mff-timing-tool.md) | Inspect the event codes in an MFF package, or measure the offset between a stimulus code and its DIN. |

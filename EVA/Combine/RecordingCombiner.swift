@@ -170,6 +170,52 @@ nonisolated enum RecordingCombiner {
         return RestoredBadChannelState(bad: bad, alreadyInterpolated: interpolated)
     }
 
+    /// Identity of one contributor to a combined output: the package, the tip of
+    /// *its* processing history, and how many steps produced it.
+    ///
+    /// The node ID is derived the same way a recording window derives it — the
+    /// content-addressed chain from the file's own `eva.xml`, keyed by package
+    /// name — so the value recorded here is the node the contributor's own
+    /// History rail would show as current when the file is opened. A file with
+    /// no `eva.xml` has no lineage to name, and reports its root.
+    static func contributorIdentity(ofPackage url: URL) -> (node: String, stepCount: Int) {
+        let name = url.lastPathComponent
+        let script = EVAProcessingScriptXML.read(fromPackage: url) ?? EVAProcessingScript()
+        let history = EVAHistory(recordingKey: name, script: script)
+        return (history.current.id.short, script.steps.count)
+    }
+
+    /// One `combineInput` step per contributor, for the combined package's own
+    /// `eva.xml`.
+    ///
+    /// **A combined output starts a fresh history** (ROADMAP RW-1 item 15). The
+    /// alternative — splicing the contributors' histories into the new file's
+    /// lineage — would claim something untrue: undo in a recording window is
+    /// linear, and there is no single "step before" a grand average of six
+    /// files. Navigating such a chain could not reproduce the bytes at any node,
+    /// which is the one promise a node ID makes.
+    ///
+    /// So the inputs are recorded as *provenance at the root* instead of as
+    /// ancestry: which files, at which point in each file's own history. That is
+    /// enough to find every contributor's processed state and to notice when one
+    /// of them has moved on since; it just does not pretend the result can be
+    /// undone back into them.
+    static func contributorProvenanceSteps(for inputs: [CombineInput]) -> [EVAProcessingStep] {
+        inputs.map { input in
+            let identity = contributorIdentity(ofPackage: input.url)
+            return EVAProcessingStep(
+                operation: .combineInput,
+                parameters: [
+                    "file": input.url.lastPathComponent,
+                    "sourceNode": identity.node,
+                    "sourceSteps": "\(identity.stepCount)"
+                ],
+                replayable: false,
+                note: "Contributor to this combined recording, at that point in its own history."
+            )
+        }
+    }
+
     static func badChannelProvenanceSteps(
         for inputs: [CombineInput],
         policy: BadChannelPolicy

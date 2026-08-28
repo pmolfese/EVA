@@ -46,10 +46,12 @@ nonisolated enum HistoryStepSummary {
         case .trialExclusion: return "exclude trials"
         case .average: return "average"
         case .combine: return "combine"
+        case .combineInput: return "combined input"
         case .combineBadChannelPolicy: return "combine bad channels"
         case .split: return "split"
         case .reference: return "Reference"
         case .bcgDetection: return "BCG detection"
+        case .bcgCorrection: return "BCG correction"
         case .ecgDetection: return "ECG detection"
         }
     }
@@ -111,6 +113,13 @@ nonisolated enum HistoryStepSummary {
                 parts.append("\(count) \(count == "1" ? "template" : "templates")")
             }
 
+        case .bcgCorrection:
+            if let method = p["method"] { parts.append(method == "surrogatePCAS" ? "PCA-S" : method) }
+            if let regularization = p["surrogateBrainRegularization"].flatMap(Double.init) {
+                parts.append(String(format: "reg %.1f%%", regularization * 100))
+            }
+            if let search = p["surrogatePatternSearch"] { parts.append(search) }
+
         case .bcgDetection, .ecgDetection:
             if let method = p["method"] { parts.append(method) }
 
@@ -151,6 +160,12 @@ nonisolated enum HistoryStepSummary {
             // place in a 260 pt rail.
             let restored = step.excludedTrials.count - excluded
             if restored > 0 { parts.append("\(restored) restored") }
+
+        case .combineInput:
+            // The identity of one contributor: which file, and which point in
+            // *its* history the combined output was built from.
+            if let file = p["file"] { parts.append(file) }
+            if let node = p["sourceNode"] { parts.append("node \(node)") }
 
         case .average, .combine, .combineBadChannelPolicy, .split:
             break

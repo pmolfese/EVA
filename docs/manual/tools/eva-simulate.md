@@ -554,6 +554,13 @@ one.
 
 The workflow is: generate, correct in EVA, export, score.
 
+!!! tip "To compare several methods, don't do this by hand"
+    Scoring one correction is what `score` is for. Comparing *methods* — the same
+    recordings through every correction EVA offers, with mean ± SD over seeds and
+    the difference between two methods measured on the same recording — is
+    automated by [Method Comparison](method-comparison.md), which drives EVA
+    headlessly and calls this subcommand for every cell.
+
 ```bash
 Tools/EVASimulate/.build/eva-simulate score \
   --truth ~/sim/sim_clean.mff \

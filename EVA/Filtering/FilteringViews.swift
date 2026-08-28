@@ -651,6 +651,27 @@ extension WaveformView {
                     onApplied: { [self] in postFilterInvalidation() }
                 )
 
+            case .bcgCorrection:
+                // Portable settings, this file's own beats. Classified `.auto`
+                // only when both the beats and the coordinates are here, so by
+                // the time the loop reaches it the evidence exists; the runner
+                // still refuses rather than approximating if that changed
+                // (ROADMAP SI-3).
+                bcg.surrogateSettings = BCGSurrogateSettings(parameters: params)
+                bcg.method = .surrogatePCAS
+                if action.gate == .review {
+                    switch await replay.gate(.awaitingReview(index: action.stepIndex),
+                        banner: .init(title: "Apply PCA-S BCG Correction?",
+                                      detail: "Surrogate separation using this file's own beats and coordinates.",
+                                      showsSkip: true, progress: nil)) {
+                    case .cancel: break loop
+                    case .skip: continue loop
+                    case .proceed: break
+                    }
+                }
+                let surrogateBase = gradient.correctedSignal ?? rawSignal
+                await runSurrogateCorrection(signal: surrogateBase)
+
             case .thresholdArtifactDetection:
                 artifactVM.detectionMethod = .threshold
                 detectsEyeBlinkArtifacts = params["eyeBlink"] == "true"

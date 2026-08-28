@@ -50,6 +50,28 @@ final class ArtifactViewModel {
     /// tracking it would invalidate views on every detection start.
     @ObservationIgnored let detectionRunner = LatestOnlyRunner()
 
+    /// The `detectionRefreshToken` value the last *completed* detection ran at,
+    /// or `nil` if no detector has produced a verdict for this recording.
+    ///
+    /// Kept as a token rather than a `Bool` so it invalidates itself: every
+    /// upstream stage that changes the signal already bumps
+    /// `detectionRefreshToken`, and a verdict about the old signal is not a
+    /// verdict about the new one. See `hasAssessedArtifacts`.
+    private(set) var completedDetectionToken: Int?
+
+    /// Whether artifact detection has produced a verdict describing the signal
+    /// as it stands now.
+    ///
+    /// `events.isEmpty` cannot answer this: it is equally true of "the detectors
+    /// ran and this recording is clean" and "nothing has looked yet". Segment
+    /// Health scored those identically — as perfect — until ROADMAP RW-1 item 16.
+    var hasAssessedArtifacts: Bool { completedDetectionToken == detectionRefreshToken }
+
+    /// Records that a detection run finished and published, whatever it found.
+    func recordCompletedDetection() {
+        completedDetectionToken = detectionRefreshToken
+    }
+
     // MARK: Threshold detector settings
     /// Two-tab config panel for the threshold-based ocular detector.
     var showsThresholdSheet = false
@@ -91,6 +113,7 @@ final class ArtifactViewModel {
         isDetecting = false
         statusMessage = nil
         detectionRefreshToken += 1
+        completedDetectionToken = nil
         // Disown any in-flight detection so a run started for the recording being
         // closed cannot publish its results into the reused view model.
         detectionRunner.invalidate()

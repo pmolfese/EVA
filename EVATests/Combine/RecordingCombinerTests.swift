@@ -634,4 +634,89 @@ struct RecordingCombinerTests {
         ]))
         #expect(!partial.isComplete)
     }
+
+    // MARK: - Combined-output provenance (ROADMAP RW-1 item 15)
+
+    /// A combined output records *which point in each contributor's own history*
+    /// it was built from — not just how many files there were.
+    @Test func contributorProvenanceNamesEachInputAndItsHistoryTip() throws {
+        let first = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-combine-a-\(UUID().uuidString).mff", isDirectory: true)
+        let second = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-combine-b-\(UUID().uuidString).mff", isDirectory: true)
+        try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+
+        var processed = EVAProcessingScript()
+        processed.append(EVAProcessingStep(operation: .filter, parameters: ["highPassHz": "0.1"]))
+        processed.append(EVAProcessingStep(operation: .segment, parameters: ["code": "stim"]))
+        try EVAProcessingScriptXML.write(processed, toPackage: first)
+        // `second` is left without an eva.xml: a file with no recorded lineage.
+
+        let steps = RecordingCombiner.contributorProvenanceSteps(for: [
+            makeInput(url: first, value: 1, sampleCount: 200),
+            makeInput(url: second, value: 2, sampleCount: 200)
+        ])
+
+        #expect(steps.count == 2)
+        #expect(steps.allSatisfy { $0.operation == .combineInput })
+        // Provenance, never replayed: these describe other files.
+        #expect(steps.allSatisfy { !$0.replayable })
+        #expect(steps[0].parameters["file"] == first.lastPathComponent)
+        #expect(steps[0].parameters["sourceSteps"] == "2")
+        #expect(steps[1].parameters["sourceSteps"] == "0")
+
+        // The recorded node is the tip of that file's own content-addressed
+        // chain — the node its History rail shows as current when opened.
+        let expected = EVAHistory(recordingKey: first.lastPathComponent, script: processed)
+        #expect(steps[0].parameters["sourceNode"] == expected.current.id.short)
+
+        // Two different files, two different identities: an unprocessed file
+        // reports its own root, not the other file's.
+        #expect(steps[0].parameters["sourceNode"] != steps[1].parameters["sourceNode"])
+    }
+
+    /// The decision itself: a combined recording starts a *fresh* history rather
+    /// than continuing any contributor's, and nothing in its lineage is shared
+    /// with them.
+    @Test func combinedOutputStartsItsOwnHistory() throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-combine-src-\(UUID().uuidString).mff", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        var contributorScript = EVAProcessingScript()
+        contributorScript.append(EVAProcessingStep(operation: .filter, parameters: ["highPassHz": "0.1"]))
+        try EVAProcessingScriptXML.write(contributorScript, toPackage: source)
+        let contributorHistory = EVAHistory(recordingKey: source.lastPathComponent, script: contributorScript)
+
+        var combinedScript = EVAProcessingScript()
+        combinedScript.append(EVAProcessingStep(operation: .combine, parameters: ["mode": "append", "files": "2"]))
+        for step in RecordingCombiner.contributorProvenanceSteps(for: [
+            makeInput(url: source, value: 1, sampleCount: 200),
+            makeInput(url: source, value: 2, sampleCount: 200)
+        ]) {
+            combinedScript.append(step)
+        }
+        let combinedHistory = EVAHistory(recordingKey: "combined.mff", script: combinedScript)
+
+        // Its lineage begins at its own root with the combine, and the
+        // contributor's nodes appear nowhere in it.
+        let lineage = combinedHistory.path(to: combinedHistory.current.id)
+        #expect(lineage.first?.id == combinedHistory.rootID)
+        #expect(lineage.dropFirst().first?.step?.operation == .combine)
+        let contributorIDs = Set(contributorHistory.path(to: contributorHistory.current.id).map(\.id))
+        #expect(Set(lineage.map(\.id)).isDisjoint(with: contributorIDs))
+
+        // The contributors are still findable — as provenance at the root
+        // rather than as ancestry.
+        let recordedFiles = combinedScript.steps
+            .filter { $0.operation == .combineInput }
+            .compactMap { $0.parameters["file"] }
+        #expect(recordedFiles == [source.lastPathComponent, source.lastPathComponent])
+    }
 }

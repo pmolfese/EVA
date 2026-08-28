@@ -31,6 +31,10 @@ final class ProcessingCore {
     let store: RecordingStore
     let filter: FilterViewModel
     let gradient: GradientViewModel
+    /// Owns the BCG correction slot. Headless PCA-S needs it for the same
+    /// reason the interactive path does: the corrected signal is published
+    /// there, and the outgoing script is rebuilt from that state.
+    let bcg: BCGDetectionViewModel
     let ica: ICAViewModel
     let artifactVM: ArtifactViewModel
     let epoching: EpochingViewModel
@@ -47,10 +51,20 @@ final class ProcessingCore {
     /// interactive path on the same input.
     let electrodePositions: [Int: SIMD3<Double>]
 
+    /// The same positions as an `ElectrodeGeometry`, for stages that need the
+    /// value rather than the dictionary. `nil` when the file carried none,
+    /// which is a refusal for PCA-S rather than a fallback.
+    var electrodeGeometry: ElectrodeGeometry? {
+        electrodePositions.isEmpty
+            ? nil
+            : ElectrodeGeometry(name: "package coordinates", positions: electrodePositions)
+    }
+
     init(
         store: RecordingStore,
         filter: FilterViewModel,
         gradient: GradientViewModel,
+        bcg: BCGDetectionViewModel,
         ica: ICAViewModel,
         artifactVM: ArtifactViewModel,
         epoching: EpochingViewModel,
@@ -62,6 +76,7 @@ final class ProcessingCore {
         self.store = store
         self.filter = filter
         self.gradient = gradient
+        self.bcg = bcg
         self.ica = ica
         self.artifactVM = artifactVM
         self.epoching = epoching
@@ -107,7 +122,7 @@ final class ProcessingCore {
         artifactPayload: ArtifactReplayPayload? = nil,
         progress: ((ProgressUpdate) -> Void)? = nil
     ) async -> Result {
-        var current = ica.cleanedSignal ?? gradient.correctedSignal ?? signal
+        var current = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? signal
 
         // `icaClean` is `replayable: false` — correctly, because the fitted
         // operator belongs to one subject's electrodes and Copy Processing must
@@ -209,6 +224,62 @@ final class ProcessingCore {
                     )
                 }
                 current = gradient.correctedSignal ?? current
+
+            case .bcgCorrection:
+                // PCA-S is portable settings plus this file's own evidence: its
+                // beats and its coordinates. Both come from the file being
+                // processed, never from the file the script came from — the same
+                // asymmetry that keeps a copied ICA operator off another
+                // subject's data (ROADMAP RW-1 item 6, SI-3).
+                let settings = BCGSurrogateSettings(parameters: step.parameters)
+                let code = step.parameters["beatEventCode"] ?? EVAProcessingStep.defaultBeatEventCode
+                let beats = current.events
+                    .filter { $0.code == code }
+                    .map(\.beginTimeSeconds)
+                    .sorted()
+                let rows = current.data.indices.filter { !store.channels.bad.contains($0) }
+                do {
+                    let output = try await BCGSurrogateCorrection.correct(
+                        data: current.data,
+                        samplingRate: current.samplingRate,
+                        correctedRows: rows,
+                        geometry: electrodeGeometry,
+                        channelNames: current.channelNames,
+                        beatSeconds: beats,
+                        settings: settings
+                    )
+                    let corrected = current.replacingSamples(output.data, signalTypeSuffix: "PCAS")
+                    bcg.correctedSignal = corrected
+                    bcg.appliedCorrection = .surrogatePCAS
+                    bcg.surrogateSettings = settings
+                    bcg.surrogateReport = output.report
+                    bcg.surrogateAuditLogLines = output.report.auditLogLines
+                    store.cleaningVariance.record(
+                        CleaningVarianceAccount.between(
+                            original: current.data,
+                            cleaned: output.data,
+                            samplingRate: current.samplingRate,
+                            epochSeconds: CleaningVarianceAccount.defaultEpochSeconds,
+                            stageName: BCGSurrogateCorrection.varianceStageName
+                        )
+                    )
+                    PipelineInvalidation.downstreamOfBaseSignalChange(
+                        store: store,
+                        ica: ica,
+                        filter: filter,
+                        artifactVM: artifactVM,
+                        template: template,
+                        epoching: epoching,
+                        segHealth: segHealth
+                    )
+                    current = corrected
+                } catch {
+                    // Stop rather than carry on with the uncorrected signal: a
+                    // batch that silently skipped the correction would emit a
+                    // file whose own script claims it was corrected.
+                    bcg.status = error.localizedDescription
+                    return Result(signal: current, remainingSteps: Array(steps[index...]))
+                }
 
             case .filter:
                 filter.apply(parameters: step.parameters)

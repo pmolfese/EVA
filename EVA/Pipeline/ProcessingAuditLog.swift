@@ -40,6 +40,7 @@ enum ProcessingAuditLog {
     /// compiler to name each call site that must supply it.
     static func lines(
         gradient: GradientViewModel,
+        bcg: BCGDetectionViewModel,
         epoching: EpochingViewModel,
         channels: ChannelModel,
         cleaningVariance: CleaningVarianceLedger
@@ -48,6 +49,12 @@ enum ProcessingAuditLog {
 
         // What the gradient run excluded and why.
         lines.append(contentsOf: gradient.auditLogLines)
+
+        // What the surrogate correction assumed and fitted: head model,
+        // geometry, beats, components, and the reliability gate's verdict
+        // (ROADMAP SI-3). The settings live in `eva.xml`; these are the
+        // subject-specific facts that cannot.
+        lines.append(contentsOf: bcg.surrogateAuditLogLines)
 
         // What each cleaning stage removed, in the order the stages ran. One
         // ledger rather than a question per stage: see `CleaningVarianceLedger`.

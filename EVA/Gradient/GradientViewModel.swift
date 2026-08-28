@@ -226,6 +226,14 @@ final class GradientViewModel {
     // MARK: Motion censoring
     var excludeHighMotion = false
     var motionParameters: MotionParameters?
+    /// Set when a restored step recorded a motion file that does not match the
+    /// one currently loaded — the external-input staleness rule (ROADMAP RW-1
+    /// item 11). Nil means "no recorded fingerprint to compare, or it matches".
+    ///
+    /// Reported rather than resolved: EVA cannot fetch the file the step was run
+    /// with, and correcting with a different motion series while showing the old
+    /// node's parameters is the failure this exists to make visible.
+    var motionSourceMismatch: String?
     var motionFileFormat = MotionFileFormat.auto
     var motionFDThreshold = 0.5
     var motionRadiusMm = 50.0
@@ -545,6 +553,12 @@ final class GradientViewModel {
             params["motionFDThreshold"] = String(format: "%.2f", motionFDThreshold)
             params["motionMetric"] = motionMetric.rawValue
             params["motionRadiusMm"] = String(format: "%.1f", motionRadiusMm)
+            // Which motion file, at what size and date, with how many rows after
+            // trimming. Without it, two runs that censored different volumes
+            // recorded the same parameters and hashed to the same history node.
+            if let fingerprint = motionParameters?.currentFingerprint {
+                params.merge(fingerprint.parameterValues) { current, _ in current }
+            }
         }
         // Four inputs the correction reads but this block used to omit — found by
         // the REWIND determinism audit (2026-08-13). `skipStart`/`skipEnd` trim
@@ -647,6 +661,7 @@ final class GradientViewModel {
             // The explicit key below overrides this when it exists.
             excludeHighMotion = true
         }
+        motionSourceMismatch = motionSourceMismatch(restoring: p)
         if let v = p["skipStart"].flatMap(Int.init) { skipStart = v }
         if let v = p["skipEnd"].flatMap(Int.init) { skipEnd = v }
         if let v = p["appliesToPNS"] { appliesToPNS = (v == "true") }
@@ -776,6 +791,20 @@ final class GradientViewModel {
             updateFinalizingProgress()
 
             auditLogLines = result.2
+            // Which motion file this correction actually ran with, and — if the
+            // parameters were restored from a step that named a different one —
+            // that the two disagree. An export whose motion input silently
+            // changed is the hazard; the log is where that becomes findable.
+            if let fingerprint = motionParameters?.currentFingerprint,
+               method.usesMotion || excludeHighMotion {
+                auditLogLines.append(
+                    "\(Self.operation) motionSource: \(fingerprint.name) "
+                    + "(\(fingerprint.byteCount) B, \(fingerprint.rowCount) rows)"
+                )
+            }
+            if let motionSourceMismatch {
+                auditLogLines.append("\(Self.operation) motionSourceMismatch: \(motionSourceMismatch)")
+            }
             let censored = highMotionVolumeSet()
             if !censored.isEmpty, !method.usesMotion {
                 let listed = censored.sorted().prefix(20).map(String.init).joined(separator: ",")
@@ -931,6 +960,23 @@ final class GradientViewModel {
     }
 
     // MARK: - Run reports
+
+    /// Compares the motion series currently loaded against the one a restored
+    /// step recorded.
+    ///
+    /// Three outcomes, and the middle one is the reason this is not a `Bool`:
+    /// the step recorded no fingerprint (nothing to check — an older script, or
+    /// a correction that used no motion), the fingerprints agree (nil), or they
+    /// disagree, including the case where the step used a motion file and this
+    /// session has none loaded at all.
+    func motionSourceMismatch(restoring parameters: [String: String]) -> String? {
+        guard let recorded = MotionSourceFingerprint(parameters: parameters) else { return nil }
+        guard let current = motionParameters?.currentFingerprint else {
+            return "This step used motion file \(recorded.name); no motion file is loaded."
+        }
+        guard let difference = current.mismatch(against: recorded) else { return nil }
+        return "Motion input differs from the one this step recorded: \(difference)."
+    }
 
     nonisolated static let operation = "mriGradientCorrection"
 

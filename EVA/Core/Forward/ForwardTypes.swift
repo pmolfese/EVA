@@ -28,6 +28,24 @@ nonisolated struct ForwardHeadModel: Codable, Sendable, Equatable {
 
     var brainRadiusMeters: Double { shells.first?.radiusMeters ?? 0 }
     var scalpRadiusMeters: Double { shells.last?.radiusMeters ?? 0 }
+
+    /// Classic brain/skull/scalp model used in three-sphere validation studies:
+    /// 72/79/85 mm and 0.33/0.0042/0.33 S/m.
+    ///
+    /// This is an *assumption*, not a measurement of the subject in front of
+    /// you, and anything built on it has to say so — see
+    /// `BCGSurrogateReport.headModelName`. EVASimulate's `classicThreeShell`
+    /// carries the identical numbers so a correction measured against simulated
+    /// truth is measured against the same head.
+    static let classicThreeShell = ForwardHeadModel(
+        name: "Classic three-shell sphere",
+        centerMeters: SIMD3<Double>(0, 0, 0),
+        shells: [
+            ForwardHeadShell(name: "brain", radiusMeters: 0.072, conductivitySiemensPerMeter: 0.33),
+            ForwardHeadShell(name: "skull", radiusMeters: 0.079, conductivitySiemensPerMeter: 0.0042),
+            ForwardHeadShell(name: "scalp", radiusMeters: 0.085, conductivitySiemensPerMeter: 0.33)
+        ]
+    )
 }
 
 /// Physical electrode locations in authoritative row order.

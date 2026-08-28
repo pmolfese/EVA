@@ -377,12 +377,24 @@ extension WaveformView {
             script.append(EVAProcessingStep(operation: .mriGradientCorrection, parameters: gradient.parameters))
         }
         if bcg.correctedSignal != nil {
-            script.append(EVAProcessingStep(
-                operation: .bcgDetection,
-                parameters: bcg.parameters,
-                replayable: false,
-                note: "BCG/CWL correction is subject-specific; parameters are recorded for provenance."
-            ))
+            if bcg.appliedCorrection == .surrogatePCAS {
+                // PCA-S is the one BCG correction whose settings are portable:
+                // another file re-fits the same model from its own beats and
+                // coordinates, so this step is replayable and the fitted result
+                // stays in the audit log where it belongs (ROADMAP SI-3).
+                script.append(EVAProcessingStep(
+                    operation: .bcgCorrection,
+                    parameters: bcg.surrogateCorrectionParameters,
+                    note: "Surrogate-source separation. Settings are portable; the fitted topographies are re-derived per file."
+                ))
+            } else {
+                script.append(EVAProcessingStep(
+                    operation: .bcgDetection,
+                    parameters: bcg.parameters,
+                    replayable: false,
+                    note: "BCG/CWL correction is subject-specific; parameters are recorded for provenance."
+                ))
+            }
         }
         if ica.cleanedSignal != nil {
             script.append(EVAProcessingStep(
@@ -540,7 +552,7 @@ extension WaveformView {
     /// settings, not this file's resulting channel/epoch decisions.
     func currentProcessingAuditLogLines() -> [String] {
         ProcessingAuditLog.lines(
-            gradient: gradient, epoching: epoching, channels: channels,
+            gradient: gradient, bcg: bcg, epoching: epoching, channels: channels,
             cleaningVariance: recordingStore.cleaningVariance
         )
     }

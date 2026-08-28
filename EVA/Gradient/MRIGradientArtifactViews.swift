@@ -446,17 +446,9 @@ extension WaveformView {
         await processingQueue.run("Gradient Correction") { [self] in
             await gradient.apply(to: signal, pnsSignal: pnsInput) { [self] in
                 guard sessionID == recordingSessionID else { return }
-                // The base signal changed, so any ICA/band-pass output
-                // computed on the old base is now stale.
-                ica.cleanedSignal = nil
-                ica.decomposition = nil
-                filter.output = nil
-                filter.pnsOutput = nil
-                filter.pnsInputSignalType = nil
-                clearAppliedArtifactCleaning()
-                artifactVM.detectionRefreshToken += 1
-                invalidateEpochsForSignalChange()
-                invalidateInterpolations()
+                // The base signal changed, so everything computed on the old
+                // base is stale. One cascade, shared with the headless path.
+                invalidateDownstreamOfBaseSignalChange()
             }
         }
     }
@@ -1034,16 +1026,12 @@ extension WaveformView {
     func clearGradientCorrection() {
         gradient.correctedSignal = nil
         gradient.correctedPNSSignal = nil
-        ica.cleanedSignal = nil
-        ica.decomposition = nil
-        filter.output = nil
-        filter.pnsOutput = nil
-        filter.pnsInputSignalType = nil
-        clearAppliedArtifactCleaning()
         gradient.statusMessage = "Removed MRI gradient correction."
         gradient.statusIsError = false
-        artifactVM.detectionRefreshToken += 1
-        invalidateEpochsForSignalChange()
-        invalidateInterpolations()
+        // The stage's own variance account describes a correction that no
+        // longer exists; the shared cascade clears only what it invalidates,
+        // so the stage clears its own line.
+        recordingStore.cleaningVariance.clear(stageName: GradientViewModel.operation)
+        invalidateDownstreamOfBaseSignalChange()
     }
 }

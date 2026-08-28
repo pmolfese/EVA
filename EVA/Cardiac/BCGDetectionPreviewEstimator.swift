@@ -128,7 +128,9 @@ nonisolated enum BCGDetectionPreviewEstimator {
                 recordingDuration: duration
             )
 
-        case .cwlRegression:
+        // Neither is a beat detector: CWL needs no beats, and PCA-S consumes
+        // beats another method found.
+        case .cwlRegression, .surrogatePCAS:
             return nil
         }
     }

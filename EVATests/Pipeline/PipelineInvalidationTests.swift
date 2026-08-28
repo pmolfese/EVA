@@ -14,9 +14,10 @@
 //  `WaveformView`, but only ICA and filter output in `ProcessingCore`. A headless
 //  or replayed run therefore kept stale downstream state.
 //
-//  These assert the *contract* rather than the implementation, so they keep
-//  holding when `REWIND.md` work item 3 replaces the mechanical cascade with a
-//  derived one.
+//  These assert the *contract* rather than the implementation. The
+//  history-derived alternative REWIND once proposed is closed (ROADMAP RW-1
+//  item 14), so the contract they pin is the shipped one rather than an interim
+//  arrangement.
 //
 
 import Testing

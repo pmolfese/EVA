@@ -91,6 +91,21 @@ final class BCGDetectionViewModel {
     var cwlDownsampleTargetHz = 0.0
     var cwlDownsampleFilter = CWLCorrector.DownsampleFilter.windowedSinc
     var cwlUpsampleToOriginalHz = false
+
+    // MARK: Surrogate separation — PCA-S (ROADMAP SI-3)
+    /// Portable settings. Recorded in `eva.xml` and replayed.
+    var surrogateSettings = BCGSurrogateSettings.default
+    /// What the last PCA-S run actually fitted on *this* recording. Kept
+    /// separate from the settings on purpose: RW-1's rule is that portable
+    /// parameters and subject-specific fitted results never share a home.
+    var surrogateReport: BCGSurrogateReport?
+    /// Audit lines from the last PCA-S run, for `log_eva_*.txt`.
+    var surrogateAuditLogLines: [String] = []
+
+    /// The correction currently published to `correctedSignal`, so the chain
+    /// can record which method produced the signal on screen rather than
+    /// inferring it from whichever method the picker happens to show now.
+    var appliedCorrection: BCGDetectionMethod?
     var correctedSignal: MFFSignalData?
 
     // MARK: Run / refine state
@@ -118,9 +133,32 @@ final class BCGDetectionViewModel {
         isEstimating = false
         algorithmResults = [:]
         correctedSignal = nil
+        appliedCorrection = nil
+        surrogateReport = nil
+        surrogateAuditLogLines = []
     }
 
     // MARK: - eva.xml / log_eva bridge
+
+    /// Portable parameters for the `bcgCorrection` step: the PCA-S settings
+    /// plus the event code naming which beats it locked to.
+    ///
+    /// Deliberately *not* `parameters`: that dictionary describes the detector
+    /// and is recorded for provenance only, while these are replayable settings
+    /// for a correction another file can re-fit from its own beats.
+    var surrogateCorrectionParameters: [String: String] {
+        var params = surrogateSettings.parameters
+        params["method"] = BCGDetectionMethod.surrogatePCAS.rawValue
+        params["beatEventCode"] = beatEventCode
+        return params
+    }
+
+    /// The event code PCA-S locks to: the BCG detector's own code when it has
+    /// one, otherwise the default.
+    var beatEventCode: String {
+        let trimmed = eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? BCGDetector.eventCode : trimmed
+    }
 
     var parameters: [String: String] {
         var params: [String: String] = [

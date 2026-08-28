@@ -42,18 +42,27 @@ nonisolated enum EEGAnalysisEngine {
             for: signal,
             lengthSeconds: request.segmentLengthSeconds
         )
-        let artifactIntervals = artifactIntervals(
-            for: request.artifactSources,
-            selectedSourceIDs: request.selectedArtifactSourceIDs,
-            signal: signal
-        )
+        // Assessed means a source was actually included in this run. With no
+        // source selected — none offered, or all unticked — nothing has looked
+        // at artifacts, and the segment score says so rather than scoring the
+        // absence as clean (ROADMAP RW-1 item 16).
+        let selectedSources = request.artifactSources.filter {
+            request.selectedArtifactSourceIDs.contains($0.id)
+        }
+        let artifacts: SegmentHealthArtifactAssessment = selectedSources.isEmpty
+            ? .notAssessed
+            : .assessed(artifactIntervals(
+                for: request.artifactSources,
+                selectedSourceIDs: request.selectedArtifactSourceIDs,
+                signal: signal
+            ))
         progress?(0.04)
 
         let health = SegmentHealthAnalyzer.analyze(
             signal: signal,
             segments: segments,
             excludedChannelIndices: request.excludedChannelIndices,
-            artifactIntervals: artifactIntervals,
+            artifacts: artifacts,
             base: request.segmentGoodnessBase,
             progress: { fraction in
                 progress?(0.04 + 0.24 * fraction)
@@ -299,15 +308,19 @@ nonisolated enum EEGAnalysisEngine {
         artifactThreshold: Double
     ) -> [EEGAnalysisSegmentDecision] {
         healthResults.map { result in
-            let artifactOverlap = featuresBySegmentID[result.segmentID]?.artifactOverlapFraction ?? 0
-            let artifactCount = featuresBySegmentID[result.segmentID]?.artifactCount ?? 0
+            // `nil` overlap means artifacts were not assessed. A segment cannot
+            // be rejected for exceeding a threshold nobody measured, so the
+            // artifact test passes — but the decision records the absence
+            // rather than reporting 0% overlap, which would read as measured.
+            let artifactOverlap = featuresBySegmentID[result.segmentID]?.artifactOverlapFraction
+            let artifactCount = featuresBySegmentID[result.segmentID]?.artifactCount
             let healthOK = keptGrades.contains(result.grade)
-            let artifactOK = artifactOverlap <= artifactThreshold
+            let artifactOK = (artifactOverlap ?? 0) <= artifactThreshold
             var reasons: [String] = []
             if !healthOK {
                 reasons.append("health:\(result.grade.rawValue)")
             }
-            if !artifactOK {
+            if !artifactOK, let artifactOverlap {
                 reasons.append(String(format: "artifact_overlap:%.1f%%", artifactOverlap * 100))
             }
             return EEGAnalysisSegmentDecision(

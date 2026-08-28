@@ -56,6 +56,7 @@ enum HeadlessBatchProcessor {
             store: store,
             filter: FilterViewModel(store: store),
             gradient: GradientViewModel(store: store),
+            bcg: BCGDetectionViewModel(store: store),
             ica: ICAViewModel(store: store),
             artifactVM: ArtifactViewModel(store: store),
             epoching: EpochingViewModel(store: store),
@@ -104,6 +105,7 @@ enum HeadlessBatchProcessor {
         // channels, escalated/interpolated channels, per-category SNR.
         let auditLogLines = ProcessingAuditLog.lines(
             gradient: core.gradient,
+            bcg: core.bcg,
             epoching: core.epoching,
             channels: store.channels,
             cleaningVariance: store.cleaningVariance

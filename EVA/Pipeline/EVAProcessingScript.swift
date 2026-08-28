@@ -102,6 +102,11 @@ nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable 
         case thresholdArtifactDetection
         case icaClean
         case bcgDetection
+        /// Surrogate-source BCG correction (PCA-S). Distinct from
+        /// `bcgDetection`, which records the *detector* for provenance: this
+        /// step's settings are portable and it re-fits from the target file's
+        /// own beats (ROADMAP SI-3).
+        case bcgCorrection
         case ecgDetection
         case interpolateChannels
         case markBad
@@ -110,6 +115,10 @@ nonisolated struct EVAProcessingStep: Codable, Identifiable, Sendable, Hashable 
         case trialExclusion
         case average
         case combine
+        /// One contributor to a combined output — its file, its own history tip,
+        /// and how many steps produced it. Provenance only: see
+        /// `RecordingCombiner.contributorProvenanceSteps`.
+        case combineInput
         case combineBadChannelPolicy
         case split
     }
@@ -180,6 +189,11 @@ nonisolated struct ReplayPayloadAvailability: Equatable, Sendable {
     /// This file has electrode coordinates, so a recorded interpolation can be
     /// re-solved for it (`ChannelInterpolationSolver`).
     var hasElectrodeGeometry = false
+    /// Event codes this file carries beats for, so a recorded `bcgCorrection`
+    /// can be re-fitted against them. Empty means PCA-S has nothing to lock to
+    /// here, whatever the script says — the correction is portable, the beats
+    /// are not.
+    var beatEventCodes: Set<String> = []
     /// IDs of `trialExclusion` steps whose every excluded trial resolves to a
     /// segment in *this* file, per `TrialExclusionResolver.resolve`.
     ///
@@ -195,6 +209,16 @@ nonisolated struct ReplayPayloadAvailability: Equatable, Sendable {
 
     /// What a plain script read tells you: nothing about any file.
     static let none = ReplayPayloadAvailability()
+}
+
+extension EVAProcessingStep {
+    /// Beat code assumed by a `bcgCorrection` step that names none.
+    ///
+    /// Spelled here rather than reached through `BCGDetector.eventCode` because
+    /// this file is compiled into the command-line tools, which do not include
+    /// the cardiac domain. `BCGDetectorEventCodeTests` pins the two together so
+    /// the duplication cannot drift.
+    static let defaultBeatEventCode = "BCG"
 }
 
 extension EVAProcessingStep {
@@ -220,6 +244,9 @@ extension EVAProcessingStep {
         // assumed to name events it has. The portable half — the criteria — is
         // re-proposed for review instead.
         case .trialExclusion: return .decision
+        // Portable settings, but useless without this file's own beats and
+        // geometry. Knowing nothing about the file, that is a decision.
+        case .bcgCorrection: return .decision
         default: return .skip
         }
     }
@@ -255,6 +282,15 @@ extension EVAProcessingStep {
             return availability.hasElectrodeGeometry ? .decision : .skip
         case .trialExclusion where availability.resolvedTrialExclusionStepIDs.contains(id):
             return .resolvedFromPayload
+        case .bcgCorrection:
+            // Two things this file either has or does not: coordinates for the
+            // brain model, and beats for the artifact model. With both, the
+            // recorded settings re-fit here and the step runs unattended; with
+            // either missing it is a decision, because the alternative is a
+            // correction built on someone else's head or on no beats at all.
+            let code = parameters["beatEventCode"] ?? EVAProcessingStep.defaultBeatEventCode
+            let hasBeats = availability.beatEventCodes.contains(code)
+            return availability.hasElectrodeGeometry && hasBeats ? .auto : .decision
         default:
             return replayInteraction
         }

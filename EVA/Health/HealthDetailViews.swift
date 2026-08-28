@@ -418,19 +418,28 @@ struct SegmentHealthMetricRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Circle()
-                .fill(metric.grade.color)
-                .frame(width: 9, height: 9)
-                .padding(.top, 4)
+            // An unassessed metric gets a hollow marker and no grade: it is not
+            // good, not poor, and not scored. Reading a grade colour here would
+            // be reading a placeholder.
+            Group {
+                if metric.isAssessed {
+                    Circle().fill(metric.grade.color)
+                } else {
+                    Circle().strokeBorder(Color.secondary, lineWidth: 1)
+                }
+            }
+            .frame(width: 9, height: 9)
+            .padding(.top, 4)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(metric.name)
                         .font(.caption.weight(.semibold))
+                        .foregroundStyle(metric.isAssessed ? Color.primary : Color.secondary)
                     Spacer()
-                    Text(metric.grade.displayName)
+                    Text(metric.isAssessed ? metric.grade.displayName : "Not assessed")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(metric.grade.color)
+                        .foregroundStyle(metric.isAssessed ? metric.grade.color : Color.secondary)
                 }
                 Text(metric.detail)
                     .font(.caption2)

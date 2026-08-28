@@ -521,4 +521,107 @@ struct GradientViewModelTests {
 
         #expect(vm.highMotionVolumeSet() == [2])
     }
+
+    // MARK: - External motion input staleness (ROADMAP RW-1 item 11)
+
+    private func motionSeries(rows: Int, source: MotionSourceFingerprint?) -> MotionParameters {
+        var parameters = MotionParameters(
+            samples: (0..<rows).map { index in
+                MotionSample(id: index, roll: 0, pitch: 0, yaw: 0, dS: Double(index) * 0.1, dL: 0, dP: 0)
+            },
+            sourceName: source?.name ?? "motion.1D"
+        )
+        parameters.source = source
+        return parameters
+    }
+
+    private var recordedSource: MotionSourceFingerprint {
+        MotionSourceFingerprint(name: "run1.1D", byteCount: 4096, modifiedAt: 1_700_000_000, rowCount: 200)
+    }
+
+    /// The motion file is an input to the correction that lives outside the
+    /// package. Recording it is what lets a replay notice it changed.
+    @MainActor
+    @Test func gradientStepRecordsWhichMotionFileItUsed() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.excludeHighMotion = true
+        vm.motionParameters = motionSeries(rows: 200, source: recordedSource)
+
+        let p = vm.parameters
+        #expect(p["motionSourceName"] == "run1.1D")
+        #expect(p["motionSourceBytes"] == "4096")
+        #expect(p["motionSourceModified"] == "1700000000")
+        #expect(p["motionSourceRows"] == "200")
+
+        // Restoring against the same file reports nothing.
+        let restored = GradientViewModel(store: RecordingStore())
+        restored.motionParameters = motionSeries(rows: 200, source: recordedSource)
+        restored.apply(parameters: p)
+        #expect(restored.motionSourceMismatch == nil)
+        #expect(restored.excludeHighMotion)
+    }
+
+    /// A trim changes which volumes are censored, so it changes the recorded
+    /// row count even though the file on disk is untouched.
+    @MainActor
+    @Test func trimmingTheMotionSeriesChangesTheRecordedRowCount() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.excludeHighMotion = true
+        vm.motionParameters = motionSeries(rows: 200, source: recordedSource).trimmed(start: 2, end: 0)
+
+        #expect(vm.parameters["motionSourceRows"] == "198")
+        #expect(vm.parameters["motionSourceName"] == "run1.1D")
+    }
+
+    /// The three ways a restored step's motion input can be wrong, each named
+    /// rather than silently corrected with whatever is loaded.
+    @MainActor
+    @Test func restoringReportsAMismatchedOrMissingMotionInput() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.excludeHighMotion = true
+        vm.motionParameters = motionSeries(rows: 200, source: recordedSource)
+        let recorded = vm.parameters
+
+        // 1. Nothing loaded at all.
+        let empty = GradientViewModel(store: RecordingStore())
+        empty.apply(parameters: recorded)
+        let missing = try! #require(empty.motionSourceMismatch)
+        #expect(missing.contains("run1.1D"))
+        #expect(missing.contains("no motion file is loaded"))
+
+        // 2. A different file.
+        let other = GradientViewModel(store: RecordingStore())
+        other.motionParameters = motionSeries(
+            rows: 200,
+            source: MotionSourceFingerprint(name: "run2.1D", byteCount: 4096, modifiedAt: 1_700_000_000, rowCount: 200)
+        )
+        other.apply(parameters: recorded)
+        #expect(try! #require(other.motionSourceMismatch).contains("run2.1D"))
+
+        // 3. The same name, edited since — the case a name-only check misses.
+        let edited = GradientViewModel(store: RecordingStore())
+        edited.motionParameters = motionSeries(
+            rows: 200,
+            source: MotionSourceFingerprint(name: "run1.1D", byteCount: 4192, modifiedAt: 1_700_009_999, rowCount: 200)
+        )
+        edited.apply(parameters: recorded)
+        let editedMessage = try! #require(edited.motionSourceMismatch)
+        #expect(editedMessage.contains("modified since"))
+        #expect(editedMessage.contains("4192 B"))
+    }
+
+    /// A step from before the fingerprint existed, or one whose correction used
+    /// no motion, has nothing to compare — and must not be reported as stale.
+    @MainActor
+    @Test func aStepWithNoRecordedMotionSourceIsNotAMismatch() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.method = .fastr
+        let withoutMotion = vm.parameters
+        #expect(withoutMotion["motionSourceName"] == nil)
+
+        let restored = GradientViewModel(store: RecordingStore())
+        restored.motionParameters = motionSeries(rows: 10, source: recordedSource)
+        restored.apply(parameters: withoutMotion)
+        #expect(restored.motionSourceMismatch == nil)
+    }
 }

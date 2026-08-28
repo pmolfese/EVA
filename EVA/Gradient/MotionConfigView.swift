@@ -27,6 +27,9 @@ struct MotionConfigView: View {
     @Binding var skipStart: Int
     @Binding var skipEnd: Int
     @Binding var trSeconds: Double
+    /// Set when the restored gradient step recorded a different motion file than
+    /// the one loaded now. See `GradientViewModel.motionSourceMismatch`.
+    @Binding var sourceMismatch: String?
 
     // Current MR gradient-removal configuration, shown for reference.
     let trMarkerCode: String
@@ -97,6 +100,13 @@ struct MotionConfigView: View {
                 Text(loadError)
                     .font(.caption)
                     .foregroundStyle(.red)
+            }
+
+            if let sourceMismatch {
+                Label(sourceMismatch, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack {
@@ -220,6 +230,7 @@ struct MotionConfigView: View {
                     Button(role: .destructive) {
                         parameters = nil
                         loadError = nil
+                        sourceMismatch = nil
                     } label: {
                         Label("Clear", systemImage: "trash")
                     }
@@ -301,12 +312,18 @@ struct MotionConfigView: View {
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
-            parameters = try MotionParameters.parse(
+            var parsed = try MotionParameters.parse(
                 text: text,
                 sourceName: url.lastPathComponent,
                 format: fileFormat
             )
+            // Record which file this was, so a later replay can tell that the
+            // motion input changed underneath it (ROADMAP RW-1 item 11).
+            parsed.source = MotionSourceFingerprint.read(fileAt: url, rowCount: parsed.count)
+            parameters = parsed
             loadError = nil
+            // The operator has answered the question the warning asked.
+            sourceMismatch = nil
             trimStart = 0
             trimEnd = 0
         } catch {

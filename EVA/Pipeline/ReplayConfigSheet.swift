@@ -34,10 +34,12 @@ nonisolated enum ReplayStepDisplay {
         case .trialExclusion: return "Reviewed Trial Exclusion"
         case .average: return "Average"
         case .combine: return "Combine"
+        case .combineInput: return "Combined Input"
         case .combineBadChannelPolicy: return "Combine Bad-channel Policy"
         case .split: return "Split"
         case .reference: return "Reference"
         case .bcgDetection: return "BCG Detection"
+        case .bcgCorrection: return "BCG Correction (PCA-S)"
         case .ecgDetection: return "ECG Detection"
         }
     }

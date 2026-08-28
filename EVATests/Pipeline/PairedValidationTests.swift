@@ -60,6 +60,7 @@ struct PairedValidationTests {
         let wavelet: WaveletReductionViewModel
         let template: ArtifactTemplateViewModel
         let segHealth: SegmentHealthViewModel
+        let bcg: BCGDetectionViewModel
 
         init() {
             filter = FilterViewModel(store: store)
@@ -70,11 +71,12 @@ struct PairedValidationTests {
             wavelet = WaveletReductionViewModel(store: store)
             template = ArtifactTemplateViewModel(store: store)
             segHealth = SegmentHealthViewModel(store: store)
+            bcg = BCGDetectionViewModel(store: store)
         }
 
         func core(positions: [Int: SIMD3<Double>] = [:]) -> ProcessingCore {
             ProcessingCore(
-                store: store, filter: filter, gradient: gradient, ica: ica,
+                store: store, filter: filter, gradient: gradient, bcg: bcg, ica: ica,
                 artifactVM: artifactVM, epoching: epoching, wavelet: wavelet,
                 template: template, segHealth: segHealth, electrodePositions: positions
             )
@@ -280,6 +282,7 @@ struct PairedValidationTests {
         // And it reaches the audit log, so a batch output says it too.
         let lines = ProcessingAuditLog.lines(
             gradient: replayed.gradient,
+            bcg: replayed.bcg,
             epoching: replayed.epoching,
             channels: replayed.store.channels,
             cleaningVariance: replayed.store.cleaningVariance
@@ -522,5 +525,167 @@ struct PairedValidationTests {
                 script: EVAProcessingScript(), hasICAPayload: false, hasArtifactPayload: false
             ).isEmpty
         )
+    }
+
+    // MARK: - PCA-S (ROADMAP SI-3)
+
+    /// A beat-locked recording with electrode coordinates: enough for PCA-S to
+    /// have something to remove and somewhere to put the brain model.
+    private func beatLockedSignal(
+        channelCount: Int = 16, samplingRate: Double = 250, duration: Double = 30
+    ) -> (signal: MFFSignalData, positions: [Int: SIMD3<Double>]) {
+        let sampleCount = Int(samplingRate * duration)
+        var state: UInt64 = 5_150_237
+        func noise() -> Double {
+            state = state &* 6_364_136_223_846_793_005 &+ 1
+            return (Double(state >> 40) / Double(UInt32.max) - 0.5) * 8
+        }
+        var data = (0..<channelCount).map { channel in
+            (0..<sampleCount).map { sample in
+                Float(6 * sin(2 * .pi * (7 + Double(channel % 3)) * Double(sample) / samplingRate)
+                      + noise())
+            }
+        }
+        // Beats every 0.85 s, each stamping a fixed spatial pattern.
+        var beatTimes: [Double] = []
+        let pattern = (0..<channelCount).map { cos(Double($0) / Double(channelCount) * 2 * .pi) }
+        var time = 1.0
+        while time < duration - 1 {
+            beatTimes.append(time)
+            let start = Int(time * samplingRate)
+            for offset in 0..<Int(0.5 * samplingRate) where start + offset < sampleCount {
+                let phase = Double(offset) / (0.5 * samplingRate)
+                let shape = sin(2 * .pi * phase) * exp(-1.5 * phase)
+                for channel in 0..<channelCount {
+                    data[channel][start + offset] += Float(60 * shape * pattern[channel])
+                }
+            }
+            time += 0.85
+        }
+        let events = beatTimes.enumerated().map { index, seconds in
+            MFFEvent(
+                id: "beat\(index)", code: BCGDetector.eventCode,
+                beginTimeSeconds: seconds,
+                rawBeginTime: "\(Int(seconds * samplingRate))", sourceFile: "test"
+            )
+        }
+        let signal = MFFSignalData(
+            signalURL: URL(fileURLWithPath: "/tmp/paired-pcas.bin"),
+            signalType: "EEG",
+            numberOfChannels: channelCount,
+            samplingRate: samplingRate,
+            duration: duration,
+            recordingStartTime: nil,
+            events: events,
+            data: data,
+            channelNames: (0..<channelCount).map { "E\($0 + 1)" }
+        )
+        return (signal, positions(channelCount))
+    }
+
+    /// SI-3's exit criterion, as a byte comparison: the same recording and the
+    /// same settings must produce the same samples whether PCA-S is applied
+    /// through the sheet's runner or replayed headlessly from `eva.xml`.
+    ///
+    /// Both sides go through `BCGSurrogateCorrection`, which is the point — the
+    /// test is here to catch a *second* path appearing, the way the gradient
+    /// cascade grew four hand-written copies before RW-1 item 14 found them.
+    @Test func surrogateCorrectionMatchesBetweenDirectUseAndHeadlessReplay() async throws {
+        let fixture = beatLockedSignal()
+        var settings = BCGSurrogateSettings.default
+        settings.regionalSourceCount = 20
+
+        // Interactive: what the sheet's runner does, minus the view models.
+        let beats = fixture.signal.events
+            .filter { $0.code == BCGDetector.eventCode }
+            .map(\.beginTimeSeconds)
+        let direct = try await BCGSurrogateCorrection.correct(
+            data: fixture.signal.data,
+            samplingRate: fixture.signal.samplingRate,
+            correctedRows: Array(fixture.signal.data.indices),
+            geometry: ElectrodeGeometry(name: "test", positions: fixture.positions),
+            channelNames: fixture.signal.channelNames,
+            beatSeconds: beats,
+            settings: settings
+        )
+
+        // Headless: the same thing arrived at from a recorded script.
+        var script = EVAProcessingScript()
+        var parameters = settings.parameters
+        parameters["method"] = BCGDetectionMethod.surrogatePCAS.rawValue
+        parameters["beatEventCode"] = BCGDetector.eventCode
+        script.append(EVAProcessingStep(operation: .bcgCorrection, parameters: parameters))
+
+        let pipeline = Pipeline()
+        let core = pipeline.core(positions: fixture.positions)
+        let result = await core.applyAutoSteps(script, to: fixture.signal)
+
+        #expect(result.remainingSteps.isEmpty, "the step did not run headlessly")
+        let headless = try #require(result.signal)
+        expectSameSamples(
+            fixture.signal.replacingSamples(direct.data),
+            headless,
+            "PCA-S interactive vs headless"
+        )
+
+        // The premise: the correction actually changed the recording, so the
+        // comparison is not two copies of the input.
+        #expect(headless.data != fixture.signal.data)
+        // And the headless path leaves the same provenance the interactive one
+        // does — the account the roadmap names, and the fitted report.
+        #expect(pipeline.store.cleaningVariance.accounts.contains {
+            $0.stageName == BCGSurrogateCorrection.varianceStageName
+        })
+        let report = try #require(pipeline.bcg.surrogateReport)
+        #expect(report.artifactComponentCount == direct.report.artifactComponentCount)
+        #expect(pipeline.bcg.appliedCorrection == .surrogatePCAS)
+    }
+
+    /// A file with no beats must stop the walk rather than emit an uncorrected
+    /// recording whose own script claims it was corrected.
+    @Test func headlessSurrogateCorrectionStopsWhenTheFileHasNoBeats() async throws {
+        let fixture = beatLockedSignal()
+        let withoutBeats = MFFSignalData(
+            signalURL: fixture.signal.signalURL,
+            signalType: fixture.signal.signalType,
+            numberOfChannels: fixture.signal.numberOfChannels,
+            samplingRate: fixture.signal.samplingRate,
+            duration: fixture.signal.duration,
+            recordingStartTime: nil,
+            events: [],
+            data: fixture.signal.data,
+            channelNames: fixture.signal.channelNames
+        )
+        var script = EVAProcessingScript()
+        var parameters = BCGSurrogateSettings.default.parameters
+        parameters["beatEventCode"] = BCGDetector.eventCode
+        script.append(EVAProcessingStep(operation: .bcgCorrection, parameters: parameters))
+
+        let pipeline = Pipeline()
+        let core = pipeline.core(positions: fixture.positions)
+        let result = await core.applyAutoSteps(script, to: withoutBeats)
+
+        #expect(result.remainingSteps.count == 1, "the step must not be treated as done")
+        #expect(result.signal?.data == withoutBeats.data)
+        #expect(pipeline.bcg.correctedSignal == nil)
+    }
+
+    /// Geometry is a refusal, not a fallback — headlessly too, where there is
+    /// nobody to warn.
+    @Test func headlessSurrogateCorrectionStopsWithoutCoordinates() async throws {
+        let fixture = beatLockedSignal()
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(
+            operation: .bcgCorrection,
+            parameters: BCGSurrogateSettings.default.parameters
+        ))
+
+        let pipeline = Pipeline()
+        // No positions: the package carried no coordinates.
+        let core = pipeline.core()
+        let result = await core.applyAutoSteps(script, to: fixture.signal)
+
+        #expect(result.remainingSteps.count == 1)
+        #expect(pipeline.bcg.correctedSignal == nil)
     }
 }

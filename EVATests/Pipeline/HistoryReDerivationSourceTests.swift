@@ -123,6 +123,7 @@ struct HistoryReDerivationSourceTests {
             store: store,
             filter: FilterViewModel(store: store),
             gradient: GradientViewModel(store: store),
+            bcg: BCGDetectionViewModel(store: store),
             ica: ICAViewModel(store: store),
             artifactVM: ArtifactViewModel(store: store),
             epoching: EpochingViewModel(store: store),

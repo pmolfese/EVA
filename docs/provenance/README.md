@@ -28,6 +28,7 @@ completed and the historical engines were deleted.
 | `amri-functional-spec.md` | The AMRI-style local-template specification. |
 | `simulation-forward-model.md` | Derivation record for `Tools/EVASimulate`, the ground-truth simulation harness the correction methods are measured against. |
 | `dirty-vs-clean-comparison.md` | Dirty-room audit note comparing the old and new implementations. Validation material, not implementation guidance. |
+| `method-comparison.md` | Design record and measured results for the method-comparison harness — what each correction method scores against simulated ground truth, and what those numbers do and do not support. |
 
 `docs/dirty-room/` holds dirty-room notes that quote reference-toolbox internals.
 It is blocked by `.claude/hooks/block-dirty-room.sh` and must not be read during
@@ -361,3 +362,6 @@ test path when those exist.
   [fastr-functional-spec.md](fastr-functional-spec.md)
 - AMRI-style template methods:
   [amri-functional-spec.md](amri-functional-spec.md)
+
+Measured comparisons between the implemented methods:
+[method-comparison.md](method-comparison.md)

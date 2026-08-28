@@ -481,6 +481,16 @@ struct WaveformView: View {
         nonmutating set { recordingStore.selection.scrollToChannelRequest = newValue }
     }
     @State var showsChannelInspector = false
+    /// A/B compare against another open window (ROADMAP RW-1 item 10).
+    @State var showsWindowComparison = false
+    /// Identifies which windows are the *same* experiment. Forking copies the
+    /// parent's, so a window and everything forked from it share one; opening
+    /// the same file again independently gets a new one. See
+    /// `WindowComparisonRegistry`.
+    @State var comparisonGroupID = UUID()
+    /// The node this window was forked at, when it was a fork — shown so a
+    /// comparison says where the two lineages parted.
+    @State var comparisonForkedFromNode: String?
     @State var channelInspectorSelection: ChannelInspectorSelection = .channel(0)
     @State var channelInspectorOverlayEnabled = true
     @State var channelInspectorShowsStandardError = false
@@ -1008,6 +1018,42 @@ struct WaveformView: View {
             isAnalyzingHealth: channels.isAnalyzingHealth,
             healthProgress: channels.healthProgress
         )
+        publishComparisonContext(signal: signal)
+    }
+
+    /// Publishes what another window's compare sheet needs to know about this
+    /// one: its identity, its place in the fork relation, and the signal it is
+    /// currently showing.
+    ///
+    /// Shares `publishChannelsWindowLiveContext`'s call sites deliberately —
+    /// those already fire on exactly the changes that make a comparison stale
+    /// (a new signal revision, new health results), and the registry drops a
+    /// publish whose snapshot is unchanged.
+    func publishComparisonContext(signal: MFFSignalData) {
+        let history = recordingStore.processingHistory
+        let lineage = history.history.currentPath.compactMap { $0.step?.operation }
+        let summary = lineage.isEmpty
+            ? "raw"
+            : lineage.suffix(3).map { ReplayStepDisplay.label(for: $0) }.joined(separator: " → ")
+        let segmentScores = segHealth.analysis?.results.map(\.goodPercentage) ?? []
+        WindowComparisonRegistry.shared.publish(ComparableWindow(
+            id: recording.id,
+            groupID: comparisonGroupID,
+            packageName: recording.packageName,
+            packageURL: recording.packageURL,
+            currentNode: history.history.currentID.short,
+            lineageSummary: summary,
+            forkedFromNode: comparisonForkedFromNode,
+            signal: signal,
+            badChannelCount: channels.bad.count,
+            interpolatedChannelCount: channels.interpolated.count,
+            segmentHealthMeanGood: segmentScores.isEmpty
+                ? nil
+                : Int((Double(segmentScores.reduce(0, +)) / Double(segmentScores.count)).rounded()),
+            artifactsAssessed: artifactVM.hasAssessedArtifacts
+                || !template.definedArtifacts.isEmpty
+                || !artifactVM.events.isEmpty
+        ))
     }
 
     /// Applies a fork's captured state on top of ordinary load-time seeding —
@@ -1038,6 +1084,10 @@ struct WaveformView: View {
     /// node appended after the fork point) actually were.
     private func applyForkSeed() {
         guard let forkSeed else { return }
+        // A fork continues the source window's experiment, so it joins its
+        // comparison group rather than starting one (ROADMAP RW-1 item 10).
+        comparisonGroupID = forkSeed.comparisonGroupID
+        comparisonForkedFromNode = forkSeed.forkedFromNode
         recordingStore.processingHistory.seedFork(forkSeed.historySeed)
         recordingStore.channels = forkSeed.channels
         PipelineSnapshotting.restore(
@@ -2252,6 +2302,9 @@ struct WaveformView: View {
                 onStepForward: { stepHistoryForward() },
                 onFork: { forkToNewWindow() },
                 onForkNode: { forkNode(EVAHistoryNodeID(hex: $0)) },
+                onCompare: { showsWindowComparison = true },
+                comparableWindowCount: WindowComparisonRegistry.shared
+                    .comparisonCandidates(for: recording.id).count,
                 cacheSummary: recordingStore.processingHistory.snapshotBudgetSummary,
                 onTogglePinNode: { togglePin(EVAHistoryNodeID(hex: $0)) },
                 onRenameNode: { beginRenamingHistoryNode(EVAHistoryNodeID(hex: $0)) }
@@ -2659,6 +2712,33 @@ struct WaveformView: View {
         PipelineInvalidation.interpolations(store: recordingStore)
     }
 
+    /// Interactive entry point for the **base-signal** cascade — the one every
+    /// stage that replaces the signal underneath ICA must use.
+    ///
+    /// Four sites used to assemble this by hand from the primitives (gradient
+    /// apply and clear, CWL apply and disable). They agreed with
+    /// `PipelineInvalidation.downstreamOfBaseSignalChange` on the caches and
+    /// disagreed on the variance ledger: the headless path cleared the
+    /// `icaClean`/`artifactClean` accounts, the interactive one left them, so an
+    /// export after an interactive gradient correction could carry a variance
+    /// line describing cleaning that had just been invalidated. Assembling the
+    /// cascade at a call site is what produces that class of divergence, so
+    /// there is one interactive entry point and no primitives-based recipe.
+    ///
+    /// `clearsICA` is false only when ICA itself is the stage that just ran.
+    func invalidateDownstreamOfBaseSignalChange(clearsICA: Bool = true) {
+        PipelineInvalidation.downstreamOfBaseSignalChange(
+            store: recordingStore,
+            ica: ica,
+            filter: filter,
+            artifactVM: artifactVM,
+            template: template,
+            epoching: epoching,
+            segHealth: segHealth,
+            clearsICA: clearsICA
+        )
+    }
+
     private func tearDownRecordingSessionForClose() {
         recordingSessionID = UUID()
         cancelInFlightRecordingTasks()
@@ -2712,6 +2792,10 @@ struct WaveformView: View {
 
     private func clearRecordingStateForClose() {
         removeOptionKeyMonitor()
+        // Another window's compare sheet must not be able to reach a signal
+        // this window is about to release.
+        WindowComparisonRegistry.shared.unregister(id: recording.id)
+        showsWindowComparison = false
 
         filter.resetForClose()
         ica.resetForClose()

@@ -24,6 +24,9 @@ struct BatchSetupSheet: View {
     let onStart: () -> Void
 
     @State private var files: [URL] = []
+    /// Beat/event codes shared by every selected file — see
+    /// `refreshSharedBeatEventCodes`.
+    @State private var sharedBeatEventCodes: Set<String> = []
     @State private var outputFolder: URL?
     @State private var sourceName = ""
     @State private var script: EVAProcessingScript?
@@ -85,6 +88,9 @@ struct BatchSetupSheet: View {
             .padding(20)
         }
         .frame(width: 520)
+        .onChange(of: files, initial: true) { _, _ in
+            refreshSharedBeatEventCodes()
+        }
     }
 
     // MARK: Sections
@@ -258,7 +264,12 @@ struct BatchSetupSheet: View {
             hasArtifactPayload: everyFileHasItsOwn(ArtifactReplayPayload.read),
             hasElectrodeGeometry: everyFileHasItsOwn { url in
                 ElectrodeGeometry.load(from: url).flatMap { $0.positions.isEmpty ? nil : $0 }
-            }
+            },
+            // Beat codes present in *every* selected file, on the same
+            // all-or-nothing rule as the payloads: one file with no beats keeps
+            // a recorded PCA-S step a decision for the whole run rather than
+            // letting it fail partway through (ROADMAP SI-3).
+            beatEventCodes: sharedBeatEventCodes
         )
     }
 
@@ -356,6 +367,27 @@ struct BatchSetupSheet: View {
     /// file can re-apply it. A file without a sidecar needs a human, which is
     /// exactly the window this gate exists to open. Reading a few tens of KB of
     /// JSON per file at setup is cheap next to being wrong about it.
+    /// Event codes every selected file carries, read from each package's own
+    /// `Events*.xml` — no sample data, and recomputed only when the selection
+    /// changes rather than on every body evaluation.
+    private func refreshSharedBeatEventCodes() {
+        guard !files.isEmpty else {
+            sharedBeatEventCodes = []
+            return
+        }
+        var shared: Set<String>?
+        let reader = MFFReader()
+        for url in files {
+            guard let events = try? reader.loadEvents(from: url) else {
+                sharedBeatEventCodes = []
+                return
+            }
+            let codes = Set(events.map(\.code))
+            shared = shared.map { $0.intersection(codes) } ?? codes
+        }
+        sharedBeatEventCodes = shared ?? []
+    }
+
     private func everyFileHasItsOwn<Payload>(_ read: (URL) -> Payload?) -> Bool {
         !files.isEmpty && files.allSatisfy { read($0) != nil }
     }

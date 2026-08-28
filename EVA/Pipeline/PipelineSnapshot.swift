@@ -59,6 +59,15 @@ struct PipelineSnapshot {
     var gradientSignal: MFFSignalData?
     var gradientPNSSignal: MFFSignalData?
     var bcgSignal: MFFSignalData?
+    /// Which correction produced `bcgSignal`, and what it fitted.
+    ///
+    /// Restored with the signal because the *script* is derived from this: a
+    /// node whose signal came from PCA-S has to keep saying so after a
+    /// navigation, or the recorded lineage would describe a correction that no
+    /// longer names its method (ROADMAP SI-3).
+    var bcgAppliedCorrection: BCGDetectionMethod?
+    var bcgSurrogateReport: BCGSurrogateReport?
+    var bcgSurrogateAuditLogLines: [String] = []
     var icaSignal: MFFSignalData?
     var filterOutput: MFFSignalData?
     var filterPNSOutput: MFFSignalData?
@@ -135,6 +144,9 @@ enum PipelineSnapshotting {
             gradientSignal: gradient.correctedSignal,
             gradientPNSSignal: gradient.correctedPNSSignal,
             bcgSignal: bcg.correctedSignal,
+            bcgAppliedCorrection: bcg.appliedCorrection,
+            bcgSurrogateReport: bcg.surrogateReport,
+            bcgSurrogateAuditLogLines: bcg.surrogateAuditLogLines,
             icaSignal: ica.cleanedSignal,
             filterOutput: filter.output,
             filterPNSOutput: filter.pnsOutput,
@@ -182,6 +194,9 @@ enum PipelineSnapshotting {
         gradient.correctedSignal = snapshot.gradientSignal
         gradient.correctedPNSSignal = snapshot.gradientPNSSignal
         bcg.correctedSignal = snapshot.bcgSignal
+        bcg.appliedCorrection = snapshot.bcgAppliedCorrection
+        bcg.surrogateReport = snapshot.bcgSurrogateReport
+        bcg.surrogateAuditLogLines = snapshot.bcgSurrogateAuditLogLines
         ica.cleanedSignal = snapshot.icaSignal
         filter.output = snapshot.filterOutput
         filter.pnsOutput = snapshot.filterPNSOutput

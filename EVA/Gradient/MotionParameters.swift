@@ -76,14 +76,104 @@ nonisolated enum MotionParametersError: LocalizedError {
     }
 }
 
+/// Cheap identity of the external file a motion series was read from.
+///
+/// Motion parameters are the one correction input that lives outside the
+/// recording package: nothing in `eva.xml` used to say *which* file produced the
+/// censored-volume set, so replaying a gradient step with a different — or
+/// edited — motion file produced different samples under an identical history
+/// node (ROADMAP RW-1 item 11). This is the explicit staleness rule for that
+/// input.
+///
+/// Name, size, and modification date, as the roadmap's cache policy prescribes:
+/// cheap source metadata, no content digest. It cannot prove two files are
+/// identical, and is not asked to — it detects the ordinary ways a motion file
+/// stops being the one that was used, and says so instead of correcting on.
+nonisolated struct MotionSourceFingerprint: Sendable, Equatable {
+    var name: String
+    var byteCount: Int
+    /// Whole seconds since 1970: the resolution that survives a file copy, an
+    /// archive round-trip, and a plist encode.
+    var modifiedAt: Int
+    /// Rows *as used* — after any trim — rather than as found in the file, since
+    /// the trimmed series is what the correction consumed.
+    var rowCount: Int
+
+    static let parameterPrefix = "motionSource"
+
+    var parameterValues: [String: String] {
+        [
+            "\(Self.parameterPrefix)Name": name,
+            "\(Self.parameterPrefix)Bytes": "\(byteCount)",
+            "\(Self.parameterPrefix)Modified": "\(modifiedAt)",
+            "\(Self.parameterPrefix)Rows": "\(rowCount)"
+        ]
+    }
+
+    init(name: String, byteCount: Int, modifiedAt: Int, rowCount: Int) {
+        self.name = name
+        self.byteCount = byteCount
+        self.modifiedAt = modifiedAt
+        self.rowCount = rowCount
+    }
+
+    /// Reads back a fingerprint recorded in a processing step's parameters.
+    init?(parameters: [String: String]) {
+        let prefix = Self.parameterPrefix
+        guard let name = parameters["\(prefix)Name"],
+              let bytes = parameters["\(prefix)Bytes"].flatMap(Int.init),
+              let modified = parameters["\(prefix)Modified"].flatMap(Int.init),
+              let rows = parameters["\(prefix)Rows"].flatMap(Int.init) else { return nil }
+        self.init(name: name, byteCount: bytes, modifiedAt: modified, rowCount: rows)
+    }
+
+    /// Fingerprints the file at `url`, or `nil` when its attributes are
+    /// unreadable — an unknown fingerprint is recorded as absent rather than as
+    /// zeroes, which would compare equal to another unreadable file.
+    static func read(fileAt url: URL, rowCount: Int) -> MotionSourceFingerprint? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = values.fileSize,
+              let modified = values.contentModificationDate else { return nil }
+        return MotionSourceFingerprint(
+            name: url.lastPathComponent,
+            byteCount: size,
+            modifiedAt: Int(modified.timeIntervalSince1970.rounded()),
+            rowCount: rowCount
+        )
+    }
+
+    /// Why `self` is not the file `recorded` describes, in one sentence, or
+    /// `nil` when nothing detectable differs.
+    func mismatch(against recorded: MotionSourceFingerprint) -> String? {
+        guard self != recorded else { return nil }
+        var parts: [String] = []
+        if name != recorded.name { parts.append("file is \(name), was \(recorded.name)") }
+        if byteCount != recorded.byteCount { parts.append("size \(byteCount) B, was \(recorded.byteCount) B") }
+        if modifiedAt != recorded.modifiedAt { parts.append("modified since") }
+        if rowCount != recorded.rowCount { parts.append("\(rowCount) rows, was \(recorded.rowCount)") }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "; ")
+    }
+}
+
 nonisolated struct MotionParameters: Sendable {
     var samples: [MotionSample]
     /// Display name of the file the parameters were read from.
     var sourceName: String
     /// How the loaded numeric rows were interpreted.
     var format: MotionFileFormat = .afni3dvolreg
+    /// Identity of the file on disk, when it was loaded from one.
+    var source: MotionSourceFingerprint?
 
     var count: Int { samples.count }
+
+    /// The fingerprint to record for the series as it stands — the loaded file's
+    /// identity with the row count it currently has, so a trim is visible.
+    var currentFingerprint: MotionSourceFingerprint? {
+        guard var source else { return nil }
+        source.rowCount = samples.count
+        return source
+    }
 
     /// Framewise displacement (Power et al. 2012) in mm, one value per volume.
     ///
@@ -130,7 +220,7 @@ nonisolated struct MotionParameters: Sendable {
                 dS: sample.dS, dL: sample.dL, dP: sample.dP
             )
         }
-        return MotionParameters(samples: reindexed, sourceName: sourceName, format: format)
+        return MotionParameters(samples: reindexed, sourceName: sourceName, format: format, source: source)
     }
 
     /// Parses the text contents of an AFNI 3dvolreg file or BERGEN/SPM rp_*.txt.

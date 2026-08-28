@@ -747,4 +747,43 @@ struct TrialExclusionResolverTests {
         )
         #expect(HistoryStepSummary.subtitle(for: step).contains("2 rules"))
     }
+
+    // MARK: - Per-category clearing
+
+    @Test func clearingOneCategoryLeavesTheOthersCriteriaIntact() {
+        var looser = TrialSelectionAnalyzer.Criteria()
+        looser.minCorrelation = 0.1
+
+        let both = commit(
+            [reviewed("RC++", index: 1, time: 3)], for: "RC++", criteria: looser, channel: "Pz", into:
+                commit([reviewed("LC++", index: 0, time: 0)], for: "LC++", into: nil)
+        )
+        let remaining = TrialExclusionResolver.removing(category: "LC++", from: both)
+
+        #expect(remaining?.excludedTrials.map(\.category) == ["RC++"])
+        #expect(remaining?.parameters["RC++.minCorrelation"] == "0.1000")
+        #expect(remaining?.parameters["RC++.channels"] == "Pz")
+        #expect(remaining?.parameters["LC++.channels"] == nil)
+        #expect(remaining?.id == both.id, "clearing a category edits the decision, it does not start a new one")
+    }
+
+    /// The rule is "does anything still get excluded", not "are there any
+    /// trials left". A step carrying only restorations records that the rule
+    /// was overruled everywhere and removes nothing — a record committing could
+    /// never have produced, so clearing must not produce it either.
+    @Test func clearingDownToRestorationsOnlyRemovesTheStep() {
+        let both = commit(
+            [reviewed("RC++", index: 0, time: 1, origin: .restored)], for: "RC++", into:
+                commit([reviewed("LC++", index: 0, time: 0)], for: "LC++", into: nil)
+        )
+        #expect(both.excludedTrials.count == 2)
+        #expect(TrialExclusionResolver.removing(category: "LC++", from: both) == nil)
+    }
+
+    @Test func clearingACategoryThatWasNeverCommittedChangesNothing() {
+        let only = commit([reviewed("LC++", index: 0, time: 0)], for: "LC++", into: nil)
+        let after = TrialExclusionResolver.removing(category: "RC++", from: only)
+        #expect(after?.excludedTrials.count == 1)
+        #expect(after?.parameters["LC++.minCorrelation"] != nil)
+    }
 }

@@ -442,6 +442,12 @@ struct CombineRecordingsSheet: View {
                     let out = try RecordingCombiner.append(inputs, log: log)
                     signal = out.signal; segments = out.segments; kind = .epoched
                     script.append(EVAProcessingStep(operation: .combine, parameters: ["mode": "append", "files": "\(inputs.count)"]))
+                    // The combined file starts its own history; the inputs are
+                    // recorded at its root rather than spliced into its lineage
+                    // (ROADMAP RW-1 item 15).
+                    for step in RecordingCombiner.contributorProvenanceSteps(for: inputs) {
+                        script.append(step)
+                    }
                 case .grandAverage:
                     let out = try RecordingCombiner.grandAverage(
                         inputs, categoryMap: map, weighting: weighting,
@@ -477,6 +483,9 @@ struct CombineRecordingsSheet: View {
                         "badChannels": policy.rawValue, "rebaselined": "\(rebaseline)",
                         "files": "\(inputs.count)"
                     ]))
+                    for step in RecordingCombiner.contributorProvenanceSteps(for: inputs) {
+                        script.append(step)
+                    }
                     for step in RecordingCombiner.badChannelProvenanceSteps(for: inputs, policy: policy) {
                         script.append(step)
                     }

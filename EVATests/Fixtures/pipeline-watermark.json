@@ -18,7 +18,7 @@
     "note": "Pan-Tompkins detection on the simulated ECG followed by EVA MAS with AMRI preprocessing and a 21-beat local template. Four-generator BCG, 25 ms simulated detector-marker jitter, 60 s at 250 Hz. Recorded 2026-08-25."
   },
   "oddball-erp": {
-    "erpAmplitudeErrorMicrovolts": 4.3829353610,
+    "erpAmplitudeErrorMicrovolts": 4.382935361,
     "erpLatencyErrorMilliseconds": 8.0,
     "note": "Thirty-trial oddball (six targets, one omitted response), baseline-corrected and category-averaged headlessly. Error is measured at the truth topography's strongest sensor against the simulator's exact target-average peak. Recorded 2026-08-25."
   },
@@ -27,5 +27,9 @@
     "bridgeCorrelation": 1.0,
     "commonModeRMSMicrovolts": 30.6988551325,
     "note": "The two known bad channels are the two lowest ChannelHealth scores; the planted bridge is perfectly correlated; the bad-reference contamination leaves a 30.7 uV common-mode RMS. Recorded 2026-08-25."
+  },
+  "bcg-pcas": {
+    "improvementRatio": 1.7276751808,
+    "note": "Surrogate-source separation (PCA-S) on the 32-channel bcg-labeller-train-standard case: four-generator BCG at field strength 3, dipole EEG from seven sources, 30 s at 200 Hz, no gradient. Pan-Tompkins beats from the simulated ECG, package coordinates, classic three-shell head, 29 regional sources, 2% brain regularization, iterative pattern search. Recorded 2026-08-27: SNR 0.778 to 1.344, 38 of 40 beats accepted, four artifact components retained with split-half reliabilities 0.95-1.00 (the paper reports 4-8 per subject), 88% of the variance removed. The oracle spatial-filter ceiling for this case is 321, so the anti-leakage bound is loose here by construction -- the simulated BCG is exactly low-rank, which an oracle fitted on the truth can null almost perfectly and no honest method can. It still catches the failure it exists for: a score in the hundreds would mean the clean recording had reached the correction."
   }
 }

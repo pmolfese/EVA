@@ -83,6 +83,11 @@ struct ProcessingStatusPopoverView: View {
     let onStepForward: () -> Void
     let onFork: () -> Void
     let onForkNode: (String) -> Void
+    /// "Compare With…" — A/B against another open window (ROADMAP RW-1 item 10).
+    var onCompare: (() -> Void)?
+    /// How many other windows are available to compare against, for the
+    /// button's enabled state and its explanation.
+    var comparableWindowCount: Int = 0
     /// What the snapshot cache is holding against its budget — see
     /// `RecordingHistoryModel.snapshotBudgetSummary`.
     var cacheSummary: String = ""
@@ -112,6 +117,8 @@ struct ProcessingStatusPopoverView: View {
                         onStepForward: onStepForward,
                         onFork: onFork,
                         onForkNode: onForkNode,
+                        onCompare: onCompare,
+                        comparableWindowCount: comparableWindowCount,
                         cacheSummary: cacheSummary,
                         onTogglePinNode: onTogglePinNode,
                         onRenameNode: onRenameNode
@@ -356,6 +363,9 @@ struct HistoryTabView: View {
     /// now" (footer) and "that other node up there" (right-click) without
     /// first clicking to navigate there.
     let onForkNode: (String) -> Void
+    /// A/B compare against another open window, when there is one.
+    var onCompare: (() -> Void)?
+    var comparableWindowCount: Int = 0
     /// Cache occupancy against the byte budget. Empty hides the line.
     var cacheSummary: String = ""
     var onTogglePinNode: ((String) -> Void)?
@@ -418,6 +428,21 @@ struct HistoryTabView: View {
             }
             .help("Open a new window on this recording, starting from exactly what's on screen — edit it independently from here.")
             .accessibilityLabel("Fork to new window")
+
+            // The other half of forking: having made the alternative, measure
+            // it (ROADMAP RW-1 item 10). Disabled rather than hidden when this
+            // is the only window, so the pairing with Fork stays visible.
+            if let onCompare {
+                Button(action: onCompare) {
+                    Label("Compare With…", systemImage: "arrow.left.arrow.right.square")
+                        .labelStyle(.iconOnly)
+                }
+                .disabled(comparableWindowCount == 0)
+                .help(comparableWindowCount == 0
+                      ? "Fork this window (or open another recording) to have something to compare against."
+                      : "Compare this window's signal against another open window: overlay, difference, and per-channel metrics.")
+                .accessibilityLabel("Compare with another window")
+            }
 
             Text(shortID)
                 .font(.system(.caption, design: .monospaced))

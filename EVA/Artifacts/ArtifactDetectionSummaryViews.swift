@@ -250,6 +250,11 @@ extension WaveformView {
         case .completed(let detectedEvents):
             artifactVM.isDetecting = false
             artifactVM.events = detectedEvents
+            // A finished run is a verdict even when it found nothing — the
+            // distinction Segment Health needs. Only the publishing path records
+            // it: a cancelled or superseded run describes inputs that may
+            // already be stale.
+            artifactVM.recordCompletedDetection()
             artifactVM.statusMessage = artifactDetectionSummary(for: detectedEvents)
 
         case .cancelled:
