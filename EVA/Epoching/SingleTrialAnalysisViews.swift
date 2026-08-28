@@ -1587,9 +1587,22 @@ struct SingleTrialAnalysisSheet: View {
 
         // Only the selected category gets panels; the others were scored so the
         // cross-category comparison had something to compare against.
-        guard let scored = similarity.first(where: { $0.name == selected }),
-              let input = inputs.first(where: { $0.name == selected }) else {
+        guard let input = inputs.first(where: { $0.name == selected }) else {
             viewModel.diagnosticsRows = []
+            viewModel.statusMessage = "\(selected) is not among the categories being scored."
+            viewModel.setupIsExpanded = true
+            return
+        }
+        // The analyzer drops a category rather than failing the whole run, so a
+        // non-nil result can still be missing the one that is selected — the
+        // other categories scored fine. Saying nothing here read as "Score does
+        // nothing on this file"; the two causes are both fixable, so name them.
+        guard let scored = similarity.first(where: { $0.name == selected }) else {
+            viewModel.diagnosticsRows = []
+            viewModel.statusMessage = input.trials.count < 2
+                ? "\(selected) has \(input.trials.count == 1 ? "one trial" : "no trials"). Scoring compares each trial against the average of the others, so it needs at least two."
+                : "No trial in \(selected) covers \(Int(windowStart.rounded()))–\(Int(windowEnd.rounded())) ms. Move the window inside the epoch and score again."
+            viewModel.setupIsExpanded = true
             return
         }
 
