@@ -525,6 +525,238 @@ nonisolated enum SelfTest {
                 passed: equalityRelativeError < 1e-12,
                 expectation: "three equal-conductivity layers match one homogeneous sphere"
             ))
+
+            // The N-shell recurrence must handle four shells, not just three.
+            // Oracle without a second implementation: a 4-shell whose CSF layer
+            // carries the same conductivity as the brain has no brain/CSF
+            // boundary, so it must equal a 3-shell whose brain radius is the CSF
+            // radius. The skull and scalp are left genuinely discontinuous, so
+            // this exercises the four-shell recurrence rather than a trivial
+            // homogeneous case.
+            let fourShellCollapsing = SphericalHeadModel(
+                name: "four-shell, CSF conductivity equals brain",
+                centerMeters: .zero,
+                shells: [
+                    HeadShell(name: "brain", radiusMeters: 0.072, conductivitySiemensPerMeter: 0.33),
+                    HeadShell(name: "csf", radiusMeters: 0.074, conductivitySiemensPerMeter: 0.33),
+                    HeadShell(name: "skull", radiusMeters: 0.079, conductivitySiemensPerMeter: 0.0042),
+                    HeadShell(name: "scalp", radiusMeters: 0.085, conductivitySiemensPerMeter: 0.33)
+                ]
+            )
+            let threeShellEquivalent = SphericalHeadModel(
+                name: "three-shell with brain radius at the CSF boundary",
+                centerMeters: .zero,
+                shells: [
+                    HeadShell(name: "brain", radiusMeters: 0.074, conductivitySiemensPerMeter: 0.33),
+                    HeadShell(name: "skull", radiusMeters: 0.079, conductivitySiemensPerMeter: 0.0042),
+                    HeadShell(name: "scalp", radiusMeters: 0.085, conductivitySiemensPerMeter: 0.33)
+                ]
+            )
+            let fourShellField = try SphericalForwardModel.leadField(
+                head: fourShellCollapsing, montage: montage, sources: [offCenter],
+                reference: .infinity, terms: 100
+            )
+            let equivalentField = try SphericalForwardModel.leadField(
+                head: threeShellEquivalent, montage: montage, sources: [offCenter],
+                reference: .infinity, terms: 100
+            )
+            var fourShellError = 0.0
+            var fourShellPeak = 0.0
+            for channel in montage.electrodes.indices {
+                let four = fourShellField.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                let three = equivalentField.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                fourShellError = max(fourShellError, abs(four - three))
+                fourShellPeak = max(fourShellPeak, abs(four))
+            }
+            let fourShellRelativeError = fourShellError / max(fourShellPeak, 1e-30)
+            outcomes.append(Outcome(
+                name: "Four-shell recurrence collapses correctly when CSF equals brain",
+                snr: fourShellRelativeError,
+                passed: fourShellRelativeError < 1e-12,
+                expectation: "a 4-shell with CSF=brain conductivity matches the equivalent 3-shell"
+            ))
+
+            // The shipped `classicFourShell` must produce a finite, well-scaled
+            // field that genuinely differs from `classicThreeShell` — inserting a
+            // highly-conductive CSF layer measurably changes the surface field,
+            // which is the whole point of offering it for the SI-4 mismatch sweep.
+            let fourShellShipped = try SphericalForwardModel.leadField(
+                head: .classicFourShell, montage: montage, sources: [offCenter],
+                reference: .infinity, terms: 100
+            )
+            let threeShellShipped = try SphericalForwardModel.leadField(
+                head: .classicThreeShell, montage: montage, sources: [offCenter],
+                reference: .infinity, terms: 100
+            )
+            var shippedDifference = 0.0
+            var shippedPeak = 0.0
+            var shippedFinite = true
+            for channel in montage.electrodes.indices {
+                let four = fourShellShipped.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                let three = threeShellShipped.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                shippedFinite = shippedFinite && four.isFinite && three.isFinite
+                shippedDifference = max(shippedDifference, abs(four - three))
+                shippedPeak = max(shippedPeak, abs(three))
+            }
+            let shippedRelativeDifference = shippedDifference / max(shippedPeak, 1e-30)
+            outcomes.append(Outcome(
+                name: "classicFourShell is finite and differs from classicThreeShell",
+                snr: shippedRelativeDifference,
+                passed: shippedFinite && shippedRelativeDifference > 1e-3,
+                expectation: "the CSF layer produces a finite field that differs by more than 0.1%"
+            ))
+
+            // The affine ellipsoid must reduce *exactly* to the concentric sphere
+            // when the axis scale is unity — otherwise the warp has a bug that a
+            // non-trivial scale would only hide. This is the ellipsoid's most
+            // important test: it pins the whole model to the solver it delegates
+            // to.
+            let sphereReference = try SphericalForwardModel.leadField(
+                head: .classicThreeShell, montage: montage, sources: [offCenter],
+                reference: .infinity, terms: 100
+            )
+            let identityEllipsoid = SimulatedEllipsoidModel(
+                name: "unit-scale ellipsoid",
+                sphere: .classicThreeShell,
+                axisScale: Vector3D(x: 1, y: 1, z: 1)
+            )
+            let identityField = try EllipsoidalForwardModel.leadField(
+                ellipsoid: identityEllipsoid, montage: montage, sources: [offCenter],
+                reference: .infinity, terms: 100
+            )
+            var identityError = 0.0
+            var identityPeak = 0.0
+            for channel in montage.electrodes.indices {
+                let sphere = sphereReference.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                let ellipsoid = identityField.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                identityError = max(identityError, abs(sphere - ellipsoid))
+                identityPeak = max(identityPeak, abs(sphere))
+            }
+            let identityRelativeError = identityError / max(identityPeak, 1e-30)
+            outcomes.append(Outcome(
+                name: "Unit-scale affine ellipsoid reduces exactly to the sphere",
+                snr: identityRelativeError,
+                passed: identityRelativeError < 1e-12,
+                expectation: "axis scale (1,1,1) reproduces the concentric-sphere lead field"
+            ))
+
+            // A real ellipsoid must produce a finite field that differs from the
+            // sphere it warps — the point of offering it for the mismatch sweep —
+            // and its convergence check must still pass through the delegation.
+            let realEllipsoidField = try EllipsoidalForwardModel.leadField(
+                ellipsoid: .classicThreeShellEllipsoid, montage: montage, sources: [offCenter],
+                reference: .infinity, terms: 100
+            )
+            var ellipsoidDifference = 0.0
+            var ellipsoidPeak = 0.0
+            var ellipsoidFinite = true
+            for channel in montage.electrodes.indices {
+                let sphere = sphereReference.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                let ellipsoid = realEllipsoidField.matrixMicrovoltsPerNanoampereMeter[channel][0]
+                ellipsoidFinite = ellipsoidFinite && ellipsoid.isFinite
+                ellipsoidDifference = max(ellipsoidDifference, abs(sphere - ellipsoid))
+                ellipsoidPeak = max(ellipsoidPeak, abs(sphere))
+            }
+            let ellipsoidRelativeDifference = ellipsoidDifference / max(ellipsoidPeak, 1e-30)
+            outcomes.append(Outcome(
+                name: "Affine ellipsoid is finite and differs from its base sphere",
+                snr: ellipsoidRelativeDifference,
+                passed: ellipsoidFinite && ellipsoidRelativeDifference > 1e-3,
+                expectation: "a (0.94, 1.0, 1.08) warp produces a finite field differing by more than 0.1%"
+            ))
+
+            // The skull-conductivity ratio is the parameter SI-4 most needs to
+            // sweep, so the three standard parameterizations must be finite and
+            // genuinely distinct — a more insulating skull (higher ratio) must
+            // change the surface field, not silently collapse to one value.
+            func skullRatioField(_ head: SphericalHeadModel) throws -> [Double] {
+                let field = try SphericalForwardModel.leadField(
+                    head: head, montage: montage, sources: [offCenter],
+                    reference: .infinity, terms: 100
+                )
+                return montage.electrodes.indices.map {
+                    field.matrixMicrovoltsPerNanoampereMeter[$0][0]
+                }
+            }
+            let ratio20 = try skullRatioField(.highSkullConductivityThreeShell)
+            let ratio40 = try skullRatioField(.standardThreeShell)
+            let ratio80 = try skullRatioField(.rushDriscollThreeShell)
+            func relativeSpread(_ a: [Double], _ b: [Double]) -> Double {
+                var difference = 0.0
+                var peak = 0.0
+                for index in a.indices {
+                    difference = max(difference, abs(a[index] - b[index]))
+                    peak = max(peak, abs(a[index]))
+                }
+                return difference / max(peak, 1e-30)
+            }
+            let allFinite = (ratio20 + ratio40 + ratio80).allSatisfy(\.isFinite)
+            let spread2040 = relativeSpread(ratio20, ratio40)
+            let spread4080 = relativeSpread(ratio40, ratio80)
+            outcomes.append(Outcome(
+                name: "Standard 3-shell skull-ratio presets are finite and distinct",
+                snr: min(spread2040, spread4080),
+                passed: allFinite && spread2040 > 1e-3 && spread4080 > 1e-3,
+                expectation: "the 1:20, 1:40 and 1:80 skull presets each differ by more than 0.1%"
+            ))
+
+            // BEM correctness: the plain double-layer BEM must reproduce the
+            // analytic sphere and converge toward it with mesh refinement, for a
+            // full 3-shell head at a realistic 1:40 skull contrast — not just the
+            // easy homogeneous case. This is the property that took a diagonal
+            // auto-solid-angle sign fix to get right (see BEMForwardModel).
+            let bemHead = ForwardHeadModel.standardThreeShell
+            let bemDipole = ForwardDipole(
+                id: offCenter.id,
+                positionMeters: SIMD3<Double>(
+                    offCenter.positionMeters.x, offCenter.positionMeters.y, offCenter.positionMeters.z
+                ),
+                orientationUnit: SIMD3<Double>(
+                    offCenter.orientation.x, offCenter.orientation.y, offCenter.orientation.z
+                )
+            )
+            func bemError(subdivisions: Int) throws -> Double {
+                let solution = try BEMForwardModel.solveSurfacePotentials(
+                    head: bemHead, dipoles: [bemDipole],
+                    subdivisions: subdivisions
+                )
+                let centroids = solution.outerCentroids
+                let electrodes = OrderedElectrodes(
+                    names: centroids.positions.indices.map { "E\($0)" },
+                    positionsMeters: centroids.positions
+                )
+                let analytic = try SphericalForwardModel.leadField(
+                    head: bemHead, electrodes: electrodes,
+                    dipoles: [bemDipole], reference: .infinity, harmonicTerms: 200
+                )
+                var bem: [Double] = []
+                var ana: [Double] = []
+                for (index, row) in centroids.rows.enumerated() {
+                    let free = solution.freePotentials[row]
+                    let value = free[0] * offCenter.orientation.x
+                        + free[1] * offCenter.orientation.y
+                        + free[2] * offCenter.orientation.z
+                    bem.append(value)
+                    ana.append(analytic.orientedMicrovoltsPerNanoampereMeter[index][0])
+                }
+                let bemMean = bem.reduce(0, +) / Double(bem.count)
+                let anaMean = ana.reduce(0, +) / Double(ana.count)
+                var difference = 0.0
+                var peak = 0.0
+                for index in bem.indices {
+                    difference = max(difference, abs((bem[index] - bemMean) - (ana[index] - anaMean)))
+                    peak = max(peak, abs(ana[index] - anaMean))
+                }
+                return difference / max(peak, 1e-30)
+            }
+            let coarseError = try bemError(subdivisions: 2)
+            let fineError = try bemError(subdivisions: 3)
+            outcomes.append(Outcome(
+                name: "BEM reproduces the 3-shell (1:40) sphere and converges with refinement",
+                snr: fineError,
+                passed: fineError < 0.05 && fineError < coarseError * 0.75,
+                expectation: "refined-mesh error below 5% and at least 25% smaller than the coarse-mesh error"
+            ))
         } catch {
             outcomes.append(Outcome(
                 name: "Centered dipole matches the homogeneous-sphere closed form",
@@ -2297,6 +2529,44 @@ nonisolated enum SelfTest {
                         > (separationComponents?.candidateBeatCount ?? 1) / 3,
                 expectation: "broadband SNR improves by at least 1.8x at the BCG's true rank, "
                     + "with over a third of beats accepted by the pattern search"
+            ))
+
+            // ---------------------------------------------------------------
+            // SI-4: PCA-S tolerates head-model mismatch (but it is not free).
+            // ---------------------------------------------------------------
+            //
+            // Generate-with-one, invert-with-another: build the correction's
+            // brain basis on a DIFFERENT head than the truth (1:80-skull truth
+            // corrected with a 1:20-skull head — a large, credible
+            // misspecification that also changes the scalp radius), apply it to
+            // the same noisy data, and measure the cost. The finding is NOT that
+            // mismatch is negligible: on this fixture it moves the broadband SNR
+            // by ~25%. It is that the correction still *works* — the brain basis
+            // is a span covering most of sensor space, so reshaping the leadfield
+            // shifts, but does not collapse, the artifact/brain split. So a wrong
+            // head model degrades PCA-S gracefully rather than breaking it, which
+            // is why the correction path can run without subject-specific
+            // geometry the way a source-localization inverse could not. The CLI
+            // `evaluate-surrogate --correction-head` sweeps this across seeds.
+            let mismatchedBrain = try SurrogateSeparation.brainModel(
+                head: .highSkullConductivityThreeShell, montage: separationMontage,
+                count: 29, reference: .average, terms: separationConfig.leadFieldTerms
+            )
+            let mismatchedFilter = try SurrogateSeparation.spatialFilter(
+                brain: mismatchedBrain, artifactTopographies: separationTopographies,
+                brainRegularization: 0.02
+            )
+            let mismatchedCorrected = try SurrogateSeparation.apply(
+                filter: mismatchedFilter, to: separationNoisy
+            )
+            let mismatchedSNR = broadbandSNR(mismatchedCorrected)
+            let relativeSNRChange = abs(mismatchedSNR - correctedSNR) / max(correctedSNR, 1e-9)
+            outcomes.append(Outcome(
+                name: "SI-4: PCA-S degrades gracefully under head-model mismatch",
+                snr: relativeSNRChange,
+                passed: mismatchedSNR > 1.8 * uncorrectedSNR && relativeSNRChange < 0.60,
+                expectation: "a 1:80→1:20 skull mismatch keeps the SNR gain (still >1.8x "
+                    + "uncorrected) while measurably changing it (here ~25%)"
             ))
 
             // ---------------------------------------------------------------

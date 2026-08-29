@@ -93,6 +93,57 @@ nonisolated struct SphericalHeadModel: Codable, Sendable, Equatable {
         ]
     )
 
+    /// Four-shell brain/CSF/skull/scalp sphere, mirroring EVA's
+    /// `ForwardHeadModel.classicFourShell` number-for-number so a correction
+    /// measured against simulated truth is measured against the same head. The
+    /// CSF layer (0.074 m, 1.79 S/m) is inserted between the brain and skull of
+    /// `classicThreeShell`; every other value is unchanged. Used to generate
+    /// truth under one geometry and invert under another for SI-4's
+    /// head-model-mismatch sweeps.
+    static let classicFourShell = SphericalHeadModel(
+        name: "Four-shell brain/CSF/skull/scalp sphere",
+        centerMeters: .zero,
+        shells: [
+            HeadShell(name: "brain", radiusMeters: 0.072, conductivitySiemensPerMeter: 0.33),
+            HeadShell(name: "csf", radiusMeters: 0.074, conductivitySiemensPerMeter: 1.79),
+            HeadShell(name: "skull", radiusMeters: 0.079, conductivitySiemensPerMeter: 0.0042),
+            HeadShell(name: "scalp", radiusMeters: 0.085, conductivitySiemensPerMeter: 0.33)
+        ]
+    )
+
+    /// Mirrors `ForwardHeadModel.threeShell(...)` so simulator scenarios can
+    /// generate truth under any standard 3-shell parameterization and invert
+    /// under another (SI-4 skull-ratio and radius sweeps).
+    static func threeShell(
+        name: String,
+        scalpRadiusMeters: Double = 0.092,
+        brainFraction: Double = 80.0 / 92.0,
+        skullFraction: Double = 86.0 / 92.0,
+        skullConductivityRatio: Double = 40,
+        brainConductivity: Double = 0.33,
+        scalpConductivity: Double = 0.33
+    ) -> SphericalHeadModel {
+        SphericalHeadModel(
+            name: name,
+            centerMeters: .zero,
+            shells: [
+                HeadShell(name: "brain", radiusMeters: scalpRadiusMeters * brainFraction,
+                          conductivitySiemensPerMeter: brainConductivity),
+                HeadShell(name: "skull", radiusMeters: scalpRadiusMeters * skullFraction,
+                          conductivitySiemensPerMeter: brainConductivity / skullConductivityRatio),
+                HeadShell(name: "scalp", radiusMeters: scalpRadiusMeters,
+                          conductivitySiemensPerMeter: scalpConductivity)
+            ]
+        )
+    }
+
+    static let rushDriscollThreeShell = threeShell(
+        name: "Rush–Driscoll three-shell (1:80 skull)", skullConductivityRatio: 80)
+    static let standardThreeShell = threeShell(
+        name: "Standard three-shell (1:40 skull)", skullConductivityRatio: 40)
+    static let highSkullConductivityThreeShell = threeShell(
+        name: "High-skull-conductivity three-shell (1:20 skull)", skullConductivityRatio: 20)
+
     var brainRadiusMeters: Double { shells.first?.radiusMeters ?? 0 }
     var scalpRadiusMeters: Double { shells.last?.radiusMeters ?? 0 }
 
@@ -304,6 +355,97 @@ extension SphericalForwardModel {
             rootMeanSquareRelativeChange: shared.rootMeanSquareRelativeChange,
             worstSourceID: shared.worstDipoleID,
             worstOrientationAxis: shared.worstOrientationAxis
+        )
+    }
+}
+
+/// An affine-warped ellipsoidal head for the simulator, mirroring EVA's
+/// `ForwardEllipsoidModel`. Kept as a stable EVASimulate scenario type; all
+/// mathematics is delegated to EVA's shared solver through the boundary
+/// adapter. Generating truth through an ellipsoid and inverting through the
+/// sphere (or vice versa) is what SI-4's head-model-mismatch sweep needs.
+nonisolated struct SimulatedEllipsoidModel: Codable, Sendable, Equatable {
+    var name: String
+    var sphere: SphericalHeadModel
+    var axisScale: Vector3D
+
+    /// Mild adult-head proportions on the classic three-shell sphere.
+    static let classicThreeShellEllipsoid = SimulatedEllipsoidModel(
+        name: "Three-shell affine ellipsoid",
+        sphere: .classicThreeShell,
+        axisScale: Vector3D(x: 0.94, y: 1.0, z: 1.08)
+    )
+
+    /// The four-shell (brain/CSF/skull/scalp) counterpart.
+    static let classicFourShellEllipsoid = SimulatedEllipsoidModel(
+        name: "Four-shell affine ellipsoid",
+        sphere: .classicFourShell,
+        axisScale: Vector3D(x: 0.94, y: 1.0, z: 1.08)
+    )
+
+    var forwardModel: ForwardEllipsoidModel {
+        ForwardEllipsoidModel(
+            name: name,
+            sphere: sphere.forwardModel,
+            axisScale: axisScale.forwardSIMD
+        )
+    }
+
+    /// Electrodes warp with the head, so the montage is expressed against the
+    /// ellipsoid's own scalp using its longest semi-axis as the nominal radius —
+    /// the warp back into sphere space then recovers per-electrode direction.
+    var scalpRadiusMeters: Double {
+        sphere.scalpRadiusMeters * max(axisScale.x, max(axisScale.y, axisScale.z))
+    }
+}
+
+extension EllipsoidalForwardModel {
+    /// EVASimulate retains its stable scenario and truth types at this boundary;
+    /// all forward mathematics is delegated to EVA's shared ellipsoidal solver.
+    static func leadField(
+        ellipsoid: SimulatedEllipsoidModel,
+        montage: Montage,
+        sources: [SimulatedSource],
+        reference: EEGReference,
+        terms: Int,
+        verifyConvergence: Bool = false
+    ) throws -> LeadField {
+        let head = ellipsoid.forwardModel
+        // Place electrodes on the ellipsoid scalp: scale the unit montage
+        // directions by the per-axis semi-axes, centred on the head.
+        let semiAxes = head.scalpSemiAxesMeters
+        let electrodes = OrderedElectrodes(
+            names: montage.channelNames,
+            positionsMeters: montage.positions.map {
+                SIMD3<Double>(
+                    $0.x * semiAxes.x + head.sphere.centerMeters.x,
+                    $0.y * semiAxes.y + head.sphere.centerMeters.y,
+                    $0.z * semiAxes.z + head.sphere.centerMeters.z
+                )
+            }
+        )
+        let shared = try leadField(
+            ellipsoid: head,
+            electrodes: electrodes,
+            dipoles: sources.map { source in
+                ForwardDipole(
+                    id: source.id,
+                    positionMeters: source.positionMeters.forwardSIMD,
+                    orientationUnit: source.orientation.forwardSIMD
+                )
+            },
+            reference: reference.forwardReference,
+            harmonicTerms: terms,
+            verifyConvergence: verifyConvergence
+        )
+        return LeadField(
+            channelNames: shared.electrodeNames,
+            sourceIDs: shared.dipoleIDs,
+            reference: reference,
+            freeOrientationMatrixMicrovoltsPerNanoampereMeter:
+                shared.freeMicrovoltsPerNanoampereMeter,
+            matrixMicrovoltsPerNanoampereMeter:
+                shared.orientedMicrovoltsPerNanoampereMeter
         )
     }
 }

@@ -9,6 +9,23 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
+//  App-wide construction of the Berg–Scherg source-informed (multiple-source
+//  correction) spatial-filter operator: a fixed brain basis is contrasted with
+//  a small artifact dictionary to build a linear sensor-space operator that
+//  reconstructs only the brain block. This is a native Swift reconstruction
+//  written from the published descriptions to the best of our ability; no
+//  reference implementation was ported.
+//
+//  References:
+//    * Berg, P., & Scherg, M. (1994). A multiple source approach to the
+//      correction of eye artifacts. Electroencephalography and Clinical
+//      Neurophysiology, 90(3), 229–241.
+//      https://doi.org/10.1016/0013-4694(94)90094-9
+//    * Rusiniak, M., Bornfleth, H., Cho, J.-H., Wolak, T., Ille, N., Berg, P.,
+//      & Scherg, M. (2022). EEG-fMRI: Ballistocardiogram artifact reduction by
+//      surrogate method for improved source localization. Frontiers in
+//      Neuroscience, 16, 842420. https://doi.org/10.3389/fnins.2022.842420
+//
 
 import Foundation
 

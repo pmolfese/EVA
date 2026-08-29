@@ -24,6 +24,8 @@ swiftc -O \
   -framework Accelerate \
   "$ROOT/EVA/Core/Forward/ForwardTypes.swift" \
   "$ROOT/EVA/Core/Forward/SphericalForwardModel.swift" \
+  "$ROOT/EVA/Core/Forward/EllipsoidalForwardModel.swift" \
+  "$ROOT/EVA/Core/Forward/BEMForwardModel.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationConfig.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/SimulationScenario.swift" \
   "$ROOT/Tools/EVASimulate/Sources/EVASimulate/GroupSimulation.swift" \

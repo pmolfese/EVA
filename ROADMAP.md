@@ -4,6 +4,9 @@ This is the single execution plan for the whole project. Detailed design
 documents may explain a project, but this file decides priority, milestone
 status, and what comes next. It covers two spheres of influence:
 
+- **Part 0 — Simulator in the app (SIM)**, a new cross-sphere program: bring
+  EVASimulate's generation and the forward model into EVA's own GUI, so
+  simulated ground truth flows through the same pipeline as real data.
 - **Part I — EVA proper**, the application itself, including REWIND (RW),
   processing/batch (PB), MRI/FASTR (MRI), trial-wise review (TW), UI/UX, and the
   source-informed correction program (SI) as it lands in the app.
@@ -26,6 +29,123 @@ Part I, and the simulator-side remainder is in Part II.
 
 ---
 
+# PART 0 — SIMULATOR IN THE APP
+
+A new program, cross-sphere by nature: the engine lives in Part II (EVASimulate)
+and the surface lives in Part I (EVA proper). The goal is that a person can
+create a simulated recording — and, later, place dipoles and watch their fields
+— from inside EVA, and that the result flows through filter / ICA / PCA-S /
+scoring exactly like a real file. That is both the teaching payoff ("here is
+ground truth; watch your pipeline act on it") and a validation multiplier (every
+cleaning method gets a truth-backed sandbox without leaving the app).
+
+**Scheduling note:** these milestones do **not** preempt the Part I execution
+order. SI-4 remains milestone 1. Part 0 is scheduled at the owner's discretion;
+SIM-3 in particular is a small, independent visual win that can land any time.
+
+Dependency map:
+
+```text
+SIM-0 (link EVASimulate into the app)
+   └─→ SIM-1 (New → Simulated Recording panel)
+          └─→ SIM-2 (interactive forward sandbox)
+SIM-3 (glass-brain dipole viz) — parallel, feeds SIM-2
+```
+
+## SIM-0 — Link EVASimulate into the app — **NOT STARTED**
+
+The prerequisite for everything else, and the one real refactor. Today
+EVASimulate builds via `Tools/EVASimulate/build.sh` — a standalone `swiftc`
+file list that pulls in selected EVA sources (`ForwardTypes`, `LinearAlgebra`,
+`MFFWriter`, …). It is **not** linked into the EVA app target, so the app cannot
+call the generation path.
+
+- [ ] Make the generation code callable from EVA. Prefer extracting a shared
+  **`SimulationKit`** Swift package that both the CLI and the app link, over
+  bolting the simulator sources onto the app target — one source of truth, and
+  the CLI stays a thin driver.
+- [ ] Resolve the dependency direction cleanly: the simulator already reaches
+  *into* EVA files, so the package boundary must not create a cycle. The natural
+  cut is the forward model + scenario + generators (already app-neutral) into
+  the kit, with EVA and the CLI both above it.
+- [ ] Keep `build.sh` working (or replace it with the package build) so the
+  self-test corpus and determinism baseline still run.
+
+**Exit:** EVA can call generation and get channels + truth in memory, and the
+existing EVASimulate self-test (106 checks) still passes.
+
+## SIM-1 — New → Simulated Recording panel — **NOT STARTED**
+
+A dedicated panel modeled directly on Batch Process. The batch scaffolding is
+the template: a `Window(id:)` scene (`BatchWindowView`) opened from a menu
+command (`OpenBatchWindowButton`) that owns a controller (`BatchController`) and
+shows a setup sheet (`BatchSetupSheet`) on first open. Mirror it:
+
+- [ ] **`SimulatorWindowView`** — a `Window(id:)` scene registered in
+  `EVAApp.swift`, opened from **File ▸ New ▸ Simulated Recording**
+  (`OpenSimulatorWindowButton`), owning a `SimulatorController`.
+- [ ] **`SimulatorSetupSheet`** — the batch-setup analogue: expose the
+  high-value knobs (channels, duration, rate, montage / coordinates, dipole
+  sources, BCG / gradient / blink / EMG artifacts, seed) rather than all 40+ CLI
+  flags. Back it with the existing `SimulationScenarioFile` JSON so a GUI
+  scenario is the *same artifact* the CLI reads and writes — round-trip parity,
+  and the CLI's presets show up as starting points.
+- [ ] **Generate** runs off the main thread (like the batch processor), then
+  opens the result as an ordinary recording; optionally write the `_truth.json`
+  sidecar alongside so scoring and the SIM-3 overlays can use it.
+- [ ] Start with driving existing scenarios and presets before full free-form
+  authoring, the way batch started from a fixed script.
+
+**Exit:** a person picks knobs, clicks Generate, and a simulated recording opens
+in EVA and flows through the normal pipeline unchanged. **Effort:** medium; the
+gate is SIM-0, the panel itself reuses batch scaffolding.
+
+## SIM-2 — Interactive forward sandbox — **NOT STARTED**
+
+The BESA-Simulator-adjacent milestone, built on SIM-1 and SIM-3. Place / drag
+dipoles or regional sources in the head, assign each a time course (canned
+waveforms, ERP shapes, coloured noise), generate the scalp EEG/MEG, and view the
+field as a sandbox — the forward direction made interactive.
+
+- [ ] Source authoring: position, orientation, and a time-course editor per
+  source, reusing `ForwardDipole` and the regional-source machinery.
+- [ ] Live forward: recompute the scalp topography as sources move, using the
+  analytic sphere by default (exact and fast) with BEM/ellipsoid available.
+- [ ] **The EVA differentiator, surfaced:** the simulator knows the true sources
+  and the true noise covariance exactly — expose that as live scoring, which a
+  teaching tool cannot. Scope to what serves method validation; skip
+  pure-teaching features that do not.
+- [ ] Before claiming BESA parity, check their current feature list rather than
+  cloning from memory; match the parts that serve EVA's mission.
+
+**Exit:** a user can build a multi-source scenario interactively, see its field,
+and read a truth-backed score. **Effort:** large — stage it (static placement →
+time courses → live field/topomap coupling).
+
+## SIM-3 — Glass-brain dipole visualization — **NOT STARTED**
+
+A semi-transparent brain/head with dipoles drawn as oriented arrows at their 3D
+positions, coupled to the forward scalp topomap they produce — drag the dipole,
+watch the topography change. Independent of SIM-1/2 (it can ship first as a
+standalone inspector/figure) and the fastest visible win; it also becomes SIM-2's
+viewport.
+
+- [ ] **Tier B first** (days, no new framework): three orthographic projections
+  (axial / sagittal / coronal) in a SwiftUI `Canvas`, dipole position + an
+  orientation arrow, drawn beside the existing topomap renderer driven by the
+  forward model — this closes the source→topography loop, which is the single
+  most useful thing the view can teach.
+- [ ] Reuse the BEM icosphere mesh for the head/brain surface outline.
+- [ ] **Tier A later** (SceneKit): a true orbiting, zoomable glass brain, once
+  tier B proves the interaction is worth the 3D dependency.
+- [ ] **Tier C** (MRI-backed mesh) only if real segmented anatomy is imported —
+  not required for the parametric sphere/ellipsoid heads.
+
+**Exit:** a dipole can be placed and its scalp topography read off live in a
+glass-brain view. **Effort:** small–medium for tier B; medium for tier A.
+
+---
+
 # PART I — EVA PROPER
 
 ## Milestone overview
@@ -36,7 +156,7 @@ when it is an independent bug fix required for safe use.
 
 | Order | Milestone | Brief description | Status |
 |---:|---|---|---|
-| 1 | **SI-4 — Adversarial validation** | Measure operating limits under geometry, head-model, rank, channel, and data-quality mismatch. | **NOT STARTED** |
+| 1 | **SI-4 — Adversarial validation** | Measure operating limits under geometry, head-model, rank, channel, and data-quality mismatch. | **IN PROGRESS** |
 | 2 | **PB-1 — Batch/replay completion** | Add partial resume, decision-skipping policy, and setup compatibility preflight. | **NOT STARTED** |
 | 3 | **MRI-1 — FASTR reliability and motion semantics** | Finish motion policy, unreliable-epoch provenance, PSA overlap behavior, and attenuation analysis. | **NOT STARTED** |
 | 4 | **SI-5 — Ocular MSEC/PCA-S** | Reuse the validated engine for blink, vertical, and horizontal ocular topographies. | **NOT STARTED** |
@@ -173,16 +293,64 @@ source-informed correction. Their records are in
 [Part III](#a-eva-proper--completed); what remains here is measurement (SI-4)
 and the later methods below.
 
-## 2. SI-4 — Adversarial evaluation — **NOT STARTED**
+## 2. SI-4 — Adversarial evaluation — **IN PROGRESS**
 
 - [ ] Sweep recording length, accepted beats, BCG rank/morphology jitter,
   component count, regularization, channels, sampling rate, and basis richness.
-- [ ] Add independent shell-radius, skull-conductivity, head-center, and
-  electrode-position mismatch to the existing basis-offset sweep.
+- [~] Add independent shell-radius, skull-conductivity, head-center, and
+  electrode-position mismatch to the existing basis-offset sweep. **Head-model
+  mismatch shipped**: `evaluate-surrogate --correction-head <name>` builds the
+  correction basis on a different standard head than the truth (the named
+  presets bundle a radius + skull-conductivity change); a self-test measures it.
+  **Measured finding: PCA-S degrades gracefully** — an extreme 1:80→1:20 skull
+  mismatch moves broadband SNR ~25% but the correction still works (>1.8×
+  uncorrected), because the brain basis is a span covering most of sensor space.
+  Independent per-parameter (radius-only, conductivity-only, head-center,
+  electrode-position) sweeps remain.
 - [ ] Report broadband/per-band residuals, clean distortion, ERP amplitude,
   latency/topography, removed variance, and mean ± SD over seeds.
 - [ ] Derive refusal/warning thresholds for inadequate beat count,
   ill-conditioning, and missing geometry from evidence.
+
+**Enabling head-model work (SI-1 shipped only one head model; the geometry
+sweeps above cannot run without a second and third).** These are shared
+infrastructure — added to EVA's `EVA/Core/Forward/` and mirrored in
+EVASimulate's boundary types so a generate-with-one, invert-with-another
+mismatch is expressible:
+
+- [x] **4-shell concentric sphere** (brain/CSF/skull/scalp). Nearly free: the
+  shell recurrence already handles arbitrary shell count, so this is a new head
+  constant plus a CSF conductivity, on both the EVA and EVASimulate sides. This
+  is the geometry the Rusiniak et al. (2022) PCA-S paper actually used.
+- [x] **Affine-scaled ellipsoid** (BESA-style), `EllipsoidalForwardModel`. The
+  paper's "4-shell ellipsoidal" model is a per-axis affine warp of a concentric
+  sphere, not true ellipsoidal harmonics: transform electrode and source
+  geometry into sphere-space, run the existing analytic solver, map back.
+  Documented as a first-order geometric approximation (no moment/conductivity
+  anisotropy); the unit-scale case reduces bit-for-bit to the sphere, which is
+  the load-bearing self-test.
+- [x] **Alternative standard 3-shell parameterizations**: a `threeShell(...)`
+  factory keyed on the skull-conductivity *ratio* (the parameter SI-4 most needs
+  to sweep), plus named presets — `rushDriscollThreeShell` (1:80),
+  `standardThreeShell` (1:40, the modern default), `highSkullConductivityThreeShell`
+  (1:20). Mirrored on both sides.
+- [x] **BEM forward solver** (`BEMForwardModel`): meshed shells, Van Oosterom–
+  Strackee solid angles, deflated double-layer (Geselowitz) system, multi-RHS
+  LU. **Validated for single AND multi-compartment** — converges to the analytic
+  sphere at first order for a full 3-shell head at realistic skull contrast
+  (subdiv 2/3/4 → 6.5%/2.9%/0.8% at 1:40; 11%/5.7%/1.65% at 1:80). The default
+  subdivision (3) gives ≈3% at 1:40. The self-test asserts 3-shell convergence.
+  (The earlier ~170% multi-shell error was a diagonal auto-solid-angle sign bug,
+  not an ISA deficiency; the plain double-layer BEM is genuinely accurate here.)
+- [ ] **IPA / isolated-skull BEM — optional efficiency, no longer a blocker.**
+  The plain BEM is already correct; IPA (Hämäläinen & Sarvas 1989) would buy the
+  same accuracy at a coarser mesh for very high skull contrast, cutting the dense
+  solve cost. Schedule only if BEM mesh cost becomes a bottleneck for
+  generation-side use.
+- [ ] **EGI HydroCel 128- and 256-channel montages** as EVASimulate scenarios,
+  so the channel-count sweep spans the dense nets EVA users actually record on
+  rather than the paper's 64-channel protocol — no need to reproduce the exact
+  64-channel montage.
 
 **Exit:** the safe operating envelope and failure messages are measured. Only
 then call PCA-S production-ready or generalize it.
@@ -192,6 +360,30 @@ then call PCA-S production-ready or generalize it.
 These remain grouped with the shared scientific rationale, but their execution
 slots are the ones in the milestone table: SI-5 follows MRI-1; SI-6 through SI-8
 follow the Trial-wise milestones.
+
+#### SI-3a — Manual / by-eye BCG exemplar — **NOT STARTED**
+
+A near-term addition to shipped PCA-S, and a prerequisite shape for SI-5's
+ocular calibration (user-provided exemplars → same engine). Today BCG
+topography discovery always begins from detected beats
+(`BCGSurrogateTopographies.components(beatSeconds:)`); when there is no ECG
+channel — and the synthesized/virtual-ECG detectors are not trusted for a
+given recording — the user has no way to assert the artifact directly. The
+brain-basis and operator halves are unchanged; this is a new discovery
+front-end only.
+
+- [ ] **Hand-marked beats**: let the user click BCG peaks in the waveform view
+  and feed those times into the existing pipeline unchanged (smallest path).
+- [ ] **Highlighted exemplar window**: let the user drag a selection over one
+  clear BCG complex and use that window as the template/correlation-search seed,
+  bypassing beat detection — the truest analogue to the paper's manual
+  representative-beat step. Add as a new `BCGArtifactPatternSearch` case
+  (e.g. `.manualExemplar`) alongside `.paper`/`.iterative`.
+- [ ] Record the manual provenance in `eva.xml` and the audit log so a manual
+  correction replays exactly rather than re-deriving from criteria.
+
+**Exit:** a recording with no usable ECG can be corrected from a user-defined
+BCG exemplar, with the manual selection recorded as replayable provenance.
 
 #### SI-5 — Ocular MSEC/PCA-S — **NOT STARTED**
 

@@ -325,6 +325,10 @@ func usage() -> String {
         --config <scenario.json>    Base scenario; AEP evaluation needs placed ERP.
         --seeds <n>                 Repeated realizations per condition (default 5).
         --offsets <mm,...>          Surrogate-basis mismatch sweep.
+        --correction-head <name>    Build the correction basis on a DIFFERENT head
+                                    than the truth (SI-4 head-model mismatch):
+                                    classic-3shell, standard-3shell, rush-3shell,
+                                    high-3shell, or 4shell. Omit for a matched head.
         --pattern-search <mode>     paper (default) or iterative.
         --representative-beat <n>   Optional 1-based paper-mode candidate beat.
         --with-erp                  Report accepted trials, ERP SNR, peak errors,
@@ -1935,12 +1939,31 @@ func runGenerateGroup(_ arguments: Arguments) throws {
 ///
 /// Everything runs in memory: no MFF is written, so a sweep of dozens of runs
 /// costs seconds rather than minutes.
+/// Resolves a `--correction-head` name to a standard head model. SI-4 uses this
+/// to build the PCA-S brain basis on a *different* head than the one that
+/// generated the truth — the "generate with one, invert with another" mismatch
+/// that measures how much a wrong head model costs the correction.
+func resolveCorrectionHead(_ name: String) throws -> SphericalHeadModel {
+    switch name.lowercased() {
+    case "classic", "classic-3shell", "classicthreeshell": return .classicThreeShell
+    case "standard", "standard-3shell":                     return .standardThreeShell
+    case "rush", "rush-driscoll", "rush-3shell":            return .rushDriscollThreeShell
+    case "high", "high-skull", "high-3shell":               return .highSkullConductivityThreeShell
+    case "4shell", "four-shell", "csf", "classicfourshell": return .classicFourShell
+    default:
+        throw SimulateError.usage(
+            "unknown --correction-head \"\(name)\"; expected classic-3shell, standard-3shell, "
+            + "rush-3shell, high-3shell, or 4shell")
+    }
+}
+
 func runEvaluateSurrogate(_ arguments: Arguments) throws {
     try arguments.validate(known: [
         "seeds", "offsets", "sources", "components", "brain-regularization",
         "duration", "channels", "coordinates", "rate", "config", "with-erp", "pattern-search",
-        "representative-beat", "json"
+        "representative-beat", "json", "correction-head"
     ])
+    let correctionHead = try arguments.string("correction-head").map(resolveCorrectionHead)
 
     let seedCount = try arguments.int("seeds") ?? 5
     guard seedCount > 0 else { throw SimulateError.usage("--seeds must be positive") }
@@ -2069,8 +2092,11 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                 patternSearchMode: patternSearchMode,
                 representativeBeatIndex: requestedRepresentative
             ) else { continue }
+            // Truth is generated with config.sphericalHeadModel; the correction
+            // basis uses correctionHead when a mismatch is requested (SI-4).
             let brain = try SurrogateSeparation.brainModel(
-                head: config.sphericalHeadModel, montage: montage, count: regionalCount,
+                head: correctionHead ?? config.sphericalHeadModel,
+                montage: montage, count: regionalCount,
                 reference: .average, terms: config.leadFieldTerms, offsetMillimetres: offset
             )
             let sourceInformedOperator = try SurrogateSeparation.sourceInformedOperator(
@@ -2270,7 +2296,10 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                 "brainRegularization": regularization,
                 "requestedRepresentativeBeat": requestedRepresentative.map { ($0 + 1) as Any }
                     ?? NSNull(),
-                "erpEvaluationEnabled": evaluateERP
+                "erpEvaluationEnabled": evaluateERP,
+                "truthHeadModel": base.sphericalHeadModel.name,
+                "correctionHeadModel": (correctionHead?.name as Any?) ?? base.sphericalHeadModel.name,
+                "headModelMismatch": correctionHead != nil
             ] as [String: Any],
             "conditions": conditions
         ]
@@ -2286,6 +2315,12 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         + "\(Int(base.durationSeconds)) s, \(regionalCount) regional sources, "
         + "\(componentCount) artifact components")
     print("  pattern search: \(patternSearchMode.rawValue)")
+    if let correctionHead {
+        print("  head-model mismatch: truth \(base.sphericalHeadModel.name) "
+            + "→ correction \(correctionHead.name)")
+    } else {
+        print("  head model: \(base.sphericalHeadModel.name) (matched)")
+    }
     print("")
     print("  offset    corrected SNR      uncorrected   nearest src   beats kept")
     print("  ---------------------------------------------------------------------")
