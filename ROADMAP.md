@@ -52,27 +52,82 @@ SIM-0 (link EVASimulate into the app)
 SIM-3 (glass-brain dipole viz) — parallel, feeds SIM-2
 ```
 
-## SIM-0 — Link EVASimulate into the app — **NOT STARTED**
+## SIM-0 — Link EVASimulate into the app — **NOT STARTED (planned)**
 
 The prerequisite for everything else, and the one real refactor. Today
 EVASimulate builds via `Tools/EVASimulate/build.sh` — a standalone `swiftc`
-file list that pulls in selected EVA sources (`ForwardTypes`, `LinearAlgebra`,
-`MFFWriter`, …). It is **not** linked into the EVA app target, so the app cannot
-call the generation path.
+file list — and is **not** linked into the EVA app target, so the app cannot
+call the generation path. Goal: the simulator is callable from the GUI **and**
+ships as a bundled CLI at `EVA.app/Contents/MacOS/EVASimulate`, with `build.sh`
+retired and the self-test in the normal build.
 
-- [ ] Make the generation code callable from EVA. Prefer extracting a shared
-  **`SimulationKit`** Swift package that both the CLI and the app link, over
-  bolting the simulator sources onto the app target — one source of truth, and
-  the CLI stays a thin driver.
-- [ ] Resolve the dependency direction cleanly: the simulator already reaches
-  *into* EVA files, so the package boundary must not create a cycle. The natural
-  cut is the forward model + scenario + generators (already app-neutral) into
-  the kit, with EVA and the CLI both above it.
-- [ ] Keep `build.sh` working (or replace it with the package build) so the
-  self-test corpus and determinism baseline still run.
+### What we learned (2026-08-29 planning pass)
 
-**Exit:** EVA can call generation and get channels + truth in memory, and the
-existing EVASimulate self-test (106 checks) still passes.
+- **The shared foundation is bounded to 17 EVA files** — exactly what `build.sh`
+  compiles alongside the simulator: `Core/Forward/{ForwardTypes, Spherical,
+  Ellipsoidal, BEM}ForwardModel`, `Core/{AccelerateCompat, DSP, LinearAlgebra,
+  SeededGenerator}`, `Artifacts/SourceInformed/SourceInformedOperator`,
+  `Channels/{ElectrodeGeometry, SensorLayout}`, `IO/{EGISensorXMLParser,
+  MFFFileType, MFFReader, MFFWriter}`, `Epoching/EpochModel`,
+  `Pipeline/EVAProcessingScript`. This is the CLI's full transitive closure
+  (that list builds and passes 106 self-test checks today).
+- **Those files are woven into the app**: `SensorLayout` is used in ~34 files,
+  `EVAProcessingScript` ~20, `ElectrodeGeometry` ~15, `LinearAlgebra` ~12,
+  `DSP` ~10, `ForwardHeadModel` ~8. So a package boundary makes their API a
+  public surface to maintain.
+- **The simulator's *core* (generators, scenario, forward) is clean** — it does
+  NOT touch the app-coupled types. Only `Montage`, `SimulationWriter`,
+  `ImpedanceModel`, `SelfTest`, and `main.swift` reach `SensorLayout` / MFF I/O,
+  and that is coordinate-file reading + MFF writing (CLI-ish glue), not the
+  math.
+
+### Chosen approach (owner, 2026-08-29): simulator lives in EVA, CLI built from it
+
+Rather than a separate SwiftPM package, **move the simulator sources into the
+EVA structure and build the CLI as a second target from what already exists in
+EVA.** This avoids inverting the dependency (the simulator already depends on
+EVA core, not the other way round) and needs no public-API pass.
+
+- [ ] **Bring `Tools/EVASimulate/Sources/EVASimulate/*` into the EVA target's
+  source tree** (a group under `EVA/`, e.g. `EVA/Simulation/`), so the app
+  compiles the generators/scenario/forward and the GUI (SIM-1) can call them
+  directly — no import, no `public`, same module.
+- [ ] **Add an `EVASimulate` command-line-tool target** to `EVA.xcodeproj` whose
+  membership is the simulator files + the 17 shared EVA files (they already
+  compile together under `build.sh`). `main.swift` stays the CLI entry point.
+- [ ] **Embed the CLI in the app bundle**: a Copy Files build phase on the EVA
+  app target copies the `EVASimulate` product into `Contents/MacOS/`. (Confirm
+  it as a plain executable, not a nested `.app`; codesigning of the embedded
+  tool needs checking.)
+- [ ] **Retire `build.sh`** once the CLI target builds; keep the module-cache /
+  case-insensitive-path note from `build.sh`'s header in mind if any residual
+  script remains.
+- [ ] **Migrate the self-test**: `SelfTest.run()` (106 checks) becomes reachable
+  both as the CLI `selftest` subcommand *and* from `EVATests` (a thin Swift
+  Testing wrapper that calls `SelfTest.run()` and `#expect`s zero failures), so
+  `xcodebuild test` covers it and the determinism baseline still runs.
+
+### Alternative kept on record: full `EVASimulationKit` SwiftPM package
+
+The cleaner-in-principle option (one source of truth, CLI as a thin driver).
+Feasible because the closure is only 17 files, and app *import* churn is
+avoidable with a single `@_exported import EVASimulationKit` in one app file.
+Cost that made the owner prefer the in-EVA path: a public-API pass over MFF I/O
+/ `SensorLayout` / `DSP` / `LinearAlgebra`, plus hand-wiring the local-package
+dependency in `EVA.xcodeproj`. Revisit only if the app itself later wants to be
+split into a core package for other reasons.
+
+### Open questions for next session
+
+- Where exactly the simulator group sits under `EVA/` (one folder vs. mirror of
+  its current file grouping).
+- Whether the CLI target and the app duplicate-compile the 17 shared files (fine,
+  and what `build.sh` does now) or whether a static library sub-target holds them
+  once and both link it (less duplication, more project plumbing).
+- Codesigning/notarization of the embedded `EVASimulate` binary.
+
+**Exit:** EVA calls generation and gets channels + truth in memory; the CLI is a
+bundled executable; `xcodebuild test` runs the 106-check corpus; `build.sh` gone.
 
 ## SIM-1 — New → Simulated Recording panel — **NOT STARTED**
 
