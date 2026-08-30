@@ -694,22 +694,54 @@ and the later methods below.
 
 ## 2. SI-4 — Adversarial evaluation — **IN PROGRESS**
 
-- [ ] Sweep recording length, accepted beats, BCG rank/morphology jitter,
-  component count, regularization, channels, sampling rate, and basis richness.
-- [~] Add independent shell-radius, skull-conductivity, head-center, and
-  electrode-position mismatch to the existing basis-offset sweep. **Head-model
-  mismatch shipped**: `evaluate-surrogate --correction-head <name>` builds the
-  correction basis on a different standard head than the truth (the named
-  presets bundle a radius + skull-conductivity change); a self-test measures it.
-  **Measured finding: PCA-S degrades gracefully** — an extreme 1:80→1:20 skull
-  mismatch moves broadband SNR ~25% but the correction still works (>1.8×
-  uncorrected), because the brain basis is a span covering most of sensor space.
-  Independent per-parameter (radius-only, conductivity-only, head-center,
-  electrode-position) sweeps remain.
-- [ ] Report broadband/per-band residuals, clean distortion, ERP amplitude,
-  latency/topography, removed variance, and mean ± SD over seeds.
-- [ ] Derive refusal/warning thresholds for inadequate beat count,
-  ill-conditioning, and missing geometry from evidence.
+SI-4 is a **measurement** milestone, not an infrastructure one: the head-model
+work and the `evaluate-surrogate` flags (`--seeds --offsets --sources --components
+--brain-regularization --duration --channels --coordinates --rate --correction-head
+--with-erp --json`) already exist. What remains is to run the adversarial campaign,
+report the full metric set, and turn the evidence into the refusal/warning
+thresholds the shipped code currently only *assumes* — `minimumAcceptedBeats = 10`
+and `minimumComponentReliability = 0.9` in `BCGSurrogateCorrection` are placeholders;
+geometry-missing is already a hard refusal. Three tracks (owner decisions 2026-08-30):
+
+**Track 1 — tooling gaps (small code):**
+
+- [ ] Add the missing sweep controls to `evaluate-surrogate`: BCG **rank/morphology
+  jitter**, an **accepted-beat-count** axis, and **independent** head-model params
+  (radius-only, skull-ratio-only, head-center, electrode-position) rather than only
+  the bundled `--correction-head` presets.
+- [ ] **Extend the per-seed report to the full metric set** the exit lists — add
+  sensor-space distortion (broadband + **per-band residual**, **clean distortion**,
+  **removed variance**) beside the ERP SNR / latency / amplitude / explained-variance,
+  reusing `SNRMetrics.score`. (Owner choice: one command gives everything.)
+- [ ] **New CLI `evaluate-surrogate-grid` subcommand** (owner choice): cross-runs the
+  sweep axes and emits one aggregated table/CSV, so the whole envelope regenerates
+  with a single command (reproducibility ethos).
+
+**Track 2 — run the campaign (experiments):**
+
+- [ ] Sweep each axis with enough seeds — length, accepted beats, rank/morphology
+  jitter, component count, regularization, channels, rate, basis richness — plus the
+  independent head-model params. The channel sweep runs on the **built-in montage at
+  32/64/128/256** for the trend now; real HydroCel geometry stays deferred (below).
+- [ ] Record mean ± SD and the **breakpoint** per axis (where corrected stops beating
+  uncorrected, or ERP distortion exceeds a committed bound). Write the findings into
+  `docs/provenance/` and summarize here — like the head-mismatch finding already on
+  record.
+- [x] **Head-model mismatch (done):** `evaluate-surrogate --correction-head <name>`
+  builds the correction basis on a different standard head than the truth.
+  **Measured: PCA-S degrades gracefully** — an extreme 1:80→1:20 skull mismatch moves
+  broadband SNR ~25% but the correction still beats uncorrected (>1.8×), because the
+  brain basis spans most of sensor space. (Independent per-parameter versions are the
+  Track-1 head-model item above.)
+
+**Track 3 — evidence → guardrails (closes SI-4):**
+
+- [ ] Confirm or **recalibrate** `minimumAcceptedBeats` and
+  `minimumComponentReliability` from the data; add an **ill-conditioning guard**
+  (condition number of the regularized brain system) only if the sweeps show it
+  matters.
+- [ ] Surface the refusals/warnings as user-visible messages + provenance events,
+  with tests. Only then is PCA-S production-ready.
 
 **Enabling head-model work (SI-1 shipped only one head model; the geometry
 sweeps above cannot run without a second and third).** These are shared
@@ -746,10 +778,11 @@ mismatch is expressible:
   same accuracy at a coarser mesh for very high skull contrast, cutting the dense
   solve cost. Schedule only if BEM mesh cost becomes a bottleneck for
   generation-side use.
-- [ ] **EGI HydroCel 128- and 256-channel montages** as EVASimulate scenarios,
-  so the channel-count sweep spans the dense nets EVA users actually record on
-  rather than the paper's 64-channel protocol — no need to reproduce the exact
-  64-channel montage.
+- [ ] **EGI HydroCel 128- and 256-channel montages** as EVASimulate scenarios —
+  **deferred within SI-4** (owner 2026-08-30): the channel sweep runs first on the
+  built-in montage at 32/64/128/256 to get the trend; author the real HydroCel
+  geometries only if that trend shows montage-specific effects the spiral montage
+  misses. No need to reproduce the paper's exact 64-channel protocol.
 
 **Exit:** the safe operating envelope and failure messages are measured. Only
 then call PCA-S production-ready or generalize it.
