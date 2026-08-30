@@ -47,8 +47,10 @@ struct SimulatorWindowView: View {
                 SimulatorGenerateView(open: openRecording)
             case .score:
                 SimulatorScoreView(open: openRecording)
-            default:
-                comingSoon(simulator.mode)
+            case .sweep:
+                SimulatorSweepView(open: openRecording)
+            case .group:
+                SimulatorGroupView(open: openRecording)
             }
         }
         .frame(minWidth: 760, minHeight: 560)

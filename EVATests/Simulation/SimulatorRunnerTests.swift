@@ -38,6 +38,48 @@ struct SimulatorRunnerTests {
         return config
     }
 
+    @Test("bundled scenario presets are available and load")
+    func scenarioPresetsLoad() throws {
+        let presets = SimulatorScenarioLibrary.all
+        #expect(!presets.isEmpty, "expected the scenarios folder reference to be bundled")
+        let first = try #require(presets.first)
+        let loaded = try #require(SimulatorScenarioLibrary.config(for: first))
+        #expect(loaded.config.channelCount > 0)
+    }
+
+    @Test("sweep generates one run per value")
+    func sweepRuns() throws {
+        var config = fastConfig()
+        config.bcgEnabled = true
+        let outcome = try SimulatorRunner.sweep(
+            config: config, name: "SweepTest",
+            parameter: "bcg-amplitude", values: [50, 120],
+            options: SimulatorRunner.Options()
+        )
+        defer { try? FileManager.default.removeItem(at: outcome.directory) }
+        #expect(outcome.runs.count == 2)
+        for run in outcome.runs {
+            #expect(FileManager.default.fileExists(atPath: run.noisyURL.path))
+            #expect(run.uncorrectedSNR.isFinite || run.uncorrectedSNR.isInfinite)
+        }
+    }
+
+    @Test("group generates one subject per draw")
+    func groupSubjects() throws {
+        var variability = SimulatorRunner.GroupVariability()
+        variability.homogeneous = true
+        let outcome = try SimulatorRunner.generateGroup(
+            config: fastConfig(), name: "GroupTest",
+            subjects: 2, groupSeed: 7, variability: variability,
+            options: SimulatorRunner.Options()
+        )
+        defer { try? FileManager.default.removeItem(at: outcome.directory) }
+        #expect(outcome.subjects.count == 2)
+        for subject in outcome.subjects {
+            #expect(FileManager.default.fileExists(atPath: subject.noisyURL.path))
+        }
+    }
+
     @Test("locates the embedded CLI in the app bundle")
     func locatesCLI() throws {
         let cli = try #require(

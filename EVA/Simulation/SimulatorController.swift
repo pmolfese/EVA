@@ -46,7 +46,7 @@ final class SimulatorController {
             case .group: return "person.3"
             }
         }
-        var isImplemented: Bool { self == .generate || self == .score }
+        var isImplemented: Bool { true }
     }
 
     enum Phase: Equatable {
@@ -200,4 +200,95 @@ final class SimulatorController {
         scorePhase = .idle
         scoreMessage = ""
     }
+
+    // MARK: - Sweep mode
+
+    var sweepParameter = "bcg-amplitude"
+    var sweepValuesText = "50, 100, 150, 200"
+    var sweepOutputDir: URL?
+    private(set) var sweepPhase: Phase = .idle
+    private(set) var sweepMessage = ""
+    private(set) var sweepOutcome: SimulatorRunner.SweepOutcome?
+    var isSweeping: Bool { sweepPhase == .generating }
+
+    func sweep() {
+        guard sweepPhase != .generating else { return }
+        let values = sweepValuesText
+            .split(separator: ",")
+            .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard !values.isEmpty else {
+            sweepPhase = .failed("Enter comma-separated numeric values.")
+            return
+        }
+        sweepPhase = .generating
+        sweepMessage = "Running sweep…"
+        let config = self.config
+        let name = scenarioName
+        let parameter = sweepParameter
+        var runOptions = options
+        runOptions.outputDirectory = sweepOutputDir
+
+        Task {
+            do {
+                let outcome = try await Task.detached(priority: .userInitiated) {
+                    try SimulatorRunner.sweep(config: config, name: name, parameter: parameter, values: values, options: runOptions)
+                }.value
+                self.sweepOutcome = outcome
+                self.sweepPhase = .done
+                self.sweepMessage = "\(outcome.runs.count) runs in \(outcome.directory.lastPathComponent)."
+            } catch {
+                self.sweepOutcome = nil
+                self.sweepPhase = .failed(error.localizedDescription)
+                self.sweepMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func clearSweepStatus() { sweepPhase = .idle; sweepMessage = "" }
+
+    // MARK: - Group mode
+
+    var groupSubjectCount = 12
+    var groupVariability = SimulatorRunner.GroupVariability()
+    var groupUsesSeed = false
+    var groupSeed: UInt64 = 20_260_830
+    var groupOutputDir: URL?
+    private(set) var groupPhase: Phase = .idle
+    private(set) var groupMessage = ""
+    private(set) var groupOutcome: SimulatorRunner.GroupOutcome?
+    var isGrouping: Bool { groupPhase == .generating }
+
+    func generateGroup() {
+        guard groupPhase != .generating else { return }
+        guard groupSubjectCount > 0 else {
+            groupPhase = .failed("Choose at least one subject.")
+            return
+        }
+        groupPhase = .generating
+        groupMessage = "Generating cohort…"
+        let config = self.config
+        let name = scenarioName
+        let subjects = groupSubjectCount
+        let seed = groupUsesSeed ? groupSeed : nil
+        let variability = groupVariability
+        var runOptions = options
+        runOptions.outputDirectory = groupOutputDir
+
+        Task {
+            do {
+                let outcome = try await Task.detached(priority: .userInitiated) {
+                    try SimulatorRunner.generateGroup(config: config, name: name, subjects: subjects, groupSeed: seed, variability: variability, options: runOptions)
+                }.value
+                self.groupOutcome = outcome
+                self.groupPhase = .done
+                self.groupMessage = "\(outcome.subjects.count) subjects in \(outcome.directory.lastPathComponent)."
+            } catch {
+                self.groupOutcome = nil
+                self.groupPhase = .failed(error.localizedDescription)
+                self.groupMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func clearGroupStatus() { groupPhase = .idle; groupMessage = "" }
 }

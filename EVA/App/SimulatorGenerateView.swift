@@ -18,6 +18,7 @@
 
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SimulatorGenerateView: View {
     @Environment(SimulatorController.self) private var simulator
@@ -27,9 +28,11 @@ struct SimulatorGenerateView: View {
     var body: some View {
         @Bindable var simulator = simulator
         VStack(spacing: 0) {
+            presetBar(simulator: simulator)
             TabView {
                 RecordingTab().tabItem { Label("Recording", systemImage: "waveform") }
                 SourcesTab().tabItem { Label("Sources & Head", systemImage: "brain.head.profile") }
+                BackgroundTab().tabItem { Label("Background", systemImage: "waveform.path") }
                 GradientTab().tabItem { Label("Gradient", systemImage: "waveform.path.ecg") }
                 CardiacTab().tabItem { Label("Cardiac", systemImage: "heart") }
                 OcularTab().tabItem { Label("Ocular", systemImage: "eye") }
@@ -48,6 +51,44 @@ struct SimulatorGenerateView: View {
             Divider()
             bottomBar(simulator: simulator)
         }
+    }
+
+    // MARK: Preset bar
+
+    private func presetBar(simulator: SimulatorController) -> some View {
+        HStack(spacing: 8) {
+            Text("Preset").font(.caption).foregroundStyle(.secondary)
+            Menu {
+                if SimulatorScenarioLibrary.all.isEmpty {
+                    Text("No bundled scenarios found")
+                } else {
+                    ForEach(SimulatorScenarioLibrary.all) { preset in
+                        Button {
+                            load(preset, into: simulator)
+                        } label: {
+                            Text(preset.name)
+                            if !preset.description.isEmpty { Text(preset.description) }
+                        }
+                    }
+                }
+            } label: {
+                Label("Load a preset…", systemImage: "square.stack.3d.up")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            Spacer()
+            Text("Presets are the same scenarios the CLI ships; each replaces the settings below.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.tail)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+    }
+
+    private func load(_ preset: SimulatorScenarioLibrary.Preset, into simulator: SimulatorController) {
+        guard let loaded = SimulatorScenarioLibrary.config(for: preset) else { return }
+        simulator.config = loaded.config
+        simulator.scenarioName = loaded.name
+        simulator.options.coordinatesFile = nil
     }
 
     // MARK: Bottom bar
@@ -266,14 +307,81 @@ private struct SourcesTab: View {
                 }.labelsHidden().frame(maxWidth: 160)
             }
             IntRow(title: "Lead-field terms", value: $simulator.config.leadFieldTerms, range: 10...400)
-            Text("Montage/coordinate import and per-source placement are planned; v1 uses the built-in montage.")
+
+            SectionHeader(title: "Montage")
+            LabeledContent("Coordinates") {
+                HStack(spacing: 8) {
+                    Text(simulator.options.coordinatesFile?.lastPathComponent ?? "Built-in montage")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Button("Import…") { chooseCoordinates() }
+                    if simulator.options.coordinatesFile != nil {
+                        Button("Clear") { simulator.options.coordinatesFile = nil }
+                    }
+                }
+            }
+            DoubleRow(title: "Electrode jitter", value: jitter, unit: "°")
+            Text("Import a coordinates.xml or an MFF to use its montage; jitter perturbs electrode angles. Named nets (HydroCel 64/128/256) come with SI-4.")
                 .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
     private var headModel: Binding<HeadModel> {
         Binding(
             get: { simulator.config.sphericalHeadModel == .classicFourShell ? .fourShell : .threeShell },
             set: { simulator.config.sphericalHeadModel = $0 == .fourShell ? .classicFourShell : .classicThreeShell }
+        )
+    }
+    private var jitter: Binding<Double> {
+        Binding(
+            get: { simulator.config.montageJitterDegrees ?? 0 },
+            set: { simulator.config.montageJitterDegrees = $0 > 0 ? $0 : nil }
+        )
+    }
+    private func chooseCoordinates() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.xml, .mff]
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Import"
+        panel.message = "Choose a coordinates.xml or an MFF recording whose montage to use."
+        if panel.runModal() == .OK, let url = panel.url {
+            simulator.options.coordinatesFile = url
+        }
+    }
+}
+
+private struct BackgroundTab: View {
+    @Environment(SimulatorController.self) private var simulator
+    var body: some View {
+        @Bindable var simulator = simulator
+        TabForm {
+            SectionHeader(title: "Overall")
+            DoubleRow(title: "Target σ", value: $simulator.config.eegTargetStdMicrovolts, unit: "µV")
+
+            SectionHeader(title: "Alpha (eyes open / closed)")
+            DoubleRow(title: "Alpha low", value: $simulator.config.alphaLowMicrovolts, unit: "µV")
+            DoubleRow(title: "Alpha high", value: $simulator.config.alphaHighMicrovolts, unit: "µV")
+            DoubleRow(title: "Alpha cycle", value: $simulator.config.alphaCycleSeconds, unit: "s")
+
+            SectionHeader(title: "Band amplitudes")
+            ForEach(bandIndices, id: \.self) { index in
+                DoubleRow(title: simulator.config.eegBands[index].name.capitalized,
+                          value: bandAmplitude(index), unit: "µV")
+            }
+            Text("Per-band σ (delta / theta / beta / gamma) before the global scale to the target σ. Alpha is driven by the envelope above rather than a fixed amplitude.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+    private var bandIndices: [Int] {
+        simulator.config.eegBands.indices.filter { !simulator.config.eegBands[$0].isAlpha }
+    }
+    private func bandAmplitude(_ index: Int) -> Binding<Double> {
+        Binding(
+            get: { simulator.config.eegBands[index].amplitudeMicrovolts ?? 0 },
+            set: { simulator.config.eegBands[index].amplitudeMicrovolts = $0 }
         )
     }
 }

@@ -7,11 +7,14 @@ status, and what comes next. It covers two spheres of influence:
 - **Part 0 — Simulator in the app (SIM)**, a new cross-sphere program: bring
   EVASimulate's generation and the forward model into EVA's own GUI, so
   simulated ground truth flows through the same pipeline as real data.
-- **Part I — EVA proper**, the application itself, including REWIND (RW),
+- **Part TF — Event-related time-frequency (TF)**, epoch-level ERSP/ITPC as the
+  frequency-lens counterpart to the Average/Trials views, feeding the existing
+  cluster-permutation stats.
+- **Part EVA Core**, the application itself, including REWIND (RW),
   processing/batch (PB), MRI/FASTR (MRI), trial-wise review (TW), UI/UX, and the
   source-informed correction program (SI) as it lands in the app.
-- **Part II — EVASimulate**, the `Tools/EVASimulate` simulator and its tiers.
-- **Part III — Completed**, everything already shipped, sorted by the same two
+- **Part Sim**, the `Tools/EVASimulate` simulator and its tiers.
+- **Part Completed**, everything already shipped, sorted by the same two
   spheres.
 
 Status values are deliberately few:
@@ -20,28 +23,35 @@ Status values are deliberately few:
 - **IN PROGRESS** — partially implemented; remaining exit criteria are listed.
 - **NOT STARTED** — approved work, ordered but not begun.
 - **DEFERRED** — intentionally waiting for evidence or a dependency.
-- **COMPLETED** — shipped or explicitly closed; details live in Part III.
+- **COMPLETED** — shipped or explicitly closed; details live in Part Completed.
 
 Cross-sphere note: SI-0, SI-1, and SI-2 were shared-code extractions executed
 across both spheres, and SI-3 shipped the first correction built on them; all
-four are recorded in Part III. The app-side remainder (SI-4 onward) is in
-Part I, and the simulator-side remainder is in Part II.
+four are recorded in Part Completed. The app-side remainder (SI-4 onward) is in
+Part EVA Core, and the simulator-side remainder is in Part Sim.
 
 ---
 
 # PART 0 — SIMULATOR IN THE APP
 
-A new program, cross-sphere by nature: the engine lives in Part II (EVASimulate)
-and the surface lives in Part I (EVA proper). The goal is that a person can
+A new program, cross-sphere by nature: the engine lives in Part Sim (EVASimulate)
+and the surface lives in Part EVA Core (EVA proper). The goal is that a person can
 create a simulated recording — and, later, place dipoles and watch their fields
 — from inside EVA, and that the result flows through filter / ICA / PCA-S /
 scoring exactly like a real file. That is both the teaching payoff ("here is
 ground truth; watch your pipeline act on it") and a validation multiplier (every
 cleaning method gets a truth-backed sandbox without leaving the app).
 
-**Scheduling note:** these milestones do **not** preempt the Part I execution
-order. SI-4 remains milestone 1. Part 0 is scheduled at the owner's discretion;
-SIM-3 in particular is a small, independent visual win that can land any time.
+**Scheduling note:** these milestones do **not** preempt the Part EVA Core
+execution order. SI-4 remains milestone 1. Part 0 is scheduled at the owner's
+discretion; SIM-3 in particular is a small, independent visual win that can land
+any time.
+
+**Near-term simulator-UI gaps:**
+
+- [x] **Per-band background amplitudes** — shipped in SIM-1 (2026-08-30): the Studio's
+  **Background** tab exposes the alpha envelope and per-band σ for δ / θ / β / γ. The
+  Source Simulator's own background spectrum could reuse this later if wanted.
 
 Dependency map:
 
@@ -170,7 +180,7 @@ generation is a direct call for SIM-1); the CLI is a bundled, codesigned
 executable at `EVA.app/Contents/MacOS/EVASimulate`; `xcodebuild test` runs the
 106-check corpus (via the CLI subprocess wrapper); `build.sh` is gone.
 
-## SIM-1 — New → Simulated Recording panel — **IN PROGRESS (v1 shipped 2026-08-29)**
+## SIM-1 — New → Simulated Recording panel — **COMPLETED (2026-08-30)**
 
 A dedicated panel modeled directly on Batch Process. The batch scaffolding was
 the template: a `Window(id:)` scene (`BatchWindowView`) opened from a menu
@@ -213,60 +223,328 @@ shows a setup sheet (`BatchSetupSheet`) on first open. Mirrored:
   + copy-pasteable command line + timestamp/app version) and `<prefix>_scenario.json`
   alongside the recordings, so both the inputs and the invocation are on disk.
 
-**Exit — met:** a person picks knobs across tabs, chooses an output folder, clicks
-Generate, and a simulated recording opens in EVA and flows through the normal
-pipeline unchanged. **Remaining for full SIM-1:** the **Score** mode (load truth +
-corrected → SNR/per-band/ERP-recovery metrics — the generate→clean→score loop),
-Sweep/Group modes, scenario-preset picker (bundle `scenarios/*.json` as resources),
-and montage/coordinate + per-source dipole authoring.
+- [x] **Score mode (2026-08-29):** the generate → clean → score loop, in-window.
+  Pick a ground-truth `_clean.mff`, the corrected recording (cleaned + exported
+  from EVA), and optionally the uncorrected `_noisy.mff` baseline; runs
+  `EVASimulate score --json`, decodes `CorrectionScore` into app-side DTOs, and
+  shows broadband metrics (corrected vs uncorrected) + a per-band table.
+  Sandbox-safe: inputs are staged into container-temp (the CLI child can't read
+  user-picked packages outside the container), then scored. "Fill truth & baseline
+  from last generation" wires the two modes together. Verified by two Score tests
+  (identical → correlation > 0.99; noisy-vs-clean → populated bands/channels).
 
-## SIM-2 — Interactive forward sandbox — **NOT STARTED**
+**Core shipped:** a person picks knobs across the Generate tabs, chooses an output
+folder, clicks Generate, a simulated recording opens and flows through the normal
+pipeline, and they can Score their cleaning against ground truth — all without
+leaving EVA.
 
-The BESA-Simulator-adjacent milestone, built on SIM-1 and SIM-3. Place / drag
-dipoles or regional sources in the head, assign each a time course (canned
-waveforms, ERP shapes, coloured noise), generate the scalp EEG/MEG, and view the
-field as a sandbox — the forward direction made interactive.
+**Remaining pieces — all shipped 2026-08-30:**
 
-- [ ] Source authoring: position, orientation, and a time-course editor per
-  source, reusing `ForwardDipole` and the regional-source machinery.
-- [ ] Live forward: recompute the scalp topography as sources move, using the
-  analytic sphere by default (exact and fast) with BEM/ellipsoid available.
-- [ ] **The EVA differentiator, surfaced:** the simulator knows the true sources
-  and the true noise covariance exactly — expose that as live scoring, which a
-  teaching tool cannot. Scope to what serves method validation; skip
-  pure-teaching features that do not.
-- [ ] Before claiming BESA parity, check their current feature list rather than
-  cloning from memory; match the parts that serve EVA's mission.
+- [x] **Sweep mode** — a Studio mode that varies one of the CLI's 10 sweepable
+  parameters across comma-separated values off the current Generate config, runs
+  `EVASimulate sweep`, and shows `sweep_summary.csv` as a value → uncorrected-SNR
+  table with per-run Open. (`SimulatorSweepView`, `SimulatorRunner.sweep`.)
+- [x] **Group mode** — a Studio mode: subject count, group seed, homogeneous or
+  seven between-subject SD sliders; runs `EVASimulate generate-group` and lists the
+  `sub-<label>` subjects + the participants TSV. (`SimulatorGroupView`,
+  `SimulatorRunner.generateGroup`.)
+- [x] **Scenario-preset picker** — the 8 `Tools/EVASimulate/scenarios/*.json` are
+  bundled into the app as a **folder reference** (single source of truth with the
+  CLI) and offered as a "Load a preset…" menu at the top of Generate that replaces
+  the current config. (`SimulatorScenarioLibrary`.)
+- [x] **Per-band amplitudes** — a **Background** tab exposes the alpha envelope and
+  a per-band σ for δ / θ / β / γ (`eegBands[i].amplitudeMicrovolts`) plus the global
+  target σ. **Coordinate/montage import** — a coordinates.xml / MFF picker (staged
+  into the run's temp dir for the sandboxed child) plus a montage-jitter knob, in
+  Sources & Head. (Named built-in nets — HydroCel 64/128/256 — remain deferred to
+  SI-4, per owner 2026-08-30.)
 
-**Exit:** a user can build a multi-source scenario interactively, see its field,
-and read a truth-backed score. **Effort:** large — stage it (static placement →
-time courses → live field/topomap coupling).
+All four are verified in `SimulatorRunnerTests` (sweep runs, group subjects, preset
+library loads) from the sandboxed host. Interactive source placement / a live field
+is deliberately **not** part of SIM-1 — that is the Source Simulator window below.
 
-## SIM-3 — Glass-brain dipole visualization — **NOT STARTED**
+## The Source Simulator window (SIM-2 + SIM-3 home) — **IN PROGRESS (Stages 1, 2, 3a shipped)**
 
-A semi-transparent brain/head with dipoles drawn as oriented arrows at their 3D
-positions, coupled to the forward scalp topomap they produce — drag the dipole,
-watch the topography change. Independent of SIM-1/2 (it can ship first as a
-standalone inspector/figure) and the fastest visible win; it also becomes SIM-2's
-viewport.
+SIM-2 and SIM-3 are two halves of one interactive tool — SIM-3 is SIM-2's
+viewport — so they ship together in **their own dedicated window, "Source
+Simulator"** (File ▸ New ▸ Source Simulator), *not* as another mode inside the
+Simulator Studio. Rationale: the Studio's Generate/Score modes are form-and-file
+work that drives the bundled CLI; the Source Simulator is a live, spatial,
+direct-manipulation tool with a fundamentally different interaction paradigm and
+its own persistent state (sources, positions, time courses, the live field). It
+mirrors the Studio's scaffolding — a single-instance `Window(id:)` scene owning a
+`SourceSimulatorController`, opened from a `File ▸ New` menu command — but is a
+separate window, as the owner suggested (2026-08-29).
 
-- [ ] **Tier B first** (days, no new framework): three orthographic projections
-  (axial / sagittal / coronal) in a SwiftUI `Canvas`, dipole position + an
-  orientation arrow, drawn beside the existing topomap renderer driven by the
-  forward model — this closes the source→topography loop, which is the single
-  most useful thing the view can teach.
-- [ ] Reuse the BEM icosphere mesh for the head/brain surface outline.
-- [ ] **Tier A later** (SceneKit): a true orbiting, zoomable glass brain, once
-  tier B proves the interaction is worth the 3D dependency.
+**Crucial architectural point:** unlike SIM-1/Score, this window does **not**
+shell out to the CLI. It calls the in-module forward solver
+(`SphericalForwardModel.leadField(head:montage:sources:reference:terms:)`, which
+returns a µV/(nA·m) matrix) **directly, in-process**, so dragging a dipole
+recomputes the scalp field with no file round-trip. This is exactly the payoff
+SIM-0 unlocked by moving the generation/forward core into the app module.
+
+Reused building blocks (all in-module): `ForwardDipole` / `SimulatedSource`
+(`EVA/Core/Forward/ForwardTypes.swift`), the analytic-sphere / ellipsoid / BEM
+solvers, `Montage.forwardElectrodes(head:)`, `SensorLayout` + an existing topomap
+renderer (e.g. `TopoFilmstripView`'s scalp interpolation) for the live field, the
+head-model picker already built for Generate, and the BEM icosphere mesh for the
+head/brain outline. Mind the shared MFF/SensorLayout y-flip when projecting.
+
+**Layout:** a split view — left, the glass-brain viewport (SIM-3); right, the live
+scalp topomap plus a source inspector (position, orientation, moment, time
+course); a source list with add/remove, and (stage 2+) a time-course editor and
+timeline scrubber.
+
+### Stage 1 — SIM-3 tier B + SIM-2 static field — **SHIPPED 2026-08-29**
+
+The fastest visible win and the single most useful teaching object; shipped first.
+
+- [x] `SourceSimulatorController` (`@Observable`) + `SourceSimulatorWindowView` +
+  the `File ▸ New ▸ New Source Simulator…` command and single-instance `Window`
+  scene (mirrors the Studio scaffolding).
+- [x] **Glass-brain viewport (tier B):** three orthographic projections (axial /
+  coronal / sagittal) in SwiftUI `Canvas` (`HeadProjectionView`), scalp + brain
+  shell outlines from the sphere radii, each source a dot + orientation arrow at
+  its projected position, drag to move within a plane's two axes (the third is
+  held; a source is clamped inside the brain shell). Laid out 2×2 with the field.
+- [x] **Live forward field:** `SourceSimulatorController.scalpPotentials()` builds
+  the lead field **in-process** via `SphericalForwardModel.leadField(...)` (60
+  harmonic terms for responsiveness) and multiplies by each source's moment; a
+  compact IDW topomap (`ScalpFieldView`) redraws as sources move. Inspector:
+  moment slider, orientation quick-sets (radial/X/Y/Z), head-model (3/4-shell),
+  channel count (19/32/64/128), reference.
+- [x] **In-canvas orientation:** ⌥-drag grabs a dipole's arrow and aims it. Each
+  projection rotates about its own normal axis (axial→z, coronal→y, sagittal→x),
+  preserving the out-of-plane tilt, so the three views together point anywhere.
+  Move vs rotate is chosen from `NSEvent.modifierFlags` at grab time.
+- Verified by `SourceSimulatorControllerTests` (field exists + spatially varies,
+  average-ref zero-sums, moving changes the field, brain-clamp keeps the solver
+  valid, ⌥-rotation aims in-plane while staying unit length).
+- [x] **Glass-brain surface:** the projections draw a faint BEM-icosphere
+  wireframe (`BEMForwardModel.icosphere(subdivisions: 1)`, cached once) behind a
+  crisp boundary circle; both layers toggle independently in the inspector. Channel
+  counts now include **256**.
+- [ ] **Deferred within Stage 1:** ellipsoid/BEM in the field picker (3/4-shell
+  only so far), and a true anatomical (MRI-backed) silhouette — the sphere/icosphere
+  is correct for the parametric heads.
+
+**Stage-1 exit — met:** a dipole can be placed/dragged in the glass brain and its
+scalp topography read off live, entirely in-process.
+
+### Stage 2 — SIM-2 time courses and scalp EEG — **SHIPPED 2026-08-30**
+
+- [x] **Per-source time-course editor:** a `TimeCourse` per source — constant,
+  sine (frequency), ERP bump (Gaussian: latency + width), pulse (onset + length),
+  and seeded coloured noise — edited in the inspector; the moment slider is the
+  peak amplitude the course modulates.
+- [x] **Timeline + animation:** a transport (play/pause) + scrubber over the epoch
+  (duration × rate); a 30 fps tick advances `currentTime`, and the scalp field is
+  shown at that instant. Fast because the lead matrix and the per-source series are
+  cached (keyed by geometry / by moments+courses+duration+rate), so a playback
+  frame is a matrix-vector product, not a fresh solve.
+- [x] **"Generate scalp EEG":** assembles the full channels × samples recording
+  (lead field × source series) and writes it as an MFF **entirely in-process** via
+  the app's own `MFFWriter` + `MontageWriter.writeLayoutFiles` (coordinates
+  included), then opens it as an ordinary recording — no CLI, no scenario file. It
+  flows through EVA's pipeline and can be exported and fed to the Studio's Score
+  mode. Verified by `SourceSimulatorControllerTests` (sine field varies / is flat
+  at t=0, ERP peaks at its latency, and the written MFF reads back with the right
+  dimensions and a loadable topomap layout).
+
+### Stage 3a — Activation timeline — **SHIPPED 2026-08-30**
+
+Time is authored as a list of *activations* per dipole rather than one continuous
+course: a dipole is silent except during its activations, and can have any number
+at any times — so "a new time with new and/or old dipoles" is just later activations
+on new or existing dipoles (a dipole reused = a later activation; a new dipole = a
+new object starting later).
+
+- [x] **Model:** `Source.activations: [Activation]`; each `Activation` is a windowed
+  waveform — hold / sine / ERP bump (Gaussian centred in the window) / seeded noise —
+  with a **variable per-activation amplitude** (negative allowed, for polarity),
+  start, and length. A dipole's moment series is the sum of its activations; the
+  default dipole gets one full-epoch hold so static placement still shows a field.
+- [x] **Multi-track timeline** (`SourceTimelineView`): one row per dipole, each
+  activation a draggable/resizable block (drag to move, right-edge to resize, click
+  to select); a red playhead scrubs the live field; **Play** watches the whole scene
+  evolve; add/remove activation; a per-activation editor in the inspector.
+- [x] Verified by `SourceSimulatorControllerTests` (activations fire only inside
+  their window, the sine field is flat at t=0 and varies at peak, the ERP peaks at
+  the window centre, and the generated MFF still reads back correctly).
+
+### Stage 3b — Noise + truth-backed scoring (the EVA differentiator) — **NOT STARTED**
+
+The clean field is known exactly at every instant, so noise and scoring stay honest
+and need no inverse solver (distributed source imaging remains EVA Resolve's job).
+
+- [ ] **Noise model — start with white + pink** at a target SNR. Further noise models
+  worth adding later, roughly by value:
+  - **Measured-EEG background** — resample real resting EEG (or match its spectrum) so
+    the background carries a physiological 1/f + alpha shape, not synthetic colour.
+  - **Spatially-correlated noise** — a realistic channel covariance (e.g. the field of
+    many shallow random sources) so noise is *not* independent per electrode; this is
+    what actually challenges spatial filters (PCA-S/ICA/SSP).
+  - **Per-band noise** — dial noise power per band (δ/θ/α/β/γ).
+  - **Sensor faults** — per-channel drift, pops, high-impedance hiss, a bad-reference
+    offset (sensor-space, not physiological).
+- [ ] **Physiological artifacts as an option under noise** (owner idea 2026-08-30):
+  inject a blink / saccade / EMG / BCG on top of the clean field so the user can *see
+  how an artifact moves an estimate* — e.g. a blink dragging a fitted dipole frontward.
+  Reuse the simulator's own artifact generators (already in-module under
+  `EVA/Simulation/`), and keep each artifact's own truth (timing/topography) so it is
+  scoreable, not just decorative.
+- [ ] **Scoring:** on Generate, write clean + noisy (clean + known noise/artifacts) +
+  a truth sidecar (active dipoles, positions/orientations, activation windows); hand
+  the noisy one to the Studio's **Score** mode (reuses everything), and show a
+  lightweight live SNR/correlation-vs-truth readout as you scrub.
+
+### Stage 3c — Single-dipole-fit localization diagnostic — **DEFERRED (follow-on)**
+
+The BESA-adjacent source-space check, after 3a/3b: fit one equivalent dipole to the
+field at the playhead (nonlinear position, linear moment) and report localization
+error (mm) and orientation error (deg) vs the true active dipole. A classic bounded
+inverse used purely as a validation diagnostic — explicitly *not* distributed
+imaging, so it stays on the right side of the EVA Resolve boundary. Also: before
+claiming BESA-Simulator parity, check their current feature list rather than cloning
+from memory.
+
+### Stage 4 — SIM-3 tier A (SceneKit) and beyond — deferred until tier B proves out
+
+- [ ] **Tier A:** a true orbiting, zoomable glass brain in SceneKit, once tier B
+  proves the interaction is worth the 3D dependency.
 - [ ] **Tier C** (MRI-backed mesh) only if real segmented anatomy is imported —
   not required for the parametric sphere/ellipsoid heads.
 
-**Exit:** a dipole can be placed and its scalp topography read off live in a
-glass-brain view. **Effort:** small–medium for tier B; medium for tier A.
+**Overall exit:** a user builds a multi-source scenario interactively in the Source
+Simulator window, sees its live field, drives it with time courses, and reads a
+truth-backed score. **Effort:** large overall; Stage 1 is small–medium and
+independently valuable.
 
 ---
 
-# PART I — EVA PROPER
+# PART TF — EVENT-RELATED TIME-FREQUENCY
+
+Bring frequency-domain analysis to the epoch level: not just "what is the spectral
+power of this recording" (already shipped) but "how does power and phase-locking
+evolve, time-locked to the event" — ERSP and ITPC, the frequency-lens counterpart
+to the Average / Trials waveform views. The payoff is that EVA can measure
+oscillatory responses in established bands (δ/θ/α/β/γ) or continuously, export them
+in the forms the field actually publishes, and feed them into the cluster-based
+permutation stats EVA already owns.
+
+**Why this is far cheaper than it looks — most organs already exist:**
+
+- **Whole-recording spectral band power is already shipped** —
+  `EVA/Analysis/EEGAnalysisEngine.swift` `spectralAnalysis` does FFT/PSD absolute +
+  relative power per band, per channel, with a tidy long-format CSV export. PART TF
+  reuses its band definitions and its CSV schema verbatim.
+- **A Morlet CWT + scalogram already exist** — `EVA/Wavelet/
+  ContinuousWaveletTransform.swift` (Morlet, w0=6, scale↔freq) and
+  `WaveletScalogram.swift` (`power[freq][time]`, log-spaced). Currently **real part
+  only** — good for a picture, but it yields no phase and a biased power estimate.
+- **The cluster-based permutation stack is already written** — `EVA/Trials/
+  ClusterPermutationAnalyzer.swift`, the F-variant, `ClusterSpatialAdjacency`, null
+  distributions (Maris–Oostenveld). The hardest group-stats code is done.
+- **Epoch / average scaffolding** — `EVA/Epoching/AveragesWorkspaceViews.swift`
+  (EpochSegment, overlays, channel/baseline selection) and the **Metal wavelet
+  backend** (`WaveletMetalBackend.swift`) are both reusable.
+
+**The genuine gaps:** (1) a **complex analytic Morlet** (add the imaginary part to
+the existing kernel) so we get phase → ITPC and an unbiased `|c|²` power; (2)
+**per-trial stack aggregation** into ERSP + ITPC; (3) a **frequency axis on cluster
+adjacency**; (4) a small **binary map writer**.
+
+**Scheduling note:** like Part 0, PART TF does **not** preempt the Part EVA Core execution
+order (SI-4 stays milestone 1). It is scheduled at the owner's discretion.
+
+Dependency map:
+
+```text
+TF-1 (complex Morlet + ERSP + validation)      ← the only hard numerical piece
+   ├─→ TF-2 (ITPC + multitaper + TF tab UI)
+   │       └─→ TF-3 (binary maps + tidy scalar CSV export)
+   │               └─→ TF-4 (frequency-axis cluster permutation stats)
+```
+
+New module: `EVA/TimeFrequency/`
+`TimeFrequencyModels.swift` · `ComplexMorlet.swift` · `Multitaper.swift` ·
+`TimeFrequencyEngine.swift` · `TimeFrequencyMetalBackend.swift` ·
+`TimeFrequencyView.swift` · `TimeFrequencyExport.swift`
+
+## TF-1 — Complex Morlet + ERSP + validation — **NOT STARTED**
+
+The one hard part; nothing proceeds until its numbers are proven.
+
+- [ ] Extend the Morlet kernel to return complex coefficients `(re, im)` — add the
+  sine (imaginary) part alongside the existing cosine. Reuse
+  `ContinuousWaveletTransform.kernel`; do not fork the scale↔freq math.
+- [ ] **Variable cycles:** `n_cycles` linear-ramped across frequency (e.g. 3 → 10),
+  the Cohen-textbook default, so low frequencies get frequency resolution and high
+  frequencies get time resolution.
+- [ ] Per-epoch × per-channel complex CWT → `c[freq][time]`; **ERSP** = mean over
+  trials of `|c|²`, then baseline-normalized.
+- [ ] **Baseline picker:** dB `10·log10(power/baseline)` (default), percent change,
+  z-score, divisive — computed over a user-set pre-stimulus window.
+- [ ] Run the per-trial loop on `WaveletMetalBackend` (trials × channels × scales is
+  embarrassingly parallel).
+- [ ] **Validation gate (mandatory):** use the simulator (PART 0) to inject a known
+  oscillatory burst (e.g. 6 Hz, 300–500 ms) and confirm ERSP recovers its frequency,
+  latency, and dB magnitude within tolerance; cross-check one channel against MNE
+  `tfr_morlet`. Add to the determinism corpus.
+
+**Effort:** small–medium — the complex kernel is ~30 lines; validation is the work.
+
+## TF-2 — ITPC, multitaper, and the Time-Frequency tab — **NOT STARTED**
+
+- [ ] **ITPC** = `|mean over trials of (c/|c|)|` — nearly free once TF-1 yields
+  complex coefficients.
+- [ ] **Multitaper** path (DPSS tapers, short-time) as a `TFMethod` picker option —
+  Fieldtrip's default, better high-freq/gamma control; shares the trial-stack
+  aggregation.
+- [ ] **UI:** a third view mode beside Average / Trials. TF heatmap (freq × time),
+  channel selector, condition selector, ITPC toggle, condition-difference map
+  (A − B). Reuse AveragesWorkspace epoch / channel / baseline selection so it reads
+  as "same data, frequency lens."
+
+**Effort:** medium — ITPC is trivial; DPSS multitaper is the new lift.
+
+## TF-3 — Export: binary maps + tidy scalar CSV — **NOT STARTED**
+
+- [ ] **Full maps:** `channel × freq × time` per condition, written as NPY
+  (dependency-free: header + little-endian float buffer) for clean round-trip into
+  MNE / Python / R; HDF5 optional later.
+- [ ] **Scalar CSV ("single numbers"):** mean ERSP / ITPC per `channel × band ×
+  window` (e.g. theta 4–7 Hz, 200–500 ms), in the **exact long format**
+  `EEGAnalysisEngine.exportResult` already emits (`domain, scope, channel, band,
+  window, measure, value`) so it drops straight into a mixed model / JASP.
+- [ ] Report baseline method and cycle settings in the export header (reviewers ask).
+
+**Effort:** medium — NPY writer is tiny; the scalar reduction reuses existing schema.
+
+## TF-4 — Frequency-axis cluster permutation stats — **NOT STARTED**
+
+The big group-analysis win, and mostly generalization of existing code.
+
+- [ ] Generalize `ClusterSpatialAdjacency` to add a **frequency neighbor axis**
+  alongside time + channels.
+- [ ] Feed TF maps (power and ITPC) into the existing `ClusterPermutationAnalyzer` /
+  F-variant with the extended adjacency.
+- [ ] Document the two accepted group paths: (a) cluster-permutation over the full
+  TF × channel space (dominant method, controls the massive multiple-comparison
+  problem); (b) a-priori band × window ROI scalars → LMM/ANOVA in R/JASP (the TF-3
+  scalar CSV, zero new stats code).
+
+**Effort:** medium — the adjacency generalization is the careful part but
+well-scoped; the permutation engine is untouched.
+
+**Overall exit:** a user selects epochs, opens the Time-Frequency tab, sees a
+baseline-normalized ERSP / ITPC map, exports full maps + tidy scalars, and runs a
+frequency-aware cluster-permutation test — all on the same epoch selection the ERP
+views use. **Effort:** medium overall; TF-1 is the gate and independently valuable.
+
+---
+
+# PART EVA Core
 
 ## Milestone overview
 
@@ -306,7 +584,7 @@ UI-1 → UX-1 → F-1
 
 The shared-code extractions (SI-0 through SI-2), the history/replay hardening
 (RW-1), and the PCA-S feature itself (SI-3) are complete; their records are in
-[Part III](#a-eva-proper--completed). **SI-4 is next**, and it is what decides
+[Part Completed](#a-eva-proper--completed). **SI-4 is next**, and it is what decides
 whether PCA-S is production-ready: the method ships with defaults that are
 defensible rather than measured — the component-reliability gate in particular —
 and its operating envelope is unmeasured until the adversarial sweeps run.
@@ -406,12 +684,12 @@ later methods below reuse the first two and supply their own domain adapter.
   regression corpus call the same engine. A sheet-only path is incomplete.
 
 Every contract above is met by SI-3 for BCG and is the reference implementation
-for SI-5 onward; see [Part III, C13](#a-eva-proper--completed).
+for SI-5 onward; see [Part Completed, C13](#a-eva-proper--completed).
 
 SI-0 through SI-3 are complete, as is the RW-1 history/replay hardening they fed
 into: the shared numerical layer, the app boundary, and the first shipped
 source-informed correction. Their records are in
-[Part III](#a-eva-proper--completed); what remains here is measurement (SI-4)
+[Part Completed](#a-eva-proper--completed); what remains here is measurement (SI-4)
 and the later methods below.
 
 ## 2. SI-4 — Adversarial evaluation — **IN PROGRESS**
@@ -1028,7 +1306,7 @@ partly mechanical from headers, DEV-1a/1c are the real authorship.
 
 ---
 
-# PART II — EVASIMULATE
+# PART Sim
 
 Planning document for `Tools/EVASimulate`. Written 2026-08-21.
 
@@ -1100,7 +1378,7 @@ only if the owner explicitly asks to reopen it.
 
 ### Next, in order
 
-The authoritative cross-project sequence is Part I of this file. SI-2, the RW-1
+The authoritative cross-project sequence is Part EVA Core of this file. SI-2, the RW-1
 history/replay hardening, and SI-3 — broadband BCG PCA-S shipped through EVA —
 are done, so the next simulator-side obligation is **SI-4**: measuring PCA-S's
 adversarial operating limits, including the component-reliability threshold it
@@ -1177,7 +1455,7 @@ These are what make the tool trustworthy; every item below should preserve them.
 ## EVASimulate — open work
 
 Tiers 1, 2, 4 and 5 are complete, as are 3.1, 7.1-7.3 and 8.1; those records are
-in [Part III](#b-evasimulate--completed). What follows is what remains.
+in [Part Completed](#b-evasimulate--completed). What follows is what remains.
 
 ### Tier 3 — valuable, more work
 
@@ -1810,7 +2088,7 @@ it. Also deferred: 3.4 clinical patterns and the rest of Tier 6.
 
 ---
 
-# PART III — COMPLETED
+# PART Completed
 
 Completed work is archived here so the active half of the roadmap contains no
 finished checklists. Dates describe landing or verification, not necessarily

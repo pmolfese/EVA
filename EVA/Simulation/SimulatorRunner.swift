@@ -42,6 +42,10 @@ nonisolated enum SimulatorRunner {
         /// Also write the source-space ground truth (`--write-sources`). Requires
         /// the dipole EEG model; the CLI errors otherwise, which we surface.
         var writeSources: Bool = false
+        /// A user-picked `coordinates.xml` or MFF whose montage overrides the
+        /// built-in one. Staged into the run's temp dir so the sandboxed CLI child
+        /// can read it, then referenced as the config's `coordinatesPath`.
+        var coordinatesFile: URL?
     }
 
     /// The files a successful `generate` run leaves behind.
@@ -167,6 +171,12 @@ nonisolated enum SimulatorRunner {
         try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
 
         let prefix = options.prefix.isEmpty ? "sim" : options.prefix
+
+        // Stage an imported coordinates file into the workspace so the sandboxed
+        // child can read it, and point the config at that copy.
+        var config = config
+        try applyCoordinates(options.coordinatesFile, into: &config, workDir: workDir)
+
         let scenarioURL = workDir.appendingPathComponent("\(prefix)_scenario.json")
         try SimulationScenarioFile.write(
             config: config,
@@ -319,6 +329,207 @@ nonisolated enum SimulatorRunner {
         let destination = workDir.appendingPathComponent(name)
         if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
         try fm.copyItem(at: source, to: destination)
+        return destination
+    }
+
+    // MARK: - Sweep
+
+    /// The parameters the CLI `sweep` accepts.
+    static let sweepParameters = [
+        "rate", "bcg-amplitude", "gradient-amplitude", "clock-offset",
+        "slow-modulation", "qrs-jitter", "impedance", "emg-rate", "emg-amplitude", "sources",
+    ]
+
+    struct SweepRun: Sendable, Identifiable {
+        let id = UUID()
+        let value: Double
+        let uncorrectedSNR: Double
+        let noisyURL: URL
+        let directory: URL
+    }
+    struct SweepOutcome: Sendable {
+        let parameter: String
+        let runs: [SweepRun]
+        let directory: URL
+    }
+
+    /// Runs `EVASimulate sweep`: one generation per value of a parameter, varying
+    /// the current base `config`. Returns the parsed `sweep_summary.csv`.
+    static func sweep(
+        config: SimulationConfig, name: String,
+        parameter: String, values: [Double], options: Options
+    ) throws -> SweepOutcome {
+        guard let cli = locateCLI() else {
+            throw RunError.cliNotFound("Expected it beside the app executable at Contents/MacOS/EVASimulate.")
+        }
+        let fm = FileManager.default
+        let workDir = try makeWorkDir("EVASimulateSweep")
+
+        var config = config
+        try applyCoordinates(options.coordinatesFile, into: &config, workDir: workDir)
+        let prefix = options.prefix.isEmpty ? "sim" : options.prefix
+        let scenarioURL = workDir.appendingPathComponent("\(prefix)_scenario.json")
+        try SimulationScenarioFile.write(config: config, to: scenarioURL,
+                                         name: name.isEmpty ? "Sweep base" : name,
+                                         description: "Sweep base (SIM-1)")
+
+        let csv = values.map { $0 == $0.rounded() ? String(Int($0)) : String($0) }.joined(separator: ",")
+        let log = try run(cli, [
+            "sweep", "--config", scenarioURL.path, "--parameter", parameter,
+            "--values", csv, "--output", workDir.path, "--prefix", prefix,
+        ])
+
+        let summary = workDir.appendingPathComponent("sweep_summary.csv")
+        guard fm.fileExists(atPath: summary.path) else { throw RunError.missingOutput(summary, log: log) }
+
+        let directory = try relocateTree(from: workDir, to: options.outputDirectory)
+        let text = try String(contentsOf: directory.appendingPathComponent("sweep_summary.csv"), encoding: .utf8)
+        var runs: [SweepRun] = []
+        for line in text.split(whereSeparator: \.isNewline).dropFirst() {
+            let fields = line.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+            guard fields.count >= 4, let value = Double(fields[1]), let snr = Double(fields[2]) else { continue }
+            let subdir = directory.appendingPathComponent((fields[3] as NSString).lastPathComponent)
+            runs.append(SweepRun(value: value, uncorrectedSNR: snr,
+                                 noisyURL: subdir.appendingPathComponent("\(prefix)_noisy.mff"),
+                                 directory: subdir))
+        }
+        return SweepOutcome(parameter: parameter, runs: runs, directory: directory)
+    }
+
+    // MARK: - Group
+
+    /// Between-subject variability for a group run (SDs; 0 leaves the CLI default).
+    struct GroupVariability: Sendable {
+        var homogeneous = false
+        var headRadiusSD = 0.08
+        var placementSD = 3.0
+        var alphaSD = 0.25
+        var bcgSD = 0.2
+        var impedanceSD = 0.3
+        var heartRateSD = 8.0
+        var erpEffectSD = 0.3
+    }
+
+    struct GroupSubject: Sendable, Identifiable {
+        let id = UUID()
+        let label: String
+        let noisyURL: URL
+        let directory: URL
+    }
+    struct GroupOutcome: Sendable {
+        let subjects: [GroupSubject]
+        let participantsTSV: URL?
+        let directory: URL
+    }
+
+    /// Runs `EVASimulate generate-group`: a cohort of subjects drawn around the
+    /// base `config` with the given between-subject variability.
+    static func generateGroup(
+        config: SimulationConfig, name: String,
+        subjects: Int, groupSeed: UInt64?, variability: GroupVariability, options: Options
+    ) throws -> GroupOutcome {
+        guard let cli = locateCLI() else {
+            throw RunError.cliNotFound("Expected it beside the app executable at Contents/MacOS/EVASimulate.")
+        }
+        let fm = FileManager.default
+        let workDir = try makeWorkDir("EVASimulateGroup")
+
+        var config = config
+        try applyCoordinates(options.coordinatesFile, into: &config, workDir: workDir)
+        let prefix = options.prefix.isEmpty ? "sim" : options.prefix
+        let scenarioURL = workDir.appendingPathComponent("\(prefix)_scenario.json")
+        try SimulationScenarioFile.write(config: config, to: scenarioURL,
+                                         name: name.isEmpty ? "Group base" : name,
+                                         description: "Group base (SIM-1)")
+
+        var arguments = [
+            "generate-group", "--config", scenarioURL.path,
+            "--subjects", String(subjects), "--output", workDir.path, "--prefix", prefix,
+        ]
+        if let groupSeed { arguments += ["--group-seed", String(groupSeed)] }
+        if variability.homogeneous {
+            arguments.append("--homogeneous")
+        } else {
+            arguments += ["--head-radius-sd", String(variability.headRadiusSD)]
+            arguments += ["--placement-sd", String(variability.placementSD)]
+            arguments += ["--alpha-sd", String(variability.alphaSD)]
+            arguments += ["--bcg-sd", String(variability.bcgSD)]
+            arguments += ["--impedance-sd", String(variability.impedanceSD)]
+            arguments += ["--heart-rate-sd", String(variability.heartRateSD)]
+            arguments += ["--erp-effect-sd", String(variability.erpEffectSD)]
+        }
+        _ = try run(cli, arguments)
+
+        let directory = try relocateTree(from: workDir, to: options.outputDirectory)
+        let contents = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        let subjectDirs = contents
+            .filter { $0.lastPathComponent.hasPrefix("sub-") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let subjectList = subjectDirs.map { dir in
+            GroupSubject(label: String(dir.lastPathComponent.dropFirst("sub-".count)),
+                         noisyURL: dir.appendingPathComponent("\(prefix)_noisy.mff"),
+                         directory: dir)
+        }
+        let tsv = contents.first { $0.pathExtension == "tsv" }
+        return GroupOutcome(subjects: subjectList, participantsTSV: tsv, directory: directory)
+    }
+
+    // MARK: - Shared helpers
+
+    private static func makeWorkDir(_ name: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(name, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Stages an imported coordinates file into `workDir` and points the config at
+    /// the copy, so the sandboxed child can read it.
+    private static func applyCoordinates(_ file: URL?, into config: inout SimulationConfig, workDir: URL) throws {
+        guard let source = file else { return }
+        let fm = FileManager.default
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        let staged = workDir.appendingPathComponent(source.lastPathComponent)
+        if fm.fileExists(atPath: staged.path) { try fm.removeItem(at: staged) }
+        try fm.copyItem(at: source, to: staged)
+        config.coordinatesPath = staged.path
+    }
+
+    /// Runs the CLI with `arguments`, draining output; throws on non-zero exit.
+    @discardableResult
+    private static func run(_ cli: URL, _ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = cli
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let log = String(decoding: data, as: UTF8.self)
+        guard process.terminationStatus == 0 else {
+            throw RunError.failed(status: process.terminationStatus, log: log)
+        }
+        return log
+    }
+
+    /// Copies every child of `workDir` into `destination` (or returns `workDir`
+    /// when `destination` is nil), using the app's security-scoped access.
+    private static func relocateTree(from workDir: URL, to destination: URL?) throws -> URL {
+        guard let destination else { return workDir }
+        let fm = FileManager.default
+        let scoped = destination.startAccessingSecurityScopedResource()
+        defer { if scoped { destination.stopAccessingSecurityScopedResource() } }
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        for child in (try? fm.contentsOfDirectory(at: workDir, includingPropertiesForKeys: nil)) ?? [] {
+            let target = destination.appendingPathComponent(child.lastPathComponent)
+            if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
+            try fm.copyItem(at: child, to: target)
+        }
+        try? fm.removeItem(at: workDir)
         return destination
     }
 
