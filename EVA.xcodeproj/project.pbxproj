@@ -9,6 +9,54 @@
 /* Begin PBXBuildFile section */
 		D000000000000000000000C /* EVAQuickLook.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D0000000000000000000002 /* EVAQuickLook.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		D000000000000000000001C /* EVAThumbnail.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D0000000000000000000012 /* EVAThumbnail.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		51B000000000000000000001 /* ForwardTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000001 /* ForwardTypes.swift */; };
+		51B000000000000000000002 /* SimulationError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000002 /* SimulationError.swift */; };
+		51B000000000000000000003 /* ERPTruth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000003 /* ERPTruth.swift */; };
+		51B000000000000000000004 /* SphericalForwardModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000004 /* SphericalForwardModel.swift */; };
+		51B000000000000000000005 /* EllipsoidalForwardModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000005 /* EllipsoidalForwardModel.swift */; };
+		51B000000000000000000006 /* BEMForwardModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000006 /* BEMForwardModel.swift */; };
+		51B000000000000000000007 /* SimulationConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000007 /* SimulationConfig.swift */; };
+		51B000000000000000000008 /* SimulationScenario.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000008 /* SimulationScenario.swift */; };
+		51B000000000000000000009 /* GroupSimulation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000009 /* GroupSimulation.swift */; };
+		51B00000000000000000000A /* SignalSynthesis.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000000A /* SignalSynthesis.swift */; };
+		51B00000000000000000000B /* EGISensorXMLParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000000B /* EGISensorXMLParser.swift */; };
+		51B00000000000000000000C /* ElectrodeGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000000C /* ElectrodeGeometry.swift */; };
+		51B00000000000000000000D /* SensorLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000000D /* SensorLayout.swift */; };
+		51B00000000000000000000E /* Montage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000000E /* Montage.swift */; };
+		51B00000000000000000000F /* SimulationForwardDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000000F /* SimulationForwardDomain.swift */; };
+		51B000000000000000000010 /* EEGGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000010 /* EEGGenerator.swift */; };
+		51B000000000000000000011 /* NonstationaryEEGModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000011 /* NonstationaryEEGModel.swift */; };
+		51B000000000000000000012 /* DipoleEEGGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000012 /* DipoleEEGGenerator.swift */; };
+		51B000000000000000000013 /* ERPGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000013 /* ERPGenerator.swift */; };
+		51B000000000000000000014 /* OcularDipoleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000014 /* OcularDipoleModel.swift */; };
+		51B000000000000000000015 /* OcularArtifactModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000015 /* OcularArtifactModel.swift */; };
+		51B000000000000000000016 /* EMGArtifactModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000016 /* EMGArtifactModel.swift */; };
+		51B000000000000000000017 /* AdditionalArtifactModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000017 /* AdditionalArtifactModel.swift */; };
+		51B000000000000000000018 /* ChannelDefectModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000018 /* ChannelDefectModel.swift */; };
+		51B000000000000000000019 /* ImpedanceModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000019 /* ImpedanceModel.swift */; };
+		51B00000000000000000001A /* GradientArtifactModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000001A /* GradientArtifactModel.swift */; };
+		51B00000000000000000001B /* BCGGeneratorModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000001B /* BCGGeneratorModel.swift */; };
+		51B00000000000000000001C /* BCGArtifactModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000001C /* BCGArtifactModel.swift */; };
+		51B00000000000000000001D /* SourceInformedOperator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000001D /* SourceInformedOperator.swift */; };
+		51B00000000000000000001E /* SurrogateSeparation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000001E /* SurrogateSeparation.swift */; };
+		51B00000000000000000001F /* ERPEvaluation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000001F /* ERPEvaluation.swift */; };
+		51B000000000000000000020 /* SNRMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000020 /* SNRMetrics.swift */; };
+		51B000000000000000000021 /* RichMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000021 /* RichMetrics.swift */; };
+		51B000000000000000000022 /* SourceMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000022 /* SourceMetrics.swift */; };
+		51B000000000000000000023 /* SimulationWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000023 /* SimulationWriter.swift */; };
+		51B000000000000000000024 /* SI0ContractFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000024 /* SI0ContractFixtures.swift */; };
+		51B000000000000000000025 /* SelfTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000025 /* SelfTest.swift */; };
+		51B000000000000000000026 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000026 /* main.swift */; };
+		51B000000000000000000027 /* AccelerateCompat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000027 /* AccelerateCompat.swift */; };
+		51B000000000000000000028 /* DSP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000028 /* DSP.swift */; };
+		51B000000000000000000029 /* LinearAlgebra.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000029 /* LinearAlgebra.swift */; };
+		51B00000000000000000002A /* SeededGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000002A /* SeededGenerator.swift */; };
+		51B00000000000000000002B /* EpochModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000002B /* EpochModel.swift */; };
+		51B00000000000000000002C /* MFFFileType.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000002C /* MFFFileType.swift */; };
+		51B00000000000000000002D /* EVAProcessingScript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000002D /* EVAProcessingScript.swift */; };
+		51B00000000000000000002E /* MFFReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000002E /* MFFReader.swift */; };
+		51B00000000000000000002F /* MFFWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000002F /* MFFWriter.swift */; };
+		510000000000000000000008 /* EVASimulate in Embed EVASimulate CLI */ = {isa = PBXBuildFile; fileRef = 510000000000000000000001 /* EVASimulate */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -40,6 +88,13 @@
 			remoteGlobalIDString = D0000000000000000000011;
 			remoteInfo = EVAThumbnail;
 		};
+		510000000000000000000009 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 77BE28B32FED64E10080DAF5 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 510000000000000000000002;
+			remoteInfo = EVASimulate;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -55,6 +110,17 @@
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		510000000000000000000007 /* Embed EVASimulate CLI */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (
+				510000000000000000000008 /* EVASimulate in Embed EVASimulate CLI */,
+			);
+			name = "Embed EVASimulate CLI";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
@@ -63,6 +129,54 @@
 		77BE28D22FED64E30080DAF5 /* EVAUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EVAUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D0000000000000000000002 /* EVAQuickLook.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EVAQuickLook.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		D0000000000000000000012 /* EVAThumbnail.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EVAThumbnail.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		51F000000000000000000001 /* ForwardTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ForwardTypes.swift; path = EVA/Core/Forward/ForwardTypes.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000002 /* SimulationError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SimulationError.swift; path = EVA/Simulation/SimulationError.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000003 /* ERPTruth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ERPTruth.swift; path = EVA/Simulation/ERPTruth.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000004 /* SphericalForwardModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SphericalForwardModel.swift; path = EVA/Core/Forward/SphericalForwardModel.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000005 /* EllipsoidalForwardModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EllipsoidalForwardModel.swift; path = EVA/Core/Forward/EllipsoidalForwardModel.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000006 /* BEMForwardModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = BEMForwardModel.swift; path = EVA/Core/Forward/BEMForwardModel.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000007 /* SimulationConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SimulationConfig.swift; path = EVA/Simulation/SimulationConfig.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000008 /* SimulationScenario.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SimulationScenario.swift; path = EVA/Simulation/SimulationScenario.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000009 /* GroupSimulation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = GroupSimulation.swift; path = EVA/Simulation/GroupSimulation.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000000A /* SignalSynthesis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SignalSynthesis.swift; path = EVA/Simulation/SignalSynthesis.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000000B /* EGISensorXMLParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EGISensorXMLParser.swift; path = EVA/IO/EGISensorXMLParser.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000000C /* ElectrodeGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ElectrodeGeometry.swift; path = EVA/Channels/ElectrodeGeometry.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000000D /* SensorLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SensorLayout.swift; path = EVA/Channels/SensorLayout.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000000E /* Montage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Montage.swift; path = EVA/Simulation/Montage.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000000F /* SimulationForwardDomain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SimulationForwardDomain.swift; path = EVA/Simulation/SimulationForwardDomain.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000010 /* EEGGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EEGGenerator.swift; path = EVA/Simulation/EEGGenerator.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000011 /* NonstationaryEEGModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NonstationaryEEGModel.swift; path = EVA/Simulation/NonstationaryEEGModel.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000012 /* DipoleEEGGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DipoleEEGGenerator.swift; path = EVA/Simulation/DipoleEEGGenerator.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000013 /* ERPGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ERPGenerator.swift; path = EVA/Simulation/ERPGenerator.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000014 /* OcularDipoleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = OcularDipoleModel.swift; path = EVA/Simulation/OcularDipoleModel.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000015 /* OcularArtifactModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = OcularArtifactModel.swift; path = EVA/Simulation/OcularArtifactModel.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000016 /* EMGArtifactModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EMGArtifactModel.swift; path = EVA/Simulation/EMGArtifactModel.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000017 /* AdditionalArtifactModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AdditionalArtifactModel.swift; path = EVA/Simulation/AdditionalArtifactModel.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000018 /* ChannelDefectModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ChannelDefectModel.swift; path = EVA/Simulation/ChannelDefectModel.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000019 /* ImpedanceModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ImpedanceModel.swift; path = EVA/Simulation/ImpedanceModel.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000001A /* GradientArtifactModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = GradientArtifactModel.swift; path = EVA/Simulation/GradientArtifactModel.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000001B /* BCGGeneratorModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = BCGGeneratorModel.swift; path = EVA/Simulation/BCGGeneratorModel.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000001C /* BCGArtifactModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = BCGArtifactModel.swift; path = EVA/Simulation/BCGArtifactModel.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000001D /* SourceInformedOperator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SourceInformedOperator.swift; path = EVA/Artifacts/SourceInformed/SourceInformedOperator.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000001E /* SurrogateSeparation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SurrogateSeparation.swift; path = Tools/EVASimulate/Sources/EVASimulate/SurrogateSeparation.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000001F /* ERPEvaluation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ERPEvaluation.swift; path = Tools/EVASimulate/Sources/EVASimulate/ERPEvaluation.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000020 /* SNRMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SNRMetrics.swift; path = Tools/EVASimulate/Sources/EVASimulate/SNRMetrics.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000021 /* RichMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = RichMetrics.swift; path = Tools/EVASimulate/Sources/EVASimulate/RichMetrics.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000022 /* SourceMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SourceMetrics.swift; path = Tools/EVASimulate/Sources/EVASimulate/SourceMetrics.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000023 /* SimulationWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SimulationWriter.swift; path = Tools/EVASimulate/Sources/EVASimulate/SimulationWriter.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000024 /* SI0ContractFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SI0ContractFixtures.swift; path = Tools/EVASimulate/Sources/EVASimulate/SI0ContractFixtures.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000025 /* SelfTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SelfTest.swift; path = Tools/EVASimulate/Sources/EVASimulate/SelfTest.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000026 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = main.swift; path = Tools/EVASimulate/Sources/EVASimulate/main.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000027 /* AccelerateCompat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AccelerateCompat.swift; path = EVA/Core/AccelerateCompat.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000028 /* DSP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DSP.swift; path = EVA/Core/DSP.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000029 /* LinearAlgebra.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LinearAlgebra.swift; path = EVA/Core/LinearAlgebra.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000002A /* SeededGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SeededGenerator.swift; path = EVA/Core/SeededGenerator.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000002B /* EpochModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EpochModel.swift; path = EVA/Epoching/EpochModel.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000002C /* MFFFileType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MFFFileType.swift; path = EVA/IO/MFFFileType.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000002D /* EVAProcessingScript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EVAProcessingScript.swift; path = EVA/Pipeline/EVAProcessingScript.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000002E /* MFFReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MFFReader.swift; path = EVA/IO/MFFReader.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000002F /* MFFWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MFFWriter.swift; path = EVA/IO/MFFWriter.swift; sourceTree = SOURCE_ROOT; };
+		510000000000000000000001 /* EVASimulate */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = EVASimulate; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -205,6 +319,7 @@
 				77BE28D22FED64E30080DAF5 /* EVAUITests.xctest */,
 				D0000000000000000000002 /* EVAQuickLook.appex */,
 				D0000000000000000000012 /* EVAThumbnail.appex */,
+				510000000000000000000001 /* EVASimulate */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -220,12 +335,14 @@
 				77BE28B82FED64E10080DAF5 /* Frameworks */,
 				77BE28B92FED64E10080DAF5 /* Resources */,
 				D00000000000000000000021 /* Embed Foundation Extensions */,
+				510000000000000000000007 /* Embed EVASimulate CLI */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				D000000000000000000000A /* PBXTargetDependency */,
 				D000000000000000000001A /* PBXTargetDependency */,
+				51000000000000000000000A /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				77BE28BD2FED64E10080DAF5 /* EVA */,
@@ -330,6 +447,23 @@
 			productReference = D0000000000000000000012 /* EVAThumbnail.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		510000000000000000000002 /* EVASimulate */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 510000000000000000000003 /* Build configuration list for PBXNativeTarget "EVASimulate" */;
+			buildPhases = (
+				510000000000000000000006 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = EVASimulate;
+			packageProductDependencies = (
+			);
+			productName = EVASimulate;
+			productReference = 510000000000000000000001 /* EVASimulate */;
+			productType = "com.apple.product-type.tool";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -378,6 +512,7 @@
 				77BE28D12FED64E30080DAF5 /* EVAUITests */,
 				D0000000000000000000001 /* EVAQuickLook */,
 				D0000000000000000000011 /* EVAThumbnail */,
+				510000000000000000000002 /* EVASimulate */,
 			);
 		};
 /* End PBXProject section */
@@ -456,6 +591,60 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		510000000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				51B000000000000000000001 /* ForwardTypes.swift in Sources */,
+				51B000000000000000000002 /* SimulationError.swift in Sources */,
+				51B000000000000000000003 /* ERPTruth.swift in Sources */,
+				51B000000000000000000004 /* SphericalForwardModel.swift in Sources */,
+				51B000000000000000000005 /* EllipsoidalForwardModel.swift in Sources */,
+				51B000000000000000000006 /* BEMForwardModel.swift in Sources */,
+				51B000000000000000000007 /* SimulationConfig.swift in Sources */,
+				51B000000000000000000008 /* SimulationScenario.swift in Sources */,
+				51B000000000000000000009 /* GroupSimulation.swift in Sources */,
+				51B00000000000000000000A /* SignalSynthesis.swift in Sources */,
+				51B00000000000000000000B /* EGISensorXMLParser.swift in Sources */,
+				51B00000000000000000000C /* ElectrodeGeometry.swift in Sources */,
+				51B00000000000000000000D /* SensorLayout.swift in Sources */,
+				51B00000000000000000000E /* Montage.swift in Sources */,
+				51B00000000000000000000F /* SimulationForwardDomain.swift in Sources */,
+				51B000000000000000000010 /* EEGGenerator.swift in Sources */,
+				51B000000000000000000011 /* NonstationaryEEGModel.swift in Sources */,
+				51B000000000000000000012 /* DipoleEEGGenerator.swift in Sources */,
+				51B000000000000000000013 /* ERPGenerator.swift in Sources */,
+				51B000000000000000000014 /* OcularDipoleModel.swift in Sources */,
+				51B000000000000000000015 /* OcularArtifactModel.swift in Sources */,
+				51B000000000000000000016 /* EMGArtifactModel.swift in Sources */,
+				51B000000000000000000017 /* AdditionalArtifactModel.swift in Sources */,
+				51B000000000000000000018 /* ChannelDefectModel.swift in Sources */,
+				51B000000000000000000019 /* ImpedanceModel.swift in Sources */,
+				51B00000000000000000001A /* GradientArtifactModel.swift in Sources */,
+				51B00000000000000000001B /* BCGGeneratorModel.swift in Sources */,
+				51B00000000000000000001C /* BCGArtifactModel.swift in Sources */,
+				51B00000000000000000001D /* SourceInformedOperator.swift in Sources */,
+				51B00000000000000000001E /* SurrogateSeparation.swift in Sources */,
+				51B00000000000000000001F /* ERPEvaluation.swift in Sources */,
+				51B000000000000000000020 /* SNRMetrics.swift in Sources */,
+				51B000000000000000000021 /* RichMetrics.swift in Sources */,
+				51B000000000000000000022 /* SourceMetrics.swift in Sources */,
+				51B000000000000000000023 /* SimulationWriter.swift in Sources */,
+				51B000000000000000000024 /* SI0ContractFixtures.swift in Sources */,
+				51B000000000000000000025 /* SelfTest.swift in Sources */,
+				51B000000000000000000026 /* main.swift in Sources */,
+				51B000000000000000000027 /* AccelerateCompat.swift in Sources */,
+				51B000000000000000000028 /* DSP.swift in Sources */,
+				51B000000000000000000029 /* LinearAlgebra.swift in Sources */,
+				51B00000000000000000002A /* SeededGenerator.swift in Sources */,
+				51B00000000000000000002B /* EpochModel.swift in Sources */,
+				51B00000000000000000002C /* MFFFileType.swift in Sources */,
+				51B00000000000000000002D /* EVAProcessingScript.swift in Sources */,
+				51B00000000000000000002E /* MFFReader.swift in Sources */,
+				51B00000000000000000002F /* MFFWriter.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -478,6 +667,11 @@
 			isa = PBXTargetDependency;
 			target = D0000000000000000000011 /* EVAThumbnail */;
 			targetProxy = D000000000000000000001B /* PBXContainerItemProxy */;
+		};
+		51000000000000000000000A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 510000000000000000000002 /* EVASimulate */;
+			targetProxy = 510000000000000000000009 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -872,6 +1066,40 @@
 			};
 			name = Release;
 		};
+		510000000000000000000004 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				OTHER_LDFLAGS = "-framework Accelerate";
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.simulate;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		510000000000000000000005 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				OTHER_LDFLAGS = "-framework Accelerate";
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.simulate;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -925,6 +1153,15 @@
 			buildConfigurations = (
 				D0000000000000000000017 /* Debug */,
 				D0000000000000000000018 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		510000000000000000000003 /* Build configuration list for PBXNativeTarget "EVASimulate" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				510000000000000000000004 /* Debug */,
+				510000000000000000000005 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

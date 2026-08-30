@@ -23,19 +23,8 @@
 
 import Foundation
 
-nonisolated enum SimulateError: LocalizedError {
-    case badTemplate(String)
-    case usage(String)
-    case io(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .badTemplate(let detail): return "Bad gradient template: \(detail)"
-        case .usage(let detail): return detail
-        case .io(let detail): return detail
-        }
-    }
-}
+// `SimulateError` moved to EVA/Simulation/SimulationError.swift (SIM-0) so the
+// generation core can throw it without depending on this CLI-side writer.
 
 /// Everything a scoring run needs that the recordings themselves do not carry.
 nonisolated struct SimulationTruth: Codable, Sendable {

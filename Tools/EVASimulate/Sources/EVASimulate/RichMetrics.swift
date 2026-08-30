@@ -220,15 +220,8 @@ nonisolated enum DetectionMetrics {
     }
 }
 
-nonisolated struct ERPComponent: Codable, Sendable {
-    var id: String
-    var peakLatencySeconds: Double
-    var peakAmplitudeMicrovolts: Double
-}
-
-nonisolated struct ERPComponentSet: Codable, Sendable {
-    var components: [ERPComponent]
-}
+// `ERPComponent` / `ERPComponentSet` moved to EVA/Simulation/ERPTruth.swift
+// (SIM-0) so the ERP generator can emit them from the app-side core.
 
 nonisolated struct ERPRecoveryScore: Codable, Sendable {
     var matchedCount: Int

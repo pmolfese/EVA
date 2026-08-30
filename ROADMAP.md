@@ -52,14 +52,50 @@ SIM-0 (link EVASimulate into the app)
 SIM-3 (glass-brain dipole viz) — parallel, feeds SIM-2
 ```
 
-## SIM-0 — Link EVASimulate into the app — **NOT STARTED (planned)**
+## SIM-0 — Link EVASimulate into the app — **COMPLETED (2026-08-29)**
 
-The prerequisite for everything else, and the one real refactor. Today
-EVASimulate builds via `Tools/EVASimulate/build.sh` — a standalone `swiftc`
-file list — and is **not** linked into the EVA app target, so the app cannot
-call the generation path. Goal: the simulator is callable from the GUI **and**
-ships as a bundled CLI at `EVA.app/Contents/MacOS/EVASimulate`, with `build.sh`
-retired and the self-test in the normal build.
+The prerequisite for everything else, and the one real refactor. Previously
+EVASimulate built via `Tools/EVASimulate/build.sh` — a standalone `swiftc`
+file list — and was **not** linked into the EVA app target, so the app could not
+call the generation path. The simulator is now callable from the GUI's own module
+**and** ships as a bundled CLI at `EVA.app/Contents/MacOS/EVASimulate`, with
+`build.sh` retired and the self-test running under `xcodebuild test`.
+
+### What shipped (2026-08-29 execution)
+
+Key discovery: `EVA.xcodeproj` is a modern Xcode-26 project using **file-system-
+synchronized groups**, not classic per-file target membership. That reshaped the
+plan below but confirmed its direction.
+
+- **Generation core moved into `EVA/Simulation/`** (19 files) so it auto-compiles
+  into the app module — the GUI (SIM-1) can now call the generators/scenario/
+  forward directly, no import, no `public`. Two shared truth/error types
+  (`SimulateError`, `ERPComponent`/`ERPComponentSet`) were extracted into their
+  own core files (`SimulationError.swift`, `ERPTruth.swift`) because they are used
+  by core generators but were declared in CLI-side files. The 9 CLI/eval-side glue
+  files (`main`, `SelfTest`, `SNRMetrics`, `RichMetrics`, `SourceMetrics`,
+  `ERPEvaluation`, `SI0ContractFixtures`, `SimulationWriter`, `SurrogateSeparation`)
+  stayed out of the app; two of them (`SNRMetrics`, `SurrogateBrainModel`) collide
+  by name with EVA types, which is exactly why they must not join the app module.
+- **`EVASimulate` command-line-tool target added to `EVA.xcodeproj`.** Because a
+  sync root group is all-or-nothing per target, the CLI cannot "include just the
+  17 shared EVA files" by membership; it **duplicate-compiles** the exact 47-file
+  closure (glue + core + 17 shared) via a classic Sources phase with explicit file
+  references — mirroring what `build.sh` did, and honoring the no-public-API
+  constraint. Builds green; self-test 106/106.
+- **CLI embedded in the app bundle** via a Copy Files phase (dstSubfolderSpec 6 →
+  `Contents/MacOS`), with an app→CLI target dependency. The embedded binary is
+  codesigned (team 7V8RRF84QH, hardened runtime) and runs.
+- **Self-test reachable from `EVATests`** as a subprocess wrapper
+  (`EVATests/Simulation/EVASimulateSelfTestTests.swift`) that execs the bundled
+  `EVASimulate selftest` and asserts zero failures — the in-process option was
+  rejected because `SelfTest`'s `SNRMetrics`/`SurrogateBrainModel` would shadow
+  EVA's own types that existing tests depend on. `xcodebuild test` passes (137s;
+  it *is* the determinism corpus).
+- **`build.sh` retired.** `run-all-tests.sh` and `scripts/check-determinism.sh`
+  now build the `EVASimulate` Release target via `xcodebuild` and stage the product
+  at `Tools/EVASimulate/.build/eva-simulate`; determinism still matches the
+  committed baseline byte-for-byte (8/8 scenarios). Docs updated.
 
 ### What we learned (2026-08-29 planning pass)
 
@@ -88,24 +124,24 @@ EVA structure and build the CLI as a second target from what already exists in
 EVA.** This avoids inverting the dependency (the simulator already depends on
 EVA core, not the other way round) and needs no public-API pass.
 
-- [ ] **Bring `Tools/EVASimulate/Sources/EVASimulate/*` into the EVA target's
-  source tree** (a group under `EVA/`, e.g. `EVA/Simulation/`), so the app
-  compiles the generators/scenario/forward and the GUI (SIM-1) can call them
-  directly — no import, no `public`, same module.
-- [ ] **Add an `EVASimulate` command-line-tool target** to `EVA.xcodeproj` whose
-  membership is the simulator files + the 17 shared EVA files (they already
-  compile together under `build.sh`). `main.swift` stays the CLI entry point.
-- [ ] **Embed the CLI in the app bundle**: a Copy Files build phase on the EVA
-  app target copies the `EVASimulate` product into `Contents/MacOS/`. (Confirm
-  it as a plain executable, not a nested `.app`; codesigning of the embedded
-  tool needs checking.)
-- [ ] **Retire `build.sh`** once the CLI target builds; keep the module-cache /
-  case-insensitive-path note from `build.sh`'s header in mind if any residual
-  script remains.
-- [ ] **Migrate the self-test**: `SelfTest.run()` (106 checks) becomes reachable
-  both as the CLI `selftest` subcommand *and* from `EVATests` (a thin Swift
-  Testing wrapper that calls `SelfTest.run()` and `#expect`s zero failures), so
-  `xcodebuild test` covers it and the determinism baseline still runs.
+- [x] **Bring the generation core into the EVA target's source tree** at
+  `EVA/Simulation/` (19 files + 2 extracted shared types), so the app compiles the
+  generators/scenario/forward and the GUI (SIM-1) can call them directly — no
+  import, no `public`, same module. CLI-only glue stayed out of the app.
+- [x] **Add an `EVASimulate` command-line-tool target** to `EVA.xcodeproj`. Under
+  the sync-group model, membership is an explicit Sources phase duplicate-compiling
+  the exact 47-file closure (glue + core + 17 shared). `main.swift` stays the CLI
+  entry point (it cannot live under `EVA/` — top-level code vs the app's `@main`).
+- [x] **Embed the CLI in the app bundle**: a Copy Files build phase
+  (dstSubfolderSpec 6 → `Contents/MacOS/`) copies the `EVASimulate` product, with
+  an app→CLI target dependency. Confirmed a plain codesigned executable (not a
+  nested `.app`), hardened runtime, team 7V8RRF84QH.
+- [x] **Retire `build.sh`** — done; `run-all-tests.sh` and `check-determinism.sh`
+  reroute to the `xcodebuild` Release product.
+- [x] **Migrate the self-test**: reachable as the CLI `selftest` subcommand *and*
+  from `EVATests` via a subprocess wrapper (execs the bundled CLI, `#expect`s zero
+  failures). The in-process `SelfTest.run()` wrapper was rejected — its
+  `SNRMetrics`/`SurrogateBrainModel` shadow EVA types that existing tests use.
 
 ### Alternative kept on record: full `EVASimulationKit` SwiftPM package
 
@@ -117,17 +153,22 @@ Cost that made the owner prefer the in-EVA path: a public-API pass over MFF I/O
 dependency in `EVA.xcodeproj`. Revisit only if the app itself later wants to be
 split into a core package for other reasons.
 
-### Open questions for next session
+### Resolved during execution
 
-- Where exactly the simulator group sits under `EVA/` (one folder vs. mirror of
-  its current file grouping).
-- Whether the CLI target and the app duplicate-compile the 17 shared files (fine,
-  and what `build.sh` does now) or whether a static library sub-target holds them
-  once and both link it (less duplication, more project plumbing).
-- Codesigning/notarization of the embedded `EVASimulate` binary.
+- **Group layout:** one flat `EVA/Simulation/` folder (the sync group compiles it
+  into the app automatically); no mirror of the old file grouping was needed.
+- **Duplicate-compile vs static lib:** duplicate-compile won, forced by the
+  sync-group model (a root group is all-or-nothing per target, so "just the 17
+  shared files" cannot be a second target's membership) and by the no-public-API
+  constraint. A static lib would reintroduce the `import` pass that was rejected.
+- **Codesigning:** the embedded CLI is codesigned by the normal build (automatic
+  signing, team 7V8RRF84QH, hardened runtime). Notarization is a release-time
+  concern, not a build-time one, and is inherited from the app's flow.
 
-**Exit:** EVA calls generation and gets channels + truth in memory; the CLI is a
-bundled executable; `xcodebuild test` runs the 106-check corpus; `build.sh` gone.
+**Exit — met:** EVA compiles the generation core in its own module (in-memory
+generation is a direct call for SIM-1); the CLI is a bundled, codesigned
+executable at `EVA.app/Contents/MacOS/EVASimulate`; `xcodebuild test` runs the
+106-check corpus (via the CLI subprocess wrapper); `build.sh` is gone.
 
 ## SIM-1 — New → Simulated Recording panel — **NOT STARTED**
 
@@ -224,6 +265,7 @@ when it is an independent bug fix required for safe use.
 | 11 | **UI-1 — Display density and montages** | Decouple sensitivity from row pitch, add channels-per-screen, then named subsets/order. | **NOT STARTED** |
 | 12 | **UX-1 — Figure Composer Phase 2** | Add a freeform, multi-page publication-layout canvas. | **NOT STARTED** |
 | 13 | **F-1 — Focused feature backlog** | Finish exports, importer mapping, detector comparators, and other bounded follow-ups. | **DEFERRED** |
+| 14 | **DEV-1 — Developer documentation** | A `docs/developers/` tree that traces every feature to the code that implements it. | **NOT STARTED** |
 
 ## Execution order and dependency map
 
@@ -449,6 +491,16 @@ BCG exemplar, with the manual selection recorded as replayable provenance.
 
 **Exit:** held-out ocular artifacts improve without exceeding committed ERP
 topography/amplitude distortion.
+
+#### SI-5b — Manual BCG component selection as a CleanArtifact method — **NOT STARTED**
+
+- [ ] Let the user click/identify a component (e.g. in an ICA/PCA component
+  browser) and tag it as BCG.
+- [ ] Add a `CleanArtifact` case that takes the user-selected component and
+  runs it through the existing PCA-S subtraction/removal path — reuse the
+  removal math, only the selection step differs from automatic detection.
+- [ ] No new removal engine: this is a manual-selection front end onto the
+  same PCA-S engine used elsewhere in SI-5.
 
 #### SI-6 — SSP–SIR comparator — **NOT STARTED**
 
@@ -904,6 +956,51 @@ projects above, not treated as one parallel program.
   JSON/HTML/Markdown output.
 - [ ] `SOURCE_ANALYSIS.md`: distributed source imaging / EVA Resolve exploration;
   do not fold it into the artifact-correction milestone.
+
+## 9. DEV-1 — Developer documentation — **NOT STARTED**
+
+A `docs/developers/` tree that traces EVA's features to the code that implements
+them — a cross between a Read-the-Docs-style API reference and an onboarding
+manual, so a maintainer can find *where* a feature lives and *how* to change it.
+Distinct from `docs/manual/` (user-facing) and `docs/provenance/` (method
+specs). Independent of every other milestone; it can proceed at any time and in
+small increments.
+
+**Two facts that shape the structure.** EVA's source is already grouped into ~23
+subsystems under `EVA/` (`Core`, `IO`, `Filtering`, `Gradient`, `ICA`,
+`Wavelet`, `Cardiac`, `Epoching`, `Trials`, `Health`, `Channels`, `Artifacts`,
+`Pipeline`, `Waveform`, `App`, …), and **nearly every source file already opens
+with a rich doc-comment header** describing what it does. So the per-file
+synopsis layer is largely *extractable*, and the high-value hand-written work is
+the architecture map and the feature→code index that no header can give.
+
+- [ ] **DEV-1a — Architecture map.** `docs/developers/architecture.md`: one
+  paragraph per subsystem (purpose + key entry-point types), the end-to-end data
+  flow (IO → Core → cleaning stages: Filtering/Gradient/ICA/Wavelet/Cardiac →
+  Epoching → Trials → Waveform/PSA UI), and the cross-cutting spines (the
+  Pipeline history/replay + `eva.xml` provenance, the shared forward model, MFF
+  I/O). A diagram is welcome but the prose map is the deliverable.
+- [ ] **DEV-1b — Per-subsystem pages.** `docs/developers/subsystems/<group>.md`,
+  one per top-level group: purpose, the public types/entry points a newcomer
+  starts from, a one-line synopsis of each file (seeded from its header comment,
+  then curated), and a short "how to extend this" note. This is the "outline of
+  each source file" the request started from.
+- [ ] **DEV-1c — Feature → code map.** `docs/developers/features.md`: a table
+  from user-facing feature (BCG detection, PCA-S correction, wavelet denoising,
+  gradient/FASTR, ICA labelling, cluster-permutation stats, trial diagnostics,
+  history/undo, batch/replay, MFF QuickLook, figure export, …) to the files and
+  entry points that implement it and where behaviour would change. This is the
+  index that motivated the whole effort ("where did we build X").
+- [ ] **DEV-1d — Keep-it-in-sync.** A lightweight check, in the spirit of the
+  existing `docs/manual/contributor-guide`, that flags a new source file with no
+  subsystem-page entry (and, ideally, a file whose header changed without its
+  synopsis following). Optional: a small extractor that regenerates the
+  header-derived synopses so the file layer cannot silently rot.
+
+**Exit:** a maintainer can open `docs/developers/`, find any feature in the
+feature map, jump to its subsystem page, and see every file's role — without
+reading the source first. **Effort:** medium, mostly writing; DEV-1b is
+partly mechanical from headers, DEV-1a/1c are the real authorship.
 
 ---
 

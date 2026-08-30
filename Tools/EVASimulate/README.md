@@ -29,9 +29,17 @@ test the same forward mathematics EVA will use for source-informed methods.
 
 Build:
 
+EVASimulate is a target in `EVA.xcodeproj` (the generation core lives in the EVA
+app itself, under `EVA/Simulation/`). Build the command-line tool and stage it at
+the path the quick-start commands use:
+
 ```sh
-sh Tools/EVASimulate/build.sh
+xcodebuild -project EVA.xcodeproj -target EVASimulate -configuration Release build
+cp "$(xcodebuild -project EVA.xcodeproj -target EVASimulate -configuration Release -showBuildSettings | awk -F' = ' '/ BUILT_PRODUCTS_DIR /{print $2; exit}')/EVASimulate" Tools/EVASimulate/.build/eva-simulate
 ```
+
+`run-all-tests.sh` does this for you. Building the EVA app also embeds the tool at
+`EVA.app/Contents/MacOS/EVASimulate`.
 
 ## Quick start
 

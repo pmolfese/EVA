@@ -28,12 +28,18 @@ current MFF writer's millisecond event timestamps. The published model used
 
 ## Building and running
 
+EVASimulate is a target in `EVA.xcodeproj`. Build it in Release and stage the
+binary at `Tools/EVASimulate/.build/eva-simulate`:
+
 ```bash
-sh Tools/EVASimulate/build.sh
+xcodebuild -project EVA.xcodeproj -target EVASimulate -configuration Release build
+cp "$(xcodebuild -project EVA.xcodeproj -target EVASimulate -configuration Release -showBuildSettings | awk -F' = ' '/ BUILT_PRODUCTS_DIR /{print $2; exit}')/EVASimulate" Tools/EVASimulate/.build/eva-simulate
 ```
 
-The binary lands at `Tools/EVASimulate/.build/eva-simulate`. Every example below
-assumes you are at the repository root; substitute the full path if not.
+`run-all-tests.sh` does this automatically. The binary lands at
+`Tools/EVASimulate/.build/eva-simulate`; building the EVA app also embeds the same
+tool at `EVA.app/Contents/MacOS/EVASimulate`. Every example below assumes you are
+at the repository root; substitute the full path if not.
 
 Eight subcommands:
 
