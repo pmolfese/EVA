@@ -2115,8 +2115,8 @@ struct WaveformView: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .frame(width: 315)
-        .help("Switch between waveform rows, averages, and single-trial analysis.")
+        .frame(width: 430)
+        .help("Switch between waveform rows, averages, single-trial analysis, and the time-frequency view.")
     }
 
     func toolbarStatusAndModeControls(for signal: MFFSignalData) -> some View {
@@ -2540,6 +2540,13 @@ struct WaveformView: View {
         } else if displayMode == .trials {
             singleTrialAnalysisWorkspace()
                 .transition(.opacity)
+        } else if displayMode == .timeFrequency {
+            TimeFrequencyView(
+                signal: epoching.segmentedEpochSignal ?? signal,
+                segments: epoching.segmentedEpochSegments,
+                epoching: epoching
+            )
+            .transition(.opacity)
         } else {
             waveformWorkspace(
                 for: signal,

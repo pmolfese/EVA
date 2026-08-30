@@ -129,6 +129,7 @@ final class EpochingViewModel {
         case waveform = "Waveform"
         case averages = "Averages"
         case trials = "Trials"
+        case timeFrequency = "Time-Frequency"
 
         var id: String { rawValue }
 
@@ -137,6 +138,7 @@ final class EpochingViewModel {
             case .waveform: return "waveform.path.ecg"
             case .averages: return "chart.xyaxis.line"
             case .trials: return "waveform.path.ecg.rectangle"
+            case .timeFrequency: return "square.grid.3x3.fill.square"
             }
         }
     }
@@ -295,6 +297,29 @@ final class EpochingViewModel {
     var showsOverlaidCategories = false
     var butterflyTopomapRelativeSample: Int?
     var averagedDisplayMode: AveragedDisplayMode = .waveform
+
+    // MARK: Time-Frequency (PART TF) view settings — persist across mode switches.
+    /// Measure shown in the TF heatmap.
+    enum TFMeasure: String, CaseIterable, Identifiable {
+        case power = "Power"
+        case itpc = "ITPC"
+        var id: String { rawValue }
+    }
+    var tfMeasure: TFMeasure = .power
+    var tfSelectedChannelIndex: Int = 0
+    var tfMethod: TFMethod = .morlet
+    var tfConditionA: String?
+    var tfConditionB: String?          // nil = no difference map
+    var tfShowsDifference = false
+    var tfMinFrequencyHz: Double = 4
+    var tfMaxFrequencyHz: Double = 40
+    var tfFrequencyCount: Int = 30
+    var tfCyclesLow: Double = 3
+    var tfCyclesHigh: Double = 10
+    var tfBaselineMethod: TFBaselineMethod = .decibel
+    /// Multitaper time-bandwidth product (TF-2 multitaper step).
+    var tfTimeBandwidth: Double = 4
+
     var showsAveragesButterfly = true
     var showsAveragesTopography = true
     var showsAveragesInspector = true
