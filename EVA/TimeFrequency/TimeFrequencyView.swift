@@ -17,6 +17,8 @@
 //
 
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct TimeFrequencyView: View {
     let signal: MFFSignalData
@@ -25,6 +27,8 @@ struct TimeFrequencyView: View {
 
     @State private var render: TFRender?
     @State private var isComputing = false
+    @State private var isExporting = false
+    @State private var exportStatus: String?
 
     private var categories: [String] {
         Array(Set(segments.map(\.category))).sorted()
@@ -140,8 +144,24 @@ struct TimeFrequencyView: View {
                 if let render {
                     Text(headerSubtitle(render)).font(.caption).foregroundStyle(.secondary)
                 }
+                if let exportStatus {
+                    Text(exportStatus).font(.caption2).foregroundStyle(.secondary)
+                }
             }
             Spacer()
+            if isExporting {
+                ProgressView().controlSize(.small)
+            }
+            Menu {
+                Button("Full Map (NPY)…") { exportNPY() }
+                    .disabled(effectiveConditionA == nil)
+                Button("Scalar CSV…") { exportScalarCSV() }
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(isExporting || render == nil)
         }
     }
 
@@ -306,6 +326,87 @@ struct TimeFrequencyView: View {
 
         // Guard against a stale result landing after the inputs changed again.
         if job == self.job { self.render = result }
+    }
+
+    // MARK: Export (TF-3)
+
+    private var exportContext: TimeFrequencyExport.Context {
+        let plan = TFFrequencyPlan.logSpaced(
+            minHz: epoching.tfMinFrequencyHz, maxHz: epoching.tfMaxFrequencyHz,
+            count: epoching.tfFrequencyCount, cyclesLow: epoching.tfCyclesLow, cyclesHigh: epoching.tfCyclesHigh
+        )
+        let maxTimeMs = render?.timesMs.last ?? 0
+        return TimeFrequencyExport.Context(
+            plan: plan, method: epoching.tfMethod, timeBandwidth: epoching.tfTimeBandwidth,
+            baselineMethod: epoching.tfBaselineMethod, bands: EEGFrequencyBand.restingDefaults,
+            windows: TimeFrequencyExport.defaultWindows(maxTimeMs: maxTimeMs)
+        )
+    }
+
+    private var exportBaseName: String {
+        (signal.signalURL.deletingPathExtension().lastPathComponent as NSString).lastPathComponent
+    }
+
+    private func exportNPY() {
+        guard let condition = effectiveConditionA else { return }
+        let measure = epoching.tfMeasure
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "npy") ?? .data]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(exportBaseName)-\(condition)-\(measure == .power ? "ersp" : "itpc").npy"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let signal = self.signal, segments = self.segments
+        let channels = Array(0..<signal.data.count), names = channelNames, ctx = exportContext
+        isExporting = true; exportStatus = nil
+        Task {
+            let output: (npy: Data, sidecar: Data)? = await Task.detached(priority: .userInitiated) {
+                guard let maps = TimeFrequencyExport.conditionMaps(
+                    signal: signal, segments: segments, condition: condition,
+                    channelIndices: channels, channelNames: names, context: ctx
+                ) else { return nil }
+                let grid = measure == .power ? maps.ersp : maps.itpc
+                return (TimeFrequencyExport.npy(grid), TimeFrequencyExport.sidecarJSON(maps, measure: measure, context: ctx))
+            }.value
+            isExporting = false
+            guard let output else { exportStatus = "Export failed: no trials on this condition."; return }
+            do {
+                try output.npy.write(to: url, options: .atomic)
+                try? output.sidecar.write(to: url.deletingPathExtension().appendingPathExtension("json"), options: .atomic)
+                exportStatus = "Saved \(url.lastPathComponent) (+ .json axes)"
+            } catch { exportStatus = error.localizedDescription }
+        }
+    }
+
+    private func exportScalarCSV() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.commaSeparatedText, .plainText]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(exportBaseName)-tf-scalars.csv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let signal = self.signal, segments = self.segments
+        let channels = Array(0..<signal.data.count), names = channelNames, ctx = exportContext, conds = categories
+        isExporting = true; exportStatus = nil
+        Task {
+            let data: Data? = await Task.detached(priority: .userInitiated) {
+                var maps: [TimeFrequencyExport.ConditionMaps] = []
+                for condition in conds {
+                    if let m = TimeFrequencyExport.conditionMaps(
+                        signal: signal, segments: segments, condition: condition,
+                        channelIndices: channels, channelNames: names, context: ctx
+                    ) { maps.append(m) }
+                }
+                guard !maps.isEmpty else { return nil }
+                return TimeFrequencyExport.csvData(TimeFrequencyExport.scalarCSVRows(maps, context: ctx))
+            }.value
+            isExporting = false
+            guard let data else { exportStatus = "Export failed: no trials."; return }
+            do { try data.write(to: url, options: .atomic); exportStatus = "Saved \(url.lastPathComponent)" }
+            catch { exportStatus = error.localizedDescription }
+        }
     }
 
     private nonisolated static func computeRender(signal: MFFSignalData, segments: [EpochSegment], job: Job) -> TFRender? {

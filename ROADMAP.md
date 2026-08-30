@@ -529,16 +529,24 @@ The one hard part; its numbers are proven against MNE. New module
 
 **Effort:** medium — ITPC is trivial; DPSS multitaper is the new lift.
 
-## TF-3 — Export: binary maps + tidy scalar CSV — **NOT STARTED**
+## TF-3 — Export: binary maps + tidy scalar CSV — **DONE**
 
-- [ ] **Full maps:** `channel × freq × time` per condition, written as NPY
-  (dependency-free: header + little-endian float buffer) for clean round-trip into
-  MNE / Python / R; HDF5 optional later.
-- [ ] **Scalar CSV ("single numbers"):** mean ERSP / ITPC per `channel × band ×
-  window` (e.g. theta 4–7 Hz, 200–500 ms), in the **exact long format**
-  `EEGAnalysisEngine.exportResult` already emits (`domain, scope, channel, band,
-  window, measure, value`) so it drops straight into a mixed model / JASP.
-- [ ] Report baseline method and cycle settings in the export header (reviewers ask).
+All in `TimeFrequencyExport.swift`; Export menu wired into the TF view header.
+
+- [x] **Full maps:** `channel × freq × time` per condition as dependency-free NPY
+  (numpy v1.0 header + little-endian float32, C order). Byte-identical to
+  `numpy.save` (test compares against a committed `numpy.save` fixture). A JSON
+  sidecar carries the axes (channel names, frequencies, times) and parameters,
+  since NPY holds no metadata.
+- [x] **Scalar CSV ("single numbers"):** mean ERSP / ITPC per condition × channel
+  × band × window, reducing over the frequency bins in each `EEGFrequencyBand
+  .restingDefaults` band and the samples in each ROI window. Emitted in the long
+  "summary + rows" convention `EEGAnalysisEngine.csvRows` uses (columns
+  `row_type, scope, condition, channel_index, channel_name, band, window,
+  measure, value`) — TF adds the `condition` and `window` columns it genuinely
+  needs. Drops straight into a mixed model / JASP.
+- [x] Baseline method, cycle settings, method, and time-bandwidth are reported —
+  as `summary` rows in the CSV and in the NPY JSON sidecar.
 
 **Effort:** medium — NPY writer is tiny; the scalar reduction reuses existing schema.
 

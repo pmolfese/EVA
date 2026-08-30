@@ -315,6 +315,49 @@ struct TimeFrequencyEngineTests {
         #expect(stackB.timeCount == 100)
     }
 
+    // MARK: TF-3 export
+
+    @Test func npyMatchesNumpyReference() {
+        // Same array numpy wrote to the fixture: arange(24)*0.5 − 3, shape (2,3,4).
+        var map = [[[Double]]](repeating: [[Double]](repeating: [Double](repeating: 0, count: 4), count: 3), count: 2)
+        var v = 0.0
+        for c in 0..<2 { for f in 0..<3 { for t in 0..<4 { map[c][f][t] = v * 0.5 - 3.0; v += 1 } } }
+
+        let produced = TimeFrequencyExport.npy(map)
+        let reference = try! Data(contentsOf: Fixtures.url("npy_reference_2x3x4.npy"))
+        #expect(produced == reference, "EVA NPY is not byte-identical to numpy (\(produced.count) vs \(reference.count) bytes)")
+    }
+
+    @Test func scalarCSVReducesBandWindowMeans() {
+        // One channel, freqs 5/6/7 Hz (all in Theta 4–8), times 100–400 ms.
+        let maps = TimeFrequencyExport.ConditionMaps(
+            condition: "A",
+            channelNames: ["Cz"],
+            ersp: [[[1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4]]],   // freq × time
+            itpc: [[[0, 0.5, 0.5, 1], [0, 0.5, 0.5, 1], [0, 0.5, 0.5, 1]]],
+            frequenciesHz: [5, 6, 7],
+            timesMs: [100, 200, 300, 400]
+        )
+        let context = TimeFrequencyExport.Context(
+            plan: .explicit(frequenciesHz: [5, 6, 7], nCycles: 7),
+            method: .morlet, timeBandwidth: 4,
+            baselineMethod: .decibel,
+            bands: EEGFrequencyBand.restingDefaults,
+            windows: [TimeFrequencyExport.Window(label: "200-500ms", startMs: 200, endMs: 500)]
+        )
+        let rows = TimeFrequencyExport.scalarCSVRows([maps], context: context)
+
+        // The 200–500 ms window selects times 200/300/400 → ersp mean (2+3+4)/3 = 3.
+        let erspRow = rows.first { $0.count == 9 && $0[0] == "tf_scalar" && $0[5] == "Theta" && $0[6] == "200-500ms" && $0[7] == "ersp" }
+        #expect(erspRow?[8] == "3")
+        // ITPC mean over the same window = (0.5+0.5+1)/3 ≈ 0.6667.
+        let itpcRow = rows.first { $0.count == 9 && $0[0] == "tf_scalar" && $0[5] == "Theta" && $0[6] == "200-500ms" && $0[7] == "itpc" }
+        #expect((itpcRow?[8]).map { Double($0) ?? -1 }.map { abs($0 - 0.6667) < 1e-3 } == true)
+        // Header + a summary parameter row are present.
+        #expect(rows.first == ["row_type", "scope", "condition", "channel_index", "channel_name", "band", "window", "measure", "value"])
+        #expect(rows.contains { $0[0] == "summary" && $0[7] == "baseline_method" && $0[8] == "dB" })
+    }
+
     // MARK: Kernel unit checks
 
     @Test func kernelMatchesMNENormalization() {
