@@ -43,6 +43,10 @@ struct EVAApp: App {
     /// found," not the earlier missing-`.environment()`/`.modelContainer`
     /// bugs, which were real but did not explain this one.
     @State private var batchController = BatchController()
+    /// Owned here and injected at the Simulated Recording `Window` scene root for
+    /// the same reason `batchController` is — its setup sheet is shown on the
+    /// window's first appearance and must find the controller in the environment.
+    @State private var simulatorController = SimulatorController()
 
     var body: some Scene {
         // `WindowGroup`, not `Window` — REWIND.md "EVA as a multi-window app"
@@ -79,6 +83,9 @@ struct EVAApp: App {
             CommandGroup(replacing: .newItem) {
                 NewWindowButton()
                     .keyboardShortcut("n", modifiers: .command)
+
+                OpenSimulatorWindowButton()
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
 
                 OpenRecordingButton()
                     .keyboardShortcut("o", modifiers: .command)
@@ -185,6 +192,16 @@ struct EVAApp: App {
         .modelContainer(for: UserMarker.self)
         .defaultSize(Self.defaultWindowSize)
 
+        // New → Simulated Recording (SIM-1). Single-instance like Batch and the
+        // utility windows: only one generation is ever being set up at a time.
+        // Drives the bundled EVASimulate tool and opens the result in a main
+        // window. See `SimulatorWindowView`.
+        Window("Simulated Recording", id: Self.simulatorWindowID) {
+            SimulatorWindowView()
+                .environment(simulatorController)
+        }
+        .defaultSize(width: 520, height: 560)
+
         Settings {
             PreferencesView()
                 .environment(goodnessSettings)
@@ -199,6 +216,7 @@ struct EVAApp: App {
     static let releaseNotesWindowID = "release-notes"
     static let figureExportWindowID = "figure-export"
     static let batchWindowID = "batch"
+    static let simulatorWindowID = "simulator"
 
     private func checkForUpdates() {
         guard !isCheckingForUpdates else { return }
@@ -294,6 +312,23 @@ private struct OpenBatchWindowButton: View {
         // than took the conflict away from Butterfly, since that one was
         // already working and this one wasn't.
         .keyboardShortcut("p", modifiers: [.command, .shift])
+    }
+}
+
+/// File-menu "New Simulated Recording…" — opens (or fronts) the single-instance
+/// Simulated Recording window (SIM-1).
+///
+/// Like `OpenBatchWindowButton`, `openWindow(id:)` on a single-instance `Window`
+/// scene brings an existing instance forward rather than making a second, and the
+/// window's own content decides what to show (its setup sheet if idle). Lives in
+/// the File → New group per the ROADMAP; ⇧⌘N pairs it with ⌘N "New Window".
+private struct OpenSimulatorWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("New Simulated Recording...") {
+            openWindow(id: EVAApp.simulatorWindowID)
+        }
     }
 }
 

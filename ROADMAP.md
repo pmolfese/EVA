@@ -170,31 +170,55 @@ generation is a direct call for SIM-1); the CLI is a bundled, codesigned
 executable at `EVA.app/Contents/MacOS/EVASimulate`; `xcodebuild test` runs the
 106-check corpus (via the CLI subprocess wrapper); `build.sh` is gone.
 
-## SIM-1 — New → Simulated Recording panel — **NOT STARTED**
+## SIM-1 — New → Simulated Recording panel — **IN PROGRESS (v1 shipped 2026-08-29)**
 
-A dedicated panel modeled directly on Batch Process. The batch scaffolding is
+A dedicated panel modeled directly on Batch Process. The batch scaffolding was
 the template: a `Window(id:)` scene (`BatchWindowView`) opened from a menu
 command (`OpenBatchWindowButton`) that owns a controller (`BatchController`) and
-shows a setup sheet (`BatchSetupSheet`) on first open. Mirror it:
+shows a setup sheet (`BatchSetupSheet`) on first open. Mirrored:
 
-- [ ] **`SimulatorWindowView`** — a `Window(id:)` scene registered in
+- [x] **`SimulatorWindowView`** — a `Window(id:)` scene registered in
   `EVAApp.swift`, opened from **File ▸ New ▸ Simulated Recording**
-  (`OpenSimulatorWindowButton`), owning a `SimulatorController`.
-- [ ] **`SimulatorSetupSheet`** — the batch-setup analogue: expose the
-  high-value knobs (channels, duration, rate, montage / coordinates, dipole
-  sources, BCG / gradient / blink / EMG artifacts, seed) rather than all 40+ CLI
-  flags. Back it with the existing `SimulationScenarioFile` JSON so a GUI
-  scenario is the *same artifact* the CLI reads and writes — round-trip parity,
-  and the CLI's presets show up as starting points.
-- [ ] **Generate** runs off the main thread (like the batch processor), then
-  opens the result as an ordinary recording; optionally write the `_truth.json`
-  sidecar alongside so scoring and the SIM-3 overlays can use it.
-- [ ] Start with driving existing scenarios and presets before full free-form
-  authoring, the way batch started from a fixed script.
+  (`OpenSimulatorWindowButton`, ⇧⌘N), owning a `SimulatorController`. Single-
+  instance like Batch; setup sheet on first appearance, then a
+  generating/done/failed view.
+- [x] **`SimulatorSetupSheet`** — exposes the high-value knobs (channels,
+  duration, rate, seed, and BCG / gradient / blink / EMG toggles) rather than all
+  40+ CLI flags, binding straight to an in-module `SimulationConfig`
+  (`SimulationConfig.default` as the starting point).
+- [x] **Generate** runs off the main thread via `SimulatorRunner` and opens the
+  contaminated `.mff` as an ordinary recording (`PendingWindowOpens` +
+  `openWindow("main")`). The clean recording and `_truth.json` sidecar are written
+  alongside. **How it works:** the GUI serializes its `SimulationConfig` to a
+  scenario JSON with the in-module `SimulationScenarioFile.write`, then drives the
+  bundled `EVASimulate generate` (SIM-0's embedded CLI) — round-trip parity, and
+  the write path reuses the CLI's `SimulationWriter` rather than duplicating MFF
+  serialization in the app. Verified end-to-end by `SimulatorRunnerTests` (runs in
+  the sandboxed app host: locates the CLI, generates, deterministic by seed).
+- [x] Drives a full `SimulationConfig` directly (superset of "existing scenarios
+  and presets").
+- [x] **Studio window (v2, 2026-08-29):** enlarged window with a top **mode
+  selector** (Generate implemented; Score / Sweep / Group are visible-but-inert
+  placeholders the shell makes room for), and Generate is a **tabbed inspector**
+  (`SimulatorGenerateView`): Recording · Sources & Head · Gradient · Cardiac ·
+  Ocular · Muscle & Other · ERP · Defects · Output — curated high/medium-value
+  knobs per tab, with a persistent bottom bar (seed · summary · Generate) and a
+  status strip. The whole config still round-trips, so unsurfaced fields keep
+  their defaults.
+- [x] **Output directory** picker (Output tab) + filename prefix + "open after".
+  Sandbox-safe: the CLI always writes into a container-temp dir (a child cannot
+  inherit the app's scoped access to a chosen folder), then the app copies the
+  results into the chosen directory.
+- [x] **Command provenance:** each run writes `<prefix>_command.json` (exact argv
+  + copy-pasteable command line + timestamp/app version) and `<prefix>_scenario.json`
+  alongside the recordings, so both the inputs and the invocation are on disk.
 
-**Exit:** a person picks knobs, clicks Generate, and a simulated recording opens
-in EVA and flows through the normal pipeline unchanged. **Effort:** medium; the
-gate is SIM-0, the panel itself reuses batch scaffolding.
+**Exit — met:** a person picks knobs across tabs, chooses an output folder, clicks
+Generate, and a simulated recording opens in EVA and flows through the normal
+pipeline unchanged. **Remaining for full SIM-1:** the **Score** mode (load truth +
+corrected → SNR/per-band/ERP-recovery metrics — the generate→clean→score loop),
+Sweep/Group modes, scenario-preset picker (bundle `scenarios/*.json` as resources),
+and montage/coordinate + per-source dipole authoring.
 
 ## SIM-2 — Interactive forward sandbox — **NOT STARTED**
 
