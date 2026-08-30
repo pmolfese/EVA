@@ -92,6 +92,41 @@ struct SimulatorRunnerTests {
         #expect(FileManager.default.fileExists(atPath: dest.appendingPathComponent("run_command.json").path))
     }
 
+    @Test("scores a recording against its ground truth")
+    func scoresAgainstTruth() throws {
+        // Turn a couple of artifacts on so noisy actually differs from clean.
+        var config = fastConfig()
+        config.bcgEnabled = true
+        config.blinksPerMinute = 20
+        let generated = try SimulatorRunner.generate(config: config, name: "Score")
+        defer { try? FileManager.default.removeItem(at: generated.directory) }
+
+        // Score the noisy recording as if it were the "corrected" one, with the
+        // clean recording as truth and noisy also as the uncorrected baseline.
+        let outcome = try SimulatorRunner.score(
+            truth: generated.cleanURL,
+            corrected: generated.noisyURL,
+            baseline: generated.noisyURL,
+            label: "noisy-as-corrected"
+        )
+
+        #expect(!outcome.corrected.bands.isEmpty, "expected a per-band breakdown")
+        #expect(!outcome.corrected.channels.isEmpty, "expected per-channel scores")
+        #expect(outcome.baseline != nil, "baseline was supplied")
+        #expect(outcome.corrected.broadbandSNR.isFinite || outcome.corrected.broadbandSNR.isInfinite)
+    }
+
+    @Test("scoring identical recordings is a near-perfect match")
+    func scoringIdenticalIsPerfect() throws {
+        let generated = try SimulatorRunner.generate(config: fastConfig(), name: "Perfect")
+        defer { try? FileManager.default.removeItem(at: generated.directory) }
+        // Clean vs clean: the residual is ~zero, so correlation should be ~1.
+        let outcome = try SimulatorRunner.score(
+            truth: generated.cleanURL, corrected: generated.cleanURL
+        )
+        #expect(outcome.corrected.broadbandCorrelation > 0.99)
+    }
+
     @Test("the same seed reproduces the same samples")
     func seedIsDeterministic() throws {
         let first = try SimulatorRunner.generate(config: fastConfig(), name: "A")

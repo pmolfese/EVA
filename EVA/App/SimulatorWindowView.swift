@@ -45,6 +45,8 @@ struct SimulatorWindowView: View {
             switch simulator.mode {
             case .generate:
                 SimulatorGenerateView(open: openRecording)
+            case .score:
+                SimulatorScoreView(open: openRecording)
             default:
                 comingSoon(simulator.mode)
             }

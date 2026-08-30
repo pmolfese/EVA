@@ -61,6 +61,49 @@ nonisolated enum SimulatorRunner {
         let directory: URL
     }
 
+    // MARK: - Scoring DTOs
+    //
+    // `CorrectionScore` and its nested types live in the CLI-side SNRMetrics.swift
+    // (not the app module), so we decode the tool's `--json` output into these
+    // app-side mirrors rather than sharing the type.
+
+    struct ScoreBand: Decodable, Sendable, Identifiable {
+        var name: String
+        var lowHz: Double
+        var highHz: Double
+        var snr: Double
+        var powerRatioDb: Double
+        var cleanRMS: Double
+        var residualRMS: Double
+        var correlation: Double
+        var spectralDistortionDbRMS: Double
+        var id: String { name }
+    }
+
+    struct ScoreChannel: Decodable, Sendable, Identifiable {
+        var name: String
+        var snr: Double
+        var rmseMicrovolts: Double
+        var correlation: Double
+        var cleanStandardDeviation: Double
+        var residualStandardDeviation: Double
+        var spectralDistortionDbRMS: Double
+        var id: String { name }
+    }
+
+    struct Score: Decodable, Sendable, Identifiable {
+        var label: String
+        var broadbandSNR: Double
+        var cleanStandardDeviation: Double
+        var residualStandardDeviation: Double
+        var broadbandRMSEMicrovolts: Double
+        var broadbandCorrelation: Double
+        var spectralDistortionDbRMS: Double
+        var bands: [ScoreBand]
+        var channels: [ScoreChannel]
+        var id: String { label }
+    }
+
     enum RunError: LocalizedError {
         case cliNotFound(String)
         case failed(status: Int32, log: String)
@@ -182,6 +225,101 @@ nonisolated enum SimulatorRunner {
             commandURL: directory.appendingPathComponent("\(prefix)_command.json"),
             directory: directory
         )
+    }
+
+    // MARK: - Scoring
+
+    /// The outcome of a `score` run: the corrected recording's fidelity against
+    /// truth, and — when a baseline was supplied — the uncorrected recording's,
+    /// so the UI can show what the correction actually bought.
+    struct ScoreOutcome: Sendable {
+        var corrected: Score
+        var baseline: Score?
+    }
+
+    /// Runs `EVASimulate score`, comparing `corrected` against the ground-truth
+    /// `truth` recording (optionally alongside the uncorrected `baseline`), and
+    /// returns the decoded metrics. Blocking — call it off the main thread.
+    ///
+    /// Inputs are staged into a container-temp directory first: the CLI child
+    /// cannot read user-picked `.mff` packages outside the app's container, but
+    /// the app (which holds the scoped access) can copy them in.
+    static func score(
+        truth: URL,
+        corrected: URL,
+        baseline: URL? = nil,
+        label: String? = nil,
+        padSeconds: Double? = nil
+    ) throws -> ScoreOutcome {
+        guard let cli = locateCLI() else {
+            throw RunError.cliNotFound(
+                "Expected it beside the app executable at Contents/MacOS/EVASimulate."
+            )
+        }
+
+        let fm = FileManager.default
+        let workDir = fm.temporaryDirectory
+            .appendingPathComponent("EVASimulateScore", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: workDir) }
+
+        let truthLocal = try stageInput(truth, into: workDir, as: "truth.mff")
+        let correctedLocal = try stageInput(corrected, into: workDir, as: "corrected.mff")
+        let baselineLocal = try baseline.map { try stageInput($0, into: workDir, as: "baseline.mff") }
+
+        let jsonURL = workDir.appendingPathComponent("score.json")
+        var arguments = [
+            "score",
+            "--truth", truthLocal.path,
+            "--corrected", correctedLocal.path,
+            "--json", jsonURL.path,
+        ]
+        if let baselineLocal { arguments += ["--baseline", baselineLocal.path] }
+        if let label, !label.isEmpty { arguments += ["--label", label] }
+        if let padSeconds { arguments += ["--pad-seconds", String(padSeconds)] }
+
+        let process = Process()
+        process.executableURL = cli
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let log = String(decoding: data, as: UTF8.self)
+
+        guard process.terminationStatus == 0 else {
+            throw RunError.failed(status: process.terminationStatus, log: log)
+        }
+        guard fm.fileExists(atPath: jsonURL.path) else {
+            throw RunError.missingOutput(jsonURL, log: log)
+        }
+
+        let decoder = JSONDecoder()
+        decoder.nonConformingFloatDecodingStrategy = .convertFromString(
+            positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN"
+        )
+        let scores = try decoder.decode([Score].self, from: Data(contentsOf: jsonURL))
+        guard let corrected = scores.first else {
+            throw RunError.missingOutput(jsonURL, log: log)
+        }
+        // The CLI writes [score] or [score, baseline] in that order.
+        return ScoreOutcome(corrected: corrected, baseline: scores.dropFirst().first)
+    }
+
+    /// Copies a (possibly security-scoped, possibly outside-container) `.mff`
+    /// package into `workDir` so the sandboxed CLI child can read it.
+    private static func stageInput(_ source: URL, into workDir: URL, as name: String) throws -> URL {
+        let fm = FileManager.default
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        let destination = workDir.appendingPathComponent(name)
+        if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+        try fm.copyItem(at: source, to: destination)
+        return destination
     }
 
     // MARK: - Helpers

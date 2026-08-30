@@ -46,7 +46,7 @@ final class SimulatorController {
             case .group: return "person.3"
             }
         }
-        var isImplemented: Bool { self == .generate }
+        var isImplemented: Bool { self == .generate || self == .score }
     }
 
     enum Phase: Equatable {
@@ -144,5 +144,60 @@ final class SimulatorController {
     func clearStatus() {
         phase = .idle
         statusMessage = ""
+    }
+
+    // MARK: - Score mode
+
+    /// Ground-truth recording (`_clean.mff`).
+    var scoreTruthURL: URL?
+    /// The recording after cleaning in EVA — what is being scored.
+    var scoreCorrectedURL: URL?
+    /// Optional uncorrected recording (`_noisy.mff`), so the table shows what the
+    /// correction bought.
+    var scoreBaselineURL: URL?
+
+    private(set) var scorePhase: Phase = .idle
+    private(set) var scoreMessage = ""
+    private(set) var scoreOutcome: SimulatorRunner.ScoreOutcome?
+
+    var isScoring: Bool { scorePhase == .generating }
+
+    /// If a recording was just generated, its clean/noisy files are the obvious
+    /// truth/baseline — offer them as a starting point.
+    func prefillScoreFromLastGeneration() {
+        guard let output = lastOutput else { return }
+        scoreTruthURL = output.cleanURL
+        scoreBaselineURL = output.noisyURL
+    }
+
+    func score() {
+        guard scorePhase != .generating else { return }
+        guard let truth = scoreTruthURL, let corrected = scoreCorrectedURL else {
+            scorePhase = .failed("Choose both a ground-truth and a corrected recording.")
+            return
+        }
+        scorePhase = .generating
+        scoreMessage = "Scoring…"
+        let baseline = scoreBaselineURL
+
+        Task {
+            do {
+                let outcome = try await Task.detached(priority: .userInitiated) {
+                    try SimulatorRunner.score(truth: truth, corrected: corrected, baseline: baseline)
+                }.value
+                self.scoreOutcome = outcome
+                self.scorePhase = .done
+                self.scoreMessage = "Scored \(corrected.lastPathComponent)."
+            } catch {
+                self.scoreOutcome = nil
+                self.scorePhase = .failed(error.localizedDescription)
+                self.scoreMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func clearScoreStatus() {
+        scorePhase = .idle
+        scoreMessage = ""
     }
 }
