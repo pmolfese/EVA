@@ -104,6 +104,12 @@ func usage() -> String {
       eva-simulate score-erp --truth <components.json> --estimated <components.json>
       eva-simulate score-pac --truth <truth.json> --estimated <pac.json>
       eva-simulate sweep --parameter <name> --values <a,b,c> --output <dir> [model options]
+      eva-simulate evaluate-surrogate [--correction-head <name>] [--max-beats <n>]
+                   [--bcg-morphology-jitter <f>] [--correction-scalp-radius <m>]
+                   [--correction-skull-ratio <r>] [--correction-head-center <x,y,z>]
+                   [--correction-electrode-jitter <deg>] [model options]
+      eva-simulate evaluate-surrogate-grid --axis <name> --values <a,b,c>
+                   [--output <csv>] [seeds/base options]
       eva-simulate selftest
 
     generate — writes <dir>/<prefix>_clean.mff, <dir>/<prefix>_noisy.mff,
@@ -1957,13 +1963,54 @@ func resolveCorrectionHead(_ name: String) throws -> SphericalHeadModel {
     }
 }
 
+/// Builds a correction head identical to the truth head except for the one
+/// parameter being swept (SI-4 independent per-parameter head-model mismatch):
+/// a uniform radius scale, the skull-conductivity ratio, or a shifted centre.
+func perturbedCorrectionHead(
+    from truth: SphericalHeadModel, scalpRadius: Double?, skullRatio: Double?, center: Vector3D?
+) -> SphericalHeadModel {
+    var shells = truth.shells
+    if let scalpRadius, truth.scalpRadiusMeters > 0 {
+        let scale = scalpRadius / truth.scalpRadiusMeters
+        shells = shells.map {
+            HeadShell(name: $0.name, radiusMeters: $0.radiusMeters * scale,
+                      conductivitySiemensPerMeter: $0.conductivitySiemensPerMeter)
+        }
+    }
+    if let skullRatio, skullRatio > 0, shells.count >= 2 {
+        let brainConductivity = shells.first?.conductivitySiemensPerMeter ?? 0.33
+        let skullIndex = shells.count - 2 // shell just inside the scalp
+        shells[skullIndex] = HeadShell(
+            name: shells[skullIndex].name, radiusMeters: shells[skullIndex].radiusMeters,
+            conductivitySiemensPerMeter: brainConductivity / skullRatio)
+    }
+    return SphericalHeadModel(name: "correction (perturbed)",
+                             centerMeters: center ?? truth.centerMeters, shells: shells)
+}
+
 func runEvaluateSurrogate(_ arguments: Arguments) throws {
     try arguments.validate(known: [
         "seeds", "offsets", "sources", "components", "brain-regularization",
         "duration", "channels", "coordinates", "rate", "config", "with-erp", "pattern-search",
-        "representative-beat", "json", "correction-head"
+        "representative-beat", "json", "correction-head",
+        "max-beats", "bcg-morphology-jitter",
+        "correction-scalp-radius", "correction-skull-ratio",
+        "correction-head-center", "correction-electrode-jitter",
     ])
-    let correctionHead = try arguments.string("correction-head").map(resolveCorrectionHead)
+    let namedCorrectionHead = try arguments.string("correction-head").map(resolveCorrectionHead)
+    let correctionScalpRadius = try arguments.double("correction-scalp-radius")
+    let correctionSkullRatio = try arguments.double("correction-skull-ratio")
+    let correctionHeadCenter = try arguments.string("correction-head-center").map { text -> Vector3D in
+        let parts = text.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count == 3 else {
+            throw SimulateError.usage("--correction-head-center needs x,y,z in metres")
+        }
+        return Vector3D(x: parts[0], y: parts[1], z: parts[2])
+    }
+    let correctionElectrodeJitter = try arguments.double("correction-electrode-jitter")
+    let maxBeats = try arguments.int("max-beats")
+    if let maxBeats, maxBeats <= 0 { throw SimulateError.usage("--max-beats must be positive") }
+    let morphologyJitter = try arguments.double("bcg-morphology-jitter")
 
     let seedCount = try arguments.int("seeds") ?? 5
     guard seedCount > 0 else { throw SimulateError.usage("--seeds must be positive") }
@@ -2021,6 +2068,21 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         try importedMontage(path: $0, channelCount: base.channelCount).montage
     } ?? Montage.standard(count: base.channelCount)
 
+    if let morphologyJitter { base.bcgMorphologyJitterFraction = morphologyJitter }
+
+    // Resolve the correction head: a named preset, or an independent per-parameter
+    // perturbation of the truth head (SI-4), or matched (nil).
+    var correctionHead = namedCorrectionHead
+    if correctionHead == nil,
+       correctionScalpRadius != nil || correctionSkullRatio != nil || correctionHeadCenter != nil {
+        correctionHead = perturbedCorrectionHead(
+            from: base.sphericalHeadModel, scalpRadius: correctionScalpRadius,
+            skullRatio: correctionSkullRatio, center: correctionHeadCenter)
+    }
+    // An electrode-position mismatch builds the brain basis on a jittered montage
+    // while the truth data stays on the real one.
+    let correctionMontage = correctionElectrodeJitter.map { montage.jittered(degrees: $0, seed: 4242) }
+
     struct ConditionResult {
         var offsetMillimetres: Double
         var successfulSeeds: [UInt64]
@@ -2042,6 +2104,11 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         var uncorrectedAmplitudeErrorFraction: [Double] = []
         var correctedExplainedVariance: [Double] = []
         var uncorrectedExplainedVariance: [Double] = []
+        // SI-4 sensor-space distortion (corrected vs clean), per seed.
+        var cleanDistortionDb: [Double] = []
+        var removedVarianceFraction: [Double] = []
+        var perBandResidualRMS: [String: [Double]] = [:]
+        var perBandCorrelation: [String: [Double]] = [:]
     }
 
     var results: [ConditionResult] = []
@@ -2064,6 +2131,10 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         var uncorrectedAmplitudeBuffer: [Double] = []
         var correctedVarianceBuffer: [Double] = []
         var uncorrectedVarianceBuffer: [Double] = []
+        var cleanDistortionBuffer: [Double] = []
+        var removedVarianceBuffer: [Double] = []
+        var perBandResidualBuffer: [String: [Double]] = [:]
+        var perBandCorrelationBuffer: [String: [Double]] = [:]
 
         for seedIndex in 0..<seedCount {
             var config = base
@@ -2085,18 +2156,23 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
             EEGReferencing.apply(.average, to: &cleanReferenced)
             EEGReferencing.apply(.average, to: &noisy)
 
+            // SI-4 accepted-beat axis: cap how many detected beats the correction
+            // may use, independent of recording length.
+            let beatSeconds = maxBeats.map { Array(bcg.detectedBeatSeconds.prefix($0)) }
+                ?? bcg.detectedBeatSeconds
             guard let components = SurrogateSeparation.artifactComponents(
                 channels: noisy,
                 samplingRate: config.samplingRate,
-                beatSeconds: bcg.detectedBeatSeconds,
+                beatSeconds: beatSeconds,
                 patternSearchMode: patternSearchMode,
                 representativeBeatIndex: requestedRepresentative
             ) else { continue }
             // Truth is generated with config.sphericalHeadModel; the correction
-            // basis uses correctionHead when a mismatch is requested (SI-4).
+            // basis uses correctionHead / correctionMontage when a mismatch is
+            // requested (SI-4).
             let brain = try SurrogateSeparation.brainModel(
                 head: correctionHead ?? config.sphericalHeadModel,
-                montage: montage, count: regionalCount,
+                montage: correctionMontage ?? montage, count: regionalCount,
                 reference: .average, terms: config.leadFieldTerms, offsetMillimetres: offset
             )
             let sourceInformedOperator = try SurrogateSeparation.sourceInformedOperator(
@@ -2137,6 +2213,30 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                         .min() ?? 0
                 }.min() ?? 0
             )
+
+            // SI-4 sensor-space distortion: how much the correction distorts the
+            // brain signal (corrected vs clean) and how much variance it removed
+            // (corrected vs noisy).
+            let distortion = SNRMetrics.score(
+                label: "corrected", clean: cleanReferenced, corrected: output,
+                samplingRate: config.samplingRate, channelNames: montage.channelNames
+            )
+            cleanDistortionBuffer.append(distortion.spectralDistortionDbRMS)
+            for band in distortion.bands {
+                perBandResidualBuffer[band.name, default: []].append(band.residualRMS)
+                perBandCorrelationBuffer[band.name, default: []].append(band.correlation)
+            }
+            var noisyPower = 0.0
+            var removedPower = 0.0
+            for channel in noisy.indices {
+                for sample in noisy[channel].indices where sample < output[channel].count {
+                    let value = noisy[channel][sample]
+                    noisyPower += value * value
+                    let removed = value - output[channel][sample]
+                    removedPower += removed * removed
+                }
+            }
+            removedVarianceBuffer.append(noisyPower > 1e-30 ? removedPower / noisyPower : 0)
 
             if let erpInjection, !erpInjection.componentSources.isEmpty {
                 let onsets = erpInjection.trials.map(\.onsetSeconds)
@@ -2206,7 +2306,11 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
             correctedAmplitudeErrorFraction: correctedAmplitudeBuffer,
             uncorrectedAmplitudeErrorFraction: uncorrectedAmplitudeBuffer,
             correctedExplainedVariance: correctedVarianceBuffer,
-            uncorrectedExplainedVariance: uncorrectedVarianceBuffer
+            uncorrectedExplainedVariance: uncorrectedVarianceBuffer,
+            cleanDistortionDb: cleanDistortionBuffer,
+            removedVarianceFraction: removedVarianceBuffer,
+            perBandResidualRMS: perBandResidualBuffer,
+            perBandCorrelation: perBandCorrelationBuffer
         ))
     }
 
@@ -2280,6 +2384,18 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                     ]
                 ] as [String: Any]
             }
+            var perBand: [String: Any] = [:]
+            for name in result.perBandResidualRMS.keys.sorted() {
+                perBand[name] = [
+                    "residualRMS": statistics(result.perBandResidualRMS[name] ?? []),
+                    "correlation": statistics(result.perBandCorrelation[name] ?? [])
+                ] as [String: Any]
+            }
+            condition["sensorDistortion"] = [
+                "cleanDistortionDbRMS": statistics(result.cleanDistortionDb),
+                "removedVarianceFraction": statistics(result.removedVarianceFraction),
+                "perBand": perBand
+            ] as [String: Any]
             conditions.append(condition)
         }
         let payload: [String: Any] = [
@@ -2334,6 +2450,17 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
             100 * mean(result.acceptedBeatFraction)
         ))
     }
+    print("")
+    print("  offset   clean distortion (dB)   removed variance")
+    print("  ---------------------------------------------------------------------")
+    for result in results {
+        print(String(
+            format: "  %5.0f mm   %6.2f ± %-5.2f          %5.2f ± %-5.2f",
+            result.offsetMillimetres,
+            mean(result.cleanDistortionDb), standardDeviation(result.cleanDistortionDb),
+            mean(result.removedVarianceFraction), standardDeviation(result.removedVarianceFraction)
+        ))
+    }
     if evaluateERP, results.contains(where: { !$0.correctedExplainedVariance.isEmpty }) {
         print("")
         print("  Rusiniak criteria, corrected vs uncorrected (mean ± SD over seeds)")
@@ -2380,6 +2507,203 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
     print("")
     print("  The spread matters as much as the means: a difference smaller than the")
     print("  standard deviation is not a result. Increase --seeds before concluding.")
+}
+
+// MARK: - evaluate-surrogate-grid
+
+/// Core-metric aggregation for one condition (no ERP/JSON) — the reusable body the
+/// grid sweeps. Kept separate from `runEvaluateSurrogate` so the grid never risks
+/// its richer per-seed reporting.
+struct SurrogateGridMetrics {
+    var correctedSNR: [Double] = []
+    var uncorrectedSNR: [Double] = []
+    var cleanDistortionDb: [Double] = []
+    var removedVariance: [Double] = []
+    var acceptedBeatFraction: [Double] = []
+    var nearestSourceMm: [Double] = []
+}
+
+func evaluateSurrogateCore(
+    base: SimulationConfig, montage: Montage, correctionHead: SphericalHeadModel?,
+    correctionMontage: Montage?, offset: Double, regionalCount: Int, componentCount: Int,
+    regularization: Double, patternSearchMode: ArtifactPatternSearchMode,
+    representative: Int?, maxBeats: Int?, seedCount: Int
+) throws -> SurrogateGridMetrics {
+    var metrics = SurrogateGridMetrics()
+    for seedIndex in 0..<seedCount {
+        var config = base
+        config.seed = UInt64(seedIndex + 1)
+
+        let clean = try DipoleEEGGenerator.generate(config: config, montage: montage).channels
+        var noisy = clean
+        var stream = GaussianSource(seed: SimulationSeedStreams.bcg(base: config.seed))
+        let bcg = BCGArtifactModel.inject(into: &noisy, config: config, montage: montage, source: &stream)
+        var cleanReferenced = clean
+        EEGReferencing.apply(.average, to: &cleanReferenced)
+        EEGReferencing.apply(.average, to: &noisy)
+
+        let beatSeconds = maxBeats.map { Array(bcg.detectedBeatSeconds.prefix($0)) }
+            ?? bcg.detectedBeatSeconds
+        guard let components = SurrogateSeparation.artifactComponents(
+            channels: noisy, samplingRate: config.samplingRate, beatSeconds: beatSeconds,
+            patternSearchMode: patternSearchMode, representativeBeatIndex: representative
+        ) else { continue }
+        let brain = try SurrogateSeparation.brainModel(
+            head: correctionHead ?? config.sphericalHeadModel,
+            montage: correctionMontage ?? montage, count: regionalCount,
+            reference: .average, terms: config.leadFieldTerms, offsetMillimetres: offset)
+        let op = try SurrogateSeparation.sourceInformedOperator(
+            brain: brain, artifactTopographies: Array(components.topographies.prefix(componentCount)),
+            brainRegularization: regularization)
+        let output = try SourceInformedSeparation.apply(op, to: noisy)
+
+        func snr(_ candidate: [[Double]]) -> Double {
+            var signal = 0.0, residual = 0.0
+            for c in cleanReferenced.indices {
+                for k in cleanReferenced[c].indices where k < candidate[c].count {
+                    let v = cleanReferenced[c][k]; signal += v * v
+                    let e = v - candidate[c][k]; residual += e * e
+                }
+            }
+            return residual > 1e-30 ? (signal / residual).squareRoot() : .infinity
+        }
+        metrics.correctedSNR.append(snr(output))
+        metrics.uncorrectedSNR.append(snr(noisy))
+        metrics.acceptedBeatFraction.append(
+            Double(components.acceptedBeatCount) / Double(max(1, components.candidateBeatCount)))
+        let score = SNRMetrics.score(label: "c", clean: cleanReferenced, corrected: output,
+                                     samplingRate: config.samplingRate, channelNames: montage.channelNames)
+        metrics.cleanDistortionDb.append(score.spectralDistortionDbRMS)
+        var noisyPower = 0.0, removedPower = 0.0
+        for c in noisy.indices {
+            for k in noisy[c].indices where k < output[c].count {
+                let v = noisy[c][k]; noisyPower += v * v
+                let d = v - output[c][k]; removedPower += d * d
+            }
+        }
+        metrics.removedVariance.append(noisyPower > 1e-30 ? removedPower / noisyPower : 0)
+        let simulated = DipoleEEGGenerator.makeSources(config: config)
+        metrics.nearestSourceMm.append(
+            brain.sources.map { sg in simulated.map { (sg.positionMeters - $0.positionMeters).norm * 1000 }.min() ?? 0 }.min() ?? 0)
+    }
+    return metrics
+}
+
+/// Cross-runs one sweep axis and writes an aggregated CSV — the SI-4 campaign
+/// workhorse. Every other `evaluate-surrogate` option sets the fixed base.
+func runEvaluateSurrogateGrid(_ arguments: Arguments) throws {
+    try arguments.validate(known: [
+        "axis", "values", "seeds", "sources", "components", "brain-regularization",
+        "duration", "channels", "coordinates", "rate", "config", "pattern-search",
+        "representative-beat", "offset", "correction-head", "output",
+    ])
+    guard let axis = arguments.string("axis") else { throw SimulateError.usage("grid needs --axis <name>") }
+    guard let valuesRaw = arguments.string("values") else { throw SimulateError.usage("grid needs --values <a,b,c>") }
+    let values = valuesRaw.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+    guard !values.isEmpty else { throw SimulateError.usage("--values needs comma-separated numbers") }
+
+    let seedCount = try arguments.int("seeds") ?? 5
+    guard seedCount > 0 else { throw SimulateError.usage("--seeds must be positive") }
+    let regionalCount = try arguments.int("sources") ?? 29
+    let componentCount = try arguments.int("components") ?? 4
+    let regularization = try arguments.double("brain-regularization") ?? 0.02
+    let patternSearchMode = ArtifactPatternSearchMode(rawValue: arguments.string("pattern-search") ?? "paper") ?? .paper
+    let representative = try arguments.int("representative-beat").map { $0 - 1 }
+    let baseOffset = try arguments.double("offset") ?? 0
+    let namedCorrectionHead = try arguments.string("correction-head").map(resolveCorrectionHead)
+
+    var base = SimulationConfig.default
+    if let path = arguments.string("config") {
+        base = try SimulationScenarioFile.load(from: URL(fileURLWithPath: path)).config
+    }
+    base.channelCount = try arguments.int("channels") ?? base.channelCount
+    if let path = arguments.string("coordinates"), !arguments.flag("coordinates") {
+        base.coordinatesPath = URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+    base.samplingRate = try arguments.double("rate") ?? 250
+    base.durationSeconds = try arguments.double("duration") ?? 180
+    base.eegGenerationModel = .dipole
+    base.recordingReference = .average
+    base.bcgSpatialModel = .generators
+    base.gradientEnabled = false
+    base.erp = nil
+    let baseMontage = try base.coordinatesPath.map {
+        try importedMontage(path: $0, channelCount: base.channelCount).montage
+    } ?? Montage.standard(count: base.channelCount)
+
+    func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
+    func sd(_ v: [Double]) -> Double {
+        guard v.count > 1 else { return 0 }
+        let m = mean(v)
+        return (v.reduce(0.0) { $0 + ($1 - m) * ($1 - m) } / Double(v.count - 1)).squareRoot()
+    }
+
+    var rows = ["axis,value,seeds,corrected_snr_mean,corrected_snr_sd,"
+        + "uncorrected_snr_mean,uncorrected_snr_sd,clean_distortion_db_mean,clean_distortion_db_sd,"
+        + "removed_variance_mean,accepted_beat_fraction_mean,nearest_source_mm_mean"]
+    print("axis=\(axis), \(values.count) values, \(seedCount) seeds each")
+    print("  value    corrected SNR       uncorrected   distortion(dB)   removed  beats")
+    print("  ---------------------------------------------------------------------------")
+
+    for value in values {
+        var b = base
+        var montage = baseMontage
+        var offset = baseOffset
+        var regional = regionalCount
+        var components = componentCount
+        var reg = regularization
+        var maxBeats: Int?
+        var correctionHead = namedCorrectionHead
+        var correctionMontage: Montage?
+
+        switch axis {
+        case "duration", "length": b.durationSeconds = value
+        case "channels": b.channelCount = Int(value); montage = Montage.standard(count: Int(value))
+        case "rate": b.samplingRate = value
+        case "components": components = Int(value)
+        case "brain-regularization", "regularization": reg = value
+        case "sources", "regional-sources": regional = Int(value)
+        case "offset": offset = value
+        case "max-beats", "beats": maxBeats = Int(value)
+        case "bcg-morphology-jitter", "morphology": b.bcgMorphologyJitterFraction = value
+        case "correction-scalp-radius":
+            correctionHead = perturbedCorrectionHead(from: b.sphericalHeadModel, scalpRadius: value, skullRatio: nil, center: nil)
+        case "correction-skull-ratio":
+            correctionHead = perturbedCorrectionHead(from: b.sphericalHeadModel, scalpRadius: nil, skullRatio: value, center: nil)
+        case "correction-electrode-jitter":
+            correctionMontage = baseMontage.jittered(degrees: value, seed: 4242)
+        default:
+            throw SimulateError.usage("unknown --axis \"\(axis)\"; expected duration, channels, rate, "
+                + "components, brain-regularization, sources, offset, max-beats, bcg-morphology-jitter, "
+                + "correction-scalp-radius, correction-skull-ratio, or correction-electrode-jitter")
+        }
+
+        let m = try evaluateSurrogateCore(
+            base: b, montage: montage, correctionHead: correctionHead, correctionMontage: correctionMontage,
+            offset: offset, regionalCount: regional, componentCount: components, regularization: reg,
+            patternSearchMode: patternSearchMode, representative: representative, maxBeats: maxBeats,
+            seedCount: seedCount)
+
+        rows.append([
+            axis, formatSweepValue(value), String(m.correctedSNR.count),
+            String(format: "%.6f", mean(m.correctedSNR)), String(format: "%.6f", sd(m.correctedSNR)),
+            String(format: "%.6f", mean(m.uncorrectedSNR)), String(format: "%.6f", sd(m.uncorrectedSNR)),
+            String(format: "%.6f", mean(m.cleanDistortionDb)), String(format: "%.6f", sd(m.cleanDistortionDb)),
+            String(format: "%.6f", mean(m.removedVariance)),
+            String(format: "%.6f", mean(m.acceptedBeatFraction)),
+            String(format: "%.6f", mean(m.nearestSourceMm)),
+        ].joined(separator: ","))
+        print(String(format: "  %-7@  %5.2f ± %-5.2f     %5.2f         %6.2f          %4.2f    %3.0f%%",
+            formatSweepValue(value) as NSString,
+            mean(m.correctedSNR), sd(m.correctedSNR), mean(m.uncorrectedSNR),
+            mean(m.cleanDistortionDb), mean(m.removedVariance), 100 * mean(m.acceptedBeatFraction)))
+    }
+
+    let csv = rows.joined(separator: "\n") + "\n"
+    if let output = arguments.string("output") {
+        try csv.write(toFile: output, atomically: true, encoding: .utf8)
+        print("\nWrote \(output)")
+    }
 }
 
 // MARK: - correct
@@ -3228,6 +3552,8 @@ do {
         try runCorrect(arguments)
     case "evaluate-surrogate":
         try runEvaluateSurrogate(arguments)
+    case "evaluate-surrogate-grid":
+        try runEvaluateSurrogateGrid(arguments)
     case "score":
         try runScore(arguments)
     case "score-sources":

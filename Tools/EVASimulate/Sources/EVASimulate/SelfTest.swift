@@ -3174,6 +3174,40 @@ nonisolated enum SelfTest {
             ))
         }
 
+        // SI-4 Track 1: the grid core reports the enriched metrics per seed.
+        do {
+            var config = SimulationConfig.default
+            config.durationSeconds = 20
+            config.channelCount = 32
+            config.samplingRate = 250
+            config.eegGenerationModel = .dipole
+            config.recordingReference = .average
+            config.bcgSpatialModel = .generators
+            config.gradientEnabled = false
+            config.erp = nil
+            let montage = Montage.standard(count: config.channelCount)
+            let metrics = try evaluateSurrogateCore(
+                base: config, montage: montage, correctionHead: nil, correctionMontage: nil,
+                offset: 0, regionalCount: 29, componentCount: 4, regularization: 0.02,
+                patternSearchMode: .paper, representative: nil, maxBeats: nil, seedCount: 2)
+            let passed = !metrics.correctedSNR.isEmpty
+                && metrics.cleanDistortionDb.allSatisfy { $0.isFinite }
+                && metrics.removedVariance.allSatisfy { $0.isFinite && $0 >= 0 }
+                && metrics.correctedSNR.count == metrics.removedVariance.count
+            outcomes.append(Outcome(
+                name: "SI-4 grid core reports distortion + removed-variance per seed",
+                snr: metrics.removedVariance.first ?? .infinity,
+                passed: passed,
+                expectation: "finite clean-distortion (dB) and non-negative removed-variance per successful seed"
+            ))
+        } catch {
+            outcomes.append(Outcome(
+                name: "SI-4 grid core reports distortion + removed-variance per seed",
+                snr: .infinity, passed: false,
+                expectation: "evaluateSurrogateCore ran (\(error.localizedDescription))"
+            ))
+        }
+
         outcomes.append(contentsOf: SI0ContractFixtures.run())
         return outcomes
     }
