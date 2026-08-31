@@ -89,6 +89,12 @@ extension WaveformView {
                                 )
                                 .help("Double-click to compare topographies at this latency.")
                                 .contextMenu {
+                                    if canFitSourceModel() {
+                                        Button("Fit Source Model…") {
+                                            fitSourceModel(centeredOnRelativeSample: epoching.butterflyTopomapRelativeSample)
+                                        }
+                                        Divider()
+                                    }
                                     figureSaveMenu(title: "Butterfly Overlay",
                                                    legend: overlayLegendItems(),
                                                    size: CGSize(width: 820, height: 300),
@@ -162,6 +168,12 @@ extension WaveformView {
                                     )
                                     .help("Double-click to compare topographies at this latency. Drag the yellow line to move it.")
                                     .contextMenu {
+                                        if canFitSourceModel() {
+                                            Button("Fit Source Model…") {
+                                                fitSourceModel(centeredOnRelativeSample: epoching.butterflyTopomapRelativeSample)
+                                            }
+                                            Divider()
+                                        }
                                         figureSaveMenu(title: "\(epoching.displayCategory(segment.category)) Butterfly",
                                                        legend: [(epoching.displayCategory(segment.category), epochColor(for: segment.colorIndex))],
                                                        size: CGSize(width: 820, height: 300),

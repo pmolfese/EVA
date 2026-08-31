@@ -116,7 +116,18 @@ struct HeadProjectionView: View {
     }()
 
     var body: some View {
-        VStack(spacing: 2) {
+        // A `Canvas` draw closure is escaping, so accessing observable state inside
+        // it does not, on its own, make SwiftUI re-render when that state changes.
+        // Touch the state the drawing depends on here in `body` so a scrub (which
+        // moves `currentSample`) or a finished fit (`fitResult`) redraws the view.
+        _ = controller.currentSample
+        _ = controller.fitResult
+        _ = controller.showDipoleFit
+        _ = controller.showWireframe
+        _ = controller.showOutlineCircle
+        _ = controller.selectedID
+        _ = controller.sources.count
+        return VStack(spacing: 2) {
             Text(plane.title).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             GeometryReader { geo in
                 let size = geo.size
@@ -125,6 +136,14 @@ struct HeadProjectionView: View {
                 }
                 .contentShape(Rectangle())
                 .gesture(dragGesture(size: size))
+                .contextMenu {
+                    Button("Fit Dipoles at Playhead") {
+                        controller.fitDipoleAtPlayhead()
+                    }
+                    if controller.showDipoleFit {
+                        Button("Hide Dipole Fit") { controller.showDipoleFit = false }
+                    }
+                }
             }
             .aspectRatio(1, contentMode: .fit)
             .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
@@ -222,6 +241,64 @@ struct HeadProjectionView: View {
             context.fill(Circle().path(in: dotRect), with: .color(selected ? .accentColor : .orange))
             context.stroke(Circle().path(in: dotRect), with: .color(.white.opacity(0.9)), lineWidth: 1)
         }
+
+        // Fitted dipole overlay (Stage 3c localization diagnostic): one purple
+        // diamond per fitted dipole, each with a dashed line to its true source.
+        if controller.showDipoleFit, let loc = controller.fitResult {
+            for pair in loc.pairs {
+                drawFittedDipole(&context, pair: pair, center: center, scale: scale)
+            }
+        }
+    }
+
+    /// Draws one fitted dipole: a purple diamond with an orientation arrow at the
+    /// fitted position, and a dashed "error" line to the paired true source so the
+    /// localization error is visible, not just a number in the inspector.
+    private func drawFittedDipole(
+        _ context: inout GraphicsContext,
+        pair: SingleDipoleFit.MultiLocalization.Pair,
+        center: CGPoint, scale: CGFloat
+    ) {
+        let fitColor = Color.purple
+        let fitPosition = SIMD3<Double>(
+            pair.fit.positionMeters.x, pair.fit.positionMeters.y, pair.fit.positionMeters.z)
+        let (fu, fv) = plane.components(fitPosition)
+        let fp = point(fu, fv, center: center, scale: scale)
+
+        // Error line from the true source to the fit.
+        if let truth = pair.truePositionMeters {
+            let truePosition = SIMD3<Double>(truth.x, truth.y, truth.z)
+            let (tu, tv) = plane.components(truePosition)
+            let tp = point(tu, tv, center: center, scale: scale)
+            var errorLine = Path()
+            errorLine.move(to: tp)
+            errorLine.addLine(to: fp)
+            context.stroke(errorLine, with: .color(fitColor.opacity(0.6)),
+                           style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+        }
+
+        // Orientation arrow.
+        let orientation = SIMD3<Double>(
+            pair.fit.orientationUnit.x, pair.fit.orientationUnit.y, pair.fit.orientationUnit.z)
+        let (ou, ov) = plane.components(orientation)
+        let arrowLength: CGFloat = 20
+        let tip = CGPoint(x: fp.x + CGFloat(ou) * arrowLength, y: fp.y - CGFloat(ov) * arrowLength)
+        var shaft = Path()
+        shaft.move(to: fp)
+        shaft.addLine(to: tip)
+        context.stroke(shaft, with: .color(fitColor), lineWidth: 2)
+        drawArrowhead(&context, from: fp, to: tip, color: fitColor)
+
+        // A hollow diamond marks the fit, distinct from the filled source dots.
+        let r: CGFloat = 6
+        var diamond = Path()
+        diamond.move(to: CGPoint(x: fp.x, y: fp.y - r))
+        diamond.addLine(to: CGPoint(x: fp.x + r, y: fp.y))
+        diamond.addLine(to: CGPoint(x: fp.x, y: fp.y + r))
+        diamond.addLine(to: CGPoint(x: fp.x - r, y: fp.y))
+        diamond.closeSubpath()
+        context.fill(diamond, with: .color(Color(nsColor: .textBackgroundColor)))
+        context.stroke(diamond, with: .color(fitColor), lineWidth: 2)
     }
 
     private func drawArrowhead(_ context: inout GraphicsContext, from: CGPoint, to: CGPoint, color: Color) {

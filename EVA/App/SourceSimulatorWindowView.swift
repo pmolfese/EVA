@@ -31,14 +31,51 @@ struct SourceSimulatorWindowView: View {
 
     var body: some View {
         @Bindable var controller = controller
+        VStack(spacing: 0) {
+            HStack {
+                Picker("Mode", selection: $controller.windowMode) {
+                    ForEach(SourceSimulatorController.WindowMode.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 200)
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            Divider()
+            if controller.windowMode == .simulate {
+                simulateLayout(controller: controller)
+            } else {
+                SourceFitModeView(controller: controller)
+            }
+        }
+        .frame(minWidth: 860, minHeight: 640)
+        .onReceive(tick) { _ in controller.advancePlayback(by: 1.0 / 30.0) }
+        .onAppear { claimPendingFit(controller: controller) }
+        .onReceive(NotificationCenter.default.publisher(for: .evaPendingSourceFit)) { _ in
+            claimPendingFit(controller: controller)
+        }
+        // Re-fit the dipole whenever an input changes (playhead, geometry, noise).
+        // `localizationSignature()` reads all of them, so evaluating it here also
+        // establishes the observation that makes this fire.
+        .onChange(of: controller.localizationSignature()) { _, _ in
+            if controller.showDipoleFit { controller.scheduleFit() }
+        }
+        .onChange(of: controller.showDipoleFit) { _, on in
+            if on { controller.scheduleFit() } else { controller.fitResult = nil }
+        }
+    }
+
+    private func claimPendingFit(controller: SourceSimulatorController) {
+        guard let payload = PendingSourceFit.shared.claim() else { return }
+        controller.applyPendingFit(dataset: payload.dataset, selection: payload.selection)
+    }
+
+    private func simulateLayout(controller: SourceSimulatorController) -> some View {
         HStack(spacing: 0) {
             viewports(controller: controller)
             Divider()
             inspector(controller: controller)
                 .frame(width: 288)
         }
-        .frame(minWidth: 860, minHeight: 640)
-        .onReceive(tick) { _ in controller.advancePlayback(by: 1.0 / 30.0) }
     }
 
     private func openRecording(_ url: URL) {
@@ -59,6 +96,9 @@ struct SourceSimulatorWindowView: View {
                 ScalpFieldView(controller: controller)
             }
             Divider()
+            if controller.showDipoleFit && controller.fitMode == .interval {
+                SourceButterflyView(controller: controller)
+            }
             SourceTimelineView(controller: controller, open: openRecording)
             if !controller.generationMessage.isEmpty {
                 HStack {
@@ -81,6 +121,8 @@ struct SourceSimulatorWindowView: View {
             HStack {
                 Text("Sources").font(.headline)
                 Spacer()
+                Button { controller.loadDemoScene() } label: { Image(systemName: "sparkles") }
+                    .help("Load a demo scene: three sources with distinct time courses")
                 Button { controller.addSource() } label: { Image(systemName: "plus") }
                     .help("Add a dipole")
                 Button { controller.removeSelected() } label: { Image(systemName: "minus") }
@@ -113,6 +155,10 @@ struct SourceSimulatorWindowView: View {
                     selectedSourceControls(controller: controller)
                     Divider()
                     selectedActivationControls(controller: controller)
+                    Divider()
+                    noiseControls(controller: controller)
+                    Divider()
+                    localizationControls(controller: controller)
                     Divider()
                     modelControls(controller: controller)
                 }
@@ -182,6 +228,146 @@ struct SourceSimulatorWindowView: View {
             Text("Select an activation in the timeline, or add one to the selected dipole.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    private func noiseControls(controller: SourceSimulatorController) -> some View {
+        @Bindable var controller = controller
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Noise & artifacts").font(.callout.weight(.semibold))
+            Text("The clean field is the truth; noise and artifacts are added on top and scored against it.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("Background noise", isOn: $controller.noiseEnabled)
+            if controller.noiseEnabled {
+                LabeledContent("Model") {
+                    Picker("Model", selection: $controller.noiseModel) {
+                        ForEach(SourceSimulatorNoise.Model.allCases) { Text($0.rawValue).tag($0) }
+                    }.pickerStyle(.segmented).labelsHidden()
+                }
+                sliderRow("SNR (dB)", $controller.noiseTargetSNRdB, -10...30, precision: 0)
+            }
+
+            Text("Artifacts").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Toggle("Blink", isOn: $controller.artifacts.blink)
+            Toggle("Saccade", isOn: $controller.artifacts.saccade)
+            Toggle("EMG", isOn: $controller.artifacts.emg)
+            Toggle("BCG (cardioballistic)", isOn: $controller.artifacts.bcg)
+
+            if controller.hasContamination {
+                Toggle("Show noisy field", isOn: $controller.showNoisyField)
+                liveScoreReadout(controller: controller)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func liveScoreReadout(controller: SourceSimulatorController) -> some View {
+        let live = controller.liveScore()
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Score vs clean truth").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if let live {
+                HStack(spacing: 12) {
+                    Text("now: SNR \(fmt(live.snrDb)) dB").font(.caption2.monospacedDigit())
+                    Text("r \(fmt(live.correlation))").font(.caption2.monospacedDigit())
+                }
+            }
+            if let overall = controller.overallScore() {
+                Text("whole: SNR \(fmt(overall.snrDb)) dB · r \(fmt(overall.correlation))")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func localizationControls(controller: SourceSimulatorController) -> some View {
+        @Bindable var controller = controller
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Localization diagnostic").font(.callout.weight(.semibold))
+            Text("Fits one dipole per placed source and reports each one's error vs its nearest true source. A validation check, not source imaging. Right-click a glass-brain view to fit; each fit shows as a purple diamond with a dashed line to its true source.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle("Show dipole fit", isOn: $controller.showDipoleFit)
+            if controller.showDipoleFit {
+                LabeledContent("Fit over") {
+                    Picker("Fit over", selection: $controller.fitMode) {
+                        ForEach(SourceSimulatorController.FitMode.allCases) { Text($0.label).tag($0) }
+                    }.pickerStyle(.segmented).labelsHidden()
+                }
+                Text(controller.fitMode == .interval
+                     ? "Interval (spatiotemporal): drag the butterfly to pick a window; separates simultaneous sources with distinct time courses."
+                     : "Instant: fits the single topography at the playhead — can't separate simultaneous sources.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                localizationReadout(controller: controller)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func localizationReadout(controller: SourceSimulatorController) -> some View {
+        if let loc = controller.fitResult {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(loc.usedNoisyField ? "Fit to noisy field" : "Fit to clean field")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    if controller.isFitting {
+                        ProgressView().controlSize(.mini)
+                    }
+                }
+                Text("\(loc.pairs.count) dipole\(loc.pairs.count == 1 ? "" : "s")  ·  GOF \(fmt(loc.goodnessOfFit * 100))%")
+                    .font(.caption2.monospacedDigit())
+                ForEach(Array(loc.pairs.enumerated()), id: \.offset) { _, pair in
+                    if let name = pair.trueSourceName,
+                       let mm = pair.positionErrorMillimeters,
+                       let deg = pair.orientationErrorDegrees {
+                        Text("→ \(name): \(fmt(mm)) mm · \(fmt(deg))°")
+                            .font(.caption2.monospacedDigit())
+                    }
+                }
+                Text("per dipole: localization · orientation error")
+                    .font(.caption2).foregroundStyle(.secondary)
+                if loc.spatioTemporal && !loc.varianceSpectrum.isEmpty {
+                    svdSpectrum(loc.varianceSpectrum, dipoles: loc.pairs.count)
+                }
+            }
+        } else if controller.isFitting {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text("Fitting…").font(.caption2).foregroundStyle(.secondary)
+            }
+        } else {
+            Text("Add a source and place the playhead where it fires.")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    /// A tiny bar sparkline of the SVD variance spectrum — the "how many dipoles"
+    /// picture. Bars for components beyond the dipole count are drawn faint, so an
+    /// over- or under-specified model is visible at a glance.
+    @ViewBuilder
+    private func svdSpectrum(_ spectrum: [Double], dipoles: Int) -> some View {
+        let shown = Array(spectrum.prefix(8))
+        let maxValue = shown.first ?? 1
+        VStack(alignment: .leading, spacing: 2) {
+            Text("SVD spectrum (model order)")
+                .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            HStack(alignment: .bottom, spacing: 3) {
+                ForEach(Array(shown.enumerated()), id: \.offset) { index, value in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(index < dipoles ? Color.purple : Color.secondary.opacity(0.35))
+                        .frame(width: 10, height: max(1, CGFloat(value / max(maxValue, 1e-9)) * 28))
+                }
+            }
+            .frame(height: 30, alignment: .bottom)
+            Text(shown.prefix(max(dipoles, 1)).map { String(format: "%.0f%%", $0 * 100) }.joined(separator: " · "))
+                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+        }
+    }
+
+    private func fmt(_ v: Double) -> String {
+        if v.isNaN { return "—" }
+        if v.isInfinite { return "∞" }
+        return String(format: "%.2f", v)
     }
 
     private func modelControls(controller: SourceSimulatorController) -> some View {

@@ -523,6 +523,15 @@ extension WaveformView {
         // even if the horizontal ScrollView scrolls during the drag.
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
+                // ⌥-drag grabs the playhead (topomap cursor) and moves it live,
+                // instead of starting a time-range selection. Reading the live flag
+                // means the mode can even flip mid-press if ⌥ is pressed/released.
+                if isOptionKeyPressed {
+                    clearLiveDragSelection()
+                    let sample = sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
+                    if topomapSample != sample { topomapSample = sample }
+                    return
+                }
                 guard dragDistance(value) >= Self.dragSelectionThreshold else { return }
                 updateLiveDragSelection(
                     start: sampleIndex(forContentX: contentX(fromGlobalX: value.startLocation.x), in: signal),
@@ -530,6 +539,17 @@ extension WaveformView {
                 )
             }
             .onEnded { value in
+                // ⌥ held: finish moving the playhead (a stationary ⌥-click also
+                // places it), and never fall through to selection / double-click.
+                if isOptionKeyPressed {
+                    topomapSample = sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
+                    epoching.butterflyTopomapRelativeSample = nil
+                    clearLiveDragSelection()
+                    lastWaveformClick = nil
+                    highlightedArtifactEvent = nil
+                    return
+                }
+
                 if dragDistance(value) >= Self.dragSelectionThreshold {
                     // Treat as a selection drag.
                     let start = sampleIndex(forContentX: contentX(fromGlobalX: value.startLocation.x), in: signal)

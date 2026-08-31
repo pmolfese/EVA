@@ -263,7 +263,7 @@ All four are verified in `SimulatorRunnerTests` (sweep runs, group subjects, pre
 library loads) from the sandboxed host. Interactive source placement / a live field
 is deliberately **not** part of SIM-1 — that is the Source Simulator window below.
 
-## The Source Simulator window (SIM-2 + SIM-3 home) — **IN PROGRESS (Stages 1, 2, 3a shipped)**
+## The Source Simulator window (SIM-2 + SIM-3 home) — **IN PROGRESS (Stages 1, 2, 3a, 3b, 3c shipped)**
 
 SIM-2 and SIM-3 are two halves of one interactive tool — SIM-3 is SIM-2's
 viewport — so they ship together in **their own dedicated window, "Source
@@ -372,12 +372,20 @@ new object starting later).
   their window, the sine field is flat at t=0 and varies at peak, the ERP peaks at
   the window centre, and the generated MFF still reads back correctly).
 
-### Stage 3b — Noise + truth-backed scoring (the EVA differentiator) — **NOT STARTED**
+### Stage 3b — Noise + truth-backed scoring (the EVA differentiator) — **SHIPPED 2026-08-30**
 
 The clean field is known exactly at every instant, so noise and scoring stay honest
 and need no inverse solver (distributed source imaging remains EVA Resolve's job).
+New files: `EVA/Simulation/SourceSimulatorNoise.swift` (white/pink + SNR scaling +
+scoring math), `EVA/Simulation/SourceSimulatorArtifacts.swift` (reuses the in-module
+Ocular/EMG/BCG generators with the parametric montage, keeps timing truth).
+Controller gained clean/noisy/contamination matrices, live + whole-recording scores,
+and a truth sidecar; inspector gained a Noise & artifacts section with a live
+SNR/correlation-vs-truth readout. 18/18 Source Simulator tests green.
 
-- [ ] **Noise model — start with white + pink** at a target SNR. Further noise models
+- [x] **Noise model — white + pink** at a target SNR (`SourceSimulatorNoise
+  .noiseMatrix` scales the background so whole-recording SNR equals the requested
+  dB, exact to fp; deterministic in seed). Further noise models
   worth adding later, roughly by value:
   - **Measured-EEG background** — resample real resting EEG (or match its spectrum) so
     the background carries a physiological 1/f + alpha shape, not synthetic colour.
@@ -387,26 +395,120 @@ and need no inverse solver (distributed source imaging remains EVA Resolve's job
   - **Per-band noise** — dial noise power per band (δ/θ/α/β/γ).
   - **Sensor faults** — per-channel drift, pops, high-impedance hiss, a bad-reference
     offset (sensor-space, not physiological).
-- [ ] **Physiological artifacts as an option under noise** (owner idea 2026-08-30):
-  inject a blink / saccade / EMG / BCG on top of the clean field so the user can *see
-  how an artifact moves an estimate* — e.g. a blink dragging a fitted dipole frontward.
-  Reuse the simulator's own artifact generators (already in-module under
-  `EVA/Simulation/`), and keep each artifact's own truth (timing/topography) so it is
-  scoreable, not just decorative.
-- [ ] **Scoring:** on Generate, write clean + noisy (clean + known noise/artifacts) +
-  a truth sidecar (active dipoles, positions/orientations, activation windows); hand
-  the noisy one to the Studio's **Score** mode (reuses everything), and show a
-  lightweight live SNR/correlation-vs-truth readout as you scrub.
+- [x] **Physiological artifacts as an option under noise** — blink / saccade / EMG /
+  BCG injected on top of the clean field via the in-module generators
+  (`OcularArtifactModel` / `EMGArtifactModel` / `BCGArtifactModel`, driven by the
+  parametric `Montage`), each keeping its timing truth in the sidecar. (Gradient
+  is available in-module too but omitted — it's an fMRI-scanner artifact, not a
+  general contamination.)
+- [x] **Scoring:** on Generate, when contamination is on, writes `source_sim_clean
+  .mff` + `source_sim_noisy.mff` + `source_sim_truth.json` (dipole positions/
+  orientations/activations, noise settings, artifact timing, overall SNR/corr) —
+  ready to hand to the Studio's **Score** mode (noisy vs the clean truth). A live
+  SNR/correlation-vs-truth readout (current sample + whole recording) updates as
+  you scrub, and a "Show noisy field" toggle overlays the contamination on the
+  topomap while the clean field stays the scoring truth.
 
-### Stage 3c — Single-dipole-fit localization diagnostic — **DEFERRED (follow-on)**
+### Stage 3c — Single-dipole-fit localization diagnostic — **SHIPPED 2026-08-30**
 
 The BESA-adjacent source-space check, after 3a/3b: fit one equivalent dipole to the
 field at the playhead (nonlinear position, linear moment) and report localization
 error (mm) and orientation error (deg) vs the true active dipole. A classic bounded
 inverse used purely as a validation diagnostic — explicitly *not* distributed
-imaging, so it stays on the right side of the EVA Resolve boundary. Also: before
-claiming BESA-Simulator parity, check their current feature list rather than cloning
-from memory.
+imaging, so it stays on the right side of the EVA Resolve boundary.
+
+- [x] **Solver** (`EVA/Simulation/SingleDipoleFit.swift`): one ECD, nonlinear in
+  position / linear in moment. A coarse grid inside the brain shell, then several
+  local refinements, each a *single batched* `SphericalForwardModel.leadField`
+  call over all its candidates — so the whole search costs a handful of
+  spherical-harmonic setups, not one per position. The moment is solved in closed
+  form from the free-orientation (x/y/z) columns that call already keeps
+  (normal equations, tiny Tikhonov diagonal for near-degenerate deep/central
+  points). Reports goodness-of-fit and RMS residual alongside position/moment.
+- [x] **Controller hook** (`liveLocalization()`): fits the *displayed* field, so
+  the "Show noisy field" toggle drives clean-field recovery (~0 mm) vs how
+  contamination degrades it; compares to the dominant instantaneous source
+  (single-ECD fitting genuinely degrades under simultaneous sources, and comparing
+  to the dominant one keeps the error honest). Cached by geometry + playhead +
+  contamination signature so re-renders and playback are cheap. Orientation error
+  folds the dipole's sign ambiguity.
+- [x] **Multiple dipoles (one per placed source)**: `fitMultiple` fits K = the
+  number of sources the user has placed — sequential deflation for an initial
+  guess, then **joint coordinate descent on the true joint objective** (each
+  candidate position re-solves *all* moments and scores the full field), then a
+  closing joint moment re-solve. Scoring the joint residual (not the peeled
+  `b − others`) is what recovers well-separated sources to a few mm rather than the
+  ~1.5 cm compromise plain peeling settles into. Each fitted dipole is paired
+  one-to-one to its nearest true source. This is still not a global simultaneous
+  optimizer — close/synchronous/noisy sources can converge to a swapped or merged
+  configuration, which the diagnostic surfaces rather than hides.
+- [x] **Spatiotemporal (interval) fit + SVD model order — the Scherg/Berg method.**
+  A single instantaneous topography is one spatial vector, so it cannot separate
+  simultaneous sources; a time *interval* can, if the sources have distinct time
+  courses (the data is then rank ≥ 2). `fitSpatioTemporal` fits over an interval by
+  reducing everything to the channels×channels covariance `C = data·dataᵀ` — the
+  residual of a dipole set with free per-sample moments is
+  `trace(C) − trace((LᵀL)⁻¹ LᵀC L)`, so positions come from the same deflation +
+  joint-objective coordinate descent scored on `C`, and per-dipole
+  orientation/RMS-magnitude come from the moment covariance `G⁻¹(LᵀC L)G⁻¹` — all
+  at the same cost as the instantaneous fit. The **eigenvalues of `C`** give the
+  variance spectrum = the model-order picture ("how many dipoles the data
+  supports"). A **fit-mode toggle** (Instant / Interval) chooses per-instant vs
+  interval; interval is the default.
+- [x] **Butterfly plot + interval selection** (`SourceButterflyView`): all channels
+  of the produced field overlaid vs time, with a playhead and drag-to-select a
+  time window (click clears → whole epoch). The selection is what the interval fit
+  runs over. Shown in the Source Simulator window when the interval fit is active.
+- [x] **Glass-brain overlay + right-click**: right-click any of the three
+  projections → "Fit Dipoles at Playhead" draws each fitted dipole as a purple
+  diamond with an orientation arrow, and a dashed error line to its paired true
+  source, so the localization error is visible in the views — not only a number.
+  The inspector shows per-dipole mm/deg errors and, for an interval fit, a small
+  **SVD spectrum sparkline** (bars beyond the dipole count drawn faint, so an
+  over-/under-specified model is visible). The fit runs off the main thread with a
+  "Fitting…" spinner and a generation guard so a fast change never lands a stale
+  result.
+- [x] **Inspector readout**: a "Localization diagnostic" section — a show/hide
+  toggle and a live GOF / magnitude / position-error-mm / orientation-error-deg
+  readout, labelled clean vs noisy.
+
+**Real-data source-analysis mode (built on 3c, EVA Resolve is now part of EVA):**
+
+- [x] **Simulate ↔ Fit mode switch** on the Source window. Fit mode
+  (`SourceFitModeView`) fits a dataset of averaged conditions instead of the
+  authored scene.
+- [x] **Shared-geometry, per-condition-moment fit** (`SingleDipoleFit
+  .fitSharedGeometry`): positions come from the *combined* covariance of all
+  conditions (so no condition's noise pulls the geometry), then each condition's
+  own moments are solved at those shared positions. That makes "does the model
+  differ between conditions?" a clean question — same generators, the difference
+  lives in per-condition moment amplitude/orientation, shown as **moment-by-
+  condition bars per dipole**. The overall **SVD spectrum** (combined covariance)
+  gives the model order for real data with no ground truth; the readout drops mm
+  error and reports GOF / residual / moment when truth is absent.
+- [x] **Fit-mode UI**: a multi-condition butterfly (all conditions overlaid,
+  colored) with drag-to-select interval; three ortho glass-brain projections
+  showing the shared dipoles (and true sources when known); a dipole-count
+  stepper; a built-in demo dataset.
+- [x] **"Fit Source Model" bridge**: right-click a recording's **averaged
+  butterfly or topography** → hands *every* averaged condition (channels × samples)
+  plus the recording's real montage (via `Montage.fromGeometry`, average-
+  referenced to match the forward) to the Source window's Fit mode via
+  `PendingSourceFit` (+ notification, since the single-instance window may already
+  be open), pre-highlighting a window around the viewed latency.
+- [x] Verified by `SourceSimulatorControllerTests` (clean field recovered
+  sub-centimetre; noise degrades GOF and moves the fitted position; one dipole
+  cannot fully explain two simultaneous sources; a silent playhead has nothing to
+  fit; the multi-dipole fit recovers two separated sources within a centimetre with
+  GOF > 0.99 and beats the single-dipole GOF; the **interval** fit recovers two
+  *simultaneous* distinct-time-course sources the instant fit can't, and the SVD
+  spectrum shows two significant components for two sources vs ~one for one; the
+  **shared-geometry** fit keeps positions fixed while a doubled-drive condition
+  doubles that dipole's moment; the **Fit-mode demo dataset** recovers three
+  sources across two conditions). 29/29 Source Simulator tests green.
+
+Deferred follow-on: before any BESA-Simulator parity claim, check their current
+feature list rather than cloning from memory.
 
 ### Stage 4 — SIM-3 tier A (SceneKit) and beyond — deferred until tier B proves out
 

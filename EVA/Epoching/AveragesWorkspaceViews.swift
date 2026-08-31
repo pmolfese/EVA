@@ -306,6 +306,13 @@ extension WaveformView {
                 currentRelativeSample: currentRelativeSample
             )
         }
+        .contextMenu {
+            if canFitSourceModel() {
+                Button("Fit Source Model…") {
+                    fitSourceModel(centeredOnRelativeSample: currentRelativeSample)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -404,6 +411,12 @@ extension WaveformView {
                         }
                     }
                     .contextMenu {
+                        if canFitSourceModel() {
+                            Button("Fit Source Model…") {
+                                fitSourceModel(centeredOnRelativeSample: relativeSample)
+                            }
+                            Divider()
+                        }
                         figureSaveMenu(
                             title: "Average Topographies",
                             legend: topomapLegendItems(samples),

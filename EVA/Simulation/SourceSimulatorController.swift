@@ -99,6 +99,15 @@ final class SourceSimulatorController {
         }
     }
 
+    /// The window's top-level mode: author a simulated scene, or fit dipoles to a
+    /// real (or handed-over) averaged dataset across conditions.
+    enum WindowMode: String, CaseIterable, Identifiable, Sendable {
+        case simulate, fit
+        var id: String { rawValue }
+        var label: String { self == .simulate ? "Simulate" : "Fit" }
+    }
+    var windowMode: WindowMode = .simulate
+
     var headModel: SphericalHeadModel = .classicThreeShell
     var channelCount: Int = 32
     var reference: EEGReference = .average
@@ -133,10 +142,96 @@ final class SourceSimulatorController {
     var sampleCount: Int { max(1, Int((durationSeconds * sampleRate).rounded())) }
     var currentSample: Int { min(max(Int((currentTime * sampleRate).rounded()), 0), sampleCount - 1) }
 
+    // MARK: Noise + artifacts (Stage 3b)
+
+    /// Add background noise to the field the topomap shows and to what Generate
+    /// writes. The clean field remains the truth for scoring.
+    var noiseEnabled = false
+    var noiseModel: SourceSimulatorNoise.Model = .pink
+    var noiseTargetSNRdB: Double = 10
+    var noiseSeed: UInt64 = 1
+    /// Physiological artifacts injected on top of the clean field.
+    var artifacts = SourceSimulatorArtifacts.Options()
+    /// When true, the topomap/scoring show the contaminated field; the clean
+    /// field is still what's scored against.
+    var showNoisyField = true
+
+    // MARK: Localization diagnostic (Stage 3c)
+
+    /// Fit equivalent dipoles to the field and report error against the true
+    /// sources. A validation diagnostic, not source imaging — see `SingleDipoleFit`.
+    var showDipoleFit = false
+
+    /// Whether to fit a single playhead sample or a whole time interval.
+    enum FitMode: String, CaseIterable, Identifiable, Sendable {
+        /// One topography at the playhead. Can't separate simultaneous sources.
+        case instant
+        /// A time interval (Scherg/Berg spatiotemporal). Separates sources with
+        /// distinct time courses and reports an SVD model-order spectrum.
+        case interval
+        var id: String { rawValue }
+        var label: String { self == .instant ? "Instant" : "Interval" }
+    }
+    var fitMode: FitMode = .interval
+    /// The butterfly interval to fit, in samples. `nil` fits the whole epoch.
+    var fitSelection: ClosedRange<Int>?
+
+    /// Whether any contamination (noise or an artifact) is active.
+    var hasContamination: Bool { noiseEnabled || artifacts.anyEnabled }
+
     @ObservationIgnored private var cachedMatrix: [[Double]]?
     @ObservationIgnored private var cachedGeometrySignature: [Double] = []
     @ObservationIgnored private var cachedSeries: [[Double]]?
     @ObservationIgnored private var cachedSeriesSignature: [Double] = []
+    @ObservationIgnored private var cachedClean: [[Double]]?
+    @ObservationIgnored private var cachedCleanSignature: [Double] = []
+    @ObservationIgnored private var cachedContamination: [[Double]]?
+    @ObservationIgnored private var cachedContaminationSignature: [Double] = []
+    @ObservationIgnored private var cachedArtifactTruth = SourceSimulatorArtifacts.Truth()
+    @ObservationIgnored private var cachedLocalization: SingleDipoleFit.Localization?
+    @ObservationIgnored private var cachedLocalizationSignature: [Double] = []
+
+    // MARK: - Fit mode (real / handed-over averaged data)
+
+    /// An averaged dataset to fit: one field matrix per condition, plus the
+    /// geometry it was recorded on. `truth` is set only when the data came from
+    /// the simulator (so the readout can still show mm/deg); real data leaves it
+    /// nil and the readout reports GOF / residual / per-condition moment instead.
+    struct FitDataset: Sendable {
+        struct ConditionData: Sendable, Identifiable {
+            var name: String
+            /// channels × samples.
+            var data: [[Double]]
+            var id: String { name }
+        }
+        struct TruthDipole: Sendable {
+            var name: String
+            var position: Vector3D
+            var orientation: Vector3D
+        }
+        var label: String
+        var conditions: [ConditionData]
+        var montage: Montage
+        var headModel: SphericalHeadModel
+        var reference: EEGReference
+        var sampleRate: Double
+        /// Sample index of the first column (for absolute-time labels when the
+        /// dataset is a slice of a longer epoch). 0 when it starts at t=0.
+        var startSample: Int = 0
+        var truth: [TruthDipole]?
+        var sampleCount: Int { conditions.first?.data.first?.count ?? 0 }
+        var channelCount: Int { conditions.first?.data.count ?? 0 }
+    }
+
+    var fitDataset: FitDataset?
+    /// Interval (samples, relative to the dataset) to fit; nil = whole dataset.
+    var fitDatasetSelection: ClosedRange<Int>?
+    /// How many dipoles to fit (defaults to the dataset's known source count).
+    var fitDipoleCount: Int = 2
+    var sharedFitResult: SingleDipoleFit.SharedGeometryResult?
+    var isFittingShared = false
+    @ObservationIgnored private var sharedFitTask: Task<Void, Never>?
+    @ObservationIgnored private var sharedFitGeneration = 0
 
     func advancePlayback(by seconds: Double) {
         guard isPlaying, durationSeconds > 0 else { return }
@@ -179,6 +274,41 @@ final class SourceSimulatorController {
         sources.removeAll { $0.id == id }
         selectedID = sources.first?.id
         selectedActivationID = nil
+    }
+
+    /// Three well-separated sources with *distinct* time courses (an ERP bump, a
+    /// sine, and a later burst). Distinct time courses make the data full-rank over
+    /// time, so the butterfly fans out and the interval fit can actually separate
+    /// them — unlike three identical holds, which are rank-1 and unseparable.
+    func loadDemoScene() {
+        durationSeconds = 1.0
+        currentTime = 0
+        fitSelection = nil
+        sources = [
+            Source(
+                name: "Source 1",
+                positionMeters: clampInsideBrain(SIMD3(0.035, 0.02, 0.04)),
+                orientationUnit: SIMD3(0, 0.5, 0.87),
+                activations: [Activation(startSeconds: 0.15, lengthSeconds: 0.3,
+                                         amplitudeNanoampereMeters: 30, waveform: .erp(widthSeconds: 0.05))]
+            ),
+            Source(
+                name: "Source 2",
+                positionMeters: clampInsideBrain(SIMD3(-0.04, -0.02, 0.03)),
+                orientationUnit: SIMD3(1, 0, 0),
+                activations: [Activation(startSeconds: 0, lengthSeconds: 1.0,
+                                         amplitudeNanoampereMeters: 18, waveform: .sine(frequencyHz: 10))]
+            ),
+            Source(
+                name: "Source 3",
+                positionMeters: clampInsideBrain(SIMD3(0.0, -0.045, 0.03)),
+                orientationUnit: SIMD3(0, 0, 1),
+                activations: [Activation(startSeconds: 0.55, lengthSeconds: 0.3,
+                                         amplitudeNanoampereMeters: 25, waveform: .hold)]
+            ),
+        ]
+        selectedID = sources.first?.id
+        selectedActivationID = sources.first?.activations.first?.id
     }
 
     /// Adds an activation to a source (defaults to the selected one) starting at a
@@ -300,8 +430,539 @@ final class SourceSimulatorController {
         return potentials
     }
 
-    /// The field at the scrubber position — what the topomap shows.
-    func scalpPotentials() -> [Double]? { fieldPotentials(atSample: currentSample) }
+    /// The clean field at the scrubber position (the truth topomap).
+    func cleanPotentials() -> [Double]? { fieldPotentials(atSample: currentSample) }
+
+    /// The field the topomap shows — noisy when contamination is on and
+    /// `showNoisyField` is set, otherwise the clean field.
+    func scalpPotentials() -> [Double]? {
+        guard hasContamination, showNoisyField else { return fieldPotentials(atSample: currentSample) }
+        return noisyPotentials(atSample: currentSample)
+    }
+
+    // MARK: - Clean / noisy matrices (Stage 3b)
+
+    /// The full clean field, `channels × samples` (lead field × source series),
+    /// cached until the geometry or the source series changes.
+    func cleanMatrix() -> [[Double]] {
+        let signature = geometrySignature() + seriesSignature()
+        if let cached = cachedClean, signature == cachedCleanSignature { return cached }
+        guard let matrix = leadMatrix(), !matrix.isEmpty else { return [] }
+        let series = sourceSeries()
+        let n = sampleCount
+        var channels = [[Double]](repeating: [Double](repeating: 0, count: n), count: matrix.count)
+        for channel in matrix.indices {
+            let row = matrix[channel]
+            for sample in 0..<n {
+                var sum = 0.0
+                for source in series.indices where source < row.count {
+                    sum += row[source] * series[source][sample]
+                }
+                channels[channel][sample] = sum
+            }
+        }
+        cachedClean = channels
+        cachedCleanSignature = signature
+        return channels
+    }
+
+    /// The contamination (noise + artifacts), `channels × samples`, cached until
+    /// the clean field or a noise/artifact setting changes. Also refreshes the
+    /// artifact truth used by the sidecar.
+    func contaminationMatrix() -> [[Double]] {
+        let clean = cleanMatrix()
+        guard hasContamination, !clean.isEmpty else {
+            cachedArtifactTruth = SourceSimulatorArtifacts.Truth()
+            return []
+        }
+        let signature = cachedCleanSignature + contaminationSignature()
+        if let cached = cachedContamination, signature == cachedContaminationSignature { return cached }
+
+        let channelCount = clean.count
+        let n = clean.first?.count ?? 0
+        var total = [[Double]](repeating: [Double](repeating: 0, count: n), count: channelCount)
+
+        if artifacts.anyEnabled {
+            let (artifactChannels, truth) = SourceSimulatorArtifacts.inject(
+                montage: montage, channelCount: channelCount, samplingRate: sampleRate,
+                durationSeconds: durationSeconds, options: artifacts
+            )
+            cachedArtifactTruth = truth
+            for c in 0..<channelCount where c < artifactChannels.count {
+                for t in 0..<min(n, artifactChannels[c].count) { total[c][t] += artifactChannels[c][t] }
+            }
+        } else {
+            cachedArtifactTruth = SourceSimulatorArtifacts.Truth()
+        }
+
+        if noiseEnabled {
+            // Scale the background to the target SNR against the clean field plus
+            // whatever artifacts were just added (so SNR is versus the full signal
+            // the user sees).
+            let reference = artifacts.anyEnabled ? addMatrices(clean, total) : clean
+            let noise = SourceSimulatorNoise.noiseMatrix(
+                clean: reference, model: noiseModel, targetSNRdB: noiseTargetSNRdB, seed: noiseSeed
+            )
+            for c in 0..<channelCount where c < noise.count {
+                for t in 0..<min(n, noise[c].count) { total[c][t] += noise[c][t] }
+            }
+        }
+
+        cachedContamination = total
+        cachedContaminationSignature = signature
+        return total
+    }
+
+    /// Clean + contamination, `channels × samples`.
+    func noisyMatrix() -> [[Double]] {
+        let clean = cleanMatrix()
+        let contamination = contaminationMatrix()
+        guard !contamination.isEmpty else { return clean }
+        return addMatrices(clean, contamination)
+    }
+
+    /// The noisy field at one sample (clean column + contamination column).
+    func noisyPotentials(atSample sample: Int) -> [Double]? {
+        let clean = cleanMatrix()
+        guard !clean.isEmpty else { return nil }
+        let contamination = contaminationMatrix()
+        let n = clean.first?.count ?? 0
+        guard n > 0 else { return nil }
+        let index = min(max(sample, 0), n - 1)
+        return clean.indices.map { c in
+            let base = clean[c][index]
+            let extra = (contamination.indices.contains(c) && index < contamination[c].count) ? contamination[c][index] : 0
+            return base + extra
+        }
+    }
+
+    // MARK: Scoring (Stage 3b)
+
+    /// SNR / correlation of the noisy field against the clean truth at the
+    /// scrubber position — the live scrub readout.
+    func liveScore() -> SourceSimulatorNoise.Score? {
+        guard hasContamination else { return nil }
+        let clean = cleanMatrix()
+        guard !clean.isEmpty else { return nil }
+        let sample = currentSample
+        let n = clean.first?.count ?? 0
+        guard n > 0 else { return nil }
+        let index = min(max(sample, 0), n - 1)
+        let cleanColumn = clean.map { $0[index] }
+        guard let noisyColumn = noisyPotentials(atSample: index) else { return nil }
+        return SourceSimulatorNoise.instantaneousScore(cleanColumn: cleanColumn, noisyColumn: noisyColumn)
+    }
+
+    /// Whole-recording SNR / correlation of the noisy field against the clean
+    /// truth.
+    func overallScore() -> SourceSimulatorNoise.Score? {
+        guard hasContamination else { return nil }
+        let clean = cleanMatrix()
+        guard !clean.isEmpty else { return nil }
+        return SourceSimulatorNoise.score(clean: clean, noisy: noisyMatrix())
+    }
+
+    // MARK: Localization diagnostic (Stage 3c)
+
+    /// The latest fit — one dipole per source the user has placed — with each
+    /// paired to its nearest true generator. Stored and observed so the glass-brain
+    /// overlay and the inspector readout redraw when a (background) fit finishes.
+    /// `nil` when there is nothing to show.
+    var fitResult: SingleDipoleFit.MultiLocalization?
+    /// True while a fit is running off the main thread, so the UI can show a
+    /// "thinking" indicator instead of appearing to do nothing on a big montage.
+    var isFitting = false
+    @ObservationIgnored private var fitTask: Task<Void, Never>?
+    /// Only the most recently scheduled fit is allowed to write `fitResult`, so a
+    /// fast scrub that outruns the solver never lands a stale result.
+    @ObservationIgnored private var fitGeneration = 0
+
+    /// Turns the fitted-dipole overlay on and kicks off a fit — the right-click /
+    /// button entry point. The overlay then re-fits as the playhead or geometry
+    /// changes (the view watches `localizationSignature()` and calls `scheduleFit`).
+    func fitDipoleAtPlayhead() {
+        showDipoleFit = true
+        scheduleFit()
+    }
+
+    /// Fits one dipole per placed source to the displayed field, off the main
+    /// thread, and stores the result. In `.instant` mode it fits the topography at
+    /// the playhead; in `.interval` mode it fits the whole selected interval
+    /// (spatiotemporal). "Show noisy field" drives whether the clean or
+    /// contaminated field is used. A no-op unless the overlay is on.
+    func scheduleFit() {
+        guard showDipoleFit, !sources.isEmpty else { fitResult = nil; return }
+        let usedNoisy = hasContamination && showNoisyField
+        let head = headModel
+        let montage = self.montage
+        let reference = self.reference
+        let terms = harmonicTerms
+        let count = sources.count
+        let mode = fitMode
+
+        // Snapshot the field inputs on the main actor; the solve is pure.
+        let potentials = scalpPotentials()
+        let intervalData = mode == .interval ? displayedMatrix(over: fitSelection) : nil
+        let sampleCount = intervalData?.first?.count ?? 0
+        guard mode == .instant ? (potentials != nil) : (sampleCount > 0) else { fitResult = nil; return }
+
+        fitTask?.cancel()
+        fitGeneration += 1
+        let generation = fitGeneration
+        isFitting = true
+        fitTask = Task { [weak self] in
+            let outcome: (result: SingleDipoleFit.MultiResult, spectrum: [Double])? =
+                await Task.detached(priority: .userInitiated) {
+                    switch mode {
+                    case .instant:
+                        guard let potentials,
+                              let r = SingleDipoleFit.fitMultiple(
+                                potentialsMicrovolts: potentials, count: count, head: head,
+                                montage: montage, reference: reference, harmonicTerms: terms)
+                        else { return nil }
+                        return (r, [])
+                    case .interval:
+                        guard let intervalData,
+                              let r = SingleDipoleFit.fitSpatioTemporal(
+                                data: intervalData, count: count, head: head,
+                                montage: montage, reference: reference, harmonicTerms: terms)
+                        else { return nil }
+                        return (r.result, r.varianceSpectrum)
+                    }
+                }.value
+            await MainActor.run {
+                guard let self, generation == self.fitGeneration else { return }
+                self.fitResult = outcome.map {
+                    self.attachTruth(to: $0.result, usedNoisyField: usedNoisy,
+                                     spatioTemporal: mode == .interval, spectrum: $0.spectrum)
+                }
+                self.isFitting = false
+            }
+        }
+    }
+
+    /// Synchronous multi-dipole fit (one per source) for tests / headless callers.
+    /// Uses the instantaneous path (single playhead sample).
+    func liveMultiLocalization() -> SingleDipoleFit.MultiLocalization? {
+        guard !sources.isEmpty else { return nil }
+        let usedNoisy = hasContamination && showNoisyField
+        guard let potentials = scalpPotentials() else { return nil }
+        guard let fit = SingleDipoleFit.fitMultiple(
+            potentialsMicrovolts: potentials, count: sources.count, head: headModel,
+            montage: montage, reference: reference, harmonicTerms: harmonicTerms
+        ) else { return nil }
+        return attachTruth(to: fit, usedNoisyField: usedNoisy)
+    }
+
+    /// Synchronous spatiotemporal fit over `range` (or the whole epoch) for tests.
+    func liveIntervalLocalization(over range: ClosedRange<Int>? = nil) -> SingleDipoleFit.MultiLocalization? {
+        guard !sources.isEmpty, let data = displayedMatrix(over: range) else { return nil }
+        let usedNoisy = hasContamination && showNoisyField
+        guard let outcome = SingleDipoleFit.fitSpatioTemporal(
+            data: data, count: sources.count, head: headModel,
+            montage: montage, reference: reference, harmonicTerms: harmonicTerms
+        ) else { return nil }
+        return attachTruth(to: outcome.result, usedNoisyField: usedNoisy,
+                           spatioTemporal: true, spectrum: outcome.varianceSpectrum)
+    }
+
+    // MARK: - Fit mode: dataset + shared-geometry fit
+
+    /// Builds a two-condition demo dataset from the demo scene (Source 1 fires
+    /// twice as strongly in condition B). Truth is known, so the Fit-mode readout
+    /// can show mm/deg here — the Stage-4 bridge will hand over real data with no
+    /// truth instead.
+    func loadFitDemoDataset() {
+        loadDemoScene()
+        guard let lead = leadMatrix(), !lead.isEmpty else { return }
+        let series = sourceSeries()
+        let n = sampleCount
+        func field(scales: [Double]) -> [[Double]] {
+            var out = [[Double]](repeating: [Double](repeating: 0, count: n), count: lead.count)
+            for ch in lead.indices {
+                let row = lead[ch]
+                for t in 0..<n {
+                    var s = 0.0
+                    for src in series.indices where src < row.count { s += row[src] * scales[src] * series[src][t] }
+                    out[ch][t] = s
+                }
+            }
+            return out
+        }
+        let unit = sources.map { _ in 1.0 }
+        var doubled = unit
+        if !doubled.isEmpty { doubled[0] = 2.0 }
+        let truth = sources.map {
+            FitDataset.TruthDipole(
+                name: $0.name,
+                position: Vector3D(x: $0.positionMeters.x, y: $0.positionMeters.y, z: $0.positionMeters.z),
+                orientation: Vector3D(x: $0.orientationNormalized.x, y: $0.orientationNormalized.y, z: $0.orientationNormalized.z))
+        }
+        fitDataset = FitDataset(
+            label: "Demo — 2 conditions",
+            conditions: [
+                .init(name: "Condition A", data: field(scales: unit)),
+                .init(name: "Condition B", data: field(scales: doubled)),
+            ],
+            montage: montage, headModel: headModel, reference: reference,
+            sampleRate: sampleRate, startSample: 0, truth: truth)
+        fitDatasetSelection = nil
+        fitDipoleCount = max(1, sources.count)
+        sharedFitResult = nil
+        windowMode = .fit
+    }
+
+    /// Installs a dataset handed over from a recording ("Fit Source Model"),
+    /// switches to Fit mode, pre-highlights the given interval, and fits.
+    func applyPendingFit(dataset: FitDataset, selection: ClosedRange<Int>?) {
+        fitDataset = dataset
+        fitDatasetSelection = selection
+        fitDipoleCount = max(1, dataset.truth?.count ?? fitDipoleCount)
+        sharedFitResult = nil
+        windowMode = .fit
+        scheduleSharedFit()
+    }
+
+    /// Conditions sliced to the current fit selection (or whole dataset).
+    private func slicedConditions() -> [(name: String, data: [[Double]])]? {
+        guard let dataset = fitDataset, !dataset.conditions.isEmpty else { return nil }
+        let sampleCount = dataset.sampleCount
+        guard sampleCount > 0 else { return nil }
+        let range: ClosedRange<Int>
+        if let selection = fitDatasetSelection {
+            let lower = min(max(selection.lowerBound, 0), sampleCount - 1)
+            let upper = min(max(selection.upperBound, lower), sampleCount - 1)
+            range = lower...upper
+        } else {
+            range = 0...(sampleCount - 1)
+        }
+        return dataset.conditions.map { ($0.name, $0.data.map { Array($0[range]) }) }
+    }
+
+    /// Runs the shared-geometry fit over the selected interval, off the main
+    /// thread, storing `sharedFitResult`.
+    func scheduleSharedFit() {
+        guard let dataset = fitDataset, let conditions = slicedConditions() else {
+            sharedFitResult = nil; return
+        }
+        let count = max(1, fitDipoleCount)
+        let head = dataset.headModel
+        let montage = dataset.montage
+        let reference = dataset.reference
+        let terms = harmonicTerms
+
+        sharedFitTask?.cancel()
+        sharedFitGeneration += 1
+        let generation = sharedFitGeneration
+        isFittingShared = true
+        sharedFitTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                SingleDipoleFit.fitSharedGeometry(
+                    conditions: conditions, count: count, head: head,
+                    montage: montage, reference: reference, harmonicTerms: terms)
+            }.value
+            await MainActor.run {
+                guard let self, generation == self.sharedFitGeneration else { return }
+                self.sharedFitResult = result
+                self.isFittingShared = false
+            }
+        }
+    }
+
+    /// Synchronous shared fit for tests.
+    func runSharedFitNow() -> SingleDipoleFit.SharedGeometryResult? {
+        guard let dataset = fitDataset, let conditions = slicedConditions() else { return nil }
+        let result = SingleDipoleFit.fitSharedGeometry(
+            conditions: conditions, count: max(1, fitDipoleCount), head: dataset.headModel,
+            montage: dataset.montage, reference: dataset.reference, harmonicTerms: harmonicTerms)
+        sharedFitResult = result
+        return result
+    }
+
+    /// Per shared-dipole error against truth, when the dataset carries it (greedy
+    /// nearest pairing). Empty when there is no ground truth (real data).
+    func sharedFitTruthErrors() -> [(name: String, positionMillimeters: Double)] {
+        guard let dataset = fitDataset, let truth = dataset.truth, let result = sharedFitResult
+        else { return [] }
+        var remaining = truth
+        var out: [(name: String, positionMillimeters: Double)] = []
+        for position in result.positions {
+            guard !remaining.isEmpty else { break }
+            var bestSlot = 0
+            var bestDistance = Double.greatestFiniteMagnitude
+            for (slot, t) in remaining.enumerated() {
+                let d = (position - t.position).norm
+                if d < bestDistance { bestDistance = d; bestSlot = slot }
+            }
+            let matched = remaining.remove(at: bestSlot)
+            out.append((matched.name, bestDistance * 1000.0))
+        }
+        return out
+    }
+
+    /// The dataset's per-condition butterfly matrices (whole dataset).
+    func fitDatasetConditions() -> [FitDataset.ConditionData] { fitDataset?.conditions ?? [] }
+
+    /// The displayed field (clean, or noisy when contamination is shown) as a
+    /// channels × samples matrix, optionally clamped to `range`.
+    func displayedMatrix(over range: ClosedRange<Int>?) -> [[Double]]? {
+        let full = (hasContamination && showNoisyField) ? noisyMatrix() : cleanMatrix()
+        guard let sampleCount = full.first?.count, sampleCount > 0 else { return nil }
+        guard let range else { return full }
+        let lower = min(max(range.lowerBound, 0), sampleCount - 1)
+        let upper = min(max(range.upperBound, lower), sampleCount - 1)
+        guard upper >= lower else { return full }
+        return full.map { Array($0[lower...upper]) }
+    }
+
+    /// Pairs each fitted dipole to its nearest true source (greedy, one-to-one),
+    /// and reports per-pair position/orientation error. A silent source at the
+    /// playhead still gets a pairing slot — the extra fitted dipole lands
+    /// arbitrarily, which is exactly the multi-ECD instability the diagnostic is
+    /// there to expose.
+    private func attachTruth(
+        to result: SingleDipoleFit.MultiResult, usedNoisyField: Bool,
+        spatioTemporal: Bool = false, spectrum: [Double] = []
+    ) -> SingleDipoleFit.MultiLocalization {
+        var remaining = Array(sources.indices)
+        var pairs: [SingleDipoleFit.MultiLocalization.Pair] = []
+        for dipole in result.dipoles {
+            var bestSlot = -1
+            var bestDistance = Double.greatestFiniteMagnitude
+            for (slot, sourceIndex) in remaining.enumerated() {
+                let s = sources[sourceIndex]
+                let d = Vector3D(
+                    x: dipole.positionMeters.x - s.positionMeters.x,
+                    y: dipole.positionMeters.y - s.positionMeters.y,
+                    z: dipole.positionMeters.z - s.positionMeters.z
+                ).norm
+                if d < bestDistance { bestDistance = d; bestSlot = slot }
+            }
+            if bestSlot >= 0 {
+                let sourceIndex = remaining.remove(at: bestSlot)
+                let s = sources[sourceIndex]
+                let o = s.orientationNormalized
+                let trueUnit = Vector3D(x: o.x, y: o.y, z: o.z)
+                let alignment = min(1.0, abs(dipole.orientationUnit.dot(trueUnit)))
+                pairs.append(SingleDipoleFit.MultiLocalization.Pair(
+                    fit: dipole,
+                    trueSourceName: s.name,
+                    truePositionMeters: Vector3D(
+                        x: s.positionMeters.x, y: s.positionMeters.y, z: s.positionMeters.z),
+                    positionErrorMillimeters: bestDistance * 1000.0,
+                    orientationErrorDegrees: acos(alignment) * 180.0 / .pi
+                ))
+            } else {
+                pairs.append(SingleDipoleFit.MultiLocalization.Pair(
+                    fit: dipole, trueSourceName: nil, truePositionMeters: nil,
+                    positionErrorMillimeters: nil, orientationErrorDegrees: nil))
+            }
+        }
+        return SingleDipoleFit.MultiLocalization(
+            pairs: pairs, usedNoisyField: usedNoisyField,
+            goodnessOfFit: result.goodnessOfFit, residualMicrovolts: result.residualMicrovolts,
+            spatioTemporal: spatioTemporal, varianceSpectrum: spectrum)
+    }
+
+    /// Synchronous fit for tests and headless callers. The UI uses the async
+    /// `scheduleFit` / `fitResult` path instead so a large montage never blocks.
+    func liveLocalization() -> SingleDipoleFit.Localization? {
+        guard !sources.isEmpty else { return nil }
+        let signature = localizationSignature()
+        if let cached = cachedLocalization, signature == cachedLocalizationSignature { return cached }
+
+        let usedNoisy = hasContamination && showNoisyField
+        guard let potentials = scalpPotentials() else { return nil }
+        guard let fit = SingleDipoleFit.fit(
+            potentialsMicrovolts: potentials, head: headModel, montage: montage,
+            reference: reference, harmonicTerms: harmonicTerms
+        ) else { return nil }
+        let localization = attachTruth(to: fit, usedNoisyField: usedNoisy)
+        cachedLocalization = localization
+        cachedLocalizationSignature = signature
+        return localization
+    }
+
+    /// Pairs a bare fit with its error against the dominant true source at the
+    /// playhead. The active source is the one carrying the largest moment: a
+    /// single ECD genuinely degrades when several fire at once, and comparing to
+    /// the dominant one keeps the reported error honest rather than flattering.
+    private func attachTruth(
+        to fit: SingleDipoleFit.Result, usedNoisyField: Bool
+    ) -> SingleDipoleFit.Localization {
+        let series = sourceSeries()
+        let sample = currentSample
+        var activeIndex = -1
+        var largestMoment = 0.0
+        for index in sources.indices where index < series.count && sample < series[index].count {
+            let moment = abs(series[index][sample])
+            if moment > largestMoment { largestMoment = moment; activeIndex = index }
+        }
+        guard activeIndex >= 0, largestMoment > 1e-9 else {
+            return SingleDipoleFit.Localization(
+                fit: fit, usedNoisyField: usedNoisyField, trueSourceName: nil,
+                truePositionMeters: nil, positionErrorMillimeters: nil,
+                orientationErrorDegrees: nil
+            )
+        }
+        let source = sources[activeIndex]
+        let o = source.orientationNormalized
+        return SingleDipoleFit.localization(
+            fit: fit,
+            trueName: source.name,
+            truePositionMeters: Vector3D(
+                x: source.positionMeters.x, y: source.positionMeters.y, z: source.positionMeters.z),
+            trueOrientationUnit: Vector3D(x: o.x, y: o.y, z: o.z),
+            usedNoisyField: usedNoisyField
+        )
+    }
+
+    /// The inputs that determine a fit: geometry, source time series, contamination
+    /// state, and — depending on mode — the playhead sample (instant) or the fit
+    /// interval (spatiotemporal). The window view watches this so any change
+    /// reschedules the fit. Interval mode deliberately omits the playhead so a
+    /// scrub doesn't re-fit a window that hasn't changed.
+    func localizationSignature() -> [Double] {
+        var signature = geometrySignature() + seriesSignature()
+            + [showNoisyField ? 1 : 0, showDipoleFit ? 1 : 0, fitMode == .interval ? 1 : 0]
+            + contaminationSignature()
+        switch fitMode {
+        case .instant:
+            signature.append(Double(currentSample))
+        case .interval:
+            signature.append(Double(fitSelection?.lowerBound ?? -1))
+            signature.append(Double(fitSelection?.upperBound ?? -1))
+        }
+        return signature
+    }
+
+    private func addMatrices(_ a: [[Double]], _ b: [[Double]]) -> [[Double]] {
+        guard !b.isEmpty else { return a }
+        return a.indices.map { c in
+            let ra = a[c]
+            guard c < b.count else { return ra }
+            let rb = b[c]
+            let n = min(ra.count, rb.count)
+            var out = ra
+            for t in 0..<n { out[t] += rb[t] }
+            return out
+        }
+    }
+
+    private func contaminationSignature() -> [Double] {
+        var signature: [Double] = [
+            noiseEnabled ? 1 : 0,
+            noiseModel == .white ? 0 : 1,
+            noiseTargetSNRdB,
+            Double(noiseSeed),
+            artifacts.blink ? 1 : 0, artifacts.blinkAmplitudeMicrovolts, artifacts.blinksPerMinute,
+            artifacts.saccade ? 1 : 0, artifacts.saccadesPerMinute, artifacts.eyeMovementAmplitudeMicrovolts,
+            artifacts.emg ? 1 : 0, artifacts.emgAmplitudeMicrovolts, artifacts.emgBurstsPerMinute,
+            artifacts.bcg ? 1 : 0, artifacts.bcgAmplitudeMicrovolts,
+            Double(artifacts.seed),
+        ]
+        return signature
+    }
 
     // MARK: Signatures & noise
 
@@ -404,45 +1065,119 @@ final class SourceSimulatorController {
     }
 
     func writeRecording() throws -> URL {
-        guard let matrix = leadMatrix(), !matrix.isEmpty else { throw GenerateError.solverFailed }
-        let series = sourceSeries()
+        let clean = cleanMatrix()
+        guard !clean.isEmpty else { throw GenerateError.solverFailed }
         let n = sampleCount
-
-        var channels = [[Float]](repeating: [Float](repeating: 0, count: n), count: matrix.count)
-        for channel in matrix.indices {
-            let row = matrix[channel]
-            for sample in 0..<n {
-                var sum = 0.0
-                for source in series.indices where source < row.count {
-                    sum += row[source] * series[source][sample]
-                }
-                channels[channel][sample] = Float(sum)
-            }
-        }
+        let currentMontage = montage
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SourceSimulator", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let packageURL = directory.appendingPathComponent("source_sim.mff")
 
-        let currentMontage = montage
+        // Without contamination, write the single clean recording as before.
+        guard hasContamination else {
+            let url = directory.appendingPathComponent("source_sim.mff")
+            try writeMFF(clean, to: url, montage: currentMontage, n: n)
+            return url
+        }
+
+        // With contamination: write clean (truth) + noisy, plus a truth sidecar.
+        let noisy = noisyMatrix()
+        let cleanURL = directory.appendingPathComponent("source_sim_clean.mff")
+        let noisyURL = directory.appendingPathComponent("source_sim_noisy.mff")
+        try writeMFF(clean, to: cleanURL, montage: currentMontage, n: n)
+        try writeMFF(noisy, to: noisyURL, montage: currentMontage, n: n)
+        try writeTruthSidecar(to: directory.appendingPathComponent("source_sim_truth.json"))
+        // The noisy recording is what the user reviews / hands to Score (with the
+        // clean one as truth).
+        return noisyURL
+    }
+
+    private func writeMFF(_ channels: [[Double]], to url: URL, montage: Montage, n: Int) throws {
+        let floatChannels = channels.map { row in row.map { Float($0) } }
         let signal = MFFSignalData(
-            signalURL: packageURL.appendingPathComponent("signal1.bin"),
+            signalURL: url.appendingPathComponent("signal1.bin"),
             signalType: "EEG Source Simulator",
-            numberOfChannels: channels.count,
+            numberOfChannels: floatChannels.count,
             samplingRate: sampleRate,
             duration: Double(n) / sampleRate,
             recordingStartTime: Date(),
             events: [],
-            data: channels,
-            channelNames: currentMontage.channelNames
+            data: floatChannels,
+            channelNames: montage.channelNames
         )
         try MFFWriter.write(
             signal: signal, segments: [], kind: .continuous,
-            to: packageURL, preserveSourceFileInfo: false
+            to: url, preserveSourceFileInfo: false
         )
-        try MontageWriter.writeLayoutFiles(montage: currentMontage, to: packageURL)
-        return packageURL
+        try MontageWriter.writeLayoutFiles(montage: montage, to: url)
+    }
+
+    /// The truth sidecar: active dipoles (position / orientation / activations),
+    /// the noise settings, the artifact timing truth, and the overall score.
+    struct TruthSidecar: Codable, Sendable {
+        struct Dipole: Codable, Sendable {
+            struct Activation: Codable, Sendable {
+                var startSeconds: Double
+                var lengthSeconds: Double
+                var amplitudeNanoampereMeters: Double
+                var waveform: String
+            }
+            var name: String
+            var positionMeters: [Double]
+            var orientationUnit: [Double]
+            var activations: [Activation]
+        }
+        var samplingRate: Double
+        var durationSeconds: Double
+        var channelCount: Int
+        var headModel: String
+        var dipoles: [Dipole]
+        var noiseEnabled: Bool
+        var noiseModel: String
+        var noiseTargetSNRdB: Double
+        var artifactTruth: SourceSimulatorArtifacts.Truth
+        var overallSNRdB: Double?
+        var overallCorrelation: Double?
+    }
+
+    func truthSidecar() -> TruthSidecar {
+        _ = contaminationMatrix()   // ensure artifact truth is current
+        let score = overallScore()
+        return TruthSidecar(
+            samplingRate: sampleRate,
+            durationSeconds: durationSeconds,
+            channelCount: channelCount,
+            headModel: headModel == .classicFourShell ? "four-shell" : "three-shell",
+            dipoles: sources.map { source in
+                let o = source.orientationNormalized
+                return TruthSidecar.Dipole(
+                    name: source.name,
+                    positionMeters: [source.positionMeters.x, source.positionMeters.y, source.positionMeters.z],
+                    orientationUnit: [o.x, o.y, o.z],
+                    activations: source.activations.map {
+                        TruthSidecar.Dipole.Activation(
+                            startSeconds: $0.startSeconds,
+                            lengthSeconds: $0.lengthSeconds,
+                            amplitudeNanoampereMeters: $0.amplitudeNanoampereMeters,
+                            waveform: $0.waveform.label
+                        )
+                    }
+                )
+            },
+            noiseEnabled: noiseEnabled,
+            noiseModel: noiseModel.rawValue,
+            noiseTargetSNRdB: noiseTargetSNRdB,
+            artifactTruth: cachedArtifactTruth,
+            overallSNRdB: score?.snrDb,
+            overallCorrelation: score?.correlation
+        )
+    }
+
+    private func writeTruthSidecar(to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(truthSidecar()).write(to: url, options: .atomic)
     }
 }

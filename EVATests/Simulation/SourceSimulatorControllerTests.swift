@@ -162,6 +162,103 @@ struct SourceSimulatorControllerTests {
         #expect(SensorLayout.load(fromPackageContaining: signal.signalURL) != nil)
     }
 
+    // MARK: Stage 3b — noise + truth-backed scoring
+
+    @Test("noise is scaled to the requested SNR")
+    func noiseHitsTargetSNR() {
+        // A non-trivial clean field: 8 channels of a sine.
+        let clean = (0..<8).map { c in
+            (0..<200).map { t in Double(c + 1) * sin(2 * .pi * 6 * Double(t) / 200) }
+        }
+        for model in SourceSimulatorNoise.Model.allCases {
+            for target in [-3.0, 0.0, 6.0, 12.0] {
+                let noise = SourceSimulatorNoise.noiseMatrix(clean: clean, model: model, targetSNRdB: target, seed: 5)
+                let noisy = clean.indices.map { c in clean[c].indices.map { clean[c][$0] + noise[c][$0] } }
+                let score = SourceSimulatorNoise.score(clean: clean, noisy: noisy)
+                #expect(abs(score.snrDb - target) < 1e-6, "\(model) @ \(target)dB → \(score.snrDb)")
+            }
+        }
+    }
+
+    @Test("noise is deterministic in its seed")
+    func noiseIsDeterministic() {
+        let clean = [[1.0, 2, 3, 4, 5, 6, 7, 8]]
+        let a = SourceSimulatorNoise.noiseMatrix(clean: clean, model: .pink, targetSNRdB: 5, seed: 42)
+        let b = SourceSimulatorNoise.noiseMatrix(clean: clean, model: .pink, targetSNRdB: 5, seed: 42)
+        let c = SourceSimulatorNoise.noiseMatrix(clean: clean, model: .pink, targetSNRdB: 5, seed: 43)
+        #expect(a == b)
+        #expect(a != c)
+    }
+
+    @Test("identical fields score as perfect")
+    func identicalScoresPerfect() {
+        let field = [[1.0, -2, 3, -4], [0.5, 0.5, -0.5, -0.5]]
+        let score = SourceSimulatorNoise.score(clean: field, noisy: field)
+        #expect(score.snrDb.isInfinite)
+        #expect(abs(score.correlation - 1) < 1e-9)
+    }
+
+    @Test("enabling noise changes the field and yields a live score")
+    func noiseChangesFieldAndScores() throws {
+        let controller = SourceSimulatorController()
+        let clean = try #require(controller.cleanPotentials())
+
+        controller.noiseEnabled = true
+        controller.noiseModel = .white
+        controller.noiseTargetSNRdB = 3
+        controller.showNoisyField = true
+
+        #expect(controller.hasContamination)
+        let noisy = try #require(controller.scalpPotentials())
+        // The shown field now differs from the clean truth.
+        let maxDelta = zip(clean, noisy).map { abs($0 - $1) }.max() ?? 0
+        #expect(maxDelta > 1e-9)
+
+        // Whole-recording SNR matches the request (constant field → exact).
+        let overall = try #require(controller.overallScore())
+        #expect(abs(overall.snrDb - 3) < 1e-6)
+        #expect(controller.liveScore() != nil)
+    }
+
+    @Test("artifacts inject onto the field with recoverable truth")
+    func artifactsInjectWithTruth() {
+        let montage = Montage.standard(count: 32)
+        var options = SourceSimulatorArtifacts.Options()
+        options.blink = true
+        options.blinksPerMinute = 60          // ~4 blinks in 4 s
+        options.blinkAmplitudeMicrovolts = 100
+        let result = SourceSimulatorArtifacts.inject(
+            montage: montage, channelCount: 32, samplingRate: 250, durationSeconds: 4, options: options
+        )
+        #expect(!result.truth.blinkSeconds.isEmpty)
+        let energy = result.channels.flatMap { $0 }.map(abs).max() ?? 0
+        #expect(energy > 1, "blink should leave a visible frontal deflection, got \(energy)")
+    }
+
+    @Test("generate writes clean + noisy + truth sidecar under contamination")
+    func generateWritesTruthBackedSet() throws {
+        let controller = SourceSimulatorController()
+        controller.channelCount = 32
+        controller.durationSeconds = 2
+        controller.noiseEnabled = true
+        controller.noiseTargetSNRdB = 6
+
+        let url = try controller.writeRecording()
+        let directory = url.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        #expect(url.lastPathComponent == "source_sim_noisy.mff")
+        let cleanURL = directory.appendingPathComponent("source_sim_clean.mff")
+        let truthURL = directory.appendingPathComponent("source_sim_truth.json")
+        #expect(FileManager.default.fileExists(atPath: cleanURL.path))
+        #expect(FileManager.default.fileExists(atPath: truthURL.path))
+
+        let sidecar = try JSONDecoder().decode(SourceSimulatorController.TruthSidecar.self, from: Data(contentsOf: truthURL))
+        #expect(sidecar.noiseEnabled)
+        #expect(!sidecar.dipoles.isEmpty)
+        #expect(sidecar.overallSNRdB != nil)
+    }
+
     @Test("electrode disc has one point per channel within the unit range")
     func electrodeDisc() {
         let controller = SourceSimulatorController()
@@ -174,5 +271,247 @@ struct SourceSimulatorControllerTests {
             let r = (entry.point.x * entry.point.x + entry.point.y * entry.point.y).squareRoot()
             #expect(r < 1.6)
         }
+    }
+
+    // MARK: - Stage 3c — single-dipole-fit localization diagnostic
+
+    @Test("a clean single-dipole field is recovered to sub-centimetre")
+    func cleanFieldRecoversSource() throws {
+        // The default scene is one dipole firing a hold from t=0, so the field at
+        // the playhead is a single clean dipole — the sanity case the fit must ace.
+        let controller = SourceSimulatorController()
+        let loc = try #require(controller.liveLocalization())
+        #expect(loc.usedNoisyField == false)
+        #expect(loc.trueSourceName == "Source 1")
+        let mm = try #require(loc.positionErrorMillimeters)
+        let deg = try #require(loc.orientationErrorDegrees)
+        #expect(mm < 3, "clean recovery should be sub-centimetre, got \(mm) mm")
+        #expect(deg < 5, "clean orientation should be close, got \(deg)°")
+        #expect(loc.fit.goodnessOfFit > 0.99, "one dipole explains a one-dipole field")
+    }
+
+    @Test("noise degrades the fit relative to the clean field")
+    func noiseDegradesFit() throws {
+        let controller = SourceSimulatorController()
+        let clean = try #require(controller.liveLocalization())
+
+        controller.noiseEnabled = true
+        controller.noiseModel = .white
+        controller.noiseTargetSNRdB = -3   // heavy noise so the effect is unambiguous
+        controller.showNoisyField = true
+        let noisy = try #require(controller.liveLocalization())
+
+        #expect(noisy.usedNoisyField == true)
+        #expect(noisy.fit.goodnessOfFit < clean.fit.goodnessOfFit,
+                "a noisy field is explained less well by one dipole")
+        let cleanMM = try #require(clean.positionErrorMillimeters)
+        let noisyMM = try #require(noisy.positionErrorMillimeters)
+        #expect(noisyMM > cleanMM, "noise should move the fitted position off the truth")
+    }
+
+    @Test("a single dipole cannot fully explain two simultaneous sources")
+    func multipleSourcesDegradeSingleFit() throws {
+        let single = SourceSimulatorController()
+        let singleLoc = try #require(single.liveLocalization())
+
+        let controller = SourceSimulatorController()
+        // Add a second, spatially distinct source firing at the same instant.
+        controller.sources.append(
+            SourceSimulatorController.Source(
+                name: "Source 2",
+                positionMeters: controller.clampInsideBrain(SIMD3(-0.04, -0.03, 0.02)),
+                orientationUnit: SIMD3(1, 0, 0),
+                activations: [SourceSimulatorController.Activation(
+                    startSeconds: 0, lengthSeconds: 4,
+                    amplitudeNanoampereMeters: 20, waveform: .hold)]
+            )
+        )
+        let twoLoc = try #require(controller.liveLocalization())
+
+        #expect(twoLoc.fit.goodnessOfFit < singleLoc.fit.goodnessOfFit,
+                "one dipole should explain a two-dipole field less completely")
+        let twoMM = try #require(twoLoc.positionErrorMillimeters)
+        #expect(twoMM > 5, "the single fit sits away from the dominant source, got \(twoMM) mm")
+    }
+
+    @Test("silence at the playhead leaves nothing to fit")
+    func silenceHasNoFit() {
+        let controller = SourceSimulatorController()
+        // Confine the only activation to late in the epoch, then scrub to t=0.
+        controller.sources[0].activations = [
+            SourceSimulatorController.Activation(
+                startSeconds: 3, lengthSeconds: 0.5,
+                amplitudeNanoampereMeters: 20, waveform: .hold)
+        ]
+        controller.currentTime = 0
+        #expect(controller.liveLocalization() == nil,
+                "with a flat field there is no dipole to localize")
+    }
+
+    // MARK: - Stage 3c — sequential multi-dipole fit
+
+    @Test("fits one dipole per source and recovers two separated sources")
+    func multiFitRecoversTwoSources() throws {
+        let controller = SourceSimulatorController()
+        controller.sources.append(
+            SourceSimulatorController.Source(
+                name: "Source 2",
+                positionMeters: controller.clampInsideBrain(SIMD3(-0.04, -0.03, 0.02)),
+                orientationUnit: SIMD3(1, 0, 0),
+                activations: [SourceSimulatorController.Activation(
+                    startSeconds: 0, lengthSeconds: 4,
+                    amplitudeNanoampereMeters: 20, waveform: .hold)]
+            )
+        )
+        let loc = try #require(controller.liveMultiLocalization())
+        #expect(loc.pairs.count == 2, "one fitted dipole per placed source")
+        // With two well-separated dipoles, a two-dipole model explains the field
+        // far better than one did, and each source is recovered near its truth.
+        #expect(loc.goodnessOfFit > 0.99, "two dipoles should explain a two-dipole field")
+        for pair in loc.pairs {
+            let mm = try #require(pair.positionErrorMillimeters)
+            #expect(mm < 10, "each source recovered within a centimetre, got \(mm) mm")
+        }
+        // Every true source is claimed exactly once (one-to-one pairing).
+        let names = Set(loc.pairs.compactMap(\.trueSourceName))
+        #expect(names == ["Source 1", "Source 2"])
+    }
+
+    @Test("two dipoles explain a two-source field better than one")
+    func multiFitBeatsSingleOnTwoSources() throws {
+        let controller = SourceSimulatorController()
+        controller.sources.append(
+            SourceSimulatorController.Source(
+                name: "Source 2",
+                positionMeters: controller.clampInsideBrain(SIMD3(-0.04, -0.03, 0.02)),
+                orientationUnit: SIMD3(1, 0, 0),
+                activations: [SourceSimulatorController.Activation(
+                    startSeconds: 0, lengthSeconds: 4,
+                    amplitudeNanoampereMeters: 20, waveform: .hold)]
+            )
+        )
+        let single = try #require(controller.liveLocalization())         // one dipole
+        let multi = try #require(controller.liveMultiLocalization())     // two dipoles
+        #expect(multi.goodnessOfFit > single.fit.goodnessOfFit,
+                "adding the second dipole should raise the goodness-of-fit")
+    }
+
+    // MARK: - Stage 3c — spatiotemporal (interval) fit
+
+    /// Two simultaneous sources with *distinct* time courses: an instant can't
+    /// separate them, but the interval can.
+    private func twoDistinctSources() -> SourceSimulatorController {
+        let controller = SourceSimulatorController()
+        // Source 1 keeps the default full-epoch hold. Source 2 fires a sine, so
+        // the two time courses are independent → the data is rank 2 over time.
+        controller.sources.append(
+            SourceSimulatorController.Source(
+                name: "Source 2",
+                positionMeters: controller.clampInsideBrain(SIMD3(-0.04, -0.03, 0.02)),
+                orientationUnit: SIMD3(1, 0, 0),
+                activations: [SourceSimulatorController.Activation(
+                    startSeconds: 0, lengthSeconds: 4,
+                    amplitudeNanoampereMeters: 20, waveform: .sine(frequencyHz: 10))]
+            )
+        )
+        return controller
+    }
+
+    @Test("the interval fit recovers two simultaneous distinct sources")
+    func intervalFitRecoversTwoSources() throws {
+        let controller = twoDistinctSources()
+        let loc = try #require(controller.liveIntervalLocalization())
+        #expect(loc.spatioTemporal)
+        #expect(loc.pairs.count == 2)
+        #expect(loc.goodnessOfFit > 0.99, "two dipoles explain a two-dipole interval")
+        for pair in loc.pairs {
+            let mm = try #require(pair.positionErrorMillimeters)
+            #expect(mm < 10, "each source recovered within a centimetre, got \(mm) mm")
+        }
+        #expect(Set(loc.pairs.compactMap(\.trueSourceName)) == ["Source 1", "Source 2"])
+    }
+
+    @Test("the SVD spectrum shows two significant components for two sources")
+    func intervalSpectrumShowsModelOrder() throws {
+        let controller = twoDistinctSources()
+        let loc = try #require(controller.liveIntervalLocalization())
+        #expect(loc.varianceSpectrum.count >= 2)
+        // Two distinct sources → the second principal component carries real
+        // variance; a single-source interval would leave it near zero.
+        #expect(loc.varianceSpectrum[0] > loc.varianceSpectrum[1])
+        #expect(loc.varianceSpectrum[1] > 0.02,
+                "a genuine second source should lift the 2nd component above noise, got \(loc.varianceSpectrum[1])")
+    }
+
+    @Test("one source leaves the second SVD component negligible")
+    func intervalSpectrumOneSource() throws {
+        // The default single hold dipole: essentially rank 1 over the interval.
+        let controller = SourceSimulatorController()
+        let loc = try #require(controller.liveIntervalLocalization())
+        #expect(loc.varianceSpectrum.count >= 2)
+        #expect(loc.varianceSpectrum[0] > 0.98, "one source dominates the spectrum")
+        #expect(loc.varianceSpectrum[1] < 0.02, "no real second component for one source")
+    }
+
+    // MARK: - Stage 3c — shared-geometry multi-condition fit
+
+    @Test("shared-geometry fit keeps positions but varies moments across conditions")
+    func sharedGeometryComparesConditions() throws {
+        let controller = twoDistinctSources()   // 2 sources, distinct time courses
+        // Condition A: as authored.
+        let conditionA = controller.displayedMatrix(over: nil)!
+        // Condition B: same generators, but Source 1 fires twice as strongly.
+        controller.sources[0].activations[0].amplitudeNanoampereMeters = 40
+        let conditionB = controller.displayedMatrix(over: nil)!
+
+        let shared = try #require(SingleDipoleFit.fitSharedGeometry(
+            conditions: [("A", conditionA), ("B", conditionB)],
+            count: controller.sources.count, head: controller.headModel,
+            montage: controller.montage, reference: controller.reference,
+            harmonicTerms: controller.harmonicTerms))
+
+        #expect(shared.positions.count == 2)
+        #expect(shared.conditions.count == 2)
+
+        // Shared positions recover both true generators.
+        for source in controller.sources {
+            let truth = Vector3D(x: source.positionMeters.x, y: source.positionMeters.y, z: source.positionMeters.z)
+            let nearest = shared.positions.map { ($0 - truth).norm }.min() ?? .greatestFiniteMagnitude
+            #expect(nearest * 1000 < 12, "a shared position should sit on a true source, got \(nearest * 1000) mm")
+        }
+
+        // The dipole nearest Source 1 should be stronger in condition B (2× drive)
+        // than in condition A — the model differs between conditions in *moment*,
+        // not geometry.
+        let s1 = Vector3D(
+            x: controller.sources[0].positionMeters.x,
+            y: controller.sources[0].positionMeters.y,
+            z: controller.sources[0].positionMeters.z)
+        let dipoleIndex = (0..<shared.positions.count).min(by: {
+            (shared.positions[$0] - s1).norm < (shared.positions[$1] - s1).norm
+        })!
+        let magA = shared.conditions[0].dipoles[dipoleIndex].magnitudeNanoampereMeters
+        let magB = shared.conditions[1].dipoles[dipoleIndex].magnitudeNanoampereMeters
+        #expect(magB > magA * 1.5, "doubling Source 1's drive should roughly double its moment (A \(magA), B \(magB))")
+    }
+
+    @Test("Fit mode: demo dataset loads and the shared fit recovers truth")
+    func fitModeDemoDatasetFits() throws {
+        let controller = SourceSimulatorController()
+        controller.loadFitDemoDataset()
+        #expect(controller.windowMode == .fit)
+        let dataset = try #require(controller.fitDataset)
+        #expect(dataset.conditions.count == 2)
+        #expect(dataset.truth?.count == 3)
+        #expect(controller.fitDipoleCount == 3)
+
+        let result = try #require(controller.runSharedFitNow())
+        #expect(result.positions.count == 3)
+        #expect(result.conditions.count == 2)
+        // Truth pairing is available because the demo carries ground truth.
+        let errors = controller.sharedFitTruthErrors()
+        #expect(errors.count == 3)
+        #expect(errors.allSatisfy { $0.positionMillimeters < 15 },
+                "shared positions land near the true sources: \(errors.map(\.positionMillimeters))")
     }
 }
