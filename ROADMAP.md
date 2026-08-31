@@ -510,6 +510,56 @@ imaging, so it stays on the right side of the EVA Resolve boundary.
 Deferred follow-on: before any BESA-Simulator parity claim, check their current
 feature list rather than cloning from memory.
 
+### Stage 3c-perf — Make dipole fitting BESA-fast — **NOT STARTED**
+
+The fit is correct but slow: a single ECD is a few hundred ms and a multi-dipole /
+shared / interval fit is seconds, where BESA fits a single ECD nearly instantly.
+The gap is *how* we compute, not the math — the objective, geometry, and results
+stay identical. Root causes, measured against the current code:
+
+1. **The forward model is recomputed from scratch inside the search loop.** Every
+   candidate position calls `SphericalForwardModel.leadField`, which sums a
+   60-term spherical-harmonic series over every electrode. The position search is
+   a brute-force grid (coarse ~hundreds of points + several refinement levels), so
+   one fit makes many series-summed forward calls; multi-dipole coordinate descent
+   repeats that over sweeps × dipoles.
+2. **Grid search instead of a gradient optimizer** — hundreds of evaluations per
+   level where a Levenberg–Marquardt/simplex walk from a seed needs ~5–15.
+3. **Plain `[[Double]]` nested loops, not Accelerate/BLAS**, plus per-call forward
+   overhead, plus reactive re-fitting on every selection/count change.
+
+Plan, in payoff order (each step is independently shippable and must keep the fit
+results within tolerance of the current tests):
+
+- [ ] **Precompute a free lead-field grid once (biggest win).** Build the free
+  (x/y/z) lead field for a dense brain-interior dipole grid a single time per
+  geometry, cached by a geometry signature (head + montage + reference + terms).
+  The position search then becomes **table lookups + 3×3 solves with zero forward
+  calls in the loop**. Interpolate between grid nodes (trilinear) for sub-grid
+  accuracy, or use the grid only to seed step 2. Expect single-ECD to drop from
+  ~hundreds of ms to "instant", and multi-dipole to fall proportionally.
+- [ ] **Levenberg–Marquardt (or Nelder–Mead) position refinement** seeded from the
+  coarse grid, replacing the multi-level grid refinement. Needs the forward
+  gradient w.r.t. position (analytic from the spherical model, or finite-
+  difference against the cached grid). Converges in a handful of evaluations to
+  sub-mm.
+- [ ] **Analytic / cheaper forward for the search.** Use fewer harmonic terms
+  (e.g. 20–30) during the search and the full 60 only for the final reported fit;
+  or drop in the closed-form Sarvas single-shell expression as a fast inner-loop
+  forward. Verify the search still lands in the same basin.
+- [ ] **Vectorize with Accelerate/vDSP/BLAS** the covariance (`data·dataᵀ`), the
+  `LᵀL` / `LᵀC L` products, and the small linear solves; replace the hand-written
+  `[[Double]]` inner loops on the hot path.
+- [ ] **Cache the forward across reactive re-fits** and debounce interval-drag /
+  dipole-count changes so a fit isn't relaunched mid-gesture.
+- [ ] **Benchmark harness**: a test that asserts single-ECD and 2-dipole fit wall
+  time stay under a budget on the standard montage, and that accuracy stays within
+  the current tests' tolerances — so the speedups can't silently regress results.
+
+**Exit:** a single equivalent dipole fits in the "feels instant" range and the
+multi-dipole / shared / interval fits are interactive, with the localization tests
+still green.
+
 ### Stage 4 — SIM-3 tier A (SceneKit) and beyond — deferred until tier B proves out
 
 - [ ] **Tier A:** a true orbiting, zoomable glass brain in SceneKit, once tier B
