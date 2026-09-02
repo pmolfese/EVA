@@ -83,7 +83,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## mffpy
 
-- EVA file: `EVA/IO/MFFWriter.swift`
+- EVA file: `EVACore/IO/MFFWriter.swift`
 - Redistributed fixtures: `EVATests/Fixtures/example_1.mff`,
   `EVATests/Fixtures/example_1.mfz`, `EVATests/Fixtures/example_2.mff`,
   `EVATests/Fixtures/example_2.json`, `EVATests/Fixtures/example_3.mff`,
