@@ -259,6 +259,11 @@
 			path = EVAThumbnail;
 			sourceTree = "<group>";
 		};
+		E10000000000000000000001 /* EVAPreviewKit */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = EVAPreviewKit;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -362,6 +367,7 @@
 				77BE28CB2FED64E30080DAF5 /* EVATests */,
 				77BE28D52FED64E30080DAF5 /* EVAUITests */,
 				D00000000000000000000020 /* MFFPreviewKit */,
+				E10000000000000000000001 /* EVAPreviewKit */,
 				D0000000000000000000009 /* EVAQuickLook */,
 				D0000000000000000000019 /* EVAThumbnail */,
 				77BE28BC2FED64E10080DAF5 /* Products */,
@@ -445,6 +451,7 @@
 			fileSystemSynchronizedGroups = (
 				77BE28CB2FED64E30080DAF5 /* EVATests */,
 				D00000000000000000000020 /* MFFPreviewKit */,
+				E10000000000000000000001 /* EVAPreviewKit */,
 			);
 			name = EVATests;
 			packageProductDependencies = (
@@ -491,6 +498,7 @@
 			fileSystemSynchronizedGroups = (
 				D00000000000000000000020 /* MFFPreviewKit */,
 				D0000000000000000000009 /* EVAQuickLook */,
+				E10000000000000000000001 /* EVAPreviewKit */,
 			);
 			name = EVAQuickLook;
 			packageProductDependencies = (
@@ -514,6 +522,7 @@
 			fileSystemSynchronizedGroups = (
 				D00000000000000000000020 /* MFFPreviewKit */,
 				D0000000000000000000019 /* EVAThumbnail */,
+				E10000000000000000000001 /* EVAPreviewKit */,
 			);
 			name = EVAThumbnail;
 			packageProductDependencies = (
@@ -1061,7 +1070,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -1088,7 +1097,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -1115,7 +1124,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -1142,7 +1151,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;

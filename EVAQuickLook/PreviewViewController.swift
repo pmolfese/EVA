@@ -9,24 +9,47 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  QuickLook preview for .mff packages. Reads only the XML sidecars and one binary
-//  block header -- see MFFQuickLookSummary -- so the panel appears well inside the
-//  few seconds QuickLook allows, even for a package with a 300 MB signal1.bin.
+//  Format-neutral Quick Look entry point. Format readers and views live in
+//  shared source groups so adding another neuroimaging format (such as GIFTI)
+//  requires one routing case rather than another extension target.
 //
 
 import AppKit
+import OSLog
 import QuickLookUI
 import SwiftUI
 
 final class PreviewViewController: NSViewController, QLPreviewingController {
 
+    private static let log = Logger(subsystem: "gov.nih.nimh.cmn.eva.quicklook", category: "preview")
+
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 560))
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
     }
 
     func preparePreviewOfFile(at url: URL) async throws {
-        let summary = try MFFQuickLookSummary.read(from: url, options: .preview)
-        let hosting = NSHostingView(rootView: MFFPreviewView(summary: summary))
+        let startedAt = ContinuousClock.now
+        Self.log.debug("Preparing preview for \(url.lastPathComponent, privacy: .public)")
+        guard let format = EVAPreviewFormat.identify(url) else {
+            throw EVAPreviewError.unsupportedFile(url)
+        }
+        let content: AnyView
+        switch format {
+        case .mff:
+            let summary = try MFFQuickLookSummary.read(from: url, options: .preview)
+            content = AnyView(MFFPreviewView(summary: summary))
+        case .nifti:
+            let model = try await Task.detached(priority: .userInitiated) {
+                try NIfTIQuickLookReader.read(from: url)
+            }.value
+            content = AnyView(NIfTIPreviewView(model: model))
+        case .gifti:
+            let model = try await Task.detached(priority: .userInitiated) {
+                try GIFTIQuickLookReader.read(from: url)
+            }.value
+            content = AnyView(GIFTIPreviewView(model: model))
+        }
+        let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
         view.subviews.forEach { $0.removeFromSuperview() }
         view.addSubview(hosting)
@@ -36,5 +59,8 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
             hosting.topAnchor.constraint(equalTo: view.topAnchor),
             hosting.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+        preferredContentSize = NSSize(width: 800, height: 600)
+        let elapsed = startedAt.duration(to: .now)
+        Self.log.notice("Installed \(format.rawValue, privacy: .public) preview view in \(elapsed, privacy: .public)")
     }
 }

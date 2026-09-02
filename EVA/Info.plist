@@ -16,6 +16,31 @@
 			<key>LSTypeIsPackage</key>
 			<true/>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>NIfTI Neuroimaging Volume</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>gov.nih.nifti-1</string>
+				<string>gov.nih.nifti-1-gzip</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>GIFTI Surface Data</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.nitrc.gifti</string>
+			</array>
+		</dict>
 	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
@@ -35,6 +60,72 @@
 				<array>
 					<string>mff</string>
 				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>NIfTI Neuroimaging Volume</string>
+			<key>UTTypeIdentifier</key>
+			<string>gov.nih.nifti-1</string>
+			<key>UTTypeReferenceURL</key>
+			<string>https://nifti.nimh.nih.gov/</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>nii</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/x-nifti</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>gov.nih.nifti-1</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Compressed NIfTI Neuroimaging Volume</string>
+			<key>UTTypeIdentifier</key>
+			<string>gov.nih.nifti-1-gzip</string>
+			<key>UTTypeReferenceURL</key>
+			<string>https://nifti.nimh.nih.gov/</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>nii.gz</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/gzip</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.xml</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>GIFTI Surface Data</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.nitrc.gifti</string>
+			<key>UTTypeReferenceURL</key>
+			<string>https://www.nitrc.org/projects/gifti/</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>gii</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/gifti+xml</string>
 			</dict>
 		</dict>
 	</array>

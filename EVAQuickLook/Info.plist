@@ -9,6 +9,10 @@
 			<key>QLSupportedContentTypes</key>
 			<array>
 				<string>com.egi.mff</string>
+				<string>gov.nih.nifti-1</string>
+				<string>gov.nih.nifti-1-gzip</string>
+				<string>org.nitrc.gifti</string>
+				<string>org.gnu.gnu-zip-archive</string>
 			</array>
 			<key>QLSupportsSearchableItems</key>
 			<false/>
@@ -18,5 +22,49 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).PreviewViewController</string>
 	</dict>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>gov.nih.nifti-1-gzip</string>
+			<key>UTTypeDescription</key>
+			<string>Compressed NIfTI Neuroimaging Volume</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>gov.nih.nifti-1</string>
+				<string>public.data</string>
+				<string>org.gnu.gnu-zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>nii.gz</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/gzip</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.nitrc.gifti</string>
+			<key>UTTypeDescription</key>
+			<string>GIFTI Surface Data</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.xml</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>gii</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/gifti+xml</string>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>
