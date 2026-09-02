@@ -38,6 +38,11 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
         case .mff:
             let summary = try MFFQuickLookSummary.read(from: url, options: .preview)
             content = AnyView(MFFPreviewView(summary: summary))
+        case .cifti:
+            let model = try await Task.detached(priority: .userInitiated) {
+                try CIFTIQuickLookReader.read(from: url)
+            }.value
+            content = AnyView(CIFTIPreviewView(model: model))
         case .nifti:
             let model = try await Task.detached(priority: .userInitiated) {
                 try NIfTIQuickLookReader.read(from: url)
@@ -48,6 +53,11 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
                 try GIFTIQuickLookReader.read(from: url)
             }.value
             content = AnyView(GIFTIPreviewView(model: model))
+        case .mgh:
+            let model = try await Task.detached(priority: .userInitiated) {
+                try MGHQuickLookReader.read(from: url)
+            }.value
+            content = AnyView(MGHPreviewView(model: model))
         }
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
