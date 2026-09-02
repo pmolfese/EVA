@@ -17,7 +17,7 @@
 
 import Foundation
 import Testing
-@testable import EVA
+@testable import EVAResolve
 
 @MainActor
 @Suite("Source Simulator")

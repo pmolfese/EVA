@@ -48,3 +48,4 @@ site/
 
 # Method-comparison results, copied out of the app container by compare-methods.sh
 .comparison/
+EVATests/Fixtures/Resolve/local/

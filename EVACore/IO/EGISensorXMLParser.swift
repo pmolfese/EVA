@@ -19,6 +19,8 @@ nonisolated struct EGISensorXMLSensor: Sendable {
     var x: Double
     var y: Double
     var z: Double?
+    /// EGI `<identifier>` code when present (fiducials: 2002 nasion, 2011 LPA, 2010 RPA).
+    var identifier: Int? = nil
 }
 
 nonisolated enum EGISensorXMLParser {
@@ -46,6 +48,7 @@ private nonisolated final class EGISensorXMLParserDelegate: NSObject, XMLParserD
     private var pendingX: Double?
     private var pendingY: Double?
     private var pendingZ: Double?
+    private var pendingIdentifier: Int?
 
     init(requiresZ: Bool) {
         self.requiresZ = requiresZ
@@ -68,6 +71,7 @@ private nonisolated final class EGISensorXMLParserDelegate: NSObject, XMLParserD
             pendingX = nil
             pendingY = nil
             pendingZ = nil
+            pendingIdentifier = nil
         case "name" where !insideSensor:
             insideTopName = true
         default:
@@ -93,6 +97,7 @@ private nonisolated final class EGISensorXMLParserDelegate: NSObject, XMLParserD
         case "x": pendingX = Double(trimmed)
         case "y": pendingY = Double(trimmed)
         case "z": pendingZ = Double(trimmed)
+        case "identifier": pendingIdentifier = Int(trimmed)
         case "name":
             if insideSensor {
                 pendingName = trimmed.isEmpty ? nil : trimmed
@@ -120,7 +125,7 @@ private nonisolated final class EGISensorXMLParserDelegate: NSObject, XMLParserD
         }
         sensors.append(EGISensorXMLSensor(
             number: number, name: pendingName, type: type,
-            x: x, y: y, z: pendingZ
+            x: x, y: y, z: pendingZ, identifier: pendingIdentifier
         ))
     }
 }
