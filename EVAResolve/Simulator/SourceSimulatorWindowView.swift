@@ -18,12 +18,12 @@
 //  `sourceSimulator` is owned by `EVAApp` and injected at the `Window` scene root.
 //
 
+import AppKit
 import Combine
 import SwiftUI
 
 struct SourceSimulatorWindowView: View {
     @Environment(SourceSimulatorController.self) private var controller
-    @Environment(\.openWindow) private var openWindow
 
     /// Drives the scrubber during playback; `advancePlayback` is a no-op when
     /// paused, so an idle window costs nothing but a discarded tick.
@@ -65,6 +65,9 @@ struct SourceSimulatorWindowView: View {
     }
 
     private func claimPendingFit(controller: SourceSimulatorController) {
+        if let message = PendingSourceFit.shared.lastError {
+            controller.showStatus(message)
+        }
         guard let payload = PendingSourceFit.shared.claim() else { return }
         controller.applyPendingFit(dataset: payload.dataset, selection: payload.selection)
     }
@@ -78,9 +81,15 @@ struct SourceSimulatorWindowView: View {
         }
     }
 
+    /// Generated recordings are reviewed in EVA, not here: hand the package to
+    /// EVA when it is installed, else to whatever owns `.mff`.
     private func openRecording(_ url: URL) {
-        PendingWindowOpens.shared.push([url])
-        openWindow(id: "main")
+        let workspace = NSWorkspace.shared
+        if let eva = workspace.urlForApplication(withBundleIdentifier: "gov.nih.nimh.cmn.eva") {
+            workspace.open([url], withApplicationAt: eva, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+        } else {
+            workspace.open(url)
+        }
     }
 
     // MARK: Viewports (2×2 glass brain + field, then the activation timeline)

@@ -58,6 +58,13 @@
 			remoteGlobalIDString = D0000000000000000000011;
 			remoteInfo = EVAThumbnail;
 		};
+		E40000000000000000000008 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 77BE28B32FED64E10080DAF5 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E30000000000000000000001;
+			remoteInfo = EVAResolve;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -103,6 +110,8 @@
 		77BE28D22FED64E30080DAF5 /* EVAUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EVAUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D0000000000000000000002 /* EVAQuickLook.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EVAQuickLook.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		D0000000000000000000012 /* EVAThumbnail.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EVAThumbnail.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		E30000000000000000000004 /* EVAResolve.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EVAResolve.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E40000000000000000000004 /* EVAResolveTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EVAResolveTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -137,6 +146,13 @@
 				Info.plist,
 			);
 			target = D0000000000000000000011 /* EVAThumbnail */;
+		};
+		E30000000000000000000003 /* Exceptions for "EVAResolve" folder in "EVAResolve" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = E30000000000000000000001 /* EVAResolve */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -193,6 +209,19 @@
 			path = EVACore;
 			sourceTree = "<group>";
 		};
+		E30000000000000000000002 /* EVAResolve */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E30000000000000000000003 /* Exceptions for "EVAResolve" folder in "EVAResolve" target */,
+			);
+			path = EVAResolve;
+			sourceTree = "<group>";
+		};
+		E40000000000000000000002 /* EVAResolveTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = EVAResolveTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -231,6 +260,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E30000000000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E40000000000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -256,6 +299,8 @@
 				520000000000000000000001 /* scenarios */,
 				77BE28BD2FED64E10080DAF5 /* EVA */,
 				E20000000000000000000001 /* EVACore */,
+				E30000000000000000000002 /* EVAResolve */,
+				E40000000000000000000002 /* EVAResolveTests */,
 				77BE28CB2FED64E30080DAF5 /* EVATests */,
 				77BE28D52FED64E30080DAF5 /* EVAUITests */,
 				D00000000000000000000020 /* MFFPreviewKit */,
@@ -276,6 +321,8 @@
 				D0000000000000000000002 /* EVAQuickLook.appex */,
 				D0000000000000000000012 /* EVAThumbnail.appex */,
 				510000000000000000000001 /* EVASimulate */,
+				E30000000000000000000004 /* EVAResolve.app */,
+				E40000000000000000000004 /* EVAResolveTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -323,6 +370,7 @@
 			fileSystemSynchronizedGroups = (
 				77BE28BD2FED64E10080DAF5 /* EVA */,
 				E20000000000000000000001 /* EVACore */,
+				E10000000000000000000001 /* EVAPreviewKit */,
 			);
 			name = EVA;
 			packageProductDependencies = (
@@ -347,7 +395,6 @@
 			fileSystemSynchronizedGroups = (
 				77BE28CB2FED64E30080DAF5 /* EVATests */,
 				D00000000000000000000020 /* MFFPreviewKit */,
-				E10000000000000000000001 /* EVAPreviewKit */,
 			);
 			name = EVATests;
 			packageProductDependencies = (
@@ -395,6 +442,7 @@
 				D00000000000000000000020 /* MFFPreviewKit */,
 				D0000000000000000000009 /* EVAQuickLook */,
 				E10000000000000000000001 /* EVAPreviewKit */,
+				E20000000000000000000001 /* EVACore */,
 			);
 			name = EVAQuickLook;
 			packageProductDependencies = (
@@ -419,6 +467,7 @@
 				D00000000000000000000020 /* MFFPreviewKit */,
 				D0000000000000000000019 /* EVAThumbnail */,
 				E10000000000000000000001 /* EVAPreviewKit */,
+				E20000000000000000000001 /* EVACore */,
 			);
 			name = EVAThumbnail;
 			packageProductDependencies = (
@@ -426,6 +475,52 @@
 			productName = EVAThumbnail;
 			productReference = D0000000000000000000012 /* EVAThumbnail.appex */;
 			productType = "com.apple.product-type.app-extension";
+		};
+		E30000000000000000000001 /* EVAResolve */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E30000000000000000000010 /* Build configuration list for PBXNativeTarget "EVAResolve" */;
+			buildPhases = (
+				E30000000000000000000005 /* Sources */,
+				E30000000000000000000006 /* Frameworks */,
+				E30000000000000000000007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				E30000000000000000000002 /* EVAResolve */,
+				E20000000000000000000001 /* EVACore */,
+			);
+			name = EVAResolve;
+			packageProductDependencies = (
+			);
+			productName = EVAResolve;
+			productReference = E30000000000000000000004 /* EVAResolve.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E40000000000000000000001 /* EVAResolveTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E40000000000000000000010 /* Build configuration list for PBXNativeTarget "EVAResolveTests" */;
+			buildPhases = (
+				E40000000000000000000005 /* Sources */,
+				E40000000000000000000006 /* Frameworks */,
+				E40000000000000000000007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E40000000000000000000009 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				E40000000000000000000002 /* EVAResolveTests */,
+			);
+			name = EVAResolveTests;
+			packageProductDependencies = (
+			);
+			productName = EVAResolveTests;
+			productReference = E40000000000000000000004 /* EVAResolveTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -454,6 +549,13 @@
 					D0000000000000000000011 = {
 						CreatedOnToolsVersion = 26.6;
 					};
+					E30000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					E40000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = E30000000000000000000001;
+					};
 				};
 			};
 			buildConfigurationList = 77BE28B62FED64E10080DAF5 /* Build configuration list for PBXProject "EVA" */;
@@ -476,6 +578,8 @@
 				D0000000000000000000001 /* EVAQuickLook */,
 				D0000000000000000000011 /* EVAThumbnail */,
 				510000000000000000000002 /* EVASimulate */,
+				E30000000000000000000001 /* EVAResolve */,
+				E40000000000000000000001 /* EVAResolveTests */,
 			);
 		};
 /* End PBXProject section */
@@ -511,6 +615,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		D0000000000000000000015 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E30000000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E40000000000000000000007 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -571,6 +689,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E30000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E40000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -598,6 +730,11 @@
 			isa = PBXTargetDependency;
 			target = D0000000000000000000011 /* EVAThumbnail */;
 			targetProxy = D000000000000000000001B /* PBXContainerItemProxy */;
+		};
+		E40000000000000000000009 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E30000000000000000000001 /* EVAResolve */;
+			targetProxy = E40000000000000000000008 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -927,6 +1064,7 @@
 		D0000000000000000000007 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
@@ -954,6 +1092,7 @@
 		D0000000000000000000008 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
@@ -981,6 +1120,7 @@
 		D0000000000000000000017 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
@@ -1008,6 +1148,7 @@
 		D0000000000000000000018 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 20260828;
 				DEVELOPMENT_TEAM = 7V8RRF84QH;
@@ -1029,6 +1170,134 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		E30000000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 20260828;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EVAResolve/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "EVA Resolve";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.medical";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.7;
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.resolve;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		E30000000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 20260828;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EVAResolve/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "EVA Resolve";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.medical";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.7;
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.resolve;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		E40000000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.resolve.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EVAResolve.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/EVAResolve";
+			};
+			name = Debug;
+		};
+		E40000000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.resolve.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EVAResolve.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/EVAResolve";
 			};
 			name = Release;
 		};
@@ -1094,6 +1363,24 @@
 			buildConfigurations = (
 				D0000000000000000000017 /* Debug */,
 				D0000000000000000000018 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E30000000000000000000010 /* Build configuration list for PBXNativeTarget "EVAResolve" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E30000000000000000000011 /* Debug */,
+				E30000000000000000000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E40000000000000000000010 /* Build configuration list for PBXNativeTarget "EVAResolveTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E40000000000000000000011 /* Debug */,
+				E40000000000000000000012 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

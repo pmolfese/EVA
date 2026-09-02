@@ -47,9 +47,6 @@ struct EVAApp: App {
     /// the same reason `batchController` is — its setup sheet is shown on the
     /// window's first appearance and must find the controller in the environment.
     @State private var simulatorController = SimulatorController()
-    /// Owned here and injected at the Source Simulator `Window` scene root, like
-    /// the other single-instance window controllers.
-    @State private var sourceSimulatorController = SourceSimulatorController()
 
     var body: some Scene {
         // `WindowGroup`, not `Window` — REWIND.md "EVA as a multi-window app"
@@ -89,8 +86,6 @@ struct EVAApp: App {
 
                 OpenSimulatorWindowButton()
                     .keyboardShortcut("n", modifiers: [.command, .shift])
-
-                OpenSourceSimulatorWindowButton()
 
                 OpenRecordingButton()
                     .keyboardShortcut("o", modifiers: .command)
@@ -207,14 +202,6 @@ struct EVAApp: App {
         }
         .defaultSize(width: 520, height: 560)
 
-        // Source Simulator (SIM-2/SIM-3): the interactive forward sandbox — place
-        // dipoles in a glass brain and see the scalp field they produce, computed
-        // in-process. Separate window from the Studio; see `SourceSimulatorWindowView`.
-        Window("Source Simulator", id: Self.sourceSimulatorWindowID) {
-            SourceSimulatorWindowView()
-                .environment(sourceSimulatorController)
-        }
-        .defaultSize(width: 940, height: 640)
 
         Settings {
             PreferencesView()
@@ -231,7 +218,6 @@ struct EVAApp: App {
     static let figureExportWindowID = "figure-export"
     static let batchWindowID = "batch"
     static let simulatorWindowID = "simulator"
-    static let sourceSimulatorWindowID = "source-simulator"
 
     private func checkForUpdates() {
         guard !isCheckingForUpdates else { return }
@@ -343,19 +329,6 @@ private struct OpenSimulatorWindowButton: View {
     var body: some View {
         Button("New Simulated Recording...") {
             openWindow(id: EVAApp.simulatorWindowID)
-        }
-    }
-}
-
-/// File-menu "New Source Simulator…" — opens (or fronts) the single-instance
-/// Source Simulator window (SIM-2/SIM-3): place dipoles in a glass brain and see
-/// the scalp field they produce, live.
-private struct OpenSourceSimulatorWindowButton: View {
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Button("New Source Simulator...") {
-            openWindow(id: EVAApp.sourceSimulatorWindowID)
         }
     }
 }

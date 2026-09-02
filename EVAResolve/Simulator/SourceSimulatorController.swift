@@ -1044,6 +1044,11 @@ final class SourceSimulatorController {
     private(set) var isGeneratingRecording = false
     private(set) var generationMessage = ""
 
+    /// Surfaces a message in the window's status line (import failures, handoffs).
+    func showStatus(_ text: String) {
+        generationMessage = text
+    }
+
     /// Assembles the full channels × samples recording (lead field × source
     /// series) and writes it as an MFF entirely in-process, then opens it. Reuses
     /// the app's own `MFFWriter` + `MontageWriter` — no CLI, no scenario file.
