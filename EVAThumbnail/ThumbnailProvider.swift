@@ -29,14 +29,18 @@ final class ThumbnailProvider: QLThumbnailProvider {
         Self.log.debug("provideThumbnail for \(request.fileURL.lastPathComponent, privacy: .public)")
         enum Renderer {
             case mff(MFFThumbnailRenderer)
+            case cifti(CIFTIThumbnailRenderer)
             case nifti(NIfTIThumbnailRenderer)
             case gifti(GIFTIThumbnailRenderer)
+            case mgh(MGHThumbnailRenderer)
 
             func draw(in context: CGContext, size: CGSize) {
                 switch self {
                 case .mff(let renderer): renderer.draw(in: context, size: size)
+                case .cifti(let renderer): renderer.draw(in: context, size: size)
                 case .nifti(let renderer): renderer.draw(in: context, size: size)
                 case .gifti(let renderer): renderer.draw(in: context, size: size)
+                case .mgh(let renderer): renderer.draw(in: context, size: size)
                 }
             }
         }
@@ -52,12 +56,18 @@ final class ThumbnailProvider: QLThumbnailProvider {
                 let model = MFFThumbnailRenderer.Model(summary: summary)
                 let isDark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
                 renderer = .mff(MFFThumbnailRenderer(model: model, palette: isDark ? .dark : .light))
+            case .cifti:
+                let model = try CIFTIQuickLookReader.read(from: request.fileURL)
+                renderer = .cifti(CIFTIThumbnailRenderer(model: model))
             case .nifti:
                 let model = try NIfTIQuickLookReader.read(from: request.fileURL)
                 renderer = .nifti(NIfTIThumbnailRenderer(model: model))
             case .gifti:
                 let model = try GIFTIQuickLookReader.read(from: request.fileURL)
                 renderer = .gifti(GIFTIThumbnailRenderer(model: model))
+            case .mgh:
+                let model = try MGHQuickLookReader.read(from: request.fileURL)
+                renderer = .mgh(MGHThumbnailRenderer(model: model))
             }
         } catch {
             Self.log.error("summary read failed: \(error.localizedDescription, privacy: .public)")

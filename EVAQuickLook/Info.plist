@@ -9,11 +9,13 @@
 			<key>QLSupportedContentTypes</key>
 			<array>
 				<string>com.egi.mff</string>
+				<string>org.nitrc.cifti-2</string>
 				<string>gov.nih.nifti-1</string>
 				<string>gov.nih.nifti-1-gzip</string>
-				<string>org.nitrc.gifti</string>
-				<string>org.gnu.gnu-zip-archive</string>
-			</array>
+					<string>org.nitrc.gifti</string>
+					<string>org.freesurfer.mgh</string>
+					<string>org.gnu.gnu-zip-archive</string>
+		</array>
 			<key>QLSupportsSearchableItems</key>
 			<false/>
 		</dict>
@@ -24,6 +26,40 @@
 	</dict>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.nitrc.cifti-2</string>
+			<key>UTTypeDescription</key>
+			<string>CIFTI-2 Connectivity Data</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>dconn.nii</string>
+					<string>dtseries.nii</string>
+					<string>pconn.nii</string>
+					<string>ptseries.nii</string>
+					<string>dscalar.nii</string>
+					<string>dlabel.nii</string>
+					<string>pscalar.nii</string>
+					<string>pdconn.nii</string>
+					<string>dpconn.nii</string>
+					<string>pconnseries.nii</string>
+					<string>pconnscalar.nii</string>
+					<string>sdseries.nii</string>
+					<string>dfan.nii</string>
+					<string>dfibersamp.nii</string>
+					<string>dfansamp.nii</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/x-cifti</string>
+			</dict>
+		</dict>
 		<dict>
 			<key>UTTypeIdentifier</key>
 			<string>gov.nih.nifti-1-gzip</string>
@@ -63,8 +99,28 @@
 				</array>
 				<key>public.mime-type</key>
 				<string>application/gifti+xml</string>
+				</dict>
 			</dict>
-		</dict>
-	</array>
+			<dict>
+				<key>UTTypeIdentifier</key>
+				<string>org.freesurfer.mgh</string>
+				<key>UTTypeDescription</key>
+				<string>FreeSurfer MGH/MGZ Volume</string>
+				<key>UTTypeConformsTo</key>
+				<array>
+					<string>public.data</string>
+					<string>public.content</string>
+				</array>
+				<key>UTTypeTagSpecification</key>
+				<dict>
+					<key>public.filename-extension</key>
+					<array>
+						<string>mgh</string>
+						<string>mgz</string>
+						<string>mgh.gz</string>
+					</array>
+				</dict>
+			</dict>
+		</array>
 </dict>
 </plist>

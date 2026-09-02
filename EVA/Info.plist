@@ -18,6 +18,18 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeName</key>
+			<string>CIFTI Connectivity Data</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.nitrc.cifti-2</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
 			<string>NIfTI Neuroimaging Volume</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
@@ -41,9 +53,57 @@
 				<string>org.nitrc.gifti</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>FreeSurfer MGH/MGZ Volume</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.freesurfer.mgh</string>
+			</array>
+		</dict>
 	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>CIFTI-2 Connectivity Data</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.nitrc.cifti-2</string>
+			<key>UTTypeReferenceURL</key>
+			<string>https://www.nitrc.org/projects/cifti/</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>dconn.nii</string>
+					<string>dtseries.nii</string>
+					<string>pconn.nii</string>
+					<string>ptseries.nii</string>
+					<string>dscalar.nii</string>
+					<string>dlabel.nii</string>
+					<string>pscalar.nii</string>
+					<string>pdconn.nii</string>
+					<string>dpconn.nii</string>
+					<string>pconnseries.nii</string>
+					<string>pconnscalar.nii</string>
+					<string>sdseries.nii</string>
+					<string>dfan.nii</string>
+					<string>dfibersamp.nii</string>
+					<string>dfansamp.nii</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/x-cifti</string>
+			</dict>
+		</dict>
 		<dict>
 			<key>UTTypeConformsTo</key>
 			<array>
@@ -126,6 +186,28 @@
 				</array>
 				<key>public.mime-type</key>
 				<string>application/gifti+xml</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>FreeSurfer MGH/MGZ Volume</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.freesurfer.mgh</string>
+			<key>UTTypeReferenceURL</key>
+			<string>https://surfer.nmr.mgh.harvard.edu/fswiki/FsTutorial/MghFormat</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>mgh</string>
+					<string>mgz</string>
+					<string>mgh.gz</string>
+				</array>
 			</dict>
 		</dict>
 	</array>
