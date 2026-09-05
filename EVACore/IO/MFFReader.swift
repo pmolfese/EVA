@@ -473,7 +473,7 @@ extension MFFEvent {
     ///
     /// For an anchor-less event (no duration) every instant coincides, so this
     /// is `beginTimeSeconds` regardless of anchor.
-    var onsetTimeSeconds: Double {
+    nonisolated var onsetTimeSeconds: Double {
         guard timeAnchor.isCentered, let duration = durationSeconds else { return beginTimeSeconds }
         return beginTimeSeconds - duration / 2
     }
@@ -484,19 +484,19 @@ extension MFFEvent {
     /// OBS alignment search, averaged-template previews, the waveform highlight
     /// band — should read this rather than `beginTimeSeconds`, or it will centre
     /// on the wrong sample for onset-stamped sources.
-    var centerTimeSeconds: Double {
+    nonisolated var centerTimeSeconds: Double {
         guard !timeAnchor.isCentered, let duration = durationSeconds else { return beginTimeSeconds }
         return beginTimeSeconds + duration / 2
     }
 
     /// The event's end.
-    var endTimeSeconds: Double {
+    nonisolated var endTimeSeconds: Double {
         onsetTimeSeconds + (durationSeconds ?? 0)
     }
 
     /// The interval the event covers, or `nil` when it records no duration and
     /// is therefore a point in time rather than a span.
-    var spanSeconds: ClosedRange<Double>? {
+    nonisolated var spanSeconds: ClosedRange<Double>? {
         guard let duration = durationSeconds, duration > 0 else { return nil }
         let start = onsetTimeSeconds
         return start...(start + duration)
@@ -507,7 +507,7 @@ extension MFFEvent {
     /// This *reinterprets* the stored instant rather than moving it, which is
     /// what applying a user rule means: the sample never changed, only EVA's
     /// understanding of which part of the event it marks.
-    func reanchored(to anchor: EventTimeAnchor, durationSeconds newDuration: Double? = nil) -> MFFEvent {
+    nonisolated func reanchored(to anchor: EventTimeAnchor, durationSeconds newDuration: Double? = nil) -> MFFEvent {
         MFFEvent(
             id: id,
             code: code,

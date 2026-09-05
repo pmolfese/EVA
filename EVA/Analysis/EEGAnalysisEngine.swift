@@ -663,9 +663,10 @@ nonisolated enum EEGAnalysisEngine {
                 pairIndex += 1
             }
         }
+        let finalizedPairIndices = pairIndices
 
-        let pairCount = max(pairIndices.count, 1)
-        var works = [ConnectivityPairWork?](repeating: nil, count: pairIndices.count)
+        let pairCount = max(finalizedPairIndices.count, 1)
+        var works = [ConnectivityPairWork?](repeating: nil, count: finalizedPairIndices.count)
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
 
@@ -674,9 +675,9 @@ nonisolated enum EEGAnalysisEngine {
             // pair count is O(n²) in node count, so this is the fan-out most
             // likely to oversubscribe the machine if left unbounded.
             nonisolated(unsafe) let out = out
-            evaConcurrentPerform(iterations: pairIndices.count) { i in
+            evaConcurrentPerform(iterations: finalizedPairIndices.count) { i in
                 guard !Task.isCancelled else { return }
-                let pair = pairIndices[i]
+                let pair = finalizedPairIndices[i]
                 let metricValues = connectivityMetrics(
                     spectraA: spectra[pair.left].spectra,
                     spectraB: spectra[pair.right].spectra,

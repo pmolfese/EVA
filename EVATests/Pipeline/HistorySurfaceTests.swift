@@ -64,7 +64,7 @@ struct HistorySurfaceTests {
     /// `EVAHistory`'s header asks for. Stepping back and forward again must
     /// return to the same node, leaving the tree the size it was.
     @Test("Undo then redo is a round trip, not two more nodes")
-    func undoIsNavigation() {
+    func undoIsNavigation() throws {
         let model = RecordingHistoryModel()
         var script = EVAProcessingScript()
         script.append(EVAProcessingStep(operation: .filter, parameters: ["highPassHz": "1"]))
@@ -75,13 +75,13 @@ struct HistorySurfaceTests {
         let tip = model.history.currentID
         let count = model.history.count
 
-        let back = try? #require(model.stepBackTarget)
-        _ = model.beginNavigation(to: back!)
+        let back = try #require(model.stepBackTarget)
+        _ = model.beginNavigation(to: back)
         model.endNavigation()
         #expect(model.history.currentID != tip)
 
-        let forward = try? #require(model.stepForwardTarget)
-        _ = model.beginNavigation(to: forward!)
+        let forward = try #require(model.stepForwardTarget)
+        _ = model.beginNavigation(to: forward)
         model.endNavigation()
 
         #expect(model.history.currentID == tip, "redo returns to where undo started")
@@ -117,7 +117,7 @@ struct HistorySurfaceTests {
     /// the package URL names. Forking one produced a window that failed to
     /// load — visibly, but for no reason the operator could act on.
     @Test("A fork payload carries the sidecar access the source window was granted")
-    func forkPayloadCarriesSecurityScopes() {
+    func forkPayloadCarriesSecurityScopes() throws {
         let header = URL(fileURLWithPath: "/tmp/subject.vhdr")
         let markers = URL(fileURLWithPath: "/tmp/subject.vmrk")
         let data = URL(fileURLWithPath: "/tmp/subject.eeg")
@@ -134,9 +134,9 @@ struct HistorySurfaceTests {
         )
         PendingWindowForks.shared.push(payload)
 
-        let claimed = try? #require(PendingWindowForks.shared.claim())
-        #expect(claimed?.packageURL == header)
-        #expect(claimed?.securityScopedURLs == [header, markers, data, folder])
+        let claimed = try #require(PendingWindowForks.shared.claim())
+        #expect(claimed.packageURL == header)
+        #expect(claimed.securityScopedURLs == [header, markers, data, folder])
         #expect(PendingWindowForks.shared.claim() == nil, "claimed exactly once")
     }
 

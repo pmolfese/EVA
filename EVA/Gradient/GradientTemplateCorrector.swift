@@ -762,6 +762,7 @@ nonisolated enum GradientTemplateCorrector {
         }
 
         guard !jobs.isEmpty else { return nil }
+        let finalizedJobs = jobs
 
         let grams = try backend.gramMatrices(
             jobs: gramJobs,
@@ -775,14 +776,14 @@ nonisolated enum GradientTemplateCorrector {
         // once the Gram is on the GPU: the eigen-decompositions dominate, and
         // running them one after another left most of the machine idle.
         var contributions = [Float](repeating: 0, count: width * epochCount * length)
-        var componentsPerJob = [Int?](repeating: nil, count: jobs.count)
+        var componentsPerJob = [Int?](repeating: nil, count: finalizedJobs.count)
 
         contributions.withUnsafeMutableBufferPointer { buffer in
             let out = GradientUnsafeSendable(base: buffer.baseAddress!)
             componentsPerJob.withUnsafeMutableBufferPointer { countBuffer in
                 let counts = GradientUnsafeSendable(base: countBuffer.baseAddress!)
-                GradientParallel.forEach(jobs.count) { index in
-                    let job = jobs[index]
+                GradientParallel.forEach(finalizedJobs.count) { index in
+                    let job = finalizedJobs[index]
                     let basis = GradientOBS.basis(
                         gram: grams[index],
                         residuals: job.detrended,
@@ -814,7 +815,7 @@ nonisolated enum GradientTemplateCorrector {
         // order, so what the diagnostic channel reports does not depend on how
         // the jobs happened to be scheduled.
         var produced = false
-        for (index, job) in jobs.enumerated() {
+        for (index, job) in finalizedJobs.enumerated() {
             guard let count = componentsPerJob[index] else {
                 if job.slot == diagnosticSlot {
                     warningsByChunk[job.chunk].append(

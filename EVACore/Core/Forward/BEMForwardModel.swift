@@ -229,7 +229,6 @@ nonisolated enum BEMForwardModel {
         let facesPerShell = unit.faces.count
 
         // Validate dipoles inside the innermost shell.
-        let sigma0 = head.shells[0].conductivitySiemensPerMeter
         let brainRadius = head.shells[0].radiusMeters
         for dipole in dipoles {
             let r = norm(subtract(dipole.positionMeters, head.centerMeters))

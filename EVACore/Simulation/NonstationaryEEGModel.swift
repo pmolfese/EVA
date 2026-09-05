@@ -353,5 +353,5 @@ nonisolated enum NonstationaryEEGModel {
 }
 
 private extension Double {
-    func squared() -> Double { self * self }
+    nonisolated func squared() -> Double { self * self }
 }

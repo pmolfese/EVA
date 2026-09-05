@@ -186,7 +186,7 @@ struct EVAHistoryTests {
     /// Identity must ignore the step's UUID and timestamp, or every node is
     /// unique and nothing ever deduplicates or hits a cache.
     @Test func identityIgnoresStepIDAndTimestamp() {
-        var history = EVAHistory(recordingKey: "r")
+        let history = EVAHistory(recordingKey: "r")
         var early = filterStep()
         early.appliedAt = Date(timeIntervalSince1970: 0)
         var late = filterStep()

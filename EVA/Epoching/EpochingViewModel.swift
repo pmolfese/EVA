@@ -76,7 +76,7 @@ enum CategoryRegexMatchField: String, CaseIterable, Identifiable, Codable, Senda
 /// `eventDescription` or `label` (per `matchField`) matches `pattern` get
 /// filed under `categoryName` in addition to their normal category. See
 /// `EpochingViewModel.categoryRegexRules`.
-struct CategoryRegexRule: Identifiable, Codable, Hashable, Sendable {
+nonisolated struct CategoryRegexRule: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var sourceCode: String
     var pattern: String

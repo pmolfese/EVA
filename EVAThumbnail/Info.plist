@@ -15,6 +15,7 @@
 					<string>org.nitrc.gifti</string>
 					<string>org.freesurfer.mgh</string>
 					<string>org.gnu.gnu-zip-archive</string>
+					<string>org.nema.dicom</string>
 		</array>
 			<key>QLThumbnailMinimumDimension</key>
 			<integer>0</integer>
@@ -120,7 +121,28 @@
 						<string>mgh.gz</string>
 					</array>
 				</dict>
-			</dict>
-		</array>
+				</dict>
+				<dict>
+					<key>UTTypeIdentifier</key>
+					<string>org.nema.dicom</string>
+					<key>UTTypeDescription</key>
+					<string>DICOM Medical Image</string>
+					<key>UTTypeConformsTo</key>
+					<array>
+						<string>public.image</string>
+						<string>public.data</string>
+					</array>
+					<key>UTTypeTagSpecification</key>
+					<dict>
+						<key>public.filename-extension</key>
+						<array>
+							<string>dcm</string>
+							<string>ima</string>
+						</array>
+						<key>public.mime-type</key>
+						<string>application/dicom</string>
+					</dict>
+				</dict>
+			</array>
 </dict>
 </plist>

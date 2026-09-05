@@ -275,7 +275,7 @@ nonisolated enum DSP {
         }
         let pad = 3 * (nb - 1)
         // Odd (point-symmetric) reflection padding, like scipy's default.
-        var ext = oddReflected(x, count: pad)
+        let ext = oddReflected(x, count: pad)
 
         var y = firFilter(b, ext)
         y.reverse()

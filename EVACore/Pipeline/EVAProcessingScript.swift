@@ -218,7 +218,7 @@ extension EVAProcessingStep {
     /// this file is compiled into the command-line tools, which do not include
     /// the cardiac domain. `BCGDetectorEventCodeTests` pins the two together so
     /// the duplication cannot drift.
-    static let defaultBeatEventCode = "BCG"
+    nonisolated static let defaultBeatEventCode = "BCG"
 }
 
 extension EVAProcessingStep {

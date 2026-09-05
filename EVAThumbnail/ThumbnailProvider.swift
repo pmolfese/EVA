@@ -33,6 +33,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
             case nifti(NIfTIThumbnailRenderer)
             case gifti(GIFTIThumbnailRenderer)
             case mgh(MGHThumbnailRenderer)
+            case dicom(DICOMThumbnailRenderer)
 
             func draw(in context: CGContext, size: CGSize) {
                 switch self {
@@ -41,6 +42,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
                 case .nifti(let renderer): renderer.draw(in: context, size: size)
                 case .gifti(let renderer): renderer.draw(in: context, size: size)
                 case .mgh(let renderer): renderer.draw(in: context, size: size)
+                case .dicom(let renderer): renderer.draw(in: context, size: size)
                 }
             }
         }
@@ -49,6 +51,9 @@ final class ThumbnailProvider: QLThumbnailProvider {
         do {
             guard let format = EVAPreviewFormat.identify(request.fileURL) else {
                 throw EVAPreviewError.unsupportedFile(request.fileURL)
+            }
+            guard EVAQuickLookPreferences.isEnabled(format) else {
+                throw EVAPreviewError.disabledFormat(format)
             }
             switch format {
             case .mff:
@@ -68,6 +73,9 @@ final class ThumbnailProvider: QLThumbnailProvider {
             case .mgh:
                 let model = try MGHQuickLookReader.read(from: request.fileURL)
                 renderer = .mgh(MGHThumbnailRenderer(model: model))
+            case .dicom:
+                let model = try DICOMQuickLookReader.read(from: request.fileURL)
+                renderer = .dicom(DICOMThumbnailRenderer(model: model))
             }
         } catch {
             Self.log.error("summary read failed: \(error.localizedDescription, privacy: .public)")

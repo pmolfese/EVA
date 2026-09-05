@@ -357,7 +357,7 @@ extension HeadTransform {
     /// The fiducial-defined head frame (Neuromag / MNE "head"): origin midway
     /// between LPA and RPA, +x through RPA, +y toward the nasion (orthogonalized),
     /// +z superior. Maps points expressed in `from` into `.head`.
-    static func headFrame(nasion: SIMD3<Double>, lpa: SIMD3<Double>, rpa: SIMD3<Double>, from: CoordinateFrame = .unknown) -> HeadTransform {
+    nonisolated static func headFrame(nasion: SIMD3<Double>, lpa: SIMD3<Double>, rpa: SIMD3<Double>, from: CoordinateFrame = .unknown) -> HeadTransform {
         let origin = (lpa + rpa) / 2
         let x = simd_normalize(rpa - lpa)
         let yRaw = nasion - origin

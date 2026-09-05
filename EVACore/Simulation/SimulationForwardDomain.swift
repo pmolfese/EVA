@@ -248,11 +248,11 @@ nonisolated struct LeadFieldConvergenceReport: Sendable {
 // MARK: - EVASimulate boundary adapters
 
 private extension Vector3D {
-    var forwardSIMD: SIMD3<Double> { SIMD3<Double>(x, y, z) }
+    nonisolated var forwardSIMD: SIMD3<Double> { SIMD3<Double>(x, y, z) }
 }
 
 private extension SphericalHeadModel {
-    var forwardModel: ForwardHeadModel {
+    nonisolated var forwardModel: ForwardHeadModel {
         ForwardHeadModel(
             name: name,
             centerMeters: centerMeters.forwardSIMD,
@@ -268,7 +268,7 @@ private extension SphericalHeadModel {
 }
 
 private extension EEGReference {
-    var forwardReference: ForwardEEGReference {
+    nonisolated var forwardReference: ForwardEEGReference {
         switch self {
         case .average: return .average
         case .infinity: return .infinity
@@ -277,7 +277,7 @@ private extension EEGReference {
 }
 
 private extension Montage {
-    func forwardElectrodes(head: SphericalHeadModel) -> OrderedElectrodes {
+    nonisolated func forwardElectrodes(head: SphericalHeadModel) -> OrderedElectrodes {
         OrderedElectrodes(
             names: channelNames,
             positionsMeters: positions.map {
@@ -292,7 +292,7 @@ private extension Montage {
 }
 
 private extension SimulatedSource {
-    var forwardDipole: ForwardDipole {
+    nonisolated var forwardDipole: ForwardDipole {
         ForwardDipole(
             id: id,
             positionMeters: positionMeters.forwardSIMD,
@@ -304,7 +304,7 @@ private extension SimulatedSource {
 extension SphericalForwardModel {
     /// EVASimulate retains its stable scenario and truth types at this boundary;
     /// all forward mathematics is delegated to EVA's shared solver overload.
-    static func leadField(
+    nonisolated static func leadField(
         head: SphericalHeadModel,
         montage: Montage,
         sources: [SimulatedSource],
@@ -331,7 +331,7 @@ extension SphericalForwardModel {
         )
     }
 
-    static func convergenceReport(
+    nonisolated static func convergenceReport(
         head: SphericalHeadModel,
         montage: Montage,
         sources: [SimulatedSource],
@@ -383,7 +383,7 @@ nonisolated struct SimulatedEllipsoidModel: Codable, Sendable, Equatable {
         axisScale: Vector3D(x: 0.94, y: 1.0, z: 1.08)
     )
 
-    var forwardModel: ForwardEllipsoidModel {
+    nonisolated var forwardModel: ForwardEllipsoidModel {
         ForwardEllipsoidModel(
             name: name,
             sphere: sphere.forwardModel,
