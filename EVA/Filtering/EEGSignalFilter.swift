@@ -164,7 +164,7 @@ enum FIRApplication: String, CaseIterable, Identifiable, Codable, Sendable {
 }
 
 /// Which cutoff edge a family is being resolved for.
-enum FilterEdge: Sendable { case highPass, lowPass }
+nonisolated enum FilterEdge: Sendable { case highPass, lowPass }
 
 /// Whether the Auto family's IIR side stops before the crossover or includes
 /// it. Historical EVA behavior is `.below`; Net Station uses `.through` at its

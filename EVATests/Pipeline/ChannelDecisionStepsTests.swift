@@ -183,18 +183,18 @@ struct ChannelDecisionStepsTests {
     /// The rail shows a count, not a list — a 40-channel rejection would push
     /// everything else off a 260 pt row. This is the node `REWIND.md`'s figure
     /// has always shown and the app could not previously produce.
-    @Test func railRendersTheseAsCounts() {
+    @Test func railRendersTheseAsCounts() throws {
         let steps = ChannelDecisionSteps.steps(
             badChannels: [0, 4, 16, 63],
             interpolatedChannels: [7, 20]
         )
-        let bad = try? #require(steps.first { $0.operation == .markBad })
+        let bad = try #require(steps.first { $0.operation == .markBad })
         #expect(HistoryStepSummary.title(for: .markBad) == "mark bad")
-        #expect(bad.map(HistoryStepSummary.subtitle(for:)) == "4 ch")
+        #expect(HistoryStepSummary.subtitle(for: bad) == "4 ch")
 
-        let interpolated = try? #require(steps.first { $0.operation == .interpolateChannels })
+        let interpolated = try #require(steps.first { $0.operation == .interpolateChannels })
         #expect(HistoryStepSummary.title(for: .interpolateChannels) == "interpolate")
-        #expect(interpolated.map(HistoryStepSummary.subtitle(for:)) == "2 ch · spherical spline")
+        #expect(HistoryStepSummary.subtitle(for: interpolated) == "2 ch · spherical spline")
     }
 
     /// The data loss a paired run exposed: `markBad` was carried in the script,

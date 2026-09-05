@@ -16,8 +16,10 @@ import Testing
 
 struct UpdateCheckerTests {
     @Test func parsesGitHubAndBundleVersionFormats() throws {
-        #expect(try #require(AppVersion("v0.1.2")) == AppVersion("0.1.2"))
-        #expect(try #require(AppVersion("  V2.4.0-beta.1  ")) == AppVersion("2.4-beta.1"))
+        let prefixed = try #require(AppVersion("v0.1.2"))
+        let paddedPrerelease = try #require(AppVersion("  V2.4.0-beta.1  "))
+        #expect(prefixed == AppVersion("0.1.2"))
+        #expect(paddedPrerelease == AppVersion("2.4-beta.1"))
         #expect(AppVersion("release-1.2.3") == nil)
         #expect(AppVersion("1..2") == nil)
     }

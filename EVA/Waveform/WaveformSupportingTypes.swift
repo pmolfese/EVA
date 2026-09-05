@@ -999,6 +999,7 @@ nonisolated struct PSABuildJob: Sendable {
         }
 
         guard !jobs.isEmpty else { return nil }
+        let acceptedJobs = jobs
 
         // PASS 2 (parallel): each job independently extracts its own channel
         // slice and, if enabled, runs per-epoch bad-channel detection +
@@ -1008,9 +1009,9 @@ nonisolated struct PSABuildJob: Sendable {
         // job's data). Indexed by the job's PASS-1 position so PASS 3 can
         // reassemble in the original, deterministic order regardless of which
         // task happens to finish first.
-        var slices = [[[Float]]?](repeating: nil, count: jobs.count)
-        var jobBadChannels = [Set<Int>?](repeating: nil, count: jobs.count)
-        let total = jobs.count
+        var slices = [[[Float]]?](repeating: nil, count: acceptedJobs.count)
+        var jobBadChannels = [Set<Int>?](repeating: nil, count: acceptedJobs.count)
+        let total = acceptedJobs.count
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
         nonisolated(unsafe) var rejectedForTooManyBadChannels = 0
@@ -1045,8 +1046,8 @@ nonisolated struct PSABuildJob: Sendable {
                 // "computer locked up" cause).
                 nonisolated(unsafe) let out = out
                 nonisolated(unsafe) let badOut = badOut
-                evaConcurrentPerform(iterations: jobs.count) { jobIndex in
-                    let job = jobs[jobIndex]
+                evaConcurrentPerform(iterations: acceptedJobs.count) { jobIndex in
+                    let job = acceptedJobs[jobIndex]
                     let jobEndSample = job.startSample + epochLength
                     var slice = signal.data.map { Array($0[job.startSample..<jobEndSample]) }
                     if interpolatesBadChannelsPerEpoch {

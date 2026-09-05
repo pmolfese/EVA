@@ -71,8 +71,9 @@ final class GradientViewModel {
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
 
-    init(store: RecordingStore, defaults: ProcessingDefaults = .shared) {
+    init(store: RecordingStore, defaults: ProcessingDefaults? = nil) {
         self.store = store
+        let defaults = defaults ?? .shared
         // Seed from the global preferences so a newly-opened recording starts on
         // the user's preferred family and method, and on the backend they chose
         // once rather than one they have to re-pick per run.

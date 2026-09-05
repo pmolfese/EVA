@@ -17,7 +17,7 @@ import Foundation
 ///
 /// EVA historically used suffixes such as `0.1.2b`, so this deliberately
 /// accepts both those versions and conventional tags such as `v0.1.2-beta.1`.
-struct AppVersion: Comparable, Equatable {
+nonisolated struct AppVersion: Comparable, Equatable {
     let source: String
     private let components: [Int]
     private let prerelease: String?
@@ -71,7 +71,7 @@ struct AppVersion: Comparable, Equatable {
     }
 }
 
-struct GitHubRelease: Decodable, Equatable {
+nonisolated struct GitHubRelease: Decodable, Equatable {
     let tagName: String
     let name: String?
     let pageURL: URL

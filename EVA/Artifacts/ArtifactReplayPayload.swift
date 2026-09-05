@@ -143,20 +143,20 @@ nonisolated struct ArtifactReplayPayload: Codable, Sendable {
 // MARK: - Package I/O
 
 extension ArtifactReplayPayload {
-    static func encoder() -> JSONEncoder {
+    nonisolated static func encoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         return encoder
     }
 
-    static func decoder() -> JSONDecoder {
+    nonisolated static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
     }
 
-    func write(toPackage packageURL: URL) throws {
+    nonisolated func write(toPackage packageURL: URL) throws {
         let data = try ArtifactReplayPayload.encoder().encode(self)
         try data.write(to: packageURL.appendingPathComponent(ArtifactReplayPayload.fileName), options: .atomic)
     }
@@ -165,7 +165,7 @@ extension ArtifactReplayPayload {
     /// that cannot be trusted must not be *partly* trusted — the caller falls
     /// back to leaving the step for a human, which is what it did before this
     /// file existed.
-    static func read(fromPackage packageURL: URL) -> ArtifactReplayPayload? {
+    nonisolated static func read(fromPackage packageURL: URL) -> ArtifactReplayPayload? {
         let url = packageURL.appendingPathComponent(fileName)
         guard let data = try? Data(contentsOf: url),
               let payload = try? decoder().decode(ArtifactReplayPayload.self, from: data),

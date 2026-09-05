@@ -210,8 +210,54 @@ struct PreferencesView: View {
 
             EventAnchorPreferencesView()
                 .tabItem { Label("Events", systemImage: "flag") }
+
+            QuickLookPreferencesView()
+                .tabItem { Label("Quick Look", systemImage: "eye") }
         }
-        .frame(width: 480, height: 560)
+        .frame(width: 720, height: 560)
+    }
+}
+
+private struct QuickLookPreferencesView: View {
+    var body: some View {
+        Form {
+            Section {
+                ForEach(EVAPreviewFormat.allCases) { format in
+                    QuickLookFormatToggle(format: format)
+                }
+            } header: {
+                Text("Finder previews and thumbnails")
+            } footer: {
+                Text("Turning a format off makes EVA decline new Quick Look requests for it. Finder may use another installed provider or its generic preview. Existing cached thumbnails can remain visible until Finder refreshes them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
+private struct QuickLookFormatToggle: View {
+    let format: EVAPreviewFormat
+    @AppStorage private var isEnabled: Bool
+
+    init(format: EVAPreviewFormat) {
+        self.format = format
+        _isEnabled = AppStorage(
+            wrappedValue: true,
+            format.preferenceKey,
+            store: EVAQuickLookPreferences.defaults
+        )
+    }
+
+    var body: some View {
+        Toggle(isOn: $isEnabled) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(format.displayName)
+                Text(format.filenameExtensions).font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

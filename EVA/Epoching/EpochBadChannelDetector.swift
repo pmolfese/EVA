@@ -99,7 +99,7 @@ nonisolated struct EpochBadChannelThresholds: Codable, Sendable, Equatable {
 /// an O(n³) solve into an O(1) lookup for every epoch after the first one
 /// that sees a given bad-channel combination. Shared across the parallel
 /// per-epoch workers in `PSABuildJob.buildEpochs()`.
-final class SphericalSplineWeightCache: @unchecked Sendable {
+nonisolated final class SphericalSplineWeightCache: @unchecked Sendable {
     private var storage: [String: (indices: [Int], weights: [Double])] = [:]
     private let lock = NSLock()
 

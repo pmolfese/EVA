@@ -281,20 +281,20 @@ nonisolated struct ICAReplayPayload: Codable, Sendable, Hashable {
 // MARK: - Package I/O
 
 extension ICAReplayPayload {
-    static func encoder() -> JSONEncoder {
+    nonisolated static func encoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         return encoder
     }
 
-    static func decoder() -> JSONDecoder {
+    nonisolated static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
     }
 
-    func write(toPackage packageURL: URL) throws {
+    nonisolated func write(toPackage packageURL: URL) throws {
         let data = try ICAReplayPayload.encoder().encode(self)
         try data.write(to: packageURL.appendingPathComponent(ICAReplayPayload.fileName), options: .atomic)
     }
@@ -303,7 +303,7 @@ extension ICAReplayPayload {
     /// or when it declares a schema this build does not understand. A payload
     /// that cannot be trusted must not be *partly* trusted: the caller falls back
     /// to refitting, which the seeded solvers make a viable recovery.
-    static func read(fromPackage packageURL: URL) -> ICAReplayPayload? {
+    nonisolated static func read(fromPackage packageURL: URL) -> ICAReplayPayload? {
         let url = packageURL.appendingPathComponent(fileName)
         guard let data = try? Data(contentsOf: url),
               let payload = try? decoder().decode(ICAReplayPayload.self, from: data),

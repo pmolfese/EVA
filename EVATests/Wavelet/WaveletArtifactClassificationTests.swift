@@ -141,7 +141,7 @@ struct WaveletArtifactClassificationTests {
     /// A burst confined to one channel should survive the scan (that's the
     /// point of per-channel detection — it isn't diluted by the quiet
     /// channels around it) and be reported as channel-local.
-    @Test func isolatedChannelBurstSurvivesScanAsChannelLocal() {
+    @Test func isolatedChannelBurstSurvivesScanAsChannelLocal() throws {
         let sr = 500.0
         let n = 30_000
         let burstStart = 15_000
@@ -179,12 +179,12 @@ struct WaveletArtifactClassificationTests {
 
         let burstTime = Double(burstStart) / sr
         let match = result.candidates.first { abs($0.peakTimeSeconds - burstTime) < 0.5 }
-        let found = try? #require(match)
-        #expect(found != nil, "no candidate near \(burstTime)s in \(result.candidates.count) candidates")
-        if let found {
-            #expect(found.channelIndex == 5, "attributed to Ch \(found.channelIndex + 1)")
-            #expect(found.artifactType == .channelLocal, "got \(found.artifactType)")
-        }
+        let found = try #require(
+            match,
+            "no candidate near \(burstTime)s in \(result.candidates.count) candidates"
+        )
+        #expect(found.channelIndex == 5, "attributed to Ch \(found.channelIndex + 1)")
+        #expect(found.artifactType == .channelLocal, "got \(found.artifactType)")
     }
 
     /// A fast (high-frequency) burst sits above the downsampled pass's

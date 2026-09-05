@@ -24,8 +24,9 @@ final class WaveletReductionViewModel {
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
 
-    init(store: RecordingStore, defaults: ProcessingDefaults = .shared) {
+    init(store: RecordingStore, defaults: ProcessingDefaults? = nil) {
         self.store = store
+        let defaults = defaults ?? .shared
         // The backend is a global preference, not a per-run control. It still
         // falls back to the CPU on its own when no Metal device is present.
         config.useGPU = defaults.waveletUsesGPU && WaveletMetalBackend.isAvailable

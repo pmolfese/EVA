@@ -23,9 +23,9 @@ import AppKit
 import SwiftUI
 
 extension WaveformView {
-    static let resolveBundleIdentifier = "gov.nih.nimh.cmn.eva.resolve"
+    nonisolated static let resolveBundleIdentifier = "gov.nih.nimh.cmn.eva.resolve"
     /// Must match `SourceFitImporter.sidecarName` in EVA Resolve.
-    static let resolveSidecarName = "eva-resolve-fit.json"
+    nonisolated static let resolveSidecarName = "eva-resolve-fit.json"
 
     /// A source-model fit needs averaged categories and some electrode geometry —
     /// the true 3-D `coordinates.xml` if present, otherwise the 2-D `sensorLayout`
@@ -73,7 +73,7 @@ extension WaveformView {
     }
 
     /// Mirrors `SourceFitImporter.Sidecar` in EVA Resolve.
-    struct ResolveFitSidecar: Codable, Sendable {
+    nonisolated struct ResolveFitSidecar: Codable, Sendable {
         var centerSample: Int?
     }
 }

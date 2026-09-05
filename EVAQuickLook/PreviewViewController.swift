@@ -33,6 +33,9 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
         guard let format = EVAPreviewFormat.identify(url) else {
             throw EVAPreviewError.unsupportedFile(url)
         }
+        guard EVAQuickLookPreferences.isEnabled(format) else {
+            throw EVAPreviewError.disabledFormat(format)
+        }
         let content: AnyView
         switch format {
         case .mff:
@@ -58,6 +61,11 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
                 try MGHQuickLookReader.read(from: url)
             }.value
             content = AnyView(MGHPreviewView(model: model))
+        case .dicom:
+            let model = try await Task.detached(priority: .userInitiated) {
+                try DICOMQuickLookReader.read(from: url)
+            }.value
+            content = AnyView(DICOMPreviewView(model: model))
         }
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false

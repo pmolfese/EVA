@@ -677,7 +677,6 @@ struct SingleTrialAnalysisSheet: View {
                     }
                 }
                 let plottedSegments = viewModel.showsAllConditionsInButterfly ? averagedSegments : [segment]
-                let isRIDEWindowMode = viewModel.analysisMode == .ride
                 SingleTrialWindowPicker(
                     data: signal.data,
                     segments: plottedSegments,
@@ -1035,8 +1034,6 @@ struct SingleTrialAnalysisSheet: View {
             }
         }
     }
-
-    @ViewBuilder
 
     /// Seconds of signal an epoch figure spans, for the exported scale caption.
     /// Nil when there is nothing to measure, so the caption omits the sweep

@@ -38,13 +38,12 @@ struct EpochSNRDeterminismTests {
     }
 
     /// The load-bearing one: paired runs must agree exactly, including SME.
-    @Test func metricsAreReproducibleAcrossRuns() {
+    @Test func metricsAreReproducibleAcrossRuns() throws {
         let input = trials(count: 12)
         let a = EpochSNR.metrics(trials: input, baselineSampleCount: 32)
         let b = EpochSNR.metrics(trials: input, baselineSampleCount: 32)
 
-        let sme = try? #require(a.standardizedMeasurementError)
-        #expect(sme != nil, "SME should be computed at 12 trials")
+        _ = try #require(a.standardizedMeasurementError, "SME should be computed at 12 trials")
         #expect(a.standardizedMeasurementError == b.standardizedMeasurementError)
         #expect(a.plusMinusSNR == b.plusMinusSNR)
         #expect(a.baselineSNR == b.baselineSNR)
