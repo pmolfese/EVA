@@ -1463,6 +1463,151 @@ projects above, not treated as one parallel program.
 - [ ] Seed BCG Spatial PCA from a selected trajectory-strip frame, bypassing
   covariance/PCA derivation when the exemplar is too short or noisy.
 
+### Averages and topography
+
+#### F-1a — Topomap variability through marker size — **DEFERRED (planned 2026-09-05)**
+
+Add the “marker size change” display: keep the interpolated scalp colour as the
+mean voltage at the selected latency, and scale each electrode marker by that
+channel's trial-to-trial uncertainty. This is an **opt-in display feature**, off
+by default in Preferences. It is not a processing step, must not modify the
+signal, and does not belong in `eva.xml` or the history graph.
+
+**Recommended v1 contract.** Name the control **“Scale electrode markers by
+trial standard error”**, not the broader “variability.” For a category with
+`n` retained trials, at each channel and latency compute the unbiased sample
+standard deviation across trials and show `SEM = SD / sqrt(n)`. Standard error
+matches the proposed figure and communicates uncertainty in the displayed mean;
+standard deviation would answer a different question. The hover detail and
+legend must say **Trial SEM (µV)** and report `n`, so the encoding cannot be read
+as voltage magnitude or electrode importance.
+
+**What already exists.** This is assembly, not new rendering infrastructure:
+
+- `TopomapView` draws every electrode in one overlay loop after the cached IDW
+  field raster. Add an optional marker-encoding input there; `nil` must preserve
+  today's fixed 3.2-point dots byte-for-byte in appearance. Marker changes do
+  not belong in `FieldCacheKey`, because they do not change the interpolated
+  voltage image.
+- Interactive PSA retains the pre-average trials in
+  `EpochingViewModel.segmentedEpochSignal` / `segmentedEpochSegments`.
+- `channelInspectorTrialStandardErrorBands` already implements trial SEM from
+  sums, sums of squares, and counts. Extract the statistical kernel, but do not
+  reuse that path unchanged: it currently builds a selected-channel time band
+  and does not itself guarantee that every trial excluded from the displayed
+  average is also excluded from the SEM.
+- `EpochSNR.categorySNR` already walks the retained trial/category structure,
+  but its scalar metrics and channel-collapsed noise curve are not a substitute
+  for channel-by-sample SEM. Likewise, topomap Z scaling is spatial SD across
+  the values feeding the maps, not trial variability.
+- Preferences already use `EVAGeneralPreferences` keys plus `@AppStorage`.
+  Add an off-by-default key and a **Topography** section in General preferences.
+
+**Data and statistical pipeline.** Introduce a pure, testable
+`AverageTopomapVariability` calculator/store keyed by category. Its source is the
+same raw trial cache used to create the average, and its retained-index set is
+the union of manual bad-segment exclusions and resolved committed trial
+exclusions. For every retained trial, apply the same average reference and
+per-channel baseline correction used for the displayed average *before*
+accumulating `sum`, `sumSquares`, and `n`. Non-finite samples do not contribute;
+return unavailable unless at least two observations contribute to a cell.
+Per-epoch bad-channel interpolations already present in the raw epoch cache are
+part of the trial values. A channel patched only after global bad-channel
+escalation is not equivalent: either perform the same interpolation per trial or
+mark its SEM unavailable in v1. Do not silently report variability from the
+unpatched source beneath a patched mean.
+
+Compute/cache a `Float` channel × sample SEM matrix for each category when this
+preference is enabled, preferably beside the background SNR work. This avoids
+rescanning all trials on every latency-slider or joint-marker redraw. Invalidate
+it whenever the raw epoch cache, retained trial set, reference/baseline state,
+bad-channel decisions, or recording session changes. Calculation must remain off
+the main actor; publish only a session-checked completed result, following the
+existing SNR task pattern.
+
+**Visual encoding.** Add a small value object to `TopomapView` rather than making
+the generic renderer know about epochs or preferences. It should carry the
+per-channel values, physical unit/label, contributing count, and a shared scale
+domain. Draw hollow, high-contrast circles like the reference design. Preserve
+the existing channel hit radius and cluster highlight semantics; if both marker
+encoding and `highlightedChannels` are ever supplied, the yellow cluster ring
+must remain visually distinct outside the variability circle.
+
+- Map value to **marker area**, not diameter. Equivalently interpolate squared
+  radii, then take the square root; retain a small nonzero base dot for zero SEM.
+- Use one `0...maxSEM` domain across every condition in the currently displayed
+  set. A filmstrip shares one domain across all of its times and conditions;
+  joint maps share one across all visible marker boxes. Never auto-normalize
+  each map independently, which would make equal-sized circles mean different
+  values.
+- Clamp maximum diameter from the rendered map size and the layout's nearest-
+  neighbour spacing. Dense 128/256-channel nets and 130-point filmstrip tiles
+  must remain legible. If a robust percentile cap is later introduced, disclose
+  the cap in the legend rather than silently saturating outliers.
+- Add a compact three-circle legend (zero/small, midpoint, maximum) labeled
+  `Trial SEM (µV)`. Exported figures must include it whenever variable markers
+  are present. Hover text shows mean voltage, SEM, and `n`; unavailable cells
+  retain a neutral fixed dot and explicitly say why SEM is unavailable.
+
+**Surfaces in v1.** Wire the optional encoding through all views of a category
+mean so screen and export agree:
+
+- Averages workspace Topography grid and its figure export.
+- The averaged topography side panel and its export.
+- Joint-marker topomaps in Butterfly and Multi-Butterfly, including export.
+- Topography filmstrips and their export.
+
+All other `TopomapView` callers pass `nil` and remain unchanged: continuous
+recording maps, ICA component maps, artifact/BCG previews and templates,
+cluster-statistic maps, source-simulator fields, and other maps without a
+well-defined trial SEM. Difference maps are also deliberately outside v1. Their
+uncertainty needs paired covariance when conditions share observations, or the
+independent-samples formula when they do not; using either condition's SEM or
+blindly adding SEMs would be wrong.
+
+**Availability and persistence boundary.** The current MFF averaged-data path
+persists `contributingEpochCount`, but not channel-by-sample second moments.
+Count alone cannot reconstruct SEM. Therefore v1 shows variable markers only
+while the contributing single trials are available in memory and gracefully
+falls back to fixed dots after opening an average-only package. Do not estimate
+SEM from neighbouring channels or from the scalar SNR/noise curve.
+
+A later persistence phase may store `n` and a second-moment/M2 matrix alongside
+the average, with import/export versioning and backwards-compatible absence.
+Grand averages are also a later phase: their observational unit is normally the
+subject/file average rather than every underlying trial, inverse-variance
+weights require weighted variance and effective sample-size handling, and the
+current grand-average output retains only a channel-collapsed noise curve.
+
+**Tests and exit criteria.**
+
+- [ ] Pure SEM fixtures: known two-/three-trial values, zero variance, `n < 2`,
+  non-finite cells, unequal valid counts, and no negative variance from floating
+  point cancellation.
+- [ ] Retained-trial parity: manual and committed exclusions change both the
+  average and SEM source set identically.
+- [ ] Transform parity: average reference and baseline correction are applied
+  per trial; the resulting trial mean matches the displayed average within
+  tolerance before its SEM is accepted.
+- [ ] Cache invalidation and stale-task tests cover recording changes,
+  re-averaging, exclusions, reference/baseline toggles, and cancellation.
+- [ ] Marker-scaling tests verify area proportionality, finite clamping, a
+  shared multi-map domain, adaptive dense-layout limits, and exact fixed-dot
+  fallback when the encoding is absent.
+- [ ] View/export coverage verifies the preference defaults off, all v1 average
+  surfaces agree, a marker legend is present in exports, and unsupported or
+  reopened average-only data never displays invented SEM.
+- [ ] Visual QA on 32-, 64-, 128-, and 256-channel layouts at full pane, joint
+  box, and filmstrip sizes; circles must not obscure the voltage topology or
+  make electrode selection/cluster highlighting ambiguous.
+
+**Effort.** A main-pane, in-memory prototype is about one engineer-day. A
+production v1 across the listed screen/export surfaces, with caching, legend,
+fallbacks, and tests, is a **small-to-medium lift (about 3–5 engineering days)**.
+Persisting uncertainty through averaged exports and adding statistically correct
+difference/grand-average support is a separate **3–7 day** design and file-format
+follow-up, not a reason to hold the in-memory v1.
+
 ### App and pipeline polish
 
 - [ ] Reuse an already-open empty window for Finder open events if the stray

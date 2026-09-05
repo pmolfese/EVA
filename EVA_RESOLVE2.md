@@ -308,6 +308,38 @@ in parallel with R3 once R2.1 lands.
 Today's `SingleDipoleFit` is a diagnostic against simulated truth on a sphere. Turn it
 into the production ECD tool.
 
+### R5.0 Fit-mode UI direction — decided 2026-09-05, implementation not started
+
+Brainstormed three window layouts for the `.fit` side of the existing `Simulate | Fit`
+`Picker` in `SourceSimulatorWindowView` (that master switch already exists — see
+`SourceSimulatorController.WindowMode`; this is about what `SourceFitModeView` shows,
+not a new window). Sketches: `resolve-layouts.html` (published as a Claude artifact,
+not checked into the repo).
+
+**Chosen: "Workbench"** — three fixed panes, always visible, no drawer/mode switching:
+- Left: condition list (extends the per-condition concepts already in
+  `FitConditionPalette`; today there's no dedicated chooser control, just legends).
+- Center: the glass head, replaced by **three linked orthogonal views** — axial,
+  sagittal, coronal — stacked vertically, each a generic head silhouette (not real MRI)
+  around the same skull/brain rings. A dipole dragged in any one view updates one shared
+  `(x, y, z)` per source, so the other two views move with it immediately.
+- Right: waveform panel with a **raw / PCA / both** toggle (new — no PCA toggle exists
+  in EVAResolve's `Waveform` view today).
+
+Rejected: "Split Stage" (waveform + single head side by side, closest to today's shape
+but the head gets small on a laptop) and "Head-First Drawer" (head as hero, waveform in
+a bottom drawer — good for skimming many fits, worse for careful raw-vs-PCA QC).
+
+**Open questions to resolve before implementation:**
+- The sketch draws one fixed sphere behind all three head silhouettes (a sphere's
+  silhouette is a circle from any angle, so this is free in the mockup). The real head
+  model (R3's BEM, or even R2's ellipsoid) is not a sphere — each of the three views
+  would need its own slice of the actual geometry, not one shared circle.
+- Whether dragged sources clamp to a free sphere interior (as sketched) or to the real
+  source space / grey-white boundary once R4's `SourceGrid` exists.
+- Whether the views need a numeric (x/y/z or mm) readout for precision editing, or stay
+  drag-only.
+
 - [ ] **Head-model agnostic**: fit against any `ForwardOperator` (R3.4), including BEM.
 - [ ] **Stage 3c-perf** from ROADMAP: precomputed free lead-field grid per geometry,
   trilinear interpolation, Levenberg–Marquardt / Nelder–Mead refinement from the grid
