@@ -24,13 +24,13 @@ import simd
 
 extension HeadTransform {
     /// Reads the first coordinate-transform tag of an MNE `-trans.fif`.
-    static func readFIF(from url: URL) throws -> HeadTransform {
+    nonisolated static func readFIF(from url: URL) throws -> HeadTransform {
         let reader = try FIFReader(url: url)
         guard let tag = reader.first(kind: FIF.coordTrans) else { throw FIF.Error.missing("coordinate transform") }
         return try decode(tag)
     }
 
-    static func decode(_ tag: FIFTag) throws -> HeadTransform {
+    nonisolated static func decode(_ tag: FIFTag) throws -> HeadTransform {
         guard tag.data.count >= 8 + 36 + 12 else { throw FIF.Error.truncated }
         let from = CoordinateFrame(rawValue: tag.intValue) ?? .unknown
         let to = CoordinateFrame(rawValue: Int(tag.int32(at: 4))) ?? .unknown
@@ -85,7 +85,13 @@ nonisolated struct Digitization: Sendable, Equatable {
 
     /// Reads the Isotrak block of a `-fiducials.fif` / `-dig.fif` / raw file.
     static func readFIF(from url: URL) throws -> Digitization {
-        let reader = try FIFReader(url: url)
+        try read(FIFReader(url: url))
+    }
+
+    /// Same, from an already-open reader — a raw recording carries its
+    /// digitization inside the measurement info, and re-reading the file to get
+    /// at it would be silly.
+    static func read(_ reader: FIFReader) throws -> Digitization {
         let block = reader.blocks(kind: FIF.blockIsotrak).first ?? reader.tags
         var frame = CoordinateFrame.unknown
         var points: [DigPoint] = []
@@ -98,7 +104,11 @@ nonisolated struct Digitization: Sendable, Equatable {
             }
         }
         guard !points.isEmpty else { throw FIF.Error.missing("digitization points") }
-        return Digitization(frame: frame, points: points)
+        // An Isotrak block inside a recording's measurement info carries no
+        // frame tag: FIF defines those points to be in head coordinates, and
+        // that is what MNE assumes when it reads one. A standalone
+        // `-fiducials.fif` / `-dig.fif` states its frame and keeps it.
+        return Digitization(frame: frame == .unknown ? .head : frame, points: points)
     }
 
     func writeFIF(to url: URL) throws {

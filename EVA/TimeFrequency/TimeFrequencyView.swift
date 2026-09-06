@@ -23,12 +23,22 @@ import UniformTypeIdentifiers
 struct TimeFrequencyView: View {
     let signal: MFFSignalData
     let segments: [EpochSegment]
+    let layout: SensorLayout?
     @Bindable var epoching: EpochingViewModel
 
     @State private var render: TFRender?
     @State private var isComputing = false
     @State private var isExporting = false
     @State private var exportStatus: String?
+    @State private var overview: [TFOverviewRender] = []
+    /// Preserve completed all-channel work by settings. A display-measure
+    /// toggle should not discard the corresponding overview.
+    @State private var overviewCache: [String: [TFOverviewRender]] = [:]
+    @State private var isBuildingOverview = false
+    @State private var overviewProgress = 0.0
+    @State private var overviewStatus = ""
+    @State private var showsDetail = false
+    @State private var renderedJob: Job?
 
     private var categories: [String] {
         Array(Set(segments.map(\.category))).sorted()
@@ -80,6 +90,24 @@ struct TimeFrequencyView: View {
         )
     }
 
+    /// The all-channel cache does not depend on which sensor happens to be in
+    /// the detail pane. Clicking an electrode on the overview should therefore
+    /// update only that detail map, not discard the costly overview itself.
+    private var overviewJob: Job {
+        var result = job
+        result.channel = -1
+        return result
+    }
+
+    private var overviewCacheKey: String {
+        [
+            job.measure.rawValue, job.method.rawValue, String(job.timeBandwidth),
+            String(job.minHz), String(job.maxHz), String(job.count),
+            String(job.cyclesLow), String(job.cyclesHigh), job.baseline.rawValue,
+            job.signalToken, String(job.segmentCount)
+        ].joined(separator: "|")
+    }
+
     private var effectiveConditionA: String? {
         epoching.tfConditionA ?? categories.first
     }
@@ -93,16 +121,47 @@ struct TimeFrequencyView: View {
                     description: Text("Create PSA averages/epochs to explore power and phase-locking in the time-frequency domain.")
                 )
             } else {
-                HStack(spacing: 0) {
-                    heatmapArea
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    Divider()
-                    controlPanel
-                        .frame(width: 260)
-                }
+                TimeFrequencyOverviewView(
+                    overviews: overview,
+                    layout: layout,
+                    epoching: epoching,
+                    samplingRate: signal.samplingRate,
+                    selectedChannel: $epoching.tfSelectedChannelIndex,
+                    groups: ChannelSetStore.shared.allSets,
+                    conditions: categories,
+                    build: buildOverview,
+                    openDetail: openDetail,
+                    isBuilding: isBuildingOverview,
+                    progress: overviewProgress,
+                    progressStatus: overviewStatus,
+                    setupNeedsRebuild: overviewCache[overviewCacheKey] == nil
+                )
             }
         }
-        .task(id: job) { await recompute() }
+        // The explorer is the complete time-frequency workspace, including
+        // its pre-computation state.  Claim the available canvas so SwiftUI
+        // does not collapse it to the empty state's intrinsic height.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .textBackgroundColor))
+        .onChange(of: overviewJob) {
+            overview = overviewCache[overviewCacheKey] ?? []
+        }
+        .sheet(isPresented: $showsDetail) {
+            VStack(spacing: 8) {
+                HStack {
+                    Text("Channel detail").font(.headline)
+                    Spacer()
+                    Button("Done") { showsDetail = false }
+                }
+                .padding(.horizontal).padding(.top, 12)
+                heatmapArea
+            }
+            .frame(minWidth: 720, minHeight: 540)
+            .task(id: job) {
+                guard renderedJob != job else { return }
+                await recompute()
+            }
+        }
     }
 
     // MARK: Heatmap area
@@ -320,12 +379,88 @@ struct TimeFrequencyView: View {
         let signal = self.signal
         let segments = self.segments
         let job = self.job
+        let usesGPU = ProcessingDefaults.shared.timeFrequencyUsesGPU
         let result = await Task.detached(priority: .userInitiated) {
-            TimeFrequencyView.computeRender(signal: signal, segments: segments, job: job)
+            TimeFrequencyView.computeRender(signal: signal, segments: segments, job: job, usesGPU: usesGPU)
         }.value
 
         // Guard against a stale result landing after the inputs changed again.
-        if job == self.job { self.render = result }
+        if job == self.job {
+            self.render = result
+            self.renderedJob = job
+        }
+    }
+
+    private func openDetail(for channel: Int) {
+        if let condition = effectiveConditionA,
+           let source = overview.first(where: { $0.condition == condition }),
+           let preview = source.detailRender(for: channel) {
+            render = preview
+            renderedJob = job
+        } else {
+            renderedJob = nil
+        }
+        showsDetail = true
+    }
+
+    /// Full-channel decomposition is intentionally an explicit request.  On a
+    /// 256-sensor net it is far too expensive to repeat for every control
+    /// adjustment, whereas the single-channel detail plot remains immediate.
+    private func buildOverview(for conditions: [String]) {
+        guard !isBuildingOverview, !conditions.isEmpty else { return }
+        let signal = self.signal, segments = self.segments, context = exportContext
+        let names = channelNames, measure = epoching.tfMeasure
+        let usesGPU = ProcessingDefaults.shared.timeFrequencyUsesGPU
+        let cacheKey = overviewCacheKey
+        isBuildingOverview = true
+        overviewProgress = 0
+        let backend = usesGPU
+            ? (TimeFrequencyMetalBackend.isAvailable ? "Metal GPU requested" : "CPU (Metal unavailable)")
+            : "CPU"
+        overviewStatus = "0% · preparing \(backend)"
+        Task {
+            let channels = Array(signal.data.indices)
+            var renders: [TFOverviewRender] = []
+            for (index, condition) in conditions.enumerated() {
+                let start = Double(index) / Double(conditions.count)
+                overviewProgress = start
+                overviewStatus = "\(Int(start * 100))% · \(index + 1)/\(conditions.count) \(condition) · \(channels.count) channels"
+                await Task.yield()
+                let maps = await Task.detached(priority: .userInitiated) {
+                    TimeFrequencyExport.conditionMaps(
+                        signal: signal, segments: segments, condition: condition,
+                        channelIndices: channels, channelNames: names, context: context, usesGPU: usesGPU,
+                        progress: { fraction, stage in
+                            Task { @MainActor in
+                                let overall = (Double(index) + fraction) / Double(conditions.count)
+                                overviewProgress = overall
+                                overviewStatus = "\(Int(overall * 100))% · \(index + 1)/\(conditions.count) \(condition) · \(stage)"
+                            }
+                        }
+                    )
+                }.value
+                guard let maps else { continue }
+                renders.append(TFOverviewRender(
+                    condition: condition,
+                    channelIndices: maps.channelIndices, channelNames: maps.channelNames,
+                    grids: measure == .power ? maps.ersp : maps.itpc,
+                    frequenciesHz: maps.frequenciesHz, timesMs: maps.timesMs,
+                    measure: measure, isDifference: false
+                ))
+                let complete = Double(index + 1) / Double(conditions.count)
+                overviewProgress = complete
+                overviewStatus = "\(Int(complete * 100))% · \(index + 1)/\(conditions.count) complete"
+            }
+            // Leave the determinate build state visible while SwiftUI installs
+            // the large dashboard.  Otherwise the last data handoff briefly
+            // falls back to an indeterminate spinner at 100%.
+            overviewProgress = 0.99
+            overviewStatus = "99% · rendering overview"
+            overview = renders
+            overviewCache[cacheKey] = renders
+            await Task.yield()
+            isBuildingOverview = false
+        }
     }
 
     // MARK: Export (TF-3)
@@ -338,7 +473,7 @@ struct TimeFrequencyView: View {
         let maxTimeMs = render?.timesMs.last ?? 0
         return TimeFrequencyExport.Context(
             plan: plan, method: epoching.tfMethod, timeBandwidth: epoching.tfTimeBandwidth,
-            baselineMethod: epoching.tfBaselineMethod, bands: EEGFrequencyBand.restingDefaults,
+            baselineMethod: epoching.tfBaselineMethod, bands: ProcessingDefaults.shared.timeFrequencyBands,
             windows: TimeFrequencyExport.defaultWindows(maxTimeMs: maxTimeMs)
         )
     }
@@ -409,7 +544,7 @@ struct TimeFrequencyView: View {
         }
     }
 
-    private nonisolated static func computeRender(signal: MFFSignalData, segments: [EpochSegment], job: Job) -> TFRender? {
+    private nonisolated static func computeRender(signal: MFFSignalData, segments: [EpochSegment], job: Job, usesGPU: Bool) -> TFRender? {
         guard let conditionA = job.conditionA,
               job.maxHz > job.minHz, job.count >= 1 else { return nil }
 
@@ -423,7 +558,7 @@ struct TimeFrequencyView: View {
         guard !stackA.isEmpty else { return nil }
 
         let baseline = baselineSpec(for: stackA, method: job.baseline)
-        guard let resultA = TimeFrequencyEngine.ersp(trials: stackA.trials, samplingRate: stackA.samplingRate, plan: plan, baseline: baseline, method: job.method, timeBandwidth: job.timeBandwidth) else { return nil }
+        guard let resultA = TimeFrequencyEngine.ersp(trials: stackA.trials, samplingRate: stackA.samplingRate, plan: plan, baseline: baseline, method: job.method, timeBandwidth: job.timeBandwidth, usesGPU: usesGPU) else { return nil }
 
         let gridA = job.measure == .power ? resultA.ersp : resultA.itpc
 
@@ -433,7 +568,7 @@ struct TimeFrequencyView: View {
         if job.showsDifference, let conditionB = job.conditionB, conditionB != conditionA {
             let stackB = TimeFrequencyTrials.stack(signal: signal, segments: segments, category: conditionB, channelIndices: channels)
             if !stackB.isEmpty,
-               let resultB = TimeFrequencyEngine.ersp(trials: stackB.trials, samplingRate: stackB.samplingRate, plan: plan, baseline: baselineSpec(for: stackB, method: job.baseline), method: job.method, timeBandwidth: job.timeBandwidth) {
+               let resultB = TimeFrequencyEngine.ersp(trials: stackB.trials, samplingRate: stackB.samplingRate, plan: plan, baseline: baselineSpec(for: stackB, method: job.baseline), method: job.method, timeBandwidth: job.timeBandwidth, usesGPU: usesGPU) {
                 let gridB = job.measure == .power ? resultB.ersp : resultB.itpc
                 grid = subtract(gridA, gridB)
                 trialCountB = stackB.trials.count

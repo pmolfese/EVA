@@ -2,8 +2,8 @@
 
 **Goal:** EVA Resolve is a *focused sibling app* to EVA for EEG source analysis. It owns
 everything that is about *where in the head* a signal comes from: the Source Simulator,
-dipole fitting, distributed inverse imaging, head models built from a subject's NIfTI,
-electrode coregistration, and (long term) FEM. EVA stays the recording editor and cleaning
+dipole fitting, distributed inverse imaging, head models imported from MNE / OpenMEEG
+(and later DUNEuro), electrode coregistration, and (long term) FEM. EVA stays the recording editor and cleaning
 pipeline. Both share IO and math through `EVACore/`.
 
 Legend: `[x]` done · `[ ]` not started · `[~]` partially there today
@@ -60,7 +60,7 @@ EVACore/
 |---|---|---|
 | Analytic 3-shell spherical forward (60-term series, free-orientation lead field) | `EVACore/Core/Forward/SphericalForwardModel` | shipped, tested vs. ground truth |
 | Ellipsoidal forward | `EVACore/Core/Forward/EllipsoidalForwardModel` | shipped |
-| Constant-collocation double-layer BEM, Van Oosterom solid angles, Lynn–Timlake deflation, icosphere mesher | `EVACore/Core/Forward/BEMForwardModel` | shipped, converges to sphere; 3-shell 1:80 skull error 11%→1.65% by mesh level (no isolated-skull approach yet) |
+| Constant-collocation double-layer BEM, Van Oosterom solid angles, Lynn–Timlake deflation, icosphere mesher | `EVACore/Core/Forward/BEMForwardModel` | shipped, converges to sphere; 3-shell 1:80 skull error 11%→1.65% by mesh level. **Generation-side / inverse-crime use only** as of 2026-09-06; subject BEMs are imported (R3) |
 | `ForwardDipole`, `SimulatedSource`, `LeadField`, `EEGReference`, `Vector3D` | `EVACore/Core/Forward/ForwardTypes`, `EVACore/Simulation/SimulationForwardDomain` | shipped |
 | Single / multiple / spatio-temporal / shared-geometry ECD fit (grid search, sphere only) | `EVA/Simulation/SingleDipoleFit` | shipped (ROADMAP Stage 3c); slow (Stage 3c-perf not started) |
 | Source Simulator window: glass-brain, live scalp field, activations, noise + truth scoring, Fit mode | `EVA/App/SourceSimulatorWindowView`, `HeadProjectionView`, `ScalpFieldView`, `SourceButterflyView`, `SourceFitModeView`, `SourceTimelineView`; `EVA/Simulation/SourceSimulatorController`, `…Noise`, `…Artifacts` | shipped, Stages 1–3c |
@@ -208,69 +208,230 @@ read the Swift-written files back with nibabel / MNE.
 
 ---
 
-## R3 — BEM head models from a subject's NIfTI
+## R3 — BEM head models **imported** from MNE / OpenMEEG  *(direction changed 2026-09-06)*
 
-Target: a clean adult T1 in, a validated 3-shell BEM out, with no external tools. Skull
-is the hard tissue (dark like air on T1), so the pipeline mirrors what `mne
-watershed_bem` does rather than pure intensity segmentation. Port math from MNE-Python
-(BSD-3) and the published papers; FieldTrip/Brainstorm/FSL are design references only.
+**Decision.** EVA Resolve does not build BEMs. Segmentation, surface extraction and the
+BEM solve are mature, validated, freely licensed work in MNE-Python and OpenMEEG, and
+re-deriving them is the single largest cost in this plan for the least differentiated
+result. Resolve **imports** a finished head model and owns everything downstream of it:
+coregistration, the forward operator, dipole fitting, inverse imaging, and the
+simulate↔fit comparison. FEM (R6) follows the same rule, importing from DUNEuro.
 
-### R3.1 T1 preprocessing (`EVACore/Segmentation/`)
-- [ ] Intensity normalization and robust range clipping.
-- [ ] Bias-field correction: a lightweight N4-style iterative B-spline/polynomial fit is
-  enough for shell segmentation. Validate on BrainWeb phantoms (public, free).
-- [ ] Optional 1 mm isotropic resample.
+What survives from the old R3, and why:
 
-### R3.2 Three-compartment segmentation
-- [ ] **Head (outer skin) mask**: Otsu/percentile threshold on the normalized T1 →
-  largest connected component → hole fill → light closing. Straightforward.
-- [ ] **Brain mask**: implement the BET deformable-surface algorithm from Smith (2002)
-  — an icosphere inflated under local intensity forces. No FSL code (FSL's license is
-  non-commercial). Alternative/fallback: watershed on the gradient image seeded at the
-  centre of mass, which is what MNE's watershed BEM uses.
-- [ ] **Inner skull**: brain mask dilated by a few mm and smoothed.
-- [ ] **Outer skull**: head mask eroded by a minimum scalp thickness, constrained to lie
-  outside inner skull by a minimum skull thickness (MNE's approach). Not "real"
-  skull, but adequate for 3-shell BEM, which only needs three smooth nested boundaries.
-- [ ] Quality gates: nesting, minimum inter-surface distance, volume sanity ranges, and
-  a slice overlay in the UI so the user sees exactly where the boundaries landed.
-- [ ] Later accuracy upgrade (separate phase): atlas-based tissue priors by affine
-  registration of ICBM152 (needs a mutual-information affine registration step, which
-  is also what FreeSurfer-free skull estimation wants).
+- The NIfTI reader, `HeadTransform`, `SurfaceRegistration` and the `.evahead` package
+  (R2) are **not** wasted — an imported BEM is in the subject's MRI frame and is useless
+  until the electrodes are coregistered to it. That transform is the thing only Resolve
+  can compute, because only Resolve knows where the electrodes are.
+- `BEMForwardModel` (our own constant-element solver on icosphere shells) **stays**, in
+  its current role: a *generation-side* forward operator for inverse-crime studies
+  (SI-4 / R4.5), where the point is that it is not the analytic sphere. It is not on the
+  path to subject BEMs any more, so IPA and linear collocation drop off the plan.
+- Dropped entirely: T1 preprocessing/bias correction, BET/watershed brain extraction,
+  skull estimation, marching cubes, Taubin smoothing, quadric decimation, atlas priors.
 
-### R3.3 Surface extraction and mesh conditioning (`EVACore/Mesh/`)
-- [ ] Marching cubes on each mask → triangle mesh.
-- [ ] Taubin smoothing (does not shrink like plain Laplacian).
-- [ ] Quadric-edge-collapse decimation to a chosen triangle budget (default 2562/5120
-  per shell, matching the icosphere levels already validated).
-- [ ] Checks: closed, consistently oriented (outward normals), no self-intersections,
-  shells do not intersect each other. Fail loudly with a picture.
-- [ ] Optional: replace marching-cubes topology by projecting an icosphere onto each
-  mask boundary (gives regular, nested, guaranteed-genus-0 meshes; it is what the BEM
-  tests already use). Probably the better default for BEM.
+**What the user does outside EVA** (documented, with a copy-pasteable recipe):
 
-### R3.4 BEM solver upgrades (`EVACore/Core/Forward/`)
-- [ ] **Isolated Skull Approach** (Hämäläinen & Sarvas 1989) — needed for realistic
-  1:80 skull ratios; the current plain double-layer BEM is 11% at coarse mesh.
-- [ ] **Linear collocation** elements (MNE default) as an option next to the existing
-  constant elements.
-- [ ] Dense solve through LAPACK (`AccelerateCompat`), and cache the inverted system
-  matrix per head model so per-source evaluation is a matrix–vector product.
-- [ ] Electrode potentials by interpolation on the outer-surface triangle containing
-  the projected electrode, not nearest-centroid.
-- [ ] `ForwardOperator` protocol (`leadField(sources:) -> LeadField`) adopted by
-  spherical, ellipsoidal, BEM, and later FEM, so every consumer (fit, inverse,
-  simulator) is head-model-agnostic.
+```
+mne watershed_bem -s subject -d $SUBJECTS_DIR        # or FLASH / SimNIBS / FieldTrip
+python -c "import mne; mne.write_bem_solution('subject-bem-sol.fif',
+           mne.make_bem_solution(mne.make_bem_model('subject'), solver='mne'))"
+```
 
-### R3.5 Validation and bundled template
-- [ ] Extend the existing sphere-convergence tests to IPA and linear collocation.
-- [ ] `Tools/forward-compare/`: a small MNE-Python script and fixture (MNE sample
-  subject or ICBM152 surfaces) that dumps a lead field for a fixed dipole set;
-  Swift test asserts agreement within tolerance. This is the real cost of R3; budget
-  for it from the first commit.
-- [ ] Bundle ICBM152 template surfaces (scalp/outer skull/inner skull) as a resource
-  with attribution; verify the license of whichever surface set is shipped (ICBM152
-  is fine; fsaverage-derived surfaces carry the FreeSurfer license — avoid).
+`solver='openmeeg'` writes the same file with an OpenMEEG-computed solution, so one
+importer covers both engines. That is the whole external dependency.
+
+---
+
+### R3.1 Import the geometry (surfaces + conductivities)  *(done 2026-09-06)*
+
+- [x] MNE `-bem.fif` / `-head.fif` surfaces (`BEMSurface.readFIF`, R2.3) — already read
+  and written, fsaverage-validated.
+- [x] `BEMGeometry` (`EVACore/Core/Forward/BEMGeometry.swift`): shells stored
+  **inner → outer** whatever the file's order, one `CoordinateFrame`, and `Provenance`
+  (source file, format, solver, approximation, subject, note). Reads from every file
+  MNE writes surfaces into — geometry-only `-bem.fif`, `-head.fif`, and either
+  solver's `-bem-sol.fif` — and writes back in MNE's outer-first order.
+- [x] OpenMEEG native geometry (`EVACore/IO/OpenMEEG/OpenMEEGGeometry.swift`): `.geom`
+  + `.cond` with `.tri`, `.off` and `.bnd` meshes, read and written. Conductivities are
+  resolved through OpenMEEG's **signed** domain bounds (`-Interface` = the domain
+  inside it), not by name matching — an interface bounds two domains and only one of
+  them is the sigma FIF means.
+- [x] **OpenMEEG's `.tri` winding is the reverse of MNE's**, established by experiment,
+  not documentation: hand it a mesh wound MNE's way and it announces "Global
+  reorientation of interface …" and assembles a head matrix ~3e-4 different. The
+  per-vertex normals in the file are ignored; only the winding is read. EVA writes the
+  reversed winding and normalizes anything it reads back to outward normals.
+- [x] Quality gates, as a list of pass/warning/failure `Check`s the UI can show, never
+  a silent pass: closed and manifold (every edge in exactly two triangles), genus 0
+  (Euler characteristic), outward normals (signed volume), nesting inner ⊂ outer with a
+  2 mm separation warning, self-intersection (grid-accelerated Möller triangle pairs,
+  `EVACore/Geometry/TriangleMeshIntersection.swift`), conductivity positivity and skull
+  ordering, plausible compartment volumes (which is what catches millimetre input).
+- [x] Validated both directions: 14 tests in `EVATests/IO/BEMImportTests.swift` covering
+  the three FIF variants, each gate against a deliberately broken model, the OpenMEEG
+  round trip and all three mesh formats — and
+  `Tools/forward-compare/check_swift_openmeeg.py`, which loads what EVA wrote with
+  **OpenMEEG itself**: `selfCheck` and `is_nested` pass, `om.HeadMat` assembles
+  1126×1126, no reorientation.
+- [ ] fsaverage at ico2 legitimately trips the separation warning (outer skull within
+  1.5 mm of the scalp). Right answer, but the threshold wants a look against real ico4
+  models before the UI shows it to anyone.
+
+### R3.2 Import the BEM *solution*
+
+This is the part that makes the import worth doing: with the solution matrix in hand we
+can evaluate a forward field for **any** dipole, not just the source space someone else
+chose.
+
+> **Found 2026-09-06 while building the R3.5 fixtures: only `solver='mne'` solutions
+> are importable as *operators*.** MNE writes an OpenMEEG solution into the same
+> `-bem-sol.fif`, but it is a different object: the symmetric-BEM head-matrix inverse,
+> whose unknowns are vertex potentials *plus* normal currents on the inner interfaces
+> (486 → 1126 for a 162-vertex-per-shell head), stored packed as the n(n+1)/2 upper
+> triangle. MNE never evaluates it itself — `_compute_forwards_openmeeg` calls back
+> into libOpenMEEG (`DipSourceMat` / `Head2EEGMat` / `GainEEG`) to re-assemble the
+> source and sensor matrices. Reproducing that means implementing OpenMEEG's symmetric
+> BEM, which is exactly the work this redirection exists to avoid.
+>
+> **The geometry, though, always travels.** Verified on the fixtures: `-bem.fif`,
+> `-bem-sol-mne.fif` and `-bem-sol-openmeeg.fif` all carry the same BEM surfaces —
+> identical vertices, triangles and conductivities — because `write_bem_solution`
+> writes the surface blocks too. Only the solution matrix is solver-specific. So an
+> OpenMEEG file is never a dead end; R3.1 reads it like any other.
+>
+> That leaves an OpenMEEG user three routes, and the UI should offer all three by name:
+> (a) re-solve the same imported surfaces with `solver='mne'` — costs OpenMEEG's
+> coarse-mesh accuracy, keeps the general operator; (b) solve the imported surfaces
+> with EVA's own constant-element BEM, labelled as ours and approximate; (c) export a
+> `-fwd.fif` lead field from `make_forward_solution` and accept a fixed source space.
+> R3.7 is therefore no longer optional — see it below.
+
+- [x] `BEMSolution` (`EVACore/Core/Forward/BEMSolution.swift`): reads
+  `FIFF_BEM_POT_SOLUTION` (3110) and `FIFF_BEM_APPROX` — which is **3111, not 3108**;
+  our `FIF.bemApprox` constant said 3108, which is not a tag at all and had never been
+  exercised. The solver is not a tag either: MNE records a non-default one as JSON in
+  `FIFF_DESCRIPTION` (206) inside the BEM block.
+- [x] `FIFReader` now maps the file (`.mappedIfSafe`) and keeps tag payloads as slices
+  of that mapping instead of copying each one, plus `matrixDimensions()` and a
+  single-precision `floatValues()` — a 3×5120-vertex head is a 15360² float32 matrix
+  ≈ 940 MB and there is no accuracy in doubling it. Oversized solutions are refused
+  before allocation with a size estimate (2 GB default limit).
+- [x] Geometry + solution + approximation + `source_mult` / `field_mult` from
+  `_add_gamma_multipliers` (MNE, BSD-3), with the per-shell block ranges the matrix is
+  laid out in — **outer first**, the file's surface order, which is the reverse of how
+  `BEMGeometry` stores the shells. R3.3 has to keep that straight.
+- [x] An OpenMEEG solution is detected (solver tag, 1-D packed storage, `nsol` ≠ vertex
+  count) and declined *by name*, keeping its geometry and naming the three routes that
+  work — verified in the tests down to the wording.
+- [x] Isolated-skull (IPA) is already baked into whatever MNE wrote; we inherit it for
+  free and record the approximation in provenance.
+- [ ] Store the solution inside `.evahead` verbatim (the original FIF, not a re-encode),
+  so the package stays MNE-readable and the provenance chain is intact. Needs R2.4's
+  package to grow a slot; do it with R3.6.
+
+### R3.3 `BEMSolutionForwardModel` — evaluating the imported operator
+
+The forward evaluation, given a solution matrix, is small and well-defined; this is the
+only real math R3 still owns.
+
+- [ ] **Electrode specification**: project each electrode onto the scalp surface
+  (`SurfaceRegistration` already projects), take the barycentric weights of the hit
+  triangle, and build the per-electrode row `w · solution[triangle vertices, :]`,
+  scaled by the outer sigma. Replaces the current nearest-centroid interpolation and is
+  computed once per montage.
+- [ ] **Per-dipole evaluation**: infinite-medium potentials of the dipole at every BEM
+  vertex, contracted with the electrode rows — a `n_electrodes × n_vertices` by
+  `n_vertices × 3` product per dipole, i.e. one BLAS call for a whole source set.
+  Target: a 10 000-source free-orientation lead field in seconds, not minutes.
+- [ ] **Frames and units, stated once and tested**: surfaces arrive in MRI (metres);
+  dipoles and electrodes live in head frame; the `-trans.fif` from R2.4 is the bridge.
+  Output in EVA's µV/(nA·m) with the conversion asserted against MNE, not assumed.
+- [ ] Reference handling (`average` / `infinity`) identical to the spherical model, so
+  swapping head models never silently changes the reference.
+
+### R3.4 `ForwardOperator` protocol and wiring *(kept from the old R3.4)*
+
+- [ ] `ForwardOperator` with `leadField(sources:) -> ForwardLeadField`, adopted by
+  spherical, ellipsoidal, our icosphere BEM, and `BEMSolutionForwardModel` — so dipole
+  fit, inverse imaging and the simulator are head-model-agnostic.
+- [ ] Head-model picker wherever a forward is chosen (Source Simulator, Fit mode, R4),
+  with the chosen model's provenance carried into every result and export. A result
+  produced under an imported subject BEM must say so, next to one produced under a
+  sphere.
+- [ ] Lead-field cache keyed by (head model id, montage, reference, source set).
+
+### R3.5 Validation  *(reference fixtures built 2026-09-06)*
+
+- [x] `Tools/forward-compare/make_forward_fixtures.py` (+ `README.md`): for four cases —
+  fsaverage watershed surfaces and 72/79/85 mm spheres, at ico2 (committed, ~7 MB) and
+  ico3/ico4 (git-ignored `local/`) — writes `-bem.fif`, `-bem-sol-mne.fif`,
+  `-bem-sol-openmeeg.fif`, a 32-electrode `-dig.fif` projected onto the scalp, and
+  `-trans.fif`, then dumps MNE's EEG gain for 12 fixed dipoles into
+  `forward_reference.json`. Runs in ~20 s; bit-reproducible.
+- [x] Both solvers on identical geometry, and MNE's analytic sphere as a third opinion.
+  Relative Frobenius difference of the whole gain matrix:
+
+  | Comparison | ico2 | ico3 |
+  |---|---|---|
+  | MNE vs OpenMEEG, fsaverage | 24.3 % | 9.8 % |
+  | MNE vs OpenMEEG, spheres | 25.8 % | 8.0 % |
+  | MNE BEM vs analytic sphere | 18.3 % | 6.9 % |
+  | OpenMEEG BEM vs analytic sphere | 8.7 % | 2.0 % |
+
+  **The two engines are not interchangeable at coarse meshes** — OpenMEEG's symmetric
+  BEM is ~3× closer to the analytic sphere than MNE's linear collocation at the same
+  mesh. Both converge. Provenance must record which solver produced a head model, and
+  the UI should say so wherever a result is shown.
+- [x] **OpenMEEG is nondeterministic when threaded**: repeated `make_bem_solution(
+  solver='openmeeg')` runs differ by 3 % of peak gain at ico2, 0.8 % at ico3 (parallel
+  reduction order, amplified by a poorly conditioned coarse system). The generator sets
+  `OMP_NUM_THREADS=1` and computes each gain *from the solution file it just wrote*, so
+  the committed (solution, gain) pair answers exactly the question the importer has to:
+  given these bytes, what does MNE produce? Worth remembering before we ever quote an
+  OpenMEEG number to more than two significant figures.
+- [x] Conventions the Swift side must match, pinned in the README and the JSON: gain
+  scale 1e-3 from MNE's V/(A·m) to EVA's µV/(nA·m); `n_electrodes × 3·n_dipoles` x/y/z
+  layout; **reference is infinity, not average**; surfaces and dipoles in MRI metres
+  with electrodes in the head frame; and `make_bem_model` returns surfaces **outer
+  first**, the opposite of EVA's stacking — index by surface id, never by position.
+  (That one already cost a debugging round: projecting the electrodes onto `surfs[-1]`
+  put them 28 mm inside the skull.)
+- [ ] The Swift side of the comparison — target <0.1 % relative, the bar the FIF and
+  coregistration work already meets. Blocked on R3.2/R3.3.
+- [ ] Sphere cross-check against `SphericalForwardModel` itself (the fixture already
+  carries MNE's analytic gain for the same dipoles, so this is a Swift-side test).
+- [ ] Degenerate-input tests: non-nested surfaces, wrong coordinate frame, missing
+  trans, solution/geometry vertex-count mismatch, single-shell head.
+
+### R3.6 UI (Resolve head-model window)
+
+- [ ] An **Import BEM** step next to the existing MRI → Fiducials → Electrodes → Fit →
+  Save flow: pick a `-bem-sol.fif` (or geometry-only `-bem.fif`, or an OpenMEEG
+  `.geom`), see the shells rendered over the T1 slices and in the 3-D view, see the
+  quality-gate report, see which electrodes project where.
+- [ ] Clear failure text for the common cases: solution and surfaces disagree, geometry
+  is in the wrong frame, no trans yet, file is a bare geometry with no solution (offer
+  the `make_bem_solution` recipe, and offer to solve it with our own solver on the
+  imported surfaces — that path exists and should be labelled as approximate).
+- [ ] Documentation page: "Bringing a head model into EVA Resolve", with the MNE and
+  OpenMEEG recipes, what each file is for, and what EVA does and does not compute.
+
+### R3.7 Precomputed lead-field import  *(promoted 2026-09-06 — this is the OpenMEEG path)*
+
+- [ ] Import MNE `-fwd.fif`: the source space (positions + orientations), the gain
+  matrix, channel names, coordinate frame and `source_ori`. Needs the FIF reader
+  extended to the forward-solution blocks, which is more tags but no new math.
+- [ ] Also accept a plain matrix (`.npy` / `.mat` / TSV) plus a source-position file,
+  for tools that do not speak FIF. This is the door R6/DUNEuro walks through, and it
+  makes FieldTrip and SimNIBS output usable without EVA understanding their internals.
+- [ ] A lead field fixes the source space at export time, so the consumers that want an
+  arbitrary dipole (R5's fitting) either interpolate within the grid or refuse. Say
+  which, in the UI, per consumer — an imported lead field is not a drop-in for a
+  solution and must not silently behave like one.
+- [ ] Solve on imported surfaces with our own BEM (R3.1 geometry → `BEMForwardModel`)
+  for users who have surfaces but no MNE install. Cheap to expose once R3.1 lands;
+  label it as our constant-element solver, not MNE's.
 
 ---
 
@@ -434,67 +595,78 @@ a bottom drawer — good for skimming many fits, worse for careful raw-vs-PCA QC
 
 ---
 
-## R6 — FEM (long term)
+## R6 — FEM: **import from DUNEuro** (long term)
 
-Decision to record now so R2–R3 do not paint us into a corner:
+Same decision as R3, one step further out. Writing a hex-FEM solver, a 6-tissue
+segmentation and an anisotropy pipeline is a multi-year project that SimBio/DUNEuro and
+SimNIBS have already done under free licenses; EVA's contribution is not a better
+solver.
 
-- [ ] **Hexahedral, voxel-based FEM** (as in SimBio/DUNEuro's hex mode, optionally with
-  geometry-adapted node shifting), not tetrahedral. It needs no volumetric mesher, so
-  it sidesteps TetGen (non-free) and Gmsh (GPL, heavy). The segmentation from R3.2 is
-  the mesh.
-- [ ] Segmentation extension to 5–6 tissues (scalp, compact skull, spongy skull, CSF,
-  grey, white). Realistically atlas-prior based (the R3.2 "later" item) — this is the
-  bulk of the FEM effort, not the solver.
-- [ ] Solver: assemble the sparse SPD stiffness matrix; solve with Accelerate Sparse
-  Solvers (preconditioned CG); **reciprocity** — one solve per electrode giving a
-  transfer matrix, then any source is a dot product. Venant or partial-integration
-  source model.
-- [ ] Optional anisotropy from DTI tensors (rare in EEG sessions; keep the interface,
-  defer the implementation).
-- [ ] Validation: 4-layer analytic sphere; then the BEM-vs-FEM comparison on the same
-  subject, which is itself a Tier 6.5 inverse-crime study.
-- FDM on the voxel grid is the fallback if hex FEM proves too slow at 1 mm.
+- [ ] **Import a DUNEuro transfer matrix / lead field** for a source space the user
+  defines outside EVA (`.npy` / `.mat` / DUNEuro's own output plus a source-position
+  file). This is R3.7's precomputed-lead-field importer, generalized — build it once,
+  and BEM-from-anywhere and FEM-from-DUNEuro both arrive through the same door.
+- [ ] Carry FEM provenance (tissue set, conductivities, anisotropy, solver settings) as
+  opaque metadata into every result and export, so a FEM result is never mistaken for a
+  BEM or sphere result.
+- [ ] Optional viewer support for a labelled volume (the FEM's segmentation) as an
+  overlay on the T1, since we already read NIfTI — display only, not computation.
+- [ ] Validation: the same fixed dipole set through sphere, imported BEM and imported
+  FEM, reported as a head-model sensitivity table. That comparison *is* the deliverable
+  (Tier 6.5 inverse-crime study); the solver behind each column is not.
+- Only reconsider writing a solver if a concrete need appears that no external tool
+  serves — and record that need here before writing a line of it.
 
 ---
 
 ## Sequencing and parallelism
 
 ```
-R0 done ─► R1 (target + move simulator)  ─► R2.1 NIfTI/GIFTI into core
-                                         │
-                       ┌─────────────────┴──────────────────┐
-                       ▼                                    ▼
-             R2.2–R2.4 electrodes + coreg         R4 inverse on sphere grid
-                       │                                    │
-                       ▼                                    ▼
-             R3 BEM from NIfTI  ─────────────────► R4 on BEM, R5 on BEM
-                       │
-                       ▼
-             R6 FEM (hex, atlas-prior segmentation)
+R0 done ─► R1 done ─► R2.1–R2.3 done ─► R2.4 coreg UI (brainstorm pending)
+                                       │
+                     ┌─────────────────┴──────────────────┐
+                     ▼                                    ▼
+       R3.1 import geometry + gates          R4 inverse on sphere grid
+                     ▼                                    │
+       R3.2 import solution                               │
+                     ▼                                    │
+       R3.3 BEMSolutionForwardModel ──► R3.4 ForwardOperator ──► R4 on BEM, R5 on BEM
+                     ▼                                    │
+       R3.5 validation vs. MNE + OpenMEEG                 │
+                     ▼                                    ▼
+       R3.6 import UI                       R3.7 lead-field import ──► R6 FEM (DUNEuro)
 ```
 
-- R1 is a pure move; do it next and keep it to one PR-sized change.
-- R2.1 is small and unblocks both branches.
-- R4 (sphere) and R2.2–R2.4 are independent and can interleave. R4 on the sphere is
-  shippable science on its own (ROADMAP Tier 6's argument) and does not wait on R3.
-- R3 is the long pole; R3.5 validation tooling should be built alongside R3.2, not
-  after.
-- R5's perf work (3c-perf) can be done any time after R1; its PCA/multi-dipole work
-  wants R3.4's `ForwardOperator` first.
+- R3.5's `Tools/forward-compare/` fixtures were generated **first**, before R3.2, so
+  R3.2/R3.3 are now a matter of driving one number to zero against a committed
+  reference gain matrix.
+- R3.1 and R3.2 are independent of each other's UI; R3.3 needs both.
+- R4 (sphere) does not wait on any of R3, and R3.4 is what lets R4 switch head models.
+- R5's perf work (3c-perf) can be done any time; its PCA/multi-dipole work wants R3.4's
+  `ForwardOperator` first.
+- R3 is no longer the long pole. The remaining long pole is R4/R5 science plus R2.4's
+  UI design.
 
 ## Membership map (what lives where when this is done)
 
 | Folder | Targets | Content |
 |---|---|---|
-| `EVACore/` | EVA, EVASimulate, EVA Resolve, tests | IO (MFF, NIfTI, GIFTI, electrode files), forward models, segmentation, meshing, registration math, source grids, inverse operators, dipole fit, simulation generators |
+| `EVACore/` | EVA, EVASimulate, EVA Resolve, tests | IO (MFF, NIfTI, GIFTI, FIF, OpenMEEG, electrode files), forward models (analytic + imported BEM/FEM operators), registration math, source grids, inverse operators, dipole fit, simulation generators |
 | `EVA/` | EVA | recording editor, cleaning pipeline (incl. surrogate-source BCG), epoching, exports; "Fit Source Model" launcher only |
 | `EVAResolve/` | EVA Resolve | head-model documents, coregistration UI, Source Simulator, dipole-fit UI, inverse-imaging UI |
 | `Tools/EVASimulate/` | EVASimulate | CLI generation/scoring; gains inverse scoring from `EVACore/` for free |
 
 ## Licensing notes to keep honest
 
-- Port from MNE-Python (BSD-3) and from papers (BET: Smith 2002; IPA: Hämäläinen &
-  Sarvas 1989; BEM: Geselowitz / Van Oosterom; hex FEM: Wolters et al.). No code from
-  FSL, FreeSurfer, FieldTrip, EEGLAB, Brainstorm, or TetGen.
+- Port from MNE-Python (BSD-3) and from papers (BEM: Geselowitz / Van Oosterom;
+  Umeyama; ICP). No code from FSL, FreeSurfer, FieldTrip, EEGLAB, Brainstorm, or
+  TetGen. BET / watershed / IPA / hex-FEM ports are off the plan as of 2026-09-06.
+- **OpenMEEG is GPL-3.** We never link it or copy from it — we read and write file
+  formats it defines and let the user run their own OpenMEEG (usually through MNE).
+  Reading a file format is not a derivative work; keep it that way and note it in
+  `THIRD_PARTY_NOTICES.md` alongside the FIF reader.
+- An imported head model carries someone else's license and someone else's subject
+  data. Provenance travels with it; nothing gets re-bundled as an EVA template unless
+  its license explicitly allows it (ICBM152 does; fsaverage-derived surfaces do not).
 - Bundled templates: ICBM152 (free with attribution). Avoid fsaverage-derived surfaces.
 - Record every ported algorithm in `THIRD_PARTY_NOTICES.md` as it lands.

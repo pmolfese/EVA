@@ -167,12 +167,21 @@ nonisolated enum TimeFrequencyEngine {
         plan: TFFrequencyPlan,
         baseline: TFBaselineSpec,
         method: TFMethod = .morlet,
-        timeBandwidth: Double = 4.0
+        timeBandwidth: Double = 4.0,
+        usesGPU: Bool = false
     ) -> TimeFrequencyResult? {
-        let (power, itpc) = decompose(
-            trials: trials, samplingRate: samplingRate, plan: plan,
-            method: method, timeBandwidth: timeBandwidth
-        )
+        let power: [[Double]]
+        let itpc: [[Double]]
+        if usesGPU, method == .morlet,
+           let gpu = TimeFrequencyMetalBackend.shared?.decompose(trials: trials, samplingRate: samplingRate, plan: plan) {
+            power = gpu.meanPower
+            itpc = gpu.itpc
+        } else {
+            (power, itpc) = decompose(
+                trials: trials, samplingRate: samplingRate, plan: plan,
+                method: method, timeBandwidth: timeBandwidth
+            )
+        }
         guard !power.isEmpty else { return nil }
 
         let normalized = normalize(power: power, baseline: baseline)

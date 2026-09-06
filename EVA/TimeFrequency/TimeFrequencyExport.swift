@@ -42,6 +42,10 @@ nonisolated enum TimeFrequencyExport {
     /// Per-channel maps for one condition, plus the shared axes.
     struct ConditionMaps: Sendable {
         var condition: String
+        /// Original zero-based signal-channel indices.  Channel labels alone
+        /// are not enough to reconnect an exported/decomposed map to a scalp
+        /// layout when a recording has skipped signal rows.
+        var channelIndices: [Int]
         var channelNames: [String]
         /// `ersp[channel][freq][time]` — baseline-normalized power.
         var ersp: [[[Double]]]
@@ -53,41 +57,127 @@ nonisolated enum TimeFrequencyExport {
 
     // MARK: Per-channel computation
 
-    /// Computes ERSP + ITPC for every channel of one condition. Heavy (loops the
-    /// engine over channels) — intended for an explicit export action.
+    /// Computes ERSP + ITPC for every channel of one condition. Channels are
+    /// independent, so this uses a bounded CPU worker pool rather than making
+    /// a 128/256-sensor export wait for one serial decomposition at a time.
+    /// Results are put back into the caller's channel order before returning.
+    ///
+    /// This remains synchronous because both export and the all-channel viewer
+    /// call it from an explicitly detached background task.
     static func conditionMaps(
         signal: MFFSignalData,
         segments: [EpochSegment],
         condition: String,
         channelIndices: [Int],
         channelNames: [String],
-        context: Context
+        context: Context,
+        usesGPU: Bool = false,
+        progress: (@Sendable (Double, String) -> Void)? = nil
     ) -> ConditionMaps? {
+        struct ChannelResult {
+            var order: Int
+            var channel: Int
+            var name: String
+            var ersp: [[Double]]
+            var itpc: [[Double]]
+            var frequenciesHz: [Double]
+            var timesMs: [Double]
+        }
+
+        if usesGPU, context.method == .morlet,
+           let gpu = gpuConditionMaps(
+            signal: signal, segments: segments, category: condition,
+            channelIndices: channelIndices, channelNames: channelNames, context: context, progress: progress
+           ) {
+            return gpu
+        }
+
+        // Keep one performance core available for the UI/OS. concurrentPerform
+        // provides a pool rather than creating one thread per channel.
+        let workers = min(channelIndices.count, max(1, ProcessInfo.processInfo.activeProcessorCount - 1))
+        let lock = NSLock()
+        var completed: [ChannelResult] = []
+        completed.reserveCapacity(channelIndices.count)
+
+        DispatchQueue.concurrentPerform(iterations: workers) { worker in
+            var order = worker
+            while order < channelIndices.count {
+                let channel = channelIndices[order]
+                let stack = TimeFrequencyTrials.stack(
+                    signal: signal, segments: segments, category: condition, channelIndices: [channel]
+                )
+                if !stack.isEmpty {
+                    let baseline = baselineSpec(for: stack, method: context.baselineMethod)
+                    if let result = TimeFrequencyEngine.ersp(
+                        trials: stack.trials, samplingRate: stack.samplingRate, plan: context.plan,
+                        baseline: baseline, method: context.method, timeBandwidth: context.timeBandwidth
+                    ) {
+                        let timesMs = (0..<stack.timeCount).map {
+                            Double($0 - stack.stimulusOffsetSamples) / stack.samplingRate * 1000.0
+                        }
+                        let entry = ChannelResult(
+                            order: order, channel: channel,
+                            name: channelNames.indices.contains(channel) ? channelNames[channel] : "Ch \(channel + 1)",
+                            ersp: result.ersp, itpc: result.itpc,
+                            frequenciesHz: result.frequenciesHz, timesMs: timesMs
+                        )
+                        lock.lock(); completed.append(entry); lock.unlock()
+                    }
+                }
+                order += workers
+            }
+        }
+
+        let ordered = completed.sorted { $0.order < $1.order }
+        guard let first = ordered.first else { return nil }
+        return ConditionMaps(
+            condition: condition,
+            channelIndices: ordered.map(\.channel), channelNames: ordered.map(\.name),
+            ersp: ordered.map(\.ersp), itpc: ordered.map(\.itpc),
+            frequenciesHz: first.frequenciesHz, timesMs: first.timesMs
+        )
+    }
+
+    /// GPU path for the all-channel explorer.  The whole channel × trial stack
+    /// reaches Metal as one batch, so it avoids a command-buffer round trip per
+    /// sensor.  If the stack is irregular or too large for the current device,
+    /// nil deliberately routes the caller to the validated CPU implementation.
+    private static func gpuConditionMaps(
+        signal: MFFSignalData, segments: [EpochSegment], category: String,
+        channelIndices: [Int], channelNames: [String], context: Context,
+        progress: (@Sendable (Double, String) -> Void)?
+    ) -> ConditionMaps? {
+        guard let backend = TimeFrequencyMetalBackend.shared else { return nil }
+        var stacks: [TimeFrequencyTrials.Stack] = []
+        var names: [String] = []
+        var indices: [Int] = []
+        for (order, channel) in channelIndices.enumerated() {
+            let stack = TimeFrequencyTrials.stack(signal: signal, segments: segments, category: category, channelIndices: [channel])
+            guard !stack.isEmpty else { continue }
+            stacks.append(stack)
+            indices.append(channel)
+            names.append(channelNames.indices.contains(channel) ? channelNames[channel] : "Ch \(channel + 1)")
+            progress?(0.10 * Double(order + 1) / Double(max(channelIndices.count, 1)), "preparing channels")
+        }
+        guard let first = stacks.first,
+              stacks.allSatisfy({ $0.trials.count == first.trials.count && $0.timeCount == first.timeCount && $0.samplingRate == first.samplingRate }) else { return nil }
+
         var ersp: [[[Double]]] = []
         var itpc: [[[Double]]] = []
-        var frequenciesHz = context.plan.frequenciesHz
-        var timesMs: [Double] = []
-        var names: [String] = []
-
-        for channel in channelIndices {
-            let stack = TimeFrequencyTrials.stack(signal: signal, segments: segments, category: condition, channelIndices: [channel])
-            guard !stack.isEmpty else { continue }
-            let baseline = baselineSpec(for: stack, method: context.baselineMethod)
-            guard let result = TimeFrequencyEngine.ersp(
-                trials: stack.trials, samplingRate: stack.samplingRate, plan: context.plan,
-                baseline: baseline, method: context.method, timeBandwidth: context.timeBandwidth
-            ) else { continue }
-
-            ersp.append(result.ersp)
-            itpc.append(result.itpc)
-            frequenciesHz = result.frequenciesHz
-            if timesMs.isEmpty {
-                timesMs = (0..<stack.timeCount).map { Double($0 - stack.stimulusOffsetSamples) / stack.samplingRate * 1000.0 }
+        let batchSize = 16
+        for start in stride(from: 0, to: stacks.count, by: batchSize) {
+            let end = min(start + batchSize, stacks.count)
+            guard let decomposed = backend.decompose(stacks: Array(stacks[start..<end]), plan: context.plan) else { return nil }
+            for (stack, result) in zip(stacks[start..<end], decomposed) {
+                let baseline = baselineSpec(for: stack, method: context.baselineMethod)
+                ersp.append(TimeFrequencyEngine.normalize(power: result.meanPower, baseline: baseline))
+                itpc.append(result.itpc)
             }
-            names.append(channelNames.indices.contains(channel) ? channelNames[channel] : "Ch \(channel + 1)")
+            progress?(0.10 + 0.90 * Double(end) / Double(stacks.count), "Metal batch \(start / batchSize + 1)")
         }
-        guard !ersp.isEmpty else { return nil }
-        return ConditionMaps(condition: condition, channelNames: names, ersp: ersp, itpc: itpc, frequenciesHz: frequenciesHz, timesMs: timesMs)
+        let timesMs = (0..<first.timeCount).map { Double($0 - first.stimulusOffsetSamples) / first.samplingRate * 1000.0 }
+        return ConditionMaps(condition: category, channelIndices: indices, channelNames: names,
+                             ersp: ersp, itpc: itpc, frequenciesHz: context.plan.frequenciesHz, timesMs: timesMs)
     }
 
     private static func baselineSpec(for stack: TimeFrequencyTrials.Stack, method: TFBaselineMethod) -> TFBaselineSpec {

@@ -23,6 +23,19 @@ enum TopomapColorBarPlacement {
     case none
 }
 
+@MainActor
+private enum TopomapRasterCache {
+    static var images: [String: CGImage] = [:]
+
+    static func image(for key: String, make: () -> CGImage?) -> CGImage? {
+        if let cached = images[key] { return cached }
+        guard let image = make() else { return nil }
+        if images.count >= 256 { images.removeAll(keepingCapacity: true) }
+        images[key] = image
+        return image
+    }
+}
+
 /// Z-score color scaling for a topomap: color spans mean ± sigma·sd.
 struct TopomapZScaling: Equatable {
     let mean: Double
@@ -55,6 +68,8 @@ struct TopomapView: View {
     let colorBarPlacement: TopomapColorBarPlacement
     let minimumMapHeight: CGFloat
     let contentPadding: CGFloat
+    let fieldResolution: Int
+    let showsElectrodes: Bool
     /// Resolves a channel index to its display name, for the hover tooltip.
     /// When nil, the tooltip falls back to "Ch <index+1>".
     let channelName: ((Int) -> String)?
@@ -64,6 +79,10 @@ struct TopomapView: View {
     /// Optional emphasis ring, used by cluster-statistics maps to identify the
     /// sensors that participate in the selected corrected cluster.
     let highlightedChannels: Set<Int>
+    /// Limits drawing, interpolation, hover, and hit-testing to an explicit
+    /// channel group.  This lets analyses display a saved ROI without the
+    /// omitted sensors silently influencing the interpolated field.
+    let visibleChannels: Set<Int>?
 
     @State private var hoveredChannel: Int?
     /// The expensive part — cached at a FIXED raster resolution, independent of
@@ -88,6 +107,7 @@ struct TopomapView: View {
         let colorRange: ClosedRange<Double>?
         let zScaling: TopomapZScaling?
         let usesPositiveSequentialScale: Bool
+        let visibleChannels: Set<Int>?
     }
 
     /// Resolution of the cached field raster, in pixels per side. Independent
@@ -111,9 +131,12 @@ struct TopomapView: View {
         colorBarPlacement: TopomapColorBarPlacement = .bottom,
         minimumMapHeight: CGFloat = 260,
         contentPadding: CGFloat = 16,
+        fieldResolution: Int = TopomapView.fieldRasterResolution,
+        showsElectrodes: Bool = true,
         channelName: ((Int) -> String)? = nil,
         onTapChannel: ((Int) -> Void)? = nil,
-        highlightedChannels: Set<Int> = []
+        highlightedChannels: Set<Int> = [],
+        visibleChannels: Set<Int>? = nil
     ) {
         self.layout = layout
         self.values = values
@@ -128,9 +151,12 @@ struct TopomapView: View {
         self.channelName = channelName
         self.onTapChannel = onTapChannel
         self.highlightedChannels = highlightedChannels
+        self.visibleChannels = visibleChannels
         self.colorBarPlacement = colorBarPlacement
         self.minimumMapHeight = minimumMapHeight
         self.contentPadding = contentPadding
+        self.fieldResolution = max(fieldResolution, 16)
+        self.showsElectrodes = showsElectrodes
     }
 
     private let interpolationPower: Double = 3
@@ -173,8 +199,18 @@ struct TopomapView: View {
             scale: scale,
             colorRange: colorRange,
             zScaling: zScaling,
-            usesPositiveSequentialScale: usesPositiveSequentialScale
+            usesPositiveSequentialScale: usesPositiveSequentialScale,
+            visibleChannels: visibleChannels
         )
+    }
+
+    private var rasterCacheKey: String {
+        let geometry = layout.positions.map { "\($0.channelIndex):\($0.x):\($0.y)" }.joined(separator: ";")
+        let samples = values.map { String($0.bitPattern) }.joined(separator: ",")
+        let range = colorRange.map { "\($0.lowerBound):\($0.upperBound)" } ?? "auto"
+        let z = zScaling.map { "\($0.mean):\($0.sd):\($0.sigma)" } ?? "none"
+        let visible = visibleChannels?.sorted().map(String.init).joined(separator: ",") ?? "all"
+        return "\(geometry)|\(samples)|\(scale)|\(range)|\(z)|\(usesPositiveSequentialScale)|\(visible)|\(fieldResolution)"
     }
 
     /// Recomputes the field raster only when its key actually changed —
@@ -184,7 +220,7 @@ struct TopomapView: View {
     private func refreshFieldRasterIfNeeded() {
         let key = fieldCacheKey
         if fieldRaster?.key == key { return }
-        guard let image = renderFieldImage() else {
+        guard let image = TopomapRasterCache.image(for: rasterCacheKey, make: renderFieldImage) else {
             fieldRaster = nil
             return
         }
@@ -230,7 +266,7 @@ struct TopomapView: View {
     private func nearestChannel(at location: CGPoint, in size: CGSize) -> Int? {
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         let radius = min(size.width, size.height) / 2 * 0.86
-        let hitRadius: CGFloat = 14
+        let hitRadius: CGFloat = 18
 
         var best: (channel: Int, distanceSquared: CGFloat)?
         for sensor in activeSensors {
@@ -311,7 +347,7 @@ struct TopomapView: View {
     }
 
     private var activeSensors: [SensorPosition] {
-        layout.positions.filter { $0.channelIndex < values.count }
+        layout.positions.filter { $0.channelIndex < values.count && (visibleChannels?.contains($0.channelIndex) ?? true) }
     }
 
     private func value(for sensor: SensorPosition) -> Double? {
@@ -365,19 +401,21 @@ struct TopomapView: View {
         drawNoseAndEars(in: &context, center: center, radius: radius)
 
         // Electrode markers. Cluster members receive a high-contrast ring;
-        // ordinary topomaps pass the default empty set and remain unchanged.
-        for sensor in sensors {
-            let point = CGPoint(
-                x: center.x + CGFloat(sensor.x) * radius,
-                y: center.y - CGFloat(sensor.y) * radius
-            )
-            if highlightedChannels.contains(sensor.channelIndex) {
-                let ring = CGRect(x: point.x - 4.5, y: point.y - 4.5, width: 9, height: 9)
-                context.fill(Path(ellipseIn: ring), with: .color(.yellow.opacity(0.95)))
-                context.stroke(Path(ellipseIn: ring), with: .color(.black.opacity(0.85)), lineWidth: 1.2)
+        // dense dashboard mini-maps can omit dots so the field remains legible.
+        if showsElectrodes {
+            for sensor in sensors {
+                let point = CGPoint(
+                    x: center.x + CGFloat(sensor.x) * radius,
+                    y: center.y - CGFloat(sensor.y) * radius
+                )
+                if highlightedChannels.contains(sensor.channelIndex) {
+                    let ring = CGRect(x: point.x - 4.5, y: point.y - 4.5, width: 9, height: 9)
+                    context.fill(Path(ellipseIn: ring), with: .color(.yellow.opacity(0.95)))
+                    context.stroke(Path(ellipseIn: ring), with: .color(.black.opacity(0.85)), lineWidth: 1.2)
+                }
+                let dot = CGRect(x: point.x - 1.6, y: point.y - 1.6, width: 3.2, height: 3.2)
+                context.fill(Path(ellipseIn: dot), with: .color(.black.opacity(0.55)))
             }
-            let dot = CGRect(x: point.x - 1.6, y: point.y - 1.6, width: 3.2, height: 3.2)
-            context.fill(Path(ellipseIn: dot), with: .color(.black.opacity(0.55)))
         }
     }
 
@@ -427,7 +465,7 @@ struct TopomapView: View {
         }
         guard !points.isEmpty else { return nil }
 
-        let resolution = Self.fieldRasterResolution
+        let resolution = fieldResolution
         guard let context = CGContext(
             data: nil,
             width: resolution,

@@ -2567,6 +2567,7 @@ struct WaveformView: View {
             TimeFrequencyView(
                 signal: epoching.segmentedEpochSignal ?? signal,
                 segments: epoching.segmentedEpochSegments,
+                layout: recording.sensorLayout,
                 epoching: epoching
             )
             .transition(.opacity)

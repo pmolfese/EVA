@@ -77,6 +77,19 @@
 				<string>org.nema.dicom</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>MNE/Neuromag FIF</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.mne-tools.fif</string>
+				<string>org.mne-tools.fif-gzip</string>
+			</array>
+		</dict>
 	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
@@ -241,6 +254,51 @@
 				</array>
 				<key>public.mime-type</key>
 				<string>application/dicom</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>MNE/Neuromag FIF</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.mne-tools.fif</string>
+			<key>UTTypeReferenceURL</key>
+			<string>https://mne.tools/stable/documentation/implementation.html</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>fif</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/x-fif</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>org.mne-tools.fif</string>
+				<string>public.data</string>
+				<string>org.gnu.gnu-zip-archive</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Compressed MNE/Neuromag FIF</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.mne-tools.fif-gzip</string>
+			<key>UTTypeReferenceURL</key>
+			<string>https://mne.tools/stable/documentation/implementation.html</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>fif.gz</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/gzip</string>
 			</dict>
 		</dict>
 	</array>

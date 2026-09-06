@@ -16,6 +16,7 @@ nonisolated enum EVAPreviewFormat: String, CaseIterable, Identifiable, Sendable 
     case gifti
     case mgh
     case dicom
+    case fif
 
     var id: String { rawValue }
 
@@ -27,6 +28,7 @@ nonisolated enum EVAPreviewFormat: String, CaseIterable, Identifiable, Sendable 
         case .gifti: "GIFTI"
         case .mgh: "FreeSurfer MGH/MGZ"
         case .dicom: "DICOM"
+        case .fif: "MNE/Neuromag FIF"
         }
     }
 
@@ -38,6 +40,7 @@ nonisolated enum EVAPreviewFormat: String, CaseIterable, Identifiable, Sendable 
         case .gifti: ".gii"
         case .mgh: ".mgh, .mgz, .mgh.gz"
         case .dicom: ".dcm, .ima"
+        case .fif: ".fif, .fif.gz"
         }
     }
 
@@ -58,6 +61,8 @@ nonisolated enum EVAPreviewFormat: String, CaseIterable, Identifiable, Sendable 
         if name.hasSuffix(".gii") { return .gifti }
         if name.hasSuffix(".mgh") || name.hasSuffix(".mgz") || name.hasSuffix(".mgh.gz") { return .mgh }
         if name.hasSuffix(".dcm") || name.hasSuffix(".ima") { return .dicom }
+        // `.fif.gz` before `.gz` in general: only FIF earns the compressed match.
+        if name.hasSuffix(".fif") || name.hasSuffix(".fif.gz") { return .fif }
         return nil
     }
 

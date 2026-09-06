@@ -263,7 +263,7 @@ All four are verified in `SimulatorRunnerTests` (sweep runs, group subjects, pre
 library loads) from the sandboxed host. Interactive source placement / a live field
 is deliberately **not** part of SIM-1 — that is the Source Simulator window below.
 
-## The Source Simulator window (SIM-2 + SIM-3 home) — **IN PROGRESS (Stages 1, 2, 3a, 3b, 3c shipped)**
+## The Source Simulator window (SIM-2 + SIM-3 home) — **IN PROGRESS (Stages 1, 2, 3a, 3b, 3c shipped; 3c-perf mostly shipped)**
 
 SIM-2 and SIM-3 are two halves of one interactive tool — SIM-3 is SIM-2's
 viewport — so they ship together in **their own dedicated window, "Source
@@ -510,7 +510,7 @@ imaging, so it stays on the right side of the EVA Resolve boundary.
 Deferred follow-on: before any BESA-Simulator parity claim, check their current
 feature list rather than cloning from memory.
 
-### Stage 3c-perf — Make dipole fitting BESA-fast — **NOT STARTED**
+### Stage 3c-perf — Make dipole fitting BESA-fast — **MOSTLY SHIPPED 2026-09-05** (now tracked in `EVA_RESOLVE2.md` R5.0)
 
 The fit is correct but slow: a single ECD is a few hundred ms and a multi-dipole /
 shared / interval fit is seconds, where BESA fits a single ECD nearly instantly.
@@ -531,34 +531,50 @@ stay identical. Root causes, measured against the current code:
 Plan, in payoff order (each step is independently shippable and must keep the fit
 results within tolerance of the current tests):
 
-- [ ] **Precompute a free lead-field grid once (biggest win).** Build the free
-  (x/y/z) lead field for a dense brain-interior dipole grid a single time per
-  geometry, cached by a geometry signature (head + montage + reference + terms).
-  The position search then becomes **table lookups + 3×3 solves with zero forward
-  calls in the loop**. Interpolate between grid nodes (trilinear) for sub-grid
-  accuracy, or use the grid only to seed step 2. Expect single-ECD to drop from
-  ~hundreds of ms to "instant", and multi-dipole to fall proportionally.
-- [ ] **Levenberg–Marquardt (or Nelder–Mead) position refinement** seeded from the
-  coarse grid, replacing the multi-level grid refinement. Needs the forward
-  gradient w.r.t. position (analytic from the spherical model, or finite-
-  difference against the cached grid). Converges in a handful of evaluations to
-  sub-mm.
-- [ ] **Analytic / cheaper forward for the search.** Use fewer harmonic terms
-  (e.g. 20–30) during the search and the full 60 only for the final reported fit;
-  or drop in the closed-form Sarvas single-shell expression as a fast inner-loop
-  forward. Verify the search still lands in the same basin.
-- [ ] **Vectorize with Accelerate/vDSP/BLAS** the covariance (`data·dataᵀ`), the
-  `LᵀL` / `LᵀC L` products, and the small linear solves; replace the hand-written
-  `[[Double]]` inner loops on the hot path.
+- [x] **Precompute a free lead-field grid once (biggest win).** Shipped
+  2026-09-05 as `LeadFieldGrid` (`brainRadius/12`, trilinear interpolation,
+  `Float` storage, cached per geometry, ≤3 kept). Candidate scoring no longer
+  solves the forward model at all; unsolvable near-shell nodes fall back to an
+  exact solve and `finalize` stays exact. See `EVA_RESOLVE2.md` R5.0.
+- [x] **Rank-reduced covariance and flat/parallel candidate scan** (not on the
+  original list, but the actual first-pass win): flat preallocated buffers, a
+  rank-reduced `C ≈ W·Wᵀ` objective, and parallelizing the candidate scan
+  *including* each worker's own forward solve. 6.4× (40.87 s → 6.34 s) on the
+  benchmark, all 35 EVAResolve tests unchanged.
+- [x] **Reduced harmonic order in the search** (24 terms vs 60 for the exact
+  `finalize`/`deflateCovariance`/`decompose` paths) plus hoisted fixed-dipole
+  blocks in the joint objective. Combined with the lead-field grid: 43× on
+  cached fits (40.87 s → 0.95 s), 14× cold (2.88 s); single ECD 0.18 s — meets
+  the "single ECD instant, multi-ECD sub-second" target once the grid is warm.
+- [~] **Levenberg–Marquardt / Nelder–Mead position refinement** — decided
+  **not needed**: with the grid warm, refinement is 0.59 s and the coarse
+  search 0.24 s, so replacing the search strategy is algorithmic risk for
+  fractions of a second. Revisit only if a realistic BEM (R3) makes
+  per-candidate evaluation expensive again.
+- [x] **Phase-timing instrumentation** (`ProgressReporter.PhaseTimings`,
+  reachable via `runSharedFitNow(reporter:)`) — what made each optimization
+  above targeted rather than guessed.
+- [ ] Remaining cost: the one-time grid build itself (1.89 s, ~66% of a cold
+  fit). Candidate follow-ups: build it lazily in the background on dataset
+  load, or coarsen the lattice and lean on the exact final refinement.
+- [ ] **Analytic / cheaper forward for the search** beyond the 24-term
+  reduction (e.g. closed-form Sarvas single-shell) — not needed yet given the
+  grid result above.
 - [ ] **Cache the forward across reactive re-fits** and debounce interval-drag /
   dipole-count changes so a fit isn't relaunched mid-gesture.
-- [ ] **Benchmark harness**: a test that asserts single-ECD and 2-dipole fit wall
-  time stay under a budget on the standard montage, and that accuracy stays within
-  the current tests' tolerances — so the speedups can't silently regress results.
+- [ ] **Benchmark harness** as a persisted regression test (today it's the
+  ad hoc `benchmarkSharedFit`/timing runs above, not a committed budget
+  assertion): assert single-ECD and 2-dipole fit wall time stay under a budget
+  on the standard montage, and that accuracy stays within the current tests'
+  tolerances.
+- [ ] **Head-model agnostic fit** against any `ForwardOperator` (R3.4),
+  including an imported BEM.
 
-**Exit:** a single equivalent dipole fits in the "feels instant" range and the
-multi-dipole / shared / interval fits are interactive, with the localization tests
-still green.
+**Exit:** met for the sphere/spherical-harmonic path — single ECD and
+multi-dipole/shared/interval fits are interactive with the grid warm, and the
+localization tests still pass (35/35 EVAResolve tests). Still open: the
+one-time grid-build cost, a committed benchmark/regression test, and
+head-model-agnostic fitting once BEM import (R3) lands.
 
 ### Stage 4 — SIM-3 tier A (SceneKit) and beyond — deferred until tier B proves out
 
@@ -1451,6 +1467,67 @@ projects above, not treated as one parallel program.
 - [ ] BESA Statistics ERP/ERF `.avr` export; invert the existing reader.
 - [ ] Auto-map auxiliary/biological channels into `pnsSignal` for BrainVision
   and EDF imports.
+
+#### FIF writing (MNE / Neuromag) — **NOT STARTED** (reader shipped 2026-09-06)
+
+Native FIF **reading** is done: `EVACore/IO/FIF/FIFMeasurementInfo.swift` and
+`FIFRecording.swift` read continuous (`*_raw.fif`, float32 / int16 / DAU-pack16
+buffers, `.fif.gz`), epoched (`*-epo.fif`) and averaged (`*-ave.fif`) files
+natively, validated sample-for-sample against MNE-Python
+(`Tools/fif-import/make_fif_fixtures.py`, `EVATests/IO/FIFRecordingTests.swift`,
+`FIFImportTests.swift`). `.fif` and `.fif.gz` open by drag-and-drop and File ▸
+Open like any other recording.
+
+**Quick Look shipped with the reader** (`EVAPreviewKit/FIF/`): `.fif` and `.fif.gz`
+preview and thumbnail in Finder. Because a `.fif` is a container for a dozen
+different documents, `FIFDocument` classifies by *block structure* rather than by
+filename convention, and each kind gets its own picture — recordings get the MFF
+treatment (montage, event timeline, waveform, per-condition butterfly), head models
+get their shells sliced and drawn as nested sagittal/axial contours, transforms get
+their matrix plus a translation/rotation decomposition, digitizations get the point
+cloud from two angles, and anything else (forward solutions, source spaces,
+covariances, ICA) gets a structural outline with its headline scalars. The same
+classifier gives the importer its error message: a head model dropped on EVA now says
+what it is and to open it in Resolve.
+
+Writing is the other half, and it is worth doing because it is how EVA hands work
+*back* to the MNE/FieldTrip/Brainstorm world — a cleaned recording, an epoched
+set, a condition average — without a detour through `.mff` or a Python bridge.
+The tag writer already exists and already produces files MNE reads
+(`FIFWriter`, validated for trans / dig / BEM by
+`Tools/resolve-validate/check_swift_fif.py`), so this is mostly measurement-info
+assembly rather than new format work.
+
+- [ ] **`FIFF_CH_INFO` writer** — the 96-byte struct: scanno, logno, kind,
+  range, cal, coil type, `loc[12]`, unit, unit multiplier, 16-byte name. The
+  keystone, exactly as it was for reading. EVA holds microvolts, so write
+  `cal = 1e-6` with `range = 1` and let the file be in volts like every other
+  FIF, rather than inventing a unit.
+- [ ] **Measurement info block** — sfreq, nchan, first sample, filter settings,
+  measurement date, bad channels (`FIFFB_MNE_BAD_CHANNELS`), and the Isotrak
+  digitization from the montage EVA already has. `Digitization.append(to:)`
+  writes that block today.
+- [ ] **Continuous writing** — `FIFFB_RAW_DATA` with float32 buffers of a fixed
+  size (MNE's default is 10 s, and the buffer boundary is visible in how MNE
+  reads it back), plus annotations from EVA's event list.
+- [ ] **Epoched and averaged writing** — the `FIFF_EPOCH` matrix (3-D for
+  epochs, 2-D per condition for averages), the event list and event-id mapping,
+  `nave` per condition, and `first_sample`. EVA's `EpochSegment` table already
+  carries everything these need.
+- [ ] **Round-trip validation** — extend the fixture tooling with a
+  `check_swift_fif_recording.py` that reads EVA-written raw / epochs / evoked
+  back with MNE and compares against the source, the way the BEM and OpenMEEG
+  writers are already checked. Round-tripping an imported file back out is the
+  cheapest strong test: read `sample_raw.fif`, write it, and require MNE to see
+  the same samples, channels, events and montage.
+- [ ] **Decide the export surface** — whether FIF joins the existing MFF export
+  flow as another destination, or is a separate File ▸ Export ▸ MNE FIF. Do not
+  build the UI before the writer round-trips.
+
+Not planned unless a need appears: SSP projector writing, CTF compensation, MEG
+channels, and split-file output (`-1.fif`, `-2.fif`). The reader reports
+projectors rather than applying them, and the writer should refuse to invent
+them.
 
 ### Detectors and analysis
 

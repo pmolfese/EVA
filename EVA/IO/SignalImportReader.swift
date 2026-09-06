@@ -72,6 +72,7 @@ nonisolated enum SignalImportReader {
         "mff",
         "vhdr", "vmrk", "eeg",
         "edf",
+        "fif",
         "lay", "dat",
         "avr", "mul"
     ]
@@ -79,7 +80,30 @@ nonisolated enum SignalImportReader {
     static let supportedLocationExtensions: Set<String> = ["sfp", "elp", "loc"]
 
     static func isSupportedRecordingURL(_ url: URL) -> Bool {
-        supportedRecordingExtensions.contains(url.pathExtension.lowercased())
+        if isGzippedFIF(url) { return true }
+        return supportedRecordingExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    /// `.fif.gz` — MNE writes them and shared datasets are full of them. Matched
+    /// on the double extension so a bare `.gz` of anything else is still refused.
+    static func isGzippedFIF(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == "gz"
+            && url.deletingPathExtension().pathExtension.lowercased() == "fif"
+    }
+
+    /// Why this file cannot be opened as a recording, or `nil` if it can be.
+    ///
+    /// For the container formats — today that means FIF — the extension does not
+    /// say what is inside. Callers use this *before* opening so a `-bem.fif`
+    /// dropped on a window with a recording already in it is refused outright,
+    /// rather than closing that recording to open something that then fails.
+    /// Cheap: it walks tag headers on a memory-mapped file and reads no samples.
+    static func recordingRejectionReason(for url: URL) -> String? {
+        guard url.pathExtension.lowercased() == "fif" || isGzippedFIF(url) else { return nil }
+        guard let kind = try? FIFDocument.classify(url) else { return nil }
+        guard !kind.isRecording else { return nil }
+        let advice = kind.importAdvice.map { " \($0)" } ?? ""
+        return "\(url.lastPathComponent) is \(kind.nounWithArticle), not a recording.\(advice)"
     }
 
     static func load(
@@ -130,6 +154,9 @@ nonisolated enum SignalImportReader {
         case "edf":
             progress?(SignalImportProgress(fraction: 0.05, message: "Reading EDF recording", detail: nil))
             imported = try EDFSignalReader.load(from: url)
+        case "fif":
+            progress?(SignalImportProgress(fraction: 0.05, message: "Reading FIF recording", detail: nil))
+            imported = try FIFSignalReader.load(from: url)
         case "lay", "dat":
             progress?(SignalImportProgress(fraction: 0.05, message: "Reading Persyst recording", detail: nil))
             imported = try PersystSignalReader.load(from: url)
@@ -152,7 +179,9 @@ nonisolated enum SignalImportReader {
                 "BESA .foc/.fsg are binary export formats; the public BESA page identifies them but does not define enough byte-level structure for a safe native reader."
             )
         default:
-            throw SignalImportError.unsupportedFormat(url)
+            guard isGzippedFIF(url) else { throw SignalImportError.unsupportedFormat(url) }
+            progress?(SignalImportProgress(fraction: 0.05, message: "Reading compressed FIF recording", detail: nil))
+            imported = try FIFSignalReader.load(from: url)
         }
 
         progress?(SignalImportProgress(
@@ -190,6 +219,237 @@ nonisolated enum SignalImportReader {
             pnsSignal: imported.pnsSignal,
             antiAliasTimingCorrection: imported.antiAliasTimingCorrection
         )
+    }
+}
+
+
+// MARK: - FIF (MNE / Neuromag)
+
+/// Bridges `FIFRecording` into EVA's recording model.
+///
+/// The reader itself is format work and lives in `EVACore/IO/FIF/`; this is the
+/// policy layer — which channels are the recording, which are peripheral, what
+/// becomes an event, and how an epoched or averaged file is laid out on a single
+/// timeline the viewer can scroll.
+private nonisolated enum FIFSignalReader {
+
+    static func load(from url: URL) throws -> ImportedRecording {
+        // A `.fif` is as likely to be a head model or a transform as a
+        // recording. Say which one it is rather than failing on a missing tag.
+        if let kind = try? FIFDocument.classify(url), !kind.isRecording {
+            throw SignalImportError.unsupportedVariant(
+                url, "it is \(kind.nounWithArticle), not a recording. \(kind.importAdvice ?? "")")
+        }
+        let recording: FIFRecording
+        do { recording = try FIFRecording.read(from: url) }
+        catch { throw SignalImportError.malformedFile(url, error.localizedDescription) }
+
+        let info = recording.info
+        let brain = info.brainChannelIndices
+        guard !brain.isEmpty else {
+            let kinds = Set(info.channels.compactMap { $0.kind?.displayName }).sorted().joined(separator: ", ")
+            throw SignalImportError.unsupportedVariant(
+                url, "the file has no EEG, sEEG or ECoG channels (it carries: \(kinds.isEmpty ? "no recognized channel kinds" : kinds))")
+        }
+
+        let signalType = "FIF \(contentName(recording.content))"
+        let signal: MFFSignalData
+        let pns: MFFSignalData?
+
+        switch recording.content {
+        case .continuous:
+            signal = try continuousSignal(recording, indices: brain, url: url, signalType: signalType)
+            pns = info.peripheralChannelIndices.isEmpty ? nil : try? continuousSignal(
+                recording, indices: info.peripheralChannelIndices, url: url, signalType: "\(signalType) PNS")
+        case .epoched, .averaged:
+            signal = try segmentedSignal(recording, indices: brain, url: url, signalType: signalType)
+            pns = info.peripheralChannelIndices.isEmpty ? nil : try? segmentedSignal(
+                recording, indices: info.peripheralChannelIndices, url: url, signalType: "\(signalType) PNS")
+        }
+
+        let locations = electrodeLocations(info, indices: brain, name: url.lastPathComponent)
+        return ImportedRecording(signal: signal, layout: locations.layout, geometry: locations.geometry, pnsSignal: pns)
+    }
+
+    private static func contentName(_ content: FIFRecording.Content) -> String {
+        switch content {
+        case .continuous: return "continuous"
+        case .epoched: return "epochs"
+        case .averaged: return "averages"
+        }
+    }
+
+    // MARK: Samples
+
+    /// FIF stores each channel in its own physical unit — volts for EEG. EVA
+    /// works in microvolts throughout, so the conversion happens once, here.
+    private static let voltsToMicrovolts = 1e6
+
+    private static func scaled(_ values: [Double], unit: Int32) -> [Float] {
+        // Only volt-unit channels get the µV conversion; a misc channel counting
+        // something else is left in its own units rather than silently inflated.
+        let factor = unit == FIF.unitVolts ? voltsToMicrovolts : 1
+        return values.map { Float($0 * factor) }
+    }
+
+    private static func continuousSignal(_ recording: FIFRecording, indices: [Int],
+                                         url: URL, signalType: String) throws -> MFFSignalData {
+        let info = recording.info
+        let data = indices.map { scaled(recording.samples[$0], unit: info.channels[$0].unit) }
+        guard let sampleCount = data.first?.count, sampleCount > 0 else {
+            throw SignalImportError.emptySignal(url)
+        }
+        return MFFSignalData(
+            signalURL: url,
+            signalType: signalType,
+            numberOfChannels: data.count,
+            samplingRate: info.samplingRate,
+            duration: Double(sampleCount) / info.samplingRate,
+            recordingStartTime: info.measurementDate,
+            events: events(recording, url: url),
+            data: data,
+            channelNames: indices.map { info.channels[$0].name },
+            referenceState: .unknown
+        )
+    }
+
+    /// Epoched and averaged files become one concatenated timeline plus the
+    /// segment table, which is exactly how EVA already represents a segmented or
+    /// category-averaged MFF — so the viewer, epoch tools and butterfly plots
+    /// work on FIF epochs with no further changes.
+    private static func segmentedSignal(_ recording: FIFRecording, indices: [Int],
+                                        url: URL, signalType: String) throws -> MFFSignalData {
+        let info = recording.info
+        let segmentLength = recording.sampleCount
+        guard segmentLength > 0, !recording.segments.isEmpty else {
+            throw SignalImportError.emptySignal(url)
+        }
+        var data = [[Float]](repeating: [], count: indices.count)
+        for (row, channel) in indices.enumerated() {
+            data[row].reserveCapacity(segmentLength * recording.segments.count)
+            for segment in recording.segments {
+                data[row].append(contentsOf: scaled(segment.data[channel], unit: info.channels[channel].unit))
+            }
+        }
+
+        // Stimulus offset: how far into each segment the event sits, from tmin.
+        let offset = min(max(Int((-recording.segmentStartSeconds * info.samplingRate).rounded()), 0), segmentLength - 1)
+        var colorIndices: [String: Int] = [:]
+        var segments: [EpochSegment] = []
+        for (i, segment) in recording.segments.enumerated() {
+            let start = i * segmentLength
+            let colorIndex = colorIndices[segment.name] ?? {
+                let next = colorIndices.count
+                colorIndices[segment.name] = next
+                return next
+            }()
+            segments.append(EpochSegment(
+                startSample: start,
+                endSample: start + segmentLength - 1,
+                stimulusOffsetSamples: offset,
+                category: segment.name,
+                sourceCode: segment.code.map(String.init) ?? segment.name,
+                sourceTimeSeconds: Double(start + offset) / info.samplingRate,
+                colorIndex: colorIndex,
+                contributingEpochCount: segment.contributingCount))
+        }
+
+        let totalSamples = segmentLength * recording.segments.count
+        return MFFSignalData(
+            signalURL: url,
+            signalType: signalType,
+            numberOfChannels: data.count,
+            samplingRate: info.samplingRate,
+            duration: Double(totalSamples) / info.samplingRate,
+            recordingStartTime: info.measurementDate,
+            events: segments.map { segment in
+                MFFEvent(
+                    id: "fif-segment-\(segment.startSample)-\(segment.category)",
+                    code: segment.sourceCode,
+                    label: segment.category,
+                    cell: segment.category,
+                    beginTimeSeconds: segment.sourceTimeSeconds,
+                    rawBeginTime: String(segment.sourceTimeSeconds),
+                    sourceFile: url.lastPathComponent,
+                    timeAnchor: .onset)
+            },
+            data: data,
+            channelNames: indices.map { info.channels[$0].name },
+            epochSegments: segments,
+            isSegmented: true,
+            isAveraged: recording.content == .averaged,
+            referenceState: .unknown)
+    }
+
+    // MARK: Events
+
+    /// Annotations plus stimulus-channel transitions. FIF files split events
+    /// between the two and different labs use different ones, so read both and
+    /// say which is which.
+    private static func events(_ recording: FIFRecording, url: URL) -> [MFFEvent] {
+        var events: [MFFEvent] = []
+        for (i, annotation) in recording.annotations.enumerated() {
+            events.append(MFFEvent(
+                id: "fif-annotation-\(i)",
+                code: annotation.description,
+                label: annotation.description,
+                eventDescription: "FIF annotation",
+                beginTimeSeconds: annotation.onsetSeconds,
+                rawBeginTime: String(annotation.onsetSeconds),
+                sourceFile: url.lastPathComponent,
+                durationSeconds: annotation.durationSeconds > 0 ? annotation.durationSeconds : nil,
+                timeAnchor: .onset))
+        }
+        events.append(contentsOf: stimulusEvents(recording, url: url))
+        return events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+    }
+
+    /// Rising edges on a stimulus channel, the way `mne.find_events` reads them:
+    /// a sample whose value is greater than the previous one and non-zero starts
+    /// an event whose code is the new value.
+    private static func stimulusEvents(_ recording: FIFRecording, url: URL) -> [MFFEvent] {
+        guard recording.content == .continuous else { return [] }
+        var events: [MFFEvent] = []
+        let rate = recording.info.samplingRate
+        for channel in recording.info.stimulusChannelIndices {
+            let name = recording.info.channels[channel].name
+            let values = recording.samples[channel]
+            var previous = 0.0
+            for (sample, raw) in values.enumerated() {
+                let value = raw.rounded()
+                if value > previous, value != 0 {
+                    events.append(MFFEvent(
+                        id: "fif-stim-\(name)-\(sample)",
+                        code: String(Int(value)),
+                        label: "\(name) \(Int(value))",
+                        eventDescription: "Stimulus channel \(name)",
+                        beginTimeSeconds: Double(sample) / rate,
+                        rawBeginTime: String(Double(sample) / rate),
+                        sourceFile: url.lastPathComponent,
+                        timeAnchor: .onset))
+                }
+                previous = value
+            }
+        }
+        return events
+    }
+
+    // MARK: Electrodes
+
+    private static func electrodeLocations(_ info: FIFMeasurementInfo, indices: [Int],
+                                           name: String) -> ImportedElectrodeLocations {
+        let coordinates = indices.compactMap { index -> (label: String, vector: SIMD3<Double>)? in
+            guard let position = info.channels[index].positionMeters else { return nil }
+            return (info.channels[index].name, position)
+        }
+        guard coordinates.count == indices.count else {
+            // A partial montage would silently mis-map channel to scalp position.
+            return ImportedElectrodeLocations(layout: nil, geometry: nil)
+        }
+        return ElectrodeLocationReader.locations(
+            from: coordinates,
+            channelNames: indices.map { info.channels[$0].name },
+            name: name)
     }
 }
 
