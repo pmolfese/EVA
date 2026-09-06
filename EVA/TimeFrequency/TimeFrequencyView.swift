@@ -451,15 +451,16 @@ struct TimeFrequencyView: View {
                 overviewProgress = complete
                 overviewStatus = "\(Int(complete * 100))% · \(index + 1)/\(conditions.count) complete"
             }
-            // Leave the determinate build state visible while SwiftUI installs
-            // the large dashboard.  Otherwise the last data handoff briefly
-            // falls back to an indeterminate spinner at 100%.
-            overviewProgress = 0.99
-            overviewStatus = "99% · rendering overview"
+            // Installing hidden instances of every dashboard was a main-thread
+            // operation and could stall at 100%.  Publish just the selected
+            // dashboard; its other tabs stay lazy until they are requested.
+            // SwiftUI views themselves are main-actor-bound, so only their
+            // underlying analysis data—not view construction—can be threaded.
+            overviewProgress = 1
+            overviewStatus = "100% · ready"
+            isBuildingOverview = false
             overview = renders
             overviewCache[cacheKey] = renders
-            await Task.yield()
-            isBuildingOverview = false
         }
     }
 
