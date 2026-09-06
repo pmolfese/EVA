@@ -25,9 +25,9 @@ struct TFOverviewRender: Sendable {
     var measure: EpochingViewModel.TFMeasure
     var isDifference: Bool
 
-    var isDiverging: Bool { measure == .power || isDifference }
+    nonisolated var isDiverging: Bool { measure == .power || isDifference }
 
-    func localIndex(for channel: Int) -> Int? {
+    nonisolated func localIndex(for channel: Int) -> Int? {
         channelIndices.firstIndex(of: channel)
     }
 
@@ -64,6 +64,7 @@ private struct TFOverviewDisplayCache: Sendable {
     var rankedLocalIndices: [Int]
     var channelRenders: [TFRender]
     var frequencyScales: [Double]
+    var clusterChannels: Set<Int>
 }
 
 private struct TFOverviewPreparationInput: Sendable {
@@ -71,10 +72,11 @@ private struct TFOverviewPreparationInput: Sendable {
     var activeChannels: [Int]
     var frequencyIndices: [Int]
     var timeIndices: [Int]
+    var layout: SensorLayout?
 }
 
 private enum TFOverviewDisplayPreparation {
-    static func prepare(_ input: TFOverviewPreparationInput) -> TFOverviewDisplayCache {
+    nonisolated static func prepare(_ input: TFOverviewPreparationInput) -> TFOverviewDisplayCache {
         let overview = input.overview
         let activeSet = Set(input.activeChannels)
         let highestChannel = (overview.channelIndices.max() ?? -1) + 1
@@ -119,16 +121,21 @@ private enum TFOverviewDisplayPreparation {
             let values = activeLocals.map { abs(mean(overview.grids[$0], frequencies: [frequency], times: Array(overview.timesMs.indices))) }.sorted()
             return max(values.dropFirst(Int(Double(values.count) * 0.99)).first ?? values.last ?? 1, 1e-6)
         }
+        let clusterChannels = largestCluster(
+            channels: input.activeChannels, roiByLocal: roiByLocal,
+            overview: overview, layout: input.layout
+        )
 
         return TFOverviewDisplayCache(
             condition: overview.condition, activeChannels: input.activeChannels,
             roiByLocal: roiByLocal, scalpValues: scalpValues, roiScale: roiScale,
             sensorRows: sensorRows, rankedLocalIndices: ranked,
-            channelRenders: channelRenders, frequencyScales: frequencyScales
+            channelRenders: channelRenders, frequencyScales: frequencyScales,
+            clusterChannels: clusterChannels
         )
     }
 
-    private static func mean(_ grid: [[Double]], frequencies: [Int], times: [Int]) -> Double {
+    private nonisolated static func mean(_ grid: [[Double]], frequencies: [Int], times: [Int]) -> Double {
         var total = 0.0, count = 0
         for frequency in frequencies where grid.indices.contains(frequency) {
             for time in times where grid[frequency].indices.contains(time) {
@@ -137,6 +144,36 @@ private enum TFOverviewDisplayPreparation {
             }
         }
         return count > 0 ? total / Double(count) : 0
+    }
+
+    private nonisolated static func largestCluster(
+        channels: [Int], roiByLocal: [Double], overview: TFOverviewRender, layout: SensorLayout?
+    ) -> Set<Int> {
+        let scored = channels.compactMap { channel -> (Int, Double)? in
+            overview.localIndex(for: channel).map { (channel, abs(roiByLocal[$0])) }
+        }
+        let sorted = scored.map(\.1).sorted()
+        guard let threshold = sorted.dropFirst(Int(Double(sorted.count) * 0.9)).first else { return [] }
+        let candidate = Set(scored.filter { $0.1 >= threshold }.map(\.0))
+        let adjacency = ClusterSpatialAdjacency.build(
+            channelIndices: channels, layout: layout,
+            configuration: ClusterAdjacencyConfiguration(method: .nearestNeighbors, distance: 0.25, neighborCount: 4)
+        )
+        var best = Set<Int>(), seen = Set<Int>()
+        for start in channels where candidate.contains(start) && !seen.contains(start) {
+            var component = Set<Int>(), queue = [start]
+            seen.insert(start)
+            while let current = queue.popLast() {
+                component.insert(current)
+                guard let local = channels.firstIndex(of: current) else { continue }
+                for neighbor in adjacency[local].map({ channels[$0] }) where candidate.contains(neighbor) && !seen.contains(neighbor) {
+                    seen.insert(neighbor)
+                    queue.append(neighbor)
+                }
+            }
+            if component.count > best.count { best = component }
+        }
+        return best
     }
 }
 
@@ -149,7 +186,7 @@ struct TimeFrequencyOverviewView: View {
     let groups: [ChannelSet]
     let conditions: [String]
     let build: ([String]) -> Void
-    let openDetail: (Int) -> Void
+    let openDetail: (Int, TFOverviewRender) -> Void
     let isBuilding: Bool
     let progress: Double
     let progressStatus: String
@@ -183,7 +220,7 @@ struct TimeFrequencyOverviewView: View {
                     conditions: conditions, builtConditions: Set(overviews.map(\.condition)),
                     hasOverview: !overviews.isEmpty, setupNeedsRebuild: setupNeedsRebuild,
                     isBuilding: isBuilding, progress: progress, progressStatus: progressStatus,
-                    build: build
+                    isDifference: epoching.tfShowsDifference, build: build
                 )
             }
 
@@ -203,12 +240,21 @@ struct TimeFrequencyOverviewView: View {
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .textBackgroundColor))
+        .onChange(of: epoching.tfShowsDifference) { _, enabled in
+            guard enabled else { return }
+            let a = epoching.tfConditionA ?? conditions.first
+            epoching.tfConditionA = a
+            if epoching.tfConditionB == nil || epoching.tfConditionB == a {
+                epoching.tfConditionB = conditions.first(where: { $0 != a })
+            }
+        }
         .task(id: displayCacheKey) {
             let requestedKey = displayCacheKey
             let inputs = overviews.map {
                 TFOverviewPreparationInput(
                     overview: $0, activeChannels: activeChannels($0),
-                    frequencyIndices: frequencyIndices($0), timeIndices: windowIndices($0)
+                    frequencyIndices: frequencyIndices($0), timeIndices: windowIndices($0),
+                    layout: layout
                 )
             }
             let cache = await Task.detached(priority: .utility) {
@@ -238,12 +284,42 @@ struct TimeFrequencyOverviewView: View {
                     }
                     .labelsHidden().pickerStyle(.segmented).frame(width: 145)
                 }
+                if epoching.tfMeasure == .power {
+                    HStack(spacing: 6) {
+                        Text("Power mode").fixedSize()
+                        Picker("Power mode", selection: $epoching.tfPowerMode) {
+                            ForEach(TFPowerMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .labelsHidden().frame(width: 105)
+                    }
+                    .help(epoching.tfPowerMode.explanation)
+                }
                 HStack(spacing: 6) {
                     Text("Method").fixedSize()
                     Picker("", selection: $epoching.tfMethod) {
                         ForEach(TFMethod.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden().pickerStyle(.segmented).frame(width: 190)
+                }
+                Toggle("A − B", isOn: $epoching.tfShowsDifference)
+                    .toggleStyle(.switch).fixedSize()
+                if epoching.tfShowsDifference {
+                    HStack(spacing: 4) {
+                        Text("A").fixedSize()
+                        Picker("A", selection: conditionABinding) {
+                            ForEach(conditions, id: \.self) { Text(epoching.displayCategory($0)).tag($0) }
+                        }
+                        .labelsHidden().frame(width: 120)
+                    }
+                    HStack(spacing: 4) {
+                        Text("B").fixedSize()
+                        Picker("B", selection: conditionBBinding) {
+                            ForEach(conditions, id: \.self) { Text(epoching.displayCategory($0)).tag($0) }
+                        }
+                        .labelsHidden().frame(width: 120)
+                    }
                 }
                 if epoching.tfMeasure == .power {
                     HStack(spacing: 6) {
@@ -267,6 +343,20 @@ struct TimeFrequencyOverviewView: View {
             .fixedSize(horizontal: true, vertical: false)
         }
         .font(.caption)
+    }
+
+    private var conditionABinding: Binding<String> {
+        Binding(
+            get: { epoching.tfConditionA ?? conditions.first ?? "" },
+            set: { epoching.tfConditionA = $0 }
+        )
+    }
+
+    private var conditionBBinding: Binding<String> {
+        Binding(
+            get: { epoching.tfConditionB ?? conditions.dropFirst().first ?? conditions.first ?? "" },
+            set: { epoching.tfConditionB = $0 }
+        )
     }
 
     @ViewBuilder
@@ -348,15 +438,23 @@ struct TimeFrequencyOverviewView: View {
                 dashboardCard("Clusters", question: "Is it spatially coherent?", symbol: "circle.hexagongrid")
             }
             Divider()
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 18) {
-                    ForEach(overviews, id: \.condition) { overview in
-                        overviewContent(overview)
-                            .frame(width: destination == "Filmstrip" || destination == "Ranked gallery" ? 1_000 : nil,
-                                   alignment: .leading)
-                            .frame(minWidth: destination == "Sensor matrix" ? 640 : 420,
-                                   maxWidth: destination == "Filmstrip" || destination == "Ranked gallery" ? 1_000 : 760,
-                                   alignment: .leading)
+            if destination == "Filmstrip" || destination == "Ranked gallery" {
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        ForEach(overviews, id: \.condition) { overview in
+                            overviewContent(overview)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            } else {
+                ScrollView(.horizontal) {
+                    HStack(alignment: .top, spacing: 18) {
+                        ForEach(overviews, id: \.condition) { overview in
+                            overviewContent(overview)
+                                .frame(minWidth: destination == "Sensor matrix" ? 640 : 420,
+                                       maxWidth: 760, alignment: .leading)
+                        }
                     }
                 }
             }
@@ -387,7 +485,7 @@ struct TimeFrequencyOverviewView: View {
                     fixedScale: cached?.roiScale ?? overviewScale(overview), unitLabel: unitLabel(overview),
                     usesPositiveSequentialScale: !overview.isDiverging, minimumMapHeight: 190,
                     channelName: { channelName($0, overview: overview) },
-                    onTapChannel: selectChannel,
+                    onTapChannel: { selectChannel($0, overview: overview) },
                     visibleChannels: Set(cached?.activeChannels ?? activeChannels(overview))
                 )
                 .frame(width: 230)
@@ -396,7 +494,7 @@ struct TimeFrequencyOverviewView: View {
                         HStack {
                             Text("\(overview.channelNames[local]) · \(windowLabel)").font(.headline)
                             Spacer()
-                            Button("Open full detail") { selectChannel(selectedChannel) }
+                            Button("Open full detail") { selectChannel(selectedChannel, overview: overview) }
                                 .controlSize(.small)
                         }
                         TFHeatmap(render: cached?.channelRenders[safe: local] ?? channelRender(local, overview))
@@ -430,7 +528,8 @@ struct TimeFrequencyOverviewView: View {
                 .font(.caption).foregroundStyle(.secondary)
             TFChannelMatrix(
                 rows: values, channels: channels, render: overview,
-                channelName: { channelName($0, overview: overview) }, onSelect: selectChannel
+                channelName: { channelName($0, overview: overview) },
+                onSelect: { selectChannel($0, overview: overview) }
             )
                 .frame(minHeight: 160)
         }
@@ -454,6 +553,13 @@ struct TimeFrequencyOverviewView: View {
                     let positions = filmstripTimeIndices(overview, maxColumns: maxColumns)
                     let mapSide = min(68, max(38, (proxy.size.width - 72) / CGFloat(max(positions.count, 1))))
                     VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 4) {
+                            Text("Frequency (Hz)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 64, alignment: .trailing)
+                            Spacer(minLength: 0)
+                        }
                         ForEach(frequencySlices, id: \.self) { frequency in
                             HStack(spacing: 4) {
                                 Text(String(format: "%.1f Hz", overview.frequenciesHz[frequency]))
@@ -487,45 +593,40 @@ struct TimeFrequencyOverviewView: View {
 
     private func gallery(_ overview: TFOverviewRender) -> some View {
         let cached = displayCache[overview.condition]
-        let top = (cached?.rankedLocalIndices ?? activeChannels(overview)
+        let top = Array((cached?.rankedLocalIndices ?? activeChannels(overview)
             .compactMap { channel -> (Int, Double)? in
                 guard let local = overview.localIndex(for: channel) else { return nil }
                 return (local, abs(roiValue(local, overview)))
             }
-            .sorted { $0.1 > $1.1 }.map(\.0)).prefix(12)
-        return GeometryReader { proxy in
-            let items = Array(top)
-            let spacing = CGFloat(max(items.count - 1, 0)) * 10
-            let width = min(320, max(220, (proxy.size.width - spacing) / CGFloat(max(items.count, 1))))
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 10) {
-                    ForEach(items, id: \.self) { local in
-                        Button { selectChannel(overview.channelIndices[local]) } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(overview.channelNames[local]).font(.caption.weight(.semibold))
-                                TFHeatmap(render: cached?.channelRenders[safe: local] ?? channelRender(local, overview))
-                                    .frame(width: width, height: width * 0.76)
-                            }
-                        }
-                        .buttonStyle(.plain)
+            .sorted { $0.1 > $1.1 }.map(\.0)).prefix(12))
+        let grid = [GridItem(.adaptive(minimum: 150, maximum: 300), spacing: 12)]
+        return LazyVGrid(columns: grid, alignment: .leading, spacing: 14) {
+            ForEach(top, id: \.self) { local in
+                Button { selectChannel(overview.channelIndices[local], overview: overview) } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(overview.channelNames[local]).font(.caption.weight(.semibold))
+                        TFHeatmap(render: cached?.channelRenders[safe: local] ?? channelRender(local, overview))
+                            .aspectRatio(1 / 0.76, contentMode: .fit)
                     }
                 }
+                .buttonStyle(.plain)
             }
         }
-        .frame(minHeight: 285)
     }
 
     @ViewBuilder
     private func clusters(_ overview: TFOverviewRender) -> some View {
         if let layout {
-            let cluster = exploratoryCluster(overview, layout: layout)
+            let cached = displayCache[overview.condition]
+            let cluster = cached?.clusterChannels ?? []
             HStack(spacing: 16) {
                 TopomapView(
-                    layout: layout, values: roiValues(overview), timeSeconds: selectedWindow.upperBound / 1000,
-                    fixedScale: overviewScale(overview), unitLabel: unitLabel(overview),
+                    layout: layout, values: cached?.scalpValues ?? [], timeSeconds: selectedWindow.upperBound / 1000,
+                    fixedScale: cached?.roiScale ?? 1, unitLabel: unitLabel(overview),
                     usesPositiveSequentialScale: !overview.isDiverging, minimumMapHeight: 190,
-                    channelName: { channelName($0, overview: overview) }, onTapChannel: selectChannel,
-                    highlightedChannels: cluster, visibleChannels: Set(activeChannels(overview))
+                    fieldResolution: 56,
+                    channelName: { channelName($0, overview: overview) }, onTapChannel: { selectChannel($0, overview: overview) },
+                    highlightedChannels: cluster, visibleChannels: Set(cached?.activeChannels ?? [])
                 )
                 .frame(width: 250)
                 VStack(alignment: .leading, spacing: 6) {
@@ -675,9 +776,9 @@ struct TimeFrequencyOverviewView: View {
         overview.localIndex(for: channel).map { overview.channelNames[$0] } ?? "Ch \(channel + 1)"
     }
 
-    private func selectChannel(_ channel: Int) {
+    private func selectChannel(_ channel: Int, overview: TFOverviewRender) {
         selectedChannel = channel
-        openDetail(channel)
+        openDetail(channel, overview)
     }
     private func unitLabel(_ overview: TFOverviewRender) -> String {
         overview.measure == .power ? (overview.isDifference ? "Δ dB" : "dB") : (overview.isDifference ? "Δ ITPC" : "ITPC")
@@ -690,30 +791,6 @@ struct TimeFrequencyOverviewView: View {
             isDiverging: overview.isDiverging, measure: overview.measure, isDifference: overview.isDifference,
             trialCountA: 0, trialCountB: nil)
     }
-    private func exploratoryCluster(_ overview: TFOverviewRender, layout: SensorLayout) -> Set<Int> {
-        let channels = activeChannels(overview)
-        let scored = channels.compactMap { channel -> (Int, Double)? in overview.localIndex(for: channel).map { (channel, abs(roiValue($0, overview))) } }
-        let sorted = scored.map(\.1).sorted()
-        guard let threshold = sorted.dropFirst(Int(Double(sorted.count) * 0.9)).first else { return [] }
-        let candidate = Set(scored.filter { $0.1 >= threshold }.map(\.0))
-        let adjacency = ClusterSpatialAdjacency.build(channelIndices: channels, layout: layout,
-            configuration: ClusterAdjacencyConfiguration(method: .nearestNeighbors, distance: 0.25, neighborCount: 4))
-        var best = Set<Int>(), seen = Set<Int>()
-        for start in channels where candidate.contains(start) && !seen.contains(start) {
-            var component = Set<Int>(), queue = [start]
-            seen.insert(start)
-            while let current = queue.popLast() {
-                component.insert(current)
-                guard let local = channels.firstIndex(of: current) else { continue }
-                for neighbor in adjacency[local].map({ channels[$0] }) where candidate.contains(neighbor) && !seen.contains(neighbor) {
-                    seen.insert(neighbor); queue.append(neighbor)
-                }
-            }
-            if component.count > best.count { best = component }
-        }
-        return best
-    }
-
     private func mean(_ grid: [[Double]], frequencies: [Int], times: [Int]) -> Double {
         var total = 0.0, count = 0
         for frequency in frequencies where grid.indices.contains(frequency) {
@@ -738,6 +815,7 @@ private struct TFOverviewBuildControls: View {
     let isBuilding: Bool
     let progress: Double
     let progressStatus: String
+    let isDifference: Bool
     let build: ([String]) -> Void
 
     @State private var selected: Set<String> = []
@@ -745,17 +823,21 @@ private struct TFOverviewBuildControls: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
             HStack(spacing: 8) {
-                Menu {
-                    ForEach(conditions, id: \.self) { condition in
-                        Button {
-                            if selected.contains(condition), selected.count > 1 { selected.remove(condition) }
-                            else { selected.insert(condition) }
-                        } label: {
-                            Label(condition, systemImage: selected.contains(condition) ? "checkmark" : "")
+                if isDifference {
+                    Label("Difference A − B", systemImage: "arrow.left.arrow.right")
+                } else {
+                    Menu {
+                        ForEach(conditions, id: \.self) { condition in
+                            Button {
+                                if selected.contains(condition), selected.count > 1 { selected.remove(condition) }
+                                else { selected.insert(condition) }
+                            } label: {
+                                Label(condition, systemImage: selected.contains(condition) ? "checkmark" : "")
+                            }
                         }
+                    } label: {
+                        Label(menuTitle, systemImage: "line.3.horizontal.decrease.circle")
                     }
-                } label: {
-                    Label(menuTitle, systemImage: "line.3.horizontal.decrease.circle")
                 }
                 Button { build(selectedList) } label: {
                     Label(hasOverview ? "Rebuild" : "Build", systemImage: needsRebuild ? "arrow.clockwise.circle.fill" : "arrow.clockwise")
@@ -778,7 +860,7 @@ private struct TFOverviewBuildControls: View {
 
     private var selectedList: [String] { conditions.filter { selected.contains($0) } }
     private var menuTitle: String { selectedList.count == 1 ? "Condition: \(selectedList[0])" : "Conditions: \(selectedList.count)" }
-    private var needsRebuild: Bool { setupNeedsRebuild || Set(selectedList) != builtConditions }
+    private var needsRebuild: Bool { setupNeedsRebuild || (!isDifference && Set(selectedList) != builtConditions) }
 }
 
 private struct TFChannelMatrix: View {
@@ -836,11 +918,5 @@ private struct TFChannelMatrix: View {
         guard !channels.isEmpty, height > 0 else { return nil }
         let row = min(max(Int(point.y / height * CGFloat(channels.count)), 0), channels.count - 1)
         return channels[row]
-    }
-}
-
-private extension Array {
-    subscript(safe index: Int) -> Element? {
-        indices.contains(index) ? self[index] : nil
     }
 }

@@ -108,7 +108,9 @@ struct TFHeatmap: View {
     private let leftGutter: CGFloat = 44
     private let bottomGutter: CGFloat = 26
     private let topPad: CGFloat = 6
-    private let rightPad: CGFloat = 6
+    // Leave room for the trailing “ms” unit rather than letting it overlap the
+    // final time tick or get clipped by a compact gallery heatmap.
+    private let rightPad: CGFloat = 26
 
     var body: some View {
         GeometryReader { proxy in
@@ -231,7 +233,7 @@ struct TFHeatmap: View {
         }
         context.draw(
             Text("ms").font(.system(size: 9)).foregroundStyle(.secondary),
-            at: CGPoint(x: plot.maxX, y: plot.maxY + 12), anchor: .trailing
+            at: CGPoint(x: plot.maxX + 4, y: plot.maxY + 12), anchor: .leading
         )
     }
 

@@ -306,6 +306,8 @@ final class EpochingViewModel {
         var id: String { rawValue }
     }
     var tfMeasure: TFMeasure = .power
+    /// Power map source. Total preserves EVA's original ERSP behavior.
+    var tfPowerMode: TFPowerMode = .total
     var tfSelectedChannelIndex: Int = 0
     var tfMethod: TFMethod = .morlet
     var tfConditionA: String?

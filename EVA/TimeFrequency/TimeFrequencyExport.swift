@@ -34,6 +34,7 @@ nonisolated enum TimeFrequencyExport {
         var plan: TFFrequencyPlan
         var method: TFMethod
         var timeBandwidth: Double
+        var powerMode: TFPowerMode = .total
         var baselineMethod: TFBaselineMethod
         var bands: [EEGFrequencyBand]
         var windows: [Window]
@@ -110,7 +111,8 @@ nonisolated enum TimeFrequencyExport {
                     let baseline = baselineSpec(for: stack, method: context.baselineMethod)
                     if let result = TimeFrequencyEngine.ersp(
                         trials: stack.trials, samplingRate: stack.samplingRate, plan: context.plan,
-                        baseline: baseline, method: context.method, timeBandwidth: context.timeBandwidth
+                        baseline: baseline, method: context.method, timeBandwidth: context.timeBandwidth,
+                        powerMode: context.powerMode
                     ) {
                         let timesMs = (0..<stack.timeCount).map {
                             Double($0 - stack.stimulusOffsetSamples) / stack.samplingRate * 1000.0
@@ -138,6 +140,32 @@ nonisolated enum TimeFrequencyExport {
         )
     }
 
+    /// Aligns two independently computed all-channel maps into an A − B map.
+    /// The decomposition itself remains reusable in the per-condition cache.
+    static func differenceMaps(_ a: ConditionMaps, _ b: ConditionMaps, label: String) -> ConditionMaps? {
+        guard a.channelIndices == b.channelIndices,
+              a.frequenciesHz == b.frequenciesHz,
+              a.timesMs == b.timesMs else { return nil }
+        return ConditionMaps(
+            condition: label, channelIndices: a.channelIndices, channelNames: a.channelNames,
+            ersp: subtract(a.ersp, b.ersp), itpc: subtract(a.itpc, b.itpc),
+            frequenciesHz: a.frequenciesHz, timesMs: a.timesMs
+        )
+    }
+
+    private static func subtract(_ lhs: [[[Double]]], _ rhs: [[[Double]]]) -> [[[Double]]] {
+        guard lhs.count == rhs.count else { return lhs }
+        return lhs.indices.map { channel in
+            let leftFrequencies = lhs[channel], rightFrequencies = rhs[channel]
+            guard leftFrequencies.count == rightFrequencies.count else { return leftFrequencies }
+            return leftFrequencies.indices.map { frequency in
+                let leftTimes = leftFrequencies[frequency], rightTimes = rightFrequencies[frequency]
+                let count = min(leftTimes.count, rightTimes.count)
+                return (0..<count).map { leftTimes[$0] - rightTimes[$0] }
+            }
+        }
+    }
+
     /// GPU path for the all-channel explorer.  The whole channel × trial stack
     /// reaches Metal as one batch, so it avoids a command-buffer round trip per
     /// sensor.  If the stack is irregular or too large for the current device,
@@ -162,16 +190,31 @@ nonisolated enum TimeFrequencyExport {
         guard let first = stacks.first,
               stacks.allSatisfy({ $0.trials.count == first.trials.count && $0.timeCount == first.timeCount && $0.samplingRate == first.samplingRate }) else { return nil }
 
+        let powerStacks = context.powerMode == .total
+            ? stacks
+            : stacks.map { stack in
+                TimeFrequencyTrials.Stack(
+                    trials: TimeFrequencyEngine.powerTrials(stack.trials, mode: context.powerMode),
+                    samplingRate: stack.samplingRate, stimulusOffsetSamples: stack.stimulusOffsetSamples
+                )
+            }
         var ersp: [[[Double]]] = []
         var itpc: [[[Double]]] = []
         let batchSize = 16
         for start in stride(from: 0, to: stacks.count, by: batchSize) {
             let end = min(start + batchSize, stacks.count)
-            guard let decomposed = backend.decompose(stacks: Array(stacks[start..<end]), plan: context.plan) else { return nil }
-            for (stack, result) in zip(stacks[start..<end], decomposed) {
+            guard let original = backend.decompose(stacks: Array(stacks[start..<end]), plan: context.plan) else { return nil }
+            let powered: [TimeFrequencyMetalBackend.Decomposition]
+            if context.powerMode == .total {
+                powered = original
+            } else {
+                guard let component = backend.decompose(stacks: Array(powerStacks[start..<end]), plan: context.plan) else { return nil }
+                powered = component
+            }
+            for ((stack, originalResult), powerResult) in zip(zip(stacks[start..<end], original), powered) {
                 let baseline = baselineSpec(for: stack, method: context.baselineMethod)
-                ersp.append(TimeFrequencyEngine.normalize(power: result.meanPower, baseline: baseline))
-                itpc.append(result.itpc)
+                ersp.append(TimeFrequencyEngine.normalize(power: powerResult.meanPower, baseline: baseline))
+                itpc.append(originalResult.itpc)
             }
             progress?(0.10 + 0.90 * Double(end) / Double(stacks.count), "Metal batch \(start / batchSize + 1)")
         }
@@ -240,6 +283,7 @@ nonisolated enum TimeFrequencyExport {
             "unit": measure == .power ? context.baselineMethod.rawValue : "itpc",
             "condition": maps.condition,
             "method": context.method.rawValue,
+            "powerMode": context.powerMode.rawValue,
             "timeBandwidth": context.timeBandwidth,
             "baselineMethod": context.baselineMethod.rawValue,
             "cyclesLow": context.plan.nCycles.first ?? 0,
@@ -266,6 +310,7 @@ nonisolated enum TimeFrequencyExport {
             rows.append(["summary", "recording", "", "", "", "", "", metric, "\(value)"])
         }
         summary("method", context.method.rawValue)
+        summary("power_mode", context.powerMode.rawValue)
         summary("baseline_method", context.baselineMethod.rawValue)
         summary("cycles_low", clean(context.plan.nCycles.first ?? 0))
         summary("cycles_high", clean(context.plan.nCycles.last ?? 0))
