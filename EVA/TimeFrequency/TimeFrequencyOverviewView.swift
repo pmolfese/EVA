@@ -13,6 +13,9 @@ import AppKit
 /// Cached all-channel data used only by the overview workspace.  The normal
 /// Time-Frequency detail panel remains a compact single-channel computation.
 struct TFOverviewRender: Sendable {
+    /// A fresh overview needs fresh derived display data even when its
+    /// conditions and controls have the same labels as a previous build.
+    var id = UUID()
     var condition: String
     var channelIndices: [Int]
     var channelNames: [String]
@@ -48,6 +51,95 @@ struct TFOverviewRender: Sendable {
     }
 }
 
+/// Derived values used by the dashboard.  This is deliberately data-only so
+/// it can be prepared away from the main actor; SwiftUI views and Canvas
+/// drawing remain main-actor work.
+private struct TFOverviewDisplayCache: Sendable {
+    var condition: String
+    var activeChannels: [Int]
+    var roiByLocal: [Double]
+    var scalpValues: [Double]
+    var roiScale: Double
+    var sensorRows: [[Double]]
+    var rankedLocalIndices: [Int]
+    var channelRenders: [TFRender]
+    var frequencyScales: [Double]
+}
+
+private struct TFOverviewPreparationInput: Sendable {
+    var overview: TFOverviewRender
+    var activeChannels: [Int]
+    var frequencyIndices: [Int]
+    var timeIndices: [Int]
+}
+
+private enum TFOverviewDisplayPreparation {
+    static func prepare(_ input: TFOverviewPreparationInput) -> TFOverviewDisplayCache {
+        let overview = input.overview
+        let activeSet = Set(input.activeChannels)
+        let highestChannel = (overview.channelIndices.max() ?? -1) + 1
+        var roiByLocal = [Double](repeating: 0, count: overview.channelIndices.count)
+        var scalpValues = [Double](repeating: 0, count: max(highestChannel, 1))
+        var sensorRows: [[Double]] = []
+        var channelRenders: [TFRender] = []
+
+        for local in overview.channelIndices.indices {
+            let grid = overview.grids[local]
+            let roi = mean(grid, frequencies: input.frequencyIndices, times: input.timeIndices)
+            roiByLocal[local] = roi
+            scalpValues[overview.channelIndices[local]] = roi
+
+            if activeSet.contains(overview.channelIndices[local]) {
+                sensorRows.append(overview.timesMs.indices.map { time in
+                    mean(grid, frequencies: input.frequencyIndices, times: [time])
+                })
+            }
+
+            let flat = grid.flatMap { $0 }
+            let range: ClosedRange<Double>
+            if overview.isDiverging {
+                let extent = max(flat.map(abs).max() ?? 1, 1e-6)
+                range = -extent...extent
+            } else {
+                range = 0...max(flat.max() ?? 1, 0.05)
+            }
+            channelRenders.append(TFRender(
+                grid: grid, frequenciesHz: overview.frequenciesHz, timesMs: overview.timesMs,
+                eventSampleIndex: overview.timesMs.firstIndex(where: { $0 >= 0 }) ?? 0,
+                valueRange: range, isDiverging: overview.isDiverging, measure: overview.measure,
+                isDifference: overview.isDifference, trialCountA: 0, trialCountB: nil
+            ))
+        }
+
+        let activeLocals = overview.channelIndices.indices.filter { activeSet.contains(overview.channelIndices[$0]) }
+        let sortedMagnitudes = activeLocals.map { abs(roiByLocal[$0]) }.sorted()
+        let roiScale = max(sortedMagnitudes.dropFirst(Int(Double(sortedMagnitudes.count) * 0.99)).first ?? sortedMagnitudes.last ?? 1, 1e-6)
+        let ranked = activeLocals.sorted { abs(roiByLocal[$0]) > abs(roiByLocal[$1]) }
+        let frequencyScales = overview.frequenciesHz.indices.map { frequency in
+            let values = activeLocals.map { abs(mean(overview.grids[$0], frequencies: [frequency], times: Array(overview.timesMs.indices))) }.sorted()
+            return max(values.dropFirst(Int(Double(values.count) * 0.99)).first ?? values.last ?? 1, 1e-6)
+        }
+
+        return TFOverviewDisplayCache(
+            condition: overview.condition, activeChannels: input.activeChannels,
+            roiByLocal: roiByLocal, scalpValues: scalpValues, roiScale: roiScale,
+            sensorRows: sensorRows, rankedLocalIndices: ranked,
+            channelRenders: channelRenders, frequencyScales: frequencyScales
+        )
+    }
+
+    private static func mean(_ grid: [[Double]], frequencies: [Int], times: [Int]) -> Double {
+        var total = 0.0, count = 0
+        for frequency in frequencies where grid.indices.contains(frequency) {
+            for time in times where grid[frequency].indices.contains(time) {
+                total += grid[frequency][time]
+                count += 1
+            }
+        }
+        return count > 0 ? total / Double(count) : 0
+    }
+}
+
 struct TimeFrequencyOverviewView: View {
     let overviews: [TFOverviewRender]
     let layout: SensorLayout?
@@ -69,6 +161,8 @@ struct TimeFrequencyOverviewView: View {
     @State private var windowStartMs = 0.0
     @State private var windowEndMs = 600.0
     @State private var filmstripStepMs = 50.0
+    @State private var displayCache: [String: TFOverviewDisplayCache] = [:]
+    @State private var preparedDisplayCacheKey = ""
 
     private let windowPresets: [(String, ClosedRange<Double>)] = [
         ("0–200 ms", 0...200), ("200–500 ms", 200...500),
@@ -109,6 +203,29 @@ struct TimeFrequencyOverviewView: View {
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .textBackgroundColor))
+        .task(id: displayCacheKey) {
+            let requestedKey = displayCacheKey
+            let inputs = overviews.map {
+                TFOverviewPreparationInput(
+                    overview: $0, activeChannels: activeChannels($0),
+                    frequencyIndices: frequencyIndices($0), timeIndices: windowIndices($0)
+                )
+            }
+            let cache = await Task.detached(priority: .utility) {
+                Dictionary(uniqueKeysWithValues: inputs.map {
+                    let prepared = TFOverviewDisplayPreparation.prepare($0)
+                    return (prepared.condition, prepared)
+                })
+            }.value
+            guard !Task.isCancelled, requestedKey == displayCacheKey else { return }
+            displayCache = cache
+            preparedDisplayCacheKey = requestedKey
+        }
+    }
+
+    private var displayCacheKey: String {
+        let renderIDs = overviews.map { $0.id.uuidString }.joined(separator: "|")
+        return "\(renderIDs)|\(groupID)|\(bandName)|\(windowStartMs)|\(windowEndMs)"
     }
 
     private var analysisControls: some View {
@@ -200,12 +317,20 @@ struct TimeFrequencyOverviewView: View {
     private func overviewContent(_ overview: TFOverviewRender, destination: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(overview.condition).font(.headline)
-            switch destination ?? self.destination {
-        case "Scalp + detail": scalpDetail(overview)
-        case "Sensor matrix": sensorMatrix(overview)
-        case "Filmstrip": filmstrip(overview)
-        case "Ranked gallery": gallery(overview)
-        default: clusters(overview)
+            if preparedDisplayCacheKey == displayCacheKey {
+                switch destination ?? self.destination {
+                case "Scalp + detail": scalpDetail(overview)
+                case "Sensor matrix": sensorMatrix(overview)
+                case "Filmstrip": filmstrip(overview)
+                case "Ranked gallery": gallery(overview)
+                default: clusters(overview)
+                }
+            } else {
+                ContentUnavailableView(
+                    "Preparing dashboard data",
+                    systemImage: "chart.bar.doc.horizontal",
+                    description: Text("Derived display values are being prepared in the background."))
+                    .frame(minWidth: 420, minHeight: 220)
             }
         }
     }
@@ -255,14 +380,15 @@ struct TimeFrequencyOverviewView: View {
     @ViewBuilder
     private func scalpDetail(_ overview: TFOverviewRender) -> some View {
         if let layout {
+            let cached = displayCache[overview.condition]
             HStack(spacing: 16) {
                 TopomapView(
-                    layout: layout, values: roiValues(overview), timeSeconds: selectedWindow.upperBound / 1000,
-                    fixedScale: overviewScale(overview), unitLabel: unitLabel(overview),
+                    layout: layout, values: cached?.scalpValues ?? roiValues(overview), timeSeconds: selectedWindow.upperBound / 1000,
+                    fixedScale: cached?.roiScale ?? overviewScale(overview), unitLabel: unitLabel(overview),
                     usesPositiveSequentialScale: !overview.isDiverging, minimumMapHeight: 190,
                     channelName: { channelName($0, overview: overview) },
                     onTapChannel: selectChannel,
-                    visibleChannels: Set(activeChannels(overview))
+                    visibleChannels: Set(cached?.activeChannels ?? activeChannels(overview))
                 )
                 .frame(width: 230)
                 if let local = overview.localIndex(for: selectedChannel) {
@@ -273,10 +399,10 @@ struct TimeFrequencyOverviewView: View {
                             Button("Open full detail") { selectChannel(selectedChannel) }
                                 .controlSize(.small)
                         }
-                        TFHeatmap(render: channelRender(local, overview))
+                        TFHeatmap(render: cached?.channelRenders[safe: local] ?? channelRender(local, overview))
                             .frame(minWidth: 300, maxWidth: .infinity, minHeight: 190)
                         Text("Selected: \(overview.channelNames[local])")
-                        Text(String(format: "ROI value: %.3f %@", roiValue(local, overview), unitLabel(overview)))
+                        Text(String(format: "ROI value: %.3f %@", cached?.roiByLocal[safe: local] ?? roiValue(local, overview), unitLabel(overview)))
                             .font(.caption.monospacedDigit())
                     }
                 } else {
@@ -295,10 +421,9 @@ struct TimeFrequencyOverviewView: View {
 
     private func sensorMatrix(_ overview: TFOverviewRender) -> some View {
         let channels = activeChannels(overview)
-        let freq = frequencyIndices(overview)
-        let values = channels.compactMap { channel -> [Double]? in
+        let values = displayCache[overview.condition]?.sensorRows ?? channels.compactMap { channel -> [Double]? in
             guard let local = overview.localIndex(for: channel) else { return nil }
-            return overview.timesMs.indices.map { time in mean(overview.grids[local], frequencies: freq, times: [time]) }
+            return overview.timesMs.indices.map { time in mean(overview.grids[local], frequencies: frequencyIndices(overview), times: [time]) }
         }
         return VStack(alignment: .leading, spacing: 4) {
             Text("\(bandName) power/ITPC by sensor and time — Option-hover to identify a row; click it to open that channel’s TF detail.")
@@ -314,6 +439,7 @@ struct TimeFrequencyOverviewView: View {
     @ViewBuilder
     private func filmstrip(_ overview: TFOverviewRender) -> some View {
         if let layout {
+            let cached = displayCache[overview.condition]
             let frequencySlices = frequencySliceIndices(overview, count: 6)
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
@@ -337,11 +463,11 @@ struct TimeFrequencyOverviewView: View {
                                         TopomapView(
                                             layout: layout, values: values(at: time, frequency: frequency, overview),
                                             timeSeconds: overview.timesMs[time] / 1000,
-                                            fixedScale: overviewScale(overview, frequency: frequency), unitLabel: unitLabel(overview),
+                                            fixedScale: cached?.frequencyScales[safe: frequency] ?? overviewScale(overview, frequency: frequency), unitLabel: unitLabel(overview),
                                             usesPositiveSequentialScale: !overview.isDiverging,
                                             showsHeader: false, colorBarPlacement: .none, minimumMapHeight: mapSide,
                                             contentPadding: 0, fieldResolution: 40, showsElectrodes: false,
-                                            visibleChannels: Set(activeChannels(overview))
+                                            visibleChannels: Set(cached?.activeChannels ?? activeChannels(overview))
                                         )
                                         .frame(width: mapSide, height: mapSide)
                                         if frequency == frequencySlices.first {
@@ -360,23 +486,24 @@ struct TimeFrequencyOverviewView: View {
     }
 
     private func gallery(_ overview: TFOverviewRender) -> some View {
-        let top = activeChannels(overview)
+        let cached = displayCache[overview.condition]
+        let top = (cached?.rankedLocalIndices ?? activeChannels(overview)
             .compactMap { channel -> (Int, Double)? in
                 guard let local = overview.localIndex(for: channel) else { return nil }
                 return (local, abs(roiValue(local, overview)))
             }
-            .sorted { $0.1 > $1.1 }.prefix(12)
+            .sorted { $0.1 > $1.1 }.map(\.0)).prefix(12)
         return GeometryReader { proxy in
             let items = Array(top)
             let spacing = CGFloat(max(items.count - 1, 0)) * 10
             let width = min(320, max(220, (proxy.size.width - spacing) / CGFloat(max(items.count, 1))))
             ScrollView(.horizontal) {
                 HStack(alignment: .top, spacing: 10) {
-                    ForEach(items, id: \.0) { local, _ in
+                    ForEach(items, id: \.self) { local in
                         Button { selectChannel(overview.channelIndices[local]) } label: {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(overview.channelNames[local]).font(.caption.weight(.semibold))
-                                TFHeatmap(render: channelRender(local, overview))
+                                TFHeatmap(render: cached?.channelRenders[safe: local] ?? channelRender(local, overview))
                                     .frame(width: width, height: width * 0.76)
                             }
                         }
@@ -709,5 +836,11 @@ private struct TFChannelMatrix: View {
         guard !channels.isEmpty, height > 0 else { return nil }
         let row = min(max(Int(point.y / height * CGFloat(channels.count)), 0), channels.count - 1)
         return channels[row]
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
