@@ -98,14 +98,13 @@ struct TimeFrequencyOverviewView: View {
             if !overviews.isEmpty {
                 controls(overviews)
                 dashboard
-                if isBuilding { prewarmedDashboard }
             } else {
-                ContentUnavailableView(
-                    "Overview not built",
-                    systemImage: "circle.grid.cross",
-                    description: Text("Build all-channel maps once to explore the current condition and analysis settings spatially."))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
+            ContentUnavailableView(
+                "Overview not built",
+                systemImage: "circle.grid.cross",
+                description: Text("Build all-channel maps once to explore the current condition and analysis settings spatially."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -237,23 +236,6 @@ struct TimeFrequencyOverviewView: View {
                 }
             }
         }
-    }
-
-    /// Builds the view-specific raster/heatmap caches while the rebuild status
-    /// is still visible.  Hidden views retain normal layout so their Canvas and
-    /// Topomap `onAppear` work happens now, rather than on the first tab click.
-    private var prewarmedDashboard: some View {
-        HStack(spacing: 0) {
-            ForEach(overviews, id: \.condition) { overview in
-                ForEach(["Scalp + detail", "Sensor matrix", "Filmstrip", "Ranked gallery", "Clusters"], id: \.self) { view in
-                    overviewContent(overview, destination: view)
-                        .frame(width: view == "Filmstrip" || view == "Ranked gallery" ? 1_000 : 640)
-                }
-            }
-        }
-        .frame(width: 1, height: 1)
-        .hidden()
-        .allowsHitTesting(false)
     }
 
     private func dashboardCard(_ name: String, question: String, symbol: String) -> some View {
