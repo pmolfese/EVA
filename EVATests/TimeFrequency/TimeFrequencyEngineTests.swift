@@ -120,6 +120,29 @@ struct TimeFrequencyEngineTests {
         #expect(maxAbsError < 1e-6, "EVA ITPC deviates from MNE by \(maxAbsError)")
     }
 
+    @Test func powerModesSeparatePhaseLockedAndERPSubtractedSignals() {
+        let samplingRate = 200.0
+        let samples = 400
+        let waveform = (0..<samples).map { index in
+            sin(2 * Double.pi * 10 * Double(index) / samplingRate)
+        }
+        let trials = Array(repeating: waveform, count: 12)
+        let plan = TFFrequencyPlan.explicit(frequenciesHz: [10], nCycles: 6)
+
+        let evokedTrials = TimeFrequencyEngine.powerTrials(trials, mode: .evoked)
+        let inducedTrials = TimeFrequencyEngine.powerTrials(trials, mode: .induced)
+        let evoked = TimeFrequencyEngine.decompose(
+            trials: evokedTrials, samplingRate: samplingRate, plan: plan
+        ).meanPower.flatMap { $0 }.max() ?? 0
+        let induced = TimeFrequencyEngine.decompose(
+            trials: inducedTrials, samplingRate: samplingRate, plan: plan
+        ).meanPower.flatMap { $0 }.max() ?? 0
+
+        #expect(evokedTrials.count == 1)
+        #expect(evoked > 0.01)
+        #expect(induced < 1e-12)
+    }
+
     @Test func itpcIsHighAtPhaseLockedBurst() {
         let ref = Self.reference
         let plan = TFFrequencyPlan.explicit(frequenciesHz: ref.freqsHz, nCycles: ref.nCycles)

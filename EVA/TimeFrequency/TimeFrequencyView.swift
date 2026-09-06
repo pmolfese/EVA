@@ -54,6 +54,7 @@ struct TimeFrequencyView: View {
     // large signal/segment arrays).
     private struct Job: Equatable {
         var measure: EpochingViewModel.TFMeasure
+        var powerMode: TFPowerMode
         var method: TFMethod
         var timeBandwidth: Double
         var channel: Int
@@ -73,6 +74,7 @@ struct TimeFrequencyView: View {
     private var job: Job {
         Job(
             measure: epoching.tfMeasure,
+            powerMode: epoching.tfPowerMode,
             method: epoching.tfMethod,
             timeBandwidth: epoching.tfTimeBandwidth,
             channel: epoching.tfSelectedChannelIndex,
@@ -100,11 +102,12 @@ struct TimeFrequencyView: View {
     }
 
     private var overviewCacheKey: String {
-        [
-            job.measure.rawValue, job.method.rawValue, String(job.timeBandwidth),
+        let differenceKey = job.showsDifference ? "\(job.conditionA ?? "")−\(job.conditionB ?? "")" : ""
+        return [
+            job.measure.rawValue, job.powerMode.rawValue, job.method.rawValue, String(job.timeBandwidth),
             String(job.minHz), String(job.maxHz), String(job.count),
             String(job.cyclesLow), String(job.cyclesHigh), job.baseline.rawValue,
-            job.signalToken, String(job.segmentCount)
+            job.signalToken, String(job.segmentCount), String(job.showsDifference), differenceKey
         ].joined(separator: "|")
     }
 
@@ -225,7 +228,7 @@ struct TimeFrequencyView: View {
     }
 
     private var headerTitle: String {
-        let measure = epoching.tfMeasure == .power ? "ERSP" : "ITPC"
+        let measure = epoching.tfMeasure == .power ? "ERSP · \(epoching.tfPowerMode.rawValue)" : "ITPC"
         let channel = channelNames.indices.contains(epoching.tfSelectedChannelIndex)
             ? channelNames[epoching.tfSelectedChannelIndex] : "—"
         if epoching.tfShowsDifference, let b = epoching.tfConditionB, let a = effectiveConditionA {
@@ -259,6 +262,19 @@ struct TimeFrequencyView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                }
+
+                if epoching.tfMeasure == .power {
+                    controlSection("Power mode") {
+                        Picker("", selection: $epoching.tfPowerMode) {
+                            ForEach(TFPowerMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text(epoching.tfPowerMode.explanation).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
 
                 controlSection("Method") {
@@ -391,10 +407,14 @@ struct TimeFrequencyView: View {
         }
     }
 
-    private func openDetail(for channel: Int) {
-        if let condition = effectiveConditionA,
-           let source = overview.first(where: { $0.condition == condition }),
-           let preview = source.detailRender(for: channel) {
+    private func openDetail(for channel: Int, in source: TFOverviewRender) {
+        // A dashboard can display several conditions at once.  Carry the
+        // originating overview through the click instead of reopening the
+        // first condition from the global A selector.
+        if !source.isDifference {
+            epoching.tfConditionA = source.condition
+        }
+        if let preview = source.detailRender(for: channel) {
             render = preview
             renderedJob = job
         } else {
@@ -412,6 +432,10 @@ struct TimeFrequencyView: View {
         let names = channelNames, measure = epoching.tfMeasure
         let usesGPU = ProcessingDefaults.shared.timeFrequencyUsesGPU
         let cacheKey = overviewCacheKey
+        let differenceA = effectiveConditionA
+        let differenceB = epoching.tfConditionB
+        let showsDifference = epoching.tfShowsDifference
+        guard !showsDifference || (differenceA != nil && differenceB != nil && differenceA != differenceB) else { return }
         isBuildingOverview = true
         overviewProgress = 0
         let backend = usesGPU
@@ -421,35 +445,46 @@ struct TimeFrequencyView: View {
         Task {
             let channels = Array(signal.data.indices)
             var renders: [TFOverviewRender] = []
-            for (index, condition) in conditions.enumerated() {
-                let start = Double(index) / Double(conditions.count)
-                overviewProgress = start
-                overviewStatus = "\(Int(start * 100))% · \(index + 1)/\(conditions.count) \(condition) · \(channels.count) channels"
-                await Task.yield()
-                let maps = await Task.detached(priority: .userInitiated) {
-                    TimeFrequencyExport.conditionMaps(
-                        signal: signal, segments: segments, condition: condition,
-                        channelIndices: channels, channelNames: names, context: context, usesGPU: usesGPU,
-                        progress: { fraction, stage in
-                            Task { @MainActor in
-                                let overall = (Double(index) + fraction) / Double(conditions.count)
-                                overviewProgress = overall
-                                overviewStatus = "\(Int(overall * 100))% · \(index + 1)/\(conditions.count) \(condition) · \(stage)"
-                            }
-                        }
+            if showsDifference, let differenceA, let differenceB {
+                let mapsA = await conditionMaps(
+                    for: differenceA, progressRange: 0...0.5,
+                    signal: signal, segments: segments, channels: channels, names: names,
+                    context: context, usesGPU: usesGPU
+                )
+                let mapsB = await conditionMaps(
+                    for: differenceB, progressRange: 0.5...1,
+                    signal: signal, segments: segments, channels: channels, names: names,
+                    context: context, usesGPU: usesGPU
+                )
+                if let mapsA, let mapsB,
+                   let difference = TimeFrequencyExport.differenceMaps(mapsA, mapsB, label: "\(differenceA) − \(differenceB)") {
+                    renders.append(TFOverviewRender(
+                        condition: difference.condition,
+                        channelIndices: difference.channelIndices, channelNames: difference.channelNames,
+                        grids: measure == .power ? difference.ersp : difference.itpc,
+                        frequenciesHz: difference.frequenciesHz, timesMs: difference.timesMs,
+                        measure: measure, isDifference: true
+                    ))
+                }
+            } else {
+                for (index, condition) in conditions.enumerated() {
+                    let start = Double(index) / Double(conditions.count)
+                    overviewProgress = start
+                    overviewStatus = "\(Int(start * 100))% · \(index + 1)/\(conditions.count) \(condition) · \(channels.count) channels"
+                    let maps = await conditionMaps(
+                        for: condition, progressRange: start...(Double(index + 1) / Double(conditions.count)),
+                        signal: signal, segments: segments, channels: channels, names: names,
+                        context: context, usesGPU: usesGPU
                     )
-                }.value
-                guard let maps else { continue }
-                renders.append(TFOverviewRender(
-                    condition: condition,
-                    channelIndices: maps.channelIndices, channelNames: maps.channelNames,
-                    grids: measure == .power ? maps.ersp : maps.itpc,
-                    frequenciesHz: maps.frequenciesHz, timesMs: maps.timesMs,
-                    measure: measure, isDifference: false
-                ))
-                let complete = Double(index + 1) / Double(conditions.count)
-                overviewProgress = complete
-                overviewStatus = "\(Int(complete * 100))% · \(index + 1)/\(conditions.count) complete"
+                    guard let maps else { continue }
+                    renders.append(TFOverviewRender(
+                        condition: condition,
+                        channelIndices: maps.channelIndices, channelNames: maps.channelNames,
+                        grids: measure == .power ? maps.ersp : maps.itpc,
+                        frequenciesHz: maps.frequenciesHz, timesMs: maps.timesMs,
+                        measure: measure, isDifference: false
+                    ))
+                }
             }
             // Installing hidden instances of every dashboard was a main-thread
             // operation and could stall at 100%.  Publish just the selected
@@ -464,6 +499,33 @@ struct TimeFrequencyView: View {
         }
     }
 
+    private func conditionMaps(
+        for condition: String,
+        progressRange: ClosedRange<Double>,
+        signal: MFFSignalData,
+        segments: [EpochSegment],
+        channels: [Int],
+        names: [String],
+        context: TimeFrequencyExport.Context,
+        usesGPU: Bool
+    ) async -> TimeFrequencyExport.ConditionMaps? {
+        overviewProgress = progressRange.lowerBound
+        overviewStatus = "\(Int(progressRange.lowerBound * 100))% · \(condition) · \(channels.count) channels"
+        return await Task.detached(priority: .userInitiated) {
+            TimeFrequencyExport.conditionMaps(
+                signal: signal, segments: segments, condition: condition,
+                channelIndices: channels, channelNames: names, context: context, usesGPU: usesGPU,
+                progress: { fraction, stage in
+                    Task { @MainActor in
+                        let overall = progressRange.lowerBound + fraction * (progressRange.upperBound - progressRange.lowerBound)
+                        overviewProgress = overall
+                        overviewStatus = "\(Int(overall * 100))% · \(condition) · \(stage)"
+                    }
+                }
+            )
+        }.value
+    }
+
     // MARK: Export (TF-3)
 
     private var exportContext: TimeFrequencyExport.Context {
@@ -474,7 +536,7 @@ struct TimeFrequencyView: View {
         let maxTimeMs = render?.timesMs.last ?? 0
         return TimeFrequencyExport.Context(
             plan: plan, method: epoching.tfMethod, timeBandwidth: epoching.tfTimeBandwidth,
-            baselineMethod: epoching.tfBaselineMethod, bands: ProcessingDefaults.shared.timeFrequencyBands,
+            powerMode: epoching.tfPowerMode, baselineMethod: epoching.tfBaselineMethod, bands: ProcessingDefaults.shared.timeFrequencyBands,
             windows: TimeFrequencyExport.defaultWindows(maxTimeMs: maxTimeMs)
         )
     }
@@ -559,7 +621,7 @@ struct TimeFrequencyView: View {
         guard !stackA.isEmpty else { return nil }
 
         let baseline = baselineSpec(for: stackA, method: job.baseline)
-        guard let resultA = TimeFrequencyEngine.ersp(trials: stackA.trials, samplingRate: stackA.samplingRate, plan: plan, baseline: baseline, method: job.method, timeBandwidth: job.timeBandwidth, usesGPU: usesGPU) else { return nil }
+        guard let resultA = TimeFrequencyEngine.ersp(trials: stackA.trials, samplingRate: stackA.samplingRate, plan: plan, baseline: baseline, method: job.method, timeBandwidth: job.timeBandwidth, powerMode: job.powerMode, usesGPU: usesGPU) else { return nil }
 
         let gridA = job.measure == .power ? resultA.ersp : resultA.itpc
 
@@ -569,7 +631,7 @@ struct TimeFrequencyView: View {
         if job.showsDifference, let conditionB = job.conditionB, conditionB != conditionA {
             let stackB = TimeFrequencyTrials.stack(signal: signal, segments: segments, category: conditionB, channelIndices: channels)
             if !stackB.isEmpty,
-               let resultB = TimeFrequencyEngine.ersp(trials: stackB.trials, samplingRate: stackB.samplingRate, plan: plan, baseline: baselineSpec(for: stackB, method: job.baseline), method: job.method, timeBandwidth: job.timeBandwidth, usesGPU: usesGPU) {
+               let resultB = TimeFrequencyEngine.ersp(trials: stackB.trials, samplingRate: stackB.samplingRate, plan: plan, baseline: baselineSpec(for: stackB, method: job.baseline), method: job.method, timeBandwidth: job.timeBandwidth, powerMode: job.powerMode, usesGPU: usesGPU) {
                 let gridB = job.measure == .power ? resultB.ersp : resultB.itpc
                 grid = subtract(gridA, gridB)
                 trialCountB = stackB.trials.count

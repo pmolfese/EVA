@@ -168,32 +168,76 @@ nonisolated enum TimeFrequencyEngine {
         baseline: TFBaselineSpec,
         method: TFMethod = .morlet,
         timeBandwidth: Double = 4.0,
+        powerMode: TFPowerMode = .total,
         usesGPU: Bool = false
     ) -> TimeFrequencyResult? {
+        let original = decompose(
+            trials: trials, samplingRate: samplingRate, plan: plan,
+            method: method, timeBandwidth: timeBandwidth, usesGPU: usesGPU
+        )
+        guard !original.meanPower.isEmpty else { return nil }
+
+        // ITPC always refers to phase consistency across the original trials.
+        // Evoked/induced affect only which signal supplies the power map.
         let power: [[Double]]
-        let itpc: [[Double]]
-        if usesGPU, method == .morlet,
-           let gpu = TimeFrequencyMetalBackend.shared?.decompose(trials: trials, samplingRate: samplingRate, plan: plan) {
-            power = gpu.meanPower
-            itpc = gpu.itpc
+        if powerMode == .total {
+            power = original.meanPower
         } else {
-            (power, itpc) = decompose(
-                trials: trials, samplingRate: samplingRate, plan: plan,
-                method: method, timeBandwidth: timeBandwidth
+            let source = powerTrials(trials, mode: powerMode)
+            let component = decompose(
+                trials: source, samplingRate: samplingRate, plan: plan,
+                method: method, timeBandwidth: timeBandwidth, usesGPU: usesGPU
             )
+            guard !component.meanPower.isEmpty else { return nil }
+            power = component.meanPower
         }
-        guard !power.isEmpty else { return nil }
 
         let normalized = normalize(power: power, baseline: baseline)
         return TimeFrequencyResult(
             ersp: normalized,
             meanPower: power,
-            itpc: itpc,
+            itpc: original.itpc,
             frequenciesHz: plan.frequenciesHz,
             nCycles: plan.nCycles,
             trialCount: trials.count,
             samplingRate: samplingRate,
             baselineMethod: baseline.method
+        )
+    }
+
+    /// Produces the waveform stack appropriate for the selected power mode.
+    /// Trials are rectangular by the time they reach the TF engine.
+    static func powerTrials(_ trials: [[Double]], mode: TFPowerMode) -> [[Double]] {
+        guard mode != .total, let first = trials.first, !first.isEmpty else { return trials }
+        let count = min(trials.map(\.count).min() ?? 0, first.count)
+        guard count > 0 else { return trials }
+        var average = [Double](repeating: 0, count: count)
+        for trial in trials {
+            for time in 0..<count { average[time] += trial[time] }
+        }
+        let divisor = Double(trials.count)
+        for time in average.indices { average[time] /= divisor }
+        switch mode {
+        case .total:
+            return trials
+        case .evoked:
+            return [average]
+        case .induced:
+            return trials.map { trial in (0..<count).map { trial[$0] - average[$0] } }
+        }
+    }
+
+    private static func decompose(
+        trials: [[Double]], samplingRate: Double, plan: TFFrequencyPlan,
+        method: TFMethod, timeBandwidth: Double, usesGPU: Bool
+    ) -> (meanPower: [[Double]], itpc: [[Double]]) {
+        if usesGPU, method == .morlet,
+           let gpu = TimeFrequencyMetalBackend.shared?.decompose(trials: trials, samplingRate: samplingRate, plan: plan) {
+            return (gpu.meanPower, gpu.itpc)
+        }
+        return decompose(
+            trials: trials, samplingRate: samplingRate, plan: plan,
+            method: method, timeBandwidth: timeBandwidth
         )
     }
 

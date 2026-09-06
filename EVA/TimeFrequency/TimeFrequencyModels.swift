@@ -26,6 +26,28 @@ nonisolated enum TFMethod: String, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
 }
 
+/// Which trial component supplies the Power map. ITPC is always computed from
+/// the original trials because it is itself a phase-consistency measure.
+nonisolated enum TFPowerMode: String, CaseIterable, Identifiable, Sendable {
+    /// Mean single-trial power — the historical EVA ERSP behavior.
+    case total = "Total"
+    /// Power of the ERP (the trial-average waveform), retaining only the
+    /// phase-locked response.
+    case evoked = "Evoked"
+    /// Mean power after the condition ERP is removed from every trial.
+    case induced = "Induced"
+
+    var id: String { rawValue }
+
+    var explanation: String {
+        switch self {
+        case .total: return "Mean single-trial power; includes phase-locked and non-phase-locked activity."
+        case .evoked: return "Power of the trial-average ERP; phase-locked activity only."
+        case .induced: return "Mean power after removing the condition ERP from each trial."
+        }
+    }
+}
+
 /// How trial-averaged power is expressed relative to a pre-stimulus baseline.
 nonisolated enum TFBaselineMethod: String, CaseIterable, Identifiable, Sendable {
     /// `10·log10(power / baseline)` — decibels. The field default.
