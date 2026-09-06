@@ -96,23 +96,78 @@ enum TFColorMap {
 struct TFHeatmap: View {
     let render: TFRender
 
+    private struct Hover: Equatable {
+        var location: CGPoint
+        var timeMs: Double
+        var frequencyHz: Double
+        var value: Double
+    }
+
+    @State private var hover: Hover?
+
     private let leftGutter: CGFloat = 44
     private let bottomGutter: CGFloat = 26
     private let topPad: CGFloat = 6
     private let rightPad: CGFloat = 6
 
     var body: some View {
-        Canvas { context, size in
-            let plot = CGRect(
-                x: leftGutter, y: topPad,
-                width: max(1, size.width - leftGutter - rightPad),
-                height: max(1, size.height - topPad - bottomGutter)
-            )
-            drawCells(context: &context, plot: plot)
-            drawEventLine(context: &context, plot: plot)
-            drawFrequencyAxis(context: &context, plot: plot)
-            drawTimeAxis(context: &context, plot: plot)
-            context.stroke(Path(plot), with: .color(.secondary.opacity(0.5)), lineWidth: 1)
+        GeometryReader { proxy in
+            Canvas { context, size in
+                let plot = plotRect(in: size)
+                drawCells(context: &context, plot: plot)
+                drawEventLine(context: &context, plot: plot)
+                drawFrequencyAxis(context: &context, plot: plot)
+                drawTimeAxis(context: &context, plot: plot)
+                context.stroke(Path(plot), with: .color(.secondary.opacity(0.5)), lineWidth: 1)
+            }
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location): updateHover(at: location, size: proxy.size)
+                case .ended: hover = nil
+                }
+            }
+            .overlay(alignment: .topLeading) { hoverTooltip(in: proxy.size) }
+        }
+    }
+
+    private func plotRect(in size: CGSize) -> CGRect {
+        CGRect(
+            x: leftGutter, y: topPad,
+            width: max(1, size.width - leftGutter - rightPad),
+            height: max(1, size.height - topPad - bottomGutter)
+        )
+    }
+
+    private func updateHover(at location: CGPoint, size: CGSize) {
+        let plot = plotRect(in: size)
+        guard plot.contains(location), !render.grid.isEmpty,
+              let timeCount = render.grid.first?.count, timeCount > 0 else {
+            hover = nil
+            return
+        }
+        let time = min(max(Int((location.x - plot.minX) / plot.width * CGFloat(timeCount)), 0), timeCount - 1)
+        let invertedRow = min(max(Int((location.y - plot.minY) / plot.height * CGFloat(render.grid.count)), 0), render.grid.count - 1)
+        let frequency = render.grid.count - 1 - invertedRow
+        guard render.frequenciesHz.indices.contains(frequency), render.timesMs.indices.contains(time),
+              render.grid[frequency].indices.contains(time) else { hover = nil; return }
+        hover = Hover(location: location, timeMs: render.timesMs[time], frequencyHz: render.frequenciesHz[frequency], value: render.grid[frequency][time])
+    }
+
+    @ViewBuilder
+    private func hoverTooltip(in size: CGSize) -> some View {
+        if let hover {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(String(format: "%.0f ms · %.2f Hz", hover.timeMs, hover.frequencyHz))
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                Text(String(format: "%.3f %@", hover.value, render.unitLabel))
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .shadow(radius: 2, y: 1)
+            .allowsHitTesting(false)
+            .offset(x: min(max(hover.location.x + 12, 0), max(size.width - 120, 0)), y: max(hover.location.y - 38, 0))
         }
     }
 

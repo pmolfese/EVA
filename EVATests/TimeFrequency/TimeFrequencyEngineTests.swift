@@ -332,6 +332,7 @@ struct TimeFrequencyEngineTests {
         // One channel, freqs 5/6/7 Hz (all in Theta 4–8), times 100–400 ms.
         let maps = TimeFrequencyExport.ConditionMaps(
             condition: "A",
+            channelIndices: [0],
             channelNames: ["Cz"],
             ersp: [[[1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4]]],   // freq × time
             itpc: [[[0, 0.5, 0.5, 1], [0, 0.5, 0.5, 1], [0, 0.5, 0.5, 1]]],

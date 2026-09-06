@@ -12,11 +12,13 @@
 				<string>org.nitrc.cifti-2</string>
 				<string>gov.nih.nifti-1</string>
 				<string>gov.nih.nifti-1-gzip</string>
-					<string>org.nitrc.gifti</string>
-					<string>org.freesurfer.mgh</string>
-					<string>org.gnu.gnu-zip-archive</string>
-					<string>org.nema.dicom</string>
-		</array>
+				<string>org.nitrc.gifti</string>
+				<string>org.freesurfer.mgh</string>
+				<string>org.gnu.gnu-zip-archive</string>
+				<string>org.nema.dicom</string>
+				<string>org.mne-tools.fif</string>
+				<string>org.mne-tools.fif-gzip</string>
+			</array>
 			<key>QLThumbnailMinimumDimension</key>
 			<integer>0</integer>
 		</dict>
@@ -28,15 +30,15 @@
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>org.nitrc.cifti-2</string>
-			<key>UTTypeDescription</key>
-			<string>CIFTI-2 Connectivity Data</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.data</string>
 				<string>public.content</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>CIFTI-2 Connectivity Data</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.nitrc.cifti-2</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -62,16 +64,16 @@
 			</dict>
 		</dict>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>gov.nih.nifti-1-gzip</string>
-			<key>UTTypeDescription</key>
-			<string>Compressed NIfTI Neuroimaging Volume</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>gov.nih.nifti-1</string>
 				<string>public.data</string>
 				<string>org.gnu.gnu-zip-archive</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>Compressed NIfTI Neuroimaging Volume</string>
+			<key>UTTypeIdentifier</key>
+			<string>gov.nih.nifti-1-gzip</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -83,15 +85,15 @@
 			</dict>
 		</dict>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>org.nitrc.gifti</string>
-			<key>UTTypeDescription</key>
-			<string>GIFTI Surface Data</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.xml</string>
 				<string>public.content</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>GIFTI Surface Data</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.nitrc.gifti</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -100,49 +102,94 @@
 				</array>
 				<key>public.mime-type</key>
 				<string>application/gifti+xml</string>
-				</dict>
 			</dict>
-			<dict>
-				<key>UTTypeIdentifier</key>
-				<string>org.freesurfer.mgh</string>
-				<key>UTTypeDescription</key>
-				<string>FreeSurfer MGH/MGZ Volume</string>
-				<key>UTTypeConformsTo</key>
-				<array>
-					<string>public.data</string>
-					<string>public.content</string>
-				</array>
-				<key>UTTypeTagSpecification</key>
-				<dict>
-					<key>public.filename-extension</key>
-					<array>
-						<string>mgh</string>
-						<string>mgz</string>
-						<string>mgh.gz</string>
-					</array>
-				</dict>
-				</dict>
-				<dict>
-					<key>UTTypeIdentifier</key>
-					<string>org.nema.dicom</string>
-					<key>UTTypeDescription</key>
-					<string>DICOM Medical Image</string>
-					<key>UTTypeConformsTo</key>
-					<array>
-						<string>public.image</string>
-						<string>public.data</string>
-					</array>
-					<key>UTTypeTagSpecification</key>
-					<dict>
-						<key>public.filename-extension</key>
-						<array>
-							<string>dcm</string>
-							<string>ima</string>
-						</array>
-						<key>public.mime-type</key>
-						<string>application/dicom</string>
-					</dict>
-				</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>FreeSurfer MGH/MGZ Volume</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.freesurfer.mgh</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>mgh</string>
+					<string>mgz</string>
+					<string>mgh.gz</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.image</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>DICOM Medical Image</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.nema.dicom</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>dcm</string>
+					<string>ima</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/dicom</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>MNE/Neuromag FIF</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.mne-tools.fif</string>
+			<key>UTTypeReferenceURL</key>
+			<string>https://mne.tools/stable/documentation/implementation.html</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>fif</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/x-fif</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>org.mne-tools.fif</string>
+				<string>public.data</string>
+				<string>org.gnu.gnu-zip-archive</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Compressed MNE/Neuromag FIF</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.mne-tools.fif-gzip</string>
+			<key>UTTypeReferenceURL</key>
+			<string>https://mne.tools/stable/documentation/implementation.html</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>fif.gz</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/gzip</string>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

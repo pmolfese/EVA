@@ -34,6 +34,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
             case gifti(GIFTIThumbnailRenderer)
             case mgh(MGHThumbnailRenderer)
             case dicom(DICOMThumbnailRenderer)
+            case fif(FIFThumbnailRenderer)
 
             func draw(in context: CGContext, size: CGSize) {
                 switch self {
@@ -43,6 +44,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
                 case .gifti(let renderer): renderer.draw(in: context, size: size)
                 case .mgh(let renderer): renderer.draw(in: context, size: size)
                 case .dicom(let renderer): renderer.draw(in: context, size: size)
+                case .fif(let renderer): renderer.draw(in: context, size: size)
                 }
             }
         }
@@ -76,6 +78,10 @@ final class ThumbnailProvider: QLThumbnailProvider {
             case .dicom:
                 let model = try DICOMQuickLookReader.read(from: request.fileURL)
                 renderer = .dicom(DICOMThumbnailRenderer(model: model))
+            case .fif:
+                let summary = try FIFQuickLookReader.read(from: request.fileURL)
+                let isDark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+                renderer = .fif(FIFThumbnailRenderer(summary: summary, palette: isDark ? .dark : .light))
             }
         } catch {
             Self.log.error("summary read failed: \(error.localizedDescription, privacy: .public)")

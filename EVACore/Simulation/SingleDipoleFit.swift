@@ -30,6 +30,12 @@
 
 import Foundation
 
+/// A manually managed result buffer crossing `concurrentPerform`.  Every
+/// caller below assigns each worker a disjoint destination range.
+private nonisolated struct SingleDipoleUnsafeSendableBuffer<Element>: @unchecked Sendable {
+    let base: UnsafeMutablePointer<Element>
+}
+
 nonisolated enum SingleDipoleFit {
 
     /// One fitted equivalent dipole for a single field snapshot.
@@ -1282,8 +1288,8 @@ nonisolated enum SingleDipoleFit {
         let perWorker = (positions.count + workers - 1) / workers
         values.withUnsafeMutableBufferPointer { valueBuffer in
             valid.withUnsafeMutableBufferPointer { validBuffer in
-                let valueBase = valueBuffer.baseAddress!
-                let validBase = validBuffer.baseAddress!
+                let valueBase = SingleDipoleUnsafeSendableBuffer(base: valueBuffer.baseAddress!)
+                let validBase = SingleDipoleUnsafeSendableBuffer(base: validBuffer.baseAddress!)
                 DispatchQueue.concurrentPerform(iterations: workers) { worker in
                     let lower = worker * perWorker
                     let upper = min(lower + perWorker, positions.count)
@@ -1304,11 +1310,11 @@ nonisolated enum SingleDipoleFit {
                             let destination = node * stride
                             for ch in 0..<channelCount {
                                 let source = ch * rowStride + 3 * local
-                                valueBase[destination + ch * 3] = Float(flat[source])
-                                valueBase[destination + ch * 3 + 1] = Float(flat[source + 1])
-                                valueBase[destination + ch * 3 + 2] = Float(flat[source + 2])
+                                valueBase.base[destination + ch * 3] = Float(flat[source])
+                                valueBase.base[destination + ch * 3 + 1] = Float(flat[source + 1])
+                                valueBase.base[destination + ch * 3 + 2] = Float(flat[source + 2])
                             }
-                            validBase[node] = true
+                            validBase.base[node] = true
                         }
                         solved = end
                     }
@@ -1421,8 +1427,8 @@ nonisolated enum SingleDipoleFit {
 
         results.withUnsafeMutableBufferPointer { residualBuffer in
             winners.withUnsafeMutableBufferPointer { winnerBuffer in
-                let residualOut = residualBuffer.baseAddress!
-                let winnerOut = winnerBuffer.baseAddress!
+                let residualOut = SingleDipoleUnsafeSendableBuffer(base: residualBuffer.baseAddress!)
+                let winnerOut = SingleDipoleUnsafeSendableBuffer(base: winnerBuffer.baseAddress!)
                 DispatchQueue.concurrentPerform(iterations: workers) { worker in
                     let lower = worker * perWorker
                     let upper = min(lower + perWorker, count)
@@ -1510,8 +1516,8 @@ nonisolated enum SingleDipoleFit {
                             }
                         }
                     }
-                    (residualOut + worker).pointee = bestResidual
-                    (winnerOut + worker).pointee = bestIndex
+                    (residualOut.base + worker).pointee = bestResidual
+                    (winnerOut.base + worker).pointee = bestIndex
                 }
             }
         }

@@ -66,6 +66,11 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
                 try DICOMQuickLookReader.read(from: url)
             }.value
             content = AnyView(DICOMPreviewView(model: model))
+        case .fif:
+            let summary = try await Task.detached(priority: .userInitiated) {
+                try FIFQuickLookReader.read(from: url)
+            }.value
+            content = AnyView(FIFPreviewView(summary: summary))
         }
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false

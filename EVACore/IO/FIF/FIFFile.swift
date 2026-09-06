@@ -37,8 +37,11 @@ nonisolated enum FIF {
     static let bemSurfNodes: Int32 = 3105
     static let bemSurfTriangles: Int32 = 3106
     static let bemSurfNormals: Int32 = 3107
-    static let bemApprox: Int32 = 3108
+    static let description: Int32 = 206
     static let bemPotSolution: Int32 = 3110
+    /// FIFF_BEM_APPROX. (It is 3111, not 3108 — 3108 is not a tag at all; the
+    /// constant here used to say 3108 and was never exercised.)
+    static let bemApprox: Int32 = 3111
     static let bemCoordFrame: Int32 = 3112
     static let bemSigma: Int32 = 3113
     static let mneCoordFrame: Int32 = 3506
@@ -73,6 +76,10 @@ nonisolated enum FIF {
     static let surfSkull: Int32 = 3
     static let surfHead: Int32 = 4
 
+    // BEM approximation methods
+    static let approxConstant: Int32 = 1
+    static let approxLinear: Int32 = 2
+
     static let version: Int32 = (1 << 16) | 3
 
     enum Error: LocalizedError {
@@ -105,6 +112,9 @@ nonisolated struct FIFTag: Sendable {
     func int32(at offset: Int = 0) -> Int32 {
         Int32(bitPattern: UInt32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }))
     }
+    func int16(at offset: Int = 0) -> Int16 {
+        Int16(bitPattern: UInt16(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt16.self) }))
+    }
     func float32(at offset: Int = 0) -> Float {
         Float(bitPattern: UInt32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }))
     }
@@ -114,6 +124,51 @@ nonisolated struct FIFTag: Sendable {
     var intValue: Int { Int(int32()) }
     var floatValue: Double { baseType == FIF.typeDouble ? float64() : Double(float32()) }
     var stringValue: String { String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? "" }
+
+    /// Matrix shape, slowest-varying first: `[rows, cols]` for a 2-D tag, `[n]`
+    /// for a 1-D one, `[epochs, channels, samples]` for an MNE epochs matrix.
+    ///
+    /// FIF stores the dimensions *after* the data as `dims[last…first]` followed
+    /// by the dimension count, so walking backwards from the end yields the
+    /// slowest-varying dimension first — which is already the order wanted. (An
+    /// earlier version reversed that a second time and returned every shape
+    /// backwards; square BEM solutions hid it.)
+    func matrixDimensions() throws -> [Int] {
+        guard isMatrix, data.count >= 4 else { throw FIF.Error.unexpected("tag \(kind) is not a matrix") }
+        let ndim = Int(int32(at: data.count - 4))
+        guard ndim >= 1, ndim <= 4, data.count >= 4 * (ndim + 1) else {
+            throw FIF.Error.unexpected("matrix tag \(kind) has \(ndim) dims")
+        }
+        var dims: [Int] = []
+        for d in 0..<ndim { dims.append(Int(int32(at: data.count - 4 * (d + 2)))) }
+        return dims
+    }
+
+    /// Matrix values in file order as single precision, without going through
+    /// `Double`. A BEM solution is float32 on disk and can be hundreds of
+    /// megabytes; doubling it in memory to read it back buys nothing.
+    func floatValues() throws -> [Float] {
+        let dims = try matrixDimensions()
+        let count = dims.reduce(1, *)
+        let trailer = 4 * (dims.count + 1)
+        switch baseType {
+        case FIF.typeFloat:
+            guard data.count >= count * 4 + trailer else { throw FIF.Error.truncated }
+            return [Float](unsafeUninitializedCapacity: count) { buffer, initialized in
+                data.withUnsafeBytes { raw in
+                    for n in 0..<count {
+                        buffer[n] = Float(bitPattern: UInt32(bigEndian: raw.loadUnaligned(fromByteOffset: n * 4, as: UInt32.self)))
+                    }
+                }
+                initialized = count
+            }
+        case FIF.typeDouble:
+            guard data.count >= count * 8 + trailer else { throw FIF.Error.truncated }
+            return (0..<count).map { Float(float64(at: $0 * 8)) }
+        default:
+            throw FIF.Error.unexpected("matrix base type \(baseType)")
+        }
+    }
 
     /// Dense matrix: (rows, cols, row-major values as Double).
     func matrix() throws -> (rows: Int, cols: Int, values: [Double]) {
@@ -146,8 +201,31 @@ nonisolated struct FIFTag: Sendable {
 nonisolated struct FIFReader: Sendable {
     let tags: [FIFTag]
 
+    /// Maps the file rather than copying it, and keeps every tag payload as a
+    /// slice of that mapping. A BEM solution matrix can be hundreds of megabytes;
+    /// nothing is materialized until a caller asks for values.
+    ///
+    /// A `.fif.gz` is decompressed into memory first — MNE writes them and they
+    /// are common in shared datasets. The gzip framing is the same plumbing the
+    /// NIfTI reader already uses for `.nii.gz`.
     init(url: URL) throws {
-        try self.init(data: Data(contentsOf: url))
+        if url.pathExtension.lowercased() == "gz" {
+            try self.init(data: Self.gunzip(url))
+        } else {
+            try self.init(data: Data(contentsOf: url, options: .mappedIfSafe))
+        }
+    }
+
+    private static func gunzip(_ url: URL) throws -> Data {
+        let source = try NIfTIGzipByteSource(url: url)
+        var output = Data()
+        while true {
+            let chunk = try source.read(maxCount: 4 * 1024 * 1024)
+            if chunk.isEmpty { break }
+            output.append(chunk)
+        }
+        guard !output.isEmpty else { throw FIF.Error.truncated }
+        return output
     }
 
     init(data: Data) throws {
@@ -165,7 +243,7 @@ nonisolated struct FIFReader: Sendable {
                 first = false
             }
             guard size >= 0, position + 16 + size <= data.count else { throw FIF.Error.truncated }
-            let payload = data.subdata(in: (position + 16)..<(position + 16 + size))
+            let payload = data[(position + 16)..<(position + 16 + size)]
             let tag = FIFTag(kind: kind, type: type, data: payload, blockPath: path)
             if kind == FIF.blockStart { path.append(tag.int32()) }
             tags.append(tag)
