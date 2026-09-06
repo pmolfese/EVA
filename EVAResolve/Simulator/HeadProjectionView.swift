@@ -91,6 +91,7 @@ struct HeadProjectionView: View {
 
     let plane: Plane
     @Bindable var controller: SourceSimulatorController
+    @AppStorage(HeadModelSex.preferenceKey) private var headModelSexRaw = HeadModelSex.female.rawValue
 
     @State private var draggingID: SourceSimulatorController.Source.ID?
     @State private var dragMode: DragMode = .move
@@ -116,6 +117,7 @@ struct HeadProjectionView: View {
     }()
 
     var body: some View {
+        let headModelSex = HeadModelSex(rawValue: headModelSexRaw) ?? .female
         // A `Canvas` draw closure is escaping, so accessing observable state inside
         // it does not, on its own, make SwiftUI re-render when that state changes.
         // Touch the state the drawing depends on here in `body` so a scrub (which
@@ -132,7 +134,7 @@ struct HeadProjectionView: View {
             GeometryReader { geo in
                 let size = geo.size
                 Canvas { context, canvasSize in
-                    draw(&context, size: canvasSize)
+                    draw(&context, size: canvasSize, sex: headModelSex)
                 }
                 .contentShape(Rectangle())
                 .gesture(dragGesture(size: size))
@@ -153,10 +155,17 @@ struct HeadProjectionView: View {
 
     // MARK: Drawing
 
+    /// The projection centre is the cranium centre (not the box centre): a
+    /// realistic head-with-neck seats the brain sphere high in the skull and lets
+    /// the neck hang below, so the sphere and every dipole are drawn about the
+    /// cranium and `scale` maps the scalp radius to the cranium radius.
     private func geometry(for size: CGSize) -> (center: CGPoint, scale: CGFloat) {
-        let center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let radius = min(size.width, size.height) / 2 - margin
-        let scale = radius / CGFloat(controller.scalpRadiusMeters)
+        let half = min(size.width, size.height) / 2 - margin
+        let layout = HeadSilhouette.layout(for: plane)
+        let boxCenter = CGPoint(x: size.width / 2, y: size.height / 2)
+        let center = CGPoint(x: boxCenter.x + layout.center.x * half,
+                             y: boxCenter.y - layout.center.y * half)
+        let scale = layout.radius * half / CGFloat(controller.scalpRadiusMeters)
         return (center, scale)
     }
 
@@ -164,7 +173,7 @@ struct HeadProjectionView: View {
         CGPoint(x: center.x + CGFloat(u) * scale, y: center.y - CGFloat(v) * scale)
     }
 
-    private func draw(_ context: inout GraphicsContext, size: CGSize) {
+    private func draw(_ context: inout GraphicsContext, size: CGSize, sex: HeadModelSex) {
         let (center, scale) = geometry(for: size)
         let scalp = CGFloat(controller.scalpRadiusMeters) * scale
         let brain = CGFloat(controller.brainRadiusMeters) * scale
@@ -183,33 +192,15 @@ struct HeadProjectionView: View {
             context.stroke(wire, with: .color(.secondary.opacity(0.14)), lineWidth: 0.6)
         }
 
-        // Scalp outline + brain shell.
+        // Approved head-model artwork, followed by the analytic spherical brain
+        // shell. The transparent artwork is presentation only: dipole positions
+        // still use the same spherical geometry as before.
         if controller.showOutlineCircle {
-            let scalpRect = CGRect(x: center.x - scalp, y: center.y - scalp, width: scalp * 2, height: scalp * 2)
-            context.stroke(Circle().path(in: scalpRect), with: .color(.secondary), lineWidth: 1.5)
+            context.draw(Image(HeadSilhouette.assetName(for: plane, sex: sex)),
+                         in: CGRect(origin: .zero, size: size))
             let brainRect = CGRect(x: center.x - brain, y: center.y - brain, width: brain * 2, height: brain * 2)
             context.stroke(Circle().path(in: brainRect), with: .color(.secondary.opacity(0.5)),
                            style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-        }
-
-        // Nose / orientation cue on the anterior-up planes.
-        if plane == .axial || plane == .sagittal {
-            let apex = point(plane == .axial ? 0 : controller.scalpRadiusMeters * 1.12,
-                             plane == .axial ? controller.scalpRadiusMeters * 1.12 : 0,
-                             center: center, scale: scale)
-            var nose = Path()
-            let base: CGFloat = 7
-            if plane == .axial {
-                nose.move(to: CGPoint(x: apex.x, y: apex.y))
-                nose.addLine(to: CGPoint(x: apex.x - base, y: apex.y + base))
-                nose.addLine(to: CGPoint(x: apex.x + base, y: apex.y + base))
-            } else {
-                nose.move(to: CGPoint(x: apex.x, y: apex.y))
-                nose.addLine(to: CGPoint(x: apex.x - base, y: apex.y - base))
-                nose.addLine(to: CGPoint(x: apex.x - base, y: apex.y + base))
-            }
-            nose.closeSubpath()
-            context.fill(nose, with: .color(.secondary.opacity(0.5)))
         }
 
         // Axis labels.

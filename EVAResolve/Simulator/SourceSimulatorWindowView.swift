@@ -25,6 +25,10 @@ import SwiftUI
 struct SourceSimulatorWindowView: View {
     @Environment(SourceSimulatorController.self) private var controller
 
+    /// Height of the activation-timeline strip; dragged by `timelineSplitter`.
+    @State private var timelineHeight: CGFloat = 210
+    @State private var dragStartTimelineHeight: CGFloat?
+
     /// Drives the scrubber during playback; `advancePlayback` is a no-op when
     /// paused, so an idle window costs nothing but a discarded tick.
     private let tick = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
@@ -72,13 +76,52 @@ struct SourceSimulatorWindowView: View {
         controller.applyPendingFit(dataset: payload.dataset, selection: payload.selection)
     }
 
+    /// Simulate mode shares the Fit-mode "Workbench" skeleton: a sources list on
+    /// the left, the three orthogonal head views stacked in the centre, and the
+    /// live scalp field over the authoring controls on the right — with the
+    /// activation timeline as a full-width strip beneath.
     private func simulateLayout(controller: SourceSimulatorController) -> some View {
-        HStack(spacing: 0) {
-            viewports(controller: controller)
-            Divider()
-            inspector(controller: controller)
-                .frame(width: 288)
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                sourcesColumn(controller: controller).frame(width: 196)
+                Divider()
+                headsColumn(controller: controller).frame(maxWidth: .infinity)
+                Divider()
+                simulateRightColumn(controller: controller).frame(width: 336)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            timelineSplitter
+            bottomStrip(controller: controller)
+                .frame(height: timelineHeight)
         }
+    }
+
+    /// Drag handle between the viewports and the timeline. Dragging it down
+    /// shrinks the timeline and gives the space to the head views, which fill
+    /// their cells and so grow with it.
+    private var timelineSplitter: some View {
+        ZStack {
+            Divider()
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Color.secondary.opacity(0.35))
+                .frame(width: 40, height: 3)
+        }
+        .frame(height: 10)
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    let start = dragStartTimelineHeight ?? timelineHeight
+                    if dragStartTimelineHeight == nil { dragStartTimelineHeight = start }
+                    timelineHeight = min(max(start - value.translation.height, 80), 640)
+                }
+                .onEnded { _ in dragStartTimelineHeight = nil }
+        )
+        .accessibilityLabel("Resize timeline")
     }
 
     /// Generated recordings are reviewed in EVA, not here: hand the package to
@@ -92,44 +135,14 @@ struct SourceSimulatorWindowView: View {
         }
     }
 
-    // MARK: Viewports (2×2 glass brain + field, then the activation timeline)
+    // MARK: Left column — sources
 
-    private func viewports(controller: SourceSimulatorController) -> some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                HeadProjectionView(plane: .axial, controller: controller)
-                HeadProjectionView(plane: .coronal, controller: controller)
-            }
-            HStack(spacing: 10) {
-                HeadProjectionView(plane: .sagittal, controller: controller)
-                ScalpFieldView(controller: controller)
-            }
-            Divider()
-            if controller.showDipoleFit && controller.fitMode == .interval {
-                SourceButterflyView(controller: controller)
-            }
-            SourceTimelineView(controller: controller, open: openRecording)
-            if !controller.generationMessage.isEmpty {
-                HStack {
-                    Text(controller.generationMessage)
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                }
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: Inspector
-
-    private func inspector(controller: SourceSimulatorController) -> some View {
+    private func sourcesColumn(controller: SourceSimulatorController) -> some View {
         @Bindable var controller = controller
         return VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Sources").font(.headline)
-                Spacer()
+            HStack(spacing: 6) {
+                Text("Sources").font(.headline).lineLimit(1).fixedSize()
+                Spacer(minLength: 4)
                 Button { controller.loadDemoScene() } label: { Image(systemName: "sparkles") }
                     .help("Load a demo scene: three sources with distinct time courses")
                 Button { controller.addSource() } label: { Image(systemName: "plus") }
@@ -138,6 +151,7 @@ struct SourceSimulatorWindowView: View {
                     .disabled(controller.selectedID == nil)
                     .help("Remove the selected dipole")
             }
+            .buttonStyle(.borderless)
             .padding([.horizontal, .top], 12)
             .padding(.bottom, 6)
 
@@ -155,10 +169,44 @@ struct SourceSimulatorWindowView: View {
                     .tag(source.id)
                 }
             }
-            .frame(minHeight: 100, maxHeight: 150)
+            .frame(maxHeight: .infinity)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
 
+    // MARK: Centre column — three stacked orthogonal head views
+
+    private func headsColumn(controller: SourceSimulatorController) -> some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text("Head — 3 views").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+            }
+            // Two views on top, one below — fills the wide centre far better than a
+            // single tall column of three squeezed squares.
+            HStack(spacing: 10) {
+                HeadProjectionView(plane: .axial, controller: controller)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                HeadProjectionView(plane: .coronal, controller: controller)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            HStack(spacing: 10) {
+                HeadProjectionView(plane: .sagittal, controller: controller)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Right column — live scalp field over authoring controls
+
+    private func simulateRightColumn(controller: SourceSimulatorController) -> some View {
+        VStack(spacing: 0) {
+            ScalpFieldView(controller: controller)
+                .padding(12)
             Divider()
-
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     selectedSourceControls(controller: controller)
@@ -175,6 +223,26 @@ struct SourceSimulatorWindowView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: Bottom strip — activation timeline (and interval butterfly)
+
+    private func bottomStrip(controller: SourceSimulatorController) -> some View {
+        VStack(spacing: 8) {
+            if controller.showDipoleFit && controller.fitMode == .interval {
+                SourceButterflyView(controller: controller)
+            }
+            SourceTimelineView(controller: controller, open: openRecording)
+            if !controller.generationMessage.isEmpty {
+                HStack {
+                    Text(controller.generationMessage)
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                }
+            }
+        }
+        .padding(12)
     }
 
     @ViewBuilder

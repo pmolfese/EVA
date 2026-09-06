@@ -228,10 +228,42 @@ final class SourceSimulatorController {
     var fitDatasetSelection: ClosedRange<Int>?
     /// How many dipoles to fit (defaults to the dataset's known source count).
     var fitDipoleCount: Int = 2
+    /// One condition's source waveforms + residual PCA, computed after a fit.
+    struct ConditionDecomposition: Sendable, Identifiable {
+        var name: String
+        var decomposition: SingleDipoleFit.SourceDecomposition
+        var id: String { name }
+    }
+
     var sharedFitResult: SingleDipoleFit.SharedGeometryResult?
+    /// Per-condition source waveforms and residual components for the last fit.
+    var sharedFitDecompositions: [ConditionDecomposition] = []
     var isFittingShared = false
+    /// 0…1 progress of the running shared fit, and a verbose description of the
+    /// phase. The fit is slow (forward solves over candidate grids), so it is
+    /// started explicitly from the Fit button and reports what it is doing.
+    var fitProgress: Double = 0
+    var fitProgressMessage: String = ""
+    /// True when the inputs changed (interval, dipole count, dataset, a dragged
+    /// dipole) since the last fit, so the Fit button can invite a re-run instead
+    /// of the app silently launching a slow solve.
+    var fitIsStale = false
     @ObservationIgnored private var sharedFitTask: Task<Void, Never>?
     @ObservationIgnored private var sharedFitGeneration = 0
+    /// Positions the user has dragged, used to seed the next shared fit so it
+    /// refines from where they placed the dipoles instead of the deflation seed.
+    /// Cleared whenever the interval or dipole count changes (a fresh fit).
+    @ObservationIgnored private var fitSeedPositions: [Vector3D]?
+    @ObservationIgnored private var fitCancellation = CancellationFlag()
+
+    /// A thread-safe cancel flag the (detached) solver polls between chunks.
+    final class CancellationFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+        func reset() { lock.lock(); cancelled = false; lock.unlock() }
+    }
 
     func advancePlayback(by seconds: Double) {
         guard isPlaying, durationSeconds > 0 else { return }
@@ -709,7 +741,10 @@ final class SourceSimulatorController {
         fitDatasetSelection = nil
         fitDipoleCount = max(1, sources.count)
         sharedFitResult = nil
+        sharedFitDecompositions = []
+        fitSeedPositions = nil
         windowMode = .fit
+        markFitStale("Demo dataset loaded — press Fit to localize.")
     }
 
     /// Installs a dataset handed over from a recording ("Fit Source Model"),
@@ -719,8 +754,12 @@ final class SourceSimulatorController {
         fitDatasetSelection = selection
         fitDipoleCount = max(1, dataset.truth?.count ?? fitDipoleCount)
         sharedFitResult = nil
+        sharedFitDecompositions = []
+        fitSeedPositions = nil
         windowMode = .fit
-        scheduleSharedFit()
+        // Fitting is slow; wait for the user to press Fit rather than launching
+        // a solve the moment a recording is handed over.
+        markFitStale("Dataset loaded — press Fit to localize.")
     }
 
     /// Conditions sliced to the current fit selection (or whole dataset).
@@ -740,41 +779,149 @@ final class SourceSimulatorController {
     }
 
     /// Runs the shared-geometry fit over the selected interval, off the main
-    /// thread, storing `sharedFitResult`.
-    func scheduleSharedFit() {
+    /// thread, storing `sharedFitResult`. When `seeds` is given (the user dragged
+    /// dipoles), the fit refines from those positions instead of the deflation
+    /// seed. A bare call is a fresh fit and drops any stale drag seed.
+    func scheduleSharedFit(seeds: [Vector3D]? = nil) {
+        if seeds == nil { fitSeedPositions = nil }
         guard let dataset = fitDataset, let conditions = slicedConditions() else {
-            sharedFitResult = nil; return
+            sharedFitResult = nil; sharedFitDecompositions = []; return
         }
         let count = max(1, fitDipoleCount)
         let head = dataset.headModel
         let montage = dataset.montage
         let reference = dataset.reference
         let terms = harmonicTerms
+        // Seeds only apply when their count matches the requested dipole count.
+        let usableSeeds = (seeds?.count == count) ? seeds : nil
 
         sharedFitTask?.cancel()
+        fitCancellation.cancel()               // stop any in-flight solve
+        fitCancellation = CancellationFlag()   // fresh flag for this run
+        let cancellation = fitCancellation
         sharedFitGeneration += 1
         let generation = sharedFitGeneration
         isFittingShared = true
+        fitIsStale = false
+        fitProgress = 0
+        fitProgressMessage = "Starting…"
+
+        // Progress hops back to the main actor; the solve itself stays detached.
+        let onProgress: @Sendable (Double, String) -> Void = { [weak self] fraction, message in
+            Task { @MainActor in
+                guard let self, generation == self.sharedFitGeneration else { return }
+                self.fitProgress = fraction
+                self.fitProgressMessage = message
+            }
+        }
+        let reporter = SingleDipoleFit.ProgressReporter(
+            report: onProgress,
+            isCancelled: { cancellation.isCancelled })
+
         sharedFitTask = Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                SingleDipoleFit.fitSharedGeometry(
+            let outcome = await Task.detached(priority: .userInitiated) {
+                () -> (SingleDipoleFit.SharedGeometryResult?, [ConditionDecomposition]) in
+                // The fit owns most of the progress budget; the decomposition
+                // that follows is comparatively quick.
+                guard let fit = SingleDipoleFit.fitSharedGeometry(
                     conditions: conditions, count: count, head: head,
-                    montage: montage, reference: reference, harmonicTerms: terms)
+                    montage: montage, reference: reference, harmonicTerms: terms,
+                    seeds: usableSeeds, reporter: reporter.scoped(0, 0.92))
+                else { return (nil, []) }
+
+                var decompositions: [ConditionDecomposition] = []
+                for (index, condition) in conditions.enumerated() {
+                    if cancellation.isCancelled { break }
+                    onProgress(0.92 + 0.08 * Double(index) / Double(conditions.count),
+                               "Source waveforms + residual PCA — \(condition.name) (\(index + 1) of \(conditions.count))")
+                    let orientations = index < fit.conditions.count
+                        ? fit.conditions[index].dipoles.map(\.orientationUnit) : []
+                    if let decomposition = SingleDipoleFit.decompose(
+                        data: condition.data, positions: fit.positions, orientations: orientations,
+                        head: head, montage: montage, reference: reference, harmonicTerms: terms) {
+                        decompositions.append(ConditionDecomposition(
+                            name: condition.name, decomposition: decomposition))
+                    }
+                }
+                return (fit, decompositions)
             }.value
+
             await MainActor.run {
                 guard let self, generation == self.sharedFitGeneration else { return }
-                self.sharedFitResult = result
                 self.isFittingShared = false
+                if cancellation.isCancelled {
+                    self.fitProgressMessage = "Fit cancelled."
+                    self.fitIsStale = true
+                    return
+                }
+                self.sharedFitResult = outcome.0
+                self.sharedFitDecompositions = outcome.1
+                if outcome.0 == nil {
+                    self.fitProgressMessage = "Fit failed — check the interval and dipole count."
+                    self.fitIsStale = true
+                } else {
+                    self.fitProgress = 1
+                    if let residual = outcome.1.first?.decomposition.residualFraction {
+                        self.fitProgressMessage = String(
+                            format: "Done — model explains %.1f%% of the variance; %.1f%% left in the residual components.",
+                            (1 - residual) * 100, residual * 100)
+                    }
+                }
             }
         }
     }
 
-    /// Synchronous shared fit for tests.
-    func runSharedFitNow() -> SingleDipoleFit.SharedGeometryResult? {
+    /// The Fit button: runs the shared-geometry fit, refining from any dragged
+    /// positions.
+    func runSharedFit() { scheduleSharedFit(seeds: fitSeedPositions) }
+
+    /// Cancels an in-flight fit; the partial result is discarded.
+    func cancelSharedFit() {
+        guard isFittingShared else { return }
+        fitCancellation.cancel()
+        sharedFitTask?.cancel()
+    }
+
+    /// Marks the fit out of date without launching a (slow) solve.
+    func markFitStale(_ reason: String? = nil) {
+        guard fitDataset != nil else { return }
+        fitIsStale = true
+        if let reason { fitProgressMessage = reason }
+    }
+
+    // MARK: Fit-mode dipole dragging (drag to seed, then refit)
+
+    /// Live-updates the dragged dipole's position so its marker follows the
+    /// cursor, and records the drag as the seed set. Call `commitFitDrag()` on
+    /// release to refit from the new positions.
+    func nudgeFitDipole(index: Int, to position: SIMD3<Double>) {
+        guard var result = sharedFitResult, index >= 0, index < result.positions.count else { return }
+        let clamped = clampInsideBrain(position)
+        let vector = Vector3D(x: clamped.x, y: clamped.y, z: clamped.z)
+        if fitSeedPositions == nil { fitSeedPositions = result.positions }
+        fitSeedPositions?[index] = vector
+        result.positions[index] = vector
+        sharedFitResult = result   // immediate visual feedback
+    }
+
+    /// Ends a drag. The fit is slow, so this does not re-solve on its own: the
+    /// dragged positions are kept as the seed and the fit is marked stale for the
+    /// Fit button to pick up.
+    func commitFitDrag() {
+        guard fitSeedPositions != nil else { return }
+        markFitStale("Dipole moved — press Fit to refit from the new position.")
+    }
+
+    /// Synchronous shared fit for tests. Pass a `reporter` carrying `PhaseTimings`
+    /// to profile where the solve spends its time.
+    func runSharedFitNow(
+        reporter: SingleDipoleFit.ProgressReporter? = nil
+    ) -> SingleDipoleFit.SharedGeometryResult? {
         guard let dataset = fitDataset, let conditions = slicedConditions() else { return nil }
         let result = SingleDipoleFit.fitSharedGeometry(
             conditions: conditions, count: max(1, fitDipoleCount), head: dataset.headModel,
-            montage: dataset.montage, reference: dataset.reference, harmonicTerms: harmonicTerms)
+            montage: dataset.montage, reference: dataset.reference, harmonicTerms: harmonicTerms,
+            reporter: reporter)
         sharedFitResult = result
         return result
     }

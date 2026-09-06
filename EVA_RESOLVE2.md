@@ -308,7 +308,32 @@ in parallel with R3 once R2.1 lands.
 Today's `SingleDipoleFit` is a diagnostic against simulated truth on a sphere. Turn it
 into the production ECD tool.
 
-### R5.0 Fit-mode UI direction — decided 2026-09-05, implementation not started
+### R5.0 Fit-mode UI direction — decided and built 2026-09-05
+
+**Built:** the Workbench layout in both modes (2+1 head grid: axial + coronal above,
+sagittal below), anatomical head silhouettes (`EVAResolve/Simulator/HeadSilhouette.swift`
+— outline, ear arcs and neck in box space, with a per-plane `Layout` that seats the
+brain sphere in the cranium so the neck can hang below), drag-to-seed-then-refit
+(optional `seeds:` on `fitSharedGeometry`), an explicit **Fit button** with a
+determinate progress bar, verbose per-phase messages and cancellation
+(`SingleDipoleFit.ProgressReporter`, threaded into the chunked `covarianceSearch`),
+a resizable timeline splitter in Simulate, and the three waveform panels below.
+
+**Waveform panels (right column).** Measured butterfly → **source waveforms** (each
+dipole's moment over time, conditions overlaid) → **residual components**. The residual
+PCA is deliberately computed on the *unexplained* field: `SingleDipoleFit.decompose`
+projects the data through the fitted lead field, subtracts the modelled field, and
+eigendecomposes what is left, reporting each component's share of the ORIGINAL variance.
+So placing dipoles that explain the highlighted interval makes those components shrink,
+and whatever remains is structure still to be modelled. Covered by
+`decompositionTracksUnexplainedVariance` (3 dipoles explain >95% of the noiseless demo
+field; 1 dipole leaves strictly more residual).
+
+Still open: no residual-component *topography* is drawn yet (the data is computed);
+`fitSeedPositions` is view-agnostic but only Fit mode drags it.
+
+Original decision record follows.
+
 
 Brainstormed three window layouts for the `.fit` side of the existing `Simulate | Fit`
 `Picker` in `SourceSimulatorWindowView` (that master switch already exists — see
@@ -341,10 +366,60 @@ a bottom drawer — good for skimming many fits, worse for careful raw-vs-PCA QC
   drag-only.
 
 - [ ] **Head-model agnostic**: fit against any `ForwardOperator` (R3.4), including BEM.
-- [ ] **Stage 3c-perf** from ROADMAP: precomputed free lead-field grid per geometry,
+- [~] **Stage 3c-perf** from ROADMAP: precomputed free lead-field grid per geometry,
   trilinear interpolation, Levenberg–Marquardt / Nelder–Mead refinement from the grid
   seed, Accelerate for the linear moment solves. Target: single ECD instant, multi-ECD
   sub-second.
+  - [x] **First pass done 2026-09-05 — 6.4× (40.87 s → 6.34 s)** on the benchmark
+    (64 channels, 256 samples, 2 conditions, 3 dipoles; `benchmarkSharedFit`). All 35
+    EVAResolve tests still pass, so positions/GOF are unchanged — only the cost moved.
+    Three changes, none of them the ROADMAP items above:
+    1. **Flat buffers.** The candidate loop was allocating one small `[Double]` per
+       channel per candidate (~70k allocations per dipole search). Designs are now
+       flat row-major with preallocated per-worker scratch.
+    2. **Rank-reduced covariance.** `C ≈ W·Wᵀ` keeping `3·dipoles + 8` components, so
+       the objective is `LᵀCL = (WᵀL)ᵀ(WᵀL)` at O(r·C·p) instead of forming `C·L` at
+       O(C²·p). A model with `p` free spatial dimensions cannot explain more than `p`
+       components, so this is the standard signal-subspace argument. Search-only:
+       `finalize` still uses the exact full covariance, so reported GOF is untouched.
+    3. **Parallel candidate scan.** Note the ordering trap: parallelising only the
+       scoring gave just 2.1×, because `freeLeadField` still ran serially ahead of the
+       parallel region. Each worker must solve the forward model for *its own slice* —
+       the spherical-harmonic series is the dominant cost, not the linear algebra.
+       That took it from 19.5 s to 6.34 s.
+  - [x] **Second pass done 2026-09-05 — 43× on cached fits (40.87 s → 0.95 s),
+    14× on a cold one (2.88 s).** Single ECD is 0.18 s, so the ROADMAP's "single
+    ECD instant, multi-ECD sub-second" target is met once the grid is warm.
+    All 35 EVAResolve tests still pass.
+    - **Phase timing** added to `ProgressReporter` (`PhaseTimings`), which is how
+      each step below was targeted instead of guessed. Reachable from tests via
+      `runSharedFitNow(reporter:)`.
+    - **Reduced harmonic order in the search** (24 terms, vs the caller's 60 for
+      `finalize` / `deflateCovariance` / `decompose`, which stay exact): 6.13 s →
+      3.56 s. Sources are clamped to 0.97 R, well inside the shell, where the
+      series has converged by ~24 terms.
+    - **Precomputed lead-field grid** (`LeadFieldGrid`) at `brainRadius/12`,
+      trilinear interpolation, `Float` storage, cached per geometry (≈19 MB at 64
+      channels, ≈75 MB at 256; at most 3 kept). Candidate scoring stops solving
+      the forward model entirely: refinement 2.42 s → 0.59 s, coarse 0.95 s →
+      0.24 s. Nodes at/outside the innermost shell are unsolvable, so they are
+      marked invalid and the few candidates needing them fall back to an exact
+      solve; `finalize` is always exact.
+    - **Hoisted fixed-dipole blocks** in the joint objective (`FixedBlocks`):
+      exact, but a modest ~10% — the refinement was forward-bound, not
+      objective-bound.
+    - Measured trap, twice: *anything solved serially ahead of a parallel region
+      becomes the bottleneck.* First on `freeLeadField` before the candidate scan,
+      then again on the grid build itself (5.99 s serial → 1.79 s parallel).
+  - **Not needed after the above:** Levenberg–Marquardt / Nelder–Mead refinement
+    and RAP-MUSIC seeding. With the grid warm, refinement is 0.59 s and the coarse
+    search 0.24 s; replacing either would be significant algorithmic risk for a
+    fraction of a second. Revisit only if a realistic BEM (R3) makes per-candidate
+    evaluation expensive again — at which point the grid is the thing that scales,
+    not the search strategy.
+  - [ ] Remaining cost is the one-time grid build (1.89 s, 66%). If that matters,
+    build it lazily in the background when a dataset loads, or coarsen the lattice
+    and lean on the exact final refinement.
 - [ ] **PCA-driven model order**: SVD of the channels × samples window; show the
   explained-variance ladder; seed one dipole per retained component (Scherg-style
   spatio-temporal model), then jointly refine positions with fixed or rotating

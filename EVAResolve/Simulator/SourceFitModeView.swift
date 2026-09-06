@@ -52,23 +52,25 @@ struct SourceFitModeView: View {
         .padding(40)
     }
 
+    /// Three-column "Workbench": conditions on the left, the three linked
+    /// orthogonal head views stacked in the centre, and the butterfly waveform
+    /// with the shared-fit comparison readouts beneath it on the right.
     private var loadedLayout: some View {
         HStack(spacing: 0) {
-            VStack(spacing: 10) {
-                projections
-                FitButterflyView(controller: controller)
-                if !controller.generationMessage.isEmpty {
-                    HStack { Text(controller.generationMessage).font(.caption2).foregroundStyle(.secondary); Spacer() }
-                }
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            conditionsColumn.frame(width: 196)
             Divider()
-            comparisonPanel.frame(width: 300)
+            headColumn.frame(maxWidth: .infinity)
+            Divider()
+            waveformColumn.frame(width: 336)
         }
-        // Re-fit when the interval, dipole count, or dataset changes.
-        .onChange(of: fitSignature) { _, _ in controller.scheduleSharedFit() }
-        .onAppear { if controller.sharedFitResult == nil { controller.scheduleSharedFit() } }
+        // Fitting is slow, so changing an input only marks the fit out of date —
+        // the user starts it from the Fit button.
+        .onChange(of: fitSignature) { _, _ in
+            controller.markFitStale("Interval or dipole count changed — press Fit.")
+        }
+        .onAppear {
+            if controller.sharedFitResult == nil { controller.markFitStale("Press Fit to localize.") }
+        }
     }
 
     private var fitSignature: [Double] {
@@ -79,46 +81,159 @@ struct SourceFitModeView: View {
          Double(controller.fitDataset?.sampleCount ?? 0)]
     }
 
-    private var projections: some View {
-        HStack(spacing: 10) {
-            FitProjectionView(plane: .axial, controller: controller)
-            FitProjectionView(plane: .coronal, controller: controller)
-            FitProjectionView(plane: .sagittal, controller: controller)
+    // MARK: Left column — conditions
+
+    /// The Fit control block: an explicit run button (the solve is slow), a
+    /// determinate progress bar with a percentage, and the solver's own running
+    /// commentary so a long fit never looks hung.
+    @ViewBuilder
+    private var fitControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if controller.isFittingShared {
+                HStack(spacing: 8) {
+                    Button("Cancel") { controller.cancelSharedFit() }
+                        .controlSize(.small)
+                    Text("\(Int((controller.fitProgress * 100).rounded()))%")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .frame(minWidth: 38, alignment: .trailing)
+                }
+                ProgressView(value: min(max(controller.fitProgress, 0), 1))
+                    .progressViewStyle(.linear)
+            } else {
+                Button {
+                    controller.runSharedFit()
+                } label: {
+                    Label(controller.sharedFitResult == nil ? "Fit" : "Re-fit",
+                          systemImage: "scope")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .disabled(controller.fitDataset == nil)
+                if controller.fitIsStale && controller.sharedFitResult != nil {
+                    Label("Out of date", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+            }
+            if !controller.fitProgressMessage.isEmpty {
+                Text(controller.fitProgressMessage)
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
-        .frame(height: 180)
     }
 
-    // MARK: Comparison panel
+    private var conditionsColumn: some View {
+        @Bindable var controller = controller
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Conditions").font(.headline).lineLimit(1).fixedSize()
+                Spacer()
+            }
 
-    private var comparisonPanel: some View {
+            fitControls
+            Divider()
+            if let dataset = controller.fitDataset {
+                Text(dataset.label).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let result = controller.sharedFitResult {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(result.conditions.enumerated()), id: \.offset) { index, condition in
+                        HStack(spacing: 8) {
+                            Circle().fill(FitConditionPalette.color(index)).frame(width: 9, height: 9)
+                            Text(condition.name).font(.callout).lineLimit(1)
+                            Spacer()
+                            Text("\(fmt(condition.goodnessOfFit * 100))%")
+                                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } else if let dataset = controller.fitDataset {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(dataset.conditions.enumerated()), id: \.offset) { index, condition in
+                        HStack(spacing: 8) {
+                            Circle().fill(FitConditionPalette.color(index)).frame(width: 9, height: 9)
+                            Text(condition.name).font(.callout).lineLimit(1)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            Stepper("Dipoles: \(controller.fitDipoleCount)",
+                    value: $controller.fitDipoleCount, in: 1...8)
+                .font(.callout)
+            Text("Positions are shared across every condition; each condition's moment is fit at those positions.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer()
+            Button("Load demo dataset") { controller.loadFitDemoDataset() }
+            if !controller.generationMessage.isEmpty {
+                Text(controller.generationMessage).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(2).truncationMode(.middle)
+            }
+        }
+        .padding(12)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: Centre column — three stacked orthogonal head views
+
+    private var headColumn: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text("Head — 3 views").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                if let result = controller.sharedFitResult {
+                    Text("\(result.positions.count) dipole\(result.positions.count == 1 ? "" : "s")")
+                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                }
+            }
+            // Two views on top, one below, each filling its cell.
+            HStack(spacing: 10) {
+                FitProjectionView(plane: .axial, controller: controller)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                FitProjectionView(plane: .coronal, controller: controller)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            HStack(spacing: 10) {
+                FitProjectionView(plane: .sagittal, controller: controller)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Right column — waveform over comparison readouts
+
+    /// Right column, top to bottom: the measured data, what the model says the
+    /// sources are doing, and what the model has not explained.
+    private var waveformColumn: some View {
         @Bindable var controller = controller
         return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("Fit").font(.headline)
-                    Spacer()
-                    if controller.isFittingShared { ProgressView().controlSize(.mini) }
-                }
-                if let dataset = controller.fitDataset {
-                    Text(dataset.label).font(.caption).foregroundStyle(.secondary)
-                }
-
-                Stepper("Dipoles: \(controller.fitDipoleCount)",
-                        value: $controller.fitDipoleCount, in: 1...8)
-                    .font(.callout)
-
+                FitButterflyView(controller: controller)
+                Divider()
+                SourceWaveformsView(controller: controller)
+                Divider()
+                ResidualComponentsView(controller: controller)
+                Divider()
                 if let result = controller.sharedFitResult {
                     spectrumView(result.varianceSpectrum, dipoles: result.positions.count)
-                    conditionLegend(result)
                     dipoleComparison(result)
                     perConditionFit(result)
                 } else {
-                    Text("Select an interval on the butterfly to fit.")
+                    Text("Drag an interval on the butterfly, then press Fit.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-
-                Divider()
-                Button("Load demo dataset") { controller.loadFitDemoDataset() }
             }
             .padding(12)
         }
@@ -141,18 +256,6 @@ struct SourceFitModeView: View {
             .frame(height: 32, alignment: .bottom)
             Text("bars past the dipole count are faint — over/under-modeling is visible")
                 .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    @ViewBuilder
-    private func conditionLegend(_ result: SingleDipoleFit.SharedGeometryResult) -> some View {
-        HStack(spacing: 10) {
-            ForEach(Array(result.conditions.enumerated()), id: \.offset) { index, condition in
-                HStack(spacing: 4) {
-                    Circle().fill(FitConditionPalette.color(index)).frame(width: 8, height: 8)
-                    Text(condition.name).font(.caption2)
-                }
-            }
         }
     }
 
@@ -339,33 +442,87 @@ struct FitButterflyView: View {
 struct FitProjectionView: View {
     let plane: HeadProjectionView.Plane
     @Bindable var controller: SourceSimulatorController
+    @AppStorage(HeadModelSex.preferenceKey) private var headModelSexRaw = HeadModelSex.female.rawValue
     private let margin: CGFloat = 12
 
+    @State private var draggingIndex: Int?
+
     var body: some View {
+        let headModelSex = HeadModelSex(rawValue: headModelSexRaw) ?? .female
         _ = controller.sharedFitResult
         return VStack(spacing: 2) {
             Text(plane.title).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            Canvas { context, size in draw(&context, size: size) }
-                .aspectRatio(1, contentMode: .fit)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+            GeometryReader { geo in
+                Canvas { context, size in draw(&context, size: size, sex: headModelSex) }
+                    .contentShape(Rectangle())
+                    .gesture(dragGesture(size: geo.size))
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
         }
     }
 
-    private func draw(_ context: inout GraphicsContext, size: CGSize) {
-        guard let head = controller.fitDataset?.headModel else { return }
-        let center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let radius = min(size.width, size.height) / 2 - margin
-        let scalp = head.scalpRadiusMeters
-        guard scalp > 0 else { return }
-        let scale = radius / CGFloat(scalp)
+    // MARK: Interaction — drag a fitted dipole to reseed the shared fit
+
+    private func geometry(for size: CGSize) -> (center: CGPoint, scale: CGFloat)? {
+        guard let head = controller.fitDataset?.headModel, head.scalpRadiusMeters > 0 else { return nil }
+        let half = min(size.width, size.height) / 2 - margin
+        let layout = HeadSilhouette.layout(for: plane)
+        let boxCenter = CGPoint(x: size.width / 2, y: size.height / 2)
+        let center = CGPoint(x: boxCenter.x + layout.center.x * half,
+                             y: boxCenter.y - layout.center.y * half)
+        return (center, layout.radius * half / CGFloat(head.scalpRadiusMeters))
+    }
+
+    private func screenPoint(_ p: Vector3D, center: CGPoint, scale: CGFloat) -> CGPoint {
+        let (u, v) = plane.components(SIMD3<Double>(p.x, p.y, p.z))
+        return CGPoint(x: center.x + CGFloat(u) * scale, y: center.y - CGFloat(v) * scale)
+    }
+
+    private func nearestDipole(to location: CGPoint, center: CGPoint, scale: CGFloat) -> Int? {
+        guard let positions = controller.sharedFitResult?.positions else { return nil }
+        var best: (index: Int, distance: CGFloat)?
+        for (index, position) in positions.enumerated() {
+            let p = screenPoint(position, center: center, scale: scale)
+            let d = hypot(p.x - location.x, p.y - location.y)
+            if d < 20, best == nil || d < best!.distance { best = (index, d) }
+        }
+        return best?.index
+    }
+
+    private func dragGesture(size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard let (center, scale) = geometry(for: size) else { return }
+                if draggingIndex == nil {
+                    draggingIndex = nearestDipole(to: value.startLocation, center: center, scale: scale)
+                }
+                guard let index = draggingIndex,
+                      let positions = controller.sharedFitResult?.positions,
+                      index < positions.count else { return }
+                let u = Double((value.location.x - center.x) / scale)
+                let v = Double((center.y - value.location.y) / scale)
+                var world = SIMD3<Double>(positions[index].x, positions[index].y, positions[index].z)
+                plane.apply(u: u, v: v, to: &world)
+                controller.nudgeFitDipole(index: index, to: world)
+            }
+            .onEnded { _ in
+                if draggingIndex != nil { controller.commitFitDrag() }
+                draggingIndex = nil
+            }
+    }
+
+    private func draw(_ context: inout GraphicsContext, size: CGSize, sex: HeadModelSex) {
+        guard let head = controller.fitDataset?.headModel,
+              let (center, scale) = geometry(for: size) else { return }
         func point(_ p: Vector3D) -> CGPoint {
             let (u, v) = plane.components(SIMD3<Double>(p.x, p.y, p.z))
             return CGPoint(x: center.x + CGFloat(u) * scale, y: center.y - CGFloat(v) * scale)
         }
 
-        let scalpRect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
-        context.stroke(Circle().path(in: scalpRect), with: .color(.secondary), lineWidth: 1.5)
+        context.draw(Image(HeadSilhouette.assetName(for: plane, sex: sex)),
+                     in: CGRect(origin: .zero, size: size))
         let brain = CGFloat(head.brainRadiusMeters) * scale
         let brainRect = CGRect(x: center.x - brain, y: center.y - brain, width: brain * 2, height: brain * 2)
         context.stroke(Circle().path(in: brainRect), with: .color(.secondary.opacity(0.5)),
