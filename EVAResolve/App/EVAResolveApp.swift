@@ -51,6 +51,10 @@ struct EVAResolveApp: App {
                 .environment(headModelController)
         }
         .defaultSize(width: 1180, height: 760)
+
+        Settings {
+            EVAResolvePreferencesView()
+        }
     }
 
     static let sourceSimulatorWindowID = "source-simulator"
