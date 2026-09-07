@@ -60,8 +60,20 @@ final class SimulatorController {
 
     /// The scenario being authored. Starts from the same defaults the CLI uses
     /// with no flags (`SimulationConfig.default`), so an unedited Generate
-    /// reproduces the tool's out-of-the-box recording.
-    var config = SimulationConfig.default
+    /// reproduces the tool's out-of-the-box recording — with one deliberate
+    /// exception, below.
+    var config: SimulationConfig = {
+        var config = SimulationConfig.default
+        // The modelled motion sensor is off here but on in the CLI. It exists
+        // for reference-channel correction research, and someone who wants it
+        // knows to ask; for everyone else it is an unexplained extra PNS trace
+        // in the file that looks like a malfunctioning sensor, because a
+        // saturating nonlinearity is exactly what it is. The CLI default stays
+        // as it is so the scenario files and the determinism baseline keep
+        // covering the code path.
+        config.includeMotionSensor = false
+        return config
+    }()
     var scenarioName = "Simulated Recording"
 
     /// Output options (where files go, prefix, source-space truth). The URL is
@@ -101,6 +113,9 @@ final class SimulatorController {
         get { config.clippingThresholdMicrovolts != nil }
         set { config.clippingThresholdMicrovolts = newValue ? 200 : nil }
     }
+
+    var badChannelCount: Int { config.badChannelCount ?? 0 }
+    var highImpedanceCount: Int { config.highImpedanceChannelCount ?? 0 }
 
     // MARK: - Generation
 

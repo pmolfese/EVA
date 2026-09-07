@@ -29,31 +29,21 @@ struct SimulatorWindowView: View {
 
     var body: some View {
         @Bindable var simulator = simulator
-        VStack(spacing: 0) {
-            Picker("Mode", selection: $simulator.mode) {
-                ForEach(SimulatorController.Mode.allCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(12)
-            .disabled(simulator.isGenerating)
-
-            Divider()
-
-            switch simulator.mode {
-            case .generate:
+        TabView(selection: $simulator.mode) {
+            Tab(SimulatorController.Mode.generate.title, systemImage: SimulatorController.Mode.generate.systemImage, value: .generate) {
                 SimulatorGenerateView(open: openRecording)
-            case .score:
+            }
+            Tab(SimulatorController.Mode.score.title, systemImage: SimulatorController.Mode.score.systemImage, value: .score) {
                 SimulatorScoreView(open: openRecording)
-            case .sweep:
+            }
+            Tab(SimulatorController.Mode.sweep.title, systemImage: SimulatorController.Mode.sweep.systemImage, value: .sweep) {
                 SimulatorSweepView(open: openRecording)
-            case .group:
+            }
+            Tab(SimulatorController.Mode.group.title, systemImage: SimulatorController.Mode.group.systemImage, value: .group) {
                 SimulatorGroupView(open: openRecording)
             }
         }
-        .frame(minWidth: 760, minHeight: 560)
+        .frame(minWidth: 900, minHeight: 560)
     }
 
     /// Loads a generated recording into a fresh main window — the same mechanism

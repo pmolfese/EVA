@@ -430,20 +430,43 @@ nonisolated enum BCGArtifactModel {
             let count = max(8, Int(((leadIn + tailOut) * rate).rounded()))
             var waveform = [Double](repeating: 0, count: count)
 
+            // Beat-to-beat morphology variation. Guarded at zero so the
+            // published benchmark keeps its exact draw order and its exact
+            // waveform: with the fraction off, not one number is consumed.
+            //
+            // The three waves are perturbed by different amounts because they
+            // vary by different amounts in a real trace. Atrial (P) and
+            // repolarization (T) amplitudes wander by a few percent from beat
+            // to beat; the QRS, being fast depolarization through fixed
+            // conduction tissue, is the most reproducible feature on the strip,
+            // so it gets 30% of the fraction. PR and QT wander in time as
+            // autonomic tone shifts.
+            var pScale = 1.0, qrsScale = 1.0, tScale = 1.0
+            var prShift = 0.0, qtScale = 1.0
+            let morphology = config.effectiveECGMorphologyJitter
+            if morphology > 0 {
+                pScale = max(0, 1 + morphology * source.gaussian())
+                qrsScale = max(0, 1 + 0.30 * morphology * source.gaussian())
+                tScale = max(0, 1 + morphology * source.gaussian())
+                prShift = 0.015 * morphology * source.gaussian()
+                qtScale = max(0.5, 1 + 0.5 * morphology * source.gaussian())
+            }
+
             for i in 0..<count {
                 let t = Double(i) / rate - leadIn
                 var value = 0.0
 
                 // P wave — scales with rate, asymmetry negligible.
-                value += 0.25 * gaussian(t, centre: -0.156 * stretch, sigma: 0.032 * stretch)
+                value += pScale * 0.25
+                    * gaussian(t, centre: -0.156 * stretch + prShift, sigma: 0.032 * stretch)
                 // QRS — fixed width regardless of rate.
-                value += -0.167 * gaussian(t, centre: -0.033, sigma: 0.0127)
-                value += 1.000 * gaussian(t, centre: 0, sigma: 0.0127)
-                value += -0.250 * gaussian(t, centre: 0.033, sigma: 0.0127)
+                value += qrsScale * -0.167 * gaussian(t, centre: -0.033, sigma: 0.0127)
+                value += qrsScale * 1.000 * gaussian(t, centre: 0, sigma: 0.0127)
+                value += qrsScale * -0.250 * gaussian(t, centre: 0.033, sigma: 0.0127)
                 // T wave — scales with rate, and rises more slowly than it falls.
-                let tCentre = 0.222 * stretch
-                let tSigma = (t < tCentre ? 0.058 : 0.040) * stretch
-                value += 0.400 * gaussian(t, centre: tCentre, sigma: tSigma)
+                let tCentre = 0.222 * stretch * qtScale
+                let tSigma = (t < tCentre ? 0.058 : 0.040) * stretch * qtScale
+                value += tScale * 0.400 * gaussian(t, centre: tCentre, sigma: tSigma)
 
                 waveform[i] = value
             }
@@ -473,6 +496,18 @@ nonisolated enum BCGArtifactModel {
             channel[index] += wanderAmplitude
                 * (sin(2 * Double.pi * config.respirationHz * t) + 0.5 * sin(2 * Double.pi * 0.07 * t + 1.1))
         }
+
+        // Sensor noise. A chest lead read through an EEG amplifier is not a
+        // clean trace: it carries baseline EMG from the chest wall and
+        // electrode noise, broadband and small next to a ~1 mV R wave. Drawn
+        // only when asked, so the benchmark's noiseless ECG is untouched and
+        // the draw order downstream of here does not move.
+        let noiseRMS = config.effectiveECGNoiseMicrovoltsRMS
+        if noiseRMS > 0 {
+            for index in channel.indices {
+                channel[index] += noiseRMS * source.gaussian()
+            }
+        }
         return channel
     }
 
@@ -482,17 +517,48 @@ nonisolated enum BCGArtifactModel {
     }
 
     /// A modelled motion sensor, per the paper's Kalman-filtering section: the
-    /// sensor sees the BCG through a saturating nonlinearity, sigmoid(a·x) with
-    /// a = 0.1, "so as to induce a strong saturation of motion signal, thereby
-    /// modelling strong nonlinear effects".
+    /// sensor sees the BCG through a saturating nonlinearity, "so as to induce
+    /// a strong saturation of motion signal, thereby modelling strong nonlinear
+    /// effects".
     ///
     /// The nonlinearity is the point. A reference channel that were a linear
     /// copy of the artifact would make regression-based correction trivially
     /// perfect and tell you nothing about how it behaves on a real carbon-wire
     /// loop or piezo sensor.
+    ///
+    /// The paper writes that nonlinearity as sigmoid(a·x) with a = 0.1, and EVA
+    /// applied it literally to a mean BCG in µV. That was wrong on units. At the
+    /// default 100 µV peak-to-peak the mean BCG swings ±50 µV, so a·x reached ±5
+    /// and the sigmoid stopped being a saturating nonlinearity and became a
+    /// comparator: 12% of samples pinned within 5% of a rail, every beat
+    /// flattened into a square wave, and the sigmoid's linear region covering
+    /// only |x| < 2 µV — the quiet baseline between beats and nothing else.
+    ///
+    /// Worse, the severity was a function of `bcgAmplitudeMicrovolts`. Across
+    /// the paper's own 10-200 µV amplitude sweep the reference channel went
+    /// from an exactly linear copy to a square wave (correlation with the true
+    /// BCG shape 1.000 -> 0.897), so the sweep silently varied how much
+    /// information the reference carried — the one thing that sweep has to hold
+    /// fixed for its numbers to mean anything.
+    ///
+    /// So `gain` is dimensionless here, and applies to the BCG normalized by
+    /// its own RMS. A mean BCG peaks around 3.2x its RMS, so the default 1.0
+    /// drives the sigmoid to ±3.2 at the extremes: the peaks compress hard,
+    /// reaching 92% of the rail without a single sample pinned to it, and they
+    /// do it identically at 10 µV and at 200 µV. Correlation with the linear
+    /// BCG is 0.990 — the nonlinearity is real, but it is a nonlinearity and
+    /// not a comparator.
     static func motionSensorChannel(meanBCG: [Double], gain: Double) -> [Double] {
-        meanBCG.map { value in
-            let sigmoid = 1 / (1 + exp(-gain * value))
+        guard !meanBCG.isEmpty else { return [] }
+        let meanSquare = meanBCG.reduce(0) { $0 + $1 * $1 } / Double(meanBCG.count)
+        let rms = meanSquare.squareRoot()
+        // A silent BCG — no beats, or zero amplitude — has nothing to normalize
+        // against. Leave it silent rather than amplifying rounding dust into a
+        // full-scale square wave, which is what dividing by it would do.
+        guard rms > 1e-9 else { return [Double](repeating: 0, count: meanBCG.count) }
+
+        return meanBCG.map { value in
+            let sigmoid = 1 / (1 + exp(-gain * value / rms))
             // Centered and scaled to a plausible sensor range in the same units
             // as the rest of the file.
             return (sigmoid - 0.5) * 200

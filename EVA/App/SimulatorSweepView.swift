@@ -33,10 +33,12 @@ struct SimulatorSweepView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    LabeledContent("Parameter") {
+                    LabeledContent {
                         Picker("Parameter", selection: $simulator.sweepParameter) {
                             ForEach(SimulatorRunner.sweepParameters, id: \.self) { Text($0).tag($0) }
                         }.labelsHidden().frame(maxWidth: 220)
+                    } label: {
+                        RowLabel(title: "Parameter", help: SimulatorHelp.sweepParameter)
                     }
                     LabeledContent("Values") {
                         TextField("50, 100, 150", text: $simulator.sweepValuesText)
