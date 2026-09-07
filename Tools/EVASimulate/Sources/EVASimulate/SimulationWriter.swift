@@ -66,6 +66,14 @@ nonisolated struct SimulationTruth: Codable, Sendable {
     var referenceApplicationStage: String? = nil
     /// 1-based channel number -> the defect applied to it.
     var badChannels: [String: String]
+    /// Defects applied to the dedicated EOG traces, keyed "VEOG"/"HEOG". Kept
+    /// separate from `badChannels` because those are EEG channel numbers and
+    /// these are not — merging them would make the sidecar ambiguous.
+    var eogDefects: [String: String] = [:]
+    /// Channels given a high impedance reading while their data was left alone.
+    /// The complement of `badChannels` for the lesson impedance screening
+    /// teaches: bad reading, good data.
+    var highImpedanceChannels: [Int] = []
     var blinkSeconds: [Double]
     var saccadeSeconds: [Double]
     /// Per-channel weight of the blink and horizontal-gaze topographies, so a

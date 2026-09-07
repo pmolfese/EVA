@@ -265,14 +265,51 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// scalp-lead ECG through an EEG amplifier.
     var ecgAmplitudeMicrovolts: Double = 1000
 
+    /// Beat-to-beat morphology variation, as a fraction. Each complex draws its
+    /// own P, QRS and T amplitudes and its own PR and QT timing around the
+    /// model values, so no two beats are the same stamp. The QRS gets 30% of
+    /// the fraction — it is by far the most reproducible feature on a real
+    /// strip — while P and T take it in full. 0.05-0.10 reads as a recorded
+    /// trace; much above that starts to look arrhythmic.
+    ///
+    /// 0 by default. Every published benchmark number was measured against the
+    /// stamped waveform, and turning this on would move all of them silently.
+    ///
+    /// Optional so that scenario files written before it stay decodable —
+    /// Swift's synthesized `Decodable` requires every non-Optional key. Nil and
+    /// 0 mean the same thing; read it through `effectiveECGMorphologyJitter`.
+    var ecgMorphologyJitterFraction: Double? = nil
+
+    /// Broadband sensor noise on the ECG channel, in µV RMS. A real chest lead
+    /// carries baseline EMG from the chest wall plus electrode noise — 5-20 µV
+    /// against a ~1 mV R wave, which is what makes R-peak detection a task
+    /// rather than an argmax.
+    ///
+    /// 0 by default, for the same reason as the morphology jitter: it changes
+    /// what every detection benchmark is being asked to do. Optional on the same
+    /// terms; read it through `effectiveECGNoiseMicrovoltsRMS`.
+    var ecgNoiseMicrovoltsRMS: Double? = nil
+
     /// Write a synthetic motion-sensor channel as PNS. Paper §"Kalman Adaptive
     /// Filtering": the sensor sees the BCG through a saturating nonlinearity,
-    /// modelled as sigmoid(a·x) with a = 0.1 applied to the across-channel mean
-    /// BCG. This exists to give reference-channel methods (CWL regression, and
-    /// the adaptive filter in TODO_Aug21.md item 2) something to regress
-    /// against that is deliberately *not* a linear copy of the artifact.
+    /// applied to the across-channel mean BCG. This exists to give
+    /// reference-channel methods (CWL regression, and the adaptive filter in
+    /// TODO_Aug21.md item 2) something to regress against that is deliberately
+    /// *not* a linear copy of the artifact.
+    ///
+    /// Off by default in Simulator Studio — see `SimulatorController` — because
+    /// a modelled sensor is a specialist's channel, and most recordings do not
+    /// want it in the file.
     var includeMotionSensor: Bool = true
-    var motionSensorSigmoidGain: Double = 0.1
+
+    /// Sigmoid gain for the modelled motion sensor. **Dimensionless**: it
+    /// applies to the mean BCG normalized by its own RMS, so the amount of
+    /// saturation no longer rides on `bcgAmplitudeMicrovolts`. The paper writes
+    /// a = 0.1 against a signal in its own units; EVA applied that to µV, which
+    /// made the sigmoid a comparator and made the nonlinearity's severity a
+    /// function of the very amplitude the paper sweeps. See
+    /// `BCGArtifactModel.motionSensorChannel` for the measurements.
+    var motionSensorSigmoidGain: Double = 1
 
     // MARK: Ocular artifacts
 
@@ -327,6 +364,82 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// Channels deliberately made bad, keyed by 1-based channel number.
     var badChannels: [Int: ChannelDefect] = [:]
 
+    /// Spoil this many channels without naming them, chosen deterministically
+    /// from the seed. Additive to `badChannels`: naming channel 7 explicitly and
+    /// asking for 3 more gives four bad channels, not three, and channel 7 keeps
+    /// the defect it was given.
+    ///
+    /// This exists because the interesting question is almost never *which*
+    /// electrode failed — it is how a pipeline behaves with some number of them
+    /// failing. Asking for a count instead of a list is what makes "how many bad
+    /// channels before the interpolation stops being trustworthy" a two-minute
+    /// experiment rather than an afternoon of editing scenario files.
+    var badChannelCount: Int? = nil
+
+    /// Defect to give the counted channels. Nil deals one of each kind in turn —
+    /// flat, noisy, drift, pop, line — which is what you want when the question
+    /// is whether a detector catches every failure mode. Pin a kind when the
+    /// question is about one of them.
+    var badChannelDefect: ChannelDefect? = nil
+
+    /// Channels that read high on the impedance check but are **not** otherwise
+    /// spoiled, by 1-based channel number.
+    ///
+    /// Deliberately its own axis rather than a defect. A high-impedance
+    /// electrode is not broken; it is worse-connected, and what follows from
+    /// that is Johnson-Nyquist thermal noise proportional to the impedance —
+    /// which `impedanceNoise` already generates from the recorded value, so
+    /// nothing artificial has to be added here. The point is the pair of cases
+    /// that impedance screening gets wrong: a flat channel reads *excellent*
+    /// because the electrolyte path is too good, and these channels read poor
+    /// while carrying perfectly usable EEG.
+    /// Optional for scenario compatibility; nil and empty mean the same thing.
+    /// Read it through `effectiveHighImpedanceChannels`.
+    var highImpedanceChannels: [Int]? = nil
+
+    /// Give this many channels a high impedance reading, chosen deterministically
+    /// and never overlapping the bad channels. Additive to
+    /// `highImpedanceChannels`, on the same terms as `badChannelCount`.
+    var highImpedanceChannelCount: Int? = nil
+
+    /// What those channels read, in kΩ, scattered a little around this value.
+    /// The default 85 sits in EVA's "poor" band (70-120), so the health report
+    /// flags them without calling them dead.
+    /// Optional for scenario compatibility; nil means the 85 kΩ default. Read
+    /// it through `effectiveHighImpedanceKOhm`.
+    var highImpedanceKOhm: Double? = nil
+
+    /// Which electrodes the counted bad channels are drawn from.
+    ///
+    /// This exists because *where* a channel fails changes what breaks. A bad
+    /// occipital electrode costs you one channel of data. A bad electrode over
+    /// the eye is upstream of every threshold-based blink and eye-movement
+    /// detector in the pipeline, all of which read the periocular sites and
+    /// compare them to a µV threshold — so a flat one silently stops reporting
+    /// blinks, a noisy one reports hundreds, and either way the artifact
+    /// rejection that everything downstream assumes has quietly stopped working.
+    /// That is a much more interesting failure than "one channel is missing",
+    /// and it is nearly impossible to set up by hand without knowing which
+    /// channel numbers are periocular in the montage you happen to be using.
+    /// Optional, and deliberately so — see the note on the BCG generator
+    /// settings above. Swift's synthesized `Decodable` does not fall back to a
+    /// property's default when a key is absent, so a non-Optional addition here
+    /// makes every scenario file written before it undecodable. Nil means
+    /// `.anywhere`; read it through `effectiveBadChannelPlacement`.
+    var badChannelPlacement: BadChannelPlacement? = nil
+
+    /// Defects applied to the dedicated EOG traces written as PNS channels,
+    /// keyed by which one. Independent of `badChannels`, which addresses the EEG
+    /// montage — these are separate physical electrodes and fail separately.
+    ///
+    /// Spoiling these is the other half of the same lesson: pipelines that
+    /// regress the EEG against a recorded VEOG/HEOG produce a confident, wrong
+    /// correction when the reference itself is bad, because nothing in the
+    /// regression can tell a dead reference from an eye that never moved.
+    /// Optional for scenario compatibility; nil and empty mean the same thing.
+    /// Read it through `effectiveEOGDefects`.
+    var eogDefects: [EOGChannel: ChannelDefect]? = nil
+
     /// Record a per-electrode impedance measurement in the file, the way a real
     /// EGI system does. On by default: a recording without one is the unusual
     /// case, and EVA's health scoring simply skips impedance when it is absent.
@@ -357,6 +470,15 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     var spatialModel: SpatialModel = .circular
 
     static let `default` = SimulationConfig()
+
+    var effectiveECGMorphologyJitter: Double { max(0, ecgMorphologyJitterFraction ?? 0) }
+    var effectiveECGNoiseMicrovoltsRMS: Double { max(0, ecgNoiseMicrovoltsRMS ?? 0) }
+    var effectiveBadChannelPlacement: BadChannelPlacement { badChannelPlacement ?? .anywhere }
+    var effectiveHighImpedanceChannels: [Int] { highImpedanceChannels ?? [] }
+    /// 85 kΩ sits in EVA's "poor" band (70-120), so a health report flags these
+    /// channels without calling them dead.
+    var effectiveHighImpedanceKOhm: Double { highImpedanceKOhm ?? 85 }
+    var effectiveEOGDefects: [EOGChannel: ChannelDefect] { eogDefects ?? [:] }
 
     var sampleCount: Int {
         max(1, Int((durationSeconds * samplingRate).rounded()))
@@ -665,6 +787,29 @@ nonisolated struct ERPComponentConfig: Codable, Sendable {
 /// A way for one channel to be bad. Each is something that really happens to
 /// an electrode, and each defeats a different naive analysis — which is what
 /// makes them worth teaching with.
+/// Which electrodes a counted bad-channel request is allowed to land on.
+nonisolated enum BadChannelPlacement: String, Codable, Sendable, CaseIterable {
+    /// Any electrode. The realistic default: electrodes fail where they fail.
+    case anywhere
+    /// Only the periocular sites — the electrodes that see the most blink.
+    /// Targets eye-artifact detection specifically.
+    case periocular
+    /// Anywhere except the periocular sites, so ocular detection is left intact
+    /// and whatever else you are testing is the only thing degraded.
+    case avoidPeriocular
+}
+
+/// The dedicated EOG electrodes, written as PNS channels rather than as part of
+/// the EEG montage — which is where a real recording puts them.
+nonisolated enum EOGChannel: String, Codable, Sendable, CaseIterable {
+    /// Vertical: above and below one eye. Carries blinks.
+    case veog
+    /// Horizontal: outer canthus of each eye. Carries lateral gaze.
+    case heog
+
+    var label: String { rawValue.uppercased() }
+}
+
 nonisolated enum ChannelDefect: String, Codable, Sendable, CaseIterable {
     /// Dead or shorted: almost no signal at all.
     case flat

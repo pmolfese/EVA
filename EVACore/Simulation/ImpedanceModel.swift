@@ -94,6 +94,15 @@ nonisolated enum ImpedanceModel {
                 return Float(span.lowerBound + position * (span.upperBound - span.lowerBound))
             }
 
+            // Poorly connected but not broken. Scattered more tightly than the
+            // healthy channels are, because these were placed at a requested
+            // level rather than being whatever the prep happened to produce.
+            if config.effectiveHighImpedanceChannels.contains(channelNumber) {
+                let target = max(1, config.effectiveHighImpedanceKOhm)
+                let scattered = target * exp(0.18 * source.gaussian())
+                return Float(min(max(scattered, 0.7 * target), 1.4 * target))
+            }
+
             // Healthy: lognormal scatter around the requested typical value.
             //
             // The clamp is relative to that value, not to a fixed healthy band.

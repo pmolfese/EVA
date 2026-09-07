@@ -49,10 +49,18 @@ struct SimulatorGroupView: View {
                         }
                     }
 
-                    Toggle("Homogeneous (no between-subject variability)", isOn: $simulator.groupVariability.homogeneous)
+                    HStack(spacing: 4) {
+                        Toggle("Homogeneous (no between-subject variability)",
+                               isOn: $simulator.groupVariability.homogeneous)
+                        HelpButton(topic: SimulatorHelp.homogeneous)
+                    }
                     if !simulator.groupVariability.homogeneous {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Between-subject SDs").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            HStack(spacing: 4) {
+                                Text("Between-subject SDs").font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                HelpButton(topic: SimulatorHelp.betweenSubjectSDs)
+                            }
                             sd("Head radius", $simulator.groupVariability.headRadiusSD, 0...0.3, 2)
                             sd("Placement °", $simulator.groupVariability.placementSD, 0...10, 1)
                             sd("Alpha", $simulator.groupVariability.alphaSD, 0...1, 2)

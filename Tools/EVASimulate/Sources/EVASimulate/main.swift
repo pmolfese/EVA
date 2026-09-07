@@ -271,6 +271,28 @@ func usage() -> String {
         --bad-channels <spec>       Comma-separated <channel>:<kind>, 1-based,
                                     e.g. "7:noisy,15:drift". Kinds: flat, noisy,
                                     drift, pop, line. Kind defaults to noisy.
+        --bad-channel-count <n>     Spoil this many channels without naming them,
+                                    chosen deterministically from the seed.
+                                    Additive to --bad-channels.
+        --bad-channel-kind <kind>   Defect for those channels. Omitted, they get
+                                    one of each kind in turn.
+        --high-impedance-count <n>  Give this many channels a high impedance
+                                    reading while leaving their data alone.
+                                    Never overlaps the bad channels.
+        --high-impedance <kohm>     What those channels read (default 85, which
+                                    is inside EVA's "poor" band).
+        --bad-channel-placement <p> Where counted bad channels land: anywhere
+                                    (default), periocular (the electrodes an eye
+                                    detector reads — breaks threshold-based blink
+                                    and eye-movement detection), or
+                                    avoid-periocular (leaves ocular detection
+                                    intact).
+        --bad-eog <spec>            Spoil the dedicated EOG traces. Comma-
+                                    separated <veog|heog>[:<kind>], e.g.
+                                    "veog:flat,heog:noisy". Kind defaults to
+                                    noisy. Breaks regression-based ocular
+                                    correction, which cannot tell a dead
+                                    reference from an eye that never moved.
         --line-noise <hz>           Mains frequency; 0 is off. Try 60.
         --line-noise-amplitude <uv> Default 8.
         --impedance <kohm>          Typical impedance of a healthy electrode
@@ -300,8 +322,16 @@ func usage() -> String {
                                     Nyquist; 0 disables (default 0.9).
         --no-ecg                    Omit the synthetic ECG channel.
         --with-ecg                  Enable ECG if a scenario disables it.
+        --ecg-amplitude <uv>        R-peak amplitude (default 1000).
+        --ecg-morphology-jitter <f> Beat-to-beat variation in P/QRS/T amplitude
+                                    and PR/QT timing, as a fraction (default 0;
+                                    0.05-0.10 reads as a recorded trace).
+        --ecg-noise <uv>            Broadband sensor noise on the ECG channel,
+                                    in µV RMS (default 0; 5-20 is realistic).
         --no-motion-sensor          Omit the synthetic motion-sensor channel.
         --with-motion-sensor        Enable it if a scenario disables it.
+        --motion-sensor-gain <g>    Sigmoid gain, applied to the mean BCG
+                                    normalized by its own RMS (default 1.0).
         --spatial-model <name>      circular (the paper's, default) or geometric
                                     (smooth by real electrode distance — prefer
                                     this for demos and topography). Grouiller
@@ -432,7 +462,8 @@ let generateOptions: Set<String> = [
     "erp-latency-amplitude-correlation", "erp-omission-rate", "erp-waveform",
     "erp-width", "erp-template", "erp-template-rate",
     "artifact-oversample", "artifact-anti-alias", "with-ecg", "no-ecg",
-    "with-motion-sensor", "no-motion-sensor", "with-impedance",
+    "ecg-amplitude", "ecg-morphology-jitter", "ecg-noise",
+    "with-motion-sensor", "no-motion-sensor", "motion-sensor-gain", "with-impedance",
     "with-impedance-noise", "no-impedance-noise", "electrode-temperature",
     "impedance-line-exponent",
     "prefix", "pre-scan", "post-scan",
@@ -443,7 +474,10 @@ let generateOptions: Set<String> = [
     "cable-movement", "cable-amplitude", "cable-duration", "no-cable-movement",
     "sweat", "sweat-amplitude", "sweat-duration", "sweat-channels", "no-sweat",
     "bridge", "no-bridges", "bad-reference", "no-bad-reference", "clip", "no-clipping",
-    "bad-channels", "line-noise", "line-noise-amplitude", "demo",
+    "bad-channels", "bad-channel-count", "bad-channel-kind",
+    "bad-channel-placement", "bad-eog",
+    "high-impedance-count", "high-impedance",
+    "line-noise", "line-noise-amplitude", "demo",
     "impedance", "no-impedance"
 ]
 
@@ -512,6 +546,34 @@ func importedMontage(
     } catch {
         throw SimulateError.usage("invalid imported montage at \(url.path): \(error.localizedDescription)")
     }
+}
+
+func parseEOGDefects(_ spec: String) throws -> [EOGChannel: ChannelDefect] {
+    var result: [EOGChannel: ChannelDefect] = [:]
+    for entry in spec.split(separator: ",") {
+        let parts = entry.split(separator: ":", maxSplits: 1)
+        let name = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
+        guard let channel = EOGChannel(rawValue: name) else {
+            throw SimulateError.usage(
+                "--bad-eog entry \"\(entry)\" should name veog or heog"
+            )
+        }
+        // Same default as --bad-channels: naming a channel with no kind asks for
+        // the most generally useful defect rather than for an error.
+        guard parts.count > 1 else {
+            result[channel] = .noisy
+            continue
+        }
+        let kind = parts[1].trimmingCharacters(in: .whitespaces).lowercased()
+        guard let defect = ChannelDefect(rawValue: kind) else {
+            throw SimulateError.usage(
+                "unknown defect \"\(kind)\"; expected one of "
+                + ChannelDefect.allCases.map(\.rawValue).joined(separator: ", ")
+            )
+        }
+        result[channel] = defect
+    }
+    return result
 }
 
 func parseBadChannels(_ spec: String) throws -> [Int: ChannelDefect] {
@@ -913,6 +975,41 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     }
 
     if let spec = arguments.string("bad-channels") { config.badChannels = try parseBadChannels(spec) }
+    if let value = try arguments.int("bad-channel-count") {
+        guard value >= 0 else { throw SimulateError.usage("--bad-channel-count must be at least 0") }
+        config.badChannelCount = value
+    }
+    if let kind = arguments.string("bad-channel-kind") {
+        guard let defect = ChannelDefect(rawValue: kind.lowercased()) else {
+            throw SimulateError.usage(
+                "unknown defect \"\(kind)\"; expected one of "
+                + ChannelDefect.allCases.map(\.rawValue).joined(separator: ", ")
+            )
+        }
+        config.badChannelDefect = defect
+    }
+    if let value = try arguments.int("high-impedance-count") {
+        guard value >= 0 else {
+            throw SimulateError.usage("--high-impedance-count must be at least 0")
+        }
+        config.highImpedanceChannelCount = value
+    }
+    if let value = try arguments.double("high-impedance") {
+        guard value > 0 else { throw SimulateError.usage("--high-impedance must be positive") }
+        config.highImpedanceKOhm = value
+    }
+    if let name = arguments.string("bad-channel-placement") {
+        let normalized = name.lowercased().replacingOccurrences(of: "-", with: "")
+        guard let placement = BadChannelPlacement.allCases.first(where: {
+            $0.rawValue.lowercased() == normalized
+        }) else {
+            throw SimulateError.usage(
+                "unknown placement \"\(name)\"; expected anywhere, periocular or avoid-periocular"
+            )
+        }
+        config.badChannelPlacement = placement
+    }
+    if let spec = arguments.string("bad-eog") { config.eogDefects = try parseEOGDefects(spec) }
     if let value = try arguments.double("line-noise") { config.lineNoiseHz = value }
     if let value = try arguments.double("line-noise-amplitude") { config.lineNoiseAmplitudeMicrovolts = value }
     if arguments.flag("with-impedance") { config.includeImpedance = true }
@@ -941,8 +1038,23 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("artifact-anti-alias") { config.artifactAntiAliasFraction = value }
     if arguments.flag("with-ecg") { config.includeECG = true }
     if arguments.flag("no-ecg") { config.includeECG = false }
+    if let value = try arguments.double("ecg-amplitude") { config.ecgAmplitudeMicrovolts = value }
+    if let value = try arguments.double("ecg-morphology-jitter") {
+        guard value >= 0 else {
+            throw SimulateError.usage("--ecg-morphology-jitter must be at least 0")
+        }
+        config.ecgMorphologyJitterFraction = value
+    }
+    if let value = try arguments.double("ecg-noise") {
+        guard value >= 0 else { throw SimulateError.usage("--ecg-noise must be at least 0") }
+        config.ecgNoiseMicrovoltsRMS = value
+    }
     if arguments.flag("with-motion-sensor") { config.includeMotionSensor = true }
     if arguments.flag("no-motion-sensor") { config.includeMotionSensor = false }
+    if let value = try arguments.double("motion-sensor-gain") {
+        guard value > 0 else { throw SimulateError.usage("--motion-sensor-gain must be positive") }
+        config.motionSensorSigmoidGain = value
+    }
 
     guard config.channelCount > 0 else { throw SimulateError.usage("--channels must be positive") }
     if let path = config.coordinatesPath {
@@ -1197,6 +1309,19 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
             "--bad-channels names channel \(number), but the montage has \(config.channelCount)"
         )
     }
+    for number in config.effectiveHighImpedanceChannels where number > config.channelCount {
+        throw SimulateError.usage(
+            "high-impedance channel \(number) is outside a \(config.channelCount)-channel montage"
+        )
+    }
+    let requestedDefective = (config.badChannelCount ?? 0) + (config.highImpedanceChannelCount ?? 0)
+        + config.badChannels.count + config.effectiveHighImpedanceChannels.count
+    guard requestedDefective <= config.channelCount else {
+        throw SimulateError.usage(
+            "asked for \(requestedDefective) bad and high-impedance channels, but the montage "
+            + "has only \(config.channelCount)"
+        )
+    }
 
     // Canonicalize legacy scenarios that only carry `dipoleReference`. New
     // resolved scenarios then state the recording-wide convention explicitly.
@@ -1211,6 +1336,7 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
 
 @discardableResult
 func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory: URL) throws -> CorrectionScore {
+    var config = config
     try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
     let prefix = try normalizedPrefix(arguments.string("prefix") ?? "sim")
 
@@ -1228,6 +1354,41 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
             degrees: jitter, seed: SimulationSeedStreams.montageJitter(base: config.seed)
         )
     }
+
+    // Expand the bad-channel and high-impedance counts into explicit channel
+    // numbers, exactly once, before anything reads `badChannels`. It happens
+    // here rather than in the argument parser because `.periocular` placement
+    // needs the montage to know which electrodes are over the eyes — and the
+    // montage is only final once an imported coordinates file and any jitter
+    // have been applied.
+    let requestedBad = max(0, config.badChannelCount ?? 0)
+    let badBefore = config.badChannels.count
+    let impedanceBefore = config.effectiveHighImpedanceChannels.count
+    config.resolveChannelSelectionCounts(montage: montage)
+
+    // Say so when a placement could not supply what was asked for. A 10-20 cap
+    // has exactly two electrodes over the eyes, so `--bad-channel-count 5
+    // --bad-channel-placement periocular` can only ever spoil two — and silently
+    // delivering fewer bad channels than requested would make a sweep's x-axis
+    // a lie.
+    let deliveredBad = config.badChannels.count - badBefore
+    if deliveredBad < requestedBad {
+        FileHandle.standardError.write(Data(
+            ("note: asked for \(requestedBad) bad channels at placement "
+             + "\(config.effectiveBadChannelPlacement.rawValue), but only \(deliveredBad) "
+             + "electrode\(deliveredBad == 1 ? "" : "s") qualify in this montage\n").utf8
+        ))
+    }
+    let requestedImpedance = max(0, config.highImpedanceChannelCount ?? 0)
+    let deliveredImpedance = config.effectiveHighImpedanceChannels.count - impedanceBefore
+    if deliveredImpedance < requestedImpedance {
+        FileHandle.standardError.write(Data(
+            ("note: asked for \(requestedImpedance) high-impedance channels, but only "
+             + "\(deliveredImpedance) channel\(deliveredImpedance == 1 ? "" : "s") were left "
+             + "after the bad-channel draw\n").utf8
+        ))
+    }
+
     var leadFieldConvergence: LeadFieldConvergenceReport?
     // One check covers every lead field this run builds — the ERP's (its source
     // comes from `makeSources`, same radius fraction) and the moving-source
@@ -1433,6 +1594,20 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         additional: additional, config: config
     )
 
+    // Spoil the dedicated EOG traces, if asked. Done here, after every artifact
+    // has been injected and just before the PNS package is assembled, for the
+    // same reason bad EEG channels go last: a defect happens to the *recording*
+    // of a channel, on top of whatever that channel was carrying.
+    var eogDefectsApplied: [String: String] = [:]
+    var veog = ocular?.veog
+    var heog = ocular?.heog
+    if !config.effectiveEOGDefects.isEmpty, veog != nil, heog != nil {
+        var random = GaussianSource(seed: SimulationSeedStreams.eogDefects(base: config.seed))
+        eogDefectsApplied = ChannelDefectModel.applyToEOG(
+            veog: &veog!, heog: &heog!, config: config, source: &random
+        )
+    }
+
     var ecg: [Double]?
     var motion: [Double]?
     if let bcg {
@@ -1497,7 +1672,7 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         ),
         pnsSignal: SimulationWriter.pnsSignal(
             ecg: ecg, motion: motion,
-            veog: ocular?.veog, heog: ocular?.heog,
+            veog: veog, heog: heog,
             config: config, packageURL: noisyURL
         ),
         segments: [],
@@ -1538,6 +1713,8 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         recordingReference: config.effectiveRecordingReference,
         referenceApplicationStage: "after additive signal layers, before recording defects",
         badChannels: badChannels,
+        eogDefects: eogDefectsApplied,
+        highImpedanceChannels: config.effectiveHighImpedanceChannels,
         blinkSeconds: ocular?.blinkSeconds ?? [],
         saccadeSeconds: ocular?.saccadeSeconds ?? [],
         blinkTopography: ocular?.blinkTopography ?? [],
@@ -1678,6 +1855,21 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
             return "\(name) (\(defect))"
         }
         print("Bad channels: " + described.joined(separator: ", "))
+    }
+    if !config.effectiveHighImpedanceChannels.isEmpty {
+        let described = config.effectiveHighImpedanceChannels.map { number -> String in
+            let index = number - 1
+            return index < montage.channelNames.count ? montage.channelNames[index] : "#\(number)"
+        }
+        print(String(
+            format: "High impedance (data intact): %@ at ~%.0f kΩ",
+            described.joined(separator: ", "), config.effectiveHighImpedanceKOhm
+        ))
+    }
+    if !eogDefectsApplied.isEmpty {
+        let described = eogDefectsApplied.sorted { $0.key < $1.key }
+            .map { "\($0.key) (\($0.value))" }
+        print("Bad EOG channels: " + described.joined(separator: ", "))
     }
     print(String(format: "Uncorrected broadband SNR: %.4f", baseline.broadbandSNR))
     return baseline

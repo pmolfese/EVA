@@ -200,7 +200,7 @@ struct EVAApp: App {
             SimulatorWindowView()
                 .environment(simulatorController)
         }
-        .defaultSize(width: 520, height: 560)
+        .defaultSize(width: 1040, height: 620)
 
 
         Settings {

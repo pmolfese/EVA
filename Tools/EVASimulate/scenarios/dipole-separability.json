@@ -98,7 +98,7 @@
     "leadFieldTerms" : 100,
     "lineNoiseAmplitudeMicrovolts" : 8,
     "lineNoiseHz" : 0,
-    "motionSensorSigmoidGain" : 0.1,
+    "motionSensorSigmoidGain" : 1,
     "neuralNonstationarity" : {
       "alphaBursts" : {
         "backgroundFraction" : 0.05,

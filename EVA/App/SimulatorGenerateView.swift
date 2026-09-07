@@ -20,28 +20,110 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum ConfigSection: String, CaseIterable, Identifiable {
+    case recording, sources, background, gradient, cardiac, ocular, muscle, erp, defects, output
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .recording: return "Recording"
+        case .sources: return "Sources & Head"
+        case .background: return "Background"
+        case .gradient: return "Gradient"
+        case .cardiac: return "Cardiac"
+        case .ocular: return "Ocular"
+        case .muscle: return "Muscle & Other"
+        case .erp: return "ERP"
+        case .defects: return "Defects"
+        case .output: return "Output"
+        }
+    }
+    var systemImage: String {
+        switch self {
+        case .recording: return "waveform"
+        case .sources: return "brain.head.profile"
+        case .background: return "waveform.path"
+        case .gradient: return "waveform.path.ecg"
+        case .cardiac: return "heart"
+        case .ocular: return "eye"
+        case .muscle: return "bolt.horizontal"
+        case .erp: return "chart.xyaxis.line"
+        case .defects: return "exclamationmark.triangle"
+        case .output: return "folder"
+        }
+    }
+    var help: String {
+        switch self {
+        case .recording: return "Channel count, duration, sampling rate, and rendering fidelity."
+        case .sources: return "Dipole source count, placement, and the head model they project through."
+        case .background: return "Background rhythm amplitude and spectral shape per band."
+        case .gradient: return "MRI gradient artifact: clock drift, template fitting, OBS removal."
+        case .cardiac: return "Ballistocardiogram (BCG) artifact amplitude and topography."
+        case .ocular: return "Blink and saccade artifacts."
+        case .muscle: return "EMG and other broadband contaminants."
+        case .erp: return "Event-related potential components layered into the recording."
+        case .defects: return "Bad channels, bridging, and reference defects."
+        case .output: return "Where the generated recording and its truth sidecar are written."
+        }
+    }
+}
+
+/// A compact icon-over-caption segmented control — the native `Picker(.segmented)`
+/// can't lay out an icon above small text, and with ten sections plain text labels
+/// don't fit any reasonable window width. Each segment shows its icon full-size,
+/// a caption in `.caption2`, and a `.help()` tooltip with the longer description.
+private struct SectionPicker: View {
+    @Binding var selection: ConfigSection
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(ConfigSection.allCases) { section in
+                Button {
+                    selection = section
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: section.systemImage)
+                            .font(.system(size: 15))
+                        Text(section.title)
+                            .font(.caption2)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(width: 74, height: 52)
+                    .foregroundStyle(selection == section ? Color.accentColor : Color.primary)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(selection == section ? Color.accentColor.opacity(0.15) : Color.clear)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help(section.help)
+            }
+        }
+        .padding(4)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+}
+
 struct SimulatorGenerateView: View {
     @Environment(SimulatorController.self) private var simulator
     /// Called with the generated recording so the window can open it.
     let open: (URL) -> Void
+    @State private var section: ConfigSection = .recording
 
     var body: some View {
         @Bindable var simulator = simulator
         VStack(spacing: 0) {
             presetBar(simulator: simulator)
-            TabView {
-                RecordingTab().tabItem { Label("Recording", systemImage: "waveform") }
-                SourcesTab().tabItem { Label("Sources & Head", systemImage: "brain.head.profile") }
-                BackgroundTab().tabItem { Label("Background", systemImage: "waveform.path") }
-                GradientTab().tabItem { Label("Gradient", systemImage: "waveform.path.ecg") }
-                CardiacTab().tabItem { Label("Cardiac", systemImage: "heart") }
-                OcularTab().tabItem { Label("Ocular", systemImage: "eye") }
-                MuscleTab().tabItem { Label("Muscle & Other", systemImage: "bolt.horizontal") }
-                ERPTab().tabItem { Label("ERP", systemImage: "chart.xyaxis.line") }
-                DefectsTab().tabItem { Label("Defects", systemImage: "exclamationmark.triangle") }
-                OutputTab().tabItem { Label("Output", systemImage: "folder") }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                SectionPicker(selection: $section)
+                    .padding(.horizontal, 12)
             }
-            .padding([.horizontal, .top], 12)
+
+            Divider().padding(.top, 12)
+
+            sectionContent
 
             if simulator.phase != .idle {
                 Divider()
@@ -50,6 +132,22 @@ struct SimulatorGenerateView: View {
 
             Divider()
             bottomBar(simulator: simulator)
+        }
+    }
+
+    @ViewBuilder
+    private var sectionContent: some View {
+        switch section {
+        case .recording: RecordingTab()
+        case .sources: SourcesTab()
+        case .background: BackgroundTab()
+        case .gradient: GradientTab()
+        case .cardiac: CardiacTab()
+        case .ocular: OcularTab()
+        case .muscle: MuscleTab()
+        case .erp: ERPTab()
+        case .defects: DefectsTab()
+        case .output: OutputTab()
         }
     }
 
@@ -176,13 +274,16 @@ private struct DoubleRow: View {
     @Binding var value: Double
     var unit: String? = nil
     var width: CGFloat = 90
+    var help: HelpTopic? = nil
     var body: some View {
-        LabeledContent(title) {
+        LabeledContent {
             HStack(spacing: 6) {
                 TextField(title, value: $value, format: .number)
                     .textFieldStyle(.roundedBorder).labelsHidden().frame(width: width)
                 if let unit { Text(unit).font(.caption).foregroundStyle(.secondary) }
             }
+        } label: {
+            RowLabel(title: title, help: help)
         }
     }
 }
@@ -193,8 +294,9 @@ private struct IntRow: View {
     @Binding var value: Int
     var range: ClosedRange<Int>? = nil
     var unit: String? = nil
+    var help: HelpTopic? = nil
     var body: some View {
-        LabeledContent(title) {
+        LabeledContent {
             HStack(spacing: 6) {
                 TextField(title, value: $value, format: .number)
                     .textFieldStyle(.roundedBorder).labelsHidden().frame(width: 80)
@@ -203,6 +305,25 @@ private struct IntRow: View {
                 }
                 if let unit { Text(unit).font(.caption).foregroundStyle(.secondary) }
             }
+        } label: {
+            RowLabel(title: title, help: help)
+        }
+    }
+}
+
+/// A toggle whose label carries a `?`. `Toggle` will not take an arbitrary
+/// label view and keep the switch on the trailing edge in a form, so the two
+/// are composed by hand.
+private struct ToggleRow: View {
+    let title: String
+    @Binding var isOn: Bool
+    var help: HelpTopic? = nil
+    var prominent: Bool = false
+    var body: some View {
+        HStack(spacing: 4) {
+            Toggle(title, isOn: $isOn)
+                .font(prominent ? .callout.weight(.semibold) : nil)
+            if let help { HelpButton(topic: help) }
         }
     }
 }
@@ -223,8 +344,13 @@ private struct TabForm<Content: View>: View {
 
 private struct SectionHeader: View {
     let title: String
+    var help: HelpTopic? = nil
     var body: some View {
-        Text(title).font(.callout.weight(.semibold)).padding(.top, 2)
+        HStack(spacing: 4) {
+            Text(title).font(.callout.weight(.semibold))
+            if let help { HelpButton(topic: help) }
+        }
+        .padding(.top, 2)
     }
 }
 
@@ -242,17 +368,21 @@ private struct RecordingTab: View {
             }
             IntRow(title: "Channels", value: $simulator.config.channelCount, range: 4...256)
             DoubleRow(title: "Duration", value: $simulator.config.durationSeconds, unit: "seconds")
-            LabeledContent("Sampling rate") {
+            LabeledContent {
                 Picker("Sampling rate", selection: $simulator.config.samplingRate) {
                     ForEach(sampleRateChoices, id: \.self) { Text("\(Int($0)) Hz").tag($0) }
                 }.labelsHidden().frame(maxWidth: 160)
+            } label: {
+                RowLabel(title: "Sampling rate", help: SimulatorHelp.samplingRate)
             }
             Text("Seed lives in the bar below and is shared across every tab.")
                 .font(.caption2).foregroundStyle(.secondary)
 
             SectionHeader(title: "Artifact rendering")
-            IntRow(title: "Oversample ×", value: $simulator.config.artifactOversampleFactor, range: 1...256)
-            DoubleRow(title: "Anti-alias fraction", value: $simulator.config.artifactAntiAliasFraction)
+            IntRow(title: "Oversample ×", value: $simulator.config.artifactOversampleFactor, range: 1...256,
+                   help: SimulatorHelp.oversample)
+            DoubleRow(title: "Anti-alias fraction", value: $simulator.config.artifactAntiAliasFraction,
+                      help: SimulatorHelp.antiAlias)
             Text("Higher oversampling renders sharp artifacts (gradient, BCG) more faithfully at a compute cost.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
@@ -274,39 +404,52 @@ private struct SourcesTab: View {
         @Bindable var simulator = simulator
         TabForm {
             SectionHeader(title: "EEG model")
-            LabeledContent("Generator") {
+            LabeledContent {
                 Picker("Generator", selection: $simulator.config.eegGenerationModel) {
                     Text("Grouiller (spatial)").tag(EEGGenerationModel.grouiller)
                     Text("Dipole (forward)").tag(EEGGenerationModel.dipole)
                 }.labelsHidden().frame(maxWidth: 220)
+            } label: {
+                RowLabel(title: "Generator", help: SimulatorHelp.generator)
             }
-            DoubleRow(title: "Target amplitude", value: $simulator.config.eegTargetStdMicrovolts, unit: "µV")
+            DoubleRow(title: "Target amplitude", value: $simulator.config.eegTargetStdMicrovolts, unit: "µV",
+                      help: SimulatorHelp.targetAmplitude)
 
             SectionHeader(title: "Dipole sources")
-            IntRow(title: "Source count", value: $simulator.config.dipoleSourceCount, range: 1...64)
-            DoubleRow(title: "Radius fraction", value: $simulator.config.dipoleSourceRadiusFraction)
-            LabeledContent("Orientation") {
+            IntRow(title: "Source count", value: $simulator.config.dipoleSourceCount, range: 1...64,
+                   help: SimulatorHelp.sourceCount)
+            DoubleRow(title: "Radius fraction", value: $simulator.config.dipoleSourceRadiusFraction,
+                      help: SimulatorHelp.radiusFraction)
+            LabeledContent {
                 Picker("Orientation", selection: $simulator.config.dipoleOrientationPattern) {
                     ForEach(DipoleOrientationPattern.allCases, id: \.self) {
                         Text($0.rawValue.capitalized).tag($0)
                     }
                 }.labelsHidden().frame(maxWidth: 180)
+            } label: {
+                RowLabel(title: "Orientation", help: SimulatorHelp.orientation)
             }
-            DoubleRow(title: "Source motion", value: $simulator.config.dipoleMotionDegrees, unit: "°")
+            DoubleRow(title: "Source motion", value: $simulator.config.dipoleMotionDegrees, unit: "°",
+                      help: SimulatorHelp.sourceMotion)
 
             SectionHeader(title: "Head model")
-            LabeledContent("Shells") {
+            LabeledContent {
                 Picker("Shells", selection: headModel) {
                     ForEach(HeadModel.allCases) { Text($0.title).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden().frame(maxWidth: 200)
+            } label: {
+                RowLabel(title: "Shells", help: SimulatorHelp.shells)
             }
-            LabeledContent("Reference") {
+            LabeledContent {
                 Picker("Reference", selection: $simulator.config.dipoleReference) {
                     Text("Average").tag(EEGReference.average)
                     Text("Infinity").tag(EEGReference.infinity)
                 }.labelsHidden().frame(maxWidth: 160)
+            } label: {
+                RowLabel(title: "Reference", help: SimulatorHelp.reference)
             }
-            IntRow(title: "Lead-field terms", value: $simulator.config.leadFieldTerms, range: 10...400)
+            IntRow(title: "Lead-field terms", value: $simulator.config.leadFieldTerms, range: 10...400,
+                   help: SimulatorHelp.leadFieldTerms)
 
             SectionHeader(title: "Montage")
             LabeledContent("Coordinates") {
@@ -320,7 +463,8 @@ private struct SourcesTab: View {
                     }
                 }
             }
-            DoubleRow(title: "Electrode jitter", value: jitter, unit: "°")
+            DoubleRow(title: "Electrode jitter", value: jitter, unit: "°",
+                      help: SimulatorHelp.electrodeJitter)
             Text("Import a coordinates.xml or an MFF to use its montage; jitter perturbs electrode angles. Named nets (HydroCel 64/128/256) come with SI-4.")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -358,14 +502,15 @@ private struct BackgroundTab: View {
         @Bindable var simulator = simulator
         TabForm {
             SectionHeader(title: "Overall")
-            DoubleRow(title: "Target σ", value: $simulator.config.eegTargetStdMicrovolts, unit: "µV")
+            DoubleRow(title: "Target σ", value: $simulator.config.eegTargetStdMicrovolts, unit: "µV",
+                      help: SimulatorHelp.targetAmplitude)
 
-            SectionHeader(title: "Alpha (eyes open / closed)")
+            SectionHeader(title: "Alpha (eyes open / closed)", help: SimulatorHelp.alpha)
             DoubleRow(title: "Alpha low", value: $simulator.config.alphaLowMicrovolts, unit: "µV")
             DoubleRow(title: "Alpha high", value: $simulator.config.alphaHighMicrovolts, unit: "µV")
             DoubleRow(title: "Alpha cycle", value: $simulator.config.alphaCycleSeconds, unit: "s")
 
-            SectionHeader(title: "Band amplitudes")
+            SectionHeader(title: "Band amplitudes", help: SimulatorHelp.bandAmplitudes)
             ForEach(bandIndices, id: \.self) { index in
                 DoubleRow(title: simulator.config.eegBands[index].name.capitalized,
                           value: bandAmplitude(index), unit: "µV")
@@ -398,10 +543,14 @@ private struct GradientTab: View {
                 IntRow(title: "Slices / volume", value: $simulator.config.slicesPerVolume, range: 1...200)
                 DoubleRow(title: "Amplitude min", value: $simulator.config.gradientAmplitudeMinMicrovolts, unit: "µV", width: 110)
                 DoubleRow(title: "Amplitude max", value: $simulator.config.gradientAmplitudeMaxMicrovolts, unit: "µV", width: 110)
-                DoubleRow(title: "Clock offset", value: $simulator.config.clockOffsetMicrosecondsPerSecond, unit: "µs/s", width: 110)
-                DoubleRow(title: "Pre-scan", value: $simulator.config.preScanSeconds, unit: "s")
-                DoubleRow(title: "Post-scan", value: $simulator.config.postScanSeconds, unit: "s")
-                DoubleRow(title: "Slow modulation", value: $simulator.config.slowModulationFraction)
+                DoubleRow(title: "Clock offset", value: $simulator.config.clockOffsetMicrosecondsPerSecond, unit: "µs/s", width: 110,
+                          help: SimulatorHelp.clockOffset)
+                DoubleRow(title: "Pre-scan", value: $simulator.config.preScanSeconds, unit: "s",
+                          help: SimulatorHelp.scanWindow)
+                DoubleRow(title: "Post-scan", value: $simulator.config.postScanSeconds, unit: "s",
+                          help: SimulatorHelp.scanWindow)
+                DoubleRow(title: "Slow modulation", value: $simulator.config.slowModulationFraction,
+                          help: SimulatorHelp.slowModulation)
             }
             .disabled(!simulator.config.gradientEnabled)
             Text("A non-integer clock offset is what makes gradient residuals realistic — the scanner and amplifier clocks drift.")
@@ -420,23 +569,57 @@ private struct CardiacTab: View {
             Group {
                 DoubleRow(title: "Heart rate min", value: $simulator.config.heartRateMinBPM, unit: "bpm", width: 100)
                 DoubleRow(title: "Heart rate max", value: $simulator.config.heartRateMaxBPM, unit: "bpm", width: 100)
-                DoubleRow(title: "Amplitude", value: $simulator.config.bcgAmplitudeMicrovolts, unit: "µV")
-                DoubleRow(title: "Amplitude jitter", value: $simulator.config.bcgAmplitudeJitterFraction)
-                DoubleRow(title: "Heart-rate variability", value: $simulator.config.heartRateVariability)
-                DoubleRow(title: "Respiration", value: $simulator.config.respirationHz, unit: "Hz")
-                LabeledContent("Spatial model") {
+                DoubleRow(title: "Amplitude", value: $simulator.config.bcgAmplitudeMicrovolts, unit: "µV",
+                          help: SimulatorHelp.bcgAmplitude)
+                DoubleRow(title: "Amplitude jitter", value: $simulator.config.bcgAmplitudeJitterFraction,
+                          help: SimulatorHelp.amplitudeJitter)
+                DoubleRow(title: "Heart-rate variability", value: $simulator.config.heartRateVariability,
+                          help: SimulatorHelp.heartRateVariability)
+                DoubleRow(title: "Respiration", value: $simulator.config.respirationHz, unit: "Hz",
+                          help: SimulatorHelp.respiration)
+                LabeledContent {
                     Picker("Spatial model", selection: bcgSpatialModel) {
                         Text("Channel index (default)").tag(BCGSpatialModel.channelIndex)
                         Text("Physical generators").tag(BCGSpatialModel.generators)
                     }.labelsHidden().frame(maxWidth: 220)
+                } label: {
+                    RowLabel(title: "Spatial model", help: SimulatorHelp.bcgSpatialModel)
                 }
             }
             .disabled(!simulator.config.bcgEnabled)
 
             SectionHeader(title: "Auxiliary channels")
             Toggle("ECG channel", isOn: $simulator.config.includeECG)
-            Toggle("Motion sensor channel", isOn: $simulator.config.includeMotionSensor)
+            Group {
+                DoubleRow(title: "R-peak amplitude", value: $simulator.config.ecgAmplitudeMicrovolts, unit: "µV",
+                          help: SimulatorHelp.ecgAmplitude)
+                DoubleRow(title: "Beat-to-beat variation", value: ecgMorphologyJitter,
+                          help: SimulatorHelp.ecgMorphologyJitter)
+                DoubleRow(title: "Sensor noise", value: ecgNoise, unit: "µV RMS",
+                          help: SimulatorHelp.ecgNoise)
+            }
+            .disabled(!simulator.config.includeECG)
+            Text("Both default to 0, which is what the published benchmarks were measured against.")
+                .font(.caption2).foregroundStyle(.secondary)
+
+            ToggleRow(title: "Motion sensor channel", isOn: $simulator.config.includeMotionSensor,
+                      help: SimulatorHelp.motionSensor)
+            DoubleRow(title: "Sigmoid gain", value: $simulator.config.motionSensorSigmoidGain,
+                      help: SimulatorHelp.motionSensorGain)
+                .disabled(!simulator.config.includeMotionSensor)
         }
+    }
+    private var ecgMorphologyJitter: Binding<Double> {
+        Binding(
+            get: { simulator.config.effectiveECGMorphologyJitter },
+            set: { simulator.config.ecgMorphologyJitterFraction = $0 > 0 ? $0 : nil }
+        )
+    }
+    private var ecgNoise: Binding<Double> {
+        Binding(
+            get: { simulator.config.effectiveECGNoiseMicrovoltsRMS },
+            set: { simulator.config.ecgNoiseMicrovoltsRMS = $0 > 0 ? $0 : nil }
+        )
     }
     private var bcgSpatialModel: Binding<BCGSpatialModel> {
         Binding(
@@ -468,12 +651,14 @@ private struct OcularTab: View {
             }
             .disabled(!simulator.saccadesEnabled)
 
-            LabeledContent("Spatial model") {
+            LabeledContent {
                 Picker("Spatial model", selection: $simulator.config.ocularSpatialModel) {
                     ForEach(OcularSpatialModel.allCases, id: \.self) {
                         Text($0.rawValue.capitalized).tag($0)
                     }
                 }.labelsHidden().frame(maxWidth: 180)
+            } label: {
+                RowLabel(title: "Spatial model", help: SimulatorHelp.ocularSpatialModel)
             }
         }
     }
@@ -499,17 +684,19 @@ private struct MuscleTab: View {
             Toggle("Sweat / drift", isOn: optionalToggle(\.sweat, make: SweatConfig()))
 
             SectionHeader(title: "Other")
-            LabeledContent("Line noise") {
+            LabeledContent {
                 Picker("Line noise", selection: $simulator.config.lineNoiseHz) {
                     Text("Off").tag(0.0)
                     Text("50 Hz").tag(50.0)
                     Text("60 Hz").tag(60.0)
                 }.labelsHidden().frame(maxWidth: 140)
+            } label: {
+                RowLabel(title: "Line noise", help: SimulatorHelp.lineNoise)
             }
             if simulator.config.lineNoiseHz > 0 {
                 DoubleRow(title: "Line amplitude", value: $simulator.config.lineNoiseAmplitudeMicrovolts, unit: "µV", width: 100)
             }
-            Toggle("Clipping", isOn: $simulator.clippingEnabled)
+            ToggleRow(title: "Clipping", isOn: $simulator.clippingEnabled, help: SimulatorHelp.clipping)
             if simulator.clippingEnabled {
                 DoubleRow(title: "Clip threshold", value: clipBinding, unit: "µV", width: 100)
             }
@@ -544,8 +731,10 @@ private struct ERPTab: View {
             if simulator.config.erp != nil {
                 Group {
                     IntRow(title: "Trials", value: erpInt(\.trialCount), range: 1...2000)
-                    DoubleRow(title: "Target fraction", value: erpDouble(\.targetFraction))
-                    DoubleRow(title: "Peak latency", value: erpDouble(\.peakLatencySeconds), unit: "s")
+                    DoubleRow(title: "Target fraction", value: erpDouble(\.targetFraction),
+                              help: SimulatorHelp.targetFraction)
+                    DoubleRow(title: "Peak latency", value: erpDouble(\.peakLatencySeconds), unit: "s",
+                              help: SimulatorHelp.erpLatency)
                     DoubleRow(title: "Target amplitude", value: erpDouble(\.targetAmplitudeMicrovolts), unit: "µV", width: 100)
                     DoubleRow(title: "ISI", value: erpDouble(\.interStimulusIntervalSeconds), unit: "s")
                 }
@@ -579,19 +768,122 @@ private struct ERPTab: View {
 
 private struct DefectsTab: View {
     @Environment(SimulatorController.self) private var simulator
+
+    /// The counts are `Int?` in the config, where nil means "not requested".
+    /// The form wants a plain Int, and 0 is the natural way to say "none" in a
+    /// stepper — so nil and 0 map onto each other here rather than giving the
+    /// UI a tri-state it has no way to show.
+    private var badChannelCount: Binding<Int> {
+        Binding(
+            get: { simulator.badChannelCount },
+            set: { simulator.config.badChannelCount = $0 > 0 ? $0 : nil }
+        )
+    }
+    private var highImpedanceCount: Binding<Int> {
+        Binding(
+            get: { simulator.highImpedanceCount },
+            set: { simulator.config.highImpedanceChannelCount = $0 > 0 ? $0 : nil }
+        )
+    }
+    private var badChannelDefect: Binding<ChannelDefect?> {
+        Binding(
+            get: { simulator.config.badChannelDefect },
+            set: { simulator.config.badChannelDefect = $0 }
+        )
+    }
+    private var highImpedanceKOhm: Binding<Double> {
+        Binding(
+            get: { simulator.config.effectiveHighImpedanceKOhm },
+            set: { simulator.config.highImpedanceKOhm = $0 }
+        )
+    }
+    private var badChannelPlacement: Binding<BadChannelPlacement> {
+        Binding(
+            get: { simulator.config.effectiveBadChannelPlacement },
+            set: { simulator.config.badChannelPlacement = $0 }
+        )
+    }
+    private func eogDefect(_ channel: EOGChannel) -> Binding<ChannelDefect?> {
+        Binding(
+            get: { simulator.config.effectiveEOGDefects[channel] },
+            set: {
+                var defects = simulator.config.effectiveEOGDefects
+                defects[channel] = $0
+                simulator.config.eogDefects = defects.isEmpty ? nil : defects
+            }
+        )
+    }
+
     var body: some View {
         @Bindable var simulator = simulator
         TabForm {
-            SectionHeader(title: "Impedance")
+            SectionHeader(title: "Impedance", help: SimulatorHelp.impedance)
             Toggle("Include impedance measurements", isOn: $simulator.config.includeImpedance)
             if simulator.config.includeImpedance {
                 DoubleRow(title: "Typical impedance", value: $simulator.config.impedanceTypicalKOhm, unit: "kΩ", width: 100)
             }
-            SectionHeader(title: "Bad channels")
-            Text("\(simulator.config.badChannels.count) channel\(simulator.config.badChannels.count == 1 ? "" : "s") flagged.")
-                .font(.callout)
-            Text("Per-channel defect authoring (flat, noisy, drifting, bridged) is planned; v1 generates a clean montage unless a scenario sets it.")
-                .font(.caption2).foregroundStyle(.secondary)
+            IntRow(title: "High-impedance channels", value: highImpedanceCount, range: 0...256,
+                   help: SimulatorHelp.highImpedanceCount)
+                .disabled(!simulator.config.includeImpedance)
+            if simulator.highImpedanceCount > 0 {
+                DoubleRow(title: "Reads", value: highImpedanceKOhm, unit: "kΩ", width: 100)
+                    .disabled(!simulator.config.includeImpedance)
+            }
+
+            SectionHeader(title: "Bad channels", help: SimulatorHelp.badChannels)
+            IntRow(title: "Count", value: badChannelCount, range: 0...256,
+                   help: SimulatorHelp.badChannelCount)
+            if simulator.badChannelCount > 0 {
+                LabeledContent {
+                    Picker("Defect", selection: badChannelDefect) {
+                        Text("One of each").tag(ChannelDefect?.none)
+                        ForEach(ChannelDefect.allCases, id: \.self) {
+                            Text($0.rawValue.capitalized).tag(ChannelDefect?.some($0))
+                        }
+                    }.labelsHidden().frame(maxWidth: 180)
+                } label: {
+                    RowLabel(title: "Defect", help: SimulatorHelp.badChannelDefect)
+                }
+                LabeledContent {
+                    Picker("Placement", selection: badChannelPlacement) {
+                        Text("Anywhere").tag(BadChannelPlacement.anywhere)
+                        Text("Eye electrodes only").tag(BadChannelPlacement.periocular)
+                        Text("Avoid eye electrodes").tag(BadChannelPlacement.avoidPeriocular)
+                    }.labelsHidden().frame(maxWidth: 220)
+                } label: {
+                    RowLabel(title: "Placement", help: SimulatorHelp.badChannelPlacement)
+                }
+            }
+            if !simulator.config.badChannels.isEmpty {
+                Text("Plus \(simulator.config.badChannels.count) channel\(simulator.config.badChannels.count == 1 ? "" : "s") named explicitly by the loaded scenario.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+
+            SectionHeader(title: "Eye (EOG) electrodes", help: SimulatorHelp.eogDefects)
+            LabeledContent {
+                Picker("VEOG", selection: eogDefect(.veog)) {
+                    Text("Healthy").tag(ChannelDefect?.none)
+                    ForEach(ChannelDefect.allCases, id: \.self) {
+                        Text($0.rawValue.capitalized).tag(ChannelDefect?.some($0))
+                    }
+                }.labelsHidden().frame(maxWidth: 160)
+            } label: {
+                RowLabel(title: "VEOG (vertical)")
+            }
+            LabeledContent {
+                Picker("HEOG", selection: eogDefect(.heog)) {
+                    Text("Healthy").tag(ChannelDefect?.none)
+                    ForEach(ChannelDefect.allCases, id: \.self) {
+                        Text($0.rawValue.capitalized).tag(ChannelDefect?.some($0))
+                    }
+                }.labelsHidden().frame(maxWidth: 160)
+            } label: {
+                RowLabel(title: "HEOG (horizontal)")
+            }
+            if simulator.config.blinksPerMinute <= 0 && simulator.config.saccadesPerMinute <= 0 {
+                Text("The EOG traces are only written when blinks or eye movements are enabled on the Ocular tab.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -621,7 +913,8 @@ private struct OutputTab: View {
                 .font(.caption2).foregroundStyle(.secondary)
 
             SectionHeader(title: "Options")
-            Toggle("Write source-space ground truth (dipole model only)", isOn: $simulator.options.writeSources)
+            ToggleRow(title: "Write source-space ground truth (dipole model only)",
+                      isOn: $simulator.options.writeSources, help: SimulatorHelp.writeSources)
             Toggle("Open the recording after generating", isOn: $simulator.openAfterGenerate)
         }
     }

@@ -53,6 +53,18 @@ nonisolated enum SimulationSeedStreams {
     static func badReference(base: UInt64) -> UInt64 { mixed(base, domain: 0xBAD0_0EED_BAD0_0EED) }
     static func lineNoise(base: UInt64) -> UInt64 { mixed(base, domain: 0x11AE_0015_EED0_0001) }
     static func defects(base: UInt64) -> UInt64 { mixed(base, domain: 0xDEFE_C750_DEFE_C750) }
+    /// Which channels the count-based defect and high-impedance requests land
+    /// on. Its own stream so asking for bad channels cannot shift any waveform:
+    /// a run with `--bad-channel-count 0` and one with `3` differ only in the
+    /// channels they spoil.
+    static func channelSelection(base: UInt64) -> UInt64 {
+        mixed(base, domain: 0xC4A1_5E1E_C700_0001)
+    }
+    /// Defects on the dedicated EOG traces. Separate from `defects` so spoiling
+    /// a VEOG cannot change what a bad EEG channel looks like.
+    static func eogDefects(base: UInt64) -> UInt64 {
+        mixed(base, domain: 0xE06_DEFEC_7000_0001)
+    }
     static func impedance(base: UInt64) -> UInt64 { mixed(base, domain: 0x1A9E_DA4C_E000_0001) }
     static func impedanceNoise(base: UInt64) -> UInt64 { mixed(base, domain: 0x1A9E_0015_E000_0002) }
     static func erpLatency(base: UInt64) -> UInt64 {
