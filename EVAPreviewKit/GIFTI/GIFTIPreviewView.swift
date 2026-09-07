@@ -130,13 +130,109 @@ private struct GIFTIScene: View {
     }
 
     var body: some View {
-        SceneView(
-            scene: bundle.scene,
-            pointOfView: bundle.camera,
-            options: [.allowsCameraControl],
-            preferredFramesPerSecond: 30,
-            antialiasingMode: .multisampling4X
-        )
+        GIFTITurntableView(bundle: bundle)
+    }
+}
+
+/// Turntable camera control: horizontal drag yaws the model around world-up,
+/// vertical drag pitches it around the local X axis, clamped so it can never
+/// flip past the poles. Scroll/pinch zoom by dollying the fixed camera along
+/// its view direction. Replaces SceneKit's stock `.allowsCameraControl`
+/// arcball, whose rotation axis and speed vary unpredictably near the edges
+/// of the view.
+private struct GIFTITurntableView: NSViewRepresentable {
+    let bundle: GIFTISceneBundle
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(bundle: bundle)
+    }
+
+    func makeNSView(context: Context) -> SCNView {
+        let view = ScrollZoomSCNView()
+        view.scene = bundle.scene
+        view.pointOfView = bundle.camera
+        view.backgroundColor = .clear
+        view.antialiasingMode = .multisampling4X
+        view.preferredFramesPerSecond = 30
+        view.allowsCameraControl = false
+        view.onScrollZoom = { [weak coordinator = context.coordinator] factor in
+            coordinator?.zoom(byFactor: factor)
+        }
+
+        let pan = NSPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        view.addGestureRecognizer(pan)
+        let magnify = NSMagnificationGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleMagnify(_:)))
+        view.addGestureRecognizer(magnify)
+        context.coordinator.view = view
+        return view
+    }
+
+    private final class ScrollZoomSCNView: SCNView {
+        var onScrollZoom: ((CGFloat) -> Void)?
+
+        override func scrollWheel(with event: NSEvent) {
+            let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 4
+            onScrollZoom?(1 + delta * 0.004)
+        }
+    }
+
+    func updateNSView(_ nsView: SCNView, context: Context) {
+        nsView.scene = bundle.scene
+        nsView.pointOfView = bundle.camera
+        context.coordinator.bundle = bundle
+    }
+
+    final class Coordinator: NSObject {
+        var bundle: GIFTISceneBundle
+        weak var view: SCNView?
+
+        private var yawAtGestureStart: CGFloat = 0
+        private var pitchAtGestureStart: CGFloat = 0
+        private let pitchLimit: CGFloat = .pi / 2 * 0.97
+        private let dragSensitivity: CGFloat = 0.012
+
+        init(bundle: GIFTISceneBundle) {
+            self.bundle = bundle
+        }
+
+        @objc func handlePan(_ recognizer: NSPanGestureRecognizer) {
+            guard let view = recognizer.view else { return }
+            switch recognizer.state {
+            case .began:
+                yawAtGestureStart = bundle.yawNode.eulerAngles.y
+                pitchAtGestureStart = bundle.pitchNode.eulerAngles.x
+            case .changed:
+                let translation = recognizer.translation(in: view)
+                bundle.yawNode.eulerAngles.y = yawAtGestureStart + translation.x * dragSensitivity
+                let pitch = pitchAtGestureStart - translation.y * dragSensitivity
+                bundle.pitchNode.eulerAngles.x = min(max(pitch, -pitchLimit), pitchLimit)
+            default:
+                break
+            }
+        }
+
+        @objc func handleMagnify(_ recognizer: NSMagnificationGestureRecognizer) {
+            zoom(byFactor: 1 - recognizer.magnification)
+            recognizer.magnification = 0
+        }
+
+        func zoom(byFactor factor: CGFloat) {
+            let camera = bundle.camera
+            let distance = length(camera.position)
+            let minDistance = Double(bundle.radius) * 1.15
+            let maxDistance = Double(bundle.radius) * 8
+            let newDistance = min(max(distance * Double(factor), minDistance), maxDistance)
+            let scale = distance > 0 ? newDistance / distance : 1
+            camera.position = SCNVector3(
+                camera.position.x * CGFloat(scale),
+                camera.position.y * CGFloat(scale),
+                camera.position.z * CGFloat(scale)
+            )
+        }
+
+        private func length(_ v: SCNVector3) -> Double {
+            sqrt(Double(v.x * v.x + v.y * v.y + v.z * v.z))
+        }
     }
 }
 
