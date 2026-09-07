@@ -27,6 +27,9 @@ build/
 *.swp
 *~
 
+#app
+.app_pw
+
 # Local reference and test material. None of it is part of EVA, and some of it
 # is third-party code EVA explicitly does not redistribute — see
 # THIRD_PARTY_NOTICES.md. Ignoring the whole tree rather than naming the
