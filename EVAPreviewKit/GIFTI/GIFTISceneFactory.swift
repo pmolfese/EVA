@@ -9,6 +9,11 @@ import SceneKit
 struct GIFTISceneBundle {
     let scene: SCNScene
     let camera: SCNNode
+    /// Rotates around world-up (Y) for turntable yaw.
+    let yawNode: SCNNode
+    /// Child of yawNode; rotates around local X for turntable pitch.
+    let pitchNode: SCNNode
+    let radius: CGFloat
 }
 
 enum GIFTISceneFactory {
@@ -30,7 +35,16 @@ enum GIFTISceneFactory {
             overlay: overlay ?? model.overlay,
             labels: model.labels
         ))
-        scene.rootNode.addChildNode(geometryNode)
+
+        // Turntable rig: yawNode spins freely around world-up, pitchNode (its
+        // child) tilts around local X. The camera and lights stay fixed —
+        // dragging rotates the model instead — so pitch can be clamped to
+        // keep the brain from ever flipping upside-down mid-drag.
+        let yawNode = SCNNode()
+        let pitchNode = SCNNode()
+        yawNode.addChildNode(pitchNode)
+        pitchNode.addChildNode(geometryNode)
+        scene.rootNode.addChildNode(yawNode)
 
         let radius = max(centered.radius, 1)
         if showsNormals, !vertexNormals.isEmpty,
@@ -41,7 +55,7 @@ enum GIFTISceneFactory {
            ) {
             let normalNode = SCNNode(geometry: normalGeometry)
             normalNode.renderingOrder = 2
-            scene.rootNode.addChildNode(normalNode)
+            pitchNode.addChildNode(normalNode)
         }
 
         let camera = SCNNode()
@@ -82,7 +96,7 @@ enum GIFTISceneFactory {
         fill.light?.color = NSColor(calibratedRed: 0.78, green: 0.86, blue: 0.83, alpha: 1)
         scene.rootNode.addChildNode(fill)
 
-        return GIFTISceneBundle(scene: scene, camera: camera)
+        return GIFTISceneBundle(scene: scene, camera: camera, yawNode: yawNode, pitchNode: pitchNode, radius: radius)
     }
 
     private static func geometry(
