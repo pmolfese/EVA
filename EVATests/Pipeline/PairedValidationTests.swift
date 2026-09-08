@@ -162,7 +162,7 @@ struct PairedValidationTests {
     /// mark in written order would exclude nothing and produce different
     /// samples from the session that wrote the script.
     @Test("A markBad written after wavelet still excludes the channel from it")
-    func markBadAppliesBeforeTheStepsThatConsultIt() async {
+    func markBadAppliesBeforeTheStepsThatConsultIt() async throws {
         let signal = stimSignal()
 
         // Interactive: the operator marked Ch 2 bad, then ran wavelet reduction.
@@ -188,10 +188,9 @@ struct PairedValidationTests {
         let result = await replayed.core().applyAutoSteps(script, to: signal)
 
         #expect(replayed.store.channels.bad == [1])
-        let headless = try? #require(result.signal)
-        if let interactive, let headless {
-            expectSameSamples(interactive, headless, "wavelet output with a bad channel")
-        }
+        let headless = try #require(result.signal)
+        let interactiveSignal = try #require(interactive)
+        expectSameSamples(interactiveSignal, headless, "wavelet output with a bad channel")
     }
 
     /// The comparison above only means something if excluding the channel

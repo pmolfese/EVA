@@ -127,7 +127,7 @@ private struct BCGMethodOverviewHelpButton: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("Detectors are original Swift implementations. Citations name the source of the technique applied; several methods adapt or combine a published approach rather than reproduce it exactly.")
+                    Text("Every method here is a native Swift implementation, reconstructed from the published manuscripts to the best of our ability rather than ported from any reference code. Citations name the source of the technique applied; several methods adapt or combine a published approach rather than reproduce it exactly. PCA-S in particular follows the Berg–Scherg source-informed spatial-filtering family (Rusiniak et al., 2022; Berg & Scherg, 1994).")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -462,7 +462,12 @@ extension WaveformView {
             }
             .padding(20)
         }
-        .frame(width: 720)
+        // Wide enough for the method picker's intrinsic width. A `.segmented`
+        // picker neither wraps nor compresses, so its nine labels set a hard
+        // floor on this sheet — at 720 the content overflowed and the sheet
+        // window clipped it symmetrically at both edges. Adding a tenth method
+        // means checking this number again.
+        .frame(width: 860)
         .disabled(bcg.isRunning || bcg.isRefining)
         .task(id: bcgDetectionPreviewRequestID(for: signal, selection: selection)) {
             await refreshBCGDetectionEstimate(for: signal, selection: selection)
@@ -1170,6 +1175,26 @@ extension WaveformView {
 
             Text("Separation")
                 .font(.caption.weight(.semibold))
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    BCGParameterLabel(
+                        title: "Head model",
+                        explanation: "The volume-conductor geometry the surrogate brain basis is built on. It is an assumption about the head, not a measurement of this subject, and it changes how a given brain source spreads across the scalp — which is what the filter uses to tell brain from artifact. Only the analytic sphere family is offered; each is exact for concentric geometry. The skull-conductivity ratio (1:80 classic vs 1:40 modern vs 1:20) is the parameter that moves results most."
+                    )
+                    Picker("Head model", selection: $bcg.surrogateSettings.headModel) {
+                        ForEach(BCGSurrogateHeadModel.allCases) { model in
+                            Text(model.displayName).tag(model)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 260, alignment: .leading)
+                }
+                Text(bcg.surrogateSettings.headModel.summary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 BCGParameterLabel(
                     title: "Pattern search",

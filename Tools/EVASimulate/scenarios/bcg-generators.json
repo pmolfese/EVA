@@ -91,7 +91,7 @@
     "leadFieldTerms": 100,
     "lineNoiseAmplitudeMicrovolts": 8,
     "lineNoiseHz": 0,
-    "motionSensorSigmoidGain": 0.1,
+    "motionSensorSigmoidGain": 1,
     "ocularSpatialModel": "heuristic",
     "postScanSeconds": 0,
     "preScanSeconds": 0,

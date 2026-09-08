@@ -94,13 +94,31 @@ build_tool() {
     stage "build $tool" bash -c "cd '$REPO/Tools/$tool' && ./build.sh"
 }
 
+# EVASimulate is now a target in EVA.xcodeproj (SIM-0) rather than a standalone
+# build.sh. Build it in Release and stage the product where the self-test,
+# determinism, and regression stages below still expect it
+# (Tools/EVASimulate/.build/eva-simulate).
+build_eva_simulate() {
+    local dest="$REPO/Tools/EVASimulate/.build/eva-simulate"
+    xcodebuild -project "$REPO/EVA.xcodeproj" -target EVASimulate \
+        -configuration Release -destination 'platform=macOS' build >/dev/null 2>&1 || return 1
+    local products
+    products="$(xcodebuild -project "$REPO/EVA.xcodeproj" -target EVASimulate \
+        -configuration Release -showBuildSettings 2>/dev/null \
+        | awk -F' = ' '/ BUILT_PRODUCTS_DIR /{print $2; exit}')"
+    [ -n "$products" ] && [ -x "$products/EVASimulate" ] || return 1
+    mkdir -p "$(dirname "$dest")"
+    cp -f "$products/EVASimulate" "$dest"
+}
+
 echo "${BOLD}EVA test run${RESET}  ${DIM}$(date '+%Y-%m-%d %H:%M:%S')${RESET}"
 [ "$LIST" -eq 1 ] && echo "Stages:"
 
 # ---------------------------------------------------------------- command-line tools
 # Test for existence, not the executable bit: a build.sh that lost +x should be
 # a visible failure, not a silently skipped stage.
-for tool in EVASimulate EVAHelper EVABIDS mffTimingTool; do
+stage "build EVASimulate" build_eva_simulate
+for tool in EVAHelper EVABIDS mffTimingTool; do
     if [ -f "Tools/$tool/build.sh" ]; then
         build_tool "$tool"
     else

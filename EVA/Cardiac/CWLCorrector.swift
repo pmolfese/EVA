@@ -903,45 +903,41 @@ nonisolated enum CWLCorrector {
             return []
         }
 
-        let workerCount = min(ranges.count, evaMaxWorkers)
-        let resultLock = NSLock()
-        var indexedWindows: [(offset: Int, window: RegressionWindow)] = []
-        indexedWindows.reserveCapacity(ranges.count)
+        let finalizedRanges = ranges
+        let workerCount = min(finalizedRanges.count, evaMaxWorkers)
+        var windows = [RegressionWindow?](repeating: nil, count: finalizedRanges.count)
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
-        let reportEvery = max(1, ranges.count / 100)
+        let reportEvery = max(1, finalizedRanges.count / 100)
 
-        evaConcurrentPerform(iterations: workerCount) { worker in
-            var localWindows: [(offset: Int, window: RegressionWindow)] = []
-            localWindows.reserveCapacity((ranges.count + workerCount - 1) / workerCount)
+        windows.withUnsafeMutableBufferPointer { buffer in
+            let output = GradientUnsafeSendable(base: buffer.baseAddress!)
+            evaConcurrentPerform(iterations: workerCount) { worker in
+                var offset = worker
+                while offset < finalizedRanges.count {
+                    guard !Task.isCancelled else { return }
+                    output.base[offset] = makeRegressionWindow(
+                        design: design,
+                        nCols: nCols,
+                        range: finalizedRanges[offset]
+                    )
 
-            var offset = worker
-            while offset < ranges.count {
-                guard !Task.isCancelled else { return }
-                let window = makeRegressionWindow(design: design, nCols: nCols, range: ranges[offset])
-                localWindows.append((offset, window))
-
-                if let progress {
-                    progressLock.lock()
-                    completed += 1
-                    let done = completed
-                    progressLock.unlock()
-                    if done % reportEvery == 0 || done == ranges.count {
-                        progress(Double(done) / Double(ranges.count))
+                    if let progress {
+                        progressLock.lock()
+                        completed += 1
+                        let done = completed
+                        progressLock.unlock()
+                        if done % reportEvery == 0 || done == finalizedRanges.count {
+                            progress(Double(done) / Double(finalizedRanges.count))
+                        }
                     }
+                    offset += workerCount
                 }
-                offset += workerCount
             }
-
-            resultLock.lock()
-            indexedWindows.append(contentsOf: localWindows)
-            resultLock.unlock()
         }
 
         try Task.checkCancellation()
-        return indexedWindows
-            .sorted { $0.offset < $1.offset }
-            .map { $0.window }
+        return windows.compactMap { $0 }
     }
 
     private static func makeRegressionWindow(

@@ -207,9 +207,10 @@ extension WaveformView {
                 )
                 entries.append((key, data))
             }
+            let completedEntries = entries
             await MainActor.run {
                 guard sessionID == self.recordingSessionID else { return }
-                for (key, data) in entries {
+                for (key, data) in completedEntries {
                     self.template.cleaningPreviewCache[key] = data
                 }
             }

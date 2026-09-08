@@ -104,6 +104,12 @@ func usage() -> String {
       eva-simulate score-erp --truth <components.json> --estimated <components.json>
       eva-simulate score-pac --truth <truth.json> --estimated <pac.json>
       eva-simulate sweep --parameter <name> --values <a,b,c> --output <dir> [model options]
+      eva-simulate evaluate-surrogate [--correction-head <name>] [--max-beats <n>]
+                   [--bcg-morphology-jitter <f>] [--correction-scalp-radius <m>]
+                   [--correction-skull-ratio <r>] [--correction-head-center <x,y,z>]
+                   [--correction-electrode-jitter <deg>] [model options]
+      eva-simulate evaluate-surrogate-grid --axis <name> --values <a,b,c>
+                   [--output <csv>] [seeds/base options]
       eva-simulate selftest
 
     generate — writes <dir>/<prefix>_clean.mff, <dir>/<prefix>_noisy.mff,
@@ -265,6 +271,28 @@ func usage() -> String {
         --bad-channels <spec>       Comma-separated <channel>:<kind>, 1-based,
                                     e.g. "7:noisy,15:drift". Kinds: flat, noisy,
                                     drift, pop, line. Kind defaults to noisy.
+        --bad-channel-count <n>     Spoil this many channels without naming them,
+                                    chosen deterministically from the seed.
+                                    Additive to --bad-channels.
+        --bad-channel-kind <kind>   Defect for those channels. Omitted, they get
+                                    one of each kind in turn.
+        --high-impedance-count <n>  Give this many channels a high impedance
+                                    reading while leaving their data alone.
+                                    Never overlaps the bad channels.
+        --high-impedance <kohm>     What those channels read (default 85, which
+                                    is inside EVA's "poor" band).
+        --bad-channel-placement <p> Where counted bad channels land: anywhere
+                                    (default), periocular (the electrodes an eye
+                                    detector reads — breaks threshold-based blink
+                                    and eye-movement detection), or
+                                    avoid-periocular (leaves ocular detection
+                                    intact).
+        --bad-eog <spec>            Spoil the dedicated EOG traces. Comma-
+                                    separated <veog|heog>[:<kind>], e.g.
+                                    "veog:flat,heog:noisy". Kind defaults to
+                                    noisy. Breaks regression-based ocular
+                                    correction, which cannot tell a dead
+                                    reference from an eye that never moved.
         --line-noise <hz>           Mains frequency; 0 is off. Try 60.
         --line-noise-amplitude <uv> Default 8.
         --impedance <kohm>          Typical impedance of a healthy electrode
@@ -294,8 +322,16 @@ func usage() -> String {
                                     Nyquist; 0 disables (default 0.9).
         --no-ecg                    Omit the synthetic ECG channel.
         --with-ecg                  Enable ECG if a scenario disables it.
+        --ecg-amplitude <uv>        R-peak amplitude (default 1000).
+        --ecg-morphology-jitter <f> Beat-to-beat variation in P/QRS/T amplitude
+                                    and PR/QT timing, as a fraction (default 0;
+                                    0.05-0.10 reads as a recorded trace).
+        --ecg-noise <uv>            Broadband sensor noise on the ECG channel,
+                                    in µV RMS (default 0; 5-20 is realistic).
         --no-motion-sensor          Omit the synthetic motion-sensor channel.
         --with-motion-sensor        Enable it if a scenario disables it.
+        --motion-sensor-gain <g>    Sigmoid gain, applied to the mean BCG
+                                    normalized by its own RMS (default 1.0).
         --spatial-model <name>      circular (the paper's, default) or geometric
                                     (smooth by real electrode distance — prefer
                                     this for demos and topography). Grouiller
@@ -325,6 +361,10 @@ func usage() -> String {
         --config <scenario.json>    Base scenario; AEP evaluation needs placed ERP.
         --seeds <n>                 Repeated realizations per condition (default 5).
         --offsets <mm,...>          Surrogate-basis mismatch sweep.
+        --correction-head <name>    Build the correction basis on a DIFFERENT head
+                                    than the truth (SI-4 head-model mismatch):
+                                    classic-3shell, standard-3shell, rush-3shell,
+                                    high-3shell, or 4shell. Omit for a matched head.
         --pattern-search <mode>     paper (default) or iterative.
         --representative-beat <n>   Optional 1-based paper-mode candidate beat.
         --with-erp                  Report accepted trials, ERP SNR, peak errors,
@@ -422,7 +462,8 @@ let generateOptions: Set<String> = [
     "erp-latency-amplitude-correlation", "erp-omission-rate", "erp-waveform",
     "erp-width", "erp-template", "erp-template-rate",
     "artifact-oversample", "artifact-anti-alias", "with-ecg", "no-ecg",
-    "with-motion-sensor", "no-motion-sensor", "with-impedance",
+    "ecg-amplitude", "ecg-morphology-jitter", "ecg-noise",
+    "with-motion-sensor", "no-motion-sensor", "motion-sensor-gain", "with-impedance",
     "with-impedance-noise", "no-impedance-noise", "electrode-temperature",
     "impedance-line-exponent",
     "prefix", "pre-scan", "post-scan",
@@ -433,7 +474,10 @@ let generateOptions: Set<String> = [
     "cable-movement", "cable-amplitude", "cable-duration", "no-cable-movement",
     "sweat", "sweat-amplitude", "sweat-duration", "sweat-channels", "no-sweat",
     "bridge", "no-bridges", "bad-reference", "no-bad-reference", "clip", "no-clipping",
-    "bad-channels", "line-noise", "line-noise-amplitude", "demo",
+    "bad-channels", "bad-channel-count", "bad-channel-kind",
+    "bad-channel-placement", "bad-eog",
+    "high-impedance-count", "high-impedance",
+    "line-noise", "line-noise-amplitude", "demo",
     "impedance", "no-impedance"
 ]
 
@@ -502,6 +546,34 @@ func importedMontage(
     } catch {
         throw SimulateError.usage("invalid imported montage at \(url.path): \(error.localizedDescription)")
     }
+}
+
+func parseEOGDefects(_ spec: String) throws -> [EOGChannel: ChannelDefect] {
+    var result: [EOGChannel: ChannelDefect] = [:]
+    for entry in spec.split(separator: ",") {
+        let parts = entry.split(separator: ":", maxSplits: 1)
+        let name = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
+        guard let channel = EOGChannel(rawValue: name) else {
+            throw SimulateError.usage(
+                "--bad-eog entry \"\(entry)\" should name veog or heog"
+            )
+        }
+        // Same default as --bad-channels: naming a channel with no kind asks for
+        // the most generally useful defect rather than for an error.
+        guard parts.count > 1 else {
+            result[channel] = .noisy
+            continue
+        }
+        let kind = parts[1].trimmingCharacters(in: .whitespaces).lowercased()
+        guard let defect = ChannelDefect(rawValue: kind) else {
+            throw SimulateError.usage(
+                "unknown defect \"\(kind)\"; expected one of "
+                + ChannelDefect.allCases.map(\.rawValue).joined(separator: ", ")
+            )
+        }
+        result[channel] = defect
+    }
+    return result
 }
 
 func parseBadChannels(_ spec: String) throws -> [Int: ChannelDefect] {
@@ -903,6 +975,41 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     }
 
     if let spec = arguments.string("bad-channels") { config.badChannels = try parseBadChannels(spec) }
+    if let value = try arguments.int("bad-channel-count") {
+        guard value >= 0 else { throw SimulateError.usage("--bad-channel-count must be at least 0") }
+        config.badChannelCount = value
+    }
+    if let kind = arguments.string("bad-channel-kind") {
+        guard let defect = ChannelDefect(rawValue: kind.lowercased()) else {
+            throw SimulateError.usage(
+                "unknown defect \"\(kind)\"; expected one of "
+                + ChannelDefect.allCases.map(\.rawValue).joined(separator: ", ")
+            )
+        }
+        config.badChannelDefect = defect
+    }
+    if let value = try arguments.int("high-impedance-count") {
+        guard value >= 0 else {
+            throw SimulateError.usage("--high-impedance-count must be at least 0")
+        }
+        config.highImpedanceChannelCount = value
+    }
+    if let value = try arguments.double("high-impedance") {
+        guard value > 0 else { throw SimulateError.usage("--high-impedance must be positive") }
+        config.highImpedanceKOhm = value
+    }
+    if let name = arguments.string("bad-channel-placement") {
+        let normalized = name.lowercased().replacingOccurrences(of: "-", with: "")
+        guard let placement = BadChannelPlacement.allCases.first(where: {
+            $0.rawValue.lowercased() == normalized
+        }) else {
+            throw SimulateError.usage(
+                "unknown placement \"\(name)\"; expected anywhere, periocular or avoid-periocular"
+            )
+        }
+        config.badChannelPlacement = placement
+    }
+    if let spec = arguments.string("bad-eog") { config.eogDefects = try parseEOGDefects(spec) }
     if let value = try arguments.double("line-noise") { config.lineNoiseHz = value }
     if let value = try arguments.double("line-noise-amplitude") { config.lineNoiseAmplitudeMicrovolts = value }
     if arguments.flag("with-impedance") { config.includeImpedance = true }
@@ -931,8 +1038,23 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("artifact-anti-alias") { config.artifactAntiAliasFraction = value }
     if arguments.flag("with-ecg") { config.includeECG = true }
     if arguments.flag("no-ecg") { config.includeECG = false }
+    if let value = try arguments.double("ecg-amplitude") { config.ecgAmplitudeMicrovolts = value }
+    if let value = try arguments.double("ecg-morphology-jitter") {
+        guard value >= 0 else {
+            throw SimulateError.usage("--ecg-morphology-jitter must be at least 0")
+        }
+        config.ecgMorphologyJitterFraction = value
+    }
+    if let value = try arguments.double("ecg-noise") {
+        guard value >= 0 else { throw SimulateError.usage("--ecg-noise must be at least 0") }
+        config.ecgNoiseMicrovoltsRMS = value
+    }
     if arguments.flag("with-motion-sensor") { config.includeMotionSensor = true }
     if arguments.flag("no-motion-sensor") { config.includeMotionSensor = false }
+    if let value = try arguments.double("motion-sensor-gain") {
+        guard value > 0 else { throw SimulateError.usage("--motion-sensor-gain must be positive") }
+        config.motionSensorSigmoidGain = value
+    }
 
     guard config.channelCount > 0 else { throw SimulateError.usage("--channels must be positive") }
     if let path = config.coordinatesPath {
@@ -1187,6 +1309,19 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
             "--bad-channels names channel \(number), but the montage has \(config.channelCount)"
         )
     }
+    for number in config.effectiveHighImpedanceChannels where number > config.channelCount {
+        throw SimulateError.usage(
+            "high-impedance channel \(number) is outside a \(config.channelCount)-channel montage"
+        )
+    }
+    let requestedDefective = (config.badChannelCount ?? 0) + (config.highImpedanceChannelCount ?? 0)
+        + config.badChannels.count + config.effectiveHighImpedanceChannels.count
+    guard requestedDefective <= config.channelCount else {
+        throw SimulateError.usage(
+            "asked for \(requestedDefective) bad and high-impedance channels, but the montage "
+            + "has only \(config.channelCount)"
+        )
+    }
 
     // Canonicalize legacy scenarios that only carry `dipoleReference`. New
     // resolved scenarios then state the recording-wide convention explicitly.
@@ -1201,6 +1336,7 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
 
 @discardableResult
 func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory: URL) throws -> CorrectionScore {
+    var config = config
     try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
     let prefix = try normalizedPrefix(arguments.string("prefix") ?? "sim")
 
@@ -1218,6 +1354,41 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
             degrees: jitter, seed: SimulationSeedStreams.montageJitter(base: config.seed)
         )
     }
+
+    // Expand the bad-channel and high-impedance counts into explicit channel
+    // numbers, exactly once, before anything reads `badChannels`. It happens
+    // here rather than in the argument parser because `.periocular` placement
+    // needs the montage to know which electrodes are over the eyes — and the
+    // montage is only final once an imported coordinates file and any jitter
+    // have been applied.
+    let requestedBad = max(0, config.badChannelCount ?? 0)
+    let badBefore = config.badChannels.count
+    let impedanceBefore = config.effectiveHighImpedanceChannels.count
+    config.resolveChannelSelectionCounts(montage: montage)
+
+    // Say so when a placement could not supply what was asked for. A 10-20 cap
+    // has exactly two electrodes over the eyes, so `--bad-channel-count 5
+    // --bad-channel-placement periocular` can only ever spoil two — and silently
+    // delivering fewer bad channels than requested would make a sweep's x-axis
+    // a lie.
+    let deliveredBad = config.badChannels.count - badBefore
+    if deliveredBad < requestedBad {
+        FileHandle.standardError.write(Data(
+            ("note: asked for \(requestedBad) bad channels at placement "
+             + "\(config.effectiveBadChannelPlacement.rawValue), but only \(deliveredBad) "
+             + "electrode\(deliveredBad == 1 ? "" : "s") qualify in this montage\n").utf8
+        ))
+    }
+    let requestedImpedance = max(0, config.highImpedanceChannelCount ?? 0)
+    let deliveredImpedance = config.effectiveHighImpedanceChannels.count - impedanceBefore
+    if deliveredImpedance < requestedImpedance {
+        FileHandle.standardError.write(Data(
+            ("note: asked for \(requestedImpedance) high-impedance channels, but only "
+             + "\(deliveredImpedance) channel\(deliveredImpedance == 1 ? "" : "s") were left "
+             + "after the bad-channel draw\n").utf8
+        ))
+    }
+
     var leadFieldConvergence: LeadFieldConvergenceReport?
     // One check covers every lead field this run builds — the ERP's (its source
     // comes from `makeSources`, same radius fraction) and the moving-source
@@ -1423,6 +1594,20 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         additional: additional, config: config
     )
 
+    // Spoil the dedicated EOG traces, if asked. Done here, after every artifact
+    // has been injected and just before the PNS package is assembled, for the
+    // same reason bad EEG channels go last: a defect happens to the *recording*
+    // of a channel, on top of whatever that channel was carrying.
+    var eogDefectsApplied: [String: String] = [:]
+    var veog = ocular?.veog
+    var heog = ocular?.heog
+    if !config.effectiveEOGDefects.isEmpty, veog != nil, heog != nil {
+        var random = GaussianSource(seed: SimulationSeedStreams.eogDefects(base: config.seed))
+        eogDefectsApplied = ChannelDefectModel.applyToEOG(
+            veog: &veog!, heog: &heog!, config: config, source: &random
+        )
+    }
+
     var ecg: [Double]?
     var motion: [Double]?
     if let bcg {
@@ -1487,7 +1672,7 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         ),
         pnsSignal: SimulationWriter.pnsSignal(
             ecg: ecg, motion: motion,
-            veog: ocular?.veog, heog: ocular?.heog,
+            veog: veog, heog: heog,
             config: config, packageURL: noisyURL
         ),
         segments: [],
@@ -1528,6 +1713,8 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         recordingReference: config.effectiveRecordingReference,
         referenceApplicationStage: "after additive signal layers, before recording defects",
         badChannels: badChannels,
+        eogDefects: eogDefectsApplied,
+        highImpedanceChannels: config.effectiveHighImpedanceChannels,
         blinkSeconds: ocular?.blinkSeconds ?? [],
         saccadeSeconds: ocular?.saccadeSeconds ?? [],
         blinkTopography: ocular?.blinkTopography ?? [],
@@ -1668,6 +1855,21 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
             return "\(name) (\(defect))"
         }
         print("Bad channels: " + described.joined(separator: ", "))
+    }
+    if !config.effectiveHighImpedanceChannels.isEmpty {
+        let described = config.effectiveHighImpedanceChannels.map { number -> String in
+            let index = number - 1
+            return index < montage.channelNames.count ? montage.channelNames[index] : "#\(number)"
+        }
+        print(String(
+            format: "High impedance (data intact): %@ at ~%.0f kΩ",
+            described.joined(separator: ", "), config.effectiveHighImpedanceKOhm
+        ))
+    }
+    if !eogDefectsApplied.isEmpty {
+        let described = eogDefectsApplied.sorted { $0.key < $1.key }
+            .map { "\($0.key) (\($0.value))" }
+        print("Bad EOG channels: " + described.joined(separator: ", "))
     }
     print(String(format: "Uncorrected broadband SNR: %.4f", baseline.broadbandSNR))
     return baseline
@@ -1935,12 +2137,72 @@ func runGenerateGroup(_ arguments: Arguments) throws {
 ///
 /// Everything runs in memory: no MFF is written, so a sweep of dozens of runs
 /// costs seconds rather than minutes.
+/// Resolves a `--correction-head` name to a standard head model. SI-4 uses this
+/// to build the PCA-S brain basis on a *different* head than the one that
+/// generated the truth — the "generate with one, invert with another" mismatch
+/// that measures how much a wrong head model costs the correction.
+func resolveCorrectionHead(_ name: String) throws -> SphericalHeadModel {
+    switch name.lowercased() {
+    case "classic", "classic-3shell", "classicthreeshell": return .classicThreeShell
+    case "standard", "standard-3shell":                     return .standardThreeShell
+    case "rush", "rush-driscoll", "rush-3shell":            return .rushDriscollThreeShell
+    case "high", "high-skull", "high-3shell":               return .highSkullConductivityThreeShell
+    case "4shell", "four-shell", "csf", "classicfourshell": return .classicFourShell
+    default:
+        throw SimulateError.usage(
+            "unknown --correction-head \"\(name)\"; expected classic-3shell, standard-3shell, "
+            + "rush-3shell, high-3shell, or 4shell")
+    }
+}
+
+/// Builds a correction head identical to the truth head except for the one
+/// parameter being swept (SI-4 independent per-parameter head-model mismatch):
+/// a uniform radius scale, the skull-conductivity ratio, or a shifted centre.
+func perturbedCorrectionHead(
+    from truth: SphericalHeadModel, scalpRadius: Double?, skullRatio: Double?, center: Vector3D?
+) -> SphericalHeadModel {
+    var shells = truth.shells
+    if let scalpRadius, truth.scalpRadiusMeters > 0 {
+        let scale = scalpRadius / truth.scalpRadiusMeters
+        shells = shells.map {
+            HeadShell(name: $0.name, radiusMeters: $0.radiusMeters * scale,
+                      conductivitySiemensPerMeter: $0.conductivitySiemensPerMeter)
+        }
+    }
+    if let skullRatio, skullRatio > 0, shells.count >= 2 {
+        let brainConductivity = shells.first?.conductivitySiemensPerMeter ?? 0.33
+        let skullIndex = shells.count - 2 // shell just inside the scalp
+        shells[skullIndex] = HeadShell(
+            name: shells[skullIndex].name, radiusMeters: shells[skullIndex].radiusMeters,
+            conductivitySiemensPerMeter: brainConductivity / skullRatio)
+    }
+    return SphericalHeadModel(name: "correction (perturbed)",
+                             centerMeters: center ?? truth.centerMeters, shells: shells)
+}
+
 func runEvaluateSurrogate(_ arguments: Arguments) throws {
     try arguments.validate(known: [
         "seeds", "offsets", "sources", "components", "brain-regularization",
         "duration", "channels", "coordinates", "rate", "config", "with-erp", "pattern-search",
-        "representative-beat", "json"
+        "representative-beat", "json", "correction-head",
+        "max-beats", "bcg-morphology-jitter",
+        "correction-scalp-radius", "correction-skull-ratio",
+        "correction-head-center", "correction-electrode-jitter",
     ])
+    let namedCorrectionHead = try arguments.string("correction-head").map(resolveCorrectionHead)
+    let correctionScalpRadius = try arguments.double("correction-scalp-radius")
+    let correctionSkullRatio = try arguments.double("correction-skull-ratio")
+    let correctionHeadCenter = try arguments.string("correction-head-center").map { text -> Vector3D in
+        let parts = text.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count == 3 else {
+            throw SimulateError.usage("--correction-head-center needs x,y,z in metres")
+        }
+        return Vector3D(x: parts[0], y: parts[1], z: parts[2])
+    }
+    let correctionElectrodeJitter = try arguments.double("correction-electrode-jitter")
+    let maxBeats = try arguments.int("max-beats")
+    if let maxBeats, maxBeats <= 0 { throw SimulateError.usage("--max-beats must be positive") }
+    let morphologyJitter = try arguments.double("bcg-morphology-jitter")
 
     let seedCount = try arguments.int("seeds") ?? 5
     guard seedCount > 0 else { throw SimulateError.usage("--seeds must be positive") }
@@ -1998,6 +2260,21 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         try importedMontage(path: $0, channelCount: base.channelCount).montage
     } ?? Montage.standard(count: base.channelCount)
 
+    if let morphologyJitter { base.bcgMorphologyJitterFraction = morphologyJitter }
+
+    // Resolve the correction head: a named preset, or an independent per-parameter
+    // perturbation of the truth head (SI-4), or matched (nil).
+    var correctionHead = namedCorrectionHead
+    if correctionHead == nil,
+       correctionScalpRadius != nil || correctionSkullRatio != nil || correctionHeadCenter != nil {
+        correctionHead = perturbedCorrectionHead(
+            from: base.sphericalHeadModel, scalpRadius: correctionScalpRadius,
+            skullRatio: correctionSkullRatio, center: correctionHeadCenter)
+    }
+    // An electrode-position mismatch builds the brain basis on a jittered montage
+    // while the truth data stays on the real one.
+    let correctionMontage = correctionElectrodeJitter.map { montage.jittered(degrees: $0, seed: 4242) }
+
     struct ConditionResult {
         var offsetMillimetres: Double
         var successfulSeeds: [UInt64]
@@ -2019,6 +2296,11 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         var uncorrectedAmplitudeErrorFraction: [Double] = []
         var correctedExplainedVariance: [Double] = []
         var uncorrectedExplainedVariance: [Double] = []
+        // SI-4 sensor-space distortion (corrected vs clean), per seed.
+        var cleanDistortionDb: [Double] = []
+        var removedVarianceFraction: [Double] = []
+        var perBandResidualRMS: [String: [Double]] = [:]
+        var perBandCorrelation: [String: [Double]] = [:]
     }
 
     var results: [ConditionResult] = []
@@ -2041,6 +2323,10 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         var uncorrectedAmplitudeBuffer: [Double] = []
         var correctedVarianceBuffer: [Double] = []
         var uncorrectedVarianceBuffer: [Double] = []
+        var cleanDistortionBuffer: [Double] = []
+        var removedVarianceBuffer: [Double] = []
+        var perBandResidualBuffer: [String: [Double]] = [:]
+        var perBandCorrelationBuffer: [String: [Double]] = [:]
 
         for seedIndex in 0..<seedCount {
             var config = base
@@ -2062,15 +2348,23 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
             EEGReferencing.apply(.average, to: &cleanReferenced)
             EEGReferencing.apply(.average, to: &noisy)
 
+            // SI-4 accepted-beat axis: cap how many detected beats the correction
+            // may use, independent of recording length.
+            let beatSeconds = maxBeats.map { Array(bcg.detectedBeatSeconds.prefix($0)) }
+                ?? bcg.detectedBeatSeconds
             guard let components = SurrogateSeparation.artifactComponents(
                 channels: noisy,
                 samplingRate: config.samplingRate,
-                beatSeconds: bcg.detectedBeatSeconds,
+                beatSeconds: beatSeconds,
                 patternSearchMode: patternSearchMode,
                 representativeBeatIndex: requestedRepresentative
             ) else { continue }
+            // Truth is generated with config.sphericalHeadModel; the correction
+            // basis uses correctionHead / correctionMontage when a mismatch is
+            // requested (SI-4).
             let brain = try SurrogateSeparation.brainModel(
-                head: config.sphericalHeadModel, montage: montage, count: regionalCount,
+                head: correctionHead ?? config.sphericalHeadModel,
+                montage: correctionMontage ?? montage, count: regionalCount,
                 reference: .average, terms: config.leadFieldTerms, offsetMillimetres: offset
             )
             let sourceInformedOperator = try SurrogateSeparation.sourceInformedOperator(
@@ -2111,6 +2405,30 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                         .min() ?? 0
                 }.min() ?? 0
             )
+
+            // SI-4 sensor-space distortion: how much the correction distorts the
+            // brain signal (corrected vs clean) and how much variance it removed
+            // (corrected vs noisy).
+            let distortion = SNRMetrics.score(
+                label: "corrected", clean: cleanReferenced, corrected: output,
+                samplingRate: config.samplingRate, channelNames: montage.channelNames
+            )
+            cleanDistortionBuffer.append(distortion.spectralDistortionDbRMS)
+            for band in distortion.bands {
+                perBandResidualBuffer[band.name, default: []].append(band.residualRMS)
+                perBandCorrelationBuffer[band.name, default: []].append(band.correlation)
+            }
+            var noisyPower = 0.0
+            var removedPower = 0.0
+            for channel in noisy.indices {
+                for sample in noisy[channel].indices where sample < output[channel].count {
+                    let value = noisy[channel][sample]
+                    noisyPower += value * value
+                    let removed = value - output[channel][sample]
+                    removedPower += removed * removed
+                }
+            }
+            removedVarianceBuffer.append(noisyPower > 1e-30 ? removedPower / noisyPower : 0)
 
             if let erpInjection, !erpInjection.componentSources.isEmpty {
                 let onsets = erpInjection.trials.map(\.onsetSeconds)
@@ -2180,7 +2498,11 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
             correctedAmplitudeErrorFraction: correctedAmplitudeBuffer,
             uncorrectedAmplitudeErrorFraction: uncorrectedAmplitudeBuffer,
             correctedExplainedVariance: correctedVarianceBuffer,
-            uncorrectedExplainedVariance: uncorrectedVarianceBuffer
+            uncorrectedExplainedVariance: uncorrectedVarianceBuffer,
+            cleanDistortionDb: cleanDistortionBuffer,
+            removedVarianceFraction: removedVarianceBuffer,
+            perBandResidualRMS: perBandResidualBuffer,
+            perBandCorrelation: perBandCorrelationBuffer
         ))
     }
 
@@ -2254,6 +2576,18 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                     ]
                 ] as [String: Any]
             }
+            var perBand: [String: Any] = [:]
+            for name in result.perBandResidualRMS.keys.sorted() {
+                perBand[name] = [
+                    "residualRMS": statistics(result.perBandResidualRMS[name] ?? []),
+                    "correlation": statistics(result.perBandCorrelation[name] ?? [])
+                ] as [String: Any]
+            }
+            condition["sensorDistortion"] = [
+                "cleanDistortionDbRMS": statistics(result.cleanDistortionDb),
+                "removedVarianceFraction": statistics(result.removedVarianceFraction),
+                "perBand": perBand
+            ] as [String: Any]
             conditions.append(condition)
         }
         let payload: [String: Any] = [
@@ -2270,7 +2604,10 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                 "brainRegularization": regularization,
                 "requestedRepresentativeBeat": requestedRepresentative.map { ($0 + 1) as Any }
                     ?? NSNull(),
-                "erpEvaluationEnabled": evaluateERP
+                "erpEvaluationEnabled": evaluateERP,
+                "truthHeadModel": base.sphericalHeadModel.name,
+                "correctionHeadModel": (correctionHead?.name as Any?) ?? base.sphericalHeadModel.name,
+                "headModelMismatch": correctionHead != nil
             ] as [String: Any],
             "conditions": conditions
         ]
@@ -2286,6 +2623,12 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         + "\(Int(base.durationSeconds)) s, \(regionalCount) regional sources, "
         + "\(componentCount) artifact components")
     print("  pattern search: \(patternSearchMode.rawValue)")
+    if let correctionHead {
+        print("  head-model mismatch: truth \(base.sphericalHeadModel.name) "
+            + "→ correction \(correctionHead.name)")
+    } else {
+        print("  head model: \(base.sphericalHeadModel.name) (matched)")
+    }
     print("")
     print("  offset    corrected SNR      uncorrected   nearest src   beats kept")
     print("  ---------------------------------------------------------------------")
@@ -2297,6 +2640,17 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
             mean(result.uncorrectedSNR),
             mean(result.nearestSourceMillimetres),
             100 * mean(result.acceptedBeatFraction)
+        ))
+    }
+    print("")
+    print("  offset   clean distortion (dB)   removed variance")
+    print("  ---------------------------------------------------------------------")
+    for result in results {
+        print(String(
+            format: "  %5.0f mm   %6.2f ± %-5.2f          %5.2f ± %-5.2f",
+            result.offsetMillimetres,
+            mean(result.cleanDistortionDb), standardDeviation(result.cleanDistortionDb),
+            mean(result.removedVarianceFraction), standardDeviation(result.removedVarianceFraction)
         ))
     }
     if evaluateERP, results.contains(where: { !$0.correctedExplainedVariance.isEmpty }) {
@@ -2345,6 +2699,203 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
     print("")
     print("  The spread matters as much as the means: a difference smaller than the")
     print("  standard deviation is not a result. Increase --seeds before concluding.")
+}
+
+// MARK: - evaluate-surrogate-grid
+
+/// Core-metric aggregation for one condition (no ERP/JSON) — the reusable body the
+/// grid sweeps. Kept separate from `runEvaluateSurrogate` so the grid never risks
+/// its richer per-seed reporting.
+struct SurrogateGridMetrics {
+    var correctedSNR: [Double] = []
+    var uncorrectedSNR: [Double] = []
+    var cleanDistortionDb: [Double] = []
+    var removedVariance: [Double] = []
+    var acceptedBeatFraction: [Double] = []
+    var nearestSourceMm: [Double] = []
+}
+
+func evaluateSurrogateCore(
+    base: SimulationConfig, montage: Montage, correctionHead: SphericalHeadModel?,
+    correctionMontage: Montage?, offset: Double, regionalCount: Int, componentCount: Int,
+    regularization: Double, patternSearchMode: ArtifactPatternSearchMode,
+    representative: Int?, maxBeats: Int?, seedCount: Int
+) throws -> SurrogateGridMetrics {
+    var metrics = SurrogateGridMetrics()
+    for seedIndex in 0..<seedCount {
+        var config = base
+        config.seed = UInt64(seedIndex + 1)
+
+        let clean = try DipoleEEGGenerator.generate(config: config, montage: montage).channels
+        var noisy = clean
+        var stream = GaussianSource(seed: SimulationSeedStreams.bcg(base: config.seed))
+        let bcg = BCGArtifactModel.inject(into: &noisy, config: config, montage: montage, source: &stream)
+        var cleanReferenced = clean
+        EEGReferencing.apply(.average, to: &cleanReferenced)
+        EEGReferencing.apply(.average, to: &noisy)
+
+        let beatSeconds = maxBeats.map { Array(bcg.detectedBeatSeconds.prefix($0)) }
+            ?? bcg.detectedBeatSeconds
+        guard let components = SurrogateSeparation.artifactComponents(
+            channels: noisy, samplingRate: config.samplingRate, beatSeconds: beatSeconds,
+            patternSearchMode: patternSearchMode, representativeBeatIndex: representative
+        ) else { continue }
+        let brain = try SurrogateSeparation.brainModel(
+            head: correctionHead ?? config.sphericalHeadModel,
+            montage: correctionMontage ?? montage, count: regionalCount,
+            reference: .average, terms: config.leadFieldTerms, offsetMillimetres: offset)
+        let op = try SurrogateSeparation.sourceInformedOperator(
+            brain: brain, artifactTopographies: Array(components.topographies.prefix(componentCount)),
+            brainRegularization: regularization)
+        let output = try SourceInformedSeparation.apply(op, to: noisy)
+
+        func snr(_ candidate: [[Double]]) -> Double {
+            var signal = 0.0, residual = 0.0
+            for c in cleanReferenced.indices {
+                for k in cleanReferenced[c].indices where k < candidate[c].count {
+                    let v = cleanReferenced[c][k]; signal += v * v
+                    let e = v - candidate[c][k]; residual += e * e
+                }
+            }
+            return residual > 1e-30 ? (signal / residual).squareRoot() : .infinity
+        }
+        metrics.correctedSNR.append(snr(output))
+        metrics.uncorrectedSNR.append(snr(noisy))
+        metrics.acceptedBeatFraction.append(
+            Double(components.acceptedBeatCount) / Double(max(1, components.candidateBeatCount)))
+        let score = SNRMetrics.score(label: "c", clean: cleanReferenced, corrected: output,
+                                     samplingRate: config.samplingRate, channelNames: montage.channelNames)
+        metrics.cleanDistortionDb.append(score.spectralDistortionDbRMS)
+        var noisyPower = 0.0, removedPower = 0.0
+        for c in noisy.indices {
+            for k in noisy[c].indices where k < output[c].count {
+                let v = noisy[c][k]; noisyPower += v * v
+                let d = v - output[c][k]; removedPower += d * d
+            }
+        }
+        metrics.removedVariance.append(noisyPower > 1e-30 ? removedPower / noisyPower : 0)
+        let simulated = DipoleEEGGenerator.makeSources(config: config)
+        metrics.nearestSourceMm.append(
+            brain.sources.map { sg in simulated.map { (sg.positionMeters - $0.positionMeters).norm * 1000 }.min() ?? 0 }.min() ?? 0)
+    }
+    return metrics
+}
+
+/// Cross-runs one sweep axis and writes an aggregated CSV — the SI-4 campaign
+/// workhorse. Every other `evaluate-surrogate` option sets the fixed base.
+func runEvaluateSurrogateGrid(_ arguments: Arguments) throws {
+    try arguments.validate(known: [
+        "axis", "values", "seeds", "sources", "components", "brain-regularization",
+        "duration", "channels", "coordinates", "rate", "config", "pattern-search",
+        "representative-beat", "offset", "correction-head", "output",
+    ])
+    guard let axis = arguments.string("axis") else { throw SimulateError.usage("grid needs --axis <name>") }
+    guard let valuesRaw = arguments.string("values") else { throw SimulateError.usage("grid needs --values <a,b,c>") }
+    let values = valuesRaw.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+    guard !values.isEmpty else { throw SimulateError.usage("--values needs comma-separated numbers") }
+
+    let seedCount = try arguments.int("seeds") ?? 5
+    guard seedCount > 0 else { throw SimulateError.usage("--seeds must be positive") }
+    let regionalCount = try arguments.int("sources") ?? 29
+    let componentCount = try arguments.int("components") ?? 4
+    let regularization = try arguments.double("brain-regularization") ?? 0.02
+    let patternSearchMode = ArtifactPatternSearchMode(rawValue: arguments.string("pattern-search") ?? "paper") ?? .paper
+    let representative = try arguments.int("representative-beat").map { $0 - 1 }
+    let baseOffset = try arguments.double("offset") ?? 0
+    let namedCorrectionHead = try arguments.string("correction-head").map(resolveCorrectionHead)
+
+    var base = SimulationConfig.default
+    if let path = arguments.string("config") {
+        base = try SimulationScenarioFile.load(from: URL(fileURLWithPath: path)).config
+    }
+    base.channelCount = try arguments.int("channels") ?? base.channelCount
+    if let path = arguments.string("coordinates"), !arguments.flag("coordinates") {
+        base.coordinatesPath = URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+    base.samplingRate = try arguments.double("rate") ?? 250
+    base.durationSeconds = try arguments.double("duration") ?? 180
+    base.eegGenerationModel = .dipole
+    base.recordingReference = .average
+    base.bcgSpatialModel = .generators
+    base.gradientEnabled = false
+    base.erp = nil
+    let baseMontage = try base.coordinatesPath.map {
+        try importedMontage(path: $0, channelCount: base.channelCount).montage
+    } ?? Montage.standard(count: base.channelCount)
+
+    func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
+    func sd(_ v: [Double]) -> Double {
+        guard v.count > 1 else { return 0 }
+        let m = mean(v)
+        return (v.reduce(0.0) { $0 + ($1 - m) * ($1 - m) } / Double(v.count - 1)).squareRoot()
+    }
+
+    var rows = ["axis,value,seeds,corrected_snr_mean,corrected_snr_sd,"
+        + "uncorrected_snr_mean,uncorrected_snr_sd,clean_distortion_db_mean,clean_distortion_db_sd,"
+        + "removed_variance_mean,accepted_beat_fraction_mean,nearest_source_mm_mean"]
+    print("axis=\(axis), \(values.count) values, \(seedCount) seeds each")
+    print("  value    corrected SNR       uncorrected   distortion(dB)   removed  beats")
+    print("  ---------------------------------------------------------------------------")
+
+    for value in values {
+        var b = base
+        var montage = baseMontage
+        var offset = baseOffset
+        var regional = regionalCount
+        var components = componentCount
+        var reg = regularization
+        var maxBeats: Int?
+        var correctionHead = namedCorrectionHead
+        var correctionMontage: Montage?
+
+        switch axis {
+        case "duration", "length": b.durationSeconds = value
+        case "channels": b.channelCount = Int(value); montage = Montage.standard(count: Int(value))
+        case "rate": b.samplingRate = value
+        case "components": components = Int(value)
+        case "brain-regularization", "regularization": reg = value
+        case "sources", "regional-sources": regional = Int(value)
+        case "offset": offset = value
+        case "max-beats", "beats": maxBeats = Int(value)
+        case "bcg-morphology-jitter", "morphology": b.bcgMorphologyJitterFraction = value
+        case "correction-scalp-radius":
+            correctionHead = perturbedCorrectionHead(from: b.sphericalHeadModel, scalpRadius: value, skullRatio: nil, center: nil)
+        case "correction-skull-ratio":
+            correctionHead = perturbedCorrectionHead(from: b.sphericalHeadModel, scalpRadius: nil, skullRatio: value, center: nil)
+        case "correction-electrode-jitter":
+            correctionMontage = baseMontage.jittered(degrees: value, seed: 4242)
+        default:
+            throw SimulateError.usage("unknown --axis \"\(axis)\"; expected duration, channels, rate, "
+                + "components, brain-regularization, sources, offset, max-beats, bcg-morphology-jitter, "
+                + "correction-scalp-radius, correction-skull-ratio, or correction-electrode-jitter")
+        }
+
+        let m = try evaluateSurrogateCore(
+            base: b, montage: montage, correctionHead: correctionHead, correctionMontage: correctionMontage,
+            offset: offset, regionalCount: regional, componentCount: components, regularization: reg,
+            patternSearchMode: patternSearchMode, representative: representative, maxBeats: maxBeats,
+            seedCount: seedCount)
+
+        rows.append([
+            axis, formatSweepValue(value), String(m.correctedSNR.count),
+            String(format: "%.6f", mean(m.correctedSNR)), String(format: "%.6f", sd(m.correctedSNR)),
+            String(format: "%.6f", mean(m.uncorrectedSNR)), String(format: "%.6f", sd(m.uncorrectedSNR)),
+            String(format: "%.6f", mean(m.cleanDistortionDb)), String(format: "%.6f", sd(m.cleanDistortionDb)),
+            String(format: "%.6f", mean(m.removedVariance)),
+            String(format: "%.6f", mean(m.acceptedBeatFraction)),
+            String(format: "%.6f", mean(m.nearestSourceMm)),
+        ].joined(separator: ","))
+        print(String(format: "  %-7@  %5.2f ± %-5.2f     %5.2f         %6.2f          %4.2f    %3.0f%%",
+            formatSweepValue(value) as NSString,
+            mean(m.correctedSNR), sd(m.correctedSNR), mean(m.uncorrectedSNR),
+            mean(m.cleanDistortionDb), mean(m.removedVariance), 100 * mean(m.acceptedBeatFraction)))
+    }
+
+    let csv = rows.joined(separator: "\n") + "\n"
+    if let output = arguments.string("output") {
+        try csv.write(toFile: output, atomically: true, encoding: .utf8)
+        print("\nWrote \(output)")
+    }
 }
 
 // MARK: - correct
@@ -3193,6 +3744,8 @@ do {
         try runCorrect(arguments)
     case "evaluate-surrogate":
         try runEvaluateSurrogate(arguments)
+    case "evaluate-surrogate-grid":
+        try runEvaluateSurrogateGrid(arguments)
     case "score":
         try runScore(arguments)
     case "score-sources":

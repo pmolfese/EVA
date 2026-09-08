@@ -40,7 +40,7 @@ UPDATE=0
 [ "${1:-}" = "--update" ] && UPDATE=1
 
 if [ ! -x "$SIMULATE" ]; then
-    echo "eva-simulate is not built; run Tools/EVASimulate/build.sh first" >&2
+    echo "eva-simulate is not built; build the EVASimulate target (e.g. via run-all-tests.sh, or 'xcodebuild -project EVA.xcodeproj -target EVASimulate build' and copy the product here) first" >&2
     exit 2
 fi
 

@@ -48,6 +48,8 @@ final class ProcessingDefaults {
         static let gradientDefaultFASTRMethodRaw = "gradientDefaultFASTRMethodRaw"
         static let gradientComputeBackendRaw = "gradientComputeBackendRaw"
         static let waveletUsesGPU = "waveletUsesGPU"
+        static let timeFrequencyUsesGPU = "timeFrequencyUsesGPU"
+        static let timeFrequencyBands = "timeFrequencyBands.v1"
         static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
         static let autoRunSegmentHealthAfterSegmentation = "autoRunSegmentHealthAfterSegmentation"
         static let autoSaveNewNetGeometries = "autoSaveNewNetGeometries"
@@ -75,6 +77,8 @@ final class ProcessingDefaults {
         static let gradientDefaultFASTRMethodRaw = MRIGradientMethod.fastr.rawValue
         static let gradientComputeBackendRaw = GradientComputeBackend.cpu.rawValue
         static let waveletUsesGPU = true
+        static let timeFrequencyUsesGPU = true
+        static let timeFrequencyBands = EEGFrequencyBand.restingDefaults
         static let interpolatedHealthFromNeighbors = true
         static let autoRunSegmentHealthAfterSegmentation = true
         static let autoSaveNewNetGeometries = false
@@ -219,6 +223,43 @@ final class ProcessingDefaults {
         set { UserDefaults.standard.set(newValue, forKey: Keys.waveletUsesGPU) }
     }
 
+    /// Whether the all-channel time-frequency explorer prefers the Metal
+    /// Morlet backend.  It falls back to the CPU for multitaper, unsupported
+    /// shapes, or machines without a usable Metal device.
+    var timeFrequencyUsesGPU: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.timeFrequencyUsesGPU) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.timeFrequencyUsesGPU) }
+    }
+
+    /// Named bands shared by the time-frequency explorer.  Values are kept in
+    /// preferences rather than hard-coded so a lab can add, for example, a
+    /// narrow beta or gamma band without changing analysis code.
+    var timeFrequencyBands: [EEGFrequencyBand] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: Keys.timeFrequencyBands),
+                  let decoded = try? JSONDecoder().decode([EEGFrequencyBand].self, from: data)
+            else { return Defaults.timeFrequencyBands }
+            return Self.validatedTimeFrequencyBands(decoded)
+        }
+        set {
+            let bands = Self.validatedTimeFrequencyBands(newValue)
+            let data = (try? JSONEncoder().encode(bands)) ?? Data()
+            UserDefaults.standard.set(data, forKey: Keys.timeFrequencyBands)
+        }
+    }
+
+    private static func validatedTimeFrequencyBands(_ candidates: [EEGFrequencyBand]) -> [EEGFrequencyBand] {
+        var names = Set<String>()
+        let bands = candidates.compactMap { candidate -> EEGFrequencyBand? in
+            let trimmed = candidate.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !names.contains(trimmed), candidate.lowHz >= 0,
+                  candidate.highHz > candidate.lowHz else { return nil }
+            names.insert(trimmed)
+            return EEGFrequencyBand(name: trimmed, lowHz: candidate.lowHz, highHz: candidate.highHz)
+        }
+        return bands.isEmpty ? Defaults.timeFrequencyBands : bands
+    }
+
     // MARK: Artifact-detection defaults
     var artifactDetectionDefaultMethodRaw: String {
         get { UserDefaults.standard.string(forKey: Keys.artifactDetectionDefaultMethodRaw) ?? Defaults.artifactDetectionDefaultMethodRaw }
@@ -302,6 +343,8 @@ final class ProcessingDefaults {
             Keys.gradientDefaultFASTRMethodRaw: Defaults.gradientDefaultFASTRMethodRaw,
             Keys.gradientComputeBackendRaw: Defaults.gradientComputeBackendRaw,
             Keys.waveletUsesGPU: Defaults.waveletUsesGPU,
+            Keys.timeFrequencyUsesGPU: Defaults.timeFrequencyUsesGPU,
+            Keys.timeFrequencyBands: (try? JSONEncoder().encode(Defaults.timeFrequencyBands)) ?? Data(),
             Keys.bcgDefaultMethodRaw: Defaults.bcgDefaultMethodRaw,
             Keys.artifactDetectionDefaultMethodRaw: Defaults.artifactDetectionDefaultMethodRaw,
             Keys.ocularBlinkThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularBlinkThresholdConfig),

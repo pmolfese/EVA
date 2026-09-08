@@ -23,19 +23,8 @@
 
 import Foundation
 
-nonisolated enum SimulateError: LocalizedError {
-    case badTemplate(String)
-    case usage(String)
-    case io(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .badTemplate(let detail): return "Bad gradient template: \(detail)"
-        case .usage(let detail): return detail
-        case .io(let detail): return detail
-        }
-    }
-}
+// `SimulateError` moved to EVA/Simulation/SimulationError.swift (SIM-0) so the
+// generation core can throw it without depending on this CLI-side writer.
 
 /// Everything a scoring run needs that the recordings themselves do not carry.
 nonisolated struct SimulationTruth: Codable, Sendable {
@@ -77,6 +66,14 @@ nonisolated struct SimulationTruth: Codable, Sendable {
     var referenceApplicationStage: String? = nil
     /// 1-based channel number -> the defect applied to it.
     var badChannels: [String: String]
+    /// Defects applied to the dedicated EOG traces, keyed "VEOG"/"HEOG". Kept
+    /// separate from `badChannels` because those are EEG channel numbers and
+    /// these are not — merging them would make the sidecar ambiguous.
+    var eogDefects: [String: String] = [:]
+    /// Channels given a high impedance reading while their data was left alone.
+    /// The complement of `badChannels` for the lesson impedance screening
+    /// teaches: bad reading, good data.
+    var highImpedanceChannels: [Int] = []
     var blinkSeconds: [Double]
     var saccadeSeconds: [Double]
     /// Per-channel weight of the blink and horizontal-gaze topographies, so a

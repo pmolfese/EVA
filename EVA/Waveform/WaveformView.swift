@@ -2107,16 +2107,39 @@ struct WaveformView: View {
     }
 
     func averagedModePicker() -> some View {
-        Picker("View Mode", selection: $epoching.averagedDisplayMode) {
-            ForEach(EpochingViewModel.AveragedDisplayMode.allCases) { mode in
-                Label(mode.rawValue, systemImage: mode.systemImage)
-                    .tag(mode)
+        // A 2×2 grid of buttons rather than one long segmented control: the
+        // "Time-Frequency" label no longer truncates, and the control is far
+        // narrower so it doesn't crowd the process/history area.
+        let modes = EpochingViewModel.AveragedDisplayMode.allCases
+        return VStack(spacing: 4) {
+            ForEach(Array(stride(from: 0, to: modes.count, by: 2)), id: \.self) { start in
+                HStack(spacing: 4) {
+                    ForEach(start..<min(start + 2, modes.count), id: \.self) { index in
+                        averagedModeButton(modes[index])
+                    }
+                }
             }
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 315)
-        .help("Switch between waveform rows, averages, and single-trial analysis.")
+        .frame(width: 240)
+        .help("Switch between waveform rows, averages, single-trial analysis, and the time-frequency view.")
+    }
+
+    @ViewBuilder
+    private func averagedModeButton(_ mode: EpochingViewModel.AveragedDisplayMode) -> some View {
+        let selected = epoching.averagedDisplayMode == mode
+        let label = Label(mode.rawValue, systemImage: mode.systemImage)
+            .font(.caption)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity)
+        if selected {
+            Button { epoching.averagedDisplayMode = mode } label: { label }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        } else {
+            Button { epoching.averagedDisplayMode = mode } label: { label }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
     }
 
     func toolbarStatusAndModeControls(for signal: MFFSignalData) -> some View {
@@ -2540,6 +2563,14 @@ struct WaveformView: View {
         } else if displayMode == .trials {
             singleTrialAnalysisWorkspace()
                 .transition(.opacity)
+        } else if displayMode == .timeFrequency {
+            TimeFrequencyView(
+                signal: epoching.segmentedEpochSignal ?? signal,
+                segments: epoching.segmentedEpochSegments,
+                layout: recording.sensorLayout,
+                epoching: epoching
+            )
+            .transition(.opacity)
         } else {
             waveformWorkspace(
                 for: signal,
@@ -3371,7 +3402,7 @@ private extension View {
 }
 
 extension Array {
-    subscript(safe index: Int) -> Element? {
+    nonisolated subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
     }
 }

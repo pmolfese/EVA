@@ -999,6 +999,7 @@ nonisolated struct PSABuildJob: Sendable {
         }
 
         guard !jobs.isEmpty else { return nil }
+        let acceptedJobs = jobs
 
         // PASS 2 (parallel): each job independently extracts its own channel
         // slice and, if enabled, runs per-epoch bad-channel detection +
@@ -1008,9 +1009,9 @@ nonisolated struct PSABuildJob: Sendable {
         // job's data). Indexed by the job's PASS-1 position so PASS 3 can
         // reassemble in the original, deterministic order regardless of which
         // task happens to finish first.
-        var slices = [[[Float]]?](repeating: nil, count: jobs.count)
-        var jobBadChannels = [Set<Int>?](repeating: nil, count: jobs.count)
-        let total = jobs.count
+        var slices = [[[Float]]?](repeating: nil, count: acceptedJobs.count)
+        var jobBadChannels = [Set<Int>?](repeating: nil, count: acceptedJobs.count)
+        let total = acceptedJobs.count
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
         nonisolated(unsafe) var rejectedForTooManyBadChannels = 0
@@ -1045,8 +1046,8 @@ nonisolated struct PSABuildJob: Sendable {
                 // "computer locked up" cause).
                 nonisolated(unsafe) let out = out
                 nonisolated(unsafe) let badOut = badOut
-                evaConcurrentPerform(iterations: jobs.count) { jobIndex in
-                    let job = jobs[jobIndex]
+                evaConcurrentPerform(iterations: acceptedJobs.count) { jobIndex in
+                    let job = acceptedJobs[jobIndex]
                     let jobEndSample = job.startSample + epochLength
                     var slice = signal.data.map { Array($0[job.startSample..<jobEndSample]) }
                     if interpolatesBadChannelsPerEpoch {
@@ -1419,7 +1420,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
         case .qrsLocking:
             return "Offset each detected R-wave by a fixed mechanical delay. Requires ECG / QRS detection to be active. The lag from QRS to BCG onset is typically 200–400 ms — adjust to align peaks."
         case .surrogatePCAS:
-            return "Surrogate-source separation (PCA-S). Models the recording as a fixed brain model plus a small BCG topography dictionary found from the detected beats, fits both at once, and reconstructs only the brain part. The brain block is regularized and the artifact block is not — that asymmetry is what separates them. Unlike template subtraction it removes only what the brain model cannot explain, so evoked responses are distorted less. Needs 3D electrode coordinates and detected beats."
+            return "Surrogate-source separation (PCA-S), a Berg–Scherg source-informed spatial filter. Models the recording as a fixed brain model plus a small BCG topography dictionary found from the detected beats, fits both at once, and reconstructs only the brain part. The brain block is regularized and the artifact block is not — that asymmetry is what separates them. Unlike template subtraction it removes only what the brain model cannot explain, so evoked responses are distorted less. Needs 3D electrode coordinates and detected beats. This is a native Swift reconstruction from the published manuscripts (see citation), not a port of any reference implementation."
         case .cwlRegression:
             return "Carbon-wire-loop (CWL) correction: no detection step. Each EEG channel is regressed against the selected CWL reference channels at a small range of time lags and the fit is subtracted, in a sliding window that adapts to slowly drifting coupling. Requires CWL leads imported as PNS channels."
         }

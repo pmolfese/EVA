@@ -16,14 +16,14 @@ swiftc -O \
   "$ROOT/Tools/EVABIDS/Sources/EVABIDS/ToBIDS.swift" \
   "$ROOT/Tools/EVABIDS/Sources/EVABIDS/FromBIDS.swift" \
   "$ROOT/Tools/EVABIDS/Sources/EVABIDS/InspectBIDS.swift" \
-  "$ROOT/EVA/Epoching/EpochModel.swift" \
-  "$ROOT/EVA/IO/EGISensorXMLParser.swift" \
-  "$ROOT/EVA/IO/MFFReader.swift" \
-  "$ROOT/EVA/IO/MFFFileType.swift" \
-  "$ROOT/EVA/Pipeline/EVAProcessingScript.swift" \
-  "$ROOT/EVA/IO/MFFWriter.swift" \
-  "$ROOT/EVA/Channels/SensorLayout.swift" \
-  "$ROOT/EVA/Channels/ElectrodeGeometry.swift" \
+  "$ROOT/EVACore/Epoching/EpochModel.swift" \
+  "$ROOT/EVACore/IO/EGISensorXMLParser.swift" \
+  "$ROOT/EVACore/IO/MFFReader.swift" \
+  "$ROOT/EVACore/IO/MFFFileType.swift" \
+  "$ROOT/EVACore/Pipeline/EVAProcessingScript.swift" \
+  "$ROOT/EVACore/IO/MFFWriter.swift" \
+  "$ROOT/EVACore/Channels/SensorLayout.swift" \
+  "$ROOT/EVACore/Channels/ElectrodeGeometry.swift" \
   -o "$OUT"
 
 echo "$OUT"

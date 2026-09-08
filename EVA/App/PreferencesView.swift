@@ -210,8 +210,54 @@ struct PreferencesView: View {
 
             EventAnchorPreferencesView()
                 .tabItem { Label("Events", systemImage: "flag") }
+
+            QuickLookPreferencesView()
+                .tabItem { Label("Quick Look", systemImage: "eye") }
         }
-        .frame(width: 480, height: 560)
+        .frame(width: 720, height: 560)
+    }
+}
+
+private struct QuickLookPreferencesView: View {
+    var body: some View {
+        Form {
+            Section {
+                ForEach(EVAPreviewFormat.allCases) { format in
+                    QuickLookFormatToggle(format: format)
+                }
+            } header: {
+                Text("Finder previews and thumbnails")
+            } footer: {
+                Text("Turning a format off makes EVA decline new Quick Look requests for it. Finder may use another installed provider or its generic preview. Existing cached thumbnails can remain visible until Finder refreshes them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
+private struct QuickLookFormatToggle: View {
+    let format: EVAPreviewFormat
+    @AppStorage private var isEnabled: Bool
+
+    init(format: EVAPreviewFormat) {
+        self.format = format
+        _isEnabled = AppStorage(
+            wrappedValue: true,
+            format.preferenceKey,
+            store: EVAQuickLookPreferences.defaults
+        )
+    }
+
+    var body: some View {
+        Toggle(isOn: $isEnabled) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(format.displayName)
+                Text(format.filenameExtensions).font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
@@ -546,6 +592,19 @@ private struct ProcessingDefaultsView: View {
                       : "No compatible Metal GPU is available on this machine.")
             }
 
+            Section("Time-Frequency") {
+                Picker("All-channel explorer backend", selection: $defaults.timeFrequencyUsesGPU) {
+                    Text("CPU").tag(false)
+                    Text("GPU (Metal)").tag(true)
+                }
+                .disabled(!TimeFrequencyMetalBackend.isAvailable)
+                .help(TimeFrequencyMetalBackend.isAvailable
+                      ? "The GPU batches Morlet power and phase-coherence maps across the complete channel set. Multitaper and unsupported data shapes fall back to the CPU automatically."
+                      : "No compatible Metal GPU is available on this machine; the all-channel explorer uses the CPU.")
+
+                TimeFrequencyBandEditor(bands: $defaults.timeFrequencyBands)
+            }
+
             Section("Artifact Detection") {
                 Picker("Default method", selection: $defaults.artifactDetectionDefaultMethod) {
                     ForEach(ArtifactDetectionMethod.selectableCases) { Text($0.rawValue).tag($0) }
@@ -597,5 +656,125 @@ private struct ProcessingDefaultsView: View {
         }
         .formStyle(.grouped)
         .padding(.top, 4)
+    }
+}
+
+private struct TimeFrequencyBandEditor: View {
+    @Binding var bands: [EEGFrequencyBand]
+    @State private var selectedIndex = 0
+
+    private let bandColumnWidth: CGFloat = 140
+    private let frequencyColumnWidth: CGFloat = 72
+    private let separatorColumnWidth: CGFloat = 12
+
+    private enum Field: Hashable { case name, low, high }
+    @FocusState private var focusedField: Field?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Frequency bands")
+                .font(.subheadline.weight(.semibold))
+            Text("Select a row to edit it below. Double-click a row to begin editing its name.")
+                .font(.caption).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Band").frame(width: bandColumnWidth, alignment: .leading)
+                    Text("Low").frame(width: frequencyColumnWidth, alignment: .trailing)
+                    Color.clear.frame(width: separatorColumnWidth, height: 1)
+                    Text("High").frame(width: frequencyColumnWidth, alignment: .trailing)
+                    Spacer()
+                }
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Divider()
+                ForEach(bands.indices, id: \.self) { index in
+                    HStack {
+                        Text(bands[index].name).frame(width: bandColumnWidth, alignment: .leading)
+                        Text(String(format: "%.1f Hz", bands[index].lowHz)).frame(width: frequencyColumnWidth, alignment: .trailing)
+                        Color.clear.frame(width: separatorColumnWidth, height: 1)
+                        Text(String(format: "%.1f Hz", bands[index].highHz)).frame(width: frequencyColumnWidth, alignment: .trailing)
+                        Spacer()
+                        if index == activeIndex { Image(systemName: "chevron.right").foregroundStyle(.secondary) }
+                    }
+                    .font(.body.monospacedDigit())
+                    .padding(.horizontal, 6).padding(.vertical, 5)
+                    .contentShape(Rectangle())
+                    .background(index == activeIndex ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 5))
+                    .onTapGesture { selectedIndex = index }
+                    .onTapGesture(count: 2) { selectedIndex = index; focusedField = .name }
+                }
+            }
+            .padding(6)
+            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+
+            if !bands.isEmpty {
+                HStack(alignment: .bottom) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Band").font(.caption).foregroundStyle(.secondary)
+                        TextField("Band", text: nameBinding(activeIndex))
+                            .textFieldStyle(.roundedBorder).frame(width: bandColumnWidth)
+                            .focused($focusedField, equals: .name)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Low").font(.caption).foregroundStyle(.secondary)
+                        TextField("Low", value: lowBinding(activeIndex), format: .number.precision(.fractionLength(1)))
+                            .textFieldStyle(.roundedBorder).frame(width: frequencyColumnWidth)
+                            .focused($focusedField, equals: .low)
+                    }
+                    Text("–").foregroundStyle(.secondary)
+                        .frame(width: separatorColumnWidth, alignment: .center)
+                        .padding(.bottom, 6)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("High").font(.caption).foregroundStyle(.secondary)
+                        TextField("High", value: highBinding(activeIndex), format: .number.precision(.fractionLength(1)))
+                            .textFieldStyle(.roundedBorder).frame(width: frequencyColumnWidth)
+                            .focused($focusedField, equals: .high)
+                    }
+                    Text("Hz").foregroundStyle(.secondary).padding(.bottom, 6)
+                    Button(role: .destructive) { removeSelected() } label: { Image(systemName: "minus.circle") }
+                        .disabled(bands.count <= 1).help("Remove selected band")
+                        .padding(.bottom, 3)
+                }
+                .padding(.horizontal, 6)
+            }
+            HStack {
+                Button { addBand() } label: { Label("Add band", systemImage: "plus") }
+                Button("Restore standard bands") { bands = EEGFrequencyBand.restingDefaults; selectedIndex = 0 }
+            }
+            .controlSize(.small)
+        }
+        .padding(.vertical, 3)
+    }
+
+    private var activeIndex: Int { min(max(selectedIndex, 0), max(bands.count - 1, 0)) }
+
+    private func nameBinding(_ index: Int) -> Binding<String> {
+        Binding(get: { bands[index].name }, set: { bands[index].name = $0 })
+    }
+
+    private func lowBinding(_ index: Int) -> Binding<Double> {
+        Binding(
+            get: { bands[index].lowHz },
+            set: { bands[index].lowHz = max(0, min($0, bands[index].highHz - 0.1)) }
+        )
+    }
+
+    private func highBinding(_ index: Int) -> Binding<Double> {
+        Binding(
+            get: { bands[index].highHz },
+            set: { bands[index].highHz = max(bands[index].lowHz + 0.1, $0) }
+        )
+    }
+
+    private func addBand() {
+        let highest = bands.map(\.highHz).max() ?? 40
+        bands.append(EEGFrequencyBand(name: "Band \(bands.count + 1)", lowHz: highest, highHz: highest + 5))
+        selectedIndex = bands.count - 1
+        focusedField = .name
+    }
+
+    private func removeSelected() {
+        guard bands.count > 1 else { return }
+        bands.remove(at: activeIndex)
+        selectedIndex = min(selectedIndex, bands.count - 1)
     }
 }

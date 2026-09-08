@@ -156,14 +156,14 @@ struct HistoryRailDerivationTests {
     // MARK: - Linear replacement policy
 
     @MainActor
-    @Test func changingAStageReplacesTheOldFuture() {
+    @Test func changingAStageReplacesTheOldFuture() throws {
         let model = RecordingHistoryModel()
         model.record(recordingKey: "r", script: script([
             step(.mriGradientCorrection, ["method": "FASTR"]),
             step(.filter, ["highPassHz": "0.1", "lowPassHz": "40"])
         ]))
         let wide = model.history.currentID
-        let branchPoint = try? #require(model.history.current.parent)
+        let branchPoint = try #require(model.history.current.parent)
 
         model.record(recordingKey: "r", script: script([
             step(.mriGradientCorrection, ["method": "FASTR"]),
@@ -174,7 +174,7 @@ struct HistoryRailDerivationTests {
         #expect(wide != narrow)
         #expect(model.history.node(wide) == nil, "the replaced filter must leave no abandoned sibling")
         #expect(model.history.currentID == narrow, "and the pointer follows the new chain")
-        #expect(branchPoint.map { model.history.children(of: $0).count } == 1)
+        #expect(model.history.children(of: branchPoint).count == 1)
     }
 
     /// Annotations ride along, because nothing is discarded any more.

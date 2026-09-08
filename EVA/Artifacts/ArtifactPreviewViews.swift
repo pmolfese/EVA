@@ -250,7 +250,7 @@ struct WaveletCleaningPreview: View {
     /// Cache key shared with the precompute pass — must stay in exact sync
     /// with every field the preview's result actually depends on, or a
     /// precomputed entry could be served for the wrong settings.
-    static func cacheKey(
+    nonisolated static func cacheKey(
         candidateID: String,
         configuration: WaveletCleaningConfiguration,
         signalDuration: Double
@@ -1604,7 +1604,7 @@ struct ArtifactCleaningPreview: View {
     @State private var magnifiesResidual = false
 
     /// Shared with the precompute step so cache keys always match.
-    static func cacheKey(artifactID: DefinedArtifact.ID, method: String, afterSignal: MFFSignalData?) -> String {
+    nonisolated static func cacheKey(artifactID: DefinedArtifact.ID, method: String, afterSignal: MFFSignalData?) -> String {
         [
             artifactID.uuidString,
             method,
@@ -2019,7 +2019,8 @@ struct ArtifactCleaningPreview: View {
             guard start >= 0, end <= sampleCount else { continue }
             validWindows.append(ValidWindow(start: start, end: end))
         }
-        let accepted = validWindows.count
+        let windows = validWindows
+        let accepted = windows.count
         guard accepted > 0 else { return nil }
 
         var averages = Array(repeating: [Float](repeating: 0, count: windowSamples), count: signal.numberOfChannels)
@@ -2030,7 +2031,7 @@ struct ArtifactCleaningPreview: View {
             evaConcurrentPerform(iterations: signal.data.count) { channelIndex in
                 let channelData = signal.data[channelIndex]
                 var accumulated = [Float](repeating: 0, count: windowSamples)
-                for window in validWindows {
+                for window in windows {
                     guard channelData.count >= window.end else { continue }
                     let firstMean = mean(channelData, start: window.start, count: edgeSamples)
                     let lastMean = mean(channelData, start: window.end - edgeSamples, count: edgeSamples)

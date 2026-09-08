@@ -131,14 +131,14 @@ nonisolated struct ICAFitFilterSettings: Codable, Sendable, Hashable {
     }
 }
 
-struct ICAComponentSuggestion: Sendable {
+nonisolated struct ICAComponentSuggestion: Sendable {
     var label: String
     var confidence: Double
     var reason: String
     var probabilities: [String: Double] = [:]
 }
 
-struct ICADecomposition: Sendable {
+nonisolated struct ICADecomposition: Sendable {
     var sourceSignalPath: String
     var sourceSamplingRate: Double
     var analysisSamplingRate: Double
