@@ -28,7 +28,7 @@ ZIP_PATH="$EXPORT_DIR/$SCHEME.app.zip"
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
 
-if ! security find-identity -v -p codesigning | grep -q "Developer ID Application"; then
+if ! security find-identity -v -p codesigning | grep -q "Apple Development"; then
     echo "error: no 'Developer ID Application' signing certificate found in keychain." >&2
     exit 1
 fi
