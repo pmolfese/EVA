@@ -231,7 +231,7 @@ nonisolated enum CWTRidgeDetector {
         let timeCount = coefficients[0].count
 
         // Local maxima of magnitude per scale row.
-        var maximaByScale: [[Int]] = coefficients.map { row in
+        let maximaByScale: [[Int]] = coefficients.map { row in
             localMaximaOfMagnitude(row)
         }
 

@@ -96,6 +96,11 @@ struct ContentView: View {
             }
         }
         .environment(batch)
+        .alert("EVA can't open this file", isPresented: showsOpenErrorAlert) {
+            Button("OK", role: .cancel) { openError = nil }
+        } message: {
+            Text(openError ?? "")
+        }
         .overlay {
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: 14)
@@ -348,7 +353,7 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
 
-            Text("Drop .mff, BrainVision, EDF, Persyst, or BESA .avr/.mul recordings here")
+            Text("Drop .mff, BrainVision, EDF, FIF, Persyst, or BESA .avr/.mul recordings here")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
@@ -366,6 +371,15 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(32)
+    }
+
+    /// The launch screen shows `openError` inline; a window that already has a
+    /// recording shows nothing, so the same message becomes an alert there.
+    /// Same state, two presentations — never both at once.
+    private var showsOpenErrorAlert: Binding<Bool> {
+        Binding(
+            get: { openError != nil && recording != nil },
+            set: { presented in if !presented { openError = nil } })
     }
 
     private func handleImportResult(_ result: Result<[URL], Error>) {
@@ -395,8 +409,13 @@ struct ContentView: View {
             return openBrainVisionSelection(brainVisionURLs)
         }
 
-        guard let url = supportedURLs.first else {
-            openError = "EVA can open .mff, BrainVision, EDF, Persyst, and BESA .avr/.mul recordings."
+        // A `.fif` in the drop may be a head model rather than a recording. If a
+        // real recording came along with it, open that and say nothing; if the
+        // drop was *only* non-recordings, say exactly which one it was.
+        let openable = supportedURLs.filter { SignalImportReader.recordingRejectionReason(for: $0) == nil }
+        guard let url = openable.first else {
+            openError = supportedURLs.compactMap(SignalImportReader.recordingRejectionReason(for:)).first
+                ?? "EVA can open .mff, BrainVision, EDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul recordings."
             return false
         }
         return open(url, securityScopedURLs: supportedURLs)
@@ -405,7 +424,15 @@ struct ContentView: View {
     @discardableResult
     private func open(_ url: URL, securityScopedURLs: [URL] = []) -> Bool {
         guard isSupportedRecordingURL(url) else {
-            openError = "EVA can open .mff, BrainVision, EDF, Persyst, and BESA .avr/.mul recordings."
+            openError = "EVA can open .mff, BrainVision, EDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul recordings."
+            return false
+        }
+        // A `.fif` may be a head model, a transform or a digitization rather
+        // than a recording, and the extension does not say which. Refuse before
+        // touching `recording`: a mis-drop must never close what is already
+        // open in this window.
+        if let reason = SignalImportReader.recordingRejectionReason(for: url) {
+            openError = reason
             return false
         }
 

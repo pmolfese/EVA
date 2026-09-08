@@ -4,11 +4,21 @@ This is the single execution plan for the whole project. Detailed design
 documents may explain a project, but this file decides priority, milestone
 status, and what comes next. It covers two spheres of influence:
 
-- **Part I — EVA proper**, the application itself, including REWIND (RW),
+- **Part 0 — Simulator in the app (SIM)**, a new cross-sphere program: bring
+  EVASimulate's generation and the forward model into EVA's own GUI, so
+  simulated ground truth flows through the same pipeline as real data.
+- **Part TF — Event-related time-frequency (TF)**, epoch-level ERSP/ITPC as the
+  frequency-lens counterpart to the Average/Trials views, feeding the existing
+  cluster-permutation stats.
+- **Part EVA Core**, the application itself, including REWIND (RW),
   processing/batch (PB), MRI/FASTR (MRI), trial-wise review (TW), UI/UX, and the
   source-informed correction program (SI) as it lands in the app.
-- **Part II — EVASimulate**, the `Tools/EVASimulate` simulator and its tiers.
-- **Part III — Completed**, everything already shipped, sorted by the same two
+- **Part Sim**, the `Tools/EVASimulate` simulator and its tiers.
+- **Part Sleep — Synthetic sleep EEG (SL)**, a whole night with a known
+  hypnogram and every spindle, K-complex and slow wave labelled to the sample.
+  Standalone; blocks nothing and is blocked by nothing. A copy of this part,
+  with a short standalone preamble, lives in `SLEEP.md`.
+- **Part Completed**, everything already shipped, sorted by the same two
   spheres.
 
 Status values are deliberately few:
@@ -17,16 +27,725 @@ Status values are deliberately few:
 - **IN PROGRESS** — partially implemented; remaining exit criteria are listed.
 - **NOT STARTED** — approved work, ordered but not begun.
 - **DEFERRED** — intentionally waiting for evidence or a dependency.
-- **COMPLETED** — shipped or explicitly closed; details live in Part III.
+- **COMPLETED** — shipped or explicitly closed; details live in Part Completed.
 
 Cross-sphere note: SI-0, SI-1, and SI-2 were shared-code extractions executed
 across both spheres, and SI-3 shipped the first correction built on them; all
-four are recorded in Part III. The app-side remainder (SI-4 onward) is in
-Part I, and the simulator-side remainder is in Part II.
+four are recorded in Part Completed. The app-side remainder (SI-4 onward) is in
+Part EVA Core, and the simulator-side remainder is in Part Sim.
 
 ---
 
-# PART I — EVA PROPER
+# PART 0 — SIMULATOR IN THE APP
+
+A new program, cross-sphere by nature: the engine lives in Part Sim (EVASimulate)
+and the surface lives in Part EVA Core (EVA proper). The goal is that a person can
+create a simulated recording — and, later, place dipoles and watch their fields
+— from inside EVA, and that the result flows through filter / ICA / PCA-S /
+scoring exactly like a real file. That is both the teaching payoff ("here is
+ground truth; watch your pipeline act on it") and a validation multiplier (every
+cleaning method gets a truth-backed sandbox without leaving the app).
+
+**Scheduling note:** these milestones do **not** preempt the Part EVA Core
+execution order. SI-4 remains milestone 1. Part 0 is scheduled at the owner's
+discretion; SIM-3 in particular is a small, independent visual win that can land
+any time.
+
+**Near-term simulator-UI gaps:**
+
+- [x] **Per-band background amplitudes** — shipped in SIM-1 (2026-08-30): the Studio's
+  **Background** tab exposes the alpha envelope and per-band σ for δ / θ / β / γ. The
+  Source Simulator's own background spectrum could reuse this later if wanted.
+
+Dependency map:
+
+```text
+SIM-0 (link EVASimulate into the app)
+   └─→ SIM-1 (New → Simulated Recording panel)
+          └─→ SIM-2 (interactive forward sandbox)
+SIM-3 (glass-brain dipole viz) — parallel, feeds SIM-2
+```
+
+## SIM-0 — Link EVASimulate into the app — **COMPLETED (2026-08-29)**
+
+The prerequisite for everything else, and the one real refactor. Previously
+EVASimulate built via `Tools/EVASimulate/build.sh` — a standalone `swiftc`
+file list — and was **not** linked into the EVA app target, so the app could not
+call the generation path. The simulator is now callable from the GUI's own module
+**and** ships as a bundled CLI at `EVA.app/Contents/MacOS/EVASimulate`, with
+`build.sh` retired and the self-test running under `xcodebuild test`.
+
+### What shipped (2026-08-29 execution)
+
+Key discovery: `EVA.xcodeproj` is a modern Xcode-26 project using **file-system-
+synchronized groups**, not classic per-file target membership. That reshaped the
+plan below but confirmed its direction.
+
+- **Generation core moved into `EVA/Simulation/`** (19 files) so it auto-compiles
+  into the app module — the GUI (SIM-1) can now call the generators/scenario/
+  forward directly, no import, no `public`. Two shared truth/error types
+  (`SimulateError`, `ERPComponent`/`ERPComponentSet`) were extracted into their
+  own core files (`SimulationError.swift`, `ERPTruth.swift`) because they are used
+  by core generators but were declared in CLI-side files. The 9 CLI/eval-side glue
+  files (`main`, `SelfTest`, `SNRMetrics`, `RichMetrics`, `SourceMetrics`,
+  `ERPEvaluation`, `SI0ContractFixtures`, `SimulationWriter`, `SurrogateSeparation`)
+  stayed out of the app; two of them (`SNRMetrics`, `SurrogateBrainModel`) collide
+  by name with EVA types, which is exactly why they must not join the app module.
+- **`EVASimulate` command-line-tool target added to `EVA.xcodeproj`.** Because a
+  sync root group is all-or-nothing per target, the CLI cannot "include just the
+  17 shared EVA files" by membership; it **duplicate-compiles** the exact 47-file
+  closure (glue + core + 17 shared) via a classic Sources phase with explicit file
+  references — mirroring what `build.sh` did, and honoring the no-public-API
+  constraint. Builds green; self-test 107/107 (106 at SIM-0; +1 from SI-4 Track 1).
+- **CLI embedded in the app bundle** via a Copy Files phase (dstSubfolderSpec 6 →
+  `Contents/MacOS`), with an app→CLI target dependency. The embedded binary is
+  codesigned (team 7V8RRF84QH, hardened runtime) and runs.
+- **Self-test reachable from `EVATests`** as a subprocess wrapper
+  (`EVATests/Simulation/EVASimulateSelfTestTests.swift`) that execs the bundled
+  `EVASimulate selftest` and asserts zero failures — the in-process option was
+  rejected because `SelfTest`'s `SNRMetrics`/`SurrogateBrainModel` would shadow
+  EVA's own types that existing tests depend on. `xcodebuild test` passes (137s;
+  it *is* the determinism corpus).
+- **`build.sh` retired.** `run-all-tests.sh` and `scripts/check-determinism.sh`
+  now build the `EVASimulate` Release target via `xcodebuild` and stage the product
+  at `Tools/EVASimulate/.build/eva-simulate`; determinism still matches the
+  committed baseline byte-for-byte (8/8 scenarios). Docs updated.
+
+### What we learned (2026-08-29 planning pass)
+
+- **The shared foundation is bounded to 17 EVA files** — exactly what `build.sh`
+  compiles alongside the simulator: `Core/Forward/{ForwardTypes, Spherical,
+  Ellipsoidal, BEM}ForwardModel`, `Core/{AccelerateCompat, DSP, LinearAlgebra,
+  SeededGenerator}`, `Artifacts/SourceInformed/SourceInformedOperator`,
+  `Channels/{ElectrodeGeometry, SensorLayout}`, `IO/{EGISensorXMLParser,
+  MFFFileType, MFFReader, MFFWriter}`, `Epoching/EpochModel`,
+  `Pipeline/EVAProcessingScript`. This is the CLI's full transitive closure
+  (that list builds and passes 107 self-test checks today).
+- **Those files are woven into the app**: `SensorLayout` is used in ~34 files,
+  `EVAProcessingScript` ~20, `ElectrodeGeometry` ~15, `LinearAlgebra` ~12,
+  `DSP` ~10, `ForwardHeadModel` ~8. So a package boundary makes their API a
+  public surface to maintain.
+- **The simulator's *core* (generators, scenario, forward) is clean** — it does
+  NOT touch the app-coupled types. Only `Montage`, `SimulationWriter`,
+  `ImpedanceModel`, `SelfTest`, and `main.swift` reach `SensorLayout` / MFF I/O,
+  and that is coordinate-file reading + MFF writing (CLI-ish glue), not the
+  math.
+
+### Chosen approach (owner, 2026-08-29): simulator lives in EVA, CLI built from it
+
+Rather than a separate SwiftPM package, **move the simulator sources into the
+EVA structure and build the CLI as a second target from what already exists in
+EVA.** This avoids inverting the dependency (the simulator already depends on
+EVA core, not the other way round) and needs no public-API pass.
+
+- [x] **Bring the generation core into the EVA target's source tree** at
+  `EVA/Simulation/` (19 files + 2 extracted shared types), so the app compiles the
+  generators/scenario/forward and the GUI (SIM-1) can call them directly — no
+  import, no `public`, same module. CLI-only glue stayed out of the app.
+- [x] **Add an `EVASimulate` command-line-tool target** to `EVA.xcodeproj`. Under
+  the sync-group model, membership is an explicit Sources phase duplicate-compiling
+  the exact 47-file closure (glue + core + 17 shared). `main.swift` stays the CLI
+  entry point (it cannot live under `EVA/` — top-level code vs the app's `@main`).
+- [x] **Embed the CLI in the app bundle**: a Copy Files build phase
+  (dstSubfolderSpec 6 → `Contents/MacOS/`) copies the `EVASimulate` product, with
+  an app→CLI target dependency. Confirmed a plain codesigned executable (not a
+  nested `.app`), hardened runtime, team 7V8RRF84QH.
+- [x] **Retire `build.sh`** — done; `run-all-tests.sh` and `check-determinism.sh`
+  reroute to the `xcodebuild` Release product.
+- [x] **Migrate the self-test**: reachable as the CLI `selftest` subcommand *and*
+  from `EVATests` via a subprocess wrapper (execs the bundled CLI, `#expect`s zero
+  failures). The in-process `SelfTest.run()` wrapper was rejected — its
+  `SNRMetrics`/`SurrogateBrainModel` shadow EVA types that existing tests use.
+
+### Alternative kept on record: full `EVASimulationKit` SwiftPM package
+
+The cleaner-in-principle option (one source of truth, CLI as a thin driver).
+Feasible because the closure is only 17 files, and app *import* churn is
+avoidable with a single `@_exported import EVASimulationKit` in one app file.
+Cost that made the owner prefer the in-EVA path: a public-API pass over MFF I/O
+/ `SensorLayout` / `DSP` / `LinearAlgebra`, plus hand-wiring the local-package
+dependency in `EVA.xcodeproj`. Revisit only if the app itself later wants to be
+split into a core package for other reasons.
+
+### Resolved during execution
+
+- **Group layout:** one flat `EVA/Simulation/` folder (the sync group compiles it
+  into the app automatically); no mirror of the old file grouping was needed.
+- **Duplicate-compile vs static lib:** duplicate-compile won, forced by the
+  sync-group model (a root group is all-or-nothing per target, so "just the 17
+  shared files" cannot be a second target's membership) and by the no-public-API
+  constraint. A static lib would reintroduce the `import` pass that was rejected.
+- **Codesigning:** the embedded CLI is codesigned by the normal build (automatic
+  signing, team 7V8RRF84QH, hardened runtime). Notarization is a release-time
+  concern, not a build-time one, and is inherited from the app's flow.
+
+**Exit — met:** EVA compiles the generation core in its own module (in-memory
+generation is a direct call for SIM-1); the CLI is a bundled, codesigned
+executable at `EVA.app/Contents/MacOS/EVASimulate`; `xcodebuild test` runs the
+107-check corpus (via the CLI subprocess wrapper); `build.sh` is gone.
+
+## SIM-1 — New → Simulated Recording panel — **COMPLETED (2026-08-30)**
+
+A dedicated panel modeled directly on Batch Process. The batch scaffolding was
+the template: a `Window(id:)` scene (`BatchWindowView`) opened from a menu
+command (`OpenBatchWindowButton`) that owns a controller (`BatchController`) and
+shows a setup sheet (`BatchSetupSheet`) on first open. Mirrored:
+
+- [x] **`SimulatorWindowView`** — a `Window(id:)` scene registered in
+  `EVAApp.swift`, opened from **File ▸ New ▸ Simulated Recording**
+  (`OpenSimulatorWindowButton`, ⇧⌘N), owning a `SimulatorController`. Single-
+  instance like Batch; setup sheet on first appearance, then a
+  generating/done/failed view.
+- [x] **`SimulatorSetupSheet`** — exposes the high-value knobs (channels,
+  duration, rate, seed, and BCG / gradient / blink / EMG toggles) rather than all
+  40+ CLI flags, binding straight to an in-module `SimulationConfig`
+  (`SimulationConfig.default` as the starting point).
+- [x] **Generate** runs off the main thread via `SimulatorRunner` and opens the
+  contaminated `.mff` as an ordinary recording (`PendingWindowOpens` +
+  `openWindow("main")`). The clean recording and `_truth.json` sidecar are written
+  alongside. **How it works:** the GUI serializes its `SimulationConfig` to a
+  scenario JSON with the in-module `SimulationScenarioFile.write`, then drives the
+  bundled `EVASimulate generate` (SIM-0's embedded CLI) — round-trip parity, and
+  the write path reuses the CLI's `SimulationWriter` rather than duplicating MFF
+  serialization in the app. Verified end-to-end by `SimulatorRunnerTests` (runs in
+  the sandboxed app host: locates the CLI, generates, deterministic by seed).
+- [x] Drives a full `SimulationConfig` directly (superset of "existing scenarios
+  and presets").
+- [x] **Studio window (v2, 2026-08-29):** enlarged window with a top **mode
+  selector** (Generate implemented; Score / Sweep / Group are visible-but-inert
+  placeholders the shell makes room for), and Generate is a **tabbed inspector**
+  (`SimulatorGenerateView`): Recording · Sources & Head · Gradient · Cardiac ·
+  Ocular · Muscle & Other · ERP · Defects · Output — curated high/medium-value
+  knobs per tab, with a persistent bottom bar (seed · summary · Generate) and a
+  status strip. The whole config still round-trips, so unsurfaced fields keep
+  their defaults.
+- [x] **Output directory** picker (Output tab) + filename prefix + "open after".
+  Sandbox-safe: the CLI always writes into a container-temp dir (a child cannot
+  inherit the app's scoped access to a chosen folder), then the app copies the
+  results into the chosen directory.
+- [x] **Command provenance:** each run writes `<prefix>_command.json` (exact argv
+  + copy-pasteable command line + timestamp/app version) and `<prefix>_scenario.json`
+  alongside the recordings, so both the inputs and the invocation are on disk.
+
+- [x] **Score mode (2026-08-29):** the generate → clean → score loop, in-window.
+  Pick a ground-truth `_clean.mff`, the corrected recording (cleaned + exported
+  from EVA), and optionally the uncorrected `_noisy.mff` baseline; runs
+  `EVASimulate score --json`, decodes `CorrectionScore` into app-side DTOs, and
+  shows broadband metrics (corrected vs uncorrected) + a per-band table.
+  Sandbox-safe: inputs are staged into container-temp (the CLI child can't read
+  user-picked packages outside the container), then scored. "Fill truth & baseline
+  from last generation" wires the two modes together. Verified by two Score tests
+  (identical → correlation > 0.99; noisy-vs-clean → populated bands/channels).
+
+**Core shipped:** a person picks knobs across the Generate tabs, chooses an output
+folder, clicks Generate, a simulated recording opens and flows through the normal
+pipeline, and they can Score their cleaning against ground truth — all without
+leaving EVA.
+
+**Remaining pieces — all shipped 2026-08-30:**
+
+- [x] **Sweep mode** — a Studio mode that varies one of the CLI's 10 sweepable
+  parameters across comma-separated values off the current Generate config, runs
+  `EVASimulate sweep`, and shows `sweep_summary.csv` as a value → uncorrected-SNR
+  table with per-run Open. (`SimulatorSweepView`, `SimulatorRunner.sweep`.)
+- [x] **Group mode** — a Studio mode: subject count, group seed, homogeneous or
+  seven between-subject SD sliders; runs `EVASimulate generate-group` and lists the
+  `sub-<label>` subjects + the participants TSV. (`SimulatorGroupView`,
+  `SimulatorRunner.generateGroup`.)
+- [x] **Scenario-preset picker** — the 8 `Tools/EVASimulate/scenarios/*.json` are
+  bundled into the app as a **folder reference** (single source of truth with the
+  CLI) and offered as a "Load a preset…" menu at the top of Generate that replaces
+  the current config. (`SimulatorScenarioLibrary`.)
+- [x] **Per-band amplitudes** — a **Background** tab exposes the alpha envelope and
+  a per-band σ for δ / θ / β / γ (`eegBands[i].amplitudeMicrovolts`) plus the global
+  target σ. **Coordinate/montage import** — a coordinates.xml / MFF picker (staged
+  into the run's temp dir for the sandboxed child) plus a montage-jitter knob, in
+  Sources & Head. (Named built-in nets — HydroCel 64/128/256 — remain deferred to
+  SI-4, per owner 2026-08-30.)
+
+All four are verified in `SimulatorRunnerTests` (sweep runs, group subjects, preset
+library loads) from the sandboxed host. Interactive source placement / a live field
+is deliberately **not** part of SIM-1 — that is the Source Simulator window below.
+
+## The Source Simulator window (SIM-2 + SIM-3 home) — **IN PROGRESS (Stages 1, 2, 3a, 3b, 3c shipped; 3c-perf mostly shipped)**
+
+SIM-2 and SIM-3 are two halves of one interactive tool — SIM-3 is SIM-2's
+viewport — so they ship together in **their own dedicated window, "Source
+Simulator"** (File ▸ New ▸ Source Simulator), *not* as another mode inside the
+Simulator Studio. Rationale: the Studio's Generate/Score modes are form-and-file
+work that drives the bundled CLI; the Source Simulator is a live, spatial,
+direct-manipulation tool with a fundamentally different interaction paradigm and
+its own persistent state (sources, positions, time courses, the live field). It
+mirrors the Studio's scaffolding — a single-instance `Window(id:)` scene owning a
+`SourceSimulatorController`, opened from a `File ▸ New` menu command — but is a
+separate window, as the owner suggested (2026-08-29).
+
+**Crucial architectural point:** unlike SIM-1/Score, this window does **not**
+shell out to the CLI. It calls the in-module forward solver
+(`SphericalForwardModel.leadField(head:montage:sources:reference:terms:)`, which
+returns a µV/(nA·m) matrix) **directly, in-process**, so dragging a dipole
+recomputes the scalp field with no file round-trip. This is exactly the payoff
+SIM-0 unlocked by moving the generation/forward core into the app module.
+
+Reused building blocks (all in-module): `ForwardDipole` / `SimulatedSource`
+(`EVA/Core/Forward/ForwardTypes.swift`), the analytic-sphere / ellipsoid / BEM
+solvers, `Montage.forwardElectrodes(head:)`, `SensorLayout` + an existing topomap
+renderer (e.g. `TopoFilmstripView`'s scalp interpolation) for the live field, the
+head-model picker already built for Generate, and the BEM icosphere mesh for the
+head/brain outline. Mind the shared MFF/SensorLayout y-flip when projecting.
+
+**Layout:** a split view — left, the glass-brain viewport (SIM-3); right, the live
+scalp topomap plus a source inspector (position, orientation, moment, time
+course); a source list with add/remove, and (stage 2+) a time-course editor and
+timeline scrubber.
+
+### Stage 1 — SIM-3 tier B + SIM-2 static field — **SHIPPED 2026-08-29**
+
+The fastest visible win and the single most useful teaching object; shipped first.
+
+- [x] `SourceSimulatorController` (`@Observable`) + `SourceSimulatorWindowView` +
+  the `File ▸ New ▸ New Source Simulator…` command and single-instance `Window`
+  scene (mirrors the Studio scaffolding).
+- [x] **Glass-brain viewport (tier B):** three orthographic projections (axial /
+  coronal / sagittal) in SwiftUI `Canvas` (`HeadProjectionView`), scalp + brain
+  shell outlines from the sphere radii, each source a dot + orientation arrow at
+  its projected position, drag to move within a plane's two axes (the third is
+  held; a source is clamped inside the brain shell). Laid out 2×2 with the field.
+- [x] **Live forward field:** `SourceSimulatorController.scalpPotentials()` builds
+  the lead field **in-process** via `SphericalForwardModel.leadField(...)` (60
+  harmonic terms for responsiveness) and multiplies by each source's moment; a
+  compact IDW topomap (`ScalpFieldView`) redraws as sources move. Inspector:
+  moment slider, orientation quick-sets (radial/X/Y/Z), head-model (3/4-shell),
+  channel count (19/32/64/128), reference.
+- [x] **In-canvas orientation:** ⌥-drag grabs a dipole's arrow and aims it. Each
+  projection rotates about its own normal axis (axial→z, coronal→y, sagittal→x),
+  preserving the out-of-plane tilt, so the three views together point anywhere.
+  Move vs rotate is chosen from `NSEvent.modifierFlags` at grab time.
+- Verified by `SourceSimulatorControllerTests` (field exists + spatially varies,
+  average-ref zero-sums, moving changes the field, brain-clamp keeps the solver
+  valid, ⌥-rotation aims in-plane while staying unit length).
+- [x] **Glass-brain surface:** the projections draw a faint BEM-icosphere
+  wireframe (`BEMForwardModel.icosphere(subdivisions: 1)`, cached once) behind a
+  crisp boundary circle; both layers toggle independently in the inspector. Channel
+  counts now include **256**.
+- [ ] **Deferred within Stage 1:** ellipsoid/BEM in the field picker (3/4-shell
+  only so far), and a true anatomical (MRI-backed) silhouette — the sphere/icosphere
+  is correct for the parametric heads.
+
+**Stage-1 exit — met:** a dipole can be placed/dragged in the glass brain and its
+scalp topography read off live, entirely in-process.
+
+### Stage 2 — SIM-2 time courses and scalp EEG — **SHIPPED 2026-08-30**
+
+- [x] **Per-source time-course editor:** a `TimeCourse` per source — constant,
+  sine (frequency), ERP bump (Gaussian: latency + width), pulse (onset + length),
+  and seeded coloured noise — edited in the inspector; the moment slider is the
+  peak amplitude the course modulates.
+- [x] **Timeline + animation:** a transport (play/pause) + scrubber over the epoch
+  (duration × rate); a 30 fps tick advances `currentTime`, and the scalp field is
+  shown at that instant. Fast because the lead matrix and the per-source series are
+  cached (keyed by geometry / by moments+courses+duration+rate), so a playback
+  frame is a matrix-vector product, not a fresh solve.
+- [x] **"Generate scalp EEG":** assembles the full channels × samples recording
+  (lead field × source series) and writes it as an MFF **entirely in-process** via
+  the app's own `MFFWriter` + `MontageWriter.writeLayoutFiles` (coordinates
+  included), then opens it as an ordinary recording — no CLI, no scenario file. It
+  flows through EVA's pipeline and can be exported and fed to the Studio's Score
+  mode. Verified by `SourceSimulatorControllerTests` (sine field varies / is flat
+  at t=0, ERP peaks at its latency, and the written MFF reads back with the right
+  dimensions and a loadable topomap layout).
+
+### Stage 3a — Activation timeline — **SHIPPED 2026-08-30**
+
+Time is authored as a list of *activations* per dipole rather than one continuous
+course: a dipole is silent except during its activations, and can have any number
+at any times — so "a new time with new and/or old dipoles" is just later activations
+on new or existing dipoles (a dipole reused = a later activation; a new dipole = a
+new object starting later).
+
+- [x] **Model:** `Source.activations: [Activation]`; each `Activation` is a windowed
+  waveform — hold / sine / ERP bump (Gaussian centred in the window) / seeded noise —
+  with a **variable per-activation amplitude** (negative allowed, for polarity),
+  start, and length. A dipole's moment series is the sum of its activations; the
+  default dipole gets one full-epoch hold so static placement still shows a field.
+- [x] **Multi-track timeline** (`SourceTimelineView`): one row per dipole, each
+  activation a draggable/resizable block (drag to move, right-edge to resize, click
+  to select); a red playhead scrubs the live field; **Play** watches the whole scene
+  evolve; add/remove activation; a per-activation editor in the inspector.
+- [x] Verified by `SourceSimulatorControllerTests` (activations fire only inside
+  their window, the sine field is flat at t=0 and varies at peak, the ERP peaks at
+  the window centre, and the generated MFF still reads back correctly).
+
+### Stage 3b — Noise + truth-backed scoring (the EVA differentiator) — **SHIPPED 2026-08-30**
+
+The clean field is known exactly at every instant, so noise and scoring stay honest
+and need no inverse solver (distributed source imaging remains EVA Resolve's job).
+New files: `EVA/Simulation/SourceSimulatorNoise.swift` (white/pink + SNR scaling +
+scoring math), `EVA/Simulation/SourceSimulatorArtifacts.swift` (reuses the in-module
+Ocular/EMG/BCG generators with the parametric montage, keeps timing truth).
+Controller gained clean/noisy/contamination matrices, live + whole-recording scores,
+and a truth sidecar; inspector gained a Noise & artifacts section with a live
+SNR/correlation-vs-truth readout. 18/18 Source Simulator tests green.
+
+- [x] **Noise model — white + pink** at a target SNR (`SourceSimulatorNoise
+  .noiseMatrix` scales the background so whole-recording SNR equals the requested
+  dB, exact to fp; deterministic in seed). Further noise models
+  worth adding later, roughly by value:
+  - **Measured-EEG background** — resample real resting EEG (or match its spectrum) so
+    the background carries a physiological 1/f + alpha shape, not synthetic colour.
+  - **Spatially-correlated noise** — a realistic channel covariance (e.g. the field of
+    many shallow random sources) so noise is *not* independent per electrode; this is
+    what actually challenges spatial filters (PCA-S/ICA/SSP).
+  - **Per-band noise** — dial noise power per band (δ/θ/α/β/γ).
+  - **Sensor faults** — per-channel drift, pops, high-impedance hiss, a bad-reference
+    offset (sensor-space, not physiological).
+- [x] **Physiological artifacts as an option under noise** — blink / saccade / EMG /
+  BCG injected on top of the clean field via the in-module generators
+  (`OcularArtifactModel` / `EMGArtifactModel` / `BCGArtifactModel`, driven by the
+  parametric `Montage`), each keeping its timing truth in the sidecar. (Gradient
+  is available in-module too but omitted — it's an fMRI-scanner artifact, not a
+  general contamination.)
+- [x] **Scoring:** on Generate, when contamination is on, writes `source_sim_clean
+  .mff` + `source_sim_noisy.mff` + `source_sim_truth.json` (dipole positions/
+  orientations/activations, noise settings, artifact timing, overall SNR/corr) —
+  ready to hand to the Studio's **Score** mode (noisy vs the clean truth). A live
+  SNR/correlation-vs-truth readout (current sample + whole recording) updates as
+  you scrub, and a "Show noisy field" toggle overlays the contamination on the
+  topomap while the clean field stays the scoring truth.
+
+### Stage 3c — Single-dipole-fit localization diagnostic — **SHIPPED 2026-08-30**
+
+The BESA-adjacent source-space check, after 3a/3b: fit one equivalent dipole to the
+field at the playhead (nonlinear position, linear moment) and report localization
+error (mm) and orientation error (deg) vs the true active dipole. A classic bounded
+inverse used purely as a validation diagnostic — explicitly *not* distributed
+imaging, so it stays on the right side of the EVA Resolve boundary.
+
+- [x] **Solver** (`EVA/Simulation/SingleDipoleFit.swift`): one ECD, nonlinear in
+  position / linear in moment. A coarse grid inside the brain shell, then several
+  local refinements, each a *single batched* `SphericalForwardModel.leadField`
+  call over all its candidates — so the whole search costs a handful of
+  spherical-harmonic setups, not one per position. The moment is solved in closed
+  form from the free-orientation (x/y/z) columns that call already keeps
+  (normal equations, tiny Tikhonov diagonal for near-degenerate deep/central
+  points). Reports goodness-of-fit and RMS residual alongside position/moment.
+- [x] **Controller hook** (`liveLocalization()`): fits the *displayed* field, so
+  the "Show noisy field" toggle drives clean-field recovery (~0 mm) vs how
+  contamination degrades it; compares to the dominant instantaneous source
+  (single-ECD fitting genuinely degrades under simultaneous sources, and comparing
+  to the dominant one keeps the error honest). Cached by geometry + playhead +
+  contamination signature so re-renders and playback are cheap. Orientation error
+  folds the dipole's sign ambiguity.
+- [x] **Multiple dipoles (one per placed source)**: `fitMultiple` fits K = the
+  number of sources the user has placed — sequential deflation for an initial
+  guess, then **joint coordinate descent on the true joint objective** (each
+  candidate position re-solves *all* moments and scores the full field), then a
+  closing joint moment re-solve. Scoring the joint residual (not the peeled
+  `b − others`) is what recovers well-separated sources to a few mm rather than the
+  ~1.5 cm compromise plain peeling settles into. Each fitted dipole is paired
+  one-to-one to its nearest true source. This is still not a global simultaneous
+  optimizer — close/synchronous/noisy sources can converge to a swapped or merged
+  configuration, which the diagnostic surfaces rather than hides.
+- [x] **Spatiotemporal (interval) fit + SVD model order — the Scherg/Berg method.**
+  A single instantaneous topography is one spatial vector, so it cannot separate
+  simultaneous sources; a time *interval* can, if the sources have distinct time
+  courses (the data is then rank ≥ 2). `fitSpatioTemporal` fits over an interval by
+  reducing everything to the channels×channels covariance `C = data·dataᵀ` — the
+  residual of a dipole set with free per-sample moments is
+  `trace(C) − trace((LᵀL)⁻¹ LᵀC L)`, so positions come from the same deflation +
+  joint-objective coordinate descent scored on `C`, and per-dipole
+  orientation/RMS-magnitude come from the moment covariance `G⁻¹(LᵀC L)G⁻¹` — all
+  at the same cost as the instantaneous fit. The **eigenvalues of `C`** give the
+  variance spectrum = the model-order picture ("how many dipoles the data
+  supports"). A **fit-mode toggle** (Instant / Interval) chooses per-instant vs
+  interval; interval is the default.
+- [x] **Butterfly plot + interval selection** (`SourceButterflyView`): all channels
+  of the produced field overlaid vs time, with a playhead and drag-to-select a
+  time window (click clears → whole epoch). The selection is what the interval fit
+  runs over. Shown in the Source Simulator window when the interval fit is active.
+- [x] **Glass-brain overlay + right-click**: right-click any of the three
+  projections → "Fit Dipoles at Playhead" draws each fitted dipole as a purple
+  diamond with an orientation arrow, and a dashed error line to its paired true
+  source, so the localization error is visible in the views — not only a number.
+  The inspector shows per-dipole mm/deg errors and, for an interval fit, a small
+  **SVD spectrum sparkline** (bars beyond the dipole count drawn faint, so an
+  over-/under-specified model is visible). The fit runs off the main thread with a
+  "Fitting…" spinner and a generation guard so a fast change never lands a stale
+  result.
+- [x] **Inspector readout**: a "Localization diagnostic" section — a show/hide
+  toggle and a live GOF / magnitude / position-error-mm / orientation-error-deg
+  readout, labelled clean vs noisy.
+
+**Real-data source-analysis mode (built on 3c, EVA Resolve is now part of EVA):**
+
+- [x] **Simulate ↔ Fit mode switch** on the Source window. Fit mode
+  (`SourceFitModeView`) fits a dataset of averaged conditions instead of the
+  authored scene.
+- [x] **Shared-geometry, per-condition-moment fit** (`SingleDipoleFit
+  .fitSharedGeometry`): positions come from the *combined* covariance of all
+  conditions (so no condition's noise pulls the geometry), then each condition's
+  own moments are solved at those shared positions. That makes "does the model
+  differ between conditions?" a clean question — same generators, the difference
+  lives in per-condition moment amplitude/orientation, shown as **moment-by-
+  condition bars per dipole**. The overall **SVD spectrum** (combined covariance)
+  gives the model order for real data with no ground truth; the readout drops mm
+  error and reports GOF / residual / moment when truth is absent.
+- [x] **Fit-mode UI**: a multi-condition butterfly (all conditions overlaid,
+  colored) with drag-to-select interval; three ortho glass-brain projections
+  showing the shared dipoles (and true sources when known); a dipole-count
+  stepper; a built-in demo dataset.
+- [x] **"Fit Source Model" bridge**: right-click a recording's **averaged
+  butterfly or topography** → hands *every* averaged condition (channels × samples)
+  plus the recording's real montage (via `Montage.fromGeometry`, average-
+  referenced to match the forward) to the Source window's Fit mode via
+  `PendingSourceFit` (+ notification, since the single-instance window may already
+  be open), pre-highlighting a window around the viewed latency.
+- [x] Verified by `SourceSimulatorControllerTests` (clean field recovered
+  sub-centimetre; noise degrades GOF and moves the fitted position; one dipole
+  cannot fully explain two simultaneous sources; a silent playhead has nothing to
+  fit; the multi-dipole fit recovers two separated sources within a centimetre with
+  GOF > 0.99 and beats the single-dipole GOF; the **interval** fit recovers two
+  *simultaneous* distinct-time-course sources the instant fit can't, and the SVD
+  spectrum shows two significant components for two sources vs ~one for one; the
+  **shared-geometry** fit keeps positions fixed while a doubled-drive condition
+  doubles that dipole's moment; the **Fit-mode demo dataset** recovers three
+  sources across two conditions). 29/29 Source Simulator tests green.
+
+Deferred follow-on: before any BESA-Simulator parity claim, check their current
+feature list rather than cloning from memory.
+
+### Stage 3c-perf — Make dipole fitting BESA-fast — **MOSTLY SHIPPED 2026-09-05** (now tracked in `EVA_RESOLVE2.md` R5.0)
+
+The fit is correct but slow: a single ECD is a few hundred ms and a multi-dipole /
+shared / interval fit is seconds, where BESA fits a single ECD nearly instantly.
+The gap is *how* we compute, not the math — the objective, geometry, and results
+stay identical. Root causes, measured against the current code:
+
+1. **The forward model is recomputed from scratch inside the search loop.** Every
+   candidate position calls `SphericalForwardModel.leadField`, which sums a
+   60-term spherical-harmonic series over every electrode. The position search is
+   a brute-force grid (coarse ~hundreds of points + several refinement levels), so
+   one fit makes many series-summed forward calls; multi-dipole coordinate descent
+   repeats that over sweeps × dipoles.
+2. **Grid search instead of a gradient optimizer** — hundreds of evaluations per
+   level where a Levenberg–Marquardt/simplex walk from a seed needs ~5–15.
+3. **Plain `[[Double]]` nested loops, not Accelerate/BLAS**, plus per-call forward
+   overhead, plus reactive re-fitting on every selection/count change.
+
+Plan, in payoff order (each step is independently shippable and must keep the fit
+results within tolerance of the current tests):
+
+- [x] **Precompute a free lead-field grid once (biggest win).** Shipped
+  2026-09-05 as `LeadFieldGrid` (`brainRadius/12`, trilinear interpolation,
+  `Float` storage, cached per geometry, ≤3 kept). Candidate scoring no longer
+  solves the forward model at all; unsolvable near-shell nodes fall back to an
+  exact solve and `finalize` stays exact. See `EVA_RESOLVE2.md` R5.0.
+- [x] **Rank-reduced covariance and flat/parallel candidate scan** (not on the
+  original list, but the actual first-pass win): flat preallocated buffers, a
+  rank-reduced `C ≈ W·Wᵀ` objective, and parallelizing the candidate scan
+  *including* each worker's own forward solve. 6.4× (40.87 s → 6.34 s) on the
+  benchmark, all 35 EVAResolve tests unchanged.
+- [x] **Reduced harmonic order in the search** (24 terms vs 60 for the exact
+  `finalize`/`deflateCovariance`/`decompose` paths) plus hoisted fixed-dipole
+  blocks in the joint objective. Combined with the lead-field grid: 43× on
+  cached fits (40.87 s → 0.95 s), 14× cold (2.88 s); single ECD 0.18 s — meets
+  the "single ECD instant, multi-ECD sub-second" target once the grid is warm.
+- [~] **Levenberg–Marquardt / Nelder–Mead position refinement** — decided
+  **not needed**: with the grid warm, refinement is 0.59 s and the coarse
+  search 0.24 s, so replacing the search strategy is algorithmic risk for
+  fractions of a second. Revisit only if a realistic BEM (R3) makes
+  per-candidate evaluation expensive again.
+- [x] **Phase-timing instrumentation** (`ProgressReporter.PhaseTimings`,
+  reachable via `runSharedFitNow(reporter:)`) — what made each optimization
+  above targeted rather than guessed.
+- [ ] Remaining cost: the one-time grid build itself (1.89 s, ~66% of a cold
+  fit). Candidate follow-ups: build it lazily in the background on dataset
+  load, or coarsen the lattice and lean on the exact final refinement.
+- [ ] **Analytic / cheaper forward for the search** beyond the 24-term
+  reduction (e.g. closed-form Sarvas single-shell) — not needed yet given the
+  grid result above.
+- [ ] **Cache the forward across reactive re-fits** and debounce interval-drag /
+  dipole-count changes so a fit isn't relaunched mid-gesture.
+- [ ] **Benchmark harness** as a persisted regression test (today it's the
+  ad hoc `benchmarkSharedFit`/timing runs above, not a committed budget
+  assertion): assert single-ECD and 2-dipole fit wall time stay under a budget
+  on the standard montage, and that accuracy stays within the current tests'
+  tolerances.
+- [ ] **Head-model agnostic fit** against any `ForwardOperator` (R3.4),
+  including an imported BEM.
+
+**Exit:** met for the sphere/spherical-harmonic path — single ECD and
+multi-dipole/shared/interval fits are interactive with the grid warm, and the
+localization tests still pass (35/35 EVAResolve tests). Still open: the
+one-time grid-build cost, a committed benchmark/regression test, and
+head-model-agnostic fitting once BEM import (R3) lands.
+
+### Stage 4 — SIM-3 tier A (SceneKit) and beyond — deferred until tier B proves out
+
+- [ ] **Tier A:** a true orbiting, zoomable glass brain in SceneKit, once tier B
+  proves the interaction is worth the 3D dependency.
+- [ ] **Tier C** (MRI-backed mesh) only if real segmented anatomy is imported —
+  not required for the parametric sphere/ellipsoid heads.
+
+**Overall exit:** a user builds a multi-source scenario interactively in the Source
+Simulator window, sees its live field, drives it with time courses, and reads a
+truth-backed score. **Effort:** large overall; Stage 1 is small–medium and
+independently valuable.
+
+---
+
+# PART TF — EVENT-RELATED TIME-FREQUENCY
+
+Bring frequency-domain analysis to the epoch level: not just "what is the spectral
+power of this recording" (already shipped) but "how does power and phase-locking
+evolve, time-locked to the event" — ERSP and ITPC, the frequency-lens counterpart
+to the Average / Trials waveform views. The payoff is that EVA can measure
+oscillatory responses in established bands (δ/θ/α/β/γ) or continuously, export them
+in the forms the field actually publishes, and feed them into the cluster-based
+permutation stats EVA already owns.
+
+**Why this is far cheaper than it looks — most organs already exist:**
+
+- **Whole-recording spectral band power is already shipped** —
+  `EVA/Analysis/EEGAnalysisEngine.swift` `spectralAnalysis` does FFT/PSD absolute +
+  relative power per band, per channel, with a tidy long-format CSV export. PART TF
+  reuses its band definitions and its CSV schema verbatim.
+- **A Morlet CWT + scalogram already exist** — `EVA/Wavelet/
+  ContinuousWaveletTransform.swift` (Morlet, w0=6, scale↔freq) and
+  `WaveletScalogram.swift` (`power[freq][time]`, log-spaced). Currently **real part
+  only** — good for a picture, but it yields no phase and a biased power estimate.
+- **The cluster-based permutation stack is already written** — `EVA/Trials/
+  ClusterPermutationAnalyzer.swift`, the F-variant, `ClusterSpatialAdjacency`, null
+  distributions (Maris–Oostenveld). The hardest group-stats code is done.
+- **Epoch / average scaffolding** — `EVA/Epoching/AveragesWorkspaceViews.swift`
+  (EpochSegment, overlays, channel/baseline selection) and the **Metal wavelet
+  backend** (`WaveletMetalBackend.swift`) are both reusable.
+
+**The genuine gaps:** (1) a **complex analytic Morlet** (add the imaginary part to
+the existing kernel) so we get phase → ITPC and an unbiased `|c|²` power; (2)
+**per-trial stack aggregation** into ERSP + ITPC; (3) a **frequency axis on cluster
+adjacency**; (4) a small **binary map writer**.
+
+**Scheduling note:** like Part 0, PART TF does **not** preempt the Part EVA Core execution
+order (SI-4 stays milestone 1). It is scheduled at the owner's discretion.
+
+Dependency map:
+
+```text
+TF-1 (complex Morlet + ERSP + validation)      ← the only hard numerical piece
+   ├─→ TF-2 (ITPC + multitaper + TF tab UI)
+   │       └─→ TF-3 (binary maps + tidy scalar CSV export)
+   │               └─→ TF-4 (frequency-axis cluster permutation stats)
+```
+
+New module: `EVA/TimeFrequency/`
+`TimeFrequencyModels.swift` · `ComplexMorlet.swift` · `Multitaper.swift` ·
+`TimeFrequencyEngine.swift` · `TimeFrequencyMetalBackend.swift` ·
+`TimeFrequencyView.swift` · `TimeFrequencyExport.swift`
+
+## TF-1 — Complex Morlet + ERSP + validation — **DONE (except GPU path)**
+
+The one hard part; its numbers are proven against MNE. New module
+`EVA/TimeFrequency/` (`ComplexMorlet.swift`, `TimeFrequencyModels.swift`,
+`TimeFrequencyEngine.swift`); gate in `EVATests/TimeFrequency/`.
+
+- [x] Complex Morlet kernel returning `(re, im)` — `ComplexMorlet.kernel`.
+  Reproduces MNE's `mne.time_frequency.morlet` convention exactly (`σ_t =
+  n/2πf`, ±5σ support, `√0.5·‖W‖` normalization, `zero_mean=True`). NOTE: this
+  is a *new* complex kernel, not the real `ContinuousWaveletTransform.kernel` —
+  variable cycles require reparameterizing by `(f, n_cycles)`, which the fixed-
+  width real kernel cannot express. Same scale↔freq convention, different kernel.
+- [x] **Variable cycles:** `TFFrequencyPlan.logSpaced` ramps `nCycles` linearly
+  3 → 10 across the band (per-frequency `nCycles` array).
+- [x] Per-trial complex CWT → mean over trials of `|c|²` → baseline-normalized —
+  `TimeFrequencyEngine.meanPower` / `.ersp`. Matches MNE
+  `tfr_array_morlet(output='avg_power')` for the Morlet path.
+- [x] **Baseline picker:** dB (default), percent, z-score, divisive, none —
+  `TFBaselineMethod` + `TimeFrequencyEngine.normalize` over a sample-range window.
+- [ ] Run the per-trial loop on `WaveletMetalBackend` (trials × channels × scales
+  is embarrassingly parallel). **DEFERRED within TF-1** — correctness gate is
+  green on the CPU direct-convolution path; the GPU/FFT port is a pure perf
+  follow-on (the CPU path is ~16 s for 40 trials × 19 freqs × 1000 samples).
+- [x] **Validation gate:** `TimeFrequencyEngineTests` — (1) MNE cross-check vs the
+  committed fixture `Fixtures/tf_morlet_reference.json` (offline-generated by
+  `Fixtures/generate_tf_reference.py`, since the XCTest sandbox can't shell out),
+  max error < 1e-6 relative to peak; (2) physics recovery of a 6 Hz burst
+  (frequency, latency ±150 ms, elevated dB); (3) determinism; (4) kernel norm.
+
+**Effort:** small–medium — the complex kernel is ~30 lines; validation was the work.
+
+## TF-2 — ITPC, multitaper, and the Time-Frequency tab — **DONE (visual pass pending)**
+
+- [x] **ITPC** = `|mean over trials of (c/|c|)|` — computed in the SAME pass as
+  ERSP power (`TimeFrequencyEngine.decompose`). Cross-checked against MNE
+  `tfr_array_morlet(output='itc')`, max error < 1e-6; plus a phase-locked-burst
+  physics check (ITPC ≈ 1 at the burst, low at baseline).
+- [x] **Multitaper** path (DPSS tapers, short-time) as a `TFMethod` picker option.
+  `DPSS.swift` reproduces `scipy.signal.windows.dpss(sym=False, norm=2)` exactly
+  (L2 eigenvectors of the Slepian tridiagonal via LAPACK `dstevr_`, sign
+  conventions, autocorrelation·sinc concentration ratios) — matches scipy to
+  < 1e-9. `Multitaper.swift` builds the short-time wavelets
+  (`exp(2iπf(t−t_win/2))·taper_m`, `t_win=n_cycles/f`); the engine combines them
+  as `2·Σ conc_m·mean|c|² / Σ conc_m` (power) and `Σ_m|Σ c/|c||/n_trials` (ITC).
+  Both cross-check against MNE `tfr_array_multitaper` at < 1e-6. Wired into the TF
+  view's Method picker with a time-bandwidth control.
+- [x] **UI:** third view mode beside Average / Trials (`AveragedDisplayMode
+  .timeFrequency` → `TimeFrequencyView`). freq × time heatmap (Canvas, log-freq
+  axis, event marker), channel selector, condition selector, Power/ITPC toggle,
+  A − B condition-difference map, baseline + frequency/cycle controls. Reads the
+  raw per-trial epochs (`segmentedEpochSignal`/`segmentedEpochSegments`) via the
+  shared `TimeFrequencyTrials.stack` reduction. Settings persist on
+  `EpochingViewModel`. Diverging (blue–white–red) map for dB/difference,
+  viridis for ITPC. Data-prep unit-tested; visual pass on a real recording still
+  pending.
+
+**Effort:** medium — ITPC is trivial; DPSS multitaper is the new lift.
+
+## TF-3 — Export: binary maps + tidy scalar CSV — **DONE**
+
+All in `TimeFrequencyExport.swift`; Export menu wired into the TF view header.
+
+- [x] **Full maps:** `channel × freq × time` per condition as dependency-free NPY
+  (numpy v1.0 header + little-endian float32, C order). Byte-identical to
+  `numpy.save` (test compares against a committed `numpy.save` fixture). A JSON
+  sidecar carries the axes (channel names, frequencies, times) and parameters,
+  since NPY holds no metadata.
+- [x] **Scalar CSV ("single numbers"):** mean ERSP / ITPC per condition × channel
+  × band × window, reducing over the frequency bins in each `EEGFrequencyBand
+  .restingDefaults` band and the samples in each ROI window. Emitted in the long
+  "summary + rows" convention `EEGAnalysisEngine.csvRows` uses (columns
+  `row_type, scope, condition, channel_index, channel_name, band, window,
+  measure, value`) — TF adds the `condition` and `window` columns it genuinely
+  needs. Drops straight into a mixed model / JASP.
+- [x] Baseline method, cycle settings, method, and time-bandwidth are reported —
+  as `summary` rows in the CSV and in the NPY JSON sidecar.
+
+**Effort:** medium — NPY writer is tiny; the scalar reduction reuses existing schema.
+
+## TF-4 — Frequency-axis cluster permutation stats — **NOT STARTED**
+
+The big group-analysis win, and mostly generalization of existing code.
+
+- [ ] Generalize `ClusterSpatialAdjacency` to add a **frequency neighbor axis**
+  alongside time + channels.
+- [ ] Feed TF maps (power and ITPC) into the existing `ClusterPermutationAnalyzer` /
+  F-variant with the extended adjacency.
+- [ ] Document the two accepted group paths: (a) cluster-permutation over the full
+  TF × channel space (dominant method, controls the massive multiple-comparison
+  problem); (b) a-priori band × window ROI scalars → LMM/ANOVA in R/JASP (the TF-3
+  scalar CSV, zero new stats code).
+
+**Effort:** medium — the adjacency generalization is the careful part but
+well-scoped; the permutation engine is untouched.
+
+**Overall exit:** a user selects epochs, opens the Time-Frequency tab, sees a
+baseline-normalized ERSP / ITPC map, exports full maps + tidy scalars, and runs a
+frequency-aware cluster-permutation test — all on the same epoch selection the ERP
+views use. **Effort:** medium overall; TF-1 is the gate and independently valuable.
+
+---
+
+# PART EVA Core
 
 ## Milestone overview
 
@@ -36,7 +755,7 @@ when it is an independent bug fix required for safe use.
 
 | Order | Milestone | Brief description | Status |
 |---:|---|---|---|
-| 1 | **SI-4 — Adversarial validation** | Measure operating limits under geometry, head-model, rank, channel, and data-quality mismatch. | **NOT STARTED** |
+| 1 | **SI-4 — Adversarial validation** | Measure operating limits under geometry, head-model, rank, channel, and data-quality mismatch. | **IN PROGRESS** |
 | 2 | **PB-1 — Batch/replay completion** | Add partial resume, decision-skipping policy, and setup compatibility preflight. | **NOT STARTED** |
 | 3 | **MRI-1 — FASTR reliability and motion semantics** | Finish motion policy, unreliable-epoch provenance, PSA overlap behavior, and attenuation analysis. | **NOT STARTED** |
 | 4 | **SI-5 — Ocular MSEC/PCA-S** | Reuse the validated engine for blink, vertical, and horizontal ocular topographies. | **NOT STARTED** |
@@ -49,6 +768,7 @@ when it is an independent bug fix required for safe use.
 | 11 | **UI-1 — Display density and montages** | Decouple sensitivity from row pitch, add channels-per-screen, then named subsets/order. | **NOT STARTED** |
 | 12 | **UX-1 — Figure Composer Phase 2** | Add a freeform, multi-page publication-layout canvas. | **NOT STARTED** |
 | 13 | **F-1 — Focused feature backlog** | Finish exports, importer mapping, detector comparators, and other bounded follow-ups. | **DEFERRED** |
+| 14 | **DEV-1 — Developer documentation** | A `docs/developers/` tree that traces every feature to the code that implements it. | **NOT STARTED** |
 
 ## Execution order and dependency map
 
@@ -65,7 +785,7 @@ UI-1 → UX-1 → F-1
 
 The shared-code extractions (SI-0 through SI-2), the history/replay hardening
 (RW-1), and the PCA-S feature itself (SI-3) are complete; their records are in
-[Part III](#a-eva-proper--completed). **SI-4 is next**, and it is what decides
+[Part Completed](#a-eva-proper--completed). **SI-4 is next**, and it is what decides
 whether PCA-S is production-ready: the method ships with defaults that are
 defensible rather than measured — the component-reliability gate in particular —
 and its operating envelope is unmeasured until the adversarial sweeps run.
@@ -165,24 +885,112 @@ later methods below reuse the first two and supply their own domain adapter.
   regression corpus call the same engine. A sheet-only path is incomplete.
 
 Every contract above is met by SI-3 for BCG and is the reference implementation
-for SI-5 onward; see [Part III, C13](#a-eva-proper--completed).
+for SI-5 onward; see [Part Completed, C13](#a-eva-proper--completed).
 
 SI-0 through SI-3 are complete, as is the RW-1 history/replay hardening they fed
 into: the shared numerical layer, the app boundary, and the first shipped
 source-informed correction. Their records are in
-[Part III](#a-eva-proper--completed); what remains here is measurement (SI-4)
+[Part Completed](#a-eva-proper--completed); what remains here is measurement (SI-4)
 and the later methods below.
 
-## 2. SI-4 — Adversarial evaluation — **NOT STARTED**
+## 2. SI-4 — Adversarial evaluation — **IN PROGRESS**
 
-- [ ] Sweep recording length, accepted beats, BCG rank/morphology jitter,
-  component count, regularization, channels, sampling rate, and basis richness.
-- [ ] Add independent shell-radius, skull-conductivity, head-center, and
-  electrode-position mismatch to the existing basis-offset sweep.
-- [ ] Report broadband/per-band residuals, clean distortion, ERP amplitude,
-  latency/topography, removed variance, and mean ± SD over seeds.
-- [ ] Derive refusal/warning thresholds for inadequate beat count,
-  ill-conditioning, and missing geometry from evidence.
+SI-4 is a **measurement** milestone, not an infrastructure one: the head-model
+work and the `evaluate-surrogate` flags (`--seeds --offsets --sources --components
+--brain-regularization --duration --channels --coordinates --rate --correction-head
+--with-erp --json`) already exist. What remains is to run the adversarial campaign,
+report the full metric set, and turn the evidence into the refusal/warning
+thresholds the shipped code currently only *assumes* — `minimumAcceptedBeats = 10`
+and `minimumComponentReliability = 0.9` in `BCGSurrogateCorrection` are placeholders;
+geometry-missing is already a hard refusal. Three tracks (owner decisions 2026-08-30):
+
+**Track 1 — tooling gaps — SHIPPED 2026-08-30:**
+
+- [x] **Missing sweep controls** added to `evaluate-surrogate`: `--bcg-morphology-jitter`,
+  `--max-beats` (accepted-beat axis), and independent head-model params
+  `--correction-scalp-radius` / `--correction-skull-ratio` / `--correction-head-center` /
+  `--correction-electrode-jitter` (the last builds the brain basis on a jittered
+  montage while truth stays on the real one; the head params perturb only the swept
+  parameter of the truth head via `perturbedCorrectionHead`).
+- [x] **Full metric set** in the per-seed report — sensor-space distortion (clean
+  distortion dB, per-band residual/correlation, removed-variance fraction) added to
+  both the text table and the `--json`, reusing `SNRMetrics.score`.
+- [x] **`evaluate-surrogate-grid` subcommand** — `--axis <name> --values <a,b,c>
+  [--output <csv>]` cross-runs an axis (duration, channels, rate, components,
+  brain-regularization, sources, offset, max-beats, bcg-morphology-jitter,
+  correction-scalp-radius/-skull-ratio/-electrode-jitter) and writes one aggregated
+  CSV (corrected/uncorrected SNR, clean distortion, removed variance, accepted-beat
+  fraction, nearest source), all in memory via the shared `evaluateSurrogateCore`.
+  Self-test now 107/0 (adds a grid-core check). **Already surfaced a breakpoint:**
+  ≤6 accepted beats makes PCA-S *hurt* (corrected SNR below uncorrected; removed-
+  variance blows past 1.0) — Track 2/3 territory.
+
+**Track 2 — run the campaign (experiments):**
+
+- [ ] Sweep each axis with enough seeds — length, accepted beats, rank/morphology
+  jitter, component count, regularization, channels, rate, basis richness — plus the
+  independent head-model params. The channel sweep runs on the **built-in montage at
+  32/64/128/256** for the trend now; real HydroCel geometry stays deferred (below).
+- [ ] Record mean ± SD and the **breakpoint** per axis (where corrected stops beating
+  uncorrected, or ERP distortion exceeds a committed bound). Write the findings into
+  `docs/provenance/` and summarize here — like the head-mismatch finding already on
+  record.
+- [x] **Head-model mismatch (done):** `evaluate-surrogate --correction-head <name>`
+  builds the correction basis on a different standard head than the truth.
+  **Measured: PCA-S degrades gracefully** — an extreme 1:80→1:20 skull mismatch moves
+  broadband SNR ~25% but the correction still beats uncorrected (>1.8×), because the
+  brain basis spans most of sensor space. (Independent per-parameter versions are the
+  Track-1 head-model item above.)
+
+**Track 3 — evidence → guardrails (closes SI-4):**
+
+- [ ] Confirm or **recalibrate** `minimumAcceptedBeats` and
+  `minimumComponentReliability` from the data; add an **ill-conditioning guard**
+  (condition number of the regularized brain system) only if the sweeps show it
+  matters.
+- [ ] Surface the refusals/warnings as user-visible messages + provenance events,
+  with tests. Only then is PCA-S production-ready.
+
+**Enabling head-model work (SI-1 shipped only one head model; the geometry
+sweeps above cannot run without a second and third).** These are shared
+infrastructure — added to EVA's `EVA/Core/Forward/` and mirrored in
+EVASimulate's boundary types so a generate-with-one, invert-with-another
+mismatch is expressible:
+
+- [x] **4-shell concentric sphere** (brain/CSF/skull/scalp). Nearly free: the
+  shell recurrence already handles arbitrary shell count, so this is a new head
+  constant plus a CSF conductivity, on both the EVA and EVASimulate sides. This
+  is the geometry the Rusiniak et al. (2022) PCA-S paper actually used.
+- [x] **Affine-scaled ellipsoid** (BESA-style), `EllipsoidalForwardModel`. The
+  paper's "4-shell ellipsoidal" model is a per-axis affine warp of a concentric
+  sphere, not true ellipsoidal harmonics: transform electrode and source
+  geometry into sphere-space, run the existing analytic solver, map back.
+  Documented as a first-order geometric approximation (no moment/conductivity
+  anisotropy); the unit-scale case reduces bit-for-bit to the sphere, which is
+  the load-bearing self-test.
+- [x] **Alternative standard 3-shell parameterizations**: a `threeShell(...)`
+  factory keyed on the skull-conductivity *ratio* (the parameter SI-4 most needs
+  to sweep), plus named presets — `rushDriscollThreeShell` (1:80),
+  `standardThreeShell` (1:40, the modern default), `highSkullConductivityThreeShell`
+  (1:20). Mirrored on both sides.
+- [x] **BEM forward solver** (`BEMForwardModel`): meshed shells, Van Oosterom–
+  Strackee solid angles, deflated double-layer (Geselowitz) system, multi-RHS
+  LU. **Validated for single AND multi-compartment** — converges to the analytic
+  sphere at first order for a full 3-shell head at realistic skull contrast
+  (subdiv 2/3/4 → 6.5%/2.9%/0.8% at 1:40; 11%/5.7%/1.65% at 1:80). The default
+  subdivision (3) gives ≈3% at 1:40. The self-test asserts 3-shell convergence.
+  (The earlier ~170% multi-shell error was a diagonal auto-solid-angle sign bug,
+  not an ISA deficiency; the plain double-layer BEM is genuinely accurate here.)
+- [ ] **IPA / isolated-skull BEM — optional efficiency, no longer a blocker.**
+  The plain BEM is already correct; IPA (Hämäläinen & Sarvas 1989) would buy the
+  same accuracy at a coarser mesh for very high skull contrast, cutting the dense
+  solve cost. Schedule only if BEM mesh cost becomes a bottleneck for
+  generation-side use.
+- [ ] **EGI HydroCel 128- and 256-channel montages** as EVASimulate scenarios —
+  **deferred within SI-4** (owner 2026-08-30): the channel sweep runs first on the
+  built-in montage at 32/64/128/256 to get the trend; author the real HydroCel
+  geometries only if that trend shows montage-specific effects the spiral montage
+  misses. No need to reproduce the paper's exact 64-channel protocol.
 
 **Exit:** the safe operating envelope and failure messages are measured. Only
 then call PCA-S production-ready or generalize it.
@@ -193,6 +1001,30 @@ These remain grouped with the shared scientific rationale, but their execution
 slots are the ones in the milestone table: SI-5 follows MRI-1; SI-6 through SI-8
 follow the Trial-wise milestones.
 
+#### SI-3a — Manual / by-eye BCG exemplar — **NOT STARTED**
+
+A near-term addition to shipped PCA-S, and a prerequisite shape for SI-5's
+ocular calibration (user-provided exemplars → same engine). Today BCG
+topography discovery always begins from detected beats
+(`BCGSurrogateTopographies.components(beatSeconds:)`); when there is no ECG
+channel — and the synthesized/virtual-ECG detectors are not trusted for a
+given recording — the user has no way to assert the artifact directly. The
+brain-basis and operator halves are unchanged; this is a new discovery
+front-end only.
+
+- [ ] **Hand-marked beats**: let the user click BCG peaks in the waveform view
+  and feed those times into the existing pipeline unchanged (smallest path).
+- [ ] **Highlighted exemplar window**: let the user drag a selection over one
+  clear BCG complex and use that window as the template/correlation-search seed,
+  bypassing beat detection — the truest analogue to the paper's manual
+  representative-beat step. Add as a new `BCGArtifactPatternSearch` case
+  (e.g. `.manualExemplar`) alongside `.paper`/`.iterative`.
+- [ ] Record the manual provenance in `eva.xml` and the audit log so a manual
+  correction replays exactly rather than re-deriving from criteria.
+
+**Exit:** a recording with no usable ECG can be corrected from a user-defined
+BCG exemplar, with the manual selection recorded as replayable provenance.
+
 #### SI-5 — Ocular MSEC/PCA-S — **NOT STARTED**
 
 - [ ] Derive distinct blink, vertical, and horizontal topographies from explicit
@@ -202,6 +1034,16 @@ follow the Trial-wise milestones.
 
 **Exit:** held-out ocular artifacts improve without exceeding committed ERP
 topography/amplitude distortion.
+
+#### SI-5b — Manual BCG component selection as a CleanArtifact method — **NOT STARTED**
+
+- [ ] Let the user click/identify a component (e.g. in an ICA/PCA component
+  browser) and tag it as BCG.
+- [ ] Add a `CleanArtifact` case that takes the user-selected component and
+  runs it through the existing PCA-S subtraction/removal path — reuse the
+  removal math, only the selection step differs from automatic detection.
+- [ ] No new removal engine: this is a manual-selection front end onto the
+  same PCA-S engine used elsewhere in SI-5.
 
 #### SI-6 — SSP–SIR comparator — **NOT STARTED**
 
@@ -630,6 +1472,67 @@ projects above, not treated as one parallel program.
 - [ ] Auto-map auxiliary/biological channels into `pnsSignal` for BrainVision
   and EDF imports.
 
+#### FIF writing (MNE / Neuromag) — **NOT STARTED** (reader shipped 2026-09-06)
+
+Native FIF **reading** is done: `EVACore/IO/FIF/FIFMeasurementInfo.swift` and
+`FIFRecording.swift` read continuous (`*_raw.fif`, float32 / int16 / DAU-pack16
+buffers, `.fif.gz`), epoched (`*-epo.fif`) and averaged (`*-ave.fif`) files
+natively, validated sample-for-sample against MNE-Python
+(`Tools/fif-import/make_fif_fixtures.py`, `EVATests/IO/FIFRecordingTests.swift`,
+`FIFImportTests.swift`). `.fif` and `.fif.gz` open by drag-and-drop and File ▸
+Open like any other recording.
+
+**Quick Look shipped with the reader** (`EVAPreviewKit/FIF/`): `.fif` and `.fif.gz`
+preview and thumbnail in Finder. Because a `.fif` is a container for a dozen
+different documents, `FIFDocument` classifies by *block structure* rather than by
+filename convention, and each kind gets its own picture — recordings get the MFF
+treatment (montage, event timeline, waveform, per-condition butterfly), head models
+get their shells sliced and drawn as nested sagittal/axial contours, transforms get
+their matrix plus a translation/rotation decomposition, digitizations get the point
+cloud from two angles, and anything else (forward solutions, source spaces,
+covariances, ICA) gets a structural outline with its headline scalars. The same
+classifier gives the importer its error message: a head model dropped on EVA now says
+what it is and to open it in Resolve.
+
+Writing is the other half, and it is worth doing because it is how EVA hands work
+*back* to the MNE/FieldTrip/Brainstorm world — a cleaned recording, an epoched
+set, a condition average — without a detour through `.mff` or a Python bridge.
+The tag writer already exists and already produces files MNE reads
+(`FIFWriter`, validated for trans / dig / BEM by
+`Tools/resolve-validate/check_swift_fif.py`), so this is mostly measurement-info
+assembly rather than new format work.
+
+- [ ] **`FIFF_CH_INFO` writer** — the 96-byte struct: scanno, logno, kind,
+  range, cal, coil type, `loc[12]`, unit, unit multiplier, 16-byte name. The
+  keystone, exactly as it was for reading. EVA holds microvolts, so write
+  `cal = 1e-6` with `range = 1` and let the file be in volts like every other
+  FIF, rather than inventing a unit.
+- [ ] **Measurement info block** — sfreq, nchan, first sample, filter settings,
+  measurement date, bad channels (`FIFFB_MNE_BAD_CHANNELS`), and the Isotrak
+  digitization from the montage EVA already has. `Digitization.append(to:)`
+  writes that block today.
+- [ ] **Continuous writing** — `FIFFB_RAW_DATA` with float32 buffers of a fixed
+  size (MNE's default is 10 s, and the buffer boundary is visible in how MNE
+  reads it back), plus annotations from EVA's event list.
+- [ ] **Epoched and averaged writing** — the `FIFF_EPOCH` matrix (3-D for
+  epochs, 2-D per condition for averages), the event list and event-id mapping,
+  `nave` per condition, and `first_sample`. EVA's `EpochSegment` table already
+  carries everything these need.
+- [ ] **Round-trip validation** — extend the fixture tooling with a
+  `check_swift_fif_recording.py` that reads EVA-written raw / epochs / evoked
+  back with MNE and compares against the source, the way the BEM and OpenMEEG
+  writers are already checked. Round-tripping an imported file back out is the
+  cheapest strong test: read `sample_raw.fif`, write it, and require MNE to see
+  the same samples, channels, events and montage.
+- [ ] **Decide the export surface** — whether FIF joins the existing MFF export
+  flow as another destination, or is a separate File ▸ Export ▸ MNE FIF. Do not
+  build the UI before the writer round-trips.
+
+Not planned unless a need appears: SSP projector writing, CTF compensation, MEG
+channels, and split-file output (`-1.fif`, `-2.fif`). The reader reports
+projectors rather than applying them, and the writer should refuse to invent
+them.
+
 ### Detectors and analysis
 
 - [ ] Engzee/Engelse–Zeelenberg QRS comparator.
@@ -640,6 +1543,151 @@ projects above, not treated as one parallel program.
 - [ ] Editable resting-state spectral bands after the dashboard workflow settles.
 - [ ] Seed BCG Spatial PCA from a selected trajectory-strip frame, bypassing
   covariance/PCA derivation when the exemplar is too short or noisy.
+
+### Averages and topography
+
+#### F-1a — Topomap variability through marker size — **DEFERRED (planned 2026-09-05)**
+
+Add the “marker size change” display: keep the interpolated scalp colour as the
+mean voltage at the selected latency, and scale each electrode marker by that
+channel's trial-to-trial uncertainty. This is an **opt-in display feature**, off
+by default in Preferences. It is not a processing step, must not modify the
+signal, and does not belong in `eva.xml` or the history graph.
+
+**Recommended v1 contract.** Name the control **“Scale electrode markers by
+trial standard error”**, not the broader “variability.” For a category with
+`n` retained trials, at each channel and latency compute the unbiased sample
+standard deviation across trials and show `SEM = SD / sqrt(n)`. Standard error
+matches the proposed figure and communicates uncertainty in the displayed mean;
+standard deviation would answer a different question. The hover detail and
+legend must say **Trial SEM (µV)** and report `n`, so the encoding cannot be read
+as voltage magnitude or electrode importance.
+
+**What already exists.** This is assembly, not new rendering infrastructure:
+
+- `TopomapView` draws every electrode in one overlay loop after the cached IDW
+  field raster. Add an optional marker-encoding input there; `nil` must preserve
+  today's fixed 3.2-point dots byte-for-byte in appearance. Marker changes do
+  not belong in `FieldCacheKey`, because they do not change the interpolated
+  voltage image.
+- Interactive PSA retains the pre-average trials in
+  `EpochingViewModel.segmentedEpochSignal` / `segmentedEpochSegments`.
+- `channelInspectorTrialStandardErrorBands` already implements trial SEM from
+  sums, sums of squares, and counts. Extract the statistical kernel, but do not
+  reuse that path unchanged: it currently builds a selected-channel time band
+  and does not itself guarantee that every trial excluded from the displayed
+  average is also excluded from the SEM.
+- `EpochSNR.categorySNR` already walks the retained trial/category structure,
+  but its scalar metrics and channel-collapsed noise curve are not a substitute
+  for channel-by-sample SEM. Likewise, topomap Z scaling is spatial SD across
+  the values feeding the maps, not trial variability.
+- Preferences already use `EVAGeneralPreferences` keys plus `@AppStorage`.
+  Add an off-by-default key and a **Topography** section in General preferences.
+
+**Data and statistical pipeline.** Introduce a pure, testable
+`AverageTopomapVariability` calculator/store keyed by category. Its source is the
+same raw trial cache used to create the average, and its retained-index set is
+the union of manual bad-segment exclusions and resolved committed trial
+exclusions. For every retained trial, apply the same average reference and
+per-channel baseline correction used for the displayed average *before*
+accumulating `sum`, `sumSquares`, and `n`. Non-finite samples do not contribute;
+return unavailable unless at least two observations contribute to a cell.
+Per-epoch bad-channel interpolations already present in the raw epoch cache are
+part of the trial values. A channel patched only after global bad-channel
+escalation is not equivalent: either perform the same interpolation per trial or
+mark its SEM unavailable in v1. Do not silently report variability from the
+unpatched source beneath a patched mean.
+
+Compute/cache a `Float` channel × sample SEM matrix for each category when this
+preference is enabled, preferably beside the background SNR work. This avoids
+rescanning all trials on every latency-slider or joint-marker redraw. Invalidate
+it whenever the raw epoch cache, retained trial set, reference/baseline state,
+bad-channel decisions, or recording session changes. Calculation must remain off
+the main actor; publish only a session-checked completed result, following the
+existing SNR task pattern.
+
+**Visual encoding.** Add a small value object to `TopomapView` rather than making
+the generic renderer know about epochs or preferences. It should carry the
+per-channel values, physical unit/label, contributing count, and a shared scale
+domain. Draw hollow, high-contrast circles like the reference design. Preserve
+the existing channel hit radius and cluster highlight semantics; if both marker
+encoding and `highlightedChannels` are ever supplied, the yellow cluster ring
+must remain visually distinct outside the variability circle.
+
+- Map value to **marker area**, not diameter. Equivalently interpolate squared
+  radii, then take the square root; retain a small nonzero base dot for zero SEM.
+- Use one `0...maxSEM` domain across every condition in the currently displayed
+  set. A filmstrip shares one domain across all of its times and conditions;
+  joint maps share one across all visible marker boxes. Never auto-normalize
+  each map independently, which would make equal-sized circles mean different
+  values.
+- Clamp maximum diameter from the rendered map size and the layout's nearest-
+  neighbour spacing. Dense 128/256-channel nets and 130-point filmstrip tiles
+  must remain legible. If a robust percentile cap is later introduced, disclose
+  the cap in the legend rather than silently saturating outliers.
+- Add a compact three-circle legend (zero/small, midpoint, maximum) labeled
+  `Trial SEM (µV)`. Exported figures must include it whenever variable markers
+  are present. Hover text shows mean voltage, SEM, and `n`; unavailable cells
+  retain a neutral fixed dot and explicitly say why SEM is unavailable.
+
+**Surfaces in v1.** Wire the optional encoding through all views of a category
+mean so screen and export agree:
+
+- Averages workspace Topography grid and its figure export.
+- The averaged topography side panel and its export.
+- Joint-marker topomaps in Butterfly and Multi-Butterfly, including export.
+- Topography filmstrips and their export.
+
+All other `TopomapView` callers pass `nil` and remain unchanged: continuous
+recording maps, ICA component maps, artifact/BCG previews and templates,
+cluster-statistic maps, source-simulator fields, and other maps without a
+well-defined trial SEM. Difference maps are also deliberately outside v1. Their
+uncertainty needs paired covariance when conditions share observations, or the
+independent-samples formula when they do not; using either condition's SEM or
+blindly adding SEMs would be wrong.
+
+**Availability and persistence boundary.** The current MFF averaged-data path
+persists `contributingEpochCount`, but not channel-by-sample second moments.
+Count alone cannot reconstruct SEM. Therefore v1 shows variable markers only
+while the contributing single trials are available in memory and gracefully
+falls back to fixed dots after opening an average-only package. Do not estimate
+SEM from neighbouring channels or from the scalar SNR/noise curve.
+
+A later persistence phase may store `n` and a second-moment/M2 matrix alongside
+the average, with import/export versioning and backwards-compatible absence.
+Grand averages are also a later phase: their observational unit is normally the
+subject/file average rather than every underlying trial, inverse-variance
+weights require weighted variance and effective sample-size handling, and the
+current grand-average output retains only a channel-collapsed noise curve.
+
+**Tests and exit criteria.**
+
+- [ ] Pure SEM fixtures: known two-/three-trial values, zero variance, `n < 2`,
+  non-finite cells, unequal valid counts, and no negative variance from floating
+  point cancellation.
+- [ ] Retained-trial parity: manual and committed exclusions change both the
+  average and SEM source set identically.
+- [ ] Transform parity: average reference and baseline correction are applied
+  per trial; the resulting trial mean matches the displayed average within
+  tolerance before its SEM is accepted.
+- [ ] Cache invalidation and stale-task tests cover recording changes,
+  re-averaging, exclusions, reference/baseline toggles, and cancellation.
+- [ ] Marker-scaling tests verify area proportionality, finite clamping, a
+  shared multi-map domain, adaptive dense-layout limits, and exact fixed-dot
+  fallback when the encoding is absent.
+- [ ] View/export coverage verifies the preference defaults off, all v1 average
+  surfaces agree, a marker legend is present in exports, and unsupported or
+  reopened average-only data never displays invented SEM.
+- [ ] Visual QA on 32-, 64-, 128-, and 256-channel layouts at full pane, joint
+  box, and filmstrip sizes; circles must not obscure the voltage topology or
+  make electrode selection/cluster highlighting ambiguous.
+
+**Effort.** A main-pane, in-memory prototype is about one engineer-day. A
+production v1 across the listed screen/export surfaces, with caching, legend,
+fallbacks, and tests, is a **small-to-medium lift (about 3–5 engineering days)**.
+Persisting uncertainty through averaged exports and adding statistically correct
+difference/grand-average support is a separate **3–7 day** design and file-format
+follow-up, not a reason to hold the in-memory v1.
 
 ### App and pipeline polish
 
@@ -658,9 +1706,54 @@ projects above, not treated as one parallel program.
 - [ ] `SOURCE_ANALYSIS.md`: distributed source imaging / EVA Resolve exploration;
   do not fold it into the artifact-correction milestone.
 
+## 9. DEV-1 — Developer documentation — **NOT STARTED**
+
+A `docs/developers/` tree that traces EVA's features to the code that implements
+them — a cross between a Read-the-Docs-style API reference and an onboarding
+manual, so a maintainer can find *where* a feature lives and *how* to change it.
+Distinct from `docs/manual/` (user-facing) and `docs/provenance/` (method
+specs). Independent of every other milestone; it can proceed at any time and in
+small increments.
+
+**Two facts that shape the structure.** EVA's source is already grouped into ~23
+subsystems under `EVA/` (`Core`, `IO`, `Filtering`, `Gradient`, `ICA`,
+`Wavelet`, `Cardiac`, `Epoching`, `Trials`, `Health`, `Channels`, `Artifacts`,
+`Pipeline`, `Waveform`, `App`, …), and **nearly every source file already opens
+with a rich doc-comment header** describing what it does. So the per-file
+synopsis layer is largely *extractable*, and the high-value hand-written work is
+the architecture map and the feature→code index that no header can give.
+
+- [ ] **DEV-1a — Architecture map.** `docs/developers/architecture.md`: one
+  paragraph per subsystem (purpose + key entry-point types), the end-to-end data
+  flow (IO → Core → cleaning stages: Filtering/Gradient/ICA/Wavelet/Cardiac →
+  Epoching → Trials → Waveform/PSA UI), and the cross-cutting spines (the
+  Pipeline history/replay + `eva.xml` provenance, the shared forward model, MFF
+  I/O). A diagram is welcome but the prose map is the deliverable.
+- [ ] **DEV-1b — Per-subsystem pages.** `docs/developers/subsystems/<group>.md`,
+  one per top-level group: purpose, the public types/entry points a newcomer
+  starts from, a one-line synopsis of each file (seeded from its header comment,
+  then curated), and a short "how to extend this" note. This is the "outline of
+  each source file" the request started from.
+- [ ] **DEV-1c — Feature → code map.** `docs/developers/features.md`: a table
+  from user-facing feature (BCG detection, PCA-S correction, wavelet denoising,
+  gradient/FASTR, ICA labelling, cluster-permutation stats, trial diagnostics,
+  history/undo, batch/replay, MFF QuickLook, figure export, …) to the files and
+  entry points that implement it and where behaviour would change. This is the
+  index that motivated the whole effort ("where did we build X").
+- [ ] **DEV-1d — Keep-it-in-sync.** A lightweight check, in the spirit of the
+  existing `docs/manual/contributor-guide`, that flags a new source file with no
+  subsystem-page entry (and, ideally, a file whose header changed without its
+  synopsis following). Optional: a small extractor that regenerates the
+  header-derived synopses so the file layer cannot silently rot.
+
+**Exit:** a maintainer can open `docs/developers/`, find any feature in the
+feature map, jump to its subsystem page, and see every file's role — without
+reading the source first. **Effort:** medium, mostly writing; DEV-1b is
+partly mechanical from headers, DEV-1a/1c are the real authorship.
+
 ---
 
-# PART II — EVASIMULATE
+# PART Sim
 
 Planning document for `Tools/EVASimulate`. Written 2026-08-21.
 
@@ -732,7 +1825,7 @@ only if the owner explicitly asks to reopen it.
 
 ### Next, in order
 
-The authoritative cross-project sequence is Part I of this file. SI-2, the RW-1
+The authoritative cross-project sequence is Part EVA Core of this file. SI-2, the RW-1
 history/replay hardening, and SI-3 — broadband BCG PCA-S shipped through EVA —
 are done, so the next simulator-side obligation is **SI-4**: measuring PCA-S's
 adversarial operating limits, including the component-reliability threshold it
@@ -809,7 +1902,7 @@ These are what make the tool trustworthy; every item below should preserve them.
 ## EVASimulate — open work
 
 Tiers 1, 2, 4 and 5 are complete, as are 3.1, 7.1-7.3 and 8.1; those records are
-in [Part III](#b-evasimulate--completed). What follows is what remains.
+in [Part Completed](#b-evasimulate--completed). What follows is what remains.
 
 ### Tier 3 — valuable, more work
 
@@ -1442,7 +2535,373 @@ it. Also deferred: 3.4 clinical patterns and the rest of Tier 6.
 
 ---
 
-# PART III — COMPLETED
+# PART Sleep — SYNTHETIC SLEEP EEG
+
+Generate a whole night of EEG with a known hypnogram, and with every spindle,
+K-complex, slow wave, vertex wave and sawtooth train labelled to the sample. The
+output is a normal EVA recording, so it flows through filter / ICA / PCA-S /
+scoring exactly like any other, and the truth sidecar answers questions no real
+dataset can answer at all.
+
+**Why this is worth building, in one paragraph.** Sleep-EEG methods are validated
+against expert scoring, and expert scoring is the weakest link in the chain:
+MASS and DREAMS between them offer a few dozen records, spindle marking is
+famously low-agreement between scorers, and nobody can tell you the *true* onset
+of a spindle in a real recording because there is no such fact to appeal to. A
+generator inverts that. A thousand nights, every event's onset and frequency
+known exactly, detection scored as a curve rather than as agreement with a
+second opinion. EVA already owns the two pieces that make its version of this
+better than a generic one: a **dipole forward model**, so slow waves can be a
+frontal-midline source and spindles a centroparietal one and the topography is
+correct by construction rather than asserted; and the **EEG–fMRI artifact stack**,
+which makes "does my BCG correction survive sleep data" answerable for the first
+time. That second one is not a hypothetical: the BCG lives around 1 Hz, directly
+on top of the slow oscillation, and gradient residuals sit near the spindle band.
+Anyone doing sleep in the scanner is correcting artifacts whose spectra overlap
+the signals they came for, and right now there is no way to measure what that
+costs them.
+
+**The one architectural rule.** Two layers, separated absolutely:
+
+1. **The hypnogram generator** decides the stage sequence. Nothing else.
+2. **The signal model** synthesizes EEG conditioned on a stage sequence it is
+   handed. It never decides what stage it is in.
+
+Everything good follows from that split. A hand-written hypnogram, a drawn one,
+and one imported from a real scored night are the same input to layer 2, so
+"resynthesize EEG onto this patient's real architecture" costs nothing extra. It
+also means the hypnogram is testable on its own — against transition statistics
+from the literature — without generating a single sample.
+
+**The rule that keeps it honest.** *Do not add a waveform the truth file cannot
+label.* If a feature cannot be written down as "event of type X at time T on
+source S with parameters P", it buys realism at the cost of the only thing that
+makes this worth building. This is the reason the plan below phenomenologically
+places templates rather than porting a thalamocortical neural-mass model: the
+neural-mass models produce beautiful signals that nobody can annotate.
+
+## Literature the model is built on
+
+Every default in this part traces to one of these. Cited so a future reader can
+check a number rather than trust it.
+
+**Hypnogram and architecture**
+
+- Kemp B, Kamphuisen HAC (1986). *Simulation of human hypnograms using a Markov
+  chain model.* Sleep 9(3):405-414. The original; fitted to 95 hypnograms from
+  23 subjects. Its central negative result is the one that matters: a
+  **stationary** chain does not reproduce real sleep. Only time-varying rates
+  give sleep-onset behaviour, the decline of SWS across the night, and REM-NREM
+  periodicity.
+- Markov modeling of sleep stage transitions and ultradian REM sleep rhythm
+  (2018), PMID 30089099. Second-order transitions plus stage-specific survival
+  functions recover the ~90 min REM-onset interval. Take the second-order
+  version — first-order chains emit N3 → W → N3 at rates real sleep does not.
+- Borbély AA et al. (2016). *The two-process model of sleep regulation: a
+  reappraisal.* J Sleep Res 25(2):131-143. And the 2022 *Beginnings and outlook*
+  retrospective, J Sleep Res 31(1):e13598. Process S decays exponentially across
+  sleep and slow-wave activity is its marker. This is the parameter that makes
+  eight hours look like a night instead of like eight repetitions of an hour,
+  and it is *physiological* — "prior wakefulness", not an arbitrary decay knob.
+
+**Stage-specific waveforms**
+
+- Schellenberg M et al. (2016). *A thalamocortical neural mass model of the EEG
+  during NREM sleep and its response to auditory stimulation.* PLoS Comput Biol;
+  PMC5008627. Generates spindles, slow oscillations and K-complexes *and their
+  temporal relations* from one mechanism. Read for the phenomenology; do not
+  port (see the honesty rule above).
+- Cross-frequency slow oscillation-spindle coupling in a biophysically realistic
+  thalamocortical neural mass model (bioRxiv 2021.08.29.458101). Same caveat,
+  same use: it tells you what the coupling should look like.
+
+**Quantitative parameters**
+
+- *Threshold values of sleep spindle features in healthy adults using scalp-EEG*
+  (PMC12172134). Fast spindles: 13.4-14.3 Hz, 0.80-1.11 s, 5.2-15.2 µV,
+  1.0-5.8/min. Slow spindles: 12.3-12.9 Hz, 0.79-1.17 s, 4.1-13.2 µV,
+  0.03-3.15/min. These are the defaults in SL-3.
+- *Individual differences in frequency and topography of slow and fast sleep
+  spindles* (PMC5591792). The slow-frontal / fast-centroparietal split, which is
+  what SL-3's two source placements encode.
+
+**The aperiodic background**
+
+- *Sources of variation in the spectral slope of the sleep EEG.* eNeuro 2022;
+  9(5):ENEURO.0094-22.2022. Fitted over **30-45 Hz**, linked-mastoid: wake
+  β = −1.11, N1 ≈ −2.4, N2 = −2.58, N3 ≈ −2.34, REM = −3.3. The slope steepens
+  monotonically wake → NREM → REM, REM steepest. **Check this direction against
+  the paper before changing it** — secondary summaries of it circulate with the
+  sign of the REM effect reversed.
+- *Overnight dynamics in scale-free and oscillatory spectral parameters of NREM
+  sleep EEG.* Sci Rep 2022;12:18409. Across-night drift of slope and intercept,
+  and their relation to slow-wave activity.
+
+**The scoring contract**
+
+AASM Manual for the Scoring of Sleep and Associated Events. The quantitative
+rules the generator must satisfy, which is what makes SL-2's acceptance test a
+measurement rather than an opinion:
+
+- **N3** — 0.5-2 Hz activity at ≥ 75 µV peak-to-peak occupying ≥ 20% of the
+  30 s epoch, frontal derivations.
+- **Spindle** — 11-16 Hz, ≥ 0.5 s, maximal centrally.
+- **K-complex** — well-delineated negative sharp wave followed by a positive
+  component, total duration ≥ 0.5 s, maximal frontally.
+- **Vertex sharp wave** — < 0.5 s, maximal centrally. N1.
+- **Sawtooth waves** — 2-6 Hz trains, sharply contoured/serrated, maximal
+  centrally, often preceding a REM burst.
+
+**Validation targets**
+
+- MASS (Montreal Archive of Sleep Studies) and DREAMS — expert-scored spindles
+  and K-complexes, for calibrating morphology against real marking.
+- YASA (Vallat & Walker, eLife 2021;10:e70092) — the open detector to benchmark
+  against, and the first external check that generated N3 actually scores as N3.
+
+Dependency map:
+
+```text
+SL-1 (hypnogram generator + truth + Sleep tab skeleton)  ← testable with zero signal work
+   └─→ SL-2 (stage-conditioned aperiodic background + band content)
+           └─→ SL-3 (spindles + slow waves as dipole sources)      ← first externally scoreable milestone
+                   ├─→ SL-4 (K-complexes, vertex waves, sawtooth, SO-spindle coupling)
+                   ├─→ SL-5 (REM: saccade bursts + chin EMG atonia)
+                   ├─→ SL-6 (event-level scoring: score-sleep + score-hypnogram)
+                   └─→ SL-7 (pathology presets + EEG-fMRI sleep composition)
+```
+
+New module: `EVACore/Simulation/Sleep/`
+`SleepStage.swift` · `HypnogramGenerator.swift` · `SleepConfig.swift` ·
+`SleepBackgroundModel.swift` · `SleepEventModel.swift` · `SleepSourceLayout.swift` ·
+`SleepTruth.swift`
+App surface: `EVA/App/SimulatorSleepTab.swift` (a tab in Simulator Studio,
+alongside Cardiac / Ocular / Muscle).
+
+**Scheduling note:** PART Sleep does not preempt the Part EVA Core execution
+order, and it does not block anything. SL-1 through SL-3 are the milestone worth
+finishing; SL-4 onward is additive and can be picked up in any order.
+
+---
+
+## SL-1 — Hypnogram generator, truth, and the Sleep tab skeleton — **NOT STARTED**
+
+The whole milestone generates no EEG. That is deliberate: the hypnogram is
+separately testable against published transition statistics, and getting it
+wrong is the failure that would poison every later milestone invisibly.
+
+- [ ] `SleepStage`: `wake`, `n1`, `n2`, `n3`, `rem`. `Codable`, `CaseIterable`,
+  with `aasmLabel` ("W", "N1", "N2", "N3", "R") for export. Epoch length is
+  **30 s**, fixed, because that is what the scoring rules and every external
+  tool assume.
+- [ ] `HypnogramGenerator.draw(config:seed:) -> [SleepStage]` — second-order
+  Markov chain over 30 s epochs, with **time-varying rates**. State is the
+  current stage *and* the previous one, per PMID 30089099.
+- [ ] **Process S** drives the N3 propensity: `S(t) = S₀·exp(−t/τ)`, with `S₀`
+  from `sleepPressure` and τ from `processSDecayHours`. The N2→N3 rate scales
+  with S, and the N3→N2 rate inversely. This is the mechanism that makes N3
+  concentrate in the first two cycles without anything hard-coding "first two
+  cycles".
+- [ ] **REM propensity** rises with time since sleep onset and with cycle count,
+  so REM bouts lengthen toward morning. Target REM latency and cycle period are
+  parameters, not constants.
+- [ ] **Minimum bout length** per stage, enforced after drawing. Without it the
+  chain emits 30 s N3 flickers that no real hypnogram contains and no scorer
+  would mark.
+- [ ] **Skip-transition control** — an explicit probability for non-ordinal
+  moves (N1→N3, N2→W). Real hypnograms are overwhelmingly ordinal; an
+  unconstrained chain produces far too many jumps, and detectors trained on real
+  data fail in strange ways when handed them. This is a knob, not a constant,
+  because deliberately raising it is a legitimate robustness test.
+- [ ] Arousals (brief W intrusions, 3-15 s, scored within the epoch) and
+  sustained awakenings, as separate rates.
+- [ ] `HypnogramSource`: `.markov` (drawn) · `.scripted` (a stage list authored
+  in the config) · `.imported` (read a scored hypnogram file). Support at least
+  one real format — Sleep-EDF `.hyp` / EDF+ annotations is the widest — so
+  "resynthesize EEG onto this patient's real night" works from day one.
+- [ ] **Truth:** the hypnogram as an epoch array, plus per-epoch Process S,
+  cycle index, and time since sleep onset. Written to the existing truth sidecar.
+- [ ] **Events:** each stage transition as an MFF event, so the hypnogram is
+  visible on the EVA timeline without any new UI.
+- [ ] **Sleep tab skeleton** in Simulator Studio: source picker, duration,
+  onset/REM latency, cycle period, sleep pressure, transition preset, and a
+  **live hypnogram preview** (a small staircase plot — it costs almost nothing
+  and it is the only way to tell at a glance that the parameters are sane).
+- [ ] **CLI:** `--sleep`, `--sleep-hours`, `--sleep-preset`, `--hypnogram <file>`,
+  `--sleep-pressure`, `--rem-latency`, `--cycle-minutes`, `--skip-transitions`,
+  `--arousals-per-hour`.
+- [ ] **Gate:** generate 100 nights and check the aggregate statistics against
+  the literature — total sleep time, N3 concentrated in the first half, REM
+  proportion rising across the night, REM-onset intervals centred near 90 min,
+  ordinal transitions dominating. Assert on distributions, not on single nights;
+  a single night is legitimately allowed to be unusual.
+
+**Effort:** medium. The chain is small; the calibration gate is the work.
+
+## SL-2 — Stage-conditioned background: aperiodic slope and band content — **NOT STARTED**
+
+Makes the stages distinguishable to anything spectral, before a single discrete
+event exists. This is a surprisingly large fraction of the perceived realism for
+a small fraction of the effort.
+
+- [ ] **Per-stage aperiodic exponent**, defaulting to the eNeuro values (wake
+  −1.11, N1 −2.4, N2 −2.58, N3 −2.34, REM −3.3). Synthesize 1/f^β noise per
+  epoch and cross-fade across epoch boundaries — a hard switch at an epoch
+  boundary is an audible step and an artifact in every spectral estimate.
+- [ ] **Per-stage band amplitudes**, reusing the existing `EEGBand` machinery:
+  alpha dominant in wake and attenuating into N1, theta rising in N1, delta
+  dominating N3, and REM's mixed-frequency low-amplitude profile.
+- [ ] **Overnight drift** of slope and intercept, per Sci Rep 2022, tied to the
+  same Process S the hypnogram uses — so the background and the architecture
+  are driven by one quantity rather than two that can disagree.
+- [ ] **Cross-fade window** as a parameter, defaulting to a few seconds.
+- [ ] **Gate:** fit the aperiodic exponent back out of each generated epoch (over
+  30-45 Hz, the paper's range) and recover the requested β within tolerance.
+  This is a closed loop — the number that goes in comes back out — and it is
+  worth more than any amount of eyeballing the trace.
+
+**Effort:** medium. 1/f^β synthesis is standard; the epoch cross-fade is the
+fiddly part.
+
+## SL-3 — Spindles and slow waves as dipole sources — **NOT STARTED**
+
+The first milestone whose output an external tool can score, and the point at
+which the feature starts earning its keep.
+
+- [ ] **Source placement** (`SleepSourceLayout`): slow waves as a frontal-midline
+  source, fast spindles centroparietal, slow spindles frontal. Under
+  `--eeg-model dipole` these project through the existing forward model and the
+  topography is correct by construction. Under the Grouiller model, fall back to
+  a fixed topography and **say so in the truth file** — a topography that was
+  asserted must be distinguishable from one that was derived.
+- [ ] **Spindle events** as `HighRateTemplate` instances — the same mechanism the
+  BCG and ERP already use. Gaussian-windowed sinusoid, waxing and waning.
+  Parameters per spindle, drawn from the PMC12172134 ranges: frequency,
+  duration, amplitude. Fast/slow ratio and per-stage density are config.
+- [ ] **Slow-wave events**: 0.5-2 Hz, with the asymmetric down-state/up-state
+  morphology rather than a sinusoid. Density and amplitude per stage.
+- [ ] **The N3 rule as a closed loop.** Amplitude is calibrated so that a
+  generated N3 epoch actually meets the AASM criterion — ≥ 20% of the epoch at
+  ≥ 75 µV peak-to-peak in 0.5-2 Hz, measured frontally. Do not set an amplitude
+  and hope. Measure the generated epoch, and make the test assert it.
+- [ ] **Truth:** every spindle (onset, duration, peak frequency, amplitude,
+  source, fast/slow) and every slow wave (onset, duration, amplitude, source),
+  as a typed array in the sidecar. This is the deliverable.
+- [ ] **Gate:** (1) the N3 rule above; (2) run **YASA**'s spindle detector over a
+  generated night and check detection rate and onset error against the truth
+  file. An external detector agreeing with the generator is the first real
+  evidence the morphology is right — and where it disagrees, the disagreement is
+  interesting rather than embarrassing.
+
+**Effort:** medium-large. The templates are easy; source placement and the N3
+calibration loop are the work.
+
+## SL-4 — K-complexes, vertex waves, sawtooth waves, SO-spindle coupling — **NOT STARTED**
+
+- [ ] **K-complexes**: negative sharp wave then positive component, total ≥ 0.5 s,
+  frontal-maximal per AASM. Both spontaneous and evoked — the evoked path should
+  reuse the ERP machinery's stimulus timing, which makes auditory-stimulation
+  sleep protocols expressible.
+- [ ] **Vertex sharp waves**: < 0.5 s, Cz source, N1.
+- [ ] **Sawtooth waves**: 2-6 Hz serrated trains, central, placed just before REM
+  saccade bursts (SL-5) so the temporal relation AASM describes actually holds.
+- [ ] **SO-spindle coupling** — spindles preferentially placed at a configurable
+  phase of the slow oscillation, with configurable strength. `PhaseAmplitudeCoupling
+  Config` already exists and this is the same machinery pointed at a new pair of
+  bands. Truth records each spindle's SO phase, which makes coupling-strength
+  estimators scoreable against a known answer. This is the most-published measure
+  in the sleep/memory literature and the one where a generator with known ground
+  truth is worth the most.
+- [ ] **Gate:** recover the imposed coupling phase and strength from the generated
+  signal, the same closed-loop shape as SL-2's exponent check.
+
+**Effort:** medium.
+
+## SL-5 — REM: saccade bursts and muscle atonia — **NOT STARTED**
+
+- [ ] **REM saccade bursts** on the EOG channels, using the existing ocular model
+  with REM-appropriate timing and density.
+- [ ] **Chin EMG atonia** — muscle tone *drops* in REM, which the existing EMG
+  model can express with a per-stage amplitude scale. Worth calling out because
+  no threshold-based artifact detector expects a channel to get quieter, and
+  several will mis-handle it.
+- [ ] Per-stage EMG and movement-artifact scaling generally: a sleeping subject
+  moves less, and then moves a lot at an arousal.
+- [ ] **Gate:** REM epochs show the expected EOG burst density and reduced EMG
+  amplitude relative to NREM.
+
+**Effort:** small. Both models exist; this is per-stage modulation of them.
+
+## SL-6 — Scoring: `score-sleep` and `score-hypnogram` — **NOT STARTED**
+
+Ground truth that cannot be scored is decoration. `score-events` already exists
+and does most of this; these are two thin subcommands over it.
+
+- [ ] `eva-simulate score-hypnogram --truth <truth.json> --scored <hypnogram>` —
+  epoch-wise agreement, Cohen's κ, and a confusion matrix by stage. κ against a
+  *known* hypnogram is a fundamentally different measurement from κ between two
+  scorers, and the distinction is worth stating in the output.
+- [ ] `eva-simulate score-sleep --truth <truth.json> --detected <events> --type
+  spindle|slow-wave|k-complex` — detection rate, false-positive rate, onset error
+  distribution, and duration error. Reuse `score-events`' matching logic.
+- [ ] Tidy CSV export of both, in the same schema the rest of the simulator's
+  scoring uses.
+
+**Effort:** small. Mostly plumbing over machinery that exists.
+
+## SL-7 — Pathology presets and EEG-fMRI sleep composition — **NOT STARTED**
+
+- [ ] **Presets**, each a transition matrix plus per-stage content overrides:
+  *healthy young adult* · *elderly* (reduced N3, fragmented) · *sleep-onset REM*
+  (narcolepsy) · *periodic arousals* (apnea-like) · *suppressed N3* (depression) ·
+  *spindle deficit* (the schizophrenia phenotype; see Nature Schizophrenia
+  2019;5:9 for the distributed slow-wave dynamics).
+- [ ] **Sleep-in-scanner composition** — a scenario that layers the gradient
+  artifact and BCG on top of a generated night. This is the milestone the whole
+  part is pointed at: the BCG sits around 1 Hz, on top of the slow oscillation,
+  and gradient residuals sit near the spindle band, so a correction that looks
+  fine on awake resting-state data may be removing the signal. With this, "how
+  many true spindles survive AAS + OBS correction" is a number.
+- [ ] Ship it as `scenarios/sleep-in-scanner.json` and add it to the determinism
+  baseline.
+- [ ] **Gate:** score spindle recovery through the full artifact-correction
+  pipeline, against the truth file, at several BCG amplitudes. That curve is a
+  publishable figure and it is the argument for the entire part.
+
+**Effort:** medium. The presets are data; the composition scenario is the
+valuable half.
+
+---
+
+### Design decisions already made, and why
+
+Recorded so they are not relitigated from scratch later.
+
+- **Phenomenological templates, not a neural-mass model.** The thalamocortical
+  models in the literature are better physics and produce signals nobody can
+  annotate. The entire value proposition here is event-level ground truth. If a
+  neural-mass background is ever wanted, it belongs *underneath* the labelled
+  events, not instead of them.
+- **Second-order Markov, not first-order.** First-order chains emit implausible
+  transitions at rates that make the output useless for anything trained on real
+  hypnograms.
+- **Sources, not channels.** Generating per-channel sleep waveforms would be
+  faster and would waste the forward model EVA already has. Source-space sleep
+  truth is a thing no other synthetic sleep data offers.
+- **30 s epochs, fixed.** Every scoring rule and every external tool assumes it.
+  A configurable epoch length would buy nothing and break interoperability.
+- **Process S is one quantity, used twice.** Both the hypnogram's N3 propensity
+  and the background's overnight slope drift read the same `S(t)`. Two decay
+  parameters that could disagree would be a bug waiting to happen.
+- **Defaults are off.** `sleepEnabled` defaults false, and all new config fields
+  are Optional — Swift's synthesized `Decodable` requires every non-Optional key,
+  so a non-Optional addition makes every scenario file written before it
+  undecodable. This has already bitten once; see the `effective*` accessors on
+  `SimulationConfig`.
+
+---
+
+# PART Completed
 
 Completed work is archived here so the active half of the roadmap contains no
 finished checklists. Dates describe landing or verification, not necessarily

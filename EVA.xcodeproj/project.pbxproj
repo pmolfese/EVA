@@ -7,11 +7,29 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		510000000000000000000008 /* EVASimulate in Embed EVASimulate CLI */ = {isa = PBXBuildFile; fileRef = 510000000000000000000001 /* EVASimulate */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		51B00000000000000000001E /* SurrogateSeparation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000001E /* SurrogateSeparation.swift */; };
+		51B00000000000000000001F /* ERPEvaluation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F00000000000000000001F /* ERPEvaluation.swift */; };
+		51B000000000000000000020 /* SNRMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000020 /* SNRMetrics.swift */; };
+		51B000000000000000000021 /* RichMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000021 /* RichMetrics.swift */; };
+		51B000000000000000000022 /* SourceMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000022 /* SourceMetrics.swift */; };
+		51B000000000000000000023 /* SimulationWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000023 /* SimulationWriter.swift */; };
+		51B000000000000000000024 /* SI0ContractFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000024 /* SI0ContractFixtures.swift */; };
+		51B000000000000000000025 /* SelfTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000025 /* SelfTest.swift */; };
+		51B000000000000000000026 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F000000000000000000026 /* main.swift */; };
+		520000000000000000000002 /* scenarios in Resources */ = {isa = PBXBuildFile; fileRef = 520000000000000000000001 /* scenarios */; };
 		D000000000000000000000C /* EVAQuickLook.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D0000000000000000000002 /* EVAQuickLook.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		D000000000000000000001C /* EVAThumbnail.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D0000000000000000000012 /* EVAThumbnail.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		510000000000000000000009 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 77BE28B32FED64E10080DAF5 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 510000000000000000000002;
+			remoteInfo = EVASimulate;
+		};
 		77BE28C92FED64E30080DAF5 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 77BE28B32FED64E10080DAF5 /* Project object */;
@@ -40,9 +58,27 @@
 			remoteGlobalIDString = D0000000000000000000011;
 			remoteInfo = EVAThumbnail;
 		};
+		E40000000000000000000008 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 77BE28B32FED64E10080DAF5 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E30000000000000000000001;
+			remoteInfo = EVAResolve;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		510000000000000000000007 /* Embed EVASimulate CLI */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (
+				510000000000000000000008 /* EVASimulate in Embed EVASimulate CLI */,
+			);
+			name = "Embed EVASimulate CLI";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		D00000000000000000000021 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -58,11 +94,24 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		510000000000000000000001 /* EVASimulate */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = EVASimulate; sourceTree = BUILT_PRODUCTS_DIR; };
+		51F00000000000000000001E /* SurrogateSeparation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SurrogateSeparation.swift; path = Tools/EVASimulate/Sources/EVASimulate/SurrogateSeparation.swift; sourceTree = SOURCE_ROOT; };
+		51F00000000000000000001F /* ERPEvaluation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ERPEvaluation.swift; path = Tools/EVASimulate/Sources/EVASimulate/ERPEvaluation.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000020 /* SNRMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SNRMetrics.swift; path = Tools/EVASimulate/Sources/EVASimulate/SNRMetrics.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000021 /* RichMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = RichMetrics.swift; path = Tools/EVASimulate/Sources/EVASimulate/RichMetrics.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000022 /* SourceMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SourceMetrics.swift; path = Tools/EVASimulate/Sources/EVASimulate/SourceMetrics.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000023 /* SimulationWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SimulationWriter.swift; path = Tools/EVASimulate/Sources/EVASimulate/SimulationWriter.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000024 /* SI0ContractFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SI0ContractFixtures.swift; path = Tools/EVASimulate/Sources/EVASimulate/SI0ContractFixtures.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000025 /* SelfTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SelfTest.swift; path = Tools/EVASimulate/Sources/EVASimulate/SelfTest.swift; sourceTree = SOURCE_ROOT; };
+		51F000000000000000000026 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = main.swift; path = Tools/EVASimulate/Sources/EVASimulate/main.swift; sourceTree = SOURCE_ROOT; };
+		520000000000000000000001 /* scenarios */ = {isa = PBXFileReference; lastKnownFileType = folder; name = scenarios; path = Tools/EVASimulate/scenarios; sourceTree = SOURCE_ROOT; };
 		77BE28BB2FED64E10080DAF5 /* EVA.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EVA.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		77BE28C82FED64E30080DAF5 /* EVATests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EVATests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		77BE28D22FED64E30080DAF5 /* EVAUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EVAUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D0000000000000000000002 /* EVAQuickLook.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EVAQuickLook.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		D0000000000000000000012 /* EVAThumbnail.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EVAThumbnail.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		E30000000000000000000004 /* EVAResolve.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EVAResolve.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E40000000000000000000004 /* EVAResolveTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EVAResolveTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -97,6 +146,13 @@
 				Info.plist,
 			);
 			target = D0000000000000000000011 /* EVAThumbnail */;
+		};
+		E30000000000000000000003 /* Exceptions for "EVAResolve" folder in "EVAResolve" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = E30000000000000000000001 /* EVAResolve */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -143,6 +199,29 @@
 			path = EVAThumbnail;
 			sourceTree = "<group>";
 		};
+		E10000000000000000000001 /* EVAPreviewKit */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = EVAPreviewKit;
+			sourceTree = "<group>";
+		};
+		E20000000000000000000001 /* EVACore */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = EVACore;
+			sourceTree = "<group>";
+		};
+		E30000000000000000000002 /* EVAResolve */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E30000000000000000000003 /* Exceptions for "EVAResolve" folder in "EVAResolve" target */,
+			);
+			path = EVAResolve;
+			sourceTree = "<group>";
+		};
+		E40000000000000000000002 /* EVAResolveTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = EVAResolveTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -181,19 +260,55 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E30000000000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E40000000000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		7786CE5030442B0E007813E3 /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				51F00000000000000000001E /* SurrogateSeparation.swift */,
+				51F00000000000000000001F /* ERPEvaluation.swift */,
+				51F000000000000000000020 /* SNRMetrics.swift */,
+				51F000000000000000000021 /* RichMetrics.swift */,
+				51F000000000000000000022 /* SourceMetrics.swift */,
+				51F000000000000000000023 /* SimulationWriter.swift */,
+				51F000000000000000000024 /* SI0ContractFixtures.swift */,
+				51F000000000000000000025 /* SelfTest.swift */,
+				51F000000000000000000026 /* main.swift */,
+			);
+			name = "Recovered References";
+			sourceTree = "<group>";
+		};
 		77BE28B22FED64E10080DAF5 = {
 			isa = PBXGroup;
 			children = (
+				520000000000000000000001 /* scenarios */,
 				77BE28BD2FED64E10080DAF5 /* EVA */,
+				E20000000000000000000001 /* EVACore */,
+				E30000000000000000000002 /* EVAResolve */,
+				E40000000000000000000002 /* EVAResolveTests */,
 				77BE28CB2FED64E30080DAF5 /* EVATests */,
 				77BE28D52FED64E30080DAF5 /* EVAUITests */,
 				D00000000000000000000020 /* MFFPreviewKit */,
+				E10000000000000000000001 /* EVAPreviewKit */,
 				D0000000000000000000009 /* EVAQuickLook */,
 				D0000000000000000000019 /* EVAThumbnail */,
 				77BE28BC2FED64E10080DAF5 /* Products */,
+				7786CE5030442B0E007813E3 /* Recovered References */,
 			);
 			sourceTree = "<group>";
 		};
@@ -205,6 +320,9 @@
 				77BE28D22FED64E30080DAF5 /* EVAUITests.xctest */,
 				D0000000000000000000002 /* EVAQuickLook.appex */,
 				D0000000000000000000012 /* EVAThumbnail.appex */,
+				510000000000000000000001 /* EVASimulate */,
+				E30000000000000000000004 /* EVAResolve.app */,
+				E40000000000000000000004 /* EVAResolveTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -212,6 +330,26 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		510000000000000000000002 /* EVASimulate */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 510000000000000000000003 /* Build configuration list for PBXNativeTarget "EVASimulate" */;
+			buildPhases = (
+				510000000000000000000006 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				E20000000000000000000001 /* EVACore */,
+			);
+			name = EVASimulate;
+			packageProductDependencies = (
+			);
+			productName = EVASimulate;
+			productReference = 510000000000000000000001 /* EVASimulate */;
+			productType = "com.apple.product-type.tool";
+		};
 		77BE28BA2FED64E10080DAF5 /* EVA */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 77BE28DC2FED64E30080DAF5 /* Build configuration list for PBXNativeTarget "EVA" */;
@@ -220,15 +358,19 @@
 				77BE28B82FED64E10080DAF5 /* Frameworks */,
 				77BE28B92FED64E10080DAF5 /* Resources */,
 				D00000000000000000000021 /* Embed Foundation Extensions */,
+				510000000000000000000007 /* Embed EVASimulate CLI */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				D000000000000000000000A /* PBXTargetDependency */,
 				D000000000000000000001A /* PBXTargetDependency */,
+				51000000000000000000000A /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				77BE28BD2FED64E10080DAF5 /* EVA */,
+				E10000000000000000000001 /* EVAPreviewKit */,
+				E20000000000000000000001 /* EVACore */,
 			);
 			name = EVA;
 			packageProductDependencies = (
@@ -299,6 +441,8 @@
 			fileSystemSynchronizedGroups = (
 				D00000000000000000000020 /* MFFPreviewKit */,
 				D0000000000000000000009 /* EVAQuickLook */,
+				E10000000000000000000001 /* EVAPreviewKit */,
+				E20000000000000000000001 /* EVACore */,
 			);
 			name = EVAQuickLook;
 			packageProductDependencies = (
@@ -322,6 +466,8 @@
 			fileSystemSynchronizedGroups = (
 				D00000000000000000000020 /* MFFPreviewKit */,
 				D0000000000000000000019 /* EVAThumbnail */,
+				E10000000000000000000001 /* EVAPreviewKit */,
+				E20000000000000000000001 /* EVACore */,
 			);
 			name = EVAThumbnail;
 			packageProductDependencies = (
@@ -329,6 +475,52 @@
 			productName = EVAThumbnail;
 			productReference = D0000000000000000000012 /* EVAThumbnail.appex */;
 			productType = "com.apple.product-type.app-extension";
+		};
+		E30000000000000000000001 /* EVAResolve */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E30000000000000000000010 /* Build configuration list for PBXNativeTarget "EVAResolve" */;
+			buildPhases = (
+				E30000000000000000000005 /* Sources */,
+				E30000000000000000000006 /* Frameworks */,
+				E30000000000000000000007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				E20000000000000000000001 /* EVACore */,
+				E30000000000000000000002 /* EVAResolve */,
+			);
+			name = EVAResolve;
+			packageProductDependencies = (
+			);
+			productName = EVAResolve;
+			productReference = E30000000000000000000004 /* EVAResolve.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E40000000000000000000001 /* EVAResolveTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E40000000000000000000010 /* Build configuration list for PBXNativeTarget "EVAResolveTests" */;
+			buildPhases = (
+				E40000000000000000000005 /* Sources */,
+				E40000000000000000000006 /* Frameworks */,
+				E40000000000000000000007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E40000000000000000000009 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				E40000000000000000000002 /* EVAResolveTests */,
+			);
+			name = EVAResolveTests;
+			packageProductDependencies = (
+			);
+			productName = EVAResolveTests;
+			productReference = E40000000000000000000004 /* EVAResolveTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -338,7 +530,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2650;
-				LastUpgradeCheck = 2650;
+				LastUpgradeCheck = 2660;
 				TargetAttributes = {
 					77BE28BA2FED64E10080DAF5 = {
 						CreatedOnToolsVersion = 26.5;
@@ -356,6 +548,13 @@
 					};
 					D0000000000000000000011 = {
 						CreatedOnToolsVersion = 26.6;
+					};
+					E30000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					E40000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = E30000000000000000000001;
 					};
 				};
 			};
@@ -378,6 +577,9 @@
 				77BE28D12FED64E30080DAF5 /* EVAUITests */,
 				D0000000000000000000001 /* EVAQuickLook */,
 				D0000000000000000000011 /* EVAThumbnail */,
+				510000000000000000000002 /* EVASimulate */,
+				E30000000000000000000001 /* EVAResolve */,
+				E40000000000000000000001 /* EVAResolveTests */,
 			);
 		};
 /* End PBXProject section */
@@ -387,6 +589,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				520000000000000000000002 /* scenarios in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -418,9 +621,39 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E30000000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E40000000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		510000000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				51B00000000000000000001E /* SurrogateSeparation.swift in Sources */,
+				51B00000000000000000001F /* ERPEvaluation.swift in Sources */,
+				51B000000000000000000020 /* SNRMetrics.swift in Sources */,
+				51B000000000000000000021 /* RichMetrics.swift in Sources */,
+				51B000000000000000000022 /* SourceMetrics.swift in Sources */,
+				51B000000000000000000023 /* SimulationWriter.swift in Sources */,
+				51B000000000000000000024 /* SI0ContractFixtures.swift in Sources */,
+				51B000000000000000000025 /* SelfTest.swift in Sources */,
+				51B000000000000000000026 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		77BE28B72FED64E10080DAF5 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -456,9 +689,28 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E30000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E40000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		51000000000000000000000A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 510000000000000000000002 /* EVASimulate */;
+			targetProxy = 510000000000000000000009 /* PBXContainerItemProxy */;
+		};
 		77BE28CA2FED64E30080DAF5 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 77BE28BA2FED64E10080DAF5 /* EVA */;
@@ -479,9 +731,56 @@
 			target = D0000000000000000000011 /* EVAThumbnail */;
 			targetProxy = D000000000000000000001B /* PBXContainerItemProxy */;
 		};
+		E40000000000000000000009 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E30000000000000000000001 /* EVAResolve */;
+			targetProxy = E40000000000000000000008 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		510000000000000000000004 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				OTHER_LDFLAGS = (
+					"-framework",
+					Accelerate,
+				);
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.simulate;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		510000000000000000000005 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				OTHER_LDFLAGS = (
+					"-framework",
+					Accelerate,
+				);
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.simulate;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 		77BE28DA2FED64E30080DAF5 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -516,7 +815,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -540,6 +841,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -579,7 +881,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 7V8RRF84QH;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -596,6 +900,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 			};
 			name = Release;
@@ -605,10 +910,11 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EVA/EVA.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20260828;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				CURRENT_PROJECT_VERSION = 20260908;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
@@ -622,7 +928,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.7;
+				MARKETING_VERSION = 0.1.8;
 				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -641,12 +947,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EVA/EVA.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20260828;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				CURRENT_PROJECT_VERSION = 20260908;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
@@ -669,7 +976,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.7;
+				MARKETING_VERSION = 0.1.8;
 				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -690,7 +997,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
@@ -711,7 +1018,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
@@ -731,7 +1038,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.uitests;
@@ -750,7 +1057,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.uitests;
@@ -767,9 +1074,10 @@
 		D0000000000000000000007 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = EVAQuickLook/EVAQuickLook.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				CURRENT_PROJECT_VERSION = 20260828;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -781,8 +1089,10 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.7;
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.quicklook;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
 				SKIP_INSTALL = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -794,9 +1104,10 @@
 		D0000000000000000000008 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = EVAQuickLook/EVAQuickLook.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				CURRENT_PROJECT_VERSION = 20260828;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -808,8 +1119,10 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.7;
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.quicklook;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
 				SKIP_INSTALL = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -821,9 +1134,10 @@
 		D0000000000000000000017 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = EVAThumbnail/EVAThumbnail.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				CURRENT_PROJECT_VERSION = 20260828;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -835,8 +1149,10 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.7;
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.thumbnail;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
 				SKIP_INSTALL = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -848,9 +1164,10 @@
 		D0000000000000000000018 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = EVAThumbnail/EVAThumbnail.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7V8RRF84QH;
+				CURRENT_PROJECT_VERSION = 20260828;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -862,8 +1179,10 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.7;
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.thumbnail;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
 				SKIP_INSTALL = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -872,9 +1191,146 @@
 			};
 			name = Release;
 		};
+		E30000000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EVAResolve/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "EVA Resolve";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.medical";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.8;
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.resolve;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		E30000000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EVAResolve/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "EVA Resolve";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.medical";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by P. Molfese, National Institutes of Health (NIH). U.S. Government work under 17 U.S.C. § 105.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.8;
+				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.resolve;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		E40000000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.resolve.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EVAResolve.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/EVAResolve";
+			};
+			name = Debug;
+		};
+		E40000000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva.resolve.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EVAResolve.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/EVAResolve";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		510000000000000000000003 /* Build configuration list for PBXNativeTarget "EVASimulate" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				510000000000000000000004 /* Debug */,
+				510000000000000000000005 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		77BE28B62FED64E10080DAF5 /* Build configuration list for PBXProject "EVA" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -925,6 +1381,24 @@
 			buildConfigurations = (
 				D0000000000000000000017 /* Debug */,
 				D0000000000000000000018 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E30000000000000000000010 /* Build configuration list for PBXNativeTarget "EVAResolve" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E30000000000000000000011 /* Debug */,
+				E30000000000000000000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E40000000000000000000010 /* Build configuration list for PBXNativeTarget "EVAResolveTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E40000000000000000000011 /* Debug */,
+				E40000000000000000000012 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

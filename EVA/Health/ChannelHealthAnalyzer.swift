@@ -34,6 +34,12 @@
 import Accelerate
 import Foundation
 
+/// Carries a manually allocated buffer across `concurrentPerform`. Callers
+/// guarantee that each worker writes a distinct index.
+private nonisolated struct HealthUnsafeSendableBuffer<Element>: @unchecked Sendable {
+    let base: UnsafeMutablePointer<Element>
+}
+
 nonisolated enum ChannelHealthGrade: String, Codable, Sendable, Equatable {
     case good
     case watch
@@ -286,7 +292,7 @@ nonisolated struct ChannelBaseMetricSettings: Codable, Sendable {
 /// Thread-safe completed-count for reporting progress out of a
 /// `DispatchQueue.concurrentPerform` loop, where multiple worker threads
 /// finish iterations in an unpredictable order.
-private final class ConcurrentProgressCounter: @unchecked Sendable {
+private nonisolated final class ConcurrentProgressCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
 
@@ -331,19 +337,20 @@ nonisolated enum ChannelHealthAnalyzer {
             summaries.append(summary(for: channel, channelIndex: index, samplingRate: signal.samplingRate, sampleStride: sampleStride))
             progress?(0.60 * Double(index + 1) / Double(max(signal.data.count, 1)))
         }
+        let channelSummaries = summaries
 
-        let baselines = ChannelHealthBaselines(summaries: summaries)
-        let neighborScores = neighborAgreementScores(summaries: summaries, layout: layout) { fraction in
+        let baselines = ChannelHealthBaselines(summaries: channelSummaries)
+        let neighborScores = neighborAgreementScores(summaries: channelSummaries, layout: layout) { fraction in
             progress?(0.60 + 0.30 * fraction)
         }
 
         // Results/features build (0.90 -> 0.92 of overall progress): cheap
         // per-channel work, parallelized mainly for consistency with the
         // stages below rather than for its own sake.
-        let resultChannelIndices = summaries.map(\.channelIndex)
+        let resultChannelIndices = channelSummaries.map(\.channelIndex)
         let resultCounter = ConcurrentProgressCounter()
         let resultPairs = concurrentMap(count: resultChannelIndices.count) { position -> (Int, ChannelHealthResult, ChannelHealthFeatures) in
-            let summary = summaries[position]
+            let summary = channelSummaries[position]
             let neighborScore = neighborScores[summary.channelIndex]
             let impedanceKOhm = impedances.flatMap { values in
                 values.indices.contains(summary.channelIndex) ? values[summary.channelIndex] : nil
@@ -425,8 +432,9 @@ nonisolated enum ChannelHealthAnalyzer {
             storage.deinitialize(count: count)
             storage.deallocate()
         }
+        let sendableStorage = HealthUnsafeSendableBuffer(base: storage)
         DispatchQueue.concurrentPerform(iterations: count) { index in
-            storage[index] = body(index)
+            sendableStorage.base[index] = body(index)
         }
         return (0..<count).map { storage[$0]! }
     }
@@ -850,8 +858,9 @@ nonisolated enum ChannelHealthAnalyzer {
         for index in signal.data.indices {
             seriesByChannel[index] = downsampledSeries(signal.data[index], stride: stride)
         }
+        let channelSeries = seriesByChannel
 
-        let positions = layout.positions.filter { seriesByChannel[$0.channelIndex] != nil }
+        let positions = layout.positions.filter { channelSeries[$0.channelIndex] != nil }
         let windowSamples = max(Int((configuration.windowSeconds * effectiveRate).rounded()), 16)
         let neighborCount = max(configuration.neighborCount, 1)
 
@@ -864,7 +873,7 @@ nonisolated enum ChannelHealthAnalyzer {
                 progress?(Double(completed) / Double(max(positionCount, 1)))
             }
             let position = positions[offset]
-            guard let actual = seriesByChannel[position.channelIndex] else { return nil }
+            guard let actual = channelSeries[position.channelIndex] else { return nil }
 
             let neighbors = positions
                 .filter { $0.channelIndex != position.channelIndex }
@@ -872,7 +881,7 @@ nonisolated enum ChannelHealthAnalyzer {
                 .prefix(neighborCount)
 
             let weightedNeighbors = neighbors.compactMap { neighbor -> (series: [Double], weight: Double)? in
-                guard let series = seriesByChannel[neighbor.channelIndex] else { return nil }
+                guard let series = channelSeries[neighbor.channelIndex] else { return nil }
                 let distance = sqrt(squaredDistance(neighbor, position))
                 return (series, 1.0 / max(distance, 1e-6))
             }

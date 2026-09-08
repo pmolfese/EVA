@@ -13,6 +13,24 @@
 //  SI-3). One UI-free entry point shared by the BCG sheet, `ProcessingCore`,
 //  batch, replay, and the pipeline regression corpus.
 //
+//  ## Method and provenance
+//
+//  Implements the PCA-S surrogate method of Rusiniak et al. (2022), which
+//  applies the Berg–Scherg source-informed spatial filtering (multiple-source
+//  correction) framework of Berg & Scherg (1994) to the ballistocardiogram.
+//  This is a native Swift reconstruction written from the published
+//  manuscripts to the best of our ability; no reference implementation was
+//  ported or consulted.
+//
+//    * Rusiniak, M., Bornfleth, H., Cho, J.-H., Wolak, T., Ille, N., Berg, P.,
+//      & Scherg, M. (2022). EEG-fMRI: Ballistocardiogram artifact reduction by
+//      surrogate method for improved source localization. Frontiers in
+//      Neuroscience, 16, 842420. https://doi.org/10.3389/fnins.2022.842420
+//    * Berg, P., & Scherg, M. (1994). A multiple source approach to the
+//      correction of eye artifacts. Electroencephalography and Clinical
+//      Neurophysiology, 90(3), 229–241.
+//      https://doi.org/10.1016/0013-4694(94)90094-9
+//
 //  ## What it does
 //
 //  The recording is written as a simultaneous mixture of a fixed brain model and
@@ -59,9 +77,66 @@
 
 import Foundation
 
+/// The head model PCA-S builds its surrogate brain basis on. Only the analytic
+/// sphere family is offered here: those are exact for concentric geometry, fast,
+/// and what the operator is validated against — the right choice for building a
+/// brain basis. The affine ellipsoid and the (now multi-shell-validated) BEM
+/// exist (`EllipsoidalForwardModel`, `BEMForwardModel`) but aren't wired into
+/// the basis: the ellipsoid needs a basis overload, and BEM's dense solve buys
+/// nothing over the exact analytic sphere for a concentric basis (its value is
+/// generation-side, in EVASimulate). Every case names an assumption, never a
+/// measurement of this subject; the choice travels in `eva.xml` and the audit log.
+nonisolated enum BCGSurrogateHeadModel: String, Codable, Sendable, CaseIterable, Identifiable {
+    case classicThreeShell
+    case standardThreeShell
+    case rushDriscollThreeShell
+    case highSkullConductivityThreeShell
+    case classicFourShell
+
+    nonisolated var id: String { rawValue }
+
+    nonisolated var forwardHeadModel: ForwardHeadModel {
+        switch self {
+        case .classicThreeShell:              return .classicThreeShell
+        case .standardThreeShell:             return .standardThreeShell
+        case .rushDriscollThreeShell:         return .rushDriscollThreeShell
+        case .highSkullConductivityThreeShell: return .highSkullConductivityThreeShell
+        case .classicFourShell:               return .classicFourShell
+        }
+    }
+
+    nonisolated var displayName: String {
+        switch self {
+        case .classicThreeShell:              return "Classic 3-shell (1:80)"
+        case .standardThreeShell:             return "Standard 3-shell (1:40)"
+        case .rushDriscollThreeShell:         return "Rush–Driscoll 3-shell (1:80)"
+        case .highSkullConductivityThreeShell: return "High-conductivity skull 3-shell (1:20)"
+        case .classicFourShell:               return "4-shell + CSF"
+        }
+    }
+
+    /// One-line reminder of what the choice changes, for the picker help.
+    nonisolated var summary: String {
+        switch self {
+        case .classicThreeShell:
+            return "Brain/skull/scalp with the classic highly-insulating 1:80 skull — EVA's long-standing default."
+        case .standardThreeShell:
+            return "The modern consensus skull conductivity (~1:40), less insulating than the classic value."
+        case .rushDriscollThreeShell:
+            return "Rush & Driscoll (1968) proportions with the classic 1:80 skull."
+        case .highSkullConductivityThreeShell:
+            return "The low end of the credible skull range (~1:20); the most conductive skull offered."
+        case .classicFourShell:
+            return "Adds a cerebrospinal-fluid layer between brain and skull — the geometry the PCA-S paper used."
+        }
+    }
+}
+
 /// Portable PCA-S settings. Everything here travels in `eva.xml`; nothing here
 /// is fitted to a particular recording.
 nonisolated struct BCGSurrogateSettings: Codable, Sendable, Equatable {
+    /// The surrogate brain basis's head model. Portable and replayable.
+    var headModel: BCGSurrogateHeadModel = .classicThreeShell
     var patternSearch: BCGArtifactPatternSearch = .iterative
     /// Beat-locked template window, relative to each detected beat.
     var windowStartSeconds: Double = -0.1
@@ -94,6 +169,7 @@ nonisolated struct BCGSurrogateSettings: Codable, Sendable, Equatable {
 
     var parameters: [String: String] {
         [
+            "surrogateHeadModel": headModel.rawValue,
             "surrogatePatternSearch": patternSearch.rawValue,
             "surrogateWindowStartSeconds": String(format: "%.6f", windowStartSeconds),
             "surrogateWindowEndSeconds": String(format: "%.6f", windowEndSeconds),
@@ -116,6 +192,9 @@ nonisolated struct BCGSurrogateSettings: Codable, Sendable, Equatable {
     /// build used.
     init(parameters p: [String: String]) {
         self.init()
+        if let value = p["surrogateHeadModel"].flatMap(BCGSurrogateHeadModel.init(rawValue:)) {
+            headModel = value
+        }
         if let value = p["surrogatePatternSearch"].flatMap(BCGArtifactPatternSearch.init(rawValue:)) {
             patternSearch = value
         }
@@ -276,8 +355,11 @@ nonisolated enum BCGSurrogateCorrection {
         channelNames: [String]?,
         beatSeconds: [Double],
         settings: BCGSurrogateSettings = .default,
-        head: ForwardHeadModel = .classicThreeShell
+        head headOverride: ForwardHeadModel? = nil
     ) async throws -> Output {
+        // The head model comes from the replayable settings; an explicit override
+        // is honored for tests and callers that need to pin a specific geometry.
+        let head = headOverride ?? settings.headModel.forwardHeadModel
         let rows = correctedRows.filter { data.indices.contains($0) }.sorted()
         guard rows.count >= minimumChannelCount else {
             throw BCGSurrogateError.tooFewChannels(found: rows.count, required: minimumChannelCount)

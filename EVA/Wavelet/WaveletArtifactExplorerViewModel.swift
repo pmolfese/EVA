@@ -32,7 +32,7 @@ final class WaveletArtifactExplorerViewModel {
     /// the onset+duration reading they need; candidates now stamp
     /// `EventTimeAnchor.onset` directly, so the string is free to say what it
     /// means.
-    static let candidateSourceFile = "Wavelet Explorer"
+    nonisolated static let candidateSourceFile = "Wavelet Explorer"
 
     /// Held directly so this VM can read channel state itself — see
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).

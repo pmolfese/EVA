@@ -367,15 +367,17 @@ nonisolated enum LocalTemplateArtifactCorrector {
             count: channels.count
         )
         var cleaned = channels
+        let finalAccumulatedWeight = accumulatedWeight
+        let finalAccumulatedArtifact = accumulatedArtifact
         artifact.withUnsafeMutableBufferPointer { artifactBuffer in
             let artifactOut = GradientUnsafeSendable(base: artifactBuffer.baseAddress!)
             cleaned.withUnsafeMutableBufferPointer { cleanedBuffer in
                 let cleanedOut = GradientUnsafeSendable(base: cleanedBuffer.baseAddress!)
                 evaConcurrentPerform(iterations: channels.count) { channelIndex in
                     for sample in channels[channelIndex].indices {
-                        let weight = accumulatedWeight[channelIndex][sample]
+                        let weight = finalAccumulatedWeight[channelIndex][sample]
                         if weight > 0 {
-                            let value = Float(accumulatedArtifact[channelIndex][sample] / weight)
+                            let value = Float(finalAccumulatedArtifact[channelIndex][sample] / weight)
                             artifactOut.base[channelIndex][sample] = value
                             cleanedOut.base[channelIndex][sample] -= value
                         }
