@@ -30,29 +30,34 @@ struct HeadProjectionView: View {
             case .sagittal: return "Sagittal (side)"
             }
         }
-        /// The two in-plane axis labels, positive u then positive v.
+        /// The anatomical labels at the screen-right and screen-top edges.
         var axisLabels: (u: String, v: String) {
             switch self {
             case .axial: return ("R", "A")
-            case .coronal: return ("R", "S")
-            case .sagittal: return ("A", "S")
+            case .coronal: return ("L", "S")
+            case .sagittal: return ("P", "S")
             }
         }
 
-        /// In-plane (u, v) meters for a 3-D point.
+        /// View-oriented in-plane `(u, v)` components for a 3-D RAS point.
+        ///
+        /// The coronal artwork is viewed from the front, so patient-right is at
+        /// screen-left. The sagittal artwork has the face at screen-left, so
+        /// anterior is also at screen-left. Negating those horizontal axes keeps
+        /// positions and orientation arrows registered to the anatomy.
         func components(_ p: SIMD3<Double>) -> (u: Double, v: Double) {
             switch self {
             case .axial: return (p.x, p.y)
-            case .coronal: return (p.x, p.z)
-            case .sagittal: return (p.y, p.z)
+            case .coronal: return (-p.x, p.z)
+            case .sagittal: return (-p.y, p.z)
             }
         }
-        /// Write (u, v) meters back into the held 3-D point.
+        /// Write view-oriented `(u, v)` back into the held 3-D RAS point.
         func apply(u: Double, v: Double, to p: inout SIMD3<Double>) {
             switch self {
             case .axial: p.x = u; p.y = v
-            case .coronal: p.x = u; p.z = v
-            case .sagittal: p.y = u; p.z = v
+            case .coronal: p.x = -u; p.z = v
+            case .sagittal: p.y = -u; p.z = v
             }
         }
 
@@ -79,8 +84,8 @@ struct HeadProjectionView: View {
             var result = current
             switch self {
             case .axial: result.x = hu; result.y = hv; result.z = out
-            case .coronal: result.x = hu; result.z = hv; result.y = out
-            case .sagittal: result.y = hu; result.z = hv; result.x = out
+            case .coronal: result.x = -hu; result.z = hv; result.y = out
+            case .sagittal: result.y = -hu; result.z = hv; result.x = out
             }
             let n = (result.x * result.x + result.y * result.y + result.z * result.z).squareRoot()
             return n > 1e-9 ? result / n : current
