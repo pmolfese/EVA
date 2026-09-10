@@ -96,6 +96,47 @@ struct SourceSimulatorControllerTests {
         #expect(rotated == start)
     }
 
+    @Test("front and side projections follow their anatomical artwork")
+    func anatomicalProjectionDirections() {
+        let ras = SIMD3<Double>(1, 2, 3)
+
+        // Axial is viewed from above with right and anterior at screen-right/up.
+        let axial = HeadProjectionView.Plane.axial.components(ras)
+        #expect(axial.u == 1 && axial.v == 2)
+
+        // Coronal faces the subject: patient-right is screen-left.
+        let coronal = HeadProjectionView.Plane.coronal.components(ras)
+        #expect(coronal.u == -1 && coronal.v == 3)
+
+        // The sagittal artwork's face is at screen-left: anterior is screen-left.
+        let sagittal = HeadProjectionView.Plane.sagittal.components(ras)
+        #expect(sagittal.u == -2 && sagittal.v == 3)
+    }
+
+    @Test("view coordinates round-trip through every projection")
+    func projectionRoundTrips() {
+        let original = SIMD3<Double>(0.01, 0.02, 0.03)
+        for plane in HeadProjectionView.Plane.allCases {
+            let view = plane.components(original)
+            var reconstructed = original
+            plane.apply(u: view.u, v: view.v, to: &reconstructed)
+            #expect(reconstructed == original)
+        }
+    }
+
+    @Test("front and side rotation follows the cursor in view space")
+    func flippedViewRotationAimsInPlane() {
+        let coronal = HeadProjectionView.Plane.coronal.rotatedOrientation(
+            towards: 1, 0, from: SIMD3<Double>(0, 0.6, 0))
+        #expect(coronal.x < 0, "screen-right in the front view is patient-left")
+        #expect(abs(coronal.y - 0.6) < 1e-9)
+
+        let sagittal = HeadProjectionView.Plane.sagittal.rotatedOrientation(
+            towards: -1, 0, from: SIMD3<Double>(0.6, 0, 0))
+        #expect(sagittal.y > 0, "screen-left in the side view is anterior")
+        #expect(abs(sagittal.x - 0.6) < 1e-9)
+    }
+
     @Test("a time course makes the field vary over the epoch")
     func timeCourseVariesField() {
         let controller = SourceSimulatorController()
