@@ -29,6 +29,10 @@ struct SourceSimulatorWindowView: View {
     @State private var timelineHeight: CGFloat = 210
     @State private var dragStartTimelineHeight: CGFloat?
 
+    /// True while an averaged recording is hovering over the window; draws the
+    /// drop outline.
+    @State private var isDropTargeted = false
+
     /// Drives the scrubber during playback; `advancePlayback` is a no-op when
     /// paused, so an idle window costs nothing but a discarded tick.
     private let tick = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
@@ -52,6 +56,20 @@ struct SourceSimulatorWindowView: View {
             }
         }
         .frame(minWidth: 860, minHeight: 640)
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(.tint, style: StrokeStyle(lineWidth: 4, dash: [10, 6]))
+                    .padding(12)
+                    .allowsHitTesting(false)
+            }
+        }
+        // Drop an averaged `.mff` anywhere in the window to fit it. Same path as
+        // File ▸ Open and EVA's handoff, so validation and mode switching are
+        // identical: `applyPendingFit` flips the window to Fit mode on success.
+        .dropDestination(for: URL.self) { urls, _ in
+            openDroppedURLs(urls, controller: controller)
+        } isTargeted: { isDropTargeted = $0 }
         .onReceive(tick) { _ in controller.advancePlayback(by: 1.0 / 30.0) }
         .onAppear { claimPendingFit(controller: controller) }
         .onReceive(NotificationCenter.default.publisher(for: .evaPendingSourceFit)) { _ in
@@ -66,6 +84,19 @@ struct SourceSimulatorWindowView: View {
         .onChange(of: controller.showDipoleFit) { _, on in
             if on { controller.scheduleFit() } else { controller.fitResult = nil }
         }
+    }
+
+    /// Takes the first `.mff` package in a drop and runs it through the Fit
+    /// importer. Anything else is reported in the status line rather than
+    /// silently ignored.
+    private func openDroppedURLs(_ urls: [URL], controller: SourceSimulatorController) -> Bool {
+        guard let url = urls.first(where: { $0.pathExtension.lowercased() == "mff" }) else {
+            controller.showStatus("Resolve fits averaged .mff recordings — that drop had none.")
+            return false
+        }
+        controller.showStatus("")  // clear any previous import failure
+        SourceFitImporter.importAndQueue(url)
+        return true
     }
 
     private func claimPendingFit(controller: SourceSimulatorController) {
