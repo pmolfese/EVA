@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-11",
+  "environment": {
+    "model": "Mac Studio",
+    "architecture": "arm64",
+    "osVersion": "26.6.2",
+    "osBuild": "25G83",
+    "buildConfiguration": "Debug"
+  },
+  "benchmarks": [
+    {
+      "name": "two-minute-four-channel-paper-profile",
+      "samplingRateHz": 256,
+      "durationSeconds": 120,
+      "channels": 4,
+      "frequencyCount": 47,
+      "surrogateCount": 0,
+      "memoryBudgetBytes": 134217728,
+      "maximumWorkerCount": 4,
+      "preferredOutputTileSamples": 4096,
+      "xcresultTestDurationSeconds": 1.6330680847167969,
+      "result": "passed"
+    },
+    {
+      "name": "long-kernel-direct-vs-fft",
+      "samplingRateHz": 512,
+      "sampleCount": 32768,
+      "frequencyHz": 4,
+      "waveletWidthCycles": 5,
+      "xcresultTestDurationSeconds": 3.9341020584106445,
+      "assertions": {
+        "fftFasterThanDirect": true,
+        "maximumRealCoefficientErrorLessThan": 1e-11
+      },
+      "result": "passed"
+    },
+    {
+      "name": "external-two-mff-production-gate",
+      "recordingSampleCounts": [768840, 762222],
+      "channelCountPerRecording": 257,
+      "samplingRateHz": 1000,
+      "observedParityWindowSeconds": 12,
+      "significanceWindowSamples": 2048,
+      "significanceSurrogateCount": 200,
+      "frequencyCount": 4,
+      "xcresultTestDurationSeconds": 125.364,
+      "result": "passed"
+    }
+  ],
+  "interpretation": "Developer-machine regression measurements, not release SLAs. External package loading and the direct oracle dominate the MFF gate. No participant samples are stored."
+}

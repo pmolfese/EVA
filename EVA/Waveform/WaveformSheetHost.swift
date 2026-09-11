@@ -11,7 +11,7 @@
 //
 //  Single-sheet host for the recording window (ROADMAP Priority 1, B3).
 //
-//  `content(for:)` used to chain 18 separate `.sheet(isPresented:)` modifiers.
+//  `content(for:)` used to chain many separate `.sheet(isPresented:)` modifiers.
 //  Each one wraps the view in another `ModifiedContent<…>` layer, so the concrete
 //  return type of the body became an enormous nested generic — and the Swift
 //  runtime pays to instantiate that type's metadata and protocol witness tables
@@ -55,6 +55,7 @@ enum ActiveRecordingSheet: String, Identifiable, CaseIterable, Sendable {
     case datasetInfo
     case physioImport
     case eegAnalysis
+    case rhythmicityExplorer
     case channelHealthDetails
     case channelGoodnessSettings
     case segmentHealthDetails
@@ -88,6 +89,7 @@ extension WaveformView {
         if showsDatasetInfo { return .datasetInfo }
         if showsPhysioImportSheet { return .physioImport }
         if eegAnalysis.showsSheet { return .eegAnalysis }
+        if rhythmicityExplorer.showsSheet { return .rhythmicityExplorer }
         if chanHealth.showsDetails { return .channelHealthDetails }
         if showsChannelGoodnessSettings { return .channelGoodnessSettings }
         if segHealth.showsDetails { return .segmentHealthDetails }
@@ -113,7 +115,7 @@ extension WaveformView {
 
     /// Clears the presentation flag for whichever sheet is showing.
     ///
-    /// Deliberately clears only the active one rather than resetting all 18: if a
+    /// Deliberately clears only the active one rather than resetting every sheet: if a
     /// second flag is also set, it should present next, matching how the chained
     /// modifiers behaved.
     func dismissActiveSheet() {
@@ -132,6 +134,7 @@ extension WaveformView {
         case .datasetInfo: showsDatasetInfo = false
         case .physioImport: showsPhysioImportSheet = false
         case .eegAnalysis: eegAnalysis.showsSheet = false
+        case .rhythmicityExplorer: rhythmicityExplorer.showsSheet = false
         case .channelHealthDetails: chanHealth.showsDetails = false
         case .channelGoodnessSettings: showsChannelGoodnessSettings = false
         case .segmentHealthDetails: segHealth.showsDetails = false
@@ -236,6 +239,14 @@ extension WaveformView {
                 channelSets: ChannelSetStore.shared.allSets,
                 sensorLayout: recording.sensorLayout,
                 onClose: { eegAnalysis.showsSheet = false }
+            )
+
+        case .rhythmicityExplorer:
+            RhythmicityExplorerView(
+                viewModel: rhythmicityExplorer,
+                packageName: recording.packageName,
+                signal: continuousSignal,
+                onClose: { rhythmicityExplorer.showsSheet = false }
             )
 
         case .channelHealthDetails:
