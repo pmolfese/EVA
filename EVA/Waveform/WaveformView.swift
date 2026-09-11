@@ -375,6 +375,7 @@ struct WaveformView: View {
     // not epoching's averaged output.
     @State var singleTrial: SingleTrialAnalysisViewModel
     @State var eegAnalysis: EEGAnalysisViewModel
+    @State var rhythmicityExplorer: RhythmicityExplorerViewModel
 
     // Band-pass / notch filtering (applied to the active base signal).
     /// Filtering domain (band-pass / line-noise / average-reference), extracted
@@ -707,6 +708,7 @@ struct WaveformView: View {
         _epoching = State(wrappedValue: EpochingViewModel(store: store))
         _singleTrial = State(wrappedValue: SingleTrialAnalysisViewModel(store: store))
         _eegAnalysis = State(wrappedValue: EEGAnalysisViewModel(store: store))
+        _rhythmicityExplorer = State(wrappedValue: RhythmicityExplorerViewModel(store: store))
         _filter = State(wrappedValue: FilterViewModel(store: store))
         _wavelet = State(wrappedValue: WaveletReductionViewModel(store: store))
         _gradient = State(wrappedValue: GradientViewModel(store: store))
@@ -1867,19 +1869,30 @@ struct WaveformView: View {
             .accessibilityLabel("Processing")
             .help("Segment the recording into event-locked epochs")
 
-            Button {
-                eegAnalysis.syncArtifactSources(eegArtifactRejectionSources())
-                eegAnalysis.showsSheet = true
+            Menu {
+                Button {
+                    eegAnalysis.syncArtifactSources(eegArtifactRejectionSources())
+                    eegAnalysis.showsSheet = true
+                } label: {
+                    Label("EEG Analysis…", systemImage: "waveform.path.ecg")
+                }
+
+                Button {
+                    rhythmicityExplorer.showsSheet = true
+                } label: {
+                    Label("Rhythmicity Explorer…", systemImage: "waveform.path")
+                }
             } label: {
                 ToolbarIcon(
                     name: "icon.eeg-processing",
                     label: toolbarButtonLabel("EEG"),
-                    isActive: eegAnalysis.result != nil
+                    isActive: eegAnalysis.result != nil || rhythmicityExplorer.showsSheet
                 )
             }
+            .menuIndicator(.hidden)
             .buttonStyle(.plain)
-            .accessibilityLabel("EEG Processing")
-            .help(eegAnalysis.result == nil ? "Continuous EEG analysis tools" : "EEG analysis results ready")
+            .accessibilityLabel("EEG analyses")
+            .help(eegAnalysis.result == nil ? "Choose an EEG analysis" : "Choose an EEG analysis; EEG analysis results are ready")
 
             Button {
                 showsEventsPanel.toggle()
@@ -2819,6 +2832,7 @@ struct WaveformView: View {
         chanHealth.resetForClose()
         segHealth.resetForClose()
         eegAnalysis.resetForClose()
+        rhythmicityExplorer.resetForClose()
     }
 
     private func clearRecordingStateForClose() {
@@ -2839,6 +2853,7 @@ struct WaveformView: View {
         bcg.resetForClose()
         ecg.resetForClose()
         eegAnalysis.resetForClose()
+        rhythmicityExplorer.resetForClose()
         chanHealth.resetForClose()
         segHealth.resetForClose()
 

@@ -1,0 +1,62 @@
+{
+  "note": "Bundled snapshots predate the fractional-lag behavior at the pinned commit.",
+  "result": {
+    "bundledPythonVersusBundledMatlab": {
+      "correlation": 0.9999999985925682,
+      "maxAbsoluteDifference": 3.386548760520025e-05,
+      "meanAbsoluteDifference": 5.173225023772924e-06
+    },
+    "currentVersusBundledMatlab": {
+      "correlation": 0.5918821136079035,
+      "maxAbsoluteDifference": 0.29321458191767247,
+      "meanAbsoluteDifference": 0.09046576559836401
+    },
+    "currentVersusBundledPython": {
+      "correlation": 0.5918779122184622,
+      "maxAbsoluteDifference": 0.2932237131680877,
+      "meanAbsoluteDifference": 0.0904673411679416
+    },
+    "inputShape": [
+      3,
+      300001
+    ],
+    "outputShape": [
+      3,
+      47
+    ],
+    "samplingRateHz": 1000.0,
+    "walkthroughOptionA": {
+      "bandCounts": [
+        11,
+        12,
+        11
+      ],
+      "durationTableValueSeconds": 300.0,
+      "estimatedAperiodicSlopes": [
+        -0.8439130887086816,
+        -1.100267310812333,
+        -1.1423526645516242
+      ],
+      "samplingRateTableValueHz": 1000.0,
+      "significantBandCounts": [
+        11,
+        8,
+        8
+      ],
+      "significantFrequencyCounts": [
+        43,
+        25,
+        35
+      ]
+    },
+    "walkthroughOptionC": {
+      "bandCounts": [
+        11,
+        12,
+        11
+      ]
+    }
+  },
+  "schemaVersion": 1,
+  "upstreamCommit": "78386879eeb8cf9be06a1edfa6917c91b2d0d2ba"
+}

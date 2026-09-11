@@ -1,0 +1,89 @@
+{
+  "auditDate": "2026-09-11",
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "commit": "78386879eeb8cf9be06a1edfa6917c91b2d0d2ba",
+      "licenseFileSHA256": "f8305036bd3881e9f2fdecc8b10fc98e38de3fc8fed0173b9431708adf3827fe",
+      "name": "LAVI",
+      "releaseTagAtCommit": null,
+      "repositoryLicense": "MIT",
+      "url": "https://github.com/laaanchic/LAVI.git"
+    },
+    {
+      "commit": "6da57b71f1084c62cfa1a4deaebee227d38f2584",
+      "licenseFileSHA256": "f8305036bd3881e9f2fdecc8b10fc98e38de3fc8fed0173b9431708adf3827fe",
+      "name": "WTPL",
+      "releaseTagAtCommit": null,
+      "repositoryLicense": "MIT",
+      "url": "https://github.com/laaanchic/WTPL.git"
+    }
+  ],
+  "laviPythonFiles": [
+    {
+      "path": "python/lavi/core.py",
+      "sha256": "b96964794a6a6d44a53d0630d55fbde1e19503d243852c73ef0521be9e9dc9a5"
+    },
+    {
+      "path": "python/lavi/abba.py",
+      "sha256": "0e7eb4a0f687cfd66626b1ca0e3b87413560c616abae635a5e2541c7e7e6acb2"
+    },
+    {
+      "path": "python/lavi/wavelets.py",
+      "sha256": "70eef7c08083ea53edac7f30408f768541a066f10cd05c3ee2d92bdf1af22a31"
+    },
+    {
+      "path": "python/lavi/surrogates.py",
+      "sha256": "3432fc48ccad93d3b8a9fc9fe34babc30847baeb5654af7ae0fa8c1ffd014e98"
+    },
+    {
+      "path": "python/lavi/statistics.py",
+      "sha256": "19826cad69c3e8161ebc73f272cecbab897c44fc8729910426b1b90f3aefad5a"
+    },
+    {
+      "path": "python/data/SIGLIM.mat",
+      "sha256": "0b2ea724bdbd49737ae30604e31ededcd82b7672923af8bf2451988583624517"
+    },
+    {
+      "path": "python/data/SIGLIM2.mat",
+      "sha256": "d8dd677bde902d5e811547cf21ec2c30ace90a41b79a222dd5ce67106f3b08eb"
+    }
+  ],
+  "fileLevelProvenance": [
+    {
+      "license": "GPL-3.0-or-later",
+      "origin": "FieldTrip",
+      "paths": [
+        "matlab/waveletLight.m",
+        "matlab/tfrLight.m"
+      ],
+      "policy": "reference execution only; do not copy or translate into EVA"
+    },
+    {
+      "license": "permissive notice-bearing license in source file",
+      "origin": "V. Venema IAAFT implementation (2003)",
+      "paths": [
+        "matlab/iaaft_loop_1d.m"
+      ],
+      "policy": "reference execution only; independently implement from the published algorithm"
+    },
+    {
+      "license": "not independently stated in the translated Python file",
+      "origin": "Python translations identify the MATLAB routines as their numerical source",
+      "paths": [
+        "python/lavi/wavelets.py",
+        "python/lavi/surrogates.py"
+      ],
+      "policy": "treat conservatively as provenance-bearing oracle code; never redistribute with EVA"
+    },
+    {
+      "license": "repository MIT; formula attributed in file comments",
+      "origin": "WTPL mean-resultant calculation is described as based on CircStat circ_r",
+      "paths": [
+        "WTPL/wtplComp.m",
+        "WTPL/freqToWTPLwholeSession.m"
+      ],
+      "policy": "provenance reference only; independently implement the published mean-resultant equation"
+    }
+  ]
+}

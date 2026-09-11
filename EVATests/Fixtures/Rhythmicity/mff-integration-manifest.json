@@ -1,0 +1,32 @@
+{
+  "packages": [
+    {
+      "blockCount": 193,
+      "channelCount": 257,
+      "durationSeconds": 768.84,
+      "packageID": "external-mff-01",
+      "sampleCountPerChannel": 768840,
+      "sampleDepthBits": 32,
+      "samplingRateHz": 1000,
+      "signalFile": "signal1.bin",
+      "signalFileBytes": 790372460,
+      "signalFileSHA256": "cbbcc4ba6615b0ab3ae3aed211a59ab955036d48c02b78f816368c1bfa37ef01",
+      "sourceNameSHA256": "47693f119acaf7082bd9b7e9c0cdb4cecec079c0f67b2876c7f039d706964ee0"
+    },
+    {
+      "blockCount": 191,
+      "channelCount": 257,
+      "durationSeconds": 762.222,
+      "packageID": "external-mff-02",
+      "sampleCountPerChannel": 762222,
+      "sampleDepthBits": 32,
+      "samplingRateHz": 1000,
+      "signalFile": "signal1.bin",
+      "signalFileBytes": 783569148,
+      "signalFileSHA256": "b0d19573424e8ceeb0e883d30149eb44b95c1dca885f0f5de882528f9ca8b1fb",
+      "sourceNameSHA256": "4c3cbabd263031230a1b4d363d07325c01cacfefc1cd06ef4d44fe38dcca1cde"
+    }
+  ],
+  "schemaVersion": 1,
+  "storagePolicy": "external-integration-input; raw EEG is not copied into EVA"
+}
