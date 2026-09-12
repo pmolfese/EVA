@@ -398,14 +398,14 @@ own steps outright (see the status snapshot below).
 |---|---|---|
 | Blink | ICA | ✅ shipped — ICA + ICLabel "Eye" (`EVA/ICA`) |
 | **Saccadic spike (MAAC-1)** | spatial filter | ✅ **built, uncommitted on this branch** — `SaccadicSpikeCorrection.swift` + VM + views + help + 6 tests, replay-aware |
-| Corneo-retinal dipole (MAAC-2) | regression | ❌ open — only generic `.regression`; SP tool explicitly does *not* touch the slow CRD |
+| **Corneo-retinal dipole (MAAC-2)** | reverse-EMCP regression | ✅ **built, uncommitted on this branch** — dedicated continuous H→V regression, blink masking/interpolation, QC/help, replay-aware |
 | Movement (MAAC-3) | temporal PCA + Promax | ❌ open — Promax not implemented anywhere |
 | EMG (MAAC-4) | BSS-CCA | ❌ open — no CCA path |
 | Mains (MAAC-5) | spectral / CleanLine | ✅ **shipped** — `adaptiveLineNoiseReduction` / `lineNoiseMode == .adaptiveCleanLine` |
 | Alpha (MAAC-6) | — | ❌ open — niche |
 | Orchestration (MAAC-7) | — | ❌ open — no MAAC pipeline preset |
 
-So the remaining genuine gaps are **MAAC-2, MAAC-3, MAAC-4, MAAC-6, and MAAC-7**.
+So the remaining genuine gaps are **MAAC-3, MAAC-4, MAAC-6, and MAAC-7**.
 MAAC-1 (below) is kept for the record but is essentially done; MAAC-5 is marked
 shipped with only optional refinements. Blink correction (the MAAC's fourth
 matched algorithm) is already covered by the ICA + ICLabel "Eye" path — its only
@@ -464,7 +464,7 @@ P300 window and any gamma-band or time-frequency result — the one artifact cla
 EVA currently cannot touch, and the one the SP literature says is most
 insidious.
 
-## MAAC-2 — Corneo-retinal dipole (regression / reverse EMCP) — **NOT STARTED**
+## MAAC-2 — Corneo-retinal dipole (regression / reverse EMCP) — **COMPLETE (core)**
 
 The corneo-retinal dipole (CRD) is the standing potential between cornea and
 retina; its scalp projection is an *eye-direction* artifact that is **always
@@ -475,25 +475,43 @@ artifact's constant presence favors a regression estimate and because electrode
 dimensionality makes ICA prone to removing signal along with CRD noise on
 non-dense montages.
 
-EVA has a generic `.regression` method but no CRD-specific algorithm. The MAAC's
-refinement is an *inverted* Gratton EMCP (Gratton et al., 1983):
+EVA's generic `.regression` remains an event-window average-waveform method.
+The dedicated MAAC-2 workflow is implemented in
+`EVA/Artifacts/CorneoRetinalCorrection.swift`; it ports the CRD-specific
+*inverted* Gratton EMCP sequence in Dien (2024) and EP Toolkit
+`ep_fixSaccade.m`:
 
-- [ ] **New artifact type** `.corneoRetinal`, correcting horizontal then
+- [x] **New artifact type** `.corneoRetinal`, correcting horizontal then
   vertical components in sequence (accepting that correlated H/V means some
   vertical variance may be attributed to horizontal — the MAAC accepts this).
-- [ ] **Rough time courses** from the HEOG-pair and VEOG-pair difference waves
+- [x] **Rough time courses** from the HEOG-pair and VEOG-pair difference waves
   as the initial H and V estimates.
-- [ ] **Topography-first inversion.** Instead of treating the whole EOG
+- [x] **Topography-first inversion.** Instead of treating the whole EOG
   difference as artifact (classic EMCP, which flattens EOG and removes any EEG
   in it), use the rough time course as weights to average a *scalp topography*
   for the H and V CRD, then regress that topography back onto the recording to
   get a refined time course — the inverse of EMCP's "difference-as-timecourse →
   project topography." Robustness: use only the smallest ⅛ of estimated
   horizontal movements, and exclude blink periods from the topography estimate.
-- [ ] **Whole-recording** correction (not split blink/non-blink), since the CRD
+- [x] **Whole-recording** correction (not split blink/non-blink), since the CRD
   is present during blinks too; interpolate the CRD across blink spans from the
   bracketing voltages.
-- [ ] **Optional gaze read-out.** The refined H/V CRD amplitudes double as a
+- [x] **Paper-specific preliminary blink masks.** Detect upper-minus-lower VEOG
+  divergence above the MAAC 150 µV default only when it has a rapid rise and
+  fall, preserve the explicit upper/lower channel roles, and expose each full
+  mask span as a reviewable `Eye Blink` event without turning it into an epoch-
+  rejection or blink-correction instruction.
+- [x] **Analysis and cleaning QC.** Stream stages, candidates, accepted masks,
+  masked/usable sample fractions, and CRD amplitudes while Analyze runs; after
+  Apply, provide a blink-aligned before/after preview plus whole-recording
+  removed peak and RMS metrics.
+- [x] **Explicit mask review.** Keep every preliminary detection in the CRD
+  sheet with per-blink inclusion, previous/next waveform navigation, and
+  sample-resolution start/end adjustment. Mask edits invalidate the displayed
+  maps until the user runs the required CRD re-estimate.
+- [ ] **Optional gaze read-out.** The refined H/V CRD amplitudes are computed
+  and summarized as RMS QC in the MAAC-2 sheet; a future trace/export view could
+  expose them as a coarse gaze-position read-out. They double as a
   coarse gaze-position estimate (less accurate for rapid movements) — a possible
   free by-product worth surfacing.
 

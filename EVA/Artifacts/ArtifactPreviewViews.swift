@@ -1567,6 +1567,12 @@ struct ArtifactCleaningPreviewData: Sendable {
     var waveformScaleMicrovolts: Float?
     var afterScaleMicrovolts: Float?
     var reductionMetrics: ArtifactCleaningReductionMetrics?
+    var continuousRemovalMetrics: ArtifactCleaningContinuousRemovalMetrics?
+}
+
+struct ArtifactCleaningContinuousRemovalMetrics: Sendable {
+    var removedPeakMicrovolts: Float
+    var removedRMSMicrovolts: Float
 }
 
 struct ArtifactCleaningReductionMetrics: Sendable {
@@ -1623,7 +1629,8 @@ struct ArtifactCleaningPreview: View {
     }
 
     private var previewHeight: CGFloat {
-        artifact.topography != nil && layout != nil ? 540 : 285
+        if artifact.isCorneoRetinalDefinition { return 390 }
+        return artifact.topography != nil && layout != nil ? 540 : 285
     }
 
     var body: some View {
@@ -1659,7 +1666,7 @@ struct ArtifactCleaningPreview: View {
             if let beforeAverage = previewData?.beforeAverage {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text("Average Waveform")
+                        Text(artifact.isCorneoRetinalDefinition ? "Blink-mask aligned waveform" : "Average Waveform")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -1672,6 +1679,13 @@ struct ArtifactCleaningPreview: View {
                     }
                     if let metrics = previewData?.reductionMetrics {
                         reductionMetricsView(metrics)
+                    }
+                    if artifact.isCorneoRetinalDefinition,
+                       let metrics = previewData?.continuousRemovalMetrics {
+                        HStack(spacing: 8) {
+                            metricChip(title: "Whole-recording removed peak", value: Self.microvoltString(metrics.removedPeakMicrovolts), reduction: nil)
+                            metricChip(title: "Whole-recording removed RMS", value: Self.microvoltString(metrics.removedRMSMicrovolts), reduction: nil)
+                        }
                     }
                     HStack(spacing: 10) {
                         waveformPreview(
@@ -1692,6 +1706,12 @@ struct ArtifactCleaningPreview: View {
                         } else {
                             missingPreview(title: "After")
                         }
+                    }
+                    if artifact.isCorneoRetinalDefinition {
+                        Text("These windows are centered on the preliminary blink masks for verification. MAAC-2 removes the continuous eye-position field; it does not remove the eyelid blink waveform itself.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             } else if isLoadingPreview {
@@ -1913,6 +1933,15 @@ struct ArtifactCleaningPreview: View {
             afterAverage: afterAverage,
             artifact: artifact
         )
+        let continuousMetrics: ArtifactCleaningContinuousRemovalMetrics? = artifact.isCorneoRetinalDefinition
+            ? afterSignal.flatMap {
+                Self.continuousRemovalMetrics(
+                    before: beforeSignal,
+                    after: $0,
+                    preferredChannels: artifact.selectedChannelIndices
+                )
+            }
+            : nil
 
         return ArtifactCleaningPreviewData(
             beforeAverage: beforeAverage,
@@ -1923,7 +1952,49 @@ struct ArtifactCleaningPreview: View {
             topographyScale: previewTopographyScale,
             waveformScaleMicrovolts: previewWaveformScale,
             afterScaleMicrovolts: previewAfterScale,
-            reductionMetrics: previewReductionMetrics
+            reductionMetrics: previewReductionMetrics,
+            continuousRemovalMetrics: continuousMetrics
+        )
+    }
+
+    nonisolated private static func continuousRemovalMetrics(
+        before: MFFSignalData,
+        after: MFFSignalData,
+        preferredChannels: [Int]
+    ) -> ArtifactCleaningContinuousRemovalMetrics? {
+        guard before.data.count == after.data.count,
+              let sampleCount = before.data.first?.count,
+              sampleCount > 0 else { return nil }
+        let preferred = preferredChannels.filter {
+            before.data.indices.contains($0)
+                && after.data.indices.contains($0)
+                && before.data[$0].count == sampleCount
+                && after.data[$0].count == sampleCount
+        }
+        let channels = preferred.isEmpty
+            ? before.data.indices.filter {
+                after.data.indices.contains($0)
+                    && before.data[$0].count == sampleCount
+                    && after.data[$0].count == sampleCount
+            }
+            : preferred
+        guard !channels.isEmpty else { return nil }
+        var peak: Float = 0
+        var squareSum = 0.0
+        var count = 0
+        for channel in channels {
+            for sample in 0..<sampleCount {
+                let removed = before.data[channel][sample] - after.data[channel][sample]
+                guard removed.isFinite else { continue }
+                peak = max(peak, abs(removed))
+                squareSum += Double(removed) * Double(removed)
+                count += 1
+            }
+        }
+        guard count > 0 else { return nil }
+        return ArtifactCleaningContinuousRemovalMetrics(
+            removedPeakMicrovolts: peak,
+            removedRMSMicrovolts: Float(sqrt(squareSum / Double(count)))
         )
     }
 
@@ -2050,15 +2121,25 @@ struct ArtifactCleaningPreview: View {
     }
 
     nonisolated private static func average(in signal: MFFSignalData, artifact: DefinedArtifact) -> ArtifactTemplateAverage? {
+        let events = artifact.isCorneoRetinalDefinition
+            ? (artifact.corneoRetinalBlinkEvents ?? [])
+            : artifact.events
         guard signal.samplingRate > 0,
               let sampleCount = signal.data.first?.count,
               sampleCount > 0,
-              !artifact.events.isEmpty else {
+              !events.isEmpty else {
             return nil
         }
 
+        let crdWindowSeconds = min(
+            max(0.6, (events.compactMap(\.durationSeconds).max() ?? 0) + 0.2),
+            2.0
+        )
+        let requestedWindowSeconds = artifact.isCorneoRetinalDefinition
+            ? crdWindowSeconds
+            : artifact.windowSizeSeconds
         let windowSamples = artifact.average?.allChannelSamples.first?.count
-            ?? max(Int((artifact.windowSizeSeconds * signal.samplingRate).rounded()), 3)
+            ?? max(Int((requestedWindowSeconds * signal.samplingRate).rounded()), 3)
         guard windowSamples > 1, sampleCount >= windowSamples else { return nil }
 
         let edgeSamples = previewBaselineEdgeSamples(windowSamples: windowSamples, samplingRate: signal.samplingRate)
@@ -2071,8 +2152,8 @@ struct ArtifactCleaningPreview: View {
         // original (serial, event-outer) accumulation semantics exactly.
         struct ValidWindow { let start: Int; let end: Int }
         var validWindows: [ValidWindow] = []
-        validWindows.reserveCapacity(artifact.events.count)
-        for event in artifact.events {
+        validWindows.reserveCapacity(events.count)
+        for event in events {
             let center = Int((event.centerTimeSeconds * signal.samplingRate).rounded())
             let start = center - windowSamples / 2
             let end = start + windowSamples

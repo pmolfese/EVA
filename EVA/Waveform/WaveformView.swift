@@ -354,6 +354,8 @@ struct WaveformView: View {
     @State var template: ArtifactTemplateViewModel
     // Dedicated MAAC saccadic-spike detection / canonical-template workflow.
     @State var saccadicSpike: SaccadicSpikeViewModel
+    // Dedicated MAAC-2 continuous corneo-retinal dipole workflow.
+    @State var corneoRetinal: CorneoRetinalViewModel
     // Wavelet artifact explorer domain, extracted into an L4 store.
     @State var waveletExplorer: WaveletArtifactExplorerViewModel
     // ICA decomposition + component removal, extracted into an L4 store. See
@@ -707,6 +709,7 @@ struct WaveformView: View {
         _artifactVM = State(wrappedValue: ArtifactViewModel(store: store))
         _template = State(wrappedValue: ArtifactTemplateViewModel(store: store))
         _saccadicSpike = State(wrappedValue: SaccadicSpikeViewModel(store: store))
+        _corneoRetinal = State(wrappedValue: CorneoRetinalViewModel(store: store))
         _ica = State(wrappedValue: ICAViewModel(store: store))
         _epoching = State(wrappedValue: EpochingViewModel(store: store))
         _singleTrial = State(wrappedValue: SingleTrialAnalysisViewModel(store: store))
@@ -1346,11 +1349,17 @@ struct WaveformView: View {
             signalType: signal.signalType,
             signalEvents: EventTrackEventSignature(events: signal.events),
             userMarkers: userMarkers,
-            artifactEvents: EventTrackEventSignature(events: artifactVM.events),
+            artifactEvents: EventTrackEventSignature(
+                events: artifactVM.events + (corneoRetinal.result?.blinkEvents ?? [])
+            ),
             definedArtifacts: template.definedArtifacts.map {
                 WaveformDefinedArtifactSignature(
                     id: $0.id,
-                    events: EventTrackEventSignature(events: $0.events)
+                    events: EventTrackEventSignature(
+                        events: $0.isCorneoRetinalDefinition
+                            ? ($0.corneoRetinalBlinkEvents ?? [])
+                            : $0.events
+                    )
                 )
             },
             epochSegments: WaveformEpochSegmentSignature(segments: epoching.epochSegments),
@@ -1385,7 +1394,10 @@ struct WaveformView: View {
 
         guard includeArtifactOverlays else { return events }
 
-        for event in definedArtifactEventList() where seenIDs.insert(event.id).inserted {
+        for event in definedArtifactDisplayEventList() where seenIDs.insert(event.id).inserted {
+            events.append(event)
+        }
+        for event in corneoRetinal.result?.blinkEvents ?? [] where seenIDs.insert(event.id).inserted {
             events.append(event)
         }
         for event in artifactVM.events where seenIDs.insert(event.id).inserted {
@@ -1425,9 +1437,17 @@ struct WaveformView: View {
     private func overlayWindowSeconds(for event: MFFEvent) -> Double? {
         let defaultWindowSeconds = 0.25
         if let artifact = template.definedArtifacts.first(where: { artifact in
-            artifact.events.contains { $0.id == event.id }
+            let events = artifact.isCorneoRetinalDefinition
+                ? (artifact.corneoRetinalBlinkEvents ?? [])
+                : artifact.events
+            return events.contains { $0.id == event.id }
         }) {
-            return max(artifact.windowSizeSeconds, defaultWindowSeconds)
+            return artifact.isCorneoRetinalDefinition
+                ? max(event.durationSeconds ?? 0, defaultWindowSeconds)
+                : max(artifact.windowSizeSeconds, defaultWindowSeconds)
+        }
+        if corneoRetinal.result?.blinkEvents.contains(where: { $0.id == event.id }) == true {
+            return max(event.durationSeconds ?? 0, defaultWindowSeconds)
         }
         if artifactVM.events.contains(where: { $0.id == event.id }) {
             return defaultWindowSeconds
@@ -1722,6 +1742,10 @@ struct WaveformView: View {
 
                 Button("Saccadic Spike Potential…") {
                     openSaccadicSpikeSheet(for: continuousSignal)
+                }
+
+                Button("Corneo-Retinal Dipole…") {
+                    openCorneoRetinalSheet(for: continuousSignal)
                 }
 
                 Divider()
@@ -2828,6 +2852,10 @@ struct WaveformView: View {
         bcgTask = nil
         bcgRefinementTask?.cancel()
         bcgRefinementTask = nil
+        saccadicSpike.detectionTask?.cancel()
+        saccadicSpike.detectionTask = nil
+        corneoRetinal.analysisTask?.cancel()
+        corneoRetinal.analysisTask = nil
         artifactIdentityRefreshTask?.cancel()
         artifactIdentityRefreshTask = nil
         historyReDeriveTask?.cancel()
@@ -2857,6 +2885,7 @@ struct WaveformView: View {
         artifactVM.resetForClose()
         template.resetForClose()
         saccadicSpike.resetForClose()
+        corneoRetinal.resetForClose()
         wavelet.resetForClose()
         epoching.resetForClose()
         singleTrial.resetForClose()
@@ -2980,6 +3009,10 @@ struct WaveformView: View {
         template.clickedChannel = nil
         template.selectionRange = nil
         template.definedArtifactID = nil
+        saccadicSpike.result = nil
+        saccadicSpike.definedArtifactID = nil
+        corneoRetinal.result = nil
+        corneoRetinal.definedArtifactID = nil
 
         // Status messages and progress.
         filter.statusMessage = nil
@@ -3178,7 +3211,7 @@ struct WaveformView: View {
         }
     }
 
-    private func jumpToEvent(_ event: MFFEvent, in signal: MFFSignalData) {
+    func jumpToEvent(_ event: MFFEvent, in signal: MFFSignalData) {
         selectedEventID = event.id
         let plotWidth = plotWidth(for: signal)
         // Onset, not `beginTimeSeconds`: jumping should land at the start of
