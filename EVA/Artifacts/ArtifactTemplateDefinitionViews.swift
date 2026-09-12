@@ -59,6 +59,7 @@ extension WaveformView {
         switch type {
         case .ocular: return "AOC"
         case .saccadicSpike: return "ASP"
+        case .corneoRetinal: return "CRD"
         case .ecg: return "ECG"
         case .bcg: return "BCG"
         case .other: return "AOT"
@@ -299,7 +300,7 @@ extension WaveformView {
                     help: "Used by Clean Artifacts to group ocular, ECG, BCG, and other artifact definitions."
                 )
                 Picker("Type", selection: $template.type) {
-                    ForEach(DefinedArtifactType.allCases) { type in
+                    ForEach(DefinedArtifactType.allCases.filter { $0 != .corneoRetinal }) { type in
                         Text(type.rawValue).tag(type)
                     }
                 }
@@ -1498,6 +1499,18 @@ extension WaveformView {
         }
     }
 
+    /// Events intended only for waveform inspection. MAAC-2 blink spans live
+    /// outside `events` so epoch rejection and ordinary artifact cleaning do
+    /// not accidentally treat a CRD estimation mask as a blink correction.
+    func definedArtifactDisplayEventList() -> [MFFEvent] {
+        template.definedArtifacts.flatMap { artifact in
+            let events = artifact.isCorneoRetinalDefinition
+                ? (artifact.corneoRetinalBlinkEvents ?? [])
+                : artifact.events
+            return definedArtifactEvents(events, label: artifact.name)
+        }
+    }
+
     func deleteDefinedArtifact(id: DefinedArtifact.ID) {
         guard let index = template.definedArtifacts.firstIndex(where: { $0.id == id }) else { return }
         let name = template.definedArtifacts[index].name
@@ -1616,19 +1629,28 @@ extension WaveformView {
                                 .help("Delete this artifact definition.")
                                 .frame(width: 24)
 
-                                Picker("Type", selection: $artifact.type) {
-                                    ForEach(DefinedArtifactType.allCases) { type in
-                                        Text(type.rawValue).tag(type)
+                                if artifact.isCorneoRetinalDefinition {
+                                    Text(DefinedArtifactType.corneoRetinal.rawValue)
+                                        .font(.callout)
+                                        .frame(width: 150, alignment: .leading)
+                                        .help("MAAC-2 is a dedicated whole-recording correction, so its artifact type is fixed.")
+                                } else {
+                                    Picker("Type", selection: $artifact.type) {
+                                        ForEach(DefinedArtifactType.allCases.filter { $0 != .corneoRetinal }) { type in
+                                            Text(type.rawValue).tag(type)
+                                        }
                                     }
+                                    .labelsHidden()
+                                    .frame(width: 150)
                                 }
-                                .labelsHidden()
-                                .frame(width: 150)
 
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(artifact.name)
                                         .font(.callout.weight(.medium))
                                         .lineLimit(1)
-                                    Text("\(artifact.eventCount) events · \(artifact.eventCode)")
+                                    Text(artifact.isCorneoRetinalDefinition
+                                         ? "\(artifact.eventCount) blink-mask spans · CRD"
+                                         : "\(artifact.eventCount) events · \(artifact.eventCode)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -1689,6 +1711,16 @@ extension WaveformView {
         .padding(.top, 28)
         .padding(.bottom, 22)
         .frame(width: 800)
+        .onAppear {
+            // Repair the transient malformed state produced by older builds:
+            // changing the Type picker could relabel a CRD definition as
+            // Ocular while its dedicated method and mask payload remained.
+            for index in template.definedArtifacts.indices
+            where template.definedArtifacts[index].isCorneoRetinalDefinition
+                && template.definedArtifacts[index].type != .corneoRetinal {
+                template.definedArtifacts[index].type = .corneoRetinal
+            }
+        }
     }
 
     func artifactTreatmentControl(
@@ -1749,7 +1781,9 @@ extension WaveformView {
 
     private func availableCleaningMethods(for artifact: DefinedArtifact) -> [ArtifactCleaningMethod] {
         ArtifactCleaningMethod.allCases.filter {
-            $0 != .spikeTemplate || artifact.type == .saccadicSpike
+            ($0 != .spikeTemplate || artifact.type == .saccadicSpike)
+                && ($0 != .corneoRetinalRegression || artifact.isCorneoRetinalDefinition)
+                && (!artifact.isCorneoRetinalDefinition || $0 == .doNothing || $0 == .corneoRetinalRegression)
         }
     }
 
@@ -1760,6 +1794,7 @@ extension WaveformView {
         OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; Options includes topography-aware OBS strategies.
         SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
         SP Spatial Filter: the MAAC saccadic-spike specialization; fits and subtracts the saved canonical scalp map inside confirmed short SP windows.
+        MAAC-2 CRD Regression: estimates continuous horizontal and vertical eye-position scalp maps from HEOG/VEOG, then removes them in sequence while interpolating the predictor through blink spans.
         MAS/MAR: local (moving-window) median template — robust to an occasional distorted event; MAR additionally scales the template by a least-squares fit.
         wAAS/wAAR: exponentially weighted template (Goldman 2000); Options defaults to AMRI global weighting, where every valid event contributes by decay^distance, and wAAR additionally scales the template by a least-squares fit.
 

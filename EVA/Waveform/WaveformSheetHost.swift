@@ -45,6 +45,7 @@ enum ActiveRecordingSheet: String, Identifiable, CaseIterable, Sendable {
     case artifactTemplate
     case artifactCleaning
     case saccadicSpike
+    case corneoRetinal
     case ecgDetection
     case eyeArtifactThreshold
     case bcgDetection
@@ -80,6 +81,7 @@ extension WaveformView {
         if template.showsSheet { return .artifactTemplate }
         if artifactVM.showsCleaningSheet { return .artifactCleaning }
         if saccadicSpike.showsSheet { return .saccadicSpike }
+        if corneoRetinal.showsSheet { return .corneoRetinal }
         if ecg.showsSheet { return .ecgDetection }
         if artifactVM.showsThresholdSheet { return .eyeArtifactThreshold }
         if bcg.showsSheet { return .bcgDetection }
@@ -126,6 +128,7 @@ extension WaveformView {
         case .artifactTemplate: template.showsSheet = false
         case .artifactCleaning: artifactVM.showsCleaningSheet = false
         case .saccadicSpike: saccadicSpike.showsSheet = false
+        case .corneoRetinal: corneoRetinal.showsSheet = false
         case .ecgDetection: ecg.showsSheet = false
         case .eyeArtifactThreshold: artifactVM.showsThresholdSheet = false
         case .bcgDetection: bcg.showsSheet = false
@@ -176,6 +179,9 @@ extension WaveformView {
 
         case .saccadicSpike:
             saccadicSpikeSheet(for: continuousSignal)
+
+        case .corneoRetinal:
+            corneoRetinalSheet(for: continuousSignal)
 
         case .ecgDetection:
             ecgDetectionSheet(for: continuousSignal)

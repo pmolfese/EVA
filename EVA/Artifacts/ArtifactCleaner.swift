@@ -29,6 +29,7 @@ import Foundation
 enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable {
     case ocular = "Ocular Artifact"
     case saccadicSpike = "Saccadic Spike Potential"
+    case corneoRetinal = "Corneo-Retinal Dipole"
     case ecg = "ECG Artifact"
     case bcg = "BCG Artifact"
     case other = "Other"
@@ -50,7 +51,7 @@ enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable 
         switch self {
         case .bcg, .ecg: return 0.25
         case .saccadicSpike: return 0.10
-        case .ocular: return 0.35
+        case .ocular, .corneoRetinal: return 0.35
         case .other: return 0.25
         }
     }
@@ -78,6 +79,8 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
     /// MAAC saccadic-spike spatial filter: least-squares amplitude of one
     /// canonical scalp map, subtracted only inside confirmed ~24 ms events.
     case spikeTemplate = "SP Spatial Filter"
+    /// MAAC-2 continuous horizontal-then-vertical reverse-EMCP regression.
+    case corneoRetinalRegression = "MAAC-2 CRD Regression"
     /// Median Artifact Subtraction — local (moving-window) median template.
     case mas = "MAS"
     /// Median Artifact Regression — MAS template, least-squares scaled before subtracting.
@@ -283,11 +286,27 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
     /// Present only for definitions created by the dedicated MAAC saccadic-
     /// spike workflow. Optional keeps older replay payloads decodable.
     var saccadicSpikeConfiguration: SaccadicSpikeConfiguration? = nil
+    /// Present only for definitions created by the dedicated MAAC-2 workflow.
+    /// Optional so artifact payloads written before MAAC-2 remain decodable.
+    var corneoRetinalConfiguration: CorneoRetinalConfiguration? = nil
+    var corneoRetinalChannelSelection: CorneoRetinalChannelSelection? = nil
+    /// Blink spans are estimation masks for MAAC-2, not artifact events to be
+    /// rejected during epoching, so they are stored separately from `events`.
+    var corneoRetinalBlinkEvents: [MFFEvent]? = nil
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
 
-    var eventCount: Int {
-        events.count
+    nonisolated var eventCount: Int {
+        isCorneoRetinalDefinition ? (corneoRetinalBlinkEvents?.count ?? 0) : events.count
+    }
+
+    /// Also recognizes the short-lived malformed state older builds could
+    /// create when their Type picker changed a CRD definition to Ocular while
+    /// leaving its dedicated method and payload intact.
+    nonisolated var isCorneoRetinalDefinition: Bool {
+        type == .corneoRetinal
+            || cleaningMethod == .corneoRetinalRegression
+            || corneoRetinalConfiguration != nil
     }
 
     mutating func preserveCleaningSettings(from previous: DefinedArtifact) {
@@ -312,6 +331,9 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
         waveletPreservesLocalBaseline = previous.waveletPreservesLocalBaseline
         usesVariableEventDuration = previous.usesVariableEventDuration
         saccadicSpikeConfiguration = previous.saccadicSpikeConfiguration
+        corneoRetinalConfiguration = previous.corneoRetinalConfiguration
+        corneoRetinalChannelSelection = previous.corneoRetinalChannelSelection
+        corneoRetinalBlinkEvents = previous.corneoRetinalBlinkEvents
     }
 }
 
@@ -333,13 +355,14 @@ extension DefinedArtifact {
             String(format: "%.6f", value)
         }
 
-        let sortedEvents = events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+        let provenanceEvents = isCorneoRetinalDefinition ? (corneoRetinalBlinkEvents ?? []) : events
+        let sortedEvents = provenanceEvents.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
         var params: [String: String] = [
             key("id"): id.uuidString,
             key("type"): type.rawValue,
             key("name"): name,
             key("eventCode"): eventCode,
-            key("eventCount"): "\(events.count)",
+            key("eventCount"): "\(eventCount)",
             key("eventOnsetsSeconds"): sortedEvents.map { fixed($0.beginTimeSeconds) }.joined(separator: ","),
             key("selectedChannels"): integerList(selectedChannelIndices.sorted(), oneBased: true),
             key("windowSizeSeconds"): fixed(windowSizeSeconds),
@@ -378,6 +401,24 @@ extension DefinedArtifact {
             params[key("saccadicSpike.maximumDerivativeMicrovolts")] = fixed(Double(saccadicSpikeConfiguration.maximumDerivativeMicrovolts))
             params[key("saccadicSpike.refractorySeconds")] = fixed(saccadicSpikeConfiguration.refractorySeconds)
             params[key("saccadicSpike.windowSeconds")] = fixed(saccadicSpikeConfiguration.windowSeconds)
+        }
+
+        if let configuration = corneoRetinalConfiguration,
+           let selection = corneoRetinalChannelSelection {
+            params[key("corneoRetinal.verticalTemplateHorizontalFraction")] = fixed(configuration.verticalTemplateHorizontalFraction)
+            params[key("corneoRetinal.blinkPaddingSeconds")] = fixed(configuration.blinkPaddingSeconds)
+            params[key("corneoRetinal.blinkAmplitudeThresholdMicrovolts")] = fixed(configuration.preliminaryBlink.amplitudeThresholdMicrovolts)
+            params[key("corneoRetinal.blinkSlopeThresholdMicrovoltsPerMillisecond")] = fixed(configuration.preliminaryBlink.slopeThresholdMicrovoltsPerMillisecond)
+            params[key("corneoRetinal.blinkSlopeWindowSeconds")] = fixed(configuration.preliminaryBlink.slopeWindowSeconds)
+            params[key("corneoRetinal.blinkUpperSymmetryToleranceMicrovolts")] = fixed(configuration.preliminaryBlink.upperSymmetryToleranceMicrovolts)
+            params[key("corneoRetinal.blinkMinimumMaskDurationSeconds")] = fixed(configuration.preliminaryBlink.minimumMaskDurationSeconds)
+            params[key("corneoRetinal.blinkMinimumPeakSeparationSeconds")] = fixed(configuration.preliminaryBlink.minimumPeakSeparationSeconds)
+            params[key("corneoRetinal.blinkSmoothingSeconds")] = fixed(configuration.preliminaryBlink.smoothingSeconds)
+            params[key("corneoRetinal.leftHEOG")] = integerList(selection.leftHEOGIndices, oneBased: true)
+            params[key("corneoRetinal.rightHEOG")] = integerList(selection.rightHEOGIndices, oneBased: true)
+            params[key("corneoRetinal.upperVEOG")] = integerList(selection.upperVEOGIndices, oneBased: true)
+            params[key("corneoRetinal.lowerVEOG")] = integerList(selection.lowerVEOGIndices, oneBased: true)
+            params[key("corneoRetinal.analysisChannels")] = integerList(selection.analysisIndices, oneBased: true)
         }
 
         let eventDurations = sortedEvents.map { event in
@@ -655,9 +696,12 @@ nonisolated enum ArtifactCleaner {
     ) -> (signal: MFFSignalData, summaries: [ArtifactCleaningSummary]) {
         var data = signal.data
         var summaries: [ArtifactCleaningSummary] = []
-        let artifactsToClean = artifacts.filter { $0.cleaningMethod.removesArtifact && !$0.events.isEmpty }
+        let artifactsToClean = artifacts.filter {
+            $0.cleaningMethod.removesArtifact
+                && (!$0.events.isEmpty || $0.cleaningMethod == .corneoRetinalRegression)
+        }
         let artifactCount = artifactsToClean.count
-        let totalEvents = artifactsToClean.reduce(0) { $0 + $1.events.count }
+        let totalEvents = artifactsToClean.reduce(0) { $0 + max($1.eventCount, 1) }
         var completedEvents = 0
 
         for (index, artifact) in artifactsToClean.enumerated() {
@@ -665,13 +709,13 @@ nonisolated enum ArtifactCleaner {
             let startingCompletedEvents = completedEvents
 
             let reportProgress: (ArtifactCleaningProgressPhase, Int, String?) -> Void = { phase, artifactCompletedEvents, detail in
-                let boundedArtifactCompleted = min(max(artifactCompletedEvents, 0), artifact.events.count)
+                let boundedArtifactCompleted = min(max(artifactCompletedEvents, 0), max(artifact.eventCount, 1))
                 completedEvents = max(completedEvents, startingCompletedEvents + boundedArtifactCompleted)
                 progress?(ArtifactCleaningProgress(
                     completed: completedEvents,
                     total: totalEvents,
                     artifactCompleted: boundedArtifactCompleted,
-                    artifactTotal: artifact.events.count,
+                    artifactTotal: max(artifact.eventCount, 1),
                     artifactIndex: index + 1,
                     artifactCount: artifactCount,
                     artifactName: artifact.name,
@@ -687,7 +731,7 @@ nonisolated enum ArtifactCleaner {
                 reportProgress(.cleaning, artifactCompletedEvents, nil)
             }
             let reportFinalizingProgress: (String) -> Void = { detail in
-                let artifactCompleted = min(max(completedEvents - startingCompletedEvents, 0), artifact.events.count)
+                let artifactCompleted = min(max(completedEvents - startingCompletedEvents, 0), max(artifact.eventCount, 1))
                 reportProgress(.finalizing, artifactCompleted, detail)
             }
 
@@ -734,6 +778,14 @@ nonisolated enum ArtifactCleaner {
                     excluding: badChannels,
                     eventProgress: reportEventProgress
                 )
+            case .corneoRetinalRegression:
+                reportSetupProgress("Estimating horizontal and vertical CRD scalp templates")
+                channelCount = applyCorneoRetinalRegression(
+                    artifact: artifact,
+                    signal: signal,
+                    data: &data,
+                    excluding: badChannels
+                )
             case .mas, .mar, .waas, .waar:
                 reportSetupProgress("Building local (moving-window) artifact templates")
                 channelCount = applyLocalTemplate(
@@ -757,13 +809,13 @@ nonisolated enum ArtifactCleaner {
                     artifactID: artifact.id,
                     name: artifact.name,
                     method: artifact.cleaningMethod,
-                    eventCount: artifact.events.count,
+                    eventCount: artifact.eventCount,
                     channelCount: channelCount
                 ))
             }
 
-            if completedEvents < startingCompletedEvents + artifact.events.count {
-                reportEventProgress(artifact.events.count)
+            if completedEvents < startingCompletedEvents + max(artifact.eventCount, 1) {
+                reportEventProgress(max(artifact.eventCount, 1))
             }
         }
 
@@ -790,6 +842,29 @@ nonisolated enum ArtifactCleaner {
     }
 
     // MARK: - Methods
+
+    private static func applyCorneoRetinalRegression(
+        artifact: DefinedArtifact,
+        signal: MFFSignalData,
+        data: inout [[Float]],
+        excluding badChannels: Set<Int>
+    ) -> Int {
+        guard let selection = artifact.corneoRetinalChannelSelection else { return 0 }
+        do {
+            let result = try CorneoRetinalCorrector.correct(
+                data: data,
+                samplingRate: signal.samplingRate,
+                selection: selection,
+                blinkEvents: artifact.corneoRetinalBlinkEvents ?? [],
+                configuration: artifact.corneoRetinalConfiguration ?? .default,
+                excluding: badChannels
+            )
+            data = result.correctedData
+            return result.diagnostics.correctedChannelCount
+        } catch {
+            return 0
+        }
+    }
 
     private static func applyTemplateRegression(
         artifact: DefinedArtifact,
