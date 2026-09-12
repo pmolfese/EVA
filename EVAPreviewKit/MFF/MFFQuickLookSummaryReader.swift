@@ -1,6 +1,6 @@
 //
 //  MFFQuickLookSummaryReader.swift
-//  MFFPreviewKit
+//  EVAPreviewKit
 //
 //  Developed by P. Molfese, National Institutes of Health (NIH).
 //

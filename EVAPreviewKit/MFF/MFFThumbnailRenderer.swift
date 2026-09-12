@@ -1,6 +1,6 @@
 //
 //  MFFThumbnailRenderer.swift
-//  MFFPreviewKit
+//  EVAPreviewKit
 //
 //  Developed by P. Molfese, National Institutes of Health (NIH).
 //
@@ -362,7 +362,7 @@ nonisolated struct MFFThumbnailRenderer: Sendable {
 /// A tiny seeded generator so every icon is byte-identical between renders.
 /// Finder caches thumbnails aggressively; a wobble on redraw would look like a
 /// glitch.
-private struct SplitMix64 {
+private nonisolated struct SplitMix64 {
     private var state: UInt64
 
     init(seed: UInt64) { state = seed }

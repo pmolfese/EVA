@@ -44,7 +44,7 @@ graph TD
         PROV["Pipeline: EVAProcessingScript (eva.xml)"]
     end
     Resolve["EVAResolve<br/>(head model / coregistration app)"]
-    QL["EVAQuickLook · EVAThumbnail<br/>EVAPreviewKit · MFFPreviewKit<br/>(Finder extensions)"]
+    QL["EVAQuickLook · EVAThumbnail<br/>EVAPreviewKit<br/>(Finder extensions)"]
     Tools["Tools/*<br/>(CLI: EVASimulate, EVABIDS, …)"]
 
     App --> Core
@@ -58,7 +58,7 @@ graph TD
 | **`EVA/`** | The macOS app: every feature subsystem, view model, and SwiftUI view. | `EVACore` |
 | **`EVACore/`** | Pure computation + file I/O + data types. **No UI.** This is the reusable heart — MFF/FIF/NIfTI/GIFTI readers, DSP, the forward model, the simulator, and the `eva.xml` schema all live here. | Accelerate / Metal only |
 | **`EVAResolve/`** | A separate window/app for head-model work: MRI slice viewing, coregistration, BEM import. See `EVAResolve/HeadModel/`. | `EVACore` |
-| **`EVAQuickLook` / `EVAThumbnail` / `EVAPreviewKit` / `MFFPreviewKit`** | Finder QuickLook previews and thumbnails for `.mff`, `.fif`, and `.gii` files. | `EVACore` |
+| **`EVAQuickLook` / `EVAThumbnail` / `EVAPreviewKit`** | Finder QuickLook previews and thumbnails for `.mff`, `.fif`, and `.gii` files. | `EVACore` |
 | **`Tools/`** | Command-line helpers: `EVASimulate` (headless scalp-EEG generator), `EVABIDS`, `forward-compare`, `resolve-validate`, `RhythmicityReference` (Python oracle), `fif-import`, `mffTimingTool`, `EVAHelper`. | `EVACore` |
 
 **Rule of thumb:** anything that must be testable in isolation, run headless in a
@@ -410,8 +410,8 @@ unrelated features: bad-channel **interpolation** (spherical spline),
 ### MFF I/O round-trip
 
 `EVACore/IO/MFFReader` + `MFFWriter` are the one place the `.mff` on-disk format
-is understood. The QuickLook/Thumbnail targets (`MFFPreviewKit`, `EVAThumbnail`)
-read the *same* format through the *same* core, so a reader change that isn't in
+is understood. The QuickLook/Thumbnail targets use `EVAPreviewKit/MFF` and read
+the *same* format through the *same* core, so a reader change that isn't in
 `EVACore` will desync the Finder previews from the app.
 
 ### Figure export

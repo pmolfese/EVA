@@ -1232,7 +1232,7 @@ Implementation record:
 - [x] **Shared code lives in `EVACore/`**, an Xcode synchronized folder group attached
   to `EVA` and `EVASimulate` (later: Resolve). The 38 files EVASimulate used to borrow by
   per-file membership were moved there with sub-folders preserved. Same mechanism as
-  `MFFPreviewKit/` and `EVAPreviewKit/`. No framework, no `public` pass; everything
+  `EVAPreviewKit/`. No framework, no `public` pass; everything
   stays in the `EVA` module for tests.
 - [x] **EVASimulate re-pointed** at the folder; per-file references deleted.
 - [x] `Tools/EVABIDS/build.sh` and `Tools/EVAHelper/build.sh` re-pointed at new paths.
