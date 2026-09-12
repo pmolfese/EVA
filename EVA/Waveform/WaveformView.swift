@@ -352,6 +352,8 @@ struct WaveformView: View {
     // "Define Artifact" template-detection domain, extracted into an L4 store
     // (REFACTOR.md — analysis-domain slice).
     @State var template: ArtifactTemplateViewModel
+    // Dedicated MAAC saccadic-spike detection / canonical-template workflow.
+    @State var saccadicSpike: SaccadicSpikeViewModel
     // Wavelet artifact explorer domain, extracted into an L4 store.
     @State var waveletExplorer: WaveletArtifactExplorerViewModel
     // ICA decomposition + component removal, extracted into an L4 store. See
@@ -704,6 +706,7 @@ struct WaveformView: View {
         _bcg = State(wrappedValue: BCGDetectionViewModel(store: store))
         _artifactVM = State(wrappedValue: ArtifactViewModel(store: store))
         _template = State(wrappedValue: ArtifactTemplateViewModel(store: store))
+        _saccadicSpike = State(wrappedValue: SaccadicSpikeViewModel(store: store))
         _ica = State(wrappedValue: ICAViewModel(store: store))
         _epoching = State(wrappedValue: EpochingViewModel(store: store))
         _singleTrial = State(wrappedValue: SingleTrialAnalysisViewModel(store: store))
@@ -1716,6 +1719,10 @@ struct WaveformView: View {
                     artifactVM.showsCleaningSheet = true
                 }
                 .disabled(template.definedArtifacts.isEmpty)
+
+                Button("Saccadic Spike Potential…") {
+                    openSaccadicSpikeSheet(for: continuousSignal)
+                }
 
                 Divider()
 
@@ -2849,6 +2856,7 @@ struct WaveformView: View {
         gradient.resetForClose()
         artifactVM.resetForClose()
         template.resetForClose()
+        saccadicSpike.resetForClose()
         wavelet.resetForClose()
         epoching.resetForClose()
         singleTrial.resetForClose()

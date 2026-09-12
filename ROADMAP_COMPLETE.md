@@ -15,16 +15,17 @@ not merely started.
 
 1. [Ingest & Formats](#1-ingest--formats)
 2. [Processing & Cleaning](#2-processing--cleaning)
-3. [MRI / fMRI Artifact Correction](#3-mri--fmri-artifact-correction)
-4. [Epoching, Averaging & Trial-wise](#4-epoching-averaging--trial-wise)
-5. [Time-Frequency & Rhythmicity](#5-time-frequency--rhythmicity)
-6. [Source & Forward Modeling](#6-source--forward-modeling)
-7. [Simulation](#7-simulation)
-8. [RSA](#8-rsa)
-9. [UI, Figures & Export](#9-ui-figures--export)
-10. [Batch, Replay & Provenance](#10-batch-replay--provenance)
-11. [Performance & Metal](#11-performance--metal)
-12. [Developer Documentation](#12-developer-documentation)
+3. [EEG Artifact Correction (MAAC)](#3-eeg-artifact-correction-maac)
+4. [MRI / fMRI Artifact Correction](#4-mri--fmri-artifact-correction)
+5. [Epoching, Averaging & Trial-wise](#5-epoching-averaging--trial-wise)
+6. [Time-Frequency & Rhythmicity](#6-time-frequency--rhythmicity)
+7. [Source & Forward Modeling](#7-source--forward-modeling)
+8. [Simulation](#8-simulation)
+9. [RSA](#9-rsa)
+10. [UI, Figures & Export](#10-ui-figures--export)
+11. [Batch, Replay & Provenance](#11-batch-replay--provenance)
+12. [Performance & Metal](#12-performance--metal)
+13. [Developer Documentation](#13-developer-documentation)
 
 ## Absorbed planning documents
 
@@ -79,7 +80,7 @@ what it is and to open it in Resolve.
 
 Both `EVA/IO/MFFWriter.swift` and `EVA/IO/MFFReader.swift` were quantizing event
 times to milliseconds; 1024 Hz is now exact in both directions. The full record
-is EVASimulate item 4.9 in [§7 Simulation](#7-simulation),
+is EVASimulate item 4.9 in [§8 Simulation](#8-simulation),
 because that is where the blocker was found and fixed.
 
 ---
@@ -270,20 +271,49 @@ artifact-dominated and brain-dominated regimes
 
 ---
 
-# 3. MRI / fMRI Artifact Correction
+# 3. EEG Artifact Correction (MAAC)
+
+The MAAC (Multi-Algorithm Artifact Correction, Dien 2024) is being adopted
+artifact-by-artifact. Delivered so far:
+
+- **MAAC-1 saccadic spike potential — COMPLETE.** Dedicated spatial-filter
+  correction per Dien §1.8: Cz-reference first-difference detection, VEOG-
+  dominant preliminary scan, biphasic 4/8 ms confirmation, 100 ms refractory,
+  Semlitsch (1986) canonical scalp-map template with a session-average
+  alternative, and least-squares spatial-filter subtraction. `.saccadicSpike`
+  artifact type, replay-aware (`ArtifactReplayPayload`), own Waveform sheet +
+  view model + help, `SaccadicSpikeCorrectionTests` (biphasic detection,
+  reference-independence, refractory gate, spatial-filter removal, template
+  normalization, replay round-trip). Files: `EVA/Artifacts/SaccadicSpike*`.
+- **MAAC-5 mains removal — SHIPPED** as EVA's adaptive **CleanLine**
+  (`EEGSignalFilter.adaptiveLineNoiseReduction`, `lineNoiseMode ==
+  .adaptiveCleanLine`): sliding-window cos/sin regression at the line frequency
+  + harmonics with Hann-taper overlap-add — the PREP/CleanLine mechanism — with
+  a notch alternative. Recorded under § 2 (Filtering) as the delivering
+  subsystem; noted here for the MAAC mapping.
+- **Blink** correction (one of the four matched algorithms) is delivered via
+  EVA's ICA + ICLabel "Eye" path (see § 2 above).
+
+Open MAAC work — corneo-retinal dipole regression (MAAC-2), temporal-PCA/Promax
+movement (MAAC-3), BSS-CCA EMG (MAAC-4), alpha (MAAC-6), and the ordered
+orchestration (MAAC-7) — is tracked in `ROADMAP.md` § 3.
+
+---
+
+# 4. MRI / fMRI Artifact Correction
 
 Gradient correction (AAS/MAR/MAS/wAAR/wAAS/FARM/FASTR/Allen IAR), the clean-room
 FASTR replacement, Metal gradient compute, and true iterative sub-sample
-alignment all shipped — see C9 in [§9 UI, Figures & Export](#9-ui-figures--export) and
-[§11 Performance & Metal](#11-performance--metal). The head-to-head measurement
+alignment all shipped — see C9 in [§10 UI, Figures & Export](#10-ui-figures--export) and
+[§12 Performance & Metal](#12-performance--metal). The head-to-head measurement
 of these engines is the method-comparison harness recorded under
-EVASimulate item 3.2 in [§7 Simulation](#7-simulation).
+EVASimulate item 3.2 in [§8 Simulation](#8-simulation).
 
 Nothing else in this subsystem is closed; MRI-1 remains open in `ROADMAP.md`.
 
 ---
 
-# 4. Epoching, Averaging & Trial-wise
+# 5. Epoching, Averaging & Trial-wise
 
 ### C8. Trial-wise diagnostics foundation — Phases 1–3 and Phase 4 core complete
 
@@ -541,7 +571,7 @@ promoting them later is a small step — carried in F-1.
 
 ---
 
-# 5. Time-Frequency & Rhythmicity
+# 6. Time-Frequency & Rhythmicity
 
 ## Time-Frequency — scope and the organs it was built from
 
@@ -1168,7 +1198,7 @@ changes.
 
 ---
 
-# 6. Source & Forward Modeling
+# 7. Source & Forward Modeling
 
 ### SI-1 — Extract the shared spherical forward model — ✅ **COMPLETED 2026-08-26**
 
@@ -1220,7 +1250,7 @@ Implementation record:
 | NIfTI-1/2 reader: gzip, all common datatypes, qform/sform affine | `EVAPreviewKit/NIfTI/*` | shipped for QuickLook; not yet in `EVACore/` |
 | GIFTI surface reader + SceneKit surface renderer | `EVAPreviewKit/GIFTI/*` | shipped for QuickLook; not yet in `EVACore/` |
 | Surrogate-source BCG separation (29 regional sources, sphere lead field) | `EVA/Artifacts/SourceInformed/SurrogateBrainBasis`, `EVACore/…/SourceInformedOperator` | shipped; **stays in EVA** (it is cleaning, not localization) |
-| ROADMAP Tier 6 design for source grids and the minimum-norm family | `ROADMAP.md` §6.1–6.5 | design only |
+| ROADMAP Tier 6 design for source grids and the minimum-norm family | `ROADMAP.md` §7.1–7.5 | design only |
 
 ---
 
@@ -1935,7 +1965,7 @@ Deferred follow-on: before any BESA-Simulator parity claim, check their current
 feature list rather than cloning from memory.
 
 
-### Stage 3c-perf — Make dipole fitting BESA-fast — **MOSTLY SHIPPED 2026-09-05** (R5.0; see § 6 above)
+### Stage 3c-perf — Make dipole fitting BESA-fast — **MOSTLY SHIPPED 2026-09-05** (R5.0; see § 7 above)
 
 The fit is correct but slow: a single ECD is a few hundred ms and a multi-dipole /
 shared / interval fit is seconds, where BESA fits a single ECD nearly instantly.
@@ -1960,7 +1990,7 @@ results within tolerance of the current tests):
   2026-09-05 as `LeadFieldGrid` (`brainRadius/12`, trilinear interpolation,
   `Float` storage, cached per geometry, ≤3 kept). Candidate scoring no longer
   solves the forward model at all; unsolvable near-shell nodes fall back to an
-  exact solve and `finalize` stays exact. See R5.0 in § 6 above.
+  exact solve and `finalize` stays exact. See R5.0 in § 7 above.
 - [x] **Rank-reduced covariance and flat/parallel candidate scan** (not on the
   original list, but the actual first-pass win): flat preallocated buffers, a
   rank-reduced `C ≈ W·Wᵀ` objective, and parallelizing the candidate scan
@@ -2004,7 +2034,7 @@ head-model-agnostic fitting once BEM import (R3) lands.
 
 ---
 
-# 7. Simulation
+# 8. Simulation
 
 ## Where it is now
 
@@ -3726,18 +3756,18 @@ recorded *outside* a scanner, and BCG is a different phenomenon (see 5.4).
 
 ---
 
-# 8. RSA
+# 9. RSA
 
 Nothing shipped. The interchange contract and estimator design are in
 [`docs/design/rsa.md`](docs/design/rsa.md); the phases are in `ROADMAP.md` § RSA.
 
 The assets RSA would build on — epoching, category averaging, channel ROIs,
 cluster statistics, and the figure/export basket — are recorded in
-[§4](#4-epoching-averaging--trial-wise) and [§9](#9-ui-figures--export).
+[§5](#5-epoching-averaging--trial-wise) and [§10](#10-ui-figures--export).
 
 ---
 
-# 9. UI, Figures & Export
+# 10. UI, Figures & Export
 
 ### C4. App/window stability fixes — completed 2026-08-15
 
@@ -3788,7 +3818,7 @@ cluster statistics, and the figure/export basket — are recorded in
 
 ---
 
-# 10. Batch, Replay & Provenance
+# 11. Batch, Replay & Provenance
 
 ### C2. Processing and batch core — completed 2026-07-04; parity closed 2026-08-13
 
@@ -3864,7 +3894,7 @@ forks rather than persistent sibling nodes.
    `dataRevision`, the node's continued existence, and the history model's
    identity before moving the window, and says so when it discards a late
    arrival.
-3. [x] **Finish channel-decision identity and carry-through — completed
+4. [x] **Finish channel-decision identity and carry-through — completed
    2026-08-26.** Four answers:
    - **Position vs application order.** `markBad` stays where
      `ChannelDecisionSteps` writes it and carries `scope: ambient`;
@@ -3888,7 +3918,7 @@ forks rather than persistent sibling nodes.
      surfaced in the channel row (its own badge and a retry), the status
      history, and an `interpolateChannels lost:` audit-log line.
    Parity is covered by byte comparison in `PairedValidationTests`.
-4. [x] **Complete the paired validation and impossible-state instrumentation —
+5. [x] **Complete the paired validation and impossible-state instrumentation —
    completed 2026-08-26.** `PairedValidationTests` compares interactive against
    headless by sample equality for `markBad` (including the ambient rule above),
    channel interpolation, ICA replay driven through `ProcessingCore`, and
@@ -3903,7 +3933,7 @@ forks rather than persistent sibling nodes.
    against sidecars in both directions at the two moments both are in hand — the
    export audit log records any disagreement, and opening a package surfaces the
    unexplainable direction (a payload with no step) in the status line.
-5. [x] **Commit threshold edits deliberately — completed 2026-08-26.** It was
+6. [x] **Commit threshold edits deliberately — completed 2026-08-26.** It was
    the zero-state end of that range: `ProcessingChainSignature` carries no
    parameter values and threshold detection produces no signal, so a retuned
    detector never reached the history at all. `ArtifactViewModel`
@@ -3913,7 +3943,7 @@ forks rather than persistent sibling nodes.
    Navigating to a threshold node now also restores its blink/movement
    configurations, so the detector re-runs off the values that node's hash was
    built from. Covered by `ThresholdConfigCommitTests`.
-6. [x] **Represent “resolved from this file's payload” in replay policy —
+7. [x] **Represent “resolved from this file's payload” in replay policy —
    completed 2026-08-26.** `ReplayInteraction` gains `.resolvedFromPayload`, and
    `EVAProcessingStep.replayInteraction(given:)` classifies against a
    `ReplayPayloadAvailability` describing *the file being processed* — ICA and
@@ -3928,7 +3958,7 @@ forks rather than persistent sibling nodes.
    cannot ask, so the steps start **unchecked** and applying them is a
    deliberate tick. BCG detection stays inert (2026-08-26 decision) and is
    carried in F-1's detector work.
-7. [x] **Make the snapshot policy truthful — completed 2026-08-26.** Four
+8. [x] **Make the snapshot policy truthful — completed 2026-08-26.** Four
    promises, each now kept or withdrawn:
    - **Supported-step matrix** is one pure function on the model
      (`RecordingHistoryModel.firstNonReDerivableStep`), folded into
@@ -3946,7 +3976,7 @@ forks rather than persistent sibling nodes.
    - **`computeCost` is measured or absent.** Re-derivation times itself and
      records the result; a row offers a duration only when one was measured, and
      there is no fast/slow guess from a table of stage names.
-8. [x] **Choose the real Queue/History contract — completed 2026-08-26.** The
+9. [x] **Choose the real Queue/History contract — completed 2026-08-26.** The
    two tabs are adjacent views, and now say so: Queue is “what is running now,
    and what it has reported”, History is “the steps that produced the signal on
    screen” (`ProcessingStatusTab.summary`, surfaced on each tab). No node
@@ -3955,7 +3985,7 @@ forks rather than persistent sibling nodes.
    dependency, and speculative node states stay unbuilt; `REWIND.md`'s lifecycle
    design is relabelled as the starting point *if* full-rate background rebuilds
    are ever built, not as pending work.
-9. [x] **Finish the minimum Mac history surface and trim aspirational UI —
+10. [x] **Finish the minimum Mac history surface and trim aspirational UI —
    completed 2026-08-26.** ⌘Z / ⇧⌘Z route to back/forward through a focused
    scene value (`HistoryTransportCommands`), replacing the standard Edit-menu
    pair; the items name the step they act on — “Undo Filter”, not a bare “Undo”
@@ -3968,7 +3998,7 @@ forks rather than persistent sibling nodes.
    would be a second way to destroy work; reopen-stage is a restore-the-sheet
    feature far larger than a menu item; per-node export belongs with F-1's
    reports. `REWIND.md`'s interaction section now matches.
-10. [x] **Define A/B comparison around related forked windows — completed
+11. [x] **Define A/B comparison around related forked windows — completed
     2026-08-27.** The old "select two sibling nodes" prerequisite was
     unbuildable by design: one window's history is linear, so two siblings only
     coexist while one is an unreplaced redo branch. Windows are the unit
@@ -3996,7 +4026,7 @@ forks rather than persistent sibling nodes.
     deliberately not built: viewport, montage, and display scale are independent
     per window, and syncing them is a far larger feature than the measurement.
     Covered by `SignalComparisonTests` and `WindowComparisonRegistryTests`.
-11. [x] **Decide portable history versus session cache — completed
+12. [x] **Decide portable history versus session cache — completed
     2026-08-27.** Three decisions and one implementation.
     - **Export carries the current lineage, and only that.** `eva.xml` already
       records the steps that produced the bytes; a second portable history file
@@ -4023,7 +4053,7 @@ forks rather than persistent sibling nodes.
       restore, and reported both in the Motion panel and in the export audit
       log. Cheap metadata, no content digest, consistent with the no-expanded-
       hashing decision. Covered by `GradientViewModelTests`.
-12. [x] **Make forks reliable for non-MFF imports — completed 2026-08-26.** The
+13. [x] **Make forks reliable for non-MFF imports — completed 2026-08-26.** The
     security scope is preserved, and no normalized cache was needed.
     `MFFRecording` already accepted `securityScopedURLs` and the BrainVision open
     path already threaded the folder scope through; the *fork* dropped them —
@@ -4033,13 +4063,13 @@ forks rather than persistent sibling nodes.
     scopes. They are process-wide and refcounted, so handing the same URLs to
     the second window is the whole fix: no bookmark round-trip, and no copy of
     the recording.
-13. [x] **Reconcile `REWIND.md` and code comments with shipped behavior —
+14. [x] **Reconcile `REWIND.md` and code comments with shipped behavior —
     completed 2026-08-25.** Removed stale claims about the sidebar, persistent
     sibling branches, disabled evicted nodes, missing re-derivation, unbuilt
     transport, `Window` rather than `WindowGroup`, and the already-finished
     Observation refactor. Historical design sections remain, clearly labeled as
     historical.
-14. [x] **Close or justify history-derived invalidation — completed
+15. [x] **Close or justify history-derived invalidation — completed
     2026-08-27.** Closed: `PipelineInvalidation` is the final design, and
     REWIND's history-derived proposal is not pending work. It was not only a
     documentation problem — four call sites (gradient apply and clear, CWL apply
@@ -4055,7 +4085,7 @@ forks rather than persistent sibling nodes.
     cascade cannot quietly reappear — a behavioural test cannot catch that,
     since a hand-written copy passes every cache assertion and diverges on
     whatever its author forgot.
-15. [x] **Define provenance for combined recordings — completed 2026-08-27.**
+16. [x] **Define provenance for combined recordings — completed 2026-08-27.**
     A combined output starts a **fresh history**, and the contributors are
     recorded at its root rather than spliced into its lineage. Merging them was
     rejected on the terms the tree is built on: undo in a window is linear,
@@ -4069,7 +4099,7 @@ forks rather than persistent sibling nodes.
     average named files only in its bad-channel policy steps. Enough to find
     every contributor's exact processed state, without implying the result can
     be undone back into it. Covered by `RecordingCombinerTests`.
-16. [x] **Separate "not assessed" from "good" — completed 2026-08-27.** The
+17. [x] **Separate "not assessed" from "good" — completed 2026-08-27.** The
     "Labeled Artifacts" metric scored 1.0 whenever no artifact intervals were
     supplied, and carried its full weight into the segment percentage — so a
     recording nobody had examined scored at least as well as an examined clean
@@ -4165,7 +4195,7 @@ and compared without introducing another view-only or non-deterministic path.
 
 ---
 
-# 11. Performance & Metal
+# 12. Performance & Metal
 
 ### C1. Performance and architecture refactor — completed 2026-08-13
 
@@ -4217,7 +4247,7 @@ and regression assertions pin CPU backends.
 
 ---
 
-# 12. Developer Documentation
+# 13. Developer Documentation
 
 `docs/manual/` (user guide, tutorials, tools, contributor guide) and
 `docs/provenance/` (method specs, audit logs, port plans, copyleft plan) are

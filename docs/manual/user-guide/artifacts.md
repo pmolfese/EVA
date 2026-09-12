@@ -26,6 +26,37 @@ Check whether:
 - New edge artifacts or ringing have not been introduced.
 - The method behaves consistently across events or channels.
 
+## Saccadic Spike Potential
+
+Choose **Artifacts > Saccadic Spike Potential…** to detect and correct the brief,
+biphasic potential produced at saccade onset. This workflow is separate from
+blink correction: it works in the first-difference domain, rereferenced to Cz,
+and uses a spatial scalp template because these fast spikes are not reliably
+isolated by ICA.
+
+EVA proposes Cz, vertical EOG, lower vertical EOG, and horizontal EOG channel
+roles from channel names or the active sensor layout. Confirm those one-based
+channel numbers before detection, especially for a custom montage. Marked-bad
+and already-interpolated channels are omitted. If Cz is not present as a
+recorded or restored channel, restore the acquisition reference or select the
+correct Cz-equivalent channel before continuing.
+
+The default **Canonical** template maps the EP Toolkit's 33-channel canonical
+saccadic-spike topography onto the recording montage and normalizes it so the
+absolute Cz-to-lower-VEOG difference is one. **Session average** instead derives
+the map from preliminary candidates in the current recording; use it when the
+canonical map is visibly inappropriate, recognizing that it is more vulnerable
+to a poor candidate set. Raising the threshold makes detection more
+conservative.
+
+After detection, inspect the number of preliminary and confirmed events and the
+template topography. **Use Detected SPs** adds the result to Clean Artifacts with
+the dedicated **SP Spatial Filter** treatment. The cleaning preview shows the
+estimated **Subtracted SPs** beside the data **With SPs removed**. Look for a
+sharp ocular/parietal spike in the removed estimate without broader ERP-shaped
+activity; if the removed estimate looks neural, revise the channel roles or
+threshold before applying it.
+
 ## MRI Gradient Artifact Correction
 
 For simultaneous EEG/fMRI workflows, EVA includes MRI gradient artifact correction tools. Treat scanner-artifact correction as a high-stakes processing step and validate parameters against known acquisition timing whenever possible.
@@ -97,6 +128,10 @@ The panel reports what each run fitted: how many beats were accepted, how many c
 **Channel count matters more than it appears.** The brain model is a tighter description of what brains can produce as electrode count rises, so the artifact block absorbs more of the slack at 20 channels than at 64. A low-density evaluation understates the method.
 
 ### References
+
+Dien, J. (2024). Multi-Algorithm Artifact Correction (MAAC) procedure part one: Algorithm and example. *Biological Psychology, 188*, 108775. https://doi.org/10.1016/j.biopsycho.2024.108775
+
+Semlitsch, H. V., Anderer, P., Schuster, P., & Presslich, O. (1986). A solution for reliable and valid reduction of ocular artifacts, applied to the P300 ERP. *Psychophysiology, 23*(6), 695-703. https://doi.org/10.1111/j.1469-8986.1986.tb00696.x
 
 Berg, P., & Scherg, M. (1994). A multiple source approach to the correction of eye artifacts. *Electroencephalography and Clinical Neurophysiology, 90*(3), 229-241. https://doi.org/10.1016/0013-4694(94)90094-9
 

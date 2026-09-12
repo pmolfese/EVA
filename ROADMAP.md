@@ -32,12 +32,12 @@ Across sections, the ordered spine is unchanged:
 | Order | Milestone | Section | Status |
 |---:|---|---|---|
 | 1 | **SI-4 — Adversarial evaluation** | [§2 Processing & Cleaning](#2-processing--cleaning) | **NEXT** |
-| 2 | **PB-1 — Batch/replay completion** | [§10 Batch, Replay & Provenance](#10-batch-replay--provenance) | NOT STARTED |
-| 3 | **MRI-1 — FASTR reliability and motion semantics** | [§3 MRI / fMRI](#3-mri--fmri-artifact-correction) | NOT STARTED |
+| 2 | **PB-1 — Batch/replay completion** | [§11 Batch, Replay & Provenance](#11-batch-replay--provenance) | NOT STARTED |
+| 3 | **MRI-1 — FASTR reliability and motion semantics** | [§4 MRI / fMRI](#4-mri--fmri-artifact-correction) | NOT STARTED |
 | 4 | **SI-5 — Ocular MSEC/PCA-S** | [§2 Processing & Cleaning](#2-processing--cleaning) | NOT STARTED |
-| 5 | **TW-4 / TW-5 — Trial diagnostics and exclusions** | [§4 Trial-wise](#4-epoching-averaging--trial-wise) | IN PROGRESS |
-| 6 | **UI-1 / UX-1 — Display density, Figure Composer 2** | [§9 UI, Figures & Export](#9-ui-figures--export) | NOT STARTED |
-| 7 | **DEV-1 — Developer documentation** | [§12 Developer Documentation](#12-developer-documentation) | IN PROGRESS (DEV-1a, 1b done) |
+| 5 | **TW-4 / TW-5 — Trial diagnostics and exclusions** | [§5 Trial-wise](#5-epoching-averaging--trial-wise) | IN PROGRESS |
+| 6 | **UI-1 / UX-1 — Display density, Figure Composer 2** | [§10 UI, Figures & Export](#10-ui-figures--export) | NOT STARTED |
+| 7 | **DEV-1 — Developer documentation** | [§13 Developer Documentation](#13-developer-documentation) | IN PROGRESS (DEV-1a, 1b done) |
 
 **SI-4 is what decides whether PCA-S is production-ready.** The method ships with
 defaults that are defensible rather than measured — the component-reliability
@@ -46,9 +46,9 @@ adversarial sweeps run.
 
 **Scheduled independently of that spine**, because each is self-contained and
 blocks nothing: the Rhythmicity Explorer's WTPL and burst milestones
-([§5](#5-time-frequency--rhythmicity)), EVA Resolve's R2.4–R6 head-model and
-inverse work ([§6](#6-source--forward-modeling)), the EVASimulate tiers and
-synthetic sleep ([§7](#7-simulation)), and RSA ([§8](#8-rsa)).
+([§6](#6-time-frequency--rhythmicity)), EVA Resolve's R2.4–R6 head-model and
+inverse work ([§7](#7-source--forward-modeling)), the EVASimulate tiers and
+synthetic sleep ([§8](#8-simulation)), and RSA ([§9](#9-rsa)).
 
 ### Owner priority guardrail
 
@@ -62,16 +62,17 @@ only if the owner explicitly asks to reopen it.
 
 1. [Ingest & Formats](#1-ingest--formats)
 2. [Processing & Cleaning](#2-processing--cleaning)
-3. [MRI / fMRI Artifact Correction](#3-mri--fmri-artifact-correction)
-4. [Epoching, Averaging & Trial-wise](#4-epoching-averaging--trial-wise)
-5. [Time-Frequency & Rhythmicity](#5-time-frequency--rhythmicity)
-6. [Source & Forward Modeling](#6-source--forward-modeling)
-7. [Simulation](#7-simulation)
-8. [RSA](#8-rsa)
-9. [UI, Figures & Export](#9-ui-figures--export)
-10. [Batch, Replay & Provenance](#10-batch-replay--provenance)
-11. [Performance & Metal](#11-performance--metal)
-12. [Developer Documentation](#12-developer-documentation)
+3. [EEG Artifact Correction (MAAC)](#3-eeg-artifact-correction-maac)
+4. [MRI / fMRI Artifact Correction](#4-mri--fmri-artifact-correction)
+5. [Epoching, Averaging & Trial-wise](#5-epoching-averaging--trial-wise)
+6. [Time-Frequency & Rhythmicity](#6-time-frequency--rhythmicity)
+7. [Source & Forward Modeling](#7-source--forward-modeling)
+8. [Simulation](#8-simulation)
+9. [RSA](#9-rsa)
+10. [UI, Figures & Export](#10-ui-figures--export)
+11. [Batch, Replay & Provenance](#11-batch-replay--provenance)
+12. [Performance & Metal](#12-performance--metal)
+13. [Developer Documentation](#13-developer-documentation)
 
 ---
 
@@ -365,10 +366,288 @@ later band-wise experiment without a second MODWT implementation.
 
 ---
 
-# 3. MRI / fMRI Artifact Correction
+# 3. EEG Artifact Correction (MAAC)
+
+This category adopts the central argument of the **Multi-Algorithm Artifact
+Correction (MAAC)** procedure (Dien, J. (2024). *Multi-Algorithm Artifact
+Correction (MAAC) procedure part one: Algorithm and example.* Biological
+Psychology, 188, 108775. https://doi.org/10.1016/j.biopsycho.2024.108775):
+that hunting for a single "best" artifact-removal algorithm is an ill-posed
+question. Each ocular/muscle/movement artifact has properties — amplitude,
+stationarity, statistical independence, dimensionality — that make one class of
+algorithm the right tool and the others a poor fit. The MAAC therefore uses
+**four different algorithms, one matched to each artifact**, run in a fixed
+order, plus adjunct steps for mains, EMG, and alpha.
+
+**Where EVA already stands.** EVA is *not* a single-algorithm cleaner. It ships
+regression, OBS (seven strategies), SSP/PCA, local-template (MAS/MAR/wAAS/wAAR),
+and wavelet correction under a drawn-template workflow (`EVA/Artifacts`), a full
+deterministic ICA with the seven-class ICLabel classifier and component removal
+(`EVA/ICA`), fMRI gradient/OBS correction (`EVA/Gradient`, nine engines),
+global + trial-wise bad-channel and bad-segment detection with spline
+interpolation (`EVA/Health`), threshold-based ocular blink/movement *detection*
+(`EyeArtifactThresholdDetector`, `EyeArtifactKind.blink`/`.movement`), a 60 Hz
+notch **and an adaptive CleanLine** (sliding-window sinusoid regression) line-
+noise mode (`EVA/Filtering`), and average rereferencing. So EVA already embodies
+the *philosophy* — and, as of this branch, already delivers **two** of the MAAC's
+own steps outright (see the status snapshot below).
+
+**Status snapshot (verified against the code, 2026-09-12):**
+
+| Step | Matched algorithm | State in EVA |
+|---|---|---|
+| Blink | ICA | ✅ shipped — ICA + ICLabel "Eye" (`EVA/ICA`) |
+| **Saccadic spike (MAAC-1)** | spatial filter | ✅ **built, uncommitted on this branch** — `SaccadicSpikeCorrection.swift` + VM + views + help + 6 tests, replay-aware |
+| Corneo-retinal dipole (MAAC-2) | regression | ❌ open — only generic `.regression`; SP tool explicitly does *not* touch the slow CRD |
+| Movement (MAAC-3) | temporal PCA + Promax | ❌ open — Promax not implemented anywhere |
+| EMG (MAAC-4) | BSS-CCA | ❌ open — no CCA path |
+| Mains (MAAC-5) | spectral / CleanLine | ✅ **shipped** — `adaptiveLineNoiseReduction` / `lineNoiseMode == .adaptiveCleanLine` |
+| Alpha (MAAC-6) | — | ❌ open — niche |
+| Orchestration (MAAC-7) | — | ❌ open — no MAAC pipeline preset |
+
+So the remaining genuine gaps are **MAAC-2, MAAC-3, MAAC-4, MAAC-6, and MAAC-7**.
+MAAC-1 (below) is kept for the record but is essentially done; MAAC-5 is marked
+shipped with only optional refinements. Blink correction (the MAAC's fourth
+matched algorithm) is already covered by the ICA + ICLabel "Eye" path — its only
+open work is wiring into MAAC-7.
+
+Method reference for the drawn-template engines these milestones extend:
+[`docs/design/source-informed-correction.md`](docs/design/source-informed-correction.md).
+
+## MAAC-1 — Saccadic spike potential (spatial filter) — **COMPLETE**
+
+*Highest priority.* The saccadic spike potential (SP) is a ~10 ms biphasic
+transient locked to saccade onset, with a positive parietal pole and a negative
+pole under the eyes. Because saccades correlate with cognition, the SP is
+event-related, survives averaging, closely resembles the P300, and — in the
+frequency domain — produces false induced gamma (Yuval-Greenberg et al., 2008).
+ICA "tends to be unable to isolate it" (Keren et al., 2010), which is exactly
+why the MAAC uses a **spatial filter with a canonical template**, not ICA.
+
+Implementation, on EVA's existing template/topography rails:
+
+- [x] **New artifact type** `.saccadicSpike` in `DefinedArtifactType`
+  (`EVA/Artifacts/ArtifactCleaner.swift`), with a short default window (~24 ms)
+  and its own detector-sensitivity default.
+- [x] **Derivative-domain detection.** Rereference to Cz, then transform to the
+  approximate first derivative `D[t] = X[t+1] − X[t]` (baseline-independent,
+  highlights sudden voltage change). Detect candidates where all VEOG channels
+  spike past a negative threshold that resolves ~8 ms later, the VEOG group is
+  more negative than the rest (excluding HEOG), and no channel exceeds ~100 µV.
+  This is a new `detectSaccadicSpike` path alongside the correlation/topography
+  detectors in `ArtifactTemplateDetector.swift`.
+- [x] **Biphasic confirmation.** Build an amplitude time course `A` as the
+  template-weighted channel sum of `D` (excluding HEOG), then rescan: accept a
+  point where `A` exceeds a critical threshold *and* exceeds twice that
+  threshold with opposite polarity 4 or 8 ms later (the offset is more
+  variable, hence the asymmetric threshold), with a ≥100 ms refractory gap
+  after the last accepted SP. Biphasic detection is the paper's key accuracy
+  improvement over Nottage (2010).
+- [x] **Canonical template.** Ship a file-based canonical SP topography
+  (Semlitsch et al., 1986 averaging), rescaled so |Cz − mean(lower VEOG)| = 1,
+  as the default; keep an auto-template option that averages confirmed SPs from
+  the session (informal MAAC testing found the file template more reliable). A
+  single combined left/right template is adequate without eye-tracker direction
+  info — the topography difference is small.
+- [x] **Subtraction as a spatial filter**, not regression: use the template
+  directly to estimate each channel's SP contribution via a least-squares fit
+  of the amplitude time course, and subtract. This is a new
+  `ArtifactCleaningMethod` case (e.g. `.spikeTemplate`) or a specialization of
+  the existing SSP/topography path.
+- [x] **QC.** Add the "subtracted SPs" / "SPs removed" before-after butterfly
+  pair to the artifact preview (`ArtifactPreviewViews.swift`) and a template
+  topography readout, so a user can verify the correction the way the MAAC's
+  summary figure does.
+
+*Why it matters:* without this step, saccade-locked activity contaminates the
+P300 window and any gamma-band or time-frequency result — the one artifact class
+EVA currently cannot touch, and the one the SP literature says is most
+insidious.
+
+## MAAC-2 — Corneo-retinal dipole (regression / reverse EMCP) — **NOT STARTED**
+
+The corneo-retinal dipole (CRD) is the standing potential between cornea and
+retina; its scalp projection is an *eye-direction* artifact that is **always
+present**, even without movement, and becomes a confound whenever gaze direction
+differs between conditions (frontal asymmetry from horizontal offset; CNV-like
+fields from vertical offset). The MAAC corrects it with regression because the
+artifact's constant presence favors a regression estimate and because electrode
+dimensionality makes ICA prone to removing signal along with CRD noise on
+non-dense montages.
+
+EVA has a generic `.regression` method but no CRD-specific algorithm. The MAAC's
+refinement is an *inverted* Gratton EMCP (Gratton et al., 1983):
+
+- [ ] **New artifact type** `.corneoRetinal`, correcting horizontal then
+  vertical components in sequence (accepting that correlated H/V means some
+  vertical variance may be attributed to horizontal — the MAAC accepts this).
+- [ ] **Rough time courses** from the HEOG-pair and VEOG-pair difference waves
+  as the initial H and V estimates.
+- [ ] **Topography-first inversion.** Instead of treating the whole EOG
+  difference as artifact (classic EMCP, which flattens EOG and removes any EEG
+  in it), use the rough time course as weights to average a *scalp topography*
+  for the H and V CRD, then regress that topography back onto the recording to
+  get a refined time course — the inverse of EMCP's "difference-as-timecourse →
+  project topography." Robustness: use only the smallest ⅛ of estimated
+  horizontal movements, and exclude blink periods from the topography estimate.
+- [ ] **Whole-recording** correction (not split blink/non-blink), since the CRD
+  is present during blinks too; interpolate the CRD across blink spans from the
+  bracketing voltages.
+- [ ] **Optional gaze read-out.** The refined H/V CRD amplitudes double as a
+  coarse gaze-position estimate (less accurate for rapid movements) — a possible
+  free by-product worth surfacing.
+
+*Why it matters:* a between-condition gaze difference silently masquerades as a
+frontal ERP effect. Correcting the CRD as a topography (rather than flattening
+the EOG channels) removes the artifact without striping genuine frontal EEG that
+lives in the EOG leads — the failure mode of the classic regression EMCP.
+
+## MAAC-3 — Movement artifact (per-epoch temporal PCA + Promax) — **NOT STARTED**
+
+Head/electrode movement is extremely **non-stationary**: its spatial *and*
+temporal signature differs every instance. That rules out regression (no
+predictor) and ICA (needs many stationary observations). The MAAC uses **temporal
+PCA with a Promax oblique rotation, applied per epoch** — PCA works with few
+observations when the variables (here, time points) are highly correlated, and a
+one-second epoch's shared cross-channel time course is enough to capture a
+movement transient.
+
+- [ ] **Temporal PCA per epoch.** Variables = time points, observations =
+  channels (the transpose of a spatial PCA). EVA's PCA/OBS covariance machinery
+  (`ArtifactOBSStrategy.spatiotemporal` already builds channel×time bases) is
+  the starting point; the new axis is per-epoch temporal decomposition.
+- [ ] **Promax oblique rotation** — the genuinely new numerical piece. Implement
+  Promax (Hendrickson & White, 1964): Varimax start, raise loadings to a power
+  (κ≈3) to form the target, then oblique Procrustes to it. Allowing correlated
+  factors is what lets a movement factor separate cleanly; an orthogonal
+  rotation would smear it. Belongs in a shared linear-algebra spot (near the ICA
+  sphering / SVD code) so ICA and future PCA-rotation work can reuse it.
+- [ ] **Back-project and threshold.** Back-project each rotated factor; delete
+  any whose negative-to-positive peak amplitude exceeds ~200 µV. As a side
+  benefit this also catches blinks and other transients that slipped past the
+  earlier stages.
+- [ ] **New method/type** `.movementPCA` under a `.movement` artifact type,
+  running epoch-wise inside the cleaning cascade (`ArtifactCleaningCore`).
+
+*Why it matters:* movement transients are the residual that defeats every
+stationary method; a per-epoch temporal PCA is the one tool that fits, and it
+doubles as a safety net for artifacts the matched stages missed.
+
+## MAAC-4 — EMG / high-frequency (BSS-CCA) — **NOT STARTED**
+
+High-frequency electromyographic (muscle) activity is broadband and poorly
+separated by ICA. The MAAC uses **blind source separation via canonical
+correlation analysis** (De Vos et al., 2010), which orders components by
+*autocorrelation* rather than variance/independence — muscle activity has low
+autocorrelation (near-white), so the low-autocorrelation components can be
+dropped.
+
+- [ ] **BSS-CCA engine.** CCA between the signal and its one-sample delay yields
+  components ranked by autocorrelation; reconstruct after removing the
+  lowest-autocorrelation set. Self-contained linear algebra (generalized
+  eigenproblem on the two covariance matrices); De Vos et al. published
+  reference code to validate against.
+- [ ] **Wire as a late cleaning stage** after the ocular/movement steps, with a
+  user threshold on how many low-autocorrelation components to remove.
+- [ ] **Reuse EVA's ICLabel "Muscle" evidence** to gate/QC the BSS-CCA removal
+  where an ICA has already run, cross-checking the two muscle estimates.
+
+*Why it matters:* residual EMG inflates high-frequency and gamma-band power and
+is exactly the band where the saccadic spike also does damage — the two together
+account for most spurious high-frequency findings.
+
+## MAAC-5 — Mains removal (spectral / CleanLine) — **ALREADY SHIPPED**
+
+EVA already satisfies the MAAC's mains step. The PREP pipeline's mains removal
+(Bigdely-Shamlo et al., 2015) *is* CleanLine, and EVA ships the equivalent:
+`EEGSignalFilter.adaptiveLineNoiseReduction` fits cos/sin at the line frequency
+and its harmonics over overlapping Hann-tapered windows and subtracts the fitted
+sinusoid by overlap-add, gated by a per-window explained-variance threshold — a
+sliding-window sinusoid regression, the same mechanism as CleanLine, preserving
+the broadband activity a notch would take. It is a first-class filter mode
+(`lineNoiseMode == .adaptiveCleanLine` in `FilterViewModel`), exposed in
+`FilteringViews` with frequency / window / strength / harmonic-count controls,
+replay-aware, and labeled "CleanLine …Hz" in provenance. The 60 Hz notch remains
+as the alternative fixed-band mode.
+
+Optional refinements only — scope only if measurement shows a need:
+
+- [ ] **Thomson multitaper F-test** detection (Slepian tapers) to pick the exact
+  line frequency and test its significance per window, matching the original
+  CleanLine statistic rather than the current least-squares explained-variance
+  gate — useful when the mains frequency drifts or only some windows carry it.
+- [ ] **Automatic line-frequency estimation** (peak-pick near 50/60 Hz) so a
+  slightly off-nominal mains line is centred exactly.
+
+*Why it matters:* the part that matters — not damaging neural/broadband activity
+at the line frequency, which the notch does — is **already delivered**; this is
+exactly why it matters for spectral, gamma, and connectivity work. Listed here
+only for completeness of the MAAC mapping; the core work is done.
+
+## MAAC-6 — Alpha mitigation — **NOT STARTED**
+
+*Lowest priority / niche.* The MAAC optionally attenuates unwanted posterior
+alpha (drowsiness/idling rhythm) that can dominate variance without being
+"artifact" in the ocular sense.
+
+- [ ] Decide whether this is a spatial-filter/template step or a spectral
+  attenuation, and whether it belongs in EVA at all given the risk of removing
+  task-relevant alpha. Scope only if a user need appears.
+
+*Why it matters:* mainly for resting-state or drowsiness-prone datasets; called
+out for completeness against the MAAC's full step list, not as committed work.
+
+## MAAC-7 — MAAC orchestration (ordered auto-pipeline) — **NOT STARTED**
+
+The individual milestones above are usable on their own through the drawn-
+template UI. This milestone assembles them into the MAAC's **automated, ordered
+pipeline** so a user gets the whole procedure without hand-drawing each artifact.
+
+The MAAC order (Dien 2024, Fig. 2), on already-gradient-corrected data:
+
+1. mains removal (MAAC-5) →
+2. **preliminary blink scan** — run blink detection only to timestamp blink
+   periods, itself refined by a preliminary SP pass to keep spikes from
+   corrupting the blink scan →
+3. saccadic spike potential (MAAC-1) →
+4. CRD (MAAC-2) →
+5. blink (existing ICA + ICLabel "Eye") →
+6. movement (MAAC-3) →
+7. EMG (MAAC-4) →
+8. trial-wise bad-channel / bad-trial exclusion + interpolation (existing
+   `EVA/Health`).
+
+- [ ] **Pipeline definition** — a MAAC preset that sequences the stages with the
+  preliminary-blink-scan dependency, integrated with `ProcessingCore` /
+  `HeadlessBatchProcessor` so it is replayable and appears in provenance.
+- [ ] **Auto-templating** — each stage builds its own template from the session
+  (or the shipped canonical file templates) with no manual drawing, matching the
+  MAAC's one-click experience.
+- [ ] **Summary QC figure** — the MAAC's signature end-to-end butterfly stack
+  (raw → each stage's subtracted / remaining pair) as a single exportable
+  figure, plus the template-topography sheet, so each session can be verified at
+  a glance.
+- [ ] **Blink-vs-CRD confusion guard** — surface the MAAC's known failure mode
+  (vertical CRD and blink topographies are similar; a broken preliminary blink
+  scan lets one stage eat the other) as an explicit warning.
+
+*Why it matters:* the ordered pipeline *is* the MAAC — the argument is not just
+"use the right algorithm" but "run them in an order where each stage cleans the
+input the next stage depends on." It is also what makes the procedure usable at
+batch scale rather than one hand-drawn template at a time.
+
+**Companion evidence to pull before committing hard:** Dien et al. (2024) part
+two (is ICA the best choice for these four artifacts?) and Dien & O'Hare (2024)
+part three (head-to-head against competing preprocessing software) carry the
+empirical justification for these algorithm-to-artifact pairings.
+
+
+---
+
+# 4. MRI / fMRI Artifact Correction
 
 Nine gradient-correction engines ship and have been measured head-to-head
-(EVASimulate item 3.2, `ROADMAP_COMPLETE.md` § 7). What is open is reliability
+(EVASimulate item 3.2, `ROADMAP_COMPLETE.md` § 8). What is open is reliability
 semantics: what the correction does when motion data is missing or the
 correction is untrustworthy.
 
@@ -400,7 +679,7 @@ this milestone's motion-policy item seen from the results side.
 
 ---
 
-# 4. Epoching, Averaging & Trial-wise
+# 5. Epoching, Averaging & Trial-wise
 
 ## Trial-wise similarity, drift, and reviewed exclusion
 
@@ -454,7 +733,7 @@ are visible without letting unconstrained alignment explain every trial away.
 
 The engine is complete and tested — operation, `eva.xml` element, per-category
 merge, review state, commit control, re-average safety, restore-on-navigate.
-The record is in `ROADMAP_COMPLETE.md` § 4. Two verification items remain:
+The record is in `ROADMAP_COMPLETE.md` § 5. Two verification items remain:
 
 - [ ] Paired *interactive* vs headless sample equality in
   `PairedValidationTests`. Both paths now resolve inside the one
@@ -519,14 +798,14 @@ RIDE decomposition and Woody latency alignment already ship inside EVA
 design they came from — a `.eva` interchange package, batch subject/condition
 analysis, ERP-image plots sorted by trial metadata, and trial-wise regression
 against behaviour — was never built, and the "EVA Resolve" name it was written
-under now belongs to the source-analysis app in [§6](#6-source--forward-modeling).
+under now belongs to the source-analysis app in [§7](#7-source--forward-modeling).
 
 Design: [`docs/design/trial-level-analysis.md`](docs/design/trial-level-analysis.md).
 Schedule only with a product decision about where it lives and what it is called.
 
 ---
 
-# 5. Time-Frequency & Rhythmicity
+# 6. Time-Frequency & Rhythmicity
 
 ERSP, ITPC and DPSS multitaper ship and cross-check against MNE below 1e-6, with
 NPY and tidy-CSV export. The Rhythmicity Explorer ships LAVI, ABBA, on-demand
@@ -567,7 +846,7 @@ and a visual/design pass over the Time-Frequency tab.
 
 ---
 
-# 6. Source & Forward Modeling
+# 7. Source & Forward Modeling
 
 **Goal:** EVA Resolve is a *focused sibling app* to EVA for EEG source analysis.
 It owns everything that is about *where in the head* a signal comes from: the
@@ -620,7 +899,7 @@ R0 done ─► R1 done ─► R2.1–R2.3 done ─► R2.4 coreg UI (brainstorm 
 
 ## R2.4 — Coregistration UI — **IN PROGRESS**
 
-The first pass is built (see `ROADMAP_COMPLETE.md` § 6). What remains:
+The first pass is built (see `ROADMAP_COMPLETE.md` § 7). What remains:
 
 - [ ] **Brainstorm the UI with the owner** before polishing: window structure (one
   head-model window vs. a study/project document), the fiducial-picking interaction,
@@ -792,7 +1071,7 @@ only real math R3 still owns.
 
 ## R4 — Distributed inverse imaging
 
-Follows ROADMAP Tier 6 (§6.1–6.5) almost verbatim; that design holds. None of this
+Follows ROADMAP Tier 6 (§7.1–6.5) almost verbatim; that design holds. None of this
 needs a BEM to start — the sphere lead field is the exact gain matrix — so R4 can begin
 in parallel with R3 once R2.1 lands.
 
@@ -827,7 +1106,7 @@ Turn it into the production ECD tool.
 
 Fit mode, the Workbench layout, drag-to-seed refitting, progress and
 cancellation, and the 43× performance work are built (`ROADMAP_COMPLETE.md`
-§ 6). The layout brainstorm left three questions open, and the science is
+§ 7). The layout brainstorm left three questions open, and the science is
 untouched.
 
 
@@ -975,7 +1254,7 @@ independently valuable.
 
 ---
 
-# 7. Simulation
+# 8. Simulation
 
 Planning document for `Tools/EVASimulate`. Written 2026-08-21.
 
@@ -996,7 +1275,7 @@ to regenerate the exact data.
 
 
 Tiers 1, 2, 4 and 5 are complete, as are 3.1, 7.1–7.3 and 8.1; the completion
-status table and every delivered tier are in `ROADMAP_COMPLETE.md` § 7.
+status table and every delivered tier are in `ROADMAP_COMPLETE.md` § 8.
 
 ## Principles to hold onto
 
@@ -1600,7 +1879,7 @@ complete** (4.1 and 4.2 subsumed by 5.1), Tier 3 has 3.1 done, and Tier 5 is
 complete apart from ICA-S and the localization criterion, which waits on Tier 6.
 
 This is the reasoning behind the short list in
-the completion-status table in `ROADMAP_COMPLETE.md` § 7. If the two
+the completion-status table in `ROADMAP_COMPLETE.md` § 8. If the two
 ever disagree, the top table is the one people read — fix it first.
 
 **Done through this pass:** 3.1, 4.1-4.9 (4.1/4.2 subsumed by 5.1), 5.1, 5.2
@@ -1894,7 +2173,7 @@ valuable half.
 
 ---
 
-# 8. RSA
+# 9. RSA
 
 Making EVA a near-seamless producer of the representational dissimilarity
 matrices `3dRSA` consumes, plus the sensor-space RSA that belongs in EVA itself.
@@ -2074,7 +2353,7 @@ RDM export as a step in the batch/replay path, so a study's 40 subjects produce
 
 ---
 
-# 9. UI, Figures & Export
+# 10. UI, Figures & Export
 
 ## UI-1 — Display density and montage control — **NOT STARTED**
 
@@ -2272,14 +2551,14 @@ follow-up, not a reason to hold the in-memory v1.
 
 Both former standalone documents are now tracked in their own sections: the
 per-recording quality/provenance report in
-[§10 Batch, Replay & Provenance](#10-batch-replay--provenance), and distributed
-source imaging in [§6 Source & Forward Modeling](#6-source--forward-modeling).
+[§11 Batch, Replay & Provenance](#11-batch-replay--provenance), and distributed
+source imaging in [§7 Source & Forward Modeling](#7-source--forward-modeling).
 Neither belongs inside the artifact-correction milestone.
 
 
 ---
 
-# 10. Batch, Replay & Provenance
+# 11. Batch, Replay & Provenance
 
 The batch/replay suite and the REWIND history graph are operational and hardened
 (RW-1 closed 2026-08-27). What remains are usability edges.
@@ -2304,10 +2583,10 @@ output. Previously tracked in `REPORTS.md`, absorbed here.
 
 ---
 
-# 11. Performance & Metal
+# 12. Performance & Metal
 
 Wavelets and gradient/local-template correction are on the GPU
-(`ROADMAP_COMPLETE.md` § 11). The June 2026 audit surveyed thirteen areas;
+(`ROADMAP_COMPLETE.md` § 12). The June 2026 audit surveyed thirteen areas;
 the eligibility rubric and full option matrix are in
 [`docs/design/metal-acceleration.md`](docs/design/metal-acceleration.md).
 
@@ -2346,7 +2625,7 @@ bottleneck*; that trap was measured twice in the Resolve fit work alone.
 
 ---
 
-# 12. Developer Documentation
+# 13. Developer Documentation
 
 
 A `docs/developers/` tree that traces EVA's features to the code that implements

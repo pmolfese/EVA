@@ -62,9 +62,6 @@ struct RhythmicityExplorerView: View {
         }
         .frame(minWidth: 1_050, idealWidth: 1_260, minHeight: 720, idealHeight: 850)
         .onAppear { synchronizeContext() }
-        .sheet(isPresented: $showsHelp) {
-            RhythmicityHelpView { showsHelp = false }
-        }
     }
 
     private var toolbar: some View {
@@ -76,27 +73,33 @@ struct RhythmicityExplorerView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Picker("Mode", selection: $viewModel.mode) {
-                ForEach(RhythmicityExplorerMode.allCases) { Text($0.rawValue).tag($0) }
+            HStack(spacing: 5) {
+                Picker("Mode", selection: $viewModel.mode) {
+                    ForEach(RhythmicityExplorerMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 330)
+                HelpButton(topic: RhythmicityHelpTopics.mode)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 330)
 
             Divider().frame(height: 28)
 
             if viewModel.mode == .bands {
-                Menu {
-                    Button { viewModel.setSignificanceEnabled(true) } label: {
-                        Label("Paper 2026", systemImage: viewModel.includesSignificance ? "checkmark" : "doc.text")
+                HStack(spacing: 5) {
+                    Menu {
+                        Button { viewModel.setSignificanceEnabled(true) } label: {
+                            Label("Paper 2026", systemImage: viewModel.includesSignificance ? "checkmark" : "doc.text")
+                        }
+                        Button { viewModel.setSignificanceEnabled(false) } label: {
+                            Label("Exploratory — no significance", systemImage: viewModel.includesSignificance ? "doc.text" : "checkmark")
+                        }
+                    } label: {
+                        Label(viewModel.includesSignificance ? "Paper 2026" : "Exploratory", systemImage: "slider.horizontal.3")
                     }
-                    Button { viewModel.setSignificanceEnabled(false) } label: {
-                        Label("Exploratory — no significance", systemImage: viewModel.includesSignificance ? "doc.text" : "checkmark")
-                    }
-                } label: {
-                    Label(viewModel.includesSignificance ? "Paper 2026" : "Exploratory", systemImage: "slider.horizontal.3")
+                    .help("Paper 2026 runs 200 matched surrogates per channel. Exploratory mode computes median-defined regions without inferential labels.")
+                    HelpButton(topic: RhythmicityHelpTopics.significance)
                 }
-                .help("Paper 2026 runs 200 matched surrogates per channel. Exploratory mode computes median-defined regions without inferential labels.")
             } else if viewModel.mode == .eventRelated {
                 Label("Paper WTPL · ±1 cycle", systemImage: "slider.horizontal.3")
                     .font(.callout)
@@ -107,8 +110,14 @@ struct RhythmicityExplorerView: View {
 
             Spacer()
 
-            Button { showsHelp = true } label: {
-                Label("Help", systemImage: "questionmark.circle")
+            Button { showsHelp.toggle() } label: {
+                Image(systemName: "questionmark.circle")
+            }
+            .buttonStyle(.plain)
+            .help("About Rhythmicity Explorer and scientific references")
+            .accessibilityLabel("About Rhythmicity Explorer")
+            .popover(isPresented: $showsHelp, arrowEdge: .trailing) {
+                HelpTopicView(topic: RhythmicityHelpTopics.overview)
             }
             if viewModel.mode == .bands {
                 Button {
@@ -167,8 +176,8 @@ struct RhythmicityExplorerView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         labeledPicker("Source", selection: $viewModel.source, values: RhythmicitySignalSource.allCases)
                             .disabled(true)
-                        labeledPicker("Data", selection: $viewModel.dataSelection, values: RhythmicityDataSelection.allCases)
-                        labeledPicker("Channels", selection: $viewModel.channelScope, values: RhythmicityChannelScope.allCases)
+                        labeledPicker("Data", selection: $viewModel.dataSelection, values: RhythmicityDataSelection.allCases, help: RhythmicityHelpTopics.dataSelection)
+                        labeledPicker("Channels", selection: $viewModel.channelScope, values: RhythmicityChannelScope.allCases, help: RhythmicityHelpTopics.channels)
                         if viewModel.channelScope == .current {
                             Picker("Channel", selection: $viewModel.selectedChannelIndex) {
                                 ForEach(signal.data.indices, id: \.self) { Text(channelName($0)).tag($0) }
@@ -186,18 +195,22 @@ struct RhythmicityExplorerView: View {
                 GroupBox("Detection") {
                     VStack(alignment: .leading, spacing: 10) {
                         keyValue("Morlet width", "5 cycles")
-                        LabeledContent("Peak threshold") {
+                        LabeledContent {
                             TextField("percentile", value: $viewModel.burstConfiguration.peakPercentile, format: .number)
                                 .frame(width: 64)
                             Text("percentile")
+                        } label: {
+                            RowLabel(title: "Peak threshold", help: RhythmicityHelpTopics.burstThresholds)
                         }
                         LabeledContent("Power boundary") {
                             TextField("percentile", value: $viewModel.burstConfiguration.boundaryPercentile, format: .number)
                                 .frame(width: 64)
                             Text("percentile")
                         }
-                        Picker("Boundary", selection: $viewModel.burstConfiguration.boundarySource) {
+                        Picker(selection: $viewModel.burstConfiguration.boundarySource) {
                             ForEach(RhythmicBurstBoundarySource.allCases) { Text($0.rawValue).tag($0) }
+                        } label: {
+                            RowLabel(title: "Boundary", help: RhythmicityHelpTopics.burstBoundary)
                         }
                         if viewModel.burstConfiguration.boundarySource == .wtplThreshold {
                             LabeledContent("WTPL threshold") {
@@ -216,8 +229,10 @@ struct RhythmicityExplorerView: View {
 
                 GroupBox("Band assignment") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Picker("Source", selection: $viewModel.burstBandSource) {
+                        Picker(selection: $viewModel.burstBandSource) {
                             ForEach(TimeFrequencyBandSource.allCases) { Text($0.rawValue).tag($0) }
+                        } label: {
+                            RowLabel(title: "Source", help: RhythmicityHelpTopics.bandSource)
                         }
                         Text("Current Rhythmicity bands preserve channel-specific sustained/transient ABBA identity when a fresh Bands result exists.")
                             .font(.caption2).foregroundStyle(.secondary)
@@ -296,8 +311,10 @@ struct RhythmicityExplorerView: View {
                                 }
                             }
                         }
-                        Picker("Display", selection: $viewModel.wtplDisplayMeasure) {
+                        Picker(selection: $viewModel.wtplDisplayMeasure) {
                             ForEach(WTPLDisplayMeasure.allCases) { Text($0.rawValue).tag($0) }
+                        } label: {
+                            RowLabel(title: "Display", help: RhythmicityHelpTopics.wtplDisplay)
                         }
                         .pickerStyle(.segmented)
                         if viewModel.wtplDisplayMeasure == .delta, !viewModel.wtplBaselineIsAvailable {
@@ -309,7 +326,7 @@ struct RhythmicityExplorerView: View {
 
                 GroupBox("Channels") {
                     VStack(alignment: .leading, spacing: 10) {
-                        labeledPicker("Scope", selection: $viewModel.channelScope, values: RhythmicityChannelScope.allCases)
+                        labeledPicker("Scope", selection: $viewModel.channelScope, values: RhythmicityChannelScope.allCases, help: RhythmicityHelpTopics.channels)
                         if viewModel.channelScope == .current {
                             Picker("Channel", selection: $viewModel.selectedChannelIndex) {
                                 ForEach(eventSignal.data.indices, id: \.self) { Text(channelName($0)).tag($0) }
@@ -340,7 +357,10 @@ struct RhythmicityExplorerView: View {
                             }
                         }
                         Divider()
-                        Text("Explicit ΔWTPL baseline").font(.caption.weight(.semibold))
+                        HStack(spacing: 4) {
+                            Text("Explicit ΔWTPL baseline").font(.caption.weight(.semibold))
+                            HelpButton(topic: RhythmicityHelpTopics.wtplBaseline)
+                        }
                         LabeledContent("Start") {
                             TextField("ms", value: $viewModel.wtplBaselineStartMs, format: .number).frame(width: 75)
                         }
@@ -353,8 +373,10 @@ struct RhythmicityExplorerView: View {
                 }
 
                 GroupBox("Band overlay & ROI") {
-                    Picker("Source", selection: $viewModel.wtplBandSource) {
+                    Picker(selection: $viewModel.wtplBandSource) {
                         ForEach(TimeFrequencyBandSource.allCases) { Text($0.rawValue).tag($0) }
+                    } label: {
+                        RowLabel(title: "Source", help: RhythmicityHelpTopics.bandSource)
                     }
                     .padding(.top, 4)
                     Text(wtplBandResolution.sourceDescription)
@@ -423,8 +445,8 @@ struct RhythmicityExplorerView: View {
                     VStack(alignment: .leading, spacing: 11) {
                         labeledPicker("Source", selection: $viewModel.source, values: RhythmicitySignalSource.allCases)
                             .disabled(true)
-                        labeledPicker("Data", selection: $viewModel.dataSelection, values: RhythmicityDataSelection.allCases)
-                        labeledPicker("Channels", selection: $viewModel.channelScope, values: RhythmicityChannelScope.allCases)
+                        labeledPicker("Data", selection: $viewModel.dataSelection, values: RhythmicityDataSelection.allCases, help: RhythmicityHelpTopics.dataSelection)
+                        labeledPicker("Channels", selection: $viewModel.channelScope, values: RhythmicityChannelScope.allCases, help: RhythmicityHelpTopics.channels)
 
                         if viewModel.channelScope == .current {
                             Picker("Channel", selection: $viewModel.selectedChannelIndex) {
@@ -852,10 +874,13 @@ struct RhythmicityExplorerView: View {
     private func labeledPicker<T: Hashable & Identifiable>(
         _ label: String,
         selection: Binding<T>,
-        values: [T]
+        values: [T],
+        help: HelpTopic? = nil
     ) -> some View where T.ID == String {
-        Picker(label, selection: selection) {
+        Picker(selection: selection) {
             ForEach(values) { value in Text(value.id).tag(value) }
+        } label: {
+            RowLabel(title: label, help: help)
         }
     }
 

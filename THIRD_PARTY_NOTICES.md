@@ -42,6 +42,23 @@ file.
 Never take a reference implementation from a proprietary source. See
 `docs/provenance/empirical-bayes-port.md` for the constraints that apply to one such case.
 
+## EP Toolkit canonical saccadic-spike data
+
+- EVA data file: `EVA/Artifacts/Resources/saccadic-spike-canonical.json`
+- Upstream project: EP Toolkit, Joseph Dien,
+  https://sourceforge.net/projects/erppcatoolkit/
+- Upstream file: `templates/spikePot.mat`
+- Upstream distribution license: GNU General Public License, version 2
+  (https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
+
+The JSON file is a transformed representation of the upstream file's 33-channel
+canonical saccadic-spike scalp map: channel labels, polar electrode coordinates,
+and numeric template weights. EVA redistributes no EP Toolkit MATLAB source and
+its detector and spatial-filter implementation is independently written from
+Dien (2024). The source distribution's GPL provenance is recorded here so
+downstream distributors can evaluate and preserve any terms that apply to the
+numeric data.
+
 ## MNE-Python
 
 - EVA files:

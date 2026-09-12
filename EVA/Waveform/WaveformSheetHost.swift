@@ -44,6 +44,7 @@ enum ActiveRecordingSheet: String, Identifiable, CaseIterable, Sendable {
     case psa
     case artifactTemplate
     case artifactCleaning
+    case saccadicSpike
     case ecgDetection
     case eyeArtifactThreshold
     case bcgDetection
@@ -78,6 +79,7 @@ extension WaveformView {
         if epoching.showsSheet { return .psa }
         if template.showsSheet { return .artifactTemplate }
         if artifactVM.showsCleaningSheet { return .artifactCleaning }
+        if saccadicSpike.showsSheet { return .saccadicSpike }
         if ecg.showsSheet { return .ecgDetection }
         if artifactVM.showsThresholdSheet { return .eyeArtifactThreshold }
         if bcg.showsSheet { return .bcgDetection }
@@ -123,6 +125,7 @@ extension WaveformView {
         case .psa: epoching.showsSheet = false
         case .artifactTemplate: template.showsSheet = false
         case .artifactCleaning: artifactVM.showsCleaningSheet = false
+        case .saccadicSpike: saccadicSpike.showsSheet = false
         case .ecgDetection: ecg.showsSheet = false
         case .eyeArtifactThreshold: artifactVM.showsThresholdSheet = false
         case .bcgDetection: bcg.showsSheet = false
@@ -170,6 +173,9 @@ extension WaveformView {
 
         case .artifactCleaning:
             artifactCleaningSheet(for: cleaningBase)
+
+        case .saccadicSpike:
+            saccadicSpikeSheet(for: continuousSignal)
 
         case .ecgDetection:
             ecgDetectionSheet(for: continuousSignal)

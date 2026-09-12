@@ -6,6 +6,11 @@
 //
 //  Segment-aware Local Auto-correlated Vector Index reduction.
 //
+//  Karvat, G., Crespo-García, M., Vishne, G., Anderson, M. C., & Landau, A. N.
+//  (2026). Universal rhythmic architecture uncovers two modes of neural dynamics.
+//  Nature Communications, 17, 7024. https://doi.org/10.1038/s41467-026-73553-8
+//  Reference implementation: https://doi.org/10.5281/zenodo.19581527
+//
 
 import Foundation
 

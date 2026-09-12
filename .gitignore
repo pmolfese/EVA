@@ -39,6 +39,8 @@ build/
 #
 # Dirty-room reviewers keep these locally; see docs/provenance/README.md.
 resources/
+!EVA/Artifacts/Resources/
+!EVA/Artifacts/Resources/saccadic-spike-canonical.json
 
 # Dirty-room notes quote reference-toolbox internals and must not be committed.
 docs/dirty-room/

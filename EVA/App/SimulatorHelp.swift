@@ -47,6 +47,12 @@ struct HelpTopic {
         var id: String { name }
     }
 
+    struct Resource: Identifiable {
+        let title: String
+        let url: URL
+        var id: String { url.absoluteString }
+    }
+
     let title: String
     /// What the control does, in a sentence or two.
     let summary: String
@@ -56,6 +62,8 @@ struct HelpTopic {
     var guidance: String? = nil
     /// Published source, when the model follows one.
     var reference: String? = nil
+    /// Clickable primary sources or method repositories.
+    var resources: [Resource] = []
 }
 
 // MARK: - Views
@@ -130,6 +138,13 @@ struct HelpTopicView: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !topic.resources.isEmpty {
+                    ForEach(topic.resources) { resource in
+                        Link(resource.title, destination: resource.url)
+                            .font(.caption)
+                    }
                 }
             }
             .padding(14)
