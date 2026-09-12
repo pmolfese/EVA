@@ -71,6 +71,9 @@ struct TimeFrequencyView: View {
         var cyclesLow: Double
         var cyclesHigh: Double
         var baseline: TFBaselineMethod
+        var wtplShowsDelta: Bool
+        var wtplBaselineStartMs: Double
+        var wtplBaselineEndMs: Double
         var signalToken: String
         var segmentCount: Int
     }
@@ -91,6 +94,9 @@ struct TimeFrequencyView: View {
             cyclesLow: epoching.tfCyclesLow,
             cyclesHigh: epoching.tfCyclesHigh,
             baseline: epoching.tfBaselineMethod,
+            wtplShowsDelta: epoching.tfWTPLShowsDelta,
+            wtplBaselineStartMs: epoching.tfWTPLBaselineStartMs,
+            wtplBaselineEndMs: epoching.tfWTPLBaselineEndMs,
             signalToken: "\(signal.signalURL.path)#\(signal.dataRevision.uuidString)#\(signal.samplingRate)#\(signal.data.count)",
             segmentCount: segments.count
         )
@@ -111,6 +117,7 @@ struct TimeFrequencyView: View {
             job.measure.rawValue, job.powerMode.rawValue, job.method.rawValue, String(job.timeBandwidth),
             String(job.minHz), String(job.maxHz), String(job.count),
             String(job.cyclesLow), String(job.cyclesHigh), job.baseline.rawValue,
+            String(job.wtplShowsDelta), String(job.wtplBaselineStartMs), String(job.wtplBaselineEndMs),
             job.signalToken, String(job.segmentCount), String(job.showsDifference), differenceKey
         ].joined(separator: "|")
     }
@@ -251,7 +258,12 @@ struct TimeFrequencyView: View {
     }
 
     private var headerTitle: String {
-        let measure = epoching.tfMeasure == .power ? "ERSP · \(epoching.tfPowerMode.rawValue)" : "ITPC"
+        let measure: String
+        switch epoching.tfMeasure {
+        case .power: measure = "ERSP · \(epoching.tfPowerMode.rawValue)"
+        case .itpc: measure = "ITPC"
+        case .wtpl: measure = epoching.tfWTPLShowsDelta ? "ΔWTPL" : "WTPL"
+        }
         let channel = channelNames.indices.contains(epoching.tfSelectedChannelIndex)
             ? channelNames[epoching.tfSelectedChannelIndex] : "—"
         if epoching.tfShowsDifference, let b = epoching.tfConditionB, let a = effectiveConditionA {
@@ -306,6 +318,11 @@ struct TimeFrequencyView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                    .disabled(epoching.tfMeasure == .wtpl)
+                    if epoching.tfMeasure == .wtpl {
+                        Text("WTPL uses the validated five-cycle Morlet implementation.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                     if epoching.tfMethod == .multitaper {
                         LabeledContent("Time·BW") {
                             Stepper(value: $epoching.tfTimeBandwidth, in: 2...10, step: 0.5) {
@@ -349,6 +366,20 @@ struct TimeFrequencyView: View {
                         }
                         .labelsHidden()
                         Text("Pre-stimulus window").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+
+                if epoching.tfMeasure == .wtpl {
+                    controlSection("WTPL") {
+                        Toggle("Baseline-subtracted ΔWTPL", isOn: $epoching.tfWTPLShowsDelta)
+                        LabeledContent("Baseline start") {
+                            TextField("ms", value: $epoching.tfWTPLBaselineStartMs, format: .number).frame(width: 70)
+                        }
+                        LabeledContent("Baseline end") {
+                            TextField("ms", value: $epoching.tfWTPLBaselineEndMs, format: .number).frame(width: 70)
+                        }
+                        Text("The full interval must exist; it is never shortened automatically.")
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
 
@@ -472,21 +503,22 @@ struct TimeFrequencyView: View {
                 let mapsA = await conditionMaps(
                     for: differenceA, progressRange: 0...0.5,
                     signal: signal, segments: segments, channels: channels, names: names,
-                    context: context, usesGPU: usesGPU
+                    context: context, usesGPU: usesGPU, measure: measure
                 )
                 let mapsB = await conditionMaps(
                     for: differenceB, progressRange: 0.5...1,
                     signal: signal, segments: segments, channels: channels, names: names,
-                    context: context, usesGPU: usesGPU
+                    context: context, usesGPU: usesGPU, measure: measure
                 )
                 if let mapsA, let mapsB,
                    let difference = TimeFrequencyExport.differenceMaps(mapsA, mapsB, label: "\(differenceA) − \(differenceB)") {
                     renders.append(TFOverviewRender(
                         condition: difference.condition,
                         channelIndices: difference.channelIndices, channelNames: difference.channelNames,
-                        grids: measure == .power ? difference.ersp : difference.itpc,
+                        grids: Self.grids(maps: difference, measure: measure, wtplShowsDelta: epoching.tfWTPLShowsDelta),
                         frequenciesHz: difference.frequenciesHz, timesMs: difference.timesMs,
-                        measure: measure, isDifference: true
+                        measure: measure, isDifference: true,
+                        isBaselineSubtracted: measure == .wtpl && epoching.tfWTPLShowsDelta
                     ))
                 }
             } else {
@@ -497,15 +529,16 @@ struct TimeFrequencyView: View {
                     let maps = await conditionMaps(
                         for: condition, progressRange: start...(Double(index + 1) / Double(conditions.count)),
                         signal: signal, segments: segments, channels: channels, names: names,
-                        context: context, usesGPU: usesGPU
+                        context: context, usesGPU: usesGPU, measure: measure
                     )
                     guard let maps else { continue }
                     renders.append(TFOverviewRender(
                         condition: condition,
                         channelIndices: maps.channelIndices, channelNames: maps.channelNames,
-                        grids: measure == .power ? maps.ersp : maps.itpc,
+                        grids: Self.grids(maps: maps, measure: measure, wtplShowsDelta: epoching.tfWTPLShowsDelta),
                         frequenciesHz: maps.frequenciesHz, timesMs: maps.timesMs,
-                        measure: measure, isDifference: false
+                        measure: measure, isDifference: false,
+                        isBaselineSubtracted: measure == .wtpl && epoching.tfWTPLShowsDelta
                     ))
                 }
             }
@@ -530,21 +563,30 @@ struct TimeFrequencyView: View {
         channels: [Int],
         names: [String],
         context: TimeFrequencyExport.Context,
-        usesGPU: Bool
+        usesGPU: Bool,
+        measure: EpochingViewModel.TFMeasure
     ) async -> TimeFrequencyExport.ConditionMaps? {
         overviewProgress = progressRange.lowerBound
         overviewStatus = "\(Int(progressRange.lowerBound * 100))% · \(condition) · \(channels.count) channels"
         return await Task.detached(priority: .userInitiated) {
-            TimeFrequencyExport.conditionMaps(
-                signal: signal, segments: segments, condition: condition,
-                channelIndices: channels, channelNames: names, context: context, usesGPU: usesGPU,
-                progress: { fraction, stage in
+            let progress: @Sendable (Double, String) -> Void = { fraction, stage in
                     Task { @MainActor in
                         let overall = progressRange.lowerBound + fraction * (progressRange.upperBound - progressRange.lowerBound)
                         overviewProgress = overall
                         overviewStatus = "\(Int(overall * 100))% · \(condition) · \(stage)"
                     }
                 }
+            if measure == .wtpl {
+                return TimeFrequencyExport.wtplConditionMaps(
+                    signal: signal, segments: segments, condition: condition,
+                    channelIndices: channels, channelNames: names, context: context,
+                    progress: progress
+                )
+            }
+            return TimeFrequencyExport.conditionMaps(
+                signal: signal, segments: segments, condition: condition,
+                channelIndices: channels, channelNames: names, context: context,
+                usesGPU: usesGPU, progress: progress
             )
         }.value
     }
@@ -563,7 +605,11 @@ struct TimeFrequencyView: View {
             bands: bandResolution.bands,
             windows: TimeFrequencyExport.defaultWindows(maxTimeMs: maxTimeMs),
             bandSource: bandResolution.source,
-            detectedBandSet: bandResolution.detectedBandSet
+            detectedBandSet: bandResolution.detectedBandSet,
+            wtplShowsDelta: epoching.tfWTPLShowsDelta,
+            wtplBaselineStartMs: epoching.tfWTPLBaselineStartMs,
+            wtplBaselineEndMs: epoching.tfWTPLBaselineEndMs,
+            wtplLagCycles: [-1, 1]
         )
     }
 
@@ -578,7 +624,13 @@ struct TimeFrequencyView: View {
         panel.allowedContentTypes = [UTType(filenameExtension: "npy") ?? .data]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        panel.nameFieldStringValue = "\(exportBaseName)-\(condition)-\(measure == .power ? "ersp" : "itpc").npy"
+        let measureName: String
+        switch measure {
+        case .power: measureName = "ersp"
+        case .itpc: measureName = "itpc"
+        case .wtpl: measureName = epoching.tfWTPLShowsDelta ? "delta-wtpl" : "wtpl"
+        }
+        panel.nameFieldStringValue = "\(exportBaseName)-\(condition)-\(measureName).npy"
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         let signal = self.signal, segments = self.segments
@@ -586,11 +638,17 @@ struct TimeFrequencyView: View {
         isExporting = true; exportStatus = nil
         Task {
             let output: (npy: Data, sidecar: Data)? = await Task.detached(priority: .userInitiated) {
-                guard let maps = TimeFrequencyExport.conditionMaps(
-                    signal: signal, segments: segments, condition: condition,
-                    channelIndices: channels, channelNames: names, context: ctx
-                ) else { return nil }
-                let grid = measure == .power ? maps.ersp : maps.itpc
+                let maps = measure == .wtpl
+                    ? TimeFrequencyExport.wtplConditionMaps(
+                        signal: signal, segments: segments, condition: condition,
+                        channelIndices: channels, channelNames: names, context: ctx
+                    )
+                    : TimeFrequencyExport.conditionMaps(
+                        signal: signal, segments: segments, condition: condition,
+                        channelIndices: channels, channelNames: names, context: ctx
+                    )
+                guard let maps else { return nil }
+                let grid = Self.grids(maps: maps, measure: measure, wtplShowsDelta: ctx.wtplShowsDelta)
                 return (TimeFrequencyExport.npy(grid), TimeFrequencyExport.sidecarJSON(maps, measure: measure, context: ctx))
             }.value
             isExporting = false
@@ -612,16 +670,23 @@ struct TimeFrequencyView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         let signal = self.signal, segments = self.segments
-        let channels = Array(0..<signal.data.count), names = channelNames, ctx = exportContext, conds = categories
+        let channels = Array(0..<signal.data.count), names = channelNames, ctx = exportContext
+        let conds = categories, measure = epoching.tfMeasure
         isExporting = true; exportStatus = nil
         Task {
             let data: Data? = await Task.detached(priority: .userInitiated) {
                 var maps: [TimeFrequencyExport.ConditionMaps] = []
                 for condition in conds {
-                    if let m = TimeFrequencyExport.conditionMaps(
-                        signal: signal, segments: segments, condition: condition,
-                        channelIndices: channels, channelNames: names, context: ctx
-                    ) { maps.append(m) }
+                    let m = measure == .wtpl
+                        ? TimeFrequencyExport.wtplConditionMaps(
+                            signal: signal, segments: segments, condition: condition,
+                            channelIndices: channels, channelNames: names, context: ctx
+                        )
+                        : TimeFrequencyExport.conditionMaps(
+                            signal: signal, segments: segments, condition: condition,
+                            channelIndices: channels, channelNames: names, context: ctx
+                        )
+                    if let m { maps.append(m) }
                 }
                 guard !maps.isEmpty else { return nil }
                 return TimeFrequencyExport.csvData(TimeFrequencyExport.scalarCSVRows(maps, context: ctx))
@@ -639,12 +704,19 @@ struct TimeFrequencyView: View {
 
         let plan = TFFrequencyPlan.logSpaced(
             minHz: job.minHz, maxHz: job.maxHz, count: job.count,
-            cyclesLow: job.cyclesLow, cyclesHigh: job.cyclesHigh
+            cyclesLow: job.measure == .wtpl ? 5 : job.cyclesLow,
+            cyclesHigh: job.measure == .wtpl ? 5 : job.cyclesHigh
         )
         let channels = [job.channel]
 
         let stackA = TimeFrequencyTrials.stack(signal: signal, segments: segments, category: conditionA, channelIndices: channels)
         guard !stackA.isEmpty else { return nil }
+        if job.measure == .wtpl {
+            return computeWTPLRender(
+                signal: signal, segments: segments, plan: plan,
+                stackA: stackA, conditionA: conditionA, job: job
+            )
+        }
 
         let baseline = baselineSpec(for: stackA, method: job.baseline)
         guard let resultA = TimeFrequencyEngine.ersp(trials: stackA.trials, samplingRate: stackA.samplingRate, plan: plan, baseline: baseline, method: job.method, timeBandwidth: job.timeBandwidth, powerMode: job.powerMode, usesGPU: usesGPU) else { return nil }
@@ -684,6 +756,94 @@ struct TimeFrequencyView: View {
             trialCountA: stackA.trials.count,
             trialCountB: trialCountB
         )
+    }
+
+    private nonisolated static func computeWTPLRender(
+        signal: MFFSignalData,
+        segments: [EpochSegment],
+        plan: TFFrequencyPlan,
+        stackA: TimeFrequencyTrials.Stack,
+        conditionA: String,
+        job: Job
+    ) -> TFRender? {
+        let provider = AccelerateFFTComplexCoefficientProvider()
+        let baselineA = wtplBaselineSpec(for: stackA, job: job)
+        guard !job.wtplShowsDelta || baselineA != nil,
+              let resultA = try? WTPLEngine.analyze(
+                trials: stackA.trials, samplingRate: stackA.samplingRate, plan: plan,
+                lagCycles: [-1, 1], baseline: baselineA,
+                eventSampleIndex: stackA.stimulusOffsetSamples,
+                coefficientProvider: provider, edgePolicy: .validOnly, retainPerTrial: false
+              ),
+              let gridA = job.wtplShowsDelta ? resultA.deltaWTPL : resultA.meanWTPL
+        else { return nil }
+
+        var grid = gridA
+        var trialCountB: Int?
+        if job.showsDifference, let conditionB = job.conditionB, conditionB != conditionA {
+            let stackB = TimeFrequencyTrials.stack(
+                signal: signal, segments: segments, category: conditionB,
+                channelIndices: [job.channel]
+            )
+            let baselineB = wtplBaselineSpec(for: stackB, job: job)
+            guard !stackB.isEmpty, !job.wtplShowsDelta || baselineB != nil,
+                  let resultB = try? WTPLEngine.analyze(
+                    trials: stackB.trials, samplingRate: stackB.samplingRate, plan: plan,
+                    lagCycles: [-1, 1], baseline: baselineB,
+                    eventSampleIndex: stackB.stimulusOffsetSamples,
+                    coefficientProvider: provider, edgePolicy: .validOnly, retainPerTrial: false
+                  ),
+                  resultB.timesMs == resultA.timesMs,
+                  resultB.frequenciesHz == resultA.frequenciesHz,
+                  let gridB = job.wtplShowsDelta ? resultB.deltaWTPL : resultB.meanWTPL
+            else { return nil }
+            grid = subtract(gridA, gridB)
+            trialCountB = stackB.trials.count
+        }
+
+        let diverging = job.wtplShowsDelta || trialCountB != nil
+        return TFRender(
+            grid: grid, frequenciesHz: resultA.frequenciesHz, timesMs: resultA.timesMs,
+            eventSampleIndex: stackA.stimulusOffsetSamples,
+            valueRange: diverging ? robustSymmetricRange(grid) : 0...1,
+            isDiverging: diverging, measure: .wtpl,
+            isDifference: trialCountB != nil,
+            isBaselineSubtracted: job.wtplShowsDelta,
+            trialCountA: stackA.trials.count, trialCountB: trialCountB
+        )
+    }
+
+    private nonisolated static func wtplBaselineSpec(
+        for stackelag: TimeFrequencyTrials.Stack,
+        job: Job
+    ) -> WTPLBaselineSpec? {
+        guard !stackelag.isEmpty, job.wtplBaselineStartMs <= job.wtplBaselineEndMs else { return nil }
+        let start = stackelag.stimulusOffsetSamples
+            + Int((job.wtplBaselineStartMs / 1_000 * stackelag.samplingRate).rounded())
+        let end = stackelag.stimulusOffsetSamples
+            + Int((job.wtplBaselineEndMs / 1_000 * stackelag.samplingRate).rounded())
+        guard start >= 0, end >= start, end < stackelag.timeCount else { return nil }
+        return WTPLBaselineSpec(startSample: start, endSample: end)
+    }
+
+    private nonisolated static func grids(
+        maps: TimeFrequencyExport.ConditionMaps,
+        measure: EpochingViewModel.TFMeasure,
+        wtplShowsDelta: Bool
+    ) -> [[[Double]]] {
+        switch measure {
+        case .power: return maps.ersp
+        case .itpc: return maps.itpc
+        case .wtpl: return wtplShowsDelta ? (maps.deltaWTPL ?? []) : (maps.wtpl ?? [])
+        }
+    }
+
+    private nonisolated static func robustSymmetricRange(_ grid: [[Double]]) -> ClosedRange<Double> {
+        let magnitudes = grid.flatMap { $0 }.filter(\.isFinite).map(abs).sorted()
+        guard !magnitudes.isEmpty else { return -1...1 }
+        let index = min(magnitudes.count - 1, Int(Double(magnitudes.count) * 0.99))
+        let extent = max(magnitudes[index], 1e-6)
+        return -extent...extent
     }
 
     /// Baseline = the pre-stimulus window when there is one, otherwise the first

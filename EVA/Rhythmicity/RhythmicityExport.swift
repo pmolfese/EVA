@@ -282,10 +282,18 @@ nonisolated extension RhythmicityWarning {
             return "Channel \(channelIndex + 1): numerical LAVI \(value) was outside [0, 1] at \(frequencyHz) Hz."
         case let .iaaftSurrogatesDidNotConverge(channelIndex, count):
             return "Channel \(channelIndex + 1): \(count) matched surrogates reached a nonconverged stopping state and were retained."
+        case let .wtplNoValidSamples(frequencyHz):
+            return "WTPL has no valid within-trial lag samples at \(String(format: "%.3g", frequencyHz)) Hz."
+        case let .wtplBaselineUnavailable(frequencyHz):
+            return "WTPL baseline has no valid samples at \(String(format: "%.3g", frequencyHz)) Hz; ΔWTPL is unavailable for that row."
+        case let .wtplRequestedBaselineOutsideEpoch(startMs, endMs):
+            return "The complete requested WTPL baseline \(String(format: "%.0f", startMs))...\(String(format: "%.0f", endMs)) ms is not present; ΔWTPL is unavailable."
         case .noAlphaAnchor:
             return "No sustained peak was found in the 6–14 Hz anchor range; bands remain unanchored."
         case .flatLAVIProfile:
             return "The finite LAVI profile is flat, so ABBA regions are unavailable."
+        case let .computeBackendFallback(requested, reason):
+            return "Requested \(requested) computation fell back to Accelerate FFT: \(reason)"
         }
     }
 }

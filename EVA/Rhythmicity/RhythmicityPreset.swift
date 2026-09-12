@@ -8,9 +8,9 @@
 import Foundation
 
 nonisolated enum RhythmicityPreset {
-    /// A stable default makes command-line/tests reproducible. Milestone 4 may
-    /// replace it with a newly generated seed when the user starts a fresh run;
-    /// the resolved seed always remains part of the result configuration.
+    /// A stable default makes command-line/tests reproducible and lets exact
+    /// reruns reuse completed per-channel significance results. The resolved
+    /// seed always remains part of the result and cache configuration.
     static let defaultPaperSeed: UInt64 = 0x4c41_5649_3230_3236
 
     static let paperLAVI2026 = RhythmicityConfiguration(
@@ -20,7 +20,7 @@ nonisolated enum RhythmicityPreset {
         },
         morletWidthCycles: 5.0,
         laviLagCycles: 1.5,
-        wtplLagCycles: [1.0],
+        wtplLagCycles: [-1.0, 1.0],
         alphaAnchorHz: 6.0...14.0,
         significance: .onDemand(
             LAVIOnDemandSignificanceConfiguration(

@@ -246,6 +246,8 @@ extension WaveformView {
                 viewModel: rhythmicityExplorer,
                 packageName: recording.packageName,
                 signal: continuousSignal,
+                eventSignal: epoching.segmentedEpochSignal ?? continuousSignal,
+                epochSegments: epoching.segmentedEpochSegments,
                 visibleSampleRange: rhythmicityVisibleSampleRange(in: continuousSignal),
                 channelSets: ChannelSetStore.shared.allSets,
                 artifactSources: eegArtifactRejectionSources(),

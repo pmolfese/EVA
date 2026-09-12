@@ -49,6 +49,28 @@
       "sha256": "d8dd677bde902d5e811547cf21ec2c30ace90a41b79a222dd5ce67106f3b08eb"
     }
   ],
+  "independentFixtures": [
+    {
+      "generator": "Tools/RhythmicityReference/generate_burst_oracle.py",
+      "path": "EVATests/Fixtures/Rhythmicity/burst-python-oracle.json",
+      "role": "standard-library Python burst map behavioral oracle",
+      "sha256": "e6e01fd37cc4ad365b3ae3b1f51295a8cc075dc114541deb7890b35afca0de00"
+    },
+    {
+      "generator": "Tools/RhythmicityReference/generate_wtpl_oracle.py",
+      "path": "EVATests/Fixtures/Rhythmicity/wtpl-python-oracle.json",
+      "role": "standard-library Python paper-equation WTPL oracle",
+      "sha256": "b6a46ff865a1e1f721ad77589a4bc6f1cdfc8e23fb0514c906241fabda5fa90a"
+    }
+  ],
+  "wtplMatlabFiles": [
+    {
+      "path": "Bursts_detection_WTPL_v1_0_0.m",
+      "role": "maintained behavioral and provenance reference; called helpers are not distributed",
+      "sha256": "76375d0f2e972ed34654abdbed12b410754876ca5b8ea8286eca2c291c101c29",
+      "version": "1.0.0"
+    }
+  ],
   "fileLevelProvenance": [
     {
       "license": "GPL-3.0-or-later",

@@ -23,7 +23,7 @@
 //
 //  `version` is required (it is what the list is keyed and sorted by); `date` and
 //  `title` are optional. Ordering uses `AppVersion`, the same comparator the
-//  update checker uses for GitHub tags, so `0.1.10` correctly follows `0.1.9`.
+//  update checker uses for GitHub tags, so `0.1.9` correctly follows `0.1.8`.
 //
 
 import Foundation

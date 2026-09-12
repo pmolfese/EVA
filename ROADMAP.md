@@ -37,7 +37,7 @@ Across sections, the ordered spine is unchanged:
 | 4 | **SI-5 — Ocular MSEC/PCA-S** | [§2 Processing & Cleaning](#2-processing--cleaning) | NOT STARTED |
 | 5 | **TW-4 / TW-5 — Trial diagnostics and exclusions** | [§4 Trial-wise](#4-epoching-averaging--trial-wise) | IN PROGRESS |
 | 6 | **UI-1 / UX-1 — Display density, Figure Composer 2** | [§9 UI, Figures & Export](#9-ui-figures--export) | NOT STARTED |
-| 7 | **DEV-1 — Developer documentation** | [§12 Developer Documentation](#12-developer-documentation) | NOT STARTED |
+| 7 | **DEV-1 — Developer documentation** | [§12 Developer Documentation](#12-developer-documentation) | IN PROGRESS (DEV-1a, 1b done) |
 
 **SI-4 is what decides whether PCA-S is production-ready.** The method ships with
 defaults that are defensible rather than measured — the component-reliability
@@ -530,8 +530,11 @@ Schedule only with a product decision about where it lives and what it is called
 
 ERSP, ITPC and DPSS multitaper ship and cross-check against MNE below 1e-6, with
 NPY and tidy-CSV export. The Rhythmicity Explorer ships LAVI, ABBA, on-demand
-significance, the standalone Bands workspace, reproducible export, and
-Time-Frequency band adoption (Milestones 0–5, released as 0.1.9).
+significance, WTPL, and burst analysis with reproducible exports and explicit
+Time-Frequency band adoption, measured Metal acceleration, and recording-scoped
+result persistence with revision-aware staleness (Milestones 0–8). Exact,
+checksummed per-channel paper-significance caching additionally reuses completed
+aperiodic fits, ribbons, and diagnostics across scientifically identical runs.
 
 Method reference: [`docs/design/rhythmicity.md`](docs/design/rhythmicity.md).
 
@@ -555,49 +558,6 @@ well-scoped; the permutation engine is untouched.
 baseline-normalized ERSP / ITPC map, exports full maps + tidy scalars, and runs a
 frequency-aware cluster-permutation test — all on the same epoch selection the ERP
 views use. **Effort:** medium overall; TF-1 is the gate and independently valuable.
-
----
-
-
-## Rhythmicity Explorer — remaining milestones
-
-### LAVI Milestone 6 — WTPL
-
-- [ ] Implement shared `WTPLEngine`.
-- [ ] Establish and match a validated independent Python WTPL oracle fixture.
-- [ ] Add raw WTPL and ΔWTPL.
-- [ ] Add condition comparisons and valid-count maps.
-- [ ] Build Event-related explorer mode.
-- [ ] Reuse/generalize TF heatmap and overview components.
-- [ ] Add NPY/scalar exports.
-- [ ] Add optional TF WTPL shortcut.
-- [ ] Add WTPL-vs-ITPC interpretation tests/help.
-
-**Exit:** users can analyze event-related within-trial rhythmicity with explicit baseline and condition semantics.
-
-### LAVI Milestone 7 — Burst analysis
-
-- [ ] Pin maintained burst reference behavior.
-- [ ] Implement 2D peak detection.
-- [ ] Implement onset/offset refinement.
-- [ ] Implement overlap merge.
-- [ ] Implement metrics and band assignment.
-- [ ] Build burst map/timeline/table.
-- [ ] Add event annotation only if product requirements demand it.
-- [ ] Add exports and tests.
-
-**Exit:** burst detections and statistics reproduce the reference workflow and remain clearly separated from artifact cleaning.
-
-### LAVI Milestone 8 — Metal acceleration and persistence
-
-- [ ] Profile CPU FFT bottlenecks first.
-- [ ] Design tiled/fused Metal reductions.
-- [ ] Add CPU/GPU parity and boundary-stability tests.
-- [ ] Add automatic fallback and preferences.
-- [ ] Add recording-scoped persisted result payload.
-- [ ] Add upstream-revision staleness checks.
-
-**Exit:** high-density workloads are accelerated where measurement justifies it, and saved results cannot be mistaken for current results after preprocessing changes.
 
 ---
 
@@ -2404,13 +2364,13 @@ with a rich doc-comment header** describing what it does. So the per-file
 synopsis layer is largely *extractable*, and the high-value hand-written work is
 the architecture map and the feature→code index that no header can give.
 
-- [ ] **DEV-1a — Architecture map.** `docs/developers/architecture.md`: one
+- [x] **DEV-1a — Architecture map.** `docs/developers/architecture.md`: one
   paragraph per subsystem (purpose + key entry-point types), the end-to-end data
   flow (IO → Core → cleaning stages: Filtering/Gradient/ICA/Wavelet/Cardiac →
   Epoching → Trials → Waveform/PSA UI), and the cross-cutting spines (the
   Pipeline history/replay + `eva.xml` provenance, the shared forward model, MFF
   I/O). A diagram is welcome but the prose map is the deliverable.
-- [ ] **DEV-1b — Per-subsystem pages.** `docs/developers/subsystems/<group>.md`,
+- [x] **DEV-1b — Per-subsystem pages.** `docs/developers/subsystems/<group>.md`,
   one per top-level group: purpose, the public types/entry points a newcomer
   starts from, a one-line synopsis of each file (seeded from its header comment,
   then curated), and a short "how to extend this" note. This is the "outline of
@@ -2433,4 +2393,3 @@ reading the source first. **Effort:** medium, mostly writing; DEV-1b is
 partly mechanical from headers, DEV-1a/1c are the real authorship.
 
 ---
-

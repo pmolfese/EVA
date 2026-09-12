@@ -303,6 +303,7 @@ final class EpochingViewModel {
     enum TFMeasure: String, CaseIterable, Identifiable {
         case power = "Power"
         case itpc = "ITPC"
+        case wtpl = "WTPL"
         var id: String { rawValue }
     }
     var tfMeasure: TFMeasure = .power
@@ -319,6 +320,11 @@ final class EpochingViewModel {
     var tfCyclesLow: Double = 3
     var tfCyclesHigh: Double = 10
     var tfBaselineMethod: TFBaselineMethod = .decibel
+    /// WTPL has its own subtractive baseline semantics; these controls are not
+    /// shared with ERSP normalization.
+    var tfWTPLShowsDelta = true
+    var tfWTPLBaselineStartMs = -1_000.0
+    var tfWTPLBaselineEndMs = -500.0
     /// Session-only ROI/overlay source. Selecting Rhythmicity Explorer never
     /// writes the user's saved ProcessingDefaults bands.
     var tfBandSource: TimeFrequencyBandSource = .evaDefaults

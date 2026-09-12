@@ -49,6 +49,7 @@ final class ProcessingDefaults {
         static let gradientComputeBackendRaw = "gradientComputeBackendRaw"
         static let waveletUsesGPU = "waveletUsesGPU"
         static let timeFrequencyUsesGPU = "timeFrequencyUsesGPU"
+        static let rhythmicityUsesGPU = "rhythmicityUsesGPU"
         static let timeFrequencyBands = "timeFrequencyBands.v1"
         static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
         static let autoRunSegmentHealthAfterSegmentation = "autoRunSegmentHealthAfterSegmentation"
@@ -78,6 +79,7 @@ final class ProcessingDefaults {
         static let gradientComputeBackendRaw = GradientComputeBackend.cpu.rawValue
         static let waveletUsesGPU = true
         static let timeFrequencyUsesGPU = true
+        static let rhythmicityUsesGPU = true
         static let timeFrequencyBands = EEGFrequencyBand.restingDefaults
         static let interpolatedHealthFromNeighbors = true
         static let autoRunSegmentHealthAfterSegmentation = true
@@ -231,6 +233,14 @@ final class ProcessingDefaults {
         set { UserDefaults.standard.set(newValue, forKey: Keys.timeFrequencyUsesGPU) }
     }
 
+    /// Whether new Rhythmicity Explorer runs automatically use the Metal
+    /// Morlet path when profiling says the workload is large enough. Unsupported
+    /// devices, shapes, and allocations fall back to bounded Accelerate FFT.
+    var rhythmicityUsesGPU: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.rhythmicityUsesGPU) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.rhythmicityUsesGPU) }
+    }
+
     /// Named bands shared by the time-frequency explorer.  Values are kept in
     /// preferences rather than hard-coded so a lab can add, for example, a
     /// narrow beta or gamma band without changing analysis code.
@@ -344,6 +354,7 @@ final class ProcessingDefaults {
             Keys.gradientComputeBackendRaw: Defaults.gradientComputeBackendRaw,
             Keys.waveletUsesGPU: Defaults.waveletUsesGPU,
             Keys.timeFrequencyUsesGPU: Defaults.timeFrequencyUsesGPU,
+            Keys.rhythmicityUsesGPU: Defaults.rhythmicityUsesGPU,
             Keys.timeFrequencyBands: (try? JSONEncoder().encode(Defaults.timeFrequencyBands)) ?? Data(),
             Keys.bcgDefaultMethodRaw: Defaults.bcgDefaultMethodRaw,
             Keys.artifactDetectionDefaultMethodRaw: Defaults.artifactDetectionDefaultMethodRaw,
@@ -410,6 +421,7 @@ final class ProcessingDefaults {
         autoRunSegmentHealthAfterSegmentation = Defaults.autoRunSegmentHealthAfterSegmentation
         autoSaveNewNetGeometries = Defaults.autoSaveNewNetGeometries
         autoSaveNewNetGeometriesFromNonMFF = Defaults.autoSaveNewNetGeometriesFromNonMFF
+        rhythmicityUsesGPU = Defaults.rhythmicityUsesGPU
     }
 
     private func ocularThresholdConfig(

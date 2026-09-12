@@ -1,7 +1,8 @@
 # Python reference-fixture tools
 
-These scripts run the external LAVI Python repository as a numerical oracle.
-They do not vendor, patch, or translate upstream code.
+These scripts run the external LAVI Python repository as a numerical oracle and
+generate EVA's independent WTPL paper-equation oracle. They do not vendor,
+patch, or translate upstream code.
 
 From the EVA repository root:
 
@@ -26,7 +27,25 @@ PYTHONPATH=/private/tmp/eva-lavi-reference/python MPLBACKEND=Agg \
   --input EVATests/Fixtures/Rhythmicity/reference-input.json \
   --output EVATests/Fixtures/Rhythmicity/python-reference.json \
   --author-example-report EVATests/Fixtures/Rhythmicity/python-author-example-report.json
+
+python3 Tools/RhythmicityReference/generate_wtpl_oracle.py \
+  --output EVATests/Fixtures/Rhythmicity/wtpl-python-oracle.json
+
+python3 Tools/RhythmicityReference/generate_burst_oracle.py
 ```
+
+The WTPL generator uses only the Python standard library. It directly evaluates
+the published within-trial signed-lag equation, including fractional complex
+interpolation, and stores its deterministic inputs and expected outputs in the
+fixture so Swift can validate complete maps without invoking Python at test
+time.
+
+The burst generator also uses only the Python standard library. It starts from
+a fixed frequency × time power/WTPL map, independently applies P90 peaks, P75
+boundaries, deterministic plateau consolidation and overlap pruning, and writes
+the complete inputs and expected detections. The maintained upstream MATLAB
+entry point is pinned as behavioral provenance because its called helper
+functions are not distributed in the repository.
 
 To refresh the deidentified manifest for a local folder containing large MFF
 integration inputs:

@@ -26,13 +26,17 @@ struct TFRender: Sendable {
     var isDiverging: Bool
     var measure: EpochingViewModel.TFMeasure
     var isDifference: Bool
+    var isBaselineSubtracted: Bool = false
+    var unitOverride: String? = nil
     var trialCountA: Int
     var trialCountB: Int?
 
     var unitLabel: String {
+        if let unitOverride { return unitOverride }
         switch measure {
         case .power: return isDifference ? "Δ dB" : "dB"
         case .itpc: return isDifference ? "Δ ITPC" : "ITPC"
+        case .wtpl: return isDifference ? "Δ WTPL" : (isBaselineSubtracted ? "ΔWTPL" : "WTPL")
         }
     }
 }
@@ -191,7 +195,15 @@ struct TFHeatmap: View {
             for ti in 0..<min(timeCount, row.count) {
                 let x = plot.minX + CGFloat(ti) * cellW
                 let rect = CGRect(x: x, y: y, width: cellW + 0.6, height: cellH + 0.6)
-                context.fill(Path(rect), with: .color(TFColorMap.color(for: row[ti], render: render)))
+                if row[ti].isFinite {
+                    context.fill(Path(rect), with: .color(TFColorMap.color(for: row[ti], render: render)))
+                } else {
+                    context.fill(Path(rect), with: .color(.secondary.opacity(0.08)))
+                    var hatch = Path()
+                    hatch.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+                    hatch.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+                    context.stroke(hatch, with: .color(.secondary.opacity(0.22)), lineWidth: 0.5)
+                }
             }
         }
     }

@@ -605,6 +605,20 @@ private struct ProcessingDefaultsView: View {
                 TimeFrequencyBandEditor(bands: $defaults.timeFrequencyBands)
             }
 
+            Section("Rhythmicity Explorer") {
+                Picker("LAVI backend", selection: $defaults.rhythmicityUsesGPU) {
+                    Text("CPU (Accelerate FFT)").tag(false)
+                    Text("Automatic (Metal preferred)").tag(true)
+                }
+                .disabled(!RhythmicityMetalCoefficientProvider.isAvailable)
+                .help(RhythmicityMetalCoefficientProvider.isAvailable
+                      ? "Uses compiled Metal Morlet kernels when the selected workload is large enough to amortize GPU setup. Smaller work and any unsupported or failed GPU run automatically use the bounded Accelerate FFT path."
+                      : "No compatible Metal GPU or compiled Rhythmicity shader is available; the explorer uses bounded Accelerate FFT.")
+                Text("The result records the backend and precision actually used. Metal computes coefficient tiles in Float32; scientific boundaries are parity-tested against the Float64 CPU oracle.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Artifact Detection") {
                 Picker("Default method", selection: $defaults.artifactDetectionDefaultMethod) {
                     ForEach(ArtifactDetectionMethod.selectableCases) { Text($0.rawValue).tag($0) }
