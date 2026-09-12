@@ -1,6 +1,6 @@
 //
 //  MFFQuickLookSummary.swift
-//  MFFPreviewKit
+//  EVAPreviewKit
 //
 //  Developed by P. Molfese, National Institutes of Health (NIH).
 //
@@ -29,8 +29,8 @@ nonisolated struct MFFQuickLookSummary: Sendable {
 
     // MARK: - Nested types
 
-    /// Mirrors `MFFFileType` in the app target. Kept nested so both can be in
-    /// scope in the test target without a name collision.
+    /// Mirrors the shared core's `MFFFileType`. Kept nested so the lightweight
+    /// preview model and full reader can coexist without a name collision.
     enum FileType: String, Sendable {
         case continuous
         case segmented
