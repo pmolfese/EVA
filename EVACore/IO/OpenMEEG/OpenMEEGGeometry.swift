@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  OpenMEEG's native head-model description (EVA_RESOLVE2.md R3.1): a `.geom`
+//  OpenMEEG's native head-model description (ROADMAP.md Source & Forward Modeling, R3.1): a `.geom`
 //  naming one mesh file per interface, a `.cond` giving each domain's
 //  conductivity, and the meshes themselves in `.tri`, `.off` or `.bnd`.
 //

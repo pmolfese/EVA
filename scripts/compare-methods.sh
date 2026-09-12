@@ -8,17 +8,22 @@
 # container instead. Copying the results back out is something only a process
 # outside the sandbox can do, which is this one.
 #
-# Usage:
-#   ./compare-methods.sh                       # the committed matrix
-#   ./compare-methods.sh path/to/matrix.json   # a one-off matrix
-#   EVA_COMPARISON_REGENERATE=1 ./compare-methods.sh   # re-generate the corpus
+# Usage (runnable from anywhere; paths resolve against the repository root):
+#   scripts/compare-methods.sh                       # the committed matrix
+#   scripts/compare-methods.sh path/to/matrix.json   # a one-off matrix
+#   EVA_COMPARISON_REGENERATE=1 scripts/compare-methods.sh   # re-generate the corpus
 #
 set -euo pipefail
 
-REPO="$(cd "$(dirname "$0")" && pwd)"
-cd "$REPO"
-
 MATRIX="${1:-}"
+# Resolve the matrix before the `cd` below, so a relative path on the command
+# line means what the caller meant rather than something relative to the repo.
+if [ -n "$MATRIX" ]; then
+    MATRIX="$(cd "$(dirname "$MATRIX")" && pwd)/$(basename "$MATRIX")"
+fi
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
 CONTAINER="$HOME/Library/Containers/gov.nih.nimh.cmn.eva/Data/Library/Application Support/EVAComparison"
 DESTINATION="$REPO/.comparison"
 
@@ -39,7 +44,7 @@ echo "==> Running the comparison matrix (this is minutes of compute per arm)"
 # `TEST_RUNNER_` is how xcodebuild passes an environment variable through to the
 # test process; a plain export does not reach it.
 env TEST_RUNNER_EVA_COMPARISON=1 \
-    ${MATRIX:+TEST_RUNNER_EVA_COMPARISON_MATRIX="$(cd "$(dirname "$MATRIX")" && pwd)/$(basename "$MATRIX")"} \
+    ${MATRIX:+TEST_RUNNER_EVA_COMPARISON_MATRIX="$MATRIX"} \
     ${EVA_COMPARISON_REGENERATE:+TEST_RUNNER_EVA_COMPARISON_REGENERATE="$EVA_COMPARISON_REGENERATE"} \
     xcodebuild test-without-building -project EVA.xcodeproj -scheme EVA \
     -destination 'platform=macOS' -only-testing:EVATests/MethodComparisonTests

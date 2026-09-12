@@ -2579,9 +2579,11 @@ struct WaveformView: View {
         } else if displayMode == .timeFrequency {
             TimeFrequencyView(
                 signal: epoching.segmentedEpochSignal ?? signal,
+                recordingSourceRevision: signal.dataRevision.uuidString,
                 segments: epoching.segmentedEpochSegments,
                 layout: recording.sensorLayout,
-                epoching: epoching
+                epoching: epoching,
+                rhythmicity: rhythmicityExplorer
             )
             .transition(.opacity)
         } else {

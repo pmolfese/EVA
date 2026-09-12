@@ -191,6 +191,7 @@ struct TimeFrequencyOverviewView: View {
     let progress: Double
     let progressStatus: String
     let setupNeedsRebuild: Bool
+    let bandResolution: TimeFrequencyBandResolution
 
     @State private var destination = "Scalp + detail"
     @State private var groupID = "all"
@@ -226,9 +227,23 @@ struct TimeFrequencyOverviewView: View {
 
             analysisControls
 
+            if let warning = bandResolution.warning {
+                Label(warning, systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.orange)
+                    .help(bandResolution.detectedBandSet?.provenanceDescription ?? warning)
+            }
+
             if !overviews.isEmpty {
-                controls(overviews)
-                dashboard
+                if frequencyBands.isEmpty {
+                    ContentUnavailableView(
+                        "Band source unavailable",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(bandResolution.warning ?? "Choose a band source with at least one valid band."))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    controls(overviews)
+                    dashboard
+                }
             } else {
             ContentUnavailableView(
                 "Overview not built",
@@ -247,6 +262,9 @@ struct TimeFrequencyOverviewView: View {
             if epoching.tfConditionB == nil || epoching.tfConditionB == a {
                 epoching.tfConditionB = conditions.first(where: { $0 != a })
             }
+        }
+        .onChange(of: bandResolutionKey) {
+            bandName = frequencyBands.first?.name ?? ""
         }
         .task(id: displayCacheKey) {
             let requestedKey = displayCacheKey
@@ -271,7 +289,12 @@ struct TimeFrequencyOverviewView: View {
 
     private var displayCacheKey: String {
         let renderIDs = overviews.map { $0.id.uuidString }.joined(separator: "|")
-        return "\(renderIDs)|\(groupID)|\(bandName)|\(windowStartMs)|\(windowEndMs)"
+        return "\(renderIDs)|\(groupID)|\(bandName)|\(windowStartMs)|\(windowEndMs)|\(bandResolutionKey)"
+    }
+
+    private var bandResolutionKey: String {
+        let ranges = bandResolution.bands.map { "\($0.name):\($0.lowHz)-\($0.highHz)" }.joined(separator: ";")
+        return "\(bandResolution.source.rawValue)|\(bandResolution.detectedBandSet?.id.uuidString ?? "none")|\(ranges)"
     }
 
     private var analysisControls: some View {
@@ -305,6 +328,19 @@ struct TimeFrequencyOverviewView: View {
                 }
                 Toggle("A − B", isOn: $epoching.tfShowsDifference)
                     .toggleStyle(.switch).fixedSize()
+                HStack(spacing: 6) {
+                    Text("Band source").fixedSize()
+                    Picker("Band source", selection: $epoching.tfBandSource) {
+                        ForEach(TimeFrequencyBandSource.allCases) { source in
+                            if source == .rhythmicityExplorer, let set = bandResolution.detectedBandSet {
+                                Text("Rhythmicity Explorer: \(set.resultDescription)").tag(source)
+                            } else {
+                                Text(source.rawValue).tag(source)
+                            }
+                        }
+                    }
+                    .labelsHidden().frame(width: 245)
+                }
                 if epoching.tfShowsDifference {
                     HStack(spacing: 4) {
                         Text("A").fixedSize()
@@ -497,7 +533,10 @@ struct TimeFrequencyOverviewView: View {
                             Button("Open full detail") { selectChannel(selectedChannel, overview: overview) }
                                 .controlSize(.small)
                         }
-                        TFHeatmap(render: cached?.channelRenders[safe: local] ?? channelRender(local, overview))
+                        TFHeatmap(
+                            render: cached?.channelRenders[safe: local] ?? channelRender(local, overview),
+                            rhythmicityBands: bandResolution.detectedBandSet
+                        )
                             .frame(minWidth: 300, maxWidth: .infinity, minHeight: 190)
                         Text("Selected: \(overview.channelNames[local])")
                         Text(String(format: "ROI value: %.3f %@", cached?.roiByLocal[safe: local] ?? roiValue(local, overview), unitLabel(overview)))
@@ -605,7 +644,10 @@ struct TimeFrequencyOverviewView: View {
                 Button { selectChannel(overview.channelIndices[local], overview: overview) } label: {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(overview.channelNames[local]).font(.caption.weight(.semibold))
-                        TFHeatmap(render: cached?.channelRenders[safe: local] ?? channelRender(local, overview))
+                        TFHeatmap(
+                            render: cached?.channelRenders[safe: local] ?? channelRender(local, overview),
+                            rhythmicityBands: bandResolution.detectedBandSet
+                        )
                             .aspectRatio(1 / 0.76, contentMode: .fit)
                     }
                 }
@@ -661,7 +703,7 @@ struct TimeFrequencyOverviewView: View {
     }
 
     private var frequencyBands: [EEGFrequencyBand] {
-        ProcessingDefaults.shared.timeFrequencyBands
+        bandResolution.bands
     }
 
     private var availableTimeRange: ClosedRange<Double> {

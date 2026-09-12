@@ -307,6 +307,7 @@ nonisolated struct LAVIAnalysisResult: Sendable, Equatable {
     var configuration: RhythmicityConfiguration
     var source: RhythmicitySourceDescriptor
     var processingProvenance: RhythmicityProcessingProvenance
+    var samplingRateHz: Double
     var channels: [LAVIChannelResult]
     var warnings: [RhythmicityWarning]
 }

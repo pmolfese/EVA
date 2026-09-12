@@ -1,7 +1,7 @@
 # forward-compare — reference lead fields for the imported-BEM forward operator
 
 EVA Resolve imports finished BEM head models from MNE-Python or OpenMEEG and
-evaluates the forward field itself (`EVA_RESOLVE2.md` R3). This directory holds
+evaluates the forward field itself (ROADMAP.md Source & Forward Modeling, R3). This directory holds
 the reference those Swift implementations are measured against: identical
 geometry, electrodes and dipoles, with the gain matrix computed by MNE's own
 `make_forward_solution`, once per BEM solver.
@@ -117,7 +117,7 @@ the same surfaces, vertex for vertex, with their conductivities, because
 `write_bem_solution` writes the surface blocks as well. An OpenMEEG file is therefore
 still a perfectly good head model to import — re-solve it with `solver='mne'`, solve it
 with EVA's own BEM, or import a `-fwd.fif` lead field instead
-(`EVA_RESOLVE2.md` R3.2/R3.7).
+(ROADMAP.md Source & Forward Modeling, R3.2/R3.7).
 
 ## Checking what EVA writes
 

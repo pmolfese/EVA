@@ -123,7 +123,7 @@ none are planned.
 The test host is the sandboxed EVA app. It can read the working tree but writing
 to it fails with `NSCocoaErrorDomain 513`, and `eva-simulate` inherits the
 sandbox as a child process. The harness therefore generates and writes inside the
-app container; `compare-methods.sh` copies the results into `.comparison/` from
+app container; `scripts/compare-methods.sh` copies the results into `.comparison/` from
 outside, and passes `TEST_RUNNER_EVA_COMPARISON=1`, which is the only way an
 environment variable reaches an xcodebuild test process.
 

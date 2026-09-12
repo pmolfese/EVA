@@ -239,7 +239,7 @@ enum MethodComparisonRunner {
     /// app container, which is writable, deterministic, and survives between
     /// runs so a generated corpus can be reused.
     ///
-    /// `compare-methods.sh` copies the results back into `<repo>/.comparison`
+    /// `scripts/compare-methods.sh` copies the results back into `<repo>/.comparison`
     /// afterwards, from outside the sandbox where that is allowed. Anyone
     /// running the test directly gets the container path printed instead.
     ///

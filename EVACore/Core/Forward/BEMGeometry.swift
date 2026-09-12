@@ -11,7 +11,7 @@
 //
 //  An *imported* BEM head model: nested triangulated shells with conductivities,
 //  in one coordinate frame, with provenance saying where it came from and who
-//  solved it (EVA_RESOLVE2.md R3.1).
+//  solved it (ROADMAP.md Source & Forward Modeling, R3.1).
 //
 //  EVA Resolve does not build BEMs. It reads a finished model from MNE-Python or
 //  OpenMEEG and owns everything downstream — coregistration, the forward

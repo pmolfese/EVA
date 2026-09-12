@@ -1,3 +1,16 @@
+# Source analysis — 2026 planning brainstorm (largely superseded)
+
+> **Superseded in part, 2026-09-06.** This document argued through whether EVA
+> should derive its own head models. The answer landed the other way: EVA
+> Resolve **imports** BEMs from MNE / OpenMEEG and FEM from DUNEuro, and does no
+> segmentation, meshing, or solver work of its own — see
+> [`head-models.md`](head-models.md) and `ROADMAP.md` § Source & Forward
+> Modeling. Sections 3, 4.1 and 4.2 (deriving head models from MRI) are
+> historical. **Section 7 (public code / licence survey) and section 8
+> (pitfalls) remain live** and are the reason this document is kept.
+
+---
+
 # Source Analysis in EVA — Planning Notes
 
 Brainstorm document. Nothing here is committed to; it's a starting map for a

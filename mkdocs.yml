@@ -1,3 +1,21 @@
+# EVA documentation site (MkDocs + Material).
+#
+# Build it:
+#
+#   pip install -r requirements-docs.txt
+#   python3 scripts/sync-planning-docs.py    # required before every build
+#   mkdocs serve                             # preview at 127.0.0.1:8000/EVA/
+#   mkdocs build --strict                    # what CI runs
+#
+# The sync step mirrors ROADMAP.md, ROADMAP_COMPLETE.md and docs/design/ into
+# docs/manual/development/, because MkDocs can only see files under `docs_dir`
+# and those files are authored at the repository root so GitHub renders them.
+# The mirrored copies are git-ignored; edit the root files, never the copies.
+# Skipping the sync makes the build fail on the missing `nav` entries below.
+#
+# `python3 scripts/sync-planning-docs.py --check` verifies the copies are
+# current. .github/workflows/docs.yml runs sync + build and deploys to Pages.
+
 site_name: EVA User Manual
 site_description: User manual and tutorials for EVA, the Electrophysiology Viewer and Analysis app.
 site_url: https://pmolfese.github.io/EVA/
@@ -26,8 +44,18 @@ markdown_extensions:
   - md_in_html
   - toc:
       permalink: true
+      # GitHub-compatible anchors. ROADMAP.md and the design docs are read both
+      # on GitHub and on this site, and their cross-links must resolve in both:
+      # Python-Markdown's default slug collapses "A & B" to "a-b" where GitHub
+      # produces "a--b". Also aligns the eight existing tool-page anchors.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
   - pymdownx.details
   - pymdownx.superfences
+  # The roadmap is ~700 task checkboxes; render them as checkboxes, not "[x]".
+  - pymdownx.tasklist:
+      custom_checkbox: true
 
 nav:
   - Home: index.md
@@ -62,6 +90,19 @@ nav:
       - EVA Helper: tools/eva-helper.md
       - MFF Timing Tool: tools/mff-timing-tool.md
       - Maintenance Scripts: tools/maintenance-scripts.md
+  - Development:
+      - Roadmap: development/roadmap.md
+      - Completed Work: development/roadmap-complete.md
+      - Design References:
+          - Design Overview: development/design/index.md
+          - Source-Informed Correction: development/design/source-informed-correction.md
+          - Head Models: development/design/head-models.md
+          - Source Analysis (Historical): development/design/source-analysis.md
+          - Trial-Level Analysis: development/design/trial-level-analysis.md
+          - Rhythmicity (LAVI/ABBA/WTPL): development/design/rhythmicity.md
+          - Synthetic Sleep EEG: development/design/sleep-eeg.md
+          - RSA: development/design/rsa.md
+          - Metal Acceleration: development/design/metal-acceleration.md
   - Contributor Notes:
       - Writing With An LLM: contributor-guide/llm-docs-workflow.md
       - Documentation Maintenance: contributor-guide/documentation-maintenance.md
