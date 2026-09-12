@@ -28,6 +28,7 @@ import Foundation
 
 enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable {
     case ocular = "Ocular Artifact"
+    case saccadicSpike = "Saccadic Spike Potential"
     case ecg = "ECG Artifact"
     case bcg = "BCG Artifact"
     case other = "Other"
@@ -48,6 +49,7 @@ enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable 
     var defaultMergeWindowSeconds: Double {
         switch self {
         case .bcg, .ecg: return 0.25
+        case .saccadicSpike: return 0.10
         case .ocular: return 0.35
         case .other: return 0.25
         }
@@ -73,6 +75,9 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
     case regression = "Regress"
     case obs = "OBS"
     case sspPCA = "SSP/PCA"
+    /// MAAC saccadic-spike spatial filter: least-squares amplitude of one
+    /// canonical scalp map, subtracted only inside confirmed ~24 ms events.
+    case spikeTemplate = "SP Spatial Filter"
     /// Median Artifact Subtraction — local (moving-window) median template.
     case mas = "MAS"
     /// Median Artifact Regression — MAS template, least-squares scaled before subtracting.
@@ -275,6 +280,9 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
     /// this exists for artifacts (typically Continuous topography scanning)
     /// whose events genuinely vary in length.
     var usesVariableEventDuration = false
+    /// Present only for definitions created by the dedicated MAAC saccadic-
+    /// spike workflow. Optional keeps older replay payloads decodable.
+    var saccadicSpikeConfiguration: SaccadicSpikeConfiguration? = nil
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
 
@@ -303,6 +311,7 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
         waveletEdgeTaperSeconds = previous.waveletEdgeTaperSeconds
         waveletPreservesLocalBaseline = previous.waveletPreservesLocalBaseline
         usesVariableEventDuration = previous.usesVariableEventDuration
+        saccadicSpikeConfiguration = previous.saccadicSpikeConfiguration
     }
 }
 
@@ -362,6 +371,14 @@ extension DefinedArtifact {
             key("waveletPreservesLocalBaseline"): "\(waveletPreservesLocalBaseline)",
             key("usesVariableEventDuration"): "\(usesVariableEventDuration)"
         ]
+
+        if let saccadicSpikeConfiguration {
+            params[key("saccadicSpike.templateSource")] = saccadicSpikeConfiguration.templateSource.rawValue
+            params[key("saccadicSpike.sensitivitySigma")] = fixed(saccadicSpikeConfiguration.sensitivitySigma)
+            params[key("saccadicSpike.maximumDerivativeMicrovolts")] = fixed(Double(saccadicSpikeConfiguration.maximumDerivativeMicrovolts))
+            params[key("saccadicSpike.refractorySeconds")] = fixed(saccadicSpikeConfiguration.refractorySeconds)
+            params[key("saccadicSpike.windowSeconds")] = fixed(saccadicSpikeConfiguration.windowSeconds)
+        }
 
         let eventDurations = sortedEvents.map { event in
             event.durationSeconds.map(fixed) ?? ""
@@ -706,6 +723,15 @@ nonisolated enum ArtifactCleaner {
                     excluding: badChannels,
                     setupProgress: reportSetupProgress,
                     finalizingProgress: reportFinalizingProgress,
+                    eventProgress: reportEventProgress
+                )
+            case .spikeTemplate:
+                reportSetupProgress("Preparing canonical saccadic-spike spatial filter")
+                channelCount = SaccadicSpikeSpatialFilter.apply(
+                    artifact: artifact,
+                    data: &data,
+                    samplingRate: signal.samplingRate,
+                    excluding: badChannels,
                     eventProgress: reportEventProgress
                 )
             case .mas, .mar, .waas, .waar:

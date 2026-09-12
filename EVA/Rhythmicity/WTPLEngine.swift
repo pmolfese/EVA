@@ -4,6 +4,8 @@
 //
 //  Shared, double-precision Within-Trial Phase Locking implementation used by
 //  Rhythmicity Explorer and the optional Time-Frequency shortcut.
+//  Method reference: Karvat et al. (2026), Nature Communications, 17, 7024.
+//  https://doi.org/10.1038/s41467-026-73553-8
 //
 
 import Foundation

@@ -1560,6 +1560,7 @@ struct ArtifactOBSOptionsSheet: View {
 struct ArtifactCleaningPreviewData: Sendable {
     var beforeAverage: ArtifactTemplateAverage?
     var afterAverage: ArtifactTemplateAverage?
+    var removedAverage: ArtifactTemplateAverage?
     var beforeTopographyValues: [Double]?
     var afterTopographyValues: [Double]?
     var topographyScale: Double?
@@ -1674,14 +1675,16 @@ struct ArtifactCleaningPreview: View {
                     }
                     HStack(spacing: 10) {
                         waveformPreview(
-                            title: "Before",
+                            title: artifact.type == .saccadicSpike ? "Subtracted SPs" : "Before",
                             subtitle: sharedScaleSubtitle,
-                            average: beforeAverage,
+                            average: artifact.type == .saccadicSpike
+                                ? (previewData?.removedAverage ?? beforeAverage)
+                                : beforeAverage,
                             scale: previewData?.waveformScaleMicrovolts
                         )
                         if let afterAverage = previewData?.afterAverage {
                             waveformPreview(
-                                title: "After",
+                                title: artifact.type == .saccadicSpike ? "With SPs removed" : "After",
                                 subtitle: afterWaveformSubtitle,
                                 average: afterAverage,
                                 scale: afterWaveformScale
@@ -1899,18 +1902,75 @@ struct ArtifactCleaningPreview: View {
         let beforeAverage = average(in: beforeSignal, artifact: artifact)
             ?? artifact.average.map(baselineAlignedAverage)
         let afterAverage = afterSignal.flatMap { average(in: $0, artifact: artifact) }
+        let removedAverage = difference(beforeAverage, afterAverage)
         let beforeTopographyValues = beforeAverage.flatMap(centerValues(from:))
         let afterTopographyValues = afterAverage.flatMap(centerValues(from:))
+        let previewTopographyScale = topographyScale(beforeTopographyValues, afterTopographyValues)
+        let previewWaveformScale = waveformScale(beforeAverage, afterAverage)
+        let previewAfterScale = waveformScale(afterAverage)
+        let previewReductionMetrics = reductionMetrics(
+            beforeAverage: beforeAverage,
+            afterAverage: afterAverage,
+            artifact: artifact
+        )
 
         return ArtifactCleaningPreviewData(
             beforeAverage: beforeAverage,
             afterAverage: afterAverage,
+            removedAverage: removedAverage,
             beforeTopographyValues: beforeTopographyValues,
             afterTopographyValues: afterTopographyValues,
-            topographyScale: topographyScale(beforeTopographyValues, afterTopographyValues),
-            waveformScaleMicrovolts: waveformScale(beforeAverage, afterAverage),
-            afterScaleMicrovolts: waveformScale(afterAverage),
-            reductionMetrics: reductionMetrics(beforeAverage: beforeAverage, afterAverage: afterAverage, artifact: artifact)
+            topographyScale: previewTopographyScale,
+            waveformScaleMicrovolts: previewWaveformScale,
+            afterScaleMicrovolts: previewAfterScale,
+            reductionMetrics: previewReductionMetrics
+        )
+    }
+
+    nonisolated private static func difference(
+        _ before: ArtifactTemplateAverage?,
+        _ after: ArtifactTemplateAverage?
+    ) -> ArtifactTemplateAverage? {
+        guard let before, let after,
+              before.allChannelSamples.count == after.allChannelSamples.count else { return nil }
+        var samples = before.allChannelSamples
+        for channel in samples.indices {
+            guard samples[channel].count == after.allChannelSamples[channel].count else { return nil }
+            for index in samples[channel].indices {
+                let beforeValue: Float = samples[channel][index]
+                let afterValue: Float = after.allChannelSamples[channel][index]
+                samples[channel][index] = beforeValue - afterValue
+            }
+        }
+        var summaries: [ArtifactTemplateChannelSummary] = []
+        summaries.reserveCapacity(samples.count)
+        for channel in samples.indices {
+            let values = samples[channel]
+            var peak: Float = 0
+            var squareSum: Double = 0
+            for value in values {
+                peak = max(peak, abs(value))
+                squareSum += Double(value) * Double(value)
+            }
+            let squareMean = values.isEmpty ? 0 : squareSum / Double(values.count)
+            summaries.append(ArtifactTemplateChannelSummary(
+                channelIndex: channel,
+                peakAbsoluteMicrovolts: peak,
+                rmsMicrovolts: Float(sqrt(squareMean))
+            ))
+        }
+        summaries.sort {
+            $0.peakAbsoluteMicrovolts == $1.peakAbsoluteMicrovolts
+                ? $0.channelIndex < $1.channelIndex
+                : $0.peakAbsoluteMicrovolts > $1.peakAbsoluteMicrovolts
+        }
+        return ArtifactTemplateAverage(
+            samplingRate: before.samplingRate,
+            windowSizeSeconds: before.windowSizeSeconds,
+            eventCount: min(before.eventCount, after.eventCount),
+            selectedChannelIndices: before.selectedChannelIndices,
+            allChannelSamples: samples,
+            channelSummaries: summaries
         )
     }
 

@@ -40,6 +40,9 @@ extension WaveformView {
 
     func inferredArtifactType(name: String, eventCode: String) -> DefinedArtifactType {
         let text = "\(name) \(eventCode)".lowercased()
+        if text.contains("saccadic spike") || text.contains("sacc-sp") || text.contains("spike potential") {
+            return .saccadicSpike
+        }
         if text.contains("ecg") || text.contains("heart") || text.contains("cardiac") {
             return .ecg
         }
@@ -55,6 +58,7 @@ extension WaveformView {
     func artifactTemplateEventCodeSuffix(for type: DefinedArtifactType) -> String {
         switch type {
         case .ocular: return "AOC"
+        case .saccadicSpike: return "ASP"
         case .ecg: return "ECG"
         case .bcg: return "BCG"
         case .other: return "AOT"
@@ -1695,7 +1699,7 @@ extension WaveformView {
     ) -> some View {
         HStack(spacing: 8) {
             Picker("Treatment", selection: artifact.cleaningMethod) {
-                ForEach(ArtifactCleaningMethod.allCases) { method in
+                ForEach(availableCleaningMethods(for: artifact.wrappedValue)) { method in
                     Text(method.rawValue).tag(method)
                 }
             }
@@ -1743,12 +1747,19 @@ extension WaveformView {
         .frame(width: 340, alignment: .leading)
     }
 
+    private func availableCleaningMethods(for artifact: DefinedArtifact) -> [ArtifactCleaningMethod] {
+        ArtifactCleaningMethod.allCases.filter {
+            $0 != .spikeTemplate || artifact.type == .saccadicSpike
+        }
+    }
+
     var artifactTreatmentHelpText: String {
         """
         Do Nothing: keep the artifact definition but do not alter the data.
         Regress: subtracts the average artifact waveform; useful as a historical/simple comparison.
         OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; Options includes topography-aware OBS strategies.
         SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
+        SP Spatial Filter: the MAAC saccadic-spike specialization; fits and subtracts the saved canonical scalp map inside confirmed short SP windows.
         MAS/MAR: local (moving-window) median template — robust to an occasional distorted event; MAR additionally scales the template by a least-squares fit.
         wAAS/wAAR: exponentially weighted template (Goldman 2000); Options defaults to AMRI global weighting, where every valid event contributes by decay^distance, and wAAR additionally scales the template by a least-squares fit.
 

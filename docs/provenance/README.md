@@ -22,6 +22,7 @@ completed and the historical engines were deleted.
 | `README.md` | This document: process, separation rules, per-track status. |
 | `copyleft-plan.md` | The provenance/risk ledger: which components are copyleft-sensitive, which tracks are closed, which are open. |
 | `empirical-bayes-port.md` | The EbayesShrink port record — written from the paper and the GPL upstream's documented behavior, R-validated. |
+| `happe-wavelet-parity.md` | Measured-results record: EVA's wavelet reducer reproduces HAPPE's wavelet-thresholding step (all pipeline configs) on a real 256-ch EEG recording, using HAPPE's own outputs. Evidence, not a spec. |
 | `fastr-functional-spec.md` | The FASTR-family specification the clean implementation was written from. |
 | `fastr-audit-log.md` | What happened and why, including the 2026-08-09 validation and its limits. |
 | `fastr-gpu-port-plan.md` | The GPU port plan, with the measured profile and the parity argument. |
