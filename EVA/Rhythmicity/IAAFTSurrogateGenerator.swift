@@ -114,7 +114,8 @@ nonisolated enum IAAFTSurrogateGenerator {
         workspace: IAAFTWorkspace,
         seed: UInt64,
         configuration: IAAFTConfiguration = .paper2026,
-        cancellation: RhythmicityCancellation = RhythmicityCancellation()
+        cancellation: RhythmicityCancellation = RhythmicityCancellation(),
+        progress: (@Sendable (_ iteration: Int, _ maximumIterations: Int) -> Void)? = nil
     ) throws -> IAAFTSurrogate {
         guard configuration.errorThreshold.isFinite, configuration.errorThreshold > 0 else {
             throw IAAFTError.invalidConfiguration("error threshold must be finite and positive")
@@ -142,7 +143,12 @@ nonisolated enum IAAFTSurrogateGenerator {
         var iterations = 0
 
         for iteration in 1...configuration.maximumIterations {
-            if iteration == 1 || iteration & 0x07 == 0 { try cancellation.check() }
+            if iteration == 1 || iteration & 0x07 == 0 {
+                try cancellation.check()
+            }
+            if iteration == 1 || iteration & 0x1f == 0 {
+                progress?(iteration, configuration.maximumIterations)
+            }
             iterations = iteration
             let transformed = workspace.plan.forward(candidate)
             var constrainedReal = [Double](repeating: 0, count: candidate.count)
@@ -189,6 +195,7 @@ nonisolated enum IAAFTSurrogateGenerator {
             }
             previousTotalError = totalError
         }
+        progress?(iterations, configuration.maximumIterations)
         return IAAFTSurrogate(
             values: candidate,
             diagnostics: IAAFTSurrogateDiagnostics(

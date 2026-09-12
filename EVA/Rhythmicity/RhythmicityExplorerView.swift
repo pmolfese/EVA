@@ -19,6 +19,8 @@ struct RhythmicityExplorerView: View {
 
     let packageName: String
     let signal: MFFSignalData
+    let eventSignal: MFFSignalData
+    let epochSegments: [EpochSegment]
     let visibleSampleRange: ClosedRange<Int>?
     let channelSets: [ChannelSet]
     let artifactSources: [EEGArtifactRejectionSource]
@@ -31,6 +33,18 @@ struct RhythmicityExplorerView: View {
     @State private var showsRunLog = false
 
     private var selectedRange: ClosedRange<Int>? { viewModel.store.selection.selectedSampleRange }
+    private var eventConditions: [String] { Array(Set(epochSegments.map(\.category))).sorted() }
+    private var wtplBandResolution: TimeFrequencyBandResolution {
+        TimeFrequencyBandResolution.resolve(
+            source: viewModel.wtplBandSource,
+            userPreferences: ProcessingDefaults.shared.timeFrequencyBands,
+            detectedBandSet: viewModel.detectedBandSetForTimeFrequency,
+            detectedBandSetIsStale: viewModel.detectedBandSetForTimeFrequencyIsStale ||
+                viewModel.detectedBandSetForTimeFrequency.map {
+                    $0.sourceRevision != eventSignal.dataRevision.uuidString
+                } == true
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,8 +52,10 @@ struct RhythmicityExplorerView: View {
             Divider()
             if viewModel.mode == .bands {
                 bandsWorkspace
+            } else if viewModel.mode == .eventRelated {
+                eventWorkspace
             } else {
-                unavailableWorkspace
+                burstWorkspace
             }
             Divider()
             footer
@@ -69,43 +85,49 @@ struct RhythmicityExplorerView: View {
 
             Divider().frame(height: 28)
 
-            Menu {
-                Button {
-                    viewModel.setSignificanceEnabled(true)
+            if viewModel.mode == .bands {
+                Menu {
+                    Button { viewModel.setSignificanceEnabled(true) } label: {
+                        Label("Paper 2026", systemImage: viewModel.includesSignificance ? "checkmark" : "doc.text")
+                    }
+                    Button { viewModel.setSignificanceEnabled(false) } label: {
+                        Label("Exploratory — no significance", systemImage: viewModel.includesSignificance ? "doc.text" : "checkmark")
+                    }
                 } label: {
-                    Label("Paper 2026", systemImage: viewModel.includesSignificance ? "checkmark" : "doc.text")
+                    Label(viewModel.includesSignificance ? "Paper 2026" : "Exploratory", systemImage: "slider.horizontal.3")
                 }
-                Button {
-                    viewModel.setSignificanceEnabled(false)
-                } label: {
-                    Label("Exploratory — no significance", systemImage: viewModel.includesSignificance ? "doc.text" : "checkmark")
-                }
-            } label: {
-                Label(viewModel.includesSignificance ? "Paper 2026" : "Exploratory", systemImage: "slider.horizontal.3")
+                .help("Paper 2026 runs 200 matched surrogates per channel. Exploratory mode computes median-defined regions without inferential labels.")
+            } else if viewModel.mode == .eventRelated {
+                Label("Paper WTPL · ±1 cycle", systemImage: "slider.horizontal.3")
+                    .font(.callout)
+            } else {
+                Label("Paper burst · P90/P75", systemImage: "slider.horizontal.3")
+                    .font(.callout)
             }
-            .help("Paper 2026 runs 200 matched surrogates per channel. Exploratory mode computes median-defined regions without inferential labels.")
 
             Spacer()
 
             Button { showsHelp = true } label: {
                 Label("Help", systemImage: "questionmark.circle")
             }
-            Button {
-                if viewModel.publishSelectedChannelBandsToTimeFrequency() {
-                    onUseInTimeFrequency()
+            if viewModel.mode == .bands {
+                Button {
+                    if viewModel.publishSelectedChannelBandsToTimeFrequency() {
+                        onUseInTimeFrequency()
+                    }
+                } label: {
+                    Label("Use in Time-Frequency", systemImage: "square.grid.3x3.fill.square")
                 }
-            } label: {
-                Label("Use in Time-Frequency", systemImage: "square.grid.3x3.fill.square")
+                .disabled(
+                    viewModel.laviResult == nil || viewModel.isRunning ||
+                    viewModel.resultIsStale || viewModel.selectedChannelResult?.bands.isEmpty != false
+                )
+                .help("Publish the displayed channel's ABBA boundaries for this recording session. Saved band preferences are not changed.")
             }
-            .disabled(
-                viewModel.laviResult == nil || viewModel.isRunning ||
-                viewModel.resultIsStale || viewModel.selectedChannelResult?.bands.isEmpty != false
-            )
-            .help("Publish the displayed channel's ABBA boundaries for this recording session. Saved band preferences are not changed.")
             Button(action: exportPackage) {
                 Label("Export", systemImage: "square.and.arrow.up")
             }
-            .disabled(viewModel.laviResult == nil || viewModel.isRunning)
+            .disabled(!canExport || viewModel.isRunning)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
@@ -117,6 +139,280 @@ struct RhythmicityExplorerView: View {
                 .frame(minWidth: 280, idealWidth: 310, maxWidth: 360)
             resultCanvas
                 .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var eventWorkspace: some View {
+        HSplitView {
+            eventInspector
+                .frame(minWidth: 300, idealWidth: 330, maxWidth: 390)
+            eventCanvas
+                .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var burstWorkspace: some View {
+        HSplitView {
+            burstInspector
+                .frame(minWidth: 300, idealWidth: 330, maxWidth: 390)
+            burstCanvas
+                .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var burstInspector: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                GroupBox("Data & channels") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        labeledPicker("Source", selection: $viewModel.source, values: RhythmicitySignalSource.allCases)
+                            .disabled(true)
+                        labeledPicker("Data", selection: $viewModel.dataSelection, values: RhythmicityDataSelection.allCases)
+                        labeledPicker("Channels", selection: $viewModel.channelScope, values: RhythmicityChannelScope.allCases)
+                        if viewModel.channelScope == .current {
+                            Picker("Channel", selection: $viewModel.selectedChannelIndex) {
+                                ForEach(signal.data.indices, id: \.self) { Text(channelName($0)).tag($0) }
+                            }
+                        }
+                        if viewModel.channelScope == .namedSet {
+                            Picker("Set", selection: $viewModel.selectedChannelSetID) {
+                                ForEach(channelSets) { Text($0.name).tag(Optional($0.id)) }
+                            }
+                        }
+                        Toggle("Include marked artifacts", isOn: $viewModel.includesMarkedArtifacts)
+                    }.padding(.top, 4)
+                }
+
+                GroupBox("Detection") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        keyValue("Morlet width", "5 cycles")
+                        LabeledContent("Peak threshold") {
+                            TextField("percentile", value: $viewModel.burstConfiguration.peakPercentile, format: .number)
+                                .frame(width: 64)
+                            Text("percentile")
+                        }
+                        LabeledContent("Power boundary") {
+                            TextField("percentile", value: $viewModel.burstConfiguration.boundaryPercentile, format: .number)
+                                .frame(width: 64)
+                            Text("percentile")
+                        }
+                        Picker("Boundary", selection: $viewModel.burstConfiguration.boundarySource) {
+                            ForEach(RhythmicBurstBoundarySource.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        if viewModel.burstConfiguration.boundarySource == .wtplThreshold {
+                            LabeledContent("WTPL threshold") {
+                                TextField("WTPL", value: $viewModel.burstConfiguration.wtplThreshold, format: .number)
+                                    .frame(width: 64)
+                            }
+                        }
+                        LabeledContent("Minimum duration") {
+                            TextField("cycles", value: $viewModel.burstConfiguration.minimumDurationCycles, format: .number)
+                                .frame(width: 64)
+                            Text("cycles")
+                        }
+                        keyValue("Merge gap", "max(4 Hz, ¼ lower peak)")
+                    }.padding(.top, 4)
+                }
+
+                GroupBox("Band assignment") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("Source", selection: $viewModel.burstBandSource) {
+                            ForEach(TimeFrequencyBandSource.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        Text("Current Rhythmicity bands preserve channel-specific sustained/transient ABBA identity when a fresh Bands result exists.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }.padding(.top, 4)
+                }
+
+                GroupBox("Safety boundary") {
+                    Label("Bursts are neural-rhythm annotations—not artifact candidates.", systemImage: "checkmark.shield")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.blue)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                }
+
+                GroupBox("Run") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(viewModel.runEstimate).font(.caption2).foregroundStyle(.secondary)
+                        if let result = viewModel.burstResult {
+                            keyValue("Bursts", "\(result.bursts.count)")
+                            keyValue("Maps", "\(result.maps.count)")
+                            ForEach(result.warnings, id: \.self) { warning in
+                                Label(warning, systemImage: "exclamationmark.triangle")
+                                    .font(.caption2).foregroundStyle(.orange)
+                            }
+                        }
+                    }.padding(.top, 4)
+                }
+            }
+            .padding(14)
+        }
+    }
+
+    @ViewBuilder
+    private var burstCanvas: some View {
+        if let result = viewModel.burstResult {
+            RhythmicBurstView(
+                result: result,
+                selectedChannelIndex: $viewModel.selectedChannelIndex,
+                background: $viewModel.burstBackground,
+                selectedBurstID: $viewModel.selectedBurstID
+            )
+            .padding(16)
+            .overlay(alignment: .top) {
+                if viewModel.burstResultIsStale {
+                    Label("Displayed burst result is stale for the current selection or controls", systemImage: "clock.arrow.circlepath")
+                        .font(.caption.weight(.semibold)).padding(7)
+                        .background(.regularMaterial, in: Capsule()).padding(8)
+                }
+            }
+        } else {
+            ContentUnavailableView(
+                "Ready for rhythmic bursts",
+                systemImage: "bolt.horizontal.circle",
+                description: Text("Detect and measure neural-rhythmicity episodes using the pinned P90/P75 reference workflow.")
+            )
+        }
+    }
+
+    private var eventInspector: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                GroupBox("Conditions & measure") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker("Condition A", selection: $viewModel.wtplConditionA) {
+                            ForEach(eventConditions, id: \.self) { Text($0).tag($0) }
+                        }
+                        Toggle("Difference (A − B)", isOn: $viewModel.wtplShowsDifference)
+                            .disabled(eventConditions.count < 2)
+                        if viewModel.wtplShowsDifference {
+                            Picker("Condition B", selection: Binding(
+                                get: { viewModel.wtplConditionB ?? "" },
+                                set: { viewModel.wtplConditionB = $0.isEmpty ? nil : $0 }
+                            )) {
+                                ForEach(eventConditions.filter { $0 != viewModel.wtplConditionA }, id: \.self) {
+                                    Text($0).tag($0)
+                                }
+                            }
+                        }
+                        Picker("Display", selection: $viewModel.wtplDisplayMeasure) {
+                            ForEach(WTPLDisplayMeasure.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        if viewModel.wtplDisplayMeasure == .delta, !viewModel.wtplBaselineIsAvailable {
+                            Label("The complete baseline is outside these epochs. Adjust it or select Raw WTPL.", systemImage: "exclamationmark.triangle")
+                                .font(.caption2).foregroundStyle(.orange)
+                        }
+                    }.padding(.top, 4)
+                }
+
+                GroupBox("Channels") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        labeledPicker("Scope", selection: $viewModel.channelScope, values: RhythmicityChannelScope.allCases)
+                        if viewModel.channelScope == .current {
+                            Picker("Channel", selection: $viewModel.selectedChannelIndex) {
+                                ForEach(eventSignal.data.indices, id: \.self) { Text(channelName($0)).tag($0) }
+                            }
+                        }
+                        if viewModel.channelScope == .namedSet {
+                            Picker("Set", selection: $viewModel.selectedChannelSetID) {
+                                ForEach(channelSets) { Text($0.name).tag(Optional($0.id)) }
+                            }
+                        }
+                    }.padding(.top, 4)
+                }
+
+                GroupBox("WTPL configuration") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        keyValue("Method", "Within-Trial Phase Locking")
+                        keyValue("Lag family", "−1, +1 cycles")
+                        keyValue("Morlet width", "5 cycles")
+                        LabeledContent("Frequency minimum") {
+                            TextField("Hz", value: $viewModel.wtplMinFrequencyHz, format: .number).frame(width: 75)
+                        }
+                        LabeledContent("Frequency maximum") {
+                            TextField("Hz", value: $viewModel.wtplMaxFrequencyHz, format: .number).frame(width: 75)
+                        }
+                        LabeledContent("Frequency bins") {
+                            Stepper(value: $viewModel.wtplFrequencyCount, in: 5...80) {
+                                Text("\(viewModel.wtplFrequencyCount)").monospacedDigit()
+                            }
+                        }
+                        Divider()
+                        Text("Explicit ΔWTPL baseline").font(.caption.weight(.semibold))
+                        LabeledContent("Start") {
+                            TextField("ms", value: $viewModel.wtplBaselineStartMs, format: .number).frame(width: 75)
+                        }
+                        LabeledContent("End") {
+                            TextField("ms", value: $viewModel.wtplBaselineEndMs, format: .number).frame(width: 75)
+                        }
+                        Text("The interval is never shortened automatically.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }.padding(.top, 4)
+                }
+
+                GroupBox("Band overlay & ROI") {
+                    Picker("Source", selection: $viewModel.wtplBandSource) {
+                        ForEach(TimeFrequencyBandSource.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .padding(.top, 4)
+                    Text(wtplBandResolution.sourceDescription)
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                GroupBox("Run") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        keyValue("Epochs", "\(epochSegments.count)")
+                        keyValue("Conditions", "\(eventConditions.count)")
+                        Text(viewModel.runEstimate).font(.caption2).foregroundStyle(.secondary)
+                        if let result = viewModel.wtplResult {
+                            ForEach(result.warnings.map(\.displayText), id: \.self) { warning in
+                                Label(warning, systemImage: "exclamationmark.triangle")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }.padding(.top, 4)
+                }
+            }
+            .padding(14)
+        }
+    }
+
+    @ViewBuilder
+    private var eventCanvas: some View {
+        if let result = viewModel.wtplResult {
+            WTPLView(
+                result: result,
+                conditionA: viewModel.wtplConditionA,
+                conditionB: viewModel.wtplConditionB,
+                showsDifference: viewModel.wtplShowsDifference,
+                displayMeasure: viewModel.wtplDisplayMeasure,
+                selectedChannelIndex: viewModel.selectedChannelIndex,
+                bandResolution: wtplBandResolution
+            )
+            .padding(16)
+            .overlay(alignment: .top) {
+                if viewModel.wtplResultIsStale {
+                    Label("Displayed WTPL is stale for the current epochs or controls", systemImage: "clock.arrow.circlepath")
+                        .font(.caption.weight(.semibold)).padding(7)
+                        .background(.regularMaterial, in: Capsule()).padding(8)
+                }
+            }
+        } else if epochSegments.isEmpty {
+            ContentUnavailableView(
+                "WTPL requires epochs",
+                systemImage: "square.stack.3d.up.slash",
+                description: Text("Create or retain epochs, then return to Event-related mode.")
+            )
+        } else {
+            ContentUnavailableView(
+                "Ready for WTPL",
+                systemImage: "waveform.path.ecg.rectangle",
+                description: Text("Analyze within-trial phase persistence with explicit conditions and baseline semantics.")
+            )
         }
     }
 
@@ -149,7 +445,7 @@ struct RhythmicityExplorerView: View {
                         Divider()
                         keyValue("Frequencies", "47 · 3.16–44.67 Hz")
                         keyValue("Morlet / lag", "5 / 1.5 cycles")
-                        keyValue("Backend", "Accelerate FFT · Float64")
+                        keyValue("Backend", viewModel.backendDescription)
                         Text(viewModel.runEstimate)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -177,6 +473,12 @@ struct RhythmicityExplorerView: View {
                         keyValue("Signal revision", String(signal.dataRevision.uuidString.prefix(8)))
                         keyValue("Sampling", "\(format(signal.samplingRate)) Hz")
                         keyValue("Reference", signal.referenceState.rawValue.capitalized)
+                        if let persisted = viewModel.persistedResultStatus {
+                            Text(persisted)
+                                .font(.caption2)
+                                .foregroundStyle(viewModel.resultIsStale ? .orange : .secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     .padding(.top, 4)
                 }
@@ -264,29 +566,30 @@ struct RhythmicityExplorerView: View {
         }
     }
 
-    private var unavailableWorkspace: some View {
-        ContentUnavailableView(
-            viewModel.mode == .eventRelated ? "Event-related WTPL is a later milestone" : "Burst analysis is a later milestone",
-            systemImage: viewModel.mode == .eventRelated ? "waveform.path.ecg.rectangle" : "bolt.horizontal.circle",
-            description: Text("Bands mode is fully available. This mode remains disabled until its independently validated numerical engine lands.")
-        )
-    }
-
     private var footer: some View {
         VStack(spacing: 0) {
             if showsRunLog {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 3) {
-                        ForEach(viewModel.log) { line in
-                            Text("\(line.date.formatted(date: .omitted, time: .standard))  \(line.message)")
-                                .font(.caption2.monospaced())
-                                .textSelection(.enabled)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 3) {
+                            ForEach(viewModel.log) { line in
+                                Text("\(line.date.formatted(date: .omitted, time: .standard))  \(line.message)")
+                                    .font(.caption2.monospaced())
+                                    .textSelection(.enabled)
+                                    .id(line.id)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 18).padding(.vertical, 8)
+                    }
+                    .onChange(of: viewModel.log.last?.id) { _, latestID in
+                        guard let latestID else { return }
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo(latestID, anchor: .bottom)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 18).padding(.vertical, 8)
                 }
-                .frame(height: 90)
+                .frame(height: 120)
                 Divider()
             }
             HStack(spacing: 12) {
@@ -309,9 +612,9 @@ struct RhythmicityExplorerView: View {
                 if viewModel.isRunning {
                     Button("Cancel") { viewModel.cancel() }
                 } else {
-                    Button(viewModel.laviResult == nil ? "Run Analysis" : "Re-run Analysis") { runAnalysis() }
+                    Button(runButtonTitle) { runAnalysis() }
                         .keyboardShortcut(.return, modifiers: [.command])
-                        .disabled(viewModel.mode != .bands)
+                        .disabled(viewModel.mode == .eventRelated && epochSegments.isEmpty)
                 }
                 Button("Close", action: onClose)
             }
@@ -329,7 +632,7 @@ struct RhythmicityExplorerView: View {
                 chip("Transient", "\(viewModel.detectedTransientCount)")
                 chip("Alpha anchored", "\(viewModel.alphaAnchorCount)/\(result.channels.count)")
                 chip("Significance", significanceSource(result))
-                chip("Backend", "Accelerate FFT")
+                chip("Backend", viewModel.backendDescription)
             }
         }
         .scrollIndicators(.hidden)
@@ -392,14 +695,32 @@ struct RhythmicityExplorerView: View {
     }
 
     private func runAnalysis() {
-        viewModel.run(
-            packageName: packageName,
-            signal: signal,
-            visibleRange: visibleSampleRange,
-            selectedRange: selectedRange,
-            channelSets: channelSets,
-            artifactSources: artifactSources
-        )
+        if viewModel.mode == .eventRelated {
+            viewModel.runEventRelated(
+                packageName: packageName,
+                signal: eventSignal,
+                segments: epochSegments,
+                channelSets: channelSets
+            )
+        } else if viewModel.mode == .bursts {
+            viewModel.runBursts(
+                packageName: packageName,
+                signal: signal,
+                visibleRange: visibleSampleRange,
+                selectedRange: selectedRange,
+                channelSets: channelSets,
+                artifactSources: artifactSources
+            )
+        } else {
+            viewModel.run(
+                packageName: packageName,
+                signal: signal,
+                visibleRange: visibleSampleRange,
+                selectedRange: selectedRange,
+                channelSets: channelSets,
+                artifactSources: artifactSources
+            )
+        }
     }
 
     private func synchronizeContext() {
@@ -410,6 +731,7 @@ struct RhythmicityExplorerView: View {
             channelSets: channelSets,
             artifactSources: artifactSources
         )
+        viewModel.synchronizeEventContext(signal: eventSignal, segments: epochSegments)
     }
 
     private func exportPackage() {
@@ -422,13 +744,49 @@ struct RhythmicityExplorerView: View {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let parent = panel.url else { return }
         let base = (packageName as NSString).deletingPathExtension
-        let destination = parent.appendingPathComponent("\(base)-rhythmicity", isDirectory: true)
+        let suffix: String
+        switch viewModel.mode {
+        case .bands: suffix = "rhythmicity"
+        case .eventRelated: suffix = "wtpl"
+        case .bursts: suffix = "bursts"
+        }
+        let destination = parent.appendingPathComponent("\(base)-\(suffix)", isDirectory: true)
         do {
-            try viewModel.exportPackage(to: destination)
+            if viewModel.mode == .eventRelated {
+                let maxTime = viewModel.wtplResult?.timesMs.last ?? 0
+                try viewModel.exportWTPLPackage(
+                    to: destination,
+                    bands: wtplBandResolution.bands,
+                    windows: TimeFrequencyExport.defaultWindows(maxTimeMs: maxTime)
+                )
+            } else if viewModel.mode == .bursts {
+                try viewModel.exportBurstPackage(to: destination)
+            } else {
+                try viewModel.exportPackage(to: destination)
+            }
         } catch {
             viewModel.exportStatus = "Export failed: \(error.localizedDescription)"
         }
     }
+
+    private var runButtonTitle: String {
+        if viewModel.mode == .eventRelated {
+            return viewModel.wtplResult == nil ? "Run WTPL" : "Re-run WTPL"
+        }
+        if viewModel.mode == .bursts {
+            return viewModel.burstResult == nil ? "Detect Bursts" : "Re-run Bursts"
+        }
+        return viewModel.laviResult == nil ? "Run Analysis" : "Re-run Analysis"
+    }
+
+    private var canExport: Bool {
+        switch viewModel.mode {
+        case .bands: return viewModel.laviResult != nil
+        case .eventRelated: return viewModel.wtplResult != nil
+        case .bursts: return viewModel.burstResult != nil
+        }
+    }
+
 
     private func channelName(_ index: Int) -> String {
         guard let names = signal.channelNames, names.indices.contains(index) else {

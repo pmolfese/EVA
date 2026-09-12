@@ -14,8 +14,64 @@ nonisolated enum LAVIEngine {
         input: RhythmicityInput,
         configuration: RhythmicityConfiguration,
         coefficientProvider: (any ComplexCoefficientProvider)? = nil,
+        significanceCache: LAVISignificanceCacheStore? = nil,
         cancellation: RhythmicityCancellation = RhythmicityCancellation(),
         progress: (@Sendable (RhythmicityProgress) -> Void)? = nil
+    ) throws -> LAVIAnalysisResult {
+        let progressRelay: LAVIMonotonicProgressRelay?
+        if let progress {
+            progressRelay = LAVIMonotonicProgressRelay(progress: progress)
+        } else {
+            progressRelay = nil
+        }
+        let relayedProgress: (@Sendable (RhythmicityProgress) -> Void)?
+        if let progressRelay {
+            relayedProgress = { update in progressRelay.emit(update) }
+        } else {
+            relayedProgress = nil
+        }
+        do {
+            return try analyzeOnce(
+                input: input,
+                configuration: configuration,
+                coefficientProvider: coefficientProvider,
+                significanceCache: significanceCache,
+                cancellation: cancellation,
+                progress: relayedProgress
+            )
+        } catch let error as RhythmicityMetalError
+            where coefficientProvider == nil
+                && (configuration.backend == .automatic || configuration.backend == .metalGPU) {
+            var fallbackConfiguration = configuration
+            fallbackConfiguration.backend = .accelerateFFTCPU
+            fallbackConfiguration.precision = .float64
+            var result = try analyzeOnce(
+                input: input,
+                configuration: fallbackConfiguration,
+                coefficientProvider: nil,
+                significanceCache: significanceCache,
+                cancellation: cancellation,
+                progress: relayedProgress
+            )
+            let warning = RhythmicityWarning.computeBackendFallback(
+                requested: configuration.backend.rawValue,
+                reason: error.localizedDescription
+            )
+            result.warnings.insert(warning, at: 0)
+            if !result.channels.isEmpty {
+                result.channels[0].warnings.insert(warning, at: 0)
+            }
+            return result
+        }
+    }
+
+    private static func analyzeOnce(
+        input: RhythmicityInput,
+        configuration: RhythmicityConfiguration,
+        coefficientProvider: (any ComplexCoefficientProvider)?,
+        significanceCache: LAVISignificanceCacheStore?,
+        cancellation: RhythmicityCancellation,
+        progress: (@Sendable (RhythmicityProgress) -> Void)?
     ) throws -> LAVIAnalysisResult {
         try cancellation.check()
         progress?(
@@ -28,21 +84,54 @@ nonisolated enum LAVIEngine {
                 totalTiles: input.channels.count * configuration.frequenciesHz.count
             )
         )
-        try validate(input: input, configuration: configuration)
-        let resolvedCoefficientProvider: any ComplexCoefficientProvider
+        let sampleCount = try validate(input: input, configuration: configuration)
+        var effectiveConfiguration = configuration
+        var backendWarning: RhythmicityWarning?
+        var resolvedCoefficientProvider: any ComplexCoefficientProvider
         if let coefficientProvider {
             resolvedCoefficientProvider = coefficientProvider
         } else {
-            switch configuration.backend {
+            let resolution = RhythmicityBackendResolver.resolve(
+                requested: configuration.backend,
+                sampleCount: sampleCount,
+                frequencyCount: configuration.frequenciesHz.count
+            )
+            effectiveConfiguration.backend = resolution.selected
+            effectiveConfiguration.precision = resolution.precision
+            if let reason = resolution.fallbackReason {
+                backendWarning = .computeBackendFallback(
+                    requested: resolution.requested.rawValue,
+                    reason: reason
+                )
+            }
+            switch resolution.selected {
             case .directReferenceCPU:
                 resolvedCoefficientProvider = DirectComplexCoefficientProvider()
             case .accelerateFFTCPU:
                 resolvedCoefficientProvider = AccelerateFFTComplexCoefficientProvider(
                     policy: configuration.computePolicy
                 )
+            case .metalGPU:
+                guard let provider = RhythmicityMetalCoefficientProvider(
+                    memoryBudgetBytes: configuration.computePolicy.memoryBudgetBytes
+                ) else {
+                    resolvedCoefficientProvider = AccelerateFFTComplexCoefficientProvider(
+                        policy: configuration.computePolicy
+                    )
+                    effectiveConfiguration.backend = .accelerateFFTCPU
+                    effectiveConfiguration.precision = .float64
+                    backendWarning = .computeBackendFallback(
+                        requested: configuration.backend.rawValue,
+                        reason: RhythmicityMetalError.unavailable.localizedDescription
+                    )
+                    break
+                }
+                resolvedCoefficientProvider = provider
+            case .automatic:
+                preconditionFailure("Automatic Rhythmicity backend must resolve before analysis")
             }
         }
-        let totalTiles = input.channels.count * configuration.frequenciesHz.count
+        let totalTiles = input.channels.count * effectiveConfiguration.frequenciesHz.count
         var completedTiles = 0
         var channelResults: [LAVIChannelResult] = []
         var allWarnings: [RhythmicityWarning] = []
@@ -59,7 +148,7 @@ nonisolated enum LAVIEngine {
         )
 
         let hasSignificance: Bool
-        if case .onDemand = configuration.significance {
+        if case .onDemand = effectiveConfiguration.significance {
             hasSignificance = true
         } else {
             hasSignificance = false
@@ -89,7 +178,7 @@ nonisolated enum LAVIEngine {
             let finiteSignals = finiteSelection.ranges.map { Array(channel.samples[$0]) }
             let tileProgress = LAVITileProgressReporter(
                 initialCompletedTiles: completedTiles,
-                frequencyCount: configuration.frequenciesHz.count,
+                frequencyCount: effectiveConfiguration.frequenciesHz.count,
                 channelBase: channelBase,
                 channelSpan: channelSpan,
                 transformShare: transformShare,
@@ -101,7 +190,7 @@ nonisolated enum LAVIEngine {
                 finiteSignals: finiteSignals,
                 samplingRate: input.samplingRate,
                 channelIndex: channel.channelIndex,
-                configuration: configuration,
+                configuration: effectiveConfiguration,
                 coefficientProvider: resolvedCoefficientProvider,
                 cancellation: cancellation
             ) { frequency in
@@ -114,11 +203,15 @@ nonisolated enum LAVIEngine {
             for result in frequencyResults {
                 channelWarnings.append(contentsOf: result.warnings)
             }
+            if channelOrdinal == 0, let backendWarning {
+                channelWarnings.append(backendWarning)
+            }
 
             try cancellation.check()
             var significanceResolution: LAVISignificanceResolution?
-            if case let .onDemand(significanceConfiguration) = configuration.significance {
+            if case let .onDemand(significanceConfiguration) = effectiveConfiguration.significance {
                 let completedObservedTiles = completedTiles
+                let profileFrequencyCount = effectiveConfiguration.frequenciesHz.count
                 progress?(
                     RhythmicityProgress(
                         fractionComplete: channelBase + channelSpan * 0.45,
@@ -132,20 +225,83 @@ nonisolated enum LAVIEngine {
                 significanceResolution = try LAVISignificanceProvider.resolve(
                     channel: channel,
                     input: input,
-                    analysisConfiguration: configuration,
+                    analysisConfiguration: effectiveConfiguration,
                     significanceConfiguration: significanceConfiguration,
                     coefficientProvider: resolvedCoefficientProvider,
+                    cache: significanceCache,
                     cancellation: cancellation
-                ) { completed, total in
-                    let fraction = Double(completed) / Double(max(total, 1))
+                ) { update in
+                    let total = max(update.totalSurrogates, 1)
+                    let phase: RhythmicityProgressPhase
+                    let channelPhaseFraction: Double
+                    let detail: String
+                    switch update.stage {
+                    case .checkingCache:
+                        phase = .estimatingAperiodicSpectrum
+                        channelPhaseFraction = 0.45
+                        detail = "Checking exact per-channel significance cache"
+                    case .usingCachedResult:
+                        phase = .generatingSignificance
+                        channelPhaseFraction = 0.95
+                        detail = "Cache hit · reused completed \(total)-surrogate significance ribbon"
+                    case .fittingAperiodicSpectrum:
+                        phase = .estimatingAperiodicSpectrum
+                        channelPhaseFraction = 0.45
+                        detail = "Fitting aperiodic spectrum · Welch estimate and power-law model"
+                    case .preparingIAAFT:
+                        phase = .estimatingAperiodicSpectrum
+                        channelPhaseFraction = 0.47
+                        let runCount = update.runCount ?? 0
+                        let workerText = update.workerCount.map {
+                            " · \($0) parallel worker\($0 == 1 ? "" : "s")"
+                        } ?? ""
+                        detail = "Preparing IAAFT workspace\(runCount == 1 ? "" : "s") for \(runCount) finite signal run\(runCount == 1 ? "" : "s")\(workerText)"
+                    case .generatingIAAFT:
+                        phase = .generatingSignificance
+                        let maximumIterations = max(update.maximumIterations ?? 1, 1)
+                        let iterationFraction = Double(update.iteration ?? 0) / Double(maximumIterations)
+                        let runCount = max(update.runCount ?? 1, 1)
+                        let runBase = Double(max((update.runIndex ?? 1) - 1, 0))
+                        let runFraction = (runBase + iterationFraction) / Double(runCount)
+                        let significanceFraction = (
+                            Double(update.completedSurrogates) + 0.65 * runFraction
+                        ) / Double(total)
+                        channelPhaseFraction = 0.48 + 0.47 * significanceFraction
+                        let current = update.currentSurrogate ?? update.completedSurrogates + 1
+                        let runText = runCount > 1
+                            ? " · run \(update.runIndex ?? 1) of \(runCount)" : ""
+                        let parallelText = (update.workerCount ?? 1) > 1 ? "Parallel IAAFT · " : ""
+                        detail = "\(parallelText)surrogate \(current) of \(total) · IAAFT iteration \(update.iteration ?? 0) of \(maximumIterations)\(runText)"
+                    case .analyzingSurrogateLAVI:
+                        phase = .generatingSignificance
+                        let significanceFraction = (
+                            Double(update.completedSurrogates) + 0.78
+                        ) / Double(total)
+                        channelPhaseFraction = 0.48 + 0.47 * significanceFraction
+                        if let batchStart = update.batchStartSurrogate,
+                           let batchEnd = update.batchEndSurrogate {
+                            detail = "Metal batch \(batchStart)–\(batchEnd) of \(total) · reducing \(profileFrequencyCount)-frequency LAVI profiles on GPU"
+                        } else {
+                            let current = update.currentSurrogate ?? update.completedSurrogates + 1
+                            detail = "Surrogate \(current) of \(total) · computing \(profileFrequencyCount)-frequency LAVI profile"
+                        }
+                    case .completedSurrogate:
+                        phase = .generatingSignificance
+                        let significanceFraction = Double(update.completedSurrogates) / Double(total)
+                        channelPhaseFraction = 0.48 + 0.47 * significanceFraction
+                        detail = "Completed surrogate \(update.completedSurrogates) of \(total)"
+                    }
                     progress?(
                         RhythmicityProgress(
-                            fractionComplete: channelBase + channelSpan * (0.48 + 0.47 * fraction),
-                            phase: .generatingSignificance,
+                            fractionComplete: channelBase + channelSpan * channelPhaseFraction,
+                            phase: phase,
                             channelIndex: channel.channelIndex,
                             frequencyHz: nil,
                             completedTiles: completedObservedTiles,
-                            totalTiles: totalTiles
+                            totalTiles: totalTiles,
+                            detail: detail,
+                            completedSignificanceProfiles: update.completedSurrogates,
+                            totalSignificanceProfiles: update.totalSurrogates
                         )
                     )
                 }
@@ -171,8 +327,8 @@ nonisolated enum LAVIEngine {
             )
             let abba = try ABBAEngine.detectBands(
                 lavi: values,
-                frequenciesHz: configuration.frequenciesHz,
-                alphaAnchorHz: configuration.alphaAnchorHz,
+                frequenciesHz: effectiveConfiguration.frequenciesHz,
+                alphaAnchorHz: effectiveConfiguration.alphaAnchorHz,
                 ribbon: significanceResolution?.ribbon
             )
             channelWarnings.append(contentsOf: abba.warnings)
@@ -181,7 +337,7 @@ nonisolated enum LAVIEngine {
                 LAVIChannelResult(
                     channelIndex: channel.channelIndex,
                     channelName: channel.channelName,
-                    frequenciesHz: configuration.frequenciesHz,
+                    frequenciesHz: effectiveConfiguration.frequenciesHz,
                     values: values,
                     validPairCounts: pairCounts,
                     effectiveDurationsSeconds: durations,
@@ -209,7 +365,7 @@ nonisolated enum LAVIEngine {
             )
         )
         return LAVIAnalysisResult(
-            configuration: configuration,
+            configuration: effectiveConfiguration,
             source: input.source,
             processingProvenance: input.processingProvenance,
             samplingRateHz: input.samplingRate,
@@ -448,7 +604,9 @@ nonisolated enum LAVIEngine {
         if case let .onDemand(significance) = configuration.significance {
             try LAVISignificanceProvider.validate(significance)
         }
-        if configuration.backend == .accelerateFFTCPU {
+        if configuration.backend == .accelerateFFTCPU
+            || configuration.backend == .metalGPU
+            || configuration.backend == .automatic {
             try RhythmicityProductionWorkPlanner.validate(configuration.computePolicy)
         }
         return sampleCount
@@ -573,6 +731,28 @@ private nonisolated final class LAVIFrequencyFailureStore: @unchecked Sendable {
         lock.lock()
         if value == nil { value = error }
         lock.unlock()
+    }
+}
+
+/// Keeps progress monotonic if a Metal command fails after work has begun and
+/// the complete analysis is restarted on the CPU fallback backend.
+private nonisolated final class LAVIMonotonicProgressRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private let progress: @Sendable (RhythmicityProgress) -> Void
+    private var highestFraction = -Double.infinity
+
+    init(progress: @escaping @Sendable (RhythmicityProgress) -> Void) {
+        self.progress = progress
+    }
+
+    func emit(_ update: RhythmicityProgress) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard update.fractionComplete >= highestFraction else {
+            return
+        }
+        highestFraction = update.fractionComplete
+        progress(update)
     }
 }
 

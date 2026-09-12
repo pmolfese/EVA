@@ -61,14 +61,20 @@ nonisolated enum RhythmicityEdgePolicy: String, Sendable, Codable, Equatable {
 }
 
 nonisolated enum RhythmicityPrecision: String, Sendable, Codable, Equatable {
+    case float32
     case float64
 }
 
 nonisolated enum RhythmicityComputeBackend: String, Sendable, Codable, Equatable {
+    /// Prefer Metal for workloads above the measured crossover and otherwise
+    /// use the bounded Accelerate FFT implementation.
+    case automatic
     /// Scalar double-precision implementation used as the correctness oracle.
     case directReferenceCPU
     /// Bounded worker pool with tiled Accelerate FFT convolution.
     case accelerateFFTCPU
+    /// Tiled single-frequency Float coefficient production on Metal.
+    case metalGPU
 }
 
 nonisolated struct RhythmicityComputePolicy: Sendable, Codable, Equatable {
@@ -270,13 +276,17 @@ nonisolated struct LAVISurrogateSummary: Sendable, Codable, Equatable {
     var nonconvergencePolicy: IAAFTNonconvergencePolicy
 }
 
-nonisolated enum RhythmicityWarning: Sendable, Equatable {
+nonisolated enum RhythmicityWarning: Sendable, Codable, Equatable {
     case nonfiniteSamplesExcluded(channelIndex: Int, count: Int)
     case insufficientValidDuration(channelIndex: Int, frequencyHz: Double)
     case laviOutsideUnitInterval(channelIndex: Int, frequencyHz: Double, value: Double)
     case iaaftSurrogatesDidNotConverge(channelIndex: Int, count: Int)
+    case wtplNoValidSamples(frequencyHz: Double)
+    case wtplBaselineUnavailable(frequencyHz: Double)
+    case wtplRequestedBaselineOutsideEpoch(startMs: Double, endMs: Double)
     case noAlphaAnchor
     case flatLAVIProfile
+    case computeBackendFallback(requested: String, reason: String)
 }
 
 nonisolated struct ABBAResult: Sendable, Equatable {
@@ -286,7 +296,7 @@ nonisolated struct ABBAResult: Sendable, Equatable {
     var warnings: [RhythmicityWarning]
 }
 
-nonisolated struct LAVIChannelResult: Sendable, Equatable {
+nonisolated struct LAVIChannelResult: Sendable, Codable, Equatable {
     var channelIndex: Int
     var channelName: String
     var frequenciesHz: [Double]
@@ -303,7 +313,7 @@ nonisolated struct LAVIChannelResult: Sendable, Equatable {
     var warnings: [RhythmicityWarning]
 }
 
-nonisolated struct LAVIAnalysisResult: Sendable, Equatable {
+nonisolated struct LAVIAnalysisResult: Sendable, Codable, Equatable {
     var configuration: RhythmicityConfiguration
     var source: RhythmicitySourceDescriptor
     var processingProvenance: RhythmicityProcessingProvenance
@@ -318,6 +328,7 @@ nonisolated enum RhythmicityProgressPhase: String, Sendable, Equatable {
     case estimatingAperiodicSpectrum
     case generatingSignificance
     case assigningBands
+    case detectingBursts
     case finished
 }
 
@@ -328,6 +339,11 @@ nonisolated struct RhythmicityProgress: Sendable, Equatable {
     var frequencyHz: Double?
     var completedTiles: Int
     var totalTiles: Int
+    /// Human-readable substage detail for long operations such as IAAFT.
+    var detail: String? = nil
+    /// Completed paper-significance profiles, separate from coefficient tiles.
+    var completedSignificanceProfiles: Int? = nil
+    var totalSignificanceProfiles: Int? = nil
 }
 
 nonisolated enum RhythmicityAnalysisError: Error, Sendable, Equatable, LocalizedError {

@@ -15,6 +15,19 @@ enum RhythmicityExplorerMode: String, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
 }
 
+enum WTPLDisplayMeasure: String, CaseIterable, Identifiable, Sendable {
+    case raw = "Raw WTPL"
+    case delta = "ΔWTPL"
+    case validCounts = "Valid counts"
+    var id: String { rawValue }
+}
+
+enum RhythmicBurstBackground: String, CaseIterable, Identifiable, Sendable {
+    case power = "Power / P90"
+    case wtpl = "WTPL"
+    var id: String { rawValue }
+}
+
 private struct RhythmicityContextSignature: Sendable, Equatable {
     var signalRevision: UUID
     var configuration: RhythmicityConfiguration
@@ -38,6 +51,40 @@ private struct RhythmicityRunSnapshot: Sendable {
     var source: RhythmicitySourceDescriptor
     var provenance: RhythmicityProcessingProvenance
     var selection: RhythmicitySelectionDescriptor
+    var significanceCache: LAVISignificanceCacheStore
+}
+
+private struct WTPLContextSignature: Sendable, Equatable {
+    var signalRevision: UUID
+    var segmentSignature: String
+    var channelIndices: [Int]
+    var conditionA: String
+    var conditionB: String?
+    var frequenciesHz: [Double]
+    var nCycles: [Double]
+    var lagCycles: [Double]
+    var baselineStartMs: Double
+    var baselineEndMs: Double
+}
+
+private struct WTPLRunSnapshot: Sendable {
+    var signal: MFFSignalData
+    var segments: [EpochSegment]
+    var conditions: [String]
+    var channelIndices: [Int]
+    var plan: TFFrequencyPlan
+    var lagCycles: [Double]
+    var baselineStartMs: Double
+    var baselineEndMs: Double
+    var source: RhythmicitySourceDescriptor
+    var provenance: RhythmicityProcessingProvenance
+}
+
+private struct RhythmicBurstContextSignature: Sendable, Equatable {
+    var selection: RhythmicityContextSignature
+    var configuration: RhythmicBurstConfiguration
+    var bandSource: TimeFrequencyBandSource
+    var bandSignature: String
 }
 
 private enum RhythmicityExplorerError: LocalizedError {
@@ -46,6 +93,10 @@ private enum RhythmicityExplorerError: LocalizedError {
     case emptyRange
     case noEligibleChannels
     case missingChannelSet
+    case noEpochs
+    case noConditions
+    case invalidWTPLComparison
+    case invalidWTPLConfiguration
 
     var errorDescription: String? {
         switch self {
@@ -54,6 +105,10 @@ private enum RhythmicityExplorerError: LocalizedError {
         case .emptyRange: return "The selected interval contains no samples."
         case .noEligibleChannels: return "No channels are eligible under the current channel scope."
         case .missingChannelSet: return "Choose a channel set before running the analysis."
+        case .noEpochs: return "Event-related WTPL requires retained epochs/trials."
+        case .noConditions: return "Choose at least one epoch condition for WTPL."
+        case .invalidWTPLComparison: return "Choose two different epoch conditions for an A − B WTPL comparison."
+        case .invalidWTPLConfiguration: return "WTPL frequency or baseline settings are invalid."
         }
     }
 }
@@ -62,21 +117,37 @@ private enum RhythmicityExplorerError: LocalizedError {
 @Observable
 final class RhythmicityExplorerViewModel {
     let store: RecordingStore
+    @ObservationIgnored private let persistenceStore: RhythmicityPersistenceStore
 
-    init(store: RecordingStore) {
+    init(
+        store: RecordingStore,
+        persistenceStore: RhythmicityPersistenceStore = RhythmicityPersistenceStore()
+    ) {
         self.store = store
+        self.persistenceStore = persistenceStore
+        self.configuration = Self.preferredPaperConfiguration(includesSignificance: true)
     }
 
     var showsSheet = false
     var mode = RhythmicityExplorerMode.bands
     var source = RhythmicitySignalSource.processed
-    var configuration = RhythmicityPreset.paperLAVI2026 { didSet { updateStaleState() } }
-    var dataSelection = RhythmicityDataSelection.entireProcessedRecording { didSet { updateStaleState() } }
-    var channelScope = RhythmicityChannelScope.current { didSet { updateStaleState() } }
-    var selectedChannelIndex = 0 { didSet { updateStaleState() } }
-    var selectedChannelSetID: UUID? { didSet { updateStaleState() } }
+    var configuration: RhythmicityConfiguration {
+        didSet { updateStaleState(); updateWTPLStaleState(); updateBurstStaleState() }
+    }
+    var dataSelection = RhythmicityDataSelection.entireProcessedRecording {
+        didSet { updateStaleState(); updateBurstStaleState() }
+    }
+    var channelScope = RhythmicityChannelScope.current {
+        didSet { updateStaleState(); updateWTPLStaleState(); updateBurstStaleState() }
+    }
+    var selectedChannelIndex = 0 {
+        didSet { updateStaleState(); updateWTPLStaleState(); updateBurstStaleState() }
+    }
+    var selectedChannelSetID: UUID? {
+        didSet { updateStaleState(); updateWTPLStaleState(); updateBurstStaleState() }
+    }
     var includesSignificance = true
-    var includesMarkedArtifacts = false { didSet { updateStaleState() } }
+    var includesMarkedArtifacts = false { didSet { updateStaleState(); updateBurstStaleState() } }
 
     var isRunning = false
     var progress = 0.0
@@ -93,6 +164,41 @@ final class RhythmicityExplorerViewModel {
     var detectedBandSetForTimeFrequency: DetectedRhythmicityBandSet?
     var detectedBandSetForTimeFrequencyIsStale = false
     var timeFrequencyPublishStatus: String?
+    var persistedResultStatus: String?
+
+    // MARK: Event-related WTPL
+    var wtplResult: WTPLAnalysisResult?
+    var wtplResultIsStale = false
+    var wtplDisplayMeasure = WTPLDisplayMeasure.delta
+    var wtplConditionA = "" {
+        didSet {
+            if wtplConditionB == wtplConditionA {
+                let categories = Array(Set(currentEpochSegments.map(\.category))).sorted()
+                wtplConditionB = categories.first(where: { $0 != wtplConditionA })
+            }
+            updateWTPLStaleState()
+        }
+    }
+    var wtplConditionB: String? { didSet { updateWTPLStaleState() } }
+    var wtplShowsDifference = false { didSet { updateWTPLStaleState() } }
+    var wtplMinFrequencyHz = 3.16 { didSet { updateWTPLStaleState() } }
+    var wtplMaxFrequencyHz = 44.67 { didSet { updateWTPLStaleState() } }
+    var wtplFrequencyCount = 47 { didSet { updateWTPLStaleState() } }
+    var wtplBaselineStartMs = -1_000.0 { didSet { updateWTPLStaleState() } }
+    var wtplBaselineEndMs = -500.0 { didSet { updateWTPLStaleState() } }
+    var wtplBandSource = TimeFrequencyBandSource.evaDefaults
+
+    // MARK: Rhythmic bursts
+    var burstResult: RhythmicBurstAnalysisResult?
+    var burstResultIsStale = false
+    var burstConfiguration = RhythmicBurstConfiguration.paper2026 {
+        didSet { updateBurstStaleState() }
+    }
+    var burstBandSource = TimeFrequencyBandSource.rhythmicityExplorer {
+        didSet { updateBurstStaleState() }
+    }
+    var burstBackground = RhythmicBurstBackground.power
+    var selectedBurstID: String?
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var cancellation: RhythmicityCancellation?
@@ -105,6 +211,15 @@ final class RhythmicityExplorerViewModel {
     @ObservationIgnored private var currentSelectedRange: ClosedRange<Int>?
     @ObservationIgnored private var currentChannelSets: [ChannelSet] = []
     @ObservationIgnored private var currentArtifactSources: [EEGArtifactRejectionSource] = []
+    @ObservationIgnored private var wtplResultSignature: WTPLContextSignature?
+    @ObservationIgnored private var burstResultSignature: RhythmicBurstContextSignature?
+    @ObservationIgnored private var currentEventSignal: MFFSignalData?
+    @ObservationIgnored private var currentEpochSegments: [EpochSegment] = []
+    @ObservationIgnored private var loadedPersistenceRecordingPath: String?
+    @ObservationIgnored private var lastLoggedProgressPhase: RhythmicityProgressPhase?
+    @ObservationIgnored private var lastLoggedProgressChannel: Int?
+    @ObservationIgnored private var lastLoggedSignificanceMilestone = 0
+    @ObservationIgnored private var runStartedAt: Date?
 
     deinit {
         cancellation?.cancel()
@@ -145,11 +260,62 @@ final class RhythmicityExplorerViewModel {
         } ?? 0
     }
 
+    var backendDescription: String {
+        switch laviResult?.configuration.backend ?? configuration.backend {
+        case .automatic: return "Automatic · Metal when suitable"
+        case .metalGPU: return "Metal · Float32"
+        case .accelerateFFTCPU: return "Accelerate FFT · Float64"
+        case .directReferenceCPU: return "Direct CPU oracle · Float64"
+        }
+    }
+
     var runEstimate: String {
+        if mode == .eventRelated {
+            let conditions = selectedWTPLConditions
+            let trials = currentEpochSegments.count { conditions.contains($0.category) }
+            return "\(estimatedChannelIndices.count) channel\(estimatedChannelIndices.count == 1 ? "" : "s") × \(trials) trials × \(wtplFrequencyCount) frequencies"
+        }
+        if mode == .bursts {
+            return "\(estimatedChannelIndices.count) channel\(estimatedChannelIndices.count == 1 ? "" : "s") × \(estimatedSelectedSampleCount) samples × \(configuration.frequenciesHz.count) frequencies"
+        }
         let channelCount = estimatedChannelIndices.count
         let profileCount = includesSignificance ? 201 : 1
         guard estimatedSelectedSampleCount > 0, channelCount > 0 else { return "Selection is incomplete" }
         return "\(channelCount) channel\(channelCount == 1 ? "" : "s") × \(configuration.frequenciesHz.count) frequencies × \(profileCount) profile\(profileCount == 1 ? "" : "s")"
+    }
+
+    var selectedWTPLConditions: [String] {
+        var values = [wtplConditionA].filter { !$0.isEmpty }
+        if wtplShowsDifference, let b = wtplConditionB, !b.isEmpty, !values.contains(b) { values.append(b) }
+        return values
+    }
+
+    var selectedWTPLChannelResult: WTPLChannelResult? {
+        guard let condition = wtplResult?.conditions.first(where: { $0.condition == wtplConditionA })
+            ?? wtplResult?.conditions.first else { return nil }
+        return condition.channels.first { $0.channelIndex == selectedChannelIndex } ?? condition.channels.first
+    }
+
+    var selectedBurst: RhythmicBurst? {
+        guard let result = burstResult else { return nil }
+        if let selectedBurstID,
+           let selected = result.bursts.first(where: { $0.id == selectedBurstID }) {
+            return selected
+        }
+        return result.bursts.first { $0.channelIndex == selectedChannelIndex }
+            ?? result.bursts.first
+    }
+
+    var wtplBaselineIsAvailable: Bool {
+        guard let signal = currentEventSignal,
+              let condition = selectedWTPLConditions.first else { return false }
+        let stack = TimeFrequencyTrials.stack(
+            signal: signal, segments: currentEpochSegments, category: condition,
+            channelIndices: [max(min(selectedChannelIndex, max(signal.data.count - 1, 0)), 0)]
+        )
+        return Self.baselineSpec(
+            startMs: wtplBaselineStartMs, endMs: wtplBaselineEndMs, stack: stack
+        ) != nil
     }
 
     var validityWarnings: [String] {
@@ -182,7 +348,7 @@ final class RhythmicityExplorerViewModel {
     func setSignificanceEnabled(_ enabled: Bool) {
         guard includesSignificance != enabled else { return }
         includesSignificance = enabled
-        configuration = enabled ? RhythmicityPreset.paperLAVI2026 : RhythmicityPreset.paperLAVI2026Exploratory
+        configuration = Self.preferredPaperConfiguration(includesSignificance: enabled)
     }
 
     func synchronizeContext(
@@ -204,7 +370,125 @@ final class RhythmicityExplorerViewModel {
         if selectedChannelSetID == nil || !channelSets.contains(where: { $0.id == selectedChannelSetID }) {
             selectedChannelSetID = channelSets.first?.id
         }
+        restorePersistedResultIfNeeded(signal: signal)
         updateStaleState()
+        updateBurstStaleState()
+    }
+
+    func synchronizeEventContext(signal: MFFSignalData, segments: [EpochSegment]) {
+        currentEventSignal = signal
+        currentEpochSegments = segments
+        let categories = Array(Set(segments.map(\.category))).sorted()
+        if wtplConditionA.isEmpty || !categories.contains(wtplConditionA) {
+            wtplConditionA = categories.first ?? ""
+        }
+        if wtplConditionB == nil || !categories.contains(wtplConditionB ?? "") || wtplConditionB == wtplConditionA {
+            wtplConditionB = categories.first(where: { $0 != wtplConditionA })
+        }
+        updateWTPLStaleState()
+    }
+
+    private func restorePersistedResultIfNeeded(signal: MFFSignalData) {
+        let path = signal.signalURL.standardizedFileURL.path
+        guard loadedPersistenceRecordingPath != path else { return }
+        loadedPersistenceRecordingPath = path
+        do {
+            guard let persisted = try persistenceStore.load(
+                recordingURL: signal.signalURL,
+                currentSourceRevision: signal.dataRevision.uuidString
+            ) else { return }
+            laviResult = persisted.result
+            resultSelection = persisted.selection
+            configuration = persisted.result.configuration
+            includesSignificance = persisted.result.channels.allSatisfy { $0.significanceRibbon != nil }
+            source = persisted.selection.source
+            dataSelection = persisted.selection.dataSelection
+            channelScope = persisted.selection.channelScope
+            includesMarkedArtifacts = persisted.selection.includedMarkedArtifacts
+            selectedChannelIndex = persisted.result.channels.first?.channelIndex
+                ?? persisted.selection.includedChannelIndices.first ?? 0
+            if channelScope == .namedSet {
+                selectedChannelSetID = currentChannelSets.first {
+                    $0.name == persisted.selection.channelSetName
+                }?.id
+            }
+
+            let contextMatches = restoredContextMatches(persisted.selection, signal: signal)
+            if !persisted.status.isStale && contextMatches {
+                resultSignature = makeSignature(
+                    signalRevision: signal.dataRevision,
+                    visibleRange: currentVisibleRange,
+                    selectedRange: currentSelectedRange,
+                    channelSets: currentChannelSets,
+                    artifactSources: currentArtifactSources
+                )
+                resultIsStale = false
+                persistedResultStatus = "Restored current recording-scoped result saved \(persisted.savedAt.formatted())"
+                statusTitle = "Saved analysis restored"
+                statusDetail = "The stored source revision and selection match the current recording."
+            } else {
+                resultSignature = nil
+                resultIsStale = true
+                let reason = persisted.status.explanation
+                    ?? "The saved selection or channel context differs from the current recording."
+                persistedResultStatus = "Restored stale result · \(reason)"
+                statusTitle = "Saved analysis is stale"
+                statusDetail = reason
+            }
+            selectedBandID = selectedChannelResult?.bands.first?.id
+            appendLog(persistedResultStatus ?? "Restored saved Rhythmicity result.")
+        } catch {
+            persistedResultStatus = "Saved result unavailable: \(error.localizedDescription)"
+            appendLog(persistedResultStatus ?? "Saved result could not be loaded.")
+        }
+    }
+
+    private func restoredContextMatches(
+        _ persisted: RhythmicitySelectionDescriptor,
+        signal: MFFSignalData
+    ) -> Bool {
+        guard persisted.excludedBadChannelIndices == Array(store.channels.bad).sorted(),
+              persisted.interpolatedChannelIndices == store.channels.interpolated.keys.sorted()
+        else { return false }
+        do {
+            var segments = try selectedSegments(
+                signal: signal,
+                sampleCount: signal.data.first?.count ?? 0,
+                visibleRange: currentVisibleRange,
+                selectedRange: currentSelectedRange
+            )
+            if !includesMarkedArtifacts {
+                segments = Self.removingArtifactIntervals(
+                    from: segments,
+                    sources: currentArtifactSources,
+                    samplingRate: signal.samplingRate,
+                    sampleCount: signal.data.first?.count ?? 0
+                )
+            }
+            let (indices, setName) = try selectedChannels(signal: signal, channelSets: currentChannelSets)
+            return segments == persisted.segments
+                && indices == persisted.includedChannelIndices
+                && setName == persisted.channelSetName
+        } catch {
+            return false
+        }
+    }
+
+    private static func preferredPaperConfiguration(
+        includesSignificance: Bool,
+        seed: UInt64? = nil
+    ) -> RhythmicityConfiguration {
+        var value: RhythmicityConfiguration
+        if includesSignificance {
+            value = seed.map(RhythmicityPreset.paperLAVI2026(seed:))
+                ?? RhythmicityPreset.paperLAVI2026
+        } else {
+            value = RhythmicityPreset.paperLAVI2026Exploratory
+        }
+        value.backend = ProcessingDefaults.shared.rhythmicityUsesGPU
+            ? .automatic : .accelerateFFTCPU
+        value.precision = .float64
+        return value
     }
 
     func run(
@@ -224,9 +508,16 @@ final class RhythmicityExplorerViewModel {
         )
         guard !isRunning else { return }
 
-        configuration = includesSignificance
-            ? RhythmicityPreset.paperLAVI2026(seed: UInt64.random(in: UInt64.min...UInt64.max))
-            : RhythmicityPreset.paperLAVI2026Exploratory
+        let retainedSeed: UInt64?
+        if case let .onDemand(significance) = configuration.significance {
+            retainedSeed = significance.seed
+        } else {
+            retainedSeed = nil
+        }
+        configuration = Self.preferredPaperConfiguration(
+            includesSignificance: includesSignificance,
+            seed: retainedSeed
+        )
 
         let snapshot: RhythmicityRunSnapshot
         let signature: RhythmicityContextSignature
@@ -264,12 +555,33 @@ final class RhythmicityExplorerViewModel {
         statusTitle = "Running LAVI/ABBA"
         statusDetail = runEstimate
         exportStatus = nil
-        appendLog("Started \(snapshot.selection.includedChannelIndices.count)-channel \(dataSelection.rawValue.lowercased()) analysis.")
+        lastLoggedProgressPhase = nil
+        lastLoggedProgressChannel = nil
+        lastLoggedSignificanceMilestone = 0
+        runStartedAt = Date()
+        let selectedSamples = snapshot.selection.segments.reduce(0) {
+            $0 + max($1.endSample - $1.startSample + 1, 0)
+        }
+        appendLog(
+            "Started \(snapshot.selection.includedChannelIndices.count)-channel "
+                + "\(dataSelection.rawValue.lowercased()) analysis · \(selectedSamples) selected samples "
+                + "· \(snapshot.configuration.frequenciesHz.count) frequencies · requested backend "
+                + "\(snapshot.configuration.backend.rawValue)."
+        )
+        if case let .onDemand(significance) = snapshot.configuration.significance {
+            let totalProfiles = significance.repetitions * snapshot.selection.includedChannelIndices.count
+            appendLog(
+                "Paper significance will resolve \(significance.repetitions) matched IAAFT surrogates per uncached channel "
+                    + "(up to \(totalProfiles) surrogate LAVI profiles total)."
+            )
+        }
 
         let (progressContinuation, progressTask) = ProgressBridge.make { [weak self] (update: RhythmicityProgress) in
             guard let self, self.runGeneration == generation else { return }
             self.progress = min(max(update.fractionComplete, 0), 1)
-            self.statusDetail = Self.progressDescription(update)
+            let description = Self.progressDescription(update)
+            self.statusDetail = description
+            self.recordProgressInLog(update, description: description)
         }
 
         task = Task { @MainActor in
@@ -298,10 +610,27 @@ final class RhythmicityExplorerViewModel {
                     selectedChannelIndex = output.channels.first(where: { $0.channelIndex == selectedChannelIndex })?.channelIndex
                         ?? output.channels.first?.channelIndex ?? 0
                     selectedBandID = selectedChannelResult?.bands.first?.id
+                    updateBurstStaleState()
                     timeFrequencyPublishStatus = nil
                     statusTitle = "Analysis complete"
                     statusDetail = "\(output.channels.count) channel\(output.channels.count == 1 ? "" : "s") · \(output.configuration.frequenciesHz.count) frequencies"
-                    appendLog("Completed LAVI/ABBA analysis; no waveform or surrogate series was retained.")
+                    let elapsed = Date().timeIntervalSince(runStartedAt ?? Date())
+                    appendLog(
+                        "Completed LAVI/ABBA in \(String(format: "%.1f", elapsed)) seconds using "
+                            + "\(backendDescription); no waveform or surrogate series was retained."
+                    )
+                    do {
+                        let url = try persistenceStore.save(
+                            result: output,
+                            selection: snapshot.selection,
+                            recordingURL: snapshot.signal.signalURL
+                        )
+                        persistedResultStatus = "Saved recording-scoped result · \(url.lastPathComponent)"
+                        appendLog("Saved compact recording-scoped LAVI/ABBA result.")
+                    } catch {
+                        persistedResultStatus = "Result complete; persistence failed: \(error.localizedDescription)"
+                        appendLog(persistedResultStatus ?? "Persistence failed.")
+                    }
                 } catch is CancellationError {
                     finishCancellation(generation: generation, progressContinuation: progressContinuation, progressTask: progressTask)
                 } catch {
@@ -318,6 +647,147 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    func runEventRelated(
+        packageName: String,
+        signal: MFFSignalData,
+        segments: [EpochSegment],
+        channelSets: [ChannelSet]
+    ) {
+        synchronizeEventContext(signal: signal, segments: segments)
+        guard !isRunning else { return }
+        do {
+            guard !segments.isEmpty else { throw RhythmicityExplorerError.noEpochs }
+            let conditions = selectedWTPLConditions
+            guard !conditions.isEmpty else { throw RhythmicityExplorerError.noConditions }
+            if wtplShowsDifference {
+                guard let conditionB = wtplConditionB,
+                      !conditionB.isEmpty,
+                      conditionB != wtplConditionA else {
+                    throw RhythmicityExplorerError.invalidWTPLComparison
+                }
+            }
+            let (indices, _) = try selectedChannels(signal: signal, channelSets: channelSets)
+            guard !indices.isEmpty else { throw RhythmicityExplorerError.noEligibleChannels }
+            guard wtplMinFrequencyHz > 0, wtplMaxFrequencyHz > wtplMinFrequencyHz,
+                  wtplMaxFrequencyHz < signal.samplingRate / 2, wtplFrequencyCount > 0,
+                  wtplBaselineStartMs <= wtplBaselineEndMs else {
+                throw RhythmicityExplorerError.invalidWTPLConfiguration
+            }
+            let plan = TFFrequencyPlan.logSpaced(
+                minHz: wtplMinFrequencyHz, maxHz: wtplMaxFrequencyHz,
+                count: wtplFrequencyCount, cyclesLow: 5, cyclesHigh: 5
+            )
+            let source = RhythmicitySourceDescriptor(
+                recordingIdentity: "\(signal.signalURL.standardizedFileURL.path)#\(signal.dataRevision.uuidString)",
+                displayName: packageName
+            )
+            let snapshot = WTPLRunSnapshot(
+                signal: signal, segments: segments, conditions: conditions,
+                channelIndices: indices, plan: plan,
+                lagCycles: configuration.wtplLagCycles,
+                baselineStartMs: wtplBaselineStartMs, baselineEndMs: wtplBaselineEndMs,
+                source: source,
+                provenance: RhythmicityProcessingProvenance(
+                    sourceRevision: signal.dataRevision.uuidString,
+                    processingSummary: [
+                        "Signal: \(signal.signalType)",
+                        "Reference state: \(signal.referenceState.rawValue)",
+                        "Conditions: \(conditions.joined(separator: ", "))",
+                        "WTPL baseline requested: \(wtplBaselineStartMs)...\(wtplBaselineEndMs) ms",
+                    ]
+                )
+            )
+            let signature = makeWTPLSignature(signal: signal, segments: segments, channelIndices: indices, plan: plan)
+            startWTPLRun(snapshot: snapshot, signature: signature)
+        } catch {
+            statusTitle = "Cannot run"
+            statusDetail = error.localizedDescription
+            appendLog(error.localizedDescription)
+        }
+    }
+
+    func runBursts(
+        packageName: String,
+        signal: MFFSignalData,
+        visibleRange: ClosedRange<Int>?,
+        selectedRange: ClosedRange<Int>?,
+        channelSets: [ChannelSet],
+        artifactSources: [EEGArtifactRejectionSource]
+    ) {
+        synchronizeContext(
+            signal: signal,
+            visibleRange: visibleRange,
+            selectedRange: selectedRange,
+            channelSets: channelSets,
+            artifactSources: artifactSources
+        )
+        guard !isRunning else { return }
+        do {
+            let base = try makeSnapshot(
+                packageName: packageName,
+                signal: signal,
+                visibleRange: visibleRange,
+                selectedRange: selectedRange,
+                channelSets: channelSets,
+                artifactSources: artifactSources
+            )
+            let bands = resolvedBurstBands(channelIndices: base.selection.includedChannelIndices)
+            let snapshot = RhythmicBurstRunSnapshot(
+                signal: signal,
+                rhythmicityConfiguration: configuration,
+                burstConfiguration: burstConfiguration,
+                source: base.source,
+                provenance: RhythmicityProcessingProvenance(
+                    sourceRevision: base.provenance.sourceRevision,
+                    processingSummary: base.provenance.processingSummary + [
+                        "Burst domain: neural rhythmicity analysis; never artifact cleaning",
+                        "Burst band source: \(bands.description)",
+                    ]
+                ),
+                selection: base.selection,
+                bandsByChannel: bands.byChannel,
+                bandSourceDescription: bands.description
+            )
+            let signature = RhythmicBurstContextSignature(
+                selection: makeSignature(
+                    signalRevision: signal.dataRevision,
+                    visibleRange: visibleRange,
+                    selectedRange: selectedRange,
+                    channelSets: channelSets,
+                    artifactSources: artifactSources
+                ),
+                configuration: burstConfiguration,
+                bandSource: burstBandSource,
+                bandSignature: bands.signature
+            )
+            startBurstRun(snapshot: snapshot, signature: signature)
+        } catch {
+            statusTitle = "Cannot run"
+            statusDetail = error.localizedDescription
+            appendLog(error.localizedDescription)
+        }
+    }
+
+    func exportWTPLPackage(
+        to destination: URL,
+        bands: [EEGFrequencyBand],
+        windows: [TimeFrequencyExport.Window]
+    ) throws {
+        guard let result = wtplResult else { return }
+        let contents = try WTPLExport.bundle(result: result, bands: bands, windows: windows)
+        try WTPLExport.write(contents, to: destination)
+        exportStatus = "Saved \(destination.lastPathComponent)"
+        appendLog(exportStatus ?? "WTPL export complete.")
+    }
+
+    func exportBurstPackage(to destination: URL) throws {
+        guard let result = burstResult else { return }
+        let contents = try RhythmicBurstExport.bundle(result: result)
+        try RhythmicBurstExport.write(contents, to: destination)
+        exportStatus = "Saved \(destination.lastPathComponent)"
+        appendLog(exportStatus ?? "Burst export complete.")
+    }
+
     func cancel() {
         runGeneration &+= 1
         cancellation?.cancel()
@@ -326,7 +796,13 @@ final class RhythmicityExplorerViewModel {
         isRunning = false
         progress = 0
         statusTitle = "Cancelled"
-        statusDetail = laviResult == nil ? "No partial result was published." : "Previous result retained."
+        let hasPreviousResult: Bool
+        switch mode {
+        case .bands: hasPreviousResult = laviResult != nil
+        case .eventRelated: hasPreviousResult = wtplResult != nil
+        case .bursts: hasPreviousResult = burstResult != nil
+        }
+        statusDetail = hasPreviousResult ? "Previous result retained." : "No partial result was published."
         appendLog("Cancelled; partial results were discarded.")
     }
 
@@ -448,7 +924,8 @@ final class RhythmicityExplorerViewModel {
                     "Marked artifact intervals included: \(includesMarkedArtifacts)",
                 ]
             ),
-            selection: selection
+            selection: selection,
+            significanceCache: persistenceStore.significanceCache(for: signal.signalURL)
         )
     }
 
@@ -546,6 +1023,192 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    private func updateWTPLStaleState() {
+        guard let signature = wtplResultSignature,
+              let signal = currentEventSignal else {
+            wtplResultIsStale = wtplResult != nil && wtplResultSignature == nil
+            return
+        }
+        let indices = estimatedChannelIndices
+        guard wtplMinFrequencyHz > 0, wtplMaxFrequencyHz > wtplMinFrequencyHz,
+              wtplFrequencyCount > 0 else {
+            wtplResultIsStale = true
+            return
+        }
+        let plan = TFFrequencyPlan.logSpaced(
+            minHz: wtplMinFrequencyHz, maxHz: wtplMaxFrequencyHz,
+            count: wtplFrequencyCount, cyclesLow: 5, cyclesHigh: 5
+        )
+        wtplResultIsStale = signature != makeWTPLSignature(
+            signal: signal, segments: currentEpochSegments, channelIndices: indices, plan: plan
+        )
+    }
+
+    private func updateBurstStaleState() {
+        guard let signature = burstResultSignature,
+              let signalRevision = currentSignalRevision else {
+            burstResultIsStale = burstResult != nil && burstResultSignature == nil
+            return
+        }
+        let bands = resolvedBurstBands(channelIndices: estimatedChannelIndices)
+        let current = RhythmicBurstContextSignature(
+            selection: makeSignature(
+                signalRevision: signalRevision,
+                visibleRange: currentVisibleRange,
+                selectedRange: currentSelectedRange,
+                channelSets: currentChannelSets,
+                artifactSources: currentArtifactSources
+            ),
+            configuration: burstConfiguration,
+            bandSource: burstBandSource,
+            bandSignature: bands.signature
+        )
+        burstResultIsStale = signature != current
+    }
+
+    private func makeWTPLSignature(
+        signal: MFFSignalData,
+        segments: [EpochSegment],
+        channelIndices: [Int],
+        plan: TFFrequencyPlan
+    ) -> WTPLContextSignature {
+        WTPLContextSignature(
+            signalRevision: signal.dataRevision,
+            segmentSignature: Self.epochSignature(segments),
+            channelIndices: channelIndices,
+            conditionA: wtplConditionA,
+            conditionB: wtplShowsDifference ? wtplConditionB : nil,
+            frequenciesHz: plan.frequenciesHz,
+            nCycles: plan.nCycles,
+            lagCycles: configuration.wtplLagCycles,
+            baselineStartMs: wtplBaselineStartMs,
+            baselineEndMs: wtplBaselineEndMs
+        )
+    }
+
+    private func startWTPLRun(snapshot: WTPLRunSnapshot, signature: WTPLContextSignature) {
+        runGeneration &+= 1
+        let generation = runGeneration
+        task?.cancel()
+        cancellation?.cancel()
+        let cancellation = RhythmicityCancellation()
+        self.cancellation = cancellation
+        isRunning = true
+        progress = 0
+        statusTitle = "Running WTPL"
+        statusDetail = runEstimate
+        exportStatus = nil
+        appendLog("Started event-related WTPL for \(snapshot.conditions.joined(separator: ", ")).")
+
+        let (continuation, progressTask) = ProgressBridge.make { [weak self] (update: RhythmicityProgress) in
+            guard let self, self.runGeneration == generation else { return }
+            self.progress = min(max(update.fractionComplete, 0), 1)
+            self.statusDetail = Self.progressDescription(update)
+        }
+        task = Task { @MainActor in
+            await store.processingQueue.run("Rhythmicity WTPL") { [self] in
+                let worker = Task.detached(priority: .userInitiated) {
+                    try WTPLExplorerRunner.analyze(
+                        snapshot: snapshot, cancellation: cancellation,
+                        progress: { continuation.yield($0) }
+                    )
+                }
+                do {
+                    let output = try await withTaskCancellationHandler(
+                        operation: { try await worker.value },
+                        onCancel: { cancellation.cancel(); worker.cancel() }
+                    )
+                    continuation.finish()
+                    progressTask.cancel()
+                    guard runGeneration == generation, !Task.isCancelled else { return }
+                    wtplResult = output
+                    wtplResultSignature = signature
+                    wtplResultIsStale = false
+                    isRunning = false
+                    progress = 1
+                    statusTitle = "WTPL complete"
+                    statusDetail = "\(output.conditions.count) condition\(output.conditions.count == 1 ? "" : "s") · \(output.frequenciesHz.count) frequencies"
+                    appendLog("Completed raw WTPL, ΔWTPL, variance, and valid-count maps.")
+                } catch is CancellationError {
+                    finishCancellation(generation: generation, progressContinuation: continuation, progressTask: progressTask)
+                } catch {
+                    continuation.finish()
+                    progressTask.cancel()
+                    guard runGeneration == generation else { return }
+                    isRunning = false
+                    progress = 0
+                    statusTitle = "WTPL failed"
+                    statusDetail = error.localizedDescription
+                    appendLog("WTPL failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func startBurstRun(
+        snapshot: RhythmicBurstRunSnapshot,
+        signature: RhythmicBurstContextSignature
+    ) {
+        runGeneration &+= 1
+        let generation = runGeneration
+        task?.cancel()
+        cancellation?.cancel()
+        let cancellation = RhythmicityCancellation()
+        self.cancellation = cancellation
+        isRunning = true
+        progress = 0
+        statusTitle = "Detecting rhythmic bursts"
+        statusDetail = runEstimate
+        exportStatus = nil
+        appendLog("Started neural-rhythmicity burst detection; no artifact action is available.")
+
+        let (continuation, progressTask) = ProgressBridge.make { [weak self] (update: RhythmicityProgress) in
+            guard let self, self.runGeneration == generation else { return }
+            self.progress = min(max(update.fractionComplete, 0), 1)
+            self.statusDetail = Self.progressDescription(update)
+        }
+        task = Task { @MainActor in
+            await store.processingQueue.run("Rhythmicity Bursts") { [self] in
+                let worker = Task.detached(priority: .userInitiated) {
+                    try RhythmicBurstRunner.analyze(
+                        snapshot: snapshot,
+                        cancellation: cancellation,
+                        progress: { continuation.yield($0) }
+                    )
+                }
+                do {
+                    let output = try await withTaskCancellationHandler(
+                        operation: { try await worker.value },
+                        onCancel: { cancellation.cancel(); worker.cancel() }
+                    )
+                    continuation.finish()
+                    progressTask.cancel()
+                    guard runGeneration == generation, !Task.isCancelled else { return }
+                    burstResult = output
+                    burstResultSignature = signature
+                    burstResultIsStale = false
+                    isRunning = false
+                    progress = 1
+                    selectedBurstID = output.bursts.first?.id
+                    statusTitle = "Burst analysis complete"
+                    statusDetail = "\(output.bursts.count) burst\(output.bursts.count == 1 ? "" : "s") · \(output.maps.count) channel-segment map\(output.maps.count == 1 ? "" : "s")"
+                    appendLog("Completed peak detection, boundary refinement, overlap merging, band assignment, and metrics.")
+                } catch is CancellationError {
+                    finishCancellation(generation: generation, progressContinuation: continuation, progressTask: progressTask)
+                } catch {
+                    continuation.finish()
+                    progressTask.cancel()
+                    guard runGeneration == generation else { return }
+                    isRunning = false
+                    progress = 0
+                    statusTitle = "Burst analysis failed"
+                    statusDetail = error.localizedDescription
+                    appendLog("Burst analysis failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     private func finishCancellation(
         generation: Int,
         progressContinuation: AsyncStream<RhythmicityProgress>.Continuation,
@@ -557,13 +1220,66 @@ final class RhythmicityExplorerViewModel {
         isRunning = false
         progress = 0
         statusTitle = "Cancelled"
-        statusDetail = laviResult == nil ? "No partial result was published." : "Previous result retained."
+        let hasPreviousResult: Bool
+        switch mode {
+        case .bands: hasPreviousResult = laviResult != nil
+        case .eventRelated: hasPreviousResult = wtplResult != nil
+        case .bursts: hasPreviousResult = burstResult != nil
+        }
+        statusDetail = hasPreviousResult ? "Previous result retained." : "No partial result was published."
         appendLog("Cancelled; partial results were discarded.")
     }
 
     private func appendLog(_ message: String) {
         log.append(RhythmicityLogLine(date: Date(), message: message))
         if log.count > 200 { log.removeFirst(log.count - 200) }
+    }
+
+    private func recordProgressInLog(
+        _ update: RhythmicityProgress,
+        description: String
+    ) {
+        if lastLoggedProgressChannel != update.channelIndex {
+            lastLoggedProgressChannel = update.channelIndex
+            lastLoggedProgressPhase = nil
+            lastLoggedSignificanceMilestone = 0
+        }
+
+        switch update.phase {
+        case .validating, .transforming, .estimatingAperiodicSpectrum, .assigningBands, .finished:
+            if lastLoggedProgressPhase != update.phase {
+                appendLog(description + ".")
+            }
+        case .generatingSignificance:
+            let completed = update.completedSignificanceProfiles ?? 0
+            let total = max(update.totalSignificanceProfiles ?? 0, 0)
+            if description.contains("Cache hit") {
+                if lastLoggedSignificanceMilestone != total {
+                    appendLog(description + ".")
+                    lastLoggedSignificanceMilestone = total
+                }
+            } else if lastLoggedProgressPhase != .generatingSignificance {
+                let workerText = update.detail?.contains("Parallel IAAFT") == true
+                    ? " · bounded parallel IAAFT enabled" : ""
+                appendLog(
+                    total > 0
+                        ? "Matched significance generation started · \(total) surrogates for this channel\(workerText)."
+                        : description + "."
+                )
+            }
+            let milestoneSize = max(total / 10, 1)
+            if !description.contains("Cache hit"),
+               completed > 0,
+               (completed == total || completed >= lastLoggedSignificanceMilestone + milestoneSize) {
+                lastLoggedSignificanceMilestone = completed
+                appendLog("Completed \(completed) of \(total) matched surrogates for this channel.")
+            }
+        case .detectingBursts:
+            if lastLoggedProgressPhase != update.phase {
+                appendLog(description + ".")
+            }
+        }
+        lastLoggedProgressPhase = update.phase
     }
 
     private static func rangeCount(_ range: ClosedRange<Int>) -> Int {
@@ -574,6 +1290,24 @@ final class RhythmicityExplorerViewModel {
         sources.flatMap { source in
             source.events.map { "\(source.id):\($0.id):\($0.beginTimeSeconds):\(source.windowSizeSeconds)" }
         }.sorted().joined(separator: "|")
+    }
+
+    private static func epochSignature(_ segments: [EpochSegment]) -> String {
+        segments.map {
+            "\($0.id):\($0.category):\($0.startSample):\($0.endSample):\($0.stimulusOffsetSamples)"
+        }.joined(separator: "|")
+    }
+
+    fileprivate nonisolated static func baselineSpec(
+        startMs: Double,
+        endMs: Double,
+        stack: TimeFrequencyTrials.Stack
+    ) -> WTPLBaselineSpec? {
+        guard !stack.isEmpty, startMs.isFinite, endMs.isFinite, startMs <= endMs else { return nil }
+        let start = stack.stimulusOffsetSamples + Int((startMs / 1_000 * stack.samplingRate).rounded())
+        let end = stack.stimulusOffsetSamples + Int((endMs / 1_000 * stack.samplingRate).rounded())
+        guard start >= 0, end >= start, end < stack.timeCount else { return nil }
+        return WTPLBaselineSpec(startSample: start, endSample: end)
     }
 
     private static func removingArtifactIntervals(
@@ -595,6 +1329,8 @@ final class RhythmicityExplorerViewModel {
     }
 
     private static func progressDescription(_ update: RhythmicityProgress) -> String {
+        let channel = update.channelIndex.map { "Channel \($0 + 1) · " } ?? ""
+        if let detail = update.detail { return channel + detail }
         let phase: String
         switch update.phase {
         case .validating: phase = "Validating input"
@@ -602,10 +1338,98 @@ final class RhythmicityExplorerViewModel {
         case .estimatingAperiodicSpectrum: phase = "Estimating aperiodic spectrum"
         case .generatingSignificance: phase = "Generating matched surrogate noise"
         case .assigningBands: phase = "Assigning ABBA regions"
+        case .detectingBursts: phase = "Detecting and merging rhythmic bursts"
         case .finished: phase = "Finishing"
         }
         let frequency = update.frequencyHz.map { " · \(String(format: "%.2f", $0)) Hz" } ?? ""
-        return phase + frequency
+        return channel + phase + frequency
+    }
+
+    private func resolvedBurstBands(
+        channelIndices: [Int]
+    ) -> (byChannel: [Int: [RhythmicBurstBandDefinition]], description: String, signature: String) {
+        switch burstBandSource {
+        case .evaDefaults:
+            let definitions = Self.burstDefinitions(
+                EEGFrequencyBand.restingDefaults,
+                source: TimeFrequencyBandSource.evaDefaults.rawValue
+            )
+            return (
+                Dictionary(uniqueKeysWithValues: channelIndices.map { ($0, definitions) }),
+                TimeFrequencyBandSource.evaDefaults.rawValue,
+                definitions.map(\.id).joined(separator: "|")
+            )
+        case .userPreferences:
+            let definitions = Self.burstDefinitions(
+                ProcessingDefaults.shared.timeFrequencyBands,
+                source: TimeFrequencyBandSource.userPreferences.rawValue
+            )
+            return (
+                Dictionary(uniqueKeysWithValues: channelIndices.map { ($0, definitions) }),
+                TimeFrequencyBandSource.userPreferences.rawValue,
+                definitions.map { "\($0.id):\($0.lowHz):\($0.highHz)" }.joined(separator: "|")
+            )
+        case .rhythmicityExplorer:
+            if let result = laviResult, !resultIsStale {
+                var byChannel: [Int: [RhythmicBurstBandDefinition]] = [:]
+                for channelIndex in channelIndices {
+                    let channel = result.channels.first { $0.channelIndex == channelIndex }
+                    byChannel[channelIndex] = channel.map(Self.burstDefinitions) ?? []
+                }
+                let signature = byChannel.keys.sorted().flatMap { channel in
+                    (byChannel[channel] ?? []).map { "\(channel):\($0.id):\($0.lowHz):\($0.highHz)" }
+                }.joined(separator: "|")
+                return (byChannel, "Current channel-specific LAVI/ABBA result", signature)
+            }
+            if let published = detectedBandSetForTimeFrequency,
+               !detectedBandSetForTimeFrequencyIsStale {
+                let definitions = published.displayBands.map {
+                    RhythmicBurstBandDefinition(
+                        id: "abba:\($0.id.uuidString)", name: $0.name,
+                        lowHz: $0.lowHz, highHz: $0.highHz,
+                        direction: $0.direction, source: "Published LAVI/ABBA"
+                    )
+                }
+                return (
+                    Dictionary(uniqueKeysWithValues: channelIndices.map { ($0, definitions) }),
+                    "Published LAVI/ABBA: \(published.resultDescription)",
+                    definitions.map { "\($0.id):\($0.lowHz):\($0.highHz)" }.joined(separator: "|")
+                )
+            }
+            return (
+                Dictionary(uniqueKeysWithValues: channelIndices.map { ($0, []) }),
+                "No current LAVI/ABBA bands; bursts will be unassigned",
+                "unavailable"
+            )
+        }
+    }
+
+    private nonisolated static func burstDefinitions(
+        _ bands: [EEGFrequencyBand],
+        source: String
+    ) -> [RhythmicBurstBandDefinition] {
+        bands.map {
+            RhythmicBurstBandDefinition(
+                id: "\(source):\($0.name):\($0.lowHz):\($0.highHz)",
+                name: $0.name, lowHz: $0.lowHz, highHz: $0.highHz,
+                direction: nil, source: source
+            )
+        }
+    }
+
+    private nonisolated static func burstDefinitions(
+        _ channel: LAVIChannelResult
+    ) -> [RhythmicBurstBandDefinition] {
+        channel.bands.enumerated().map { index, band in
+            RhythmicBurstBandDefinition(
+                id: "abba:\(band.id.uuidString)",
+                name: band.canonicalName ?? "\(band.direction.rawValue.capitalized) \(index + 1)",
+                lowHz: min(band.beginFrequencyHz, band.endFrequencyHz),
+                highHz: max(band.beginFrequencyHz, band.endFrequencyHz),
+                direction: band.direction,
+                source: "Current channel-specific LAVI/ABBA result"
+            )
+        }
     }
 }
 
@@ -615,8 +1439,23 @@ private nonisolated enum RhythmicityExplorerRunner {
         cancellation: RhythmicityCancellation,
         progress: @escaping @Sendable (RhythmicityProgress) -> Void
     ) throws -> LAVIAnalysisResult {
+        let progressRelay = RhythmicityRunnerProgressRelay(progress: progress)
+        return try analyzePass(
+            snapshot: snapshot,
+            cancellation: cancellation,
+            progress: { progressRelay.emit($0) }
+        )
+    }
+
+    private static func analyzePass(
+        snapshot: RhythmicityRunSnapshot,
+        cancellation: RhythmicityCancellation,
+        progress: @escaping @Sendable (RhythmicityProgress) -> Void
+    ) throws -> LAVIAnalysisResult {
         var channelResults: [LAVIChannelResult] = []
         var warnings: [RhythmicityWarning] = []
+        var runConfiguration = snapshot.configuration
+        var effectiveConfiguration: RhythmicityConfiguration?
         let channelIndices = snapshot.selection.includedChannelIndices
         for (ordinal, index) in channelIndices.enumerated() {
             try cancellation.check()
@@ -641,7 +1480,8 @@ private nonisolated enum RhythmicityExplorerRunner {
             )
             let output = try LAVIEngine.analyze(
                 input: input,
-                configuration: snapshot.configuration,
+                configuration: runConfiguration,
+                significanceCache: snapshot.significanceCache,
                 cancellation: cancellation
             ) { update in
                 let fraction = (Double(ordinal) + update.fractionComplete) / Double(max(channelIndices.count, 1))
@@ -651,19 +1491,175 @@ private nonisolated enum RhythmicityExplorerRunner {
                     channelIndex: index,
                     frequencyHz: update.frequencyHz,
                     completedTiles: ordinal * snapshot.configuration.frequenciesHz.count + update.completedTiles,
-                    totalTiles: channelIndices.count * snapshot.configuration.frequenciesHz.count
+                    totalTiles: channelIndices.count * snapshot.configuration.frequenciesHz.count,
+                    detail: update.detail,
+                    completedSignificanceProfiles: update.completedSignificanceProfiles,
+                    totalSignificanceProfiles: update.totalSignificanceProfiles
                 ))
+            }
+            if let effectiveConfiguration,
+               output.configuration.backend != effectiveConfiguration.backend {
+                var fallbackSnapshot = snapshot
+                fallbackSnapshot.configuration.backend = .accelerateFFTCPU
+                fallbackSnapshot.configuration.precision = .float64
+                var fallback = try analyzePass(
+                    snapshot: fallbackSnapshot,
+                    cancellation: cancellation,
+                    progress: progress
+                )
+                let warning = output.warnings.first(where: Self.isBackendFallback)
+                    ?? .computeBackendFallback(
+                        requested: snapshot.configuration.backend.rawValue,
+                        reason: "Metal became unavailable during a later channel; the complete result was recomputed on CPU."
+                    )
+                if !fallback.warnings.contains(warning) {
+                    fallback.warnings.insert(warning, at: 0)
+                    if !fallback.channels.isEmpty {
+                        fallback.channels[0].warnings.insert(warning, at: 0)
+                    }
+                }
+                return fallback
+            }
+            if effectiveConfiguration == nil {
+                effectiveConfiguration = output.configuration
+                runConfiguration = output.configuration
             }
             channelResults.append(contentsOf: output.channels)
             warnings.append(contentsOf: output.warnings)
         }
         try cancellation.check()
         return LAVIAnalysisResult(
-            configuration: snapshot.configuration,
+            configuration: effectiveConfiguration ?? snapshot.configuration,
             source: snapshot.source,
             processingProvenance: snapshot.provenance,
             samplingRateHz: snapshot.signal.samplingRate,
             channels: channelResults,
+            warnings: warnings
+        )
+    }
+
+    private static func isBackendFallback(_ warning: RhythmicityWarning) -> Bool {
+        if case .computeBackendFallback = warning { return true }
+        return false
+    }
+}
+
+private nonisolated final class RhythmicityRunnerProgressRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private let progress: @Sendable (RhythmicityProgress) -> Void
+    private var highestFraction = -Double.infinity
+
+    init(progress: @escaping @Sendable (RhythmicityProgress) -> Void) {
+        self.progress = progress
+    }
+
+    func emit(_ update: RhythmicityProgress) {
+        lock.lock()
+        guard update.fractionComplete >= highestFraction else {
+            lock.unlock()
+            return
+        }
+        highestFraction = update.fractionComplete
+        lock.unlock()
+        progress(update)
+    }
+}
+
+private nonisolated enum WTPLExplorerRunner {
+    static func analyze(
+        snapshot: WTPLRunSnapshot,
+        cancellation: RhythmicityCancellation,
+        progress: @escaping @Sendable (RhythmicityProgress) -> Void
+    ) throws -> WTPLAnalysisResult {
+        let provider = AccelerateFFTComplexCoefficientProvider()
+        let total = max(snapshot.conditions.count * snapshot.channelIndices.count, 1)
+        var completed = 0
+        var conditionResults: [WTPLConditionResult] = []
+        var warnings: [RhythmicityWarning] = []
+        var sharedTimes: [Double] = []
+        var sharedBaseline: ClosedRange<Double>?
+
+        for condition in snapshot.conditions {
+            var channels: [WTPLChannelResult] = []
+            for channelIndex in snapshot.channelIndices {
+                try cancellation.check()
+                let stack = TimeFrequencyTrials.stack(
+                    signal: snapshot.signal,
+                    segments: snapshot.segments,
+                    category: condition,
+                    channelIndices: [channelIndex]
+                )
+                guard !stack.isEmpty else { continue }
+                let baseline = RhythmicityExplorerViewModel.baselineSpec(
+                    startMs: snapshot.baselineStartMs,
+                    endMs: snapshot.baselineEndMs,
+                    stack: stack
+                )
+                if baseline == nil {
+                    warnings.append(.wtplRequestedBaselineOutsideEpoch(
+                        startMs: snapshot.baselineStartMs, endMs: snapshot.baselineEndMs
+                    ))
+                }
+                let completedBefore = completed
+                let result = try WTPLEngine.analyze(
+                    trials: stack.trials,
+                    samplingRate: stack.samplingRate,
+                    plan: snapshot.plan,
+                    lagCycles: snapshot.lagCycles,
+                    baseline: baseline,
+                    eventSampleIndex: stack.stimulusOffsetSamples,
+                    coefficientProvider: provider,
+                    edgePolicy: .validOnly,
+                    retainPerTrial: false,
+                    cancellation: cancellation
+                ) { update in
+                    progress(RhythmicityProgress(
+                        fractionComplete: (Double(completedBefore) + update.fractionComplete) / Double(total),
+                        phase: update.phase,
+                        channelIndex: channelIndex,
+                        frequencyHz: update.frequencyHz,
+                        completedTiles: completedBefore,
+                        totalTiles: total
+                    ))
+                }
+                if sharedTimes.isEmpty {
+                    sharedTimes = result.timesMs
+                } else if result.timesMs != sharedTimes {
+                    throw WTPLAnalysisError.mismatchedTimeAxis(condition: condition)
+                }
+                if sharedBaseline == nil { sharedBaseline = result.baselineWindowMs }
+                warnings.append(contentsOf: result.warnings)
+                let name = snapshot.signal.channelNames.flatMap { names in
+                    names.indices.contains(channelIndex) ? names[channelIndex] : nil
+                } ?? "E\(channelIndex + 1)"
+                channels.append(WTPLChannelResult(
+                    channelIndex: channelIndex,
+                    channelName: name,
+                    meanWTPL: result.meanWTPL,
+                    deltaWTPL: result.deltaWTPL,
+                    validTrialCounts: result.validTrialCounts,
+                    varianceWTPL: result.varianceWTPL,
+                    trialCount: result.trialCount
+                ))
+                completed += 1
+            }
+            if !channels.isEmpty {
+                conditionResults.append(WTPLConditionResult(condition: condition, channels: channels))
+            }
+        }
+        guard !conditionResults.isEmpty else { throw WTPLAnalysisError.noTrials }
+        var seen = Set<String>()
+        warnings = warnings.filter { seen.insert($0.displayText).inserted }
+        return WTPLAnalysisResult(
+            source: snapshot.source,
+            processingProvenance: snapshot.provenance,
+            frequenciesHz: snapshot.plan.frequenciesHz,
+            timesMs: sharedTimes,
+            nCycles: snapshot.plan.nCycles,
+            lagCycles: snapshot.lagCycles,
+            edgePolicy: .validOnly,
+            baselineWindowMs: sharedBaseline,
+            conditions: conditionResults,
             warnings: warnings
         )
     }

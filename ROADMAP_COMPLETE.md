@@ -670,9 +670,9 @@ All in `TimeFrequencyExport.swift`; Export menu wired into the TF view header.
 **Effort:** medium — NPY writer is tiny; the scalar reduction reuses existing schema.
 
 
-## Rhythmicity Explorer — LAVI and ABBA, Milestones 0–5
+## Rhythmicity Explorer — LAVI, ABBA, WTPL, bursts, Metal, and persistence, Milestones 0–8
 
-Shipped 2026-09-11 and released as 0.1.9. Method reference:
+Shipped through Milestone 8 on 2026-09-11. Method reference:
 [`docs/design/rhythmicity.md`](docs/design/rhythmicity.md).
 
 ### Milestone 0 — Reference and licensing lock
@@ -1013,6 +1013,157 @@ expert-only override for including marked artifact intervals.
 - Three focused integration tests cover explicit publication and preference
   isolation, stale-result rejection without fallback, and ABBA ROI/export
   provenance. The app target and focused suite pass on macOS.
+
+### Milestone 6 — Within-Trial Phase Locking
+
+- [x] Implement shared `WTPLEngine`.
+- [x] Establish and match a validated independent Python WTPL oracle fixture.
+- [x] Add raw WTPL and ΔWTPL.
+- [x] Add condition comparisons and valid-count maps.
+- [x] Build Event-related explorer mode.
+- [x] Reuse/generalize TF heatmap and overview components.
+- [x] Add NPY/scalar exports.
+- [x] Add optional TF WTPL shortcut.
+- [x] Add WTPL-vs-ITPC interpretation tests/help.
+
+**Exit:** users can analyze event-related within-trial rhythmicity with explicit baseline and condition semantics.
+
+#### Milestone 6 completion record (2026-09-11)
+
+- `WTPLEngine` is the single double-precision implementation used by
+  Rhythmicity Explorer and the Time-Frequency shortcut. It evaluates signed
+  one-cycle phase relations after complex-plane fractional interpolation,
+  isolates every trial, retains invalid edges as NaN, and computes condition
+  means, unbiased variance, and valid-trial counts with online accumulators.
+- The independent standard-library Python paper-equation generator and its
+  committed fixture pin full raw, delta, variance, and count maps. Swift matches
+  the fixture within `2e-12`; the fixture SHA-256 is
+  `b6a46ff865a1e1f721ad77589a4bc6f1cdfc8e23fb0514c906241fabda5fa90a`.
+  The MATLAB-only upstream WTPL repository remains provenance/API context, not
+  copied code or an executable oracle.
+- Event-related mode uses retained epoch conditions and channel scopes, supports
+  raw WTPL, ΔWTPL, A − B comparisons, and a valid-count display (minimum A/B
+  support for differences), and reuses the NaN-hatched TF heatmap plus ABBA band
+  overlays and band × window ROI summaries. Runs are cancellable and stale when
+  epochs, signal revision, conditions, channels, frequencies, lags, or baseline
+  settings change.
+- Baseline semantics are explicit: raw WTPL is always available when the
+  transform is valid; ΔWTPL subtracts each frequency's mean over the requested
+  complete interval. EVA never silently shrinks an out-of-epoch baseline and
+  reports frequencies with no valid baseline support.
+- Event exports contain condition-specific raw WTPL, ΔWTPL, and valid-count NPY
+  maps; tidy band × window scalars; a versioned manifest with axes, settings,
+  source and processing provenance; and warnings. The Time-Frequency WTPL option
+  delegates to the same engine and records the same method, lag, baseline, and
+  invalid-value semantics.
+- Help and the consolidated 0.1.9 release notes distinguish within-trial phase persistence from
+  across-trial ITPC. Eleven focused tests cover the oracle, phase reset,
+  amplitude invariance, fractional lags, edge masks, trial isolation, online
+  means, strict baselines, WTPL-vs-ITPC interpretation, TF-engine delegation,
+  condition support, and package export.
+- The opt-in external gate also passes both supplied 257-channel, 1 kHz MFF
+  recordings in 117.466 seconds. Each contributes four bounded observed-data
+  trial containers to direct-vs-production WTPL parity checks at 8, 10, and
+  20 Hz, including raw/delta maps, NaN masks, and valid counts; no participant
+  waveform is copied into the repository or exports.
+
+### Milestone 7 — Burst analysis
+
+- [x] Pin maintained burst reference behavior.
+- [x] Implement deterministic 2D peak detection.
+- [x] Implement power- and WTPL-defined onset/offset refinement.
+- [x] Implement overlap merge.
+- [x] Implement metrics and channel-specific band assignment.
+- [x] Build the burst map, linked timeline, sortable table, summaries, and filters.
+- [x] Keep event annotation out of scope because no product requirement demands it.
+- [x] Add versioned NPY/CSV exports and focused/reference/real-MFF tests.
+
+**Exit:** burst detections and statistics reproduce the reference workflow and remain clearly separated from artifact cleaning.
+
+#### Milestone 7 completion record (2026-09-11)
+
+- EVA pins `Bursts_detection_WTPL_v1_0_0.m` from WTPL commit
+  `6da57b71f1084c62cfa1a4deaebee227d38f2584` and file SHA-256
+  `76375d0f2e972ed34654abdbed12b410754876ca5b8ea8286eca2c291c101c29`.
+  The upstream file supplies the maintained thresholds and workflow, but calls
+  helper functions absent from the repository; it is therefore provenance and
+  behavioral reference material rather than an executable oracle.
+- `RhythmicBurstDetector` computes per-frequency P90/P75 thresholds, consolidates
+  regional-max plateaus deterministically, refines candidate boundaries without
+  crossing selection segments, and repeatedly merges overlapping close-frequency
+  candidates using the higher power×duration representative. The optional WTPL
+  boundary uses the same signed-lag reducer as Milestone 6.
+- Every burst records duration in milliseconds/cycles, rate and occupancy inputs,
+  relative P90 power, energy, frequency span, peak/mean WTPL, band consistency,
+  channel/segment identity, and LAVI/ABBA sustained/transient identity when fresh
+  channel-specific bands are available.
+- Bursts mode includes selectable power/WTPL maps with peak and interval overlays,
+  a linked waveform, filters, band summaries, duration histogram, and sortable
+  table. It deliberately exposes no clean/apply or artifact-event action.
+- Export bundles contain burst and band-summary CSV, normalized-power and WTPL NPY
+  maps with axis sidecars, a method/reference/source/selection manifest, and all
+  warnings. The manifest explicitly identifies the result as neural-rhythmicity
+  analysis rather than artifact rejection.
+- A dependency-free Python map oracle (SHA-256
+  `e6e01fd37cc4ad365b3ae3b1f51295a8cc075dc114541deb7890b35afca0de00`)
+  plus focused Swift tests cover thresholding, P75 and WTPL boundaries, plateaus,
+  merge/non-merge behavior, metrics, occupancy union, export rows, and segment
+  clamping. The opt-in MFF gate passes the production transform-to-detection
+  chain on bounded observed data from both supplied recordings; no participant
+  waveform is copied into the repository or exports.
+
+### Milestone 8 — Metal acceleration and persistence
+
+- [x] Profile CPU FFT bottlenecks first.
+- [x] Implement bounded, frequency-tiled Metal coefficient computation.
+- [x] Add CPU/GPU parity and boundary-stability tests.
+- [x] Add automatic fallback and preferences.
+- [x] Add recording-scoped persisted result payload.
+- [x] Add method, upstream-reference, and signal-revision staleness checks.
+
+**Exit:** high-density workloads are accelerated where measurement justifies it,
+and saved results cannot be mistaken for current results after preprocessing
+changes.
+
+#### Milestone 8 completion record (2026-09-11)
+
+- CPU profiling established the crossover before automatic GPU selection. On the
+  reference Apple-Silicon host, a 32,768-sample 4 Hz coefficient tile took
+  36.95 ms through bounded Accelerate FFT and 7.25 ms through Metal, a 5.1×
+  improvement. Automatic mode retains CPU FFT for work below the measured
+  frequency × sample threshold and when no compatible Metal library is present.
+- `RhythmicityKernels.metal` contains the compiled Float32 Morlet coefficient
+  kernel so Xcode shader diagnostics and GPU capture remain available. The Swift
+  backend dispatches one channel/run/frequency tile at a time, uses shared bounded
+  buffers, applies the same central crop and validity range as the Double CPU
+  oracle, and never constructs an all-channel complex cube.
+- Runtime device, pipeline, shape, allocation, command, and memory-budget failures
+  fall back to the existing bounded Double-precision Accelerate FFT path and are
+  recorded as result warnings. Preferences expose CPU-only or automatic Metal-
+  preferred operation; each result records the backend and precision actually
+  used rather than merely the requested policy.
+- Compiled-kernel tests compare real and imaginary coefficients with the direct
+  CPU oracle below `2e-4`. End-to-end LAVI agrees below `2e-5`, valid-pair counts
+  are identical, and every ABBA begin/end/peak/direction boundary is exact on the
+  validated fixture. Progress, cancellation, valid-edge semantics, and the
+  existing 512 MiB production policy remain in force.
+- Each completed Bands analysis saves only its compact result and selection in
+  Application Support, keyed by a SHA-256 recording-path identity. The envelope
+  includes a schema version, EVA method revision, pinned upstream reference
+  commit, processed-signal revision, save time, and content checksum; it contains
+  neither source samples nor surrogate waveforms.
+- Reopening a recording restores the saved spectrum for inspection, but marks it
+  visibly stale unless the signal revision, current selection/channel context,
+  method version, and upstream reference revision all still match. Stale results
+  cannot be republished as current Time-Frequency bands. Checksum tampering is
+  rejected rather than shown.
+- Six focused Milestone 8 tests cover automatic crossover and fallback, compiled
+  Metal parity, exact band stability, the recorded CPU/GPU profile, compact
+  persistence round-trip, revision staleness, non-finite result encoding, and
+  checksum rejection. The app build compiles and links the standalone shader into
+  `default.metallib`. The opt-in MFF gate also passes both supplied 257-channel,
+  1 kHz recordings in 119.729 seconds through the complete bounded LAVI/WTPL/
+  burst validation chain without copying or persisting participant waveforms.
 
 
 ---
