@@ -4,7 +4,7 @@
 Run with the MNE env:
     /Users/molfesepj/micromamba/envs/mne/bin/python Tools/forward-compare/make_forward_fixtures.py
 
-EVA Resolve no longer builds BEMs (EVA_RESOLVE2.md R3, 2026-09-06); it imports a
+EVA Resolve no longer builds BEMs (ROADMAP.md Source & Forward Modeling, R3, 2026-09-06); it imports a
 finished head model from MNE-Python or OpenMEEG and evaluates the forward field
 itself.  This script produces the reference the Swift side is measured against:
 the *same* geometry, electrodes and dipoles, with the gain matrix computed by

@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths:
       - "docs/manual/**"
+      - "docs/design/**"
+      - "ROADMAP.md"
+      - "ROADMAP_COMPLETE.md"
+      - "scripts/sync-planning-docs.py"
       - "mkdocs.yml"
       - "requirements-docs.txt"
       - ".github/workflows/docs.yml"
@@ -29,6 +33,8 @@ jobs:
           python-version: "3.12"
       - name: Install documentation dependencies
         run: pip install -r requirements-docs.txt
+      - name: Sync planning documents into the docs tree
+        run: python3 scripts/sync-planning-docs.py
       - name: Build documentation
         run: mkdocs build --strict
       - uses: actions/upload-pages-artifact@v3

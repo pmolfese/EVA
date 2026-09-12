@@ -246,6 +246,15 @@ extension WaveformView {
                 viewModel: rhythmicityExplorer,
                 packageName: recording.packageName,
                 signal: continuousSignal,
+                visibleSampleRange: rhythmicityVisibleSampleRange(in: continuousSignal),
+                channelSets: ChannelSetStore.shared.allSets,
+                artifactSources: eegArtifactRejectionSources(),
+                sensorLayout: recording.sensorLayout,
+                onUseInTimeFrequency: {
+                    epoching.tfBandSource = .rhythmicityExplorer
+                    epoching.averagedDisplayMode = .timeFrequency
+                    rhythmicityExplorer.showsSheet = false
+                },
                 onClose: { rhythmicityExplorer.showsSheet = false }
             )
 
@@ -298,5 +307,12 @@ extension WaveformView {
                 }
             )
         }
+    }
+
+    private func rhythmicityVisibleSampleRange(in signal: MFFSignalData) -> ClosedRange<Int>? {
+        guard signal.data.first?.isEmpty == false else { return nil }
+        let lower = sampleIndex(forContentX: visibleHorizontalRange.lowerBound, in: signal)
+        let upper = sampleIndex(forContentX: visibleHorizontalRange.upperBound, in: signal)
+        return min(lower, upper)...max(lower, upper)
     }
 }

@@ -319,6 +319,9 @@ final class EpochingViewModel {
     var tfCyclesLow: Double = 3
     var tfCyclesHigh: Double = 10
     var tfBaselineMethod: TFBaselineMethod = .decibel
+    /// Session-only ROI/overlay source. Selecting Rhythmicity Explorer never
+    /// writes the user's saved ProcessingDefaults bands.
+    var tfBandSource: TimeFrequencyBandSource = .evaDefaults
     /// Multitaper time-bandwidth product (TF-2 multitaper step).
     var tfTimeBandwidth: Double = 4
 

@@ -2,7 +2,7 @@
 //  BEMImportTests.swift
 //  EVATests
 //
-//  Importing a finished BEM head model (EVA_RESOLVE2.md R3.1/R3.2): geometry
+//  Importing a finished BEM head model (ROADMAP.md Source & Forward Modeling, R3.1/R3.2): geometry
 //  from any file MNE or OpenMEEG writes, the quality gates that stand between an
 //  imported model and a lead field, and the solution matrix itself.
 //

@@ -22,9 +22,13 @@ import UniformTypeIdentifiers
 
 struct TimeFrequencyView: View {
     let signal: MFFSignalData
+    /// Revision of the processed recording that produced the epochs. Kept
+    /// separate because the segmented signal can carry its own derived token.
+    let recordingSourceRevision: String
     let segments: [EpochSegment]
     let layout: SensorLayout?
     @Bindable var epoching: EpochingViewModel
+    @Bindable var rhythmicity: RhythmicityExplorerViewModel
 
     @State private var render: TFRender?
     @State private var isComputing = false
@@ -87,7 +91,7 @@ struct TimeFrequencyView: View {
             cyclesLow: epoching.tfCyclesLow,
             cyclesHigh: epoching.tfCyclesHigh,
             baseline: epoching.tfBaselineMethod,
-            signalToken: "\(signal.signalURL.path)#\(signal.samplingRate)#\(signal.data.count)",
+            signalToken: "\(signal.signalURL.path)#\(signal.dataRevision.uuidString)#\(signal.samplingRate)#\(signal.data.count)",
             segmentCount: segments.count
         )
     }
@@ -115,6 +119,16 @@ struct TimeFrequencyView: View {
         epoching.tfConditionA ?? categories.first
     }
 
+    private var bandResolution: TimeFrequencyBandResolution {
+        TimeFrequencyBandResolution.resolve(
+            source: epoching.tfBandSource,
+            userPreferences: ProcessingDefaults.shared.timeFrequencyBands,
+            detectedBandSet: rhythmicity.detectedBandSetForTimeFrequency,
+            detectedBandSetIsStale: rhythmicity.detectedBandSetForTimeFrequencyIsStale ||
+                rhythmicity.detectedBandSetForTimeFrequency.map { $0.sourceRevision != recordingSourceRevision } == true
+        )
+    }
+
     var body: some View {
         Group {
             if categories.isEmpty {
@@ -137,7 +151,8 @@ struct TimeFrequencyView: View {
                     isBuilding: isBuildingOverview,
                     progress: overviewProgress,
                     progressStatus: overviewStatus,
-                    setupNeedsRebuild: overviewCache[overviewCacheKey] == nil
+                    setupNeedsRebuild: overviewCache[overviewCacheKey] == nil,
+                    bandResolution: bandResolution
                 )
             }
         }
@@ -174,7 +189,7 @@ struct TimeFrequencyView: View {
         VStack(spacing: 8) {
             header
             if let render, !render.grid.isEmpty {
-                TFHeatmap(render: render)
+                TFHeatmap(render: render, rhythmicityBands: bandResolution.detectedBandSet)
                     .overlay(alignment: .topTrailing) {
                         if isComputing { ProgressView().controlSize(.small).padding(8) }
                     }
@@ -209,6 +224,13 @@ struct TimeFrequencyView: View {
                 if let exportStatus {
                     Text(exportStatus).font(.caption2).foregroundStyle(.secondary)
                 }
+                Text(bandResolution.sourceDescription)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .help(bandResolution.detectedBandSet?.provenanceDescription ?? bandResolution.sourceDescription)
+                if let warning = bandResolution.warning {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
             }
             Spacer()
             if isExporting {
@@ -218,6 +240,7 @@ struct TimeFrequencyView: View {
                 Button("Full Map (NPY)…") { exportNPY() }
                     .disabled(effectiveConditionA == nil)
                 Button("Scalar CSV…") { exportScalarCSV() }
+                    .disabled(bandResolution.bands.isEmpty)
             } label: {
                 Label("Export", systemImage: "square.and.arrow.up")
             }
@@ -536,8 +559,11 @@ struct TimeFrequencyView: View {
         let maxTimeMs = render?.timesMs.last ?? 0
         return TimeFrequencyExport.Context(
             plan: plan, method: epoching.tfMethod, timeBandwidth: epoching.tfTimeBandwidth,
-            powerMode: epoching.tfPowerMode, baselineMethod: epoching.tfBaselineMethod, bands: ProcessingDefaults.shared.timeFrequencyBands,
-            windows: TimeFrequencyExport.defaultWindows(maxTimeMs: maxTimeMs)
+            powerMode: epoching.tfPowerMode, baselineMethod: epoching.tfBaselineMethod,
+            bands: bandResolution.bands,
+            windows: TimeFrequencyExport.defaultWindows(maxTimeMs: maxTimeMs),
+            bandSource: bandResolution.source,
+            detectedBandSet: bandResolution.detectedBandSet
         )
     }
 

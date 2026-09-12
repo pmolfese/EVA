@@ -38,6 +38,8 @@ nonisolated enum TimeFrequencyExport {
         var baselineMethod: TFBaselineMethod
         var bands: [EEGFrequencyBand]
         var windows: [Window]
+        var bandSource: TimeFrequencyBandSource = .userPreferences
+        var detectedBandSet: DetectedRhythmicityBandSet? = nil
     }
 
     /// Per-channel maps for one condition, plus the shared axes.
@@ -278,7 +280,7 @@ nonisolated enum TimeFrequencyExport {
 
     /// JSON sidecar with axes and parameters (NPY carries no metadata).
     static func sidecarJSON(_ maps: ConditionMaps, measure: EpochingViewModel.TFMeasure, context: Context) -> Data {
-        let object: [String: Any] = [
+        var object: [String: Any] = [
             "measure": measure == .power ? "ersp" : "itpc",
             "unit": measure == .power ? context.baselineMethod.rawValue : "itpc",
             "condition": maps.condition,
@@ -293,6 +295,7 @@ nonisolated enum TimeFrequencyExport {
             "frequenciesHz": maps.frequenciesHz,
             "timesMs": maps.timesMs,
         ]
+        object["bandSource"] = bandSourceJSON(context)
         return (try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])) ?? Data()
     }
 
@@ -318,6 +321,26 @@ nonisolated enum TimeFrequencyExport {
         summary("freq_min_hz", clean(context.plan.frequenciesHz.first ?? 0))
         summary("freq_max_hz", clean(context.plan.frequenciesHz.last ?? 0))
         summary("freq_bins", context.plan.frequenciesHz.count)
+        summary("band_source", context.bandSource.rawValue)
+        if let set = context.detectedBandSet {
+            summary("band_source_recording", set.recordingDisplayName)
+            summary("band_source_revision", set.sourceRevision)
+            summary("band_source_channel", "\(set.sourceChannelName) [\(set.sourceChannelIndex + 1)]")
+            summary("band_source_scope", set.channelScope.rawValue)
+            summary("band_source_selection", set.dataSelection.dataSelection.rawValue)
+            summary("band_source_preset", set.configuration.presetID)
+            summary("band_source_method_version", set.methodVersion)
+            summary("band_source_created_at", set.createdAt.ISO8601Format())
+            for (index, band) in set.displayBands.enumerated() {
+                let prefix = "band_\(index + 1)"
+                summary("\(prefix)_name", band.name)
+                summary("\(prefix)_low_hz", clean(band.lowHz))
+                summary("\(prefix)_high_hz", clean(band.highHz))
+                summary("\(prefix)_peak_hz", clean(band.peakHz))
+                summary("\(prefix)_direction", band.direction.rawValue)
+                summary("\(prefix)_significant", band.isSignificant.map(String.init) ?? "not_computed")
+            }
+        }
 
         for maps in conditions {
             for band in context.bands {
@@ -370,6 +393,37 @@ nonisolated enum TimeFrequencyExport {
             return "\"" + field.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         }
         return field
+    }
+
+    private static func bandSourceJSON(_ context: Context) -> [String: Any] {
+        var object: [String: Any] = [
+            "source": context.bandSource.rawValue,
+            "bands": context.bands.map { ["name": $0.name, "lowHz": $0.lowHz, "highHz": $0.highHz] },
+        ]
+        if let set = context.detectedBandSet {
+            object["recordingIdentity"] = set.recordingIdentity
+            object["recordingDisplayName"] = set.recordingDisplayName
+            object["sourceRevision"] = set.sourceRevision
+            object["channelScope"] = set.channelScope.rawValue
+            object["sourceChannelIndex"] = set.sourceChannelIndex
+            object["sourceChannelName"] = set.sourceChannelName
+            object["dataSelection"] = set.dataSelection.dataSelection.rawValue
+            object["presetID"] = set.configuration.presetID
+            object["methodVersion"] = set.methodVersion
+            object["createdAt"] = ISO8601DateFormatter().string(from: set.createdAt)
+            object["abbaBands"] = set.displayBands.map { band -> [String: Any] in
+                var item: [String: Any] = [
+                    "name": band.name,
+                    "lowHz": band.lowHz,
+                    "highHz": band.highHz,
+                    "peakHz": band.peakHz,
+                    "direction": band.direction.rawValue,
+                ]
+                if let isSignificant = band.isSignificant { item["isSignificant"] = isSignificant }
+                return item
+            }
+        }
+        return object
     }
 
     /// Default ROI windows for the scalar CSV, clipped to the available range.

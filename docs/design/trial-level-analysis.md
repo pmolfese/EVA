@@ -1,3 +1,28 @@
+# Trial-level analysis and the `.eva` package — design reference
+
+> **Unbuilt, and the name moved.** This is the original (early 2026) conception
+> of "EVA Resolve": a companion app for trial-level ERP analysis with RIDE as
+> its flagship method, fed by a native `.eva` interchange package.
+>
+> **The app that shipped under that name does source analysis instead** — head
+> models, coregistration, dipole fitting, inverse imaging (`ROADMAP.md` § Source
+> & Forward Modeling). The handoff it uses is an averaged `.mff` plus a JSON
+> sidecar, not `.eva`.
+>
+> **Parts of it landed in EVA itself instead of a second app:**
+> `EVA/Trials/RIDEAnalyzer.swift` and `EVA/Trials/WoodyAlignmentAnalyzer.swift`
+> ship RIDE decomposition and Woody latency alignment inside EVA's Trials
+> subsystem, with tests. So the "native Swift RIDE plan" below is partly
+> delivered — what was never built is the separate app, the `.eva` package, and
+> the batch/behavioural-regression layer around it.
+>
+> Nothing further here is scheduled. It is kept because the RIDE port plan, the
+> validation ladder, and the `.eva` package shape are still the design anyone
+> would start from — under a different product name. Tracked as **TL-1** in
+> `ROADMAP.md` § Epoching, Averaging & Trial-wise.
+
+---
+
 # EVA Resolve Planning Notes
 
 ## Working Name

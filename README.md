@@ -132,6 +132,40 @@ EVA is an Xcode macOS project.
 xcodebuild -project EVA.xcodeproj -scheme EVA -destination platform=macOS build
 ```
 
+### Planning documents
+
+- **[`ROADMAP.md`](ROADMAP.md)** — everything left to do, by subsystem. Decides priority.
+- **[`ROADMAP_COMPLETE.md`](ROADMAP_COMPLETE.md)** — everything shipped, under the same section headings.
+- **[`docs/design/`](docs/design/README.md)** — method and file-format references (equations, contracts, licence surveys). Never status.
+
+All of the above is also published as the **Development** tab of the
+documentation site, so the roadmap, the completed record, and the design
+references are searchable alongside the user manual.
+
+### Building the documentation
+
+The site is MkDocs + Material. `docs_dir` is `docs/manual`, and the root
+planning files are mirrored into it at build time by
+`scripts/sync-planning-docs.py` — the root files stay the only source of truth,
+and the generated copies under `docs/manual/development/` are git-ignored.
+
+```bash
+pip install -r requirements-docs.txt
+python3 scripts/sync-planning-docs.py   # mirror ROADMAP/design into docs_dir
+mkdocs serve                            # live preview at 127.0.0.1:8000/EVA/
+```
+
+Build the way CI does, treating warnings as errors:
+
+```bash
+python3 scripts/sync-planning-docs.py && mkdocs build --strict
+```
+
+`python3 scripts/sync-planning-docs.py --check` reports whether the mirrored
+copies are current without writing anything. `.github/workflows/docs.yml` runs
+the sync and then `mkdocs build --strict`, deploying to GitHub Pages on pushes
+to `main`.
+
 EVA is a public work of the United States Government under 17 U.S.C. § 105. Some reader behavior and format details were implemented with reference to MNE-Python and related public documentation; see source comments and third-party notices.
 
 The authors of EVA are domain experts in EEG/ERP and other neuroimaging techniques with *decent* programming chops.  However, the codebase stems from years of C, C++, Objective-C tools written by P. Molfese, and as such was translated, improved, and implemented with a combination of human and LLM skills. The code has been used internally for months and iterated on by the authors/developers before we published it to GitHub, so we are reasonably confident in the correctness of the systems. 

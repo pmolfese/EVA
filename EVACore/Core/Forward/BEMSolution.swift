@@ -9,7 +9,7 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  An imported BEM *solution* (EVA_RESOLVE2.md R3.2): the geometry plus the dense
+//  An imported BEM *solution* (ROADMAP.md Source & Forward Modeling, R3.2): the geometry plus the dense
 //  potential-solution matrix MNE computes with `make_bem_solution`. This is what
 //  makes importing worth doing — with the solution in hand EVA can evaluate a
 //  forward field for *any* dipole, not just the source space someone else chose

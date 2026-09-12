@@ -1,6 +1,6 @@
 # Method Comparison
 
-`compare-methods.sh` runs every correction method EVA offers over the same
+`scripts/compare-methods.sh` runs every correction method EVA offers over the same
 simulated recordings and emits a table saying how each one did — mean ± SD over
 several seeds, with the difference between any two methods measured on the
 *same* recording.
@@ -21,10 +21,10 @@ against the same truth.
 ## Running it
 
 ```bash
-./compare-methods.sh
+scripts/compare-methods.sh
 ```
 
-From the repository root. The script builds `eva-simulate` if it is missing,
+Runnable from any directory. The script builds `eva-simulate` if it is missing,
 builds EVA for testing, runs the matrix, and copies the results into
 `.comparison/` at the repository root.
 
@@ -34,8 +34,8 @@ that: generated recordings are reused, because the generator is deterministic in
 its seed.
 
 ```bash
-EVA_COMPARISON_REGENERATE=1 ./compare-methods.sh   # regenerate the recordings
-./compare-methods.sh path/to/my-matrix.json        # run a different matrix
+EVA_COMPARISON_REGENERATE=1 scripts/compare-methods.sh   # regenerate the recordings
+scripts/compare-methods.sh path/to/my-matrix.json        # run a different matrix
 ```
 
 !!! note "Why a script rather than a plain test run"

@@ -212,6 +212,7 @@ nonisolated enum LAVIEngine {
             configuration: configuration,
             source: input.source,
             processingProvenance: input.processingProvenance,
+            samplingRateHz: input.samplingRate,
             channels: channelResults,
             warnings: allWarnings
         )
