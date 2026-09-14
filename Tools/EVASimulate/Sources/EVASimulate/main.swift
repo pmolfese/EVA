@@ -99,6 +99,13 @@ func usage() -> String {
     Usage:
       eva-simulate generate [--output <dir>] [--write-config <json>] [model options]
       eva-simulate score --truth <clean.mff> --corrected <file.mff> [options]
+      eva-simulate score-cleaning --clean <clean.mff> --noisy <noisy.mff>
+               --corrected <file.mff> [--label <name>] [--json <path>]
+      eva-simulate evaluate-retention [--seeds <n>] [--blinks <per-min>]
+               [--erp-trials <n>] [--output <csv>]
+      eva-simulate score-mixing --true-mixing <A.json> --unmixing <W.json>
+      eva-simulate score-preservation --clean <clean.mff> --corrected <file.mff>
+               --transients <truth.json>
       eva-simulate score-sources --truth <truth.json> [source options]
       eva-simulate score-events --truth <truth.json> --detected <json-or-mff> --type <event>
       eva-simulate score-erp --truth <components.json> --estimated <components.json>
@@ -109,7 +116,8 @@ func usage() -> String {
                    [--correction-skull-ratio <r>] [--correction-head-center <x,y,z>]
                    [--correction-electrode-jitter <deg>] [model options]
       eva-simulate evaluate-surrogate-grid --axis <name> --values <a,b,c>
-                   [--output <csv>] [seeds/base options]
+                   [--pattern-search iterative|paper] [--output <csv>]
+                   [seeds/base options]
       eva-simulate selftest
 
     generate — writes <dir>/<prefix>_clean.mff, <dir>/<prefix>_noisy.mff,
@@ -156,6 +164,10 @@ func usage() -> String {
                                 generators. channelIndex weights each channel by
                                 its INDEX and is rank one; generators places four
                                 physical sources with real topographies.
+        --bcg-generators <n>        Active BCG generators, 1-4 (generators model
+                                    only; default 4). Sets the artifact's spatial
+                                    rank — the number of components an OBS-style
+                                    correction has to keep.
     --bcg-field-strength <T>    Static field for the generator model (default 3).
     --bcg-morphology-jitter <f> Per-generator beat-to-beat weight SD (default
                                 0.20). Zero fixes the composite morphology.
@@ -184,6 +196,13 @@ func usage() -> String {
         --source-orientations <p>   radial, tangential, mixed, or free (default mixed).
         --lead-field-terms <n>      Spherical-harmonic terms (default 100).
         --source-correlation <r>    Correlate S001/S002 at Pearson r (-0.99...0.99).
+        --source-burstiness <f>     Make dipole sources non-Gaussian/bursty, 0-1
+                                    (0 = the Gaussian paper model). Needed for
+                                    honest ICA / BSS-CCA evaluation: ICA cannot
+                                    separate Gaussian sources. Band-preserving and
+                                    RMS-preserving. Dipole model only.
+        --source-burst-seconds <s>  Burst timescale for --source-burstiness
+                                    (default 0.5).
         --near-source-separation <deg>  Put S002 this many degrees from S001.
         --source-motion <deg>       Rotate S001 by this angle during the run.
         --source-motion-start <f>   Motion start as recording fraction (default 0.45).
@@ -230,6 +249,12 @@ func usage() -> String {
         --erp-template-rate <hz>    Sampling rate of the measured ERP waveform.
 
       Ocular artifacts (off by default — the paper's model has none)
+        --brain-transients <n>      Sharp BRAIN transients per minute (K-complexes,
+                                    spindles, sharp waves) added to the clean EEG.
+                                    Not artifacts — a cleaner must preserve them.
+                                    Pair with --write-transients and score with
+                                    score-preservation. Default off.
+        --brain-transient-amplitude <uv>  Peak at the strongest channel (default 150).
         --blinks <per-min>          Blink rate; 12-20 is a resting adult.
         --blink-amplitude <uv>      Peak amplitude at Fp1/Fp2 (default 100).
         --eye-movements <per-min>   Saccade rate.
@@ -241,6 +266,10 @@ func usage() -> String {
         --no-emg                    Disable EMG loaded from a scenario.
         --emg <bursts-per-min>      Mean burst rate (default 8 when enabled).
         --emg-amplitude <uv>        RMS at the strongest electrode (default 50).
+        --emg-autocorrelation <r>   AR-1 coloring of the EMG carrier, 0-0.99
+                                    (default off). Raises the carrier's
+                                    autocorrelation toward brain-like — the
+                                    stressor for BSS-CCA muscle separation.
         --emg-duration <s>          Mean burst duration (default 0.75).
         --emg-low <hz>              Carrier low edge (default 20).
         --emg-high <hz>             Carrier high edge (default 200).
@@ -351,7 +380,13 @@ func usage() -> String {
                                     with coordinates.xml or another MFF package.
         --assume-standard-montage  Explicitly allow the built-in montage when
                                     no valid coordinates.xml is available.
-        --pattern-search <mode>     paper (default) or iterative.
+        --pattern-search <mode>     How the BCG artifact template is discovered:
+                                    iterative (default) refines the template from
+                                    the average of all accepted beats and is what
+                                    the EVA app uses; paper reproduces Rusiniak
+                                    et al. (2022) from a single representative
+                                    beat and is a comparison arm, not the shipped
+                                    method. Pass paper only for paper-parity runs.
         --representative-beat <n>   Optional 1-based candidate beat selected for
                                     paper mode; otherwise median-energy is used.
         --report <json>             Write filter construction and provenance.
@@ -365,7 +400,16 @@ func usage() -> String {
                                     than the truth (SI-4 head-model mismatch):
                                     classic-3shell, standard-3shell, rush-3shell,
                                     high-3shell, or 4shell. Omit for a matched head.
-        --pattern-search <mode>     paper (default) or iterative.
+        --pattern-search <mode>     iterative (default) or paper. iterative
+                                    refines the template from the average of
+                                    accepted beats — the mode the EVA app ships
+                                    and the one these sweeps should use. paper
+                                    uses one representative beat to reproduce
+                                    Rusiniak et al. (2022); at these settings it
+                                    accepts few beats and can land below
+                                    uncorrected, a comparison-arm artifact, not
+                                    an operator bug. See the manual: "Operating
+                                    envelope of PCA-S".
         --representative-beat <n>   Optional 1-based paper-mode candidate beat.
         --with-erp                  Report accepted trials, ERP SNR, peak errors,
                                     and explained variance against clean truth.
@@ -381,6 +425,68 @@ func usage() -> String {
         --pad-seconds <s>           Ignore this much at each end (default 2).
         --csv <path>                Also write the per-band table as CSV.
         --json <path>               Also write the full result as JSON.
+
+    score-cleaning — calibrate a cleaning step's quality bands
+
+        Correlates the run-time metric a cleaning step can compute WITHOUT truth
+        (removed-variance fraction) against the truth-based residual error and
+        SNR, so a Good/Watch/Poor band can be set on the run-time number. This is
+        the per-method calibration tool the run-grade work needs: removed variance
+        is not a quality score on its own, so this says what value of it
+        corresponds to a good vs an over-subtracted result, for THIS method.
+
+        --clean <clean.mff>         Ground-truth recording from `generate`. Required.
+        --noisy <noisy.mff>         The uncorrected input to the correction. Required.
+        --corrected <file.mff>      The recording after correction. Required.
+        --label <name>              Name for this run in the output.
+        --pad-seconds <s>           Ignore this much at each end (default 2).
+        --json <path>               Also write the full result as JSON.
+
+        Reports: removed_variance_fraction (run-time, no truth), residual_error_
+        fraction and corrected/uncorrected SNR (truth), artifact_reduction_fraction
+        (share of the artifact's energy actually removed), and spectral distortion.
+
+    evaluate-retention — "can I save this data?" for blink cleaning
+
+        Scores an ERP experiment where blinks contaminate some trials, comparing
+        three strategies against the true ERP: reject contaminated trials,
+        keep every trial uncorrected, and clean-then-keep every trial (built-in
+        Gratton–Coles VEOG regression). Reports trials kept, ERP-average SNR, and
+        peak amplitude/latency bias — the currency being "more trials kept without
+        biasing the component."
+
+        --seeds <n>                 Repeated experiments (default 20).
+        --blinks <per-min>          Blink rate; higher = more contamination (default 20).
+        --erp-trials <n>            Oddball trial count (default 80).
+        --channels <n>              Channel count (default 32).
+        --rate <hz>                 Sampling rate (default 250).
+        --source-burstiness <f>     Non-Gaussian sources, 0-1 (default Gaussian).
+        --output <csv>              Also write the per-strategy table as CSV.
+
+    score-preservation — did a cleaner keep the real brain transients?
+
+        Scores how much of each seeded brain transient (K-complex, spindle, sharp
+        wave) survived cleaning, on its strongest channel: 1 = kept intact, 0 =
+        flattened, negative = distorted. This is the oversmoothing test for the
+        wavelet reducer and any transient-thresholding method. Generate with
+        --brain-transients and --write-transients.
+
+        --clean <clean.mff>         Ground-truth recording. Required.
+        --corrected <file.mff>      The recording after cleaning. Required.
+        --transients <truth.json>   From `generate --write-transients`. Required.
+        --json <path>               Also write per-type preservation as JSON.
+
+    score-mixing — ICA unmixing quality (Amari performance index)
+
+        Scores an estimated unmixing matrix against the true source mixing. The
+        Amari index is 0 for perfect separation (a permutation-and-scaling of the
+        identity) and grows as sources leak into each other. Pair with a dipole
+        recording generated at `--source-burstiness > 0` (ICA cannot separate
+        Gaussian sources) and export the true mixing with `generate --write-mixing`.
+
+        --true-mixing <A.json>      True mixing, channels × sources. Required.
+        --unmixing <W.json>         Estimated unmixing, sources × channels. Required.
+        --json <path>               Also write the index as JSON.
 
     score-sources — score inverse locations and/or recovered source signals
 
@@ -440,15 +546,17 @@ func usage() -> String {
 // MARK: - Config assembly
 
 let generateOptions: Set<String> = [
-    "config", "write-config", "output", "channels", "coordinates", "no-coordinates",
+    "config", "write-config", "write-mixing", "write-transients",
+    "brain-transients", "brain-transient-amplitude", "output", "channels", "coordinates", "no-coordinates",
     "rate", "duration", "seed",
     "with-gradient", "no-gradient", "tr", "slices", "gradient-amplitude", "gradient-amplitude-min",
     "clock-offset", "slow-modulation", "gradient-template", "gradient-template-rate",
-    "no-gradient-template", "with-bcg", "no-bcg", "bcg-amplitude", "bcg-model", "bcg-field-strength",
+    "no-gradient-template", "with-bcg", "no-bcg", "bcg-amplitude", "bcg-model", "bcg-generators", "bcg-field-strength",
     "bcg-morphology-jitter", "bcg-generator-scales", "qrs-jitter", "heart-rate-min", "heart-rate-max",
     "hrv", "respiration",
     "alpha-low", "alpha-high", "eeg-std", "eeg-model", "sources", "source-depth",
-    "source-orientations", "lead-field-terms", "source-correlation", "reference",
+    "source-orientations", "lead-field-terms", "source-correlation",
+    "source-burstiness", "source-burst-seconds", "reference",
     "near-source-separation", "source-motion", "source-motion-start",
     "source-motion-transition", "write-sources", "spatial-model", "spatial-smoothing",
     "with-nonstationarity", "no-nonstationarity", "alpha-bursts",
@@ -468,7 +576,7 @@ let generateOptions: Set<String> = [
     "impedance-line-exponent",
     "prefix", "pre-scan", "post-scan",
     "blinks", "blink-amplitude", "eye-movements", "eye-movement-amplitude", "ocular-model",
-    "with-emg", "no-emg", "emg", "emg-amplitude", "emg-duration", "emg-low", "emg-high",
+    "with-emg", "no-emg", "emg", "emg-amplitude", "emg-duration", "emg-autocorrelation", "emg-low", "emg-high",
     "chewing", "chewing-amplitude", "chewing-duration", "chewing-cycle", "no-chewing",
     "swallowing", "swallowing-amplitude", "swallowing-duration", "no-swallowing",
     "cable-movement", "cable-amplitude", "cable-duration", "no-cable-movement",
@@ -701,6 +809,12 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
         }
         config.bcgSpatialModel = model
     }
+    if let value = try arguments.int("bcg-generators") {
+        guard (1...4).contains(value) else {
+            throw SimulateError.usage("--bcg-generators must be 1-4")
+        }
+        config.bcgActiveGeneratorCount = value
+    }
     if let value = try arguments.double("bcg-field-strength") {
         guard value > 0 else {
             throw SimulateError.usage("--bcg-field-strength must be positive")
@@ -759,6 +873,16 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.int("lead-field-terms") { config.leadFieldTerms = value }
     if let value = try arguments.double("source-correlation") {
         config.dipoleSourceCorrelation = value
+    }
+    if let value = try arguments.double("source-burstiness") {
+        var model = config.nonGaussianSources ?? .default
+        model.burstiness = value
+        config.nonGaussianSources = model
+    }
+    if let value = try arguments.double("source-burst-seconds") {
+        var model = config.nonGaussianSources ?? .default
+        model.burstSeconds = value
+        config.nonGaussianSources = model
     }
     if let value = try arguments.double("near-source-separation") {
         config.dipoleNearPairSeparationDegrees = value
@@ -849,6 +973,16 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("pre-scan") { config.preScanSeconds = value }
     if let value = try arguments.double("post-scan") { config.postScanSeconds = value }
 
+    if let value = try arguments.double("brain-transients") {
+        var model = config.brainTransients ?? .default
+        model.ratePerMinute = value
+        config.brainTransients = model
+    }
+    if let value = try arguments.double("brain-transient-amplitude") {
+        var model = config.brainTransients ?? .default
+        model.amplitudeMicrovolts = value
+        config.brainTransients = model
+    }
     if let value = try arguments.double("blinks") { config.blinksPerMinute = value }
     if let value = try arguments.double("blink-amplitude") { config.blinkAmplitudeMicrovolts = value }
     if let value = try arguments.double("eye-movements") { config.saccadesPerMinute = value }
@@ -872,6 +1006,13 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     }
     if let value = try arguments.double("emg-duration") {
         emg.burstDurationSeconds = value
+        emgChanged = true
+    }
+    if let value = try arguments.double("emg-autocorrelation") {
+        guard (0...0.99).contains(value) else {
+            throw SimulateError.usage("--emg-autocorrelation must be 0-0.99")
+        }
+        emg.carrierAutocorrelation = value
         emgChanged = true
     }
     if let value = try arguments.double("emg-low") {
@@ -1436,6 +1577,12 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
 
     let erp = try ERPGenerator.inject(into: &eeg.channels, config: config, montage: montage)
 
+    // Sharp brain transients are brain, not artifact: inject before the clean/
+    // noisy split so they appear in both and a cleaner must preserve them.
+    var brainTransientSource = GaussianSource(seed: config.seed &+ 0x5851_F42D_4C95_7F2D)
+    let brainTransients = BrainTransientModel.inject(
+        into: &eeg.channels, config: config, montage: montage, source: &brainTransientSource)
+
     var noisy = eeg.channels
 
     // Coupled impedance must exist before sample noise is generated. It is a
@@ -1767,6 +1914,31 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
             : "+x right, +y anterior, +z vertex; origin at the head-model centre; millimetres"
     )
     try SimulationWriter.writeTruth(truth, to: truthURL)
+
+    // The true source mixing (lead field, channels × sources), for scoring an
+    // ICA unmixing with `score-mixing`. Dipole model only.
+    if let mixingPath = arguments.string("write-mixing") {
+        guard let sourceSpace = eeg.sourceSpace else {
+            throw SimulateError.usage("--write-mixing needs the dipole model (--eeg-model dipole)")
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted]
+        try encoder.encode(sourceSpace.leadField.matrixMicrovoltsPerNanoampereMeter)
+            .write(to: URL(fileURLWithPath: mixingPath))
+        print("Wrote \(mixingPath)")
+    }
+
+    // Sharp brain-transient truth, for `score-preservation` to check whether a
+    // cleaner kept the K-complexes, spindles and sharp waves it should have.
+    if let transientsPath = arguments.string("write-transients") {
+        guard let brainTransients else {
+            throw SimulateError.usage("--write-transients needs --brain-transients <per-min>")
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(brainTransients.episodes).write(to: URL(fileURLWithPath: transientsPath))
+        print("Wrote \(transientsPath)")
+    }
 
     // The uncorrected recording's own score, which every correction has to beat
     // to have been worth running.
@@ -2215,7 +2387,7 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
     let regionalCount = try arguments.int("sources") ?? 29
     let componentCount = try arguments.int("components") ?? 4
     let regularization = try arguments.double("brain-regularization") ?? 0.02
-    let patternSearchRaw = arguments.string("pattern-search") ?? "paper"
+    let patternSearchRaw = arguments.string("pattern-search") ?? "iterative"
     guard let patternSearchMode = ArtifactPatternSearchMode(rawValue: patternSearchRaw) else {
         throw SimulateError.usage("--pattern-search expects paper or iterative")
     }
@@ -2713,6 +2885,11 @@ struct SurrogateGridMetrics {
     var removedVariance: [Double] = []
     var acceptedBeatFraction: [Double] = []
     var nearestSourceMm: [Double] = []
+    /// Conditioning indicator of the regularized brain system: the squared ratio
+    /// of the largest to smallest Cholesky pivot, a lower bound on the true
+    /// condition number that the shipped operator already computes. SI-4 Track 3
+    /// uses it to calibrate an electrode/co-registration guard.
+    var conditionIndicator: [Double] = []
 }
 
 func evaluateSurrogateCore(
@@ -2747,6 +2924,12 @@ func evaluateSurrogateCore(
         let op = try SurrogateSeparation.sourceInformedOperator(
             brain: brain, artifactTopographies: Array(components.topographies.prefix(componentCount)),
             brainRegularization: regularization)
+        let minPivot = op.diagnostics.minimumCholeskyDiagonal
+        let maxPivot = op.diagnostics.maximumCholeskyDiagonal
+        if minPivot > 0, maxPivot.isFinite {
+            let ratio = maxPivot / minPivot
+            metrics.conditionIndicator.append(ratio * ratio)
+        }
         let output = try SourceInformedSeparation.apply(op, to: noisy)
 
         func snr(_ candidate: [[Double]]) -> Double {
@@ -2799,7 +2982,7 @@ func runEvaluateSurrogateGrid(_ arguments: Arguments) throws {
     let regionalCount = try arguments.int("sources") ?? 29
     let componentCount = try arguments.int("components") ?? 4
     let regularization = try arguments.double("brain-regularization") ?? 0.02
-    let patternSearchMode = ArtifactPatternSearchMode(rawValue: arguments.string("pattern-search") ?? "paper") ?? .paper
+    let patternSearchMode = ArtifactPatternSearchMode(rawValue: arguments.string("pattern-search") ?? "iterative") ?? .iterative
     let representative = try arguments.int("representative-beat").map { $0 - 1 }
     let baseOffset = try arguments.double("offset") ?? 0
     let namedCorrectionHead = try arguments.string("correction-head").map(resolveCorrectionHead)
@@ -2832,10 +3015,10 @@ func runEvaluateSurrogateGrid(_ arguments: Arguments) throws {
 
     var rows = ["axis,value,seeds,corrected_snr_mean,corrected_snr_sd,"
         + "uncorrected_snr_mean,uncorrected_snr_sd,clean_distortion_db_mean,clean_distortion_db_sd,"
-        + "removed_variance_mean,accepted_beat_fraction_mean,nearest_source_mm_mean"]
+        + "removed_variance_mean,accepted_beat_fraction_mean,nearest_source_mm_mean,condition_indicator_mean"]
     print("axis=\(axis), \(values.count) values, \(seedCount) seeds each")
-    print("  value    corrected SNR       uncorrected   distortion(dB)   removed  beats")
-    print("  ---------------------------------------------------------------------------")
+    print("  value    corrected SNR       uncorrected   distortion(dB)   removed  beats   condition")
+    print("  --------------------------------------------------------------------------------------")
 
     for value in values {
         var b = base
@@ -2884,11 +3067,13 @@ func runEvaluateSurrogateGrid(_ arguments: Arguments) throws {
             String(format: "%.6f", mean(m.removedVariance)),
             String(format: "%.6f", mean(m.acceptedBeatFraction)),
             String(format: "%.6f", mean(m.nearestSourceMm)),
+            String(format: "%.1f", mean(m.conditionIndicator)),
         ].joined(separator: ","))
-        print(String(format: "  %-7@  %5.2f ± %-5.2f     %5.2f         %6.2f          %4.2f    %3.0f%%",
+        print(String(format: "  %-7@  %5.2f ± %-5.2f     %5.2f         %6.2f          %4.2f    %3.0f%%   %9.1f",
             formatSweepValue(value) as NSString,
             mean(m.correctedSNR), sd(m.correctedSNR), mean(m.uncorrectedSNR),
-            mean(m.cleanDistortionDb), mean(m.removedVariance), 100 * mean(m.acceptedBeatFraction)))
+            mean(m.cleanDistortionDb), mean(m.removedVariance), 100 * mean(m.acceptedBeatFraction),
+            mean(m.conditionIndicator)))
     }
 
     let csv = rows.joined(separator: "\n") + "\n"
@@ -2951,7 +3136,7 @@ func runCorrect(_ arguments: Arguments) throws {
     let correlationThreshold = try arguments.double("correlation-threshold") ?? 0.6
     let lowHz = try arguments.double("low-hz") ?? 1
     let highHz = try arguments.double("high-hz") ?? 20
-    let patternSearchRaw = arguments.string("pattern-search") ?? "paper"
+    let patternSearchRaw = arguments.string("pattern-search") ?? "iterative"
     guard let patternSearchMode = ArtifactPatternSearchMode(rawValue: patternSearchRaw) else {
         throw SimulateError.usage("--pattern-search expects paper or iterative")
     }
@@ -3539,6 +3724,380 @@ func formatted(_ score: SourceRecoveryScore) -> String {
     return lines.joined(separator: "\n")
 }
 
+// MARK: - score-cleaning
+
+/// The calibration triangle for one cleaning run. `removedVarianceFraction` is
+/// the only number a live correction can compute without truth; the rest need
+/// the clean reference. Correlating them across many runs is how a Good/Watch/
+/// Poor band gets set on the run-time number, per method.
+struct CleaningScore: Codable, Sendable {
+    var label: String
+    /// var(noisy - corrected) / var(noisy). The run-time metric, no truth.
+    var removedVarianceFraction: Double
+    /// var(corrected - clean) / var(clean). What is still wrong after cleaning.
+    var residualErrorFraction: Double
+    /// 1 - var(corrected - clean) / var(noisy - clean): share of the artifact's
+    /// energy actually removed. 1 is perfect; 0 did nothing; negative made it
+    /// worse.
+    var artifactReductionFraction: Double
+    var correctedSNR: Double
+    var uncorrectedSNR: Double
+    var correctedSpectralDistortionDbRMS: Double
+}
+
+func scoreCleaningCore(
+    label: String, clean: [[Double]], noisy: [[Double]], corrected: [[Double]],
+    rate: Double, names: [String]?
+) -> CleaningScore {
+    func difference(_ a: [[Double]], _ b: [[Double]]) -> [[Double]] {
+        a.indices.map { channel in
+            let x = a[channel], y = b[channel]
+            let count = min(x.count, y.count)
+            return (0..<count).map { x[$0] - y[$0] }
+        }
+    }
+    func variance(_ x: [[Double]]) -> Double {
+        let sd = EEGGenerator.pooledStandardDeviation(x); return sd * sd
+    }
+    let noisyVar = variance(noisy)
+    let cleanVar = variance(clean)
+    let artifactVar = variance(difference(noisy, clean))
+    let residualVar = variance(difference(corrected, clean))
+    let removedVar = variance(difference(noisy, corrected))
+
+    let corrected2 = SNRMetrics.score(
+        label: label, clean: clean, corrected: corrected, samplingRate: rate, channelNames: names)
+    let uncorrected = SNRMetrics.score(
+        label: "uncorrected", clean: clean, corrected: noisy, samplingRate: rate, channelNames: names)
+
+    return CleaningScore(
+        label: label,
+        removedVarianceFraction: noisyVar > 0 ? removedVar / noisyVar : 0,
+        residualErrorFraction: cleanVar > 0 ? residualVar / cleanVar : 0,
+        artifactReductionFraction: artifactVar > 0 ? 1 - residualVar / artifactVar : 0,
+        correctedSNR: corrected2.broadbandSNR,
+        uncorrectedSNR: uncorrected.broadbandSNR,
+        correctedSpectralDistortionDbRMS: corrected2.spectralDistortionDbRMS)
+}
+
+func runScoreCleaning(_ arguments: Arguments) throws {
+    try arguments.validate(known: ["clean", "noisy", "corrected", "label", "pad-seconds", "json"])
+    guard let cleanPath = arguments.string("clean") else {
+        throw SimulateError.usage("score-cleaning needs --clean <clean.mff>")
+    }
+    guard let noisyPath = arguments.string("noisy") else {
+        throw SimulateError.usage("score-cleaning needs --noisy <noisy.mff>")
+    }
+    guard let correctedPath = arguments.string("corrected") else {
+        throw SimulateError.usage("score-cleaning needs --corrected <file.mff>")
+    }
+    let pad = try arguments.double("pad-seconds") ?? 2
+    let clean = try loadChannels(cleanPath, padSeconds: pad)
+    let noisy = try loadChannels(noisyPath, padSeconds: pad)
+    let corrected = try loadChannels(correctedPath, padSeconds: pad)
+    guard clean.channels.count == noisy.channels.count,
+          clean.channels.count == corrected.channels.count else {
+        throw SimulateError.io("channel counts differ across clean/noisy/corrected")
+    }
+    guard abs(clean.rate - noisy.rate) < 1e-6, abs(clean.rate - corrected.rate) < 1e-6 else {
+        throw SimulateError.io("sampling rates differ across clean/noisy/corrected")
+    }
+
+    let label = arguments.string("label") ?? URL(fileURLWithPath: correctedPath).lastPathComponent
+    let score = scoreCleaningCore(
+        label: label, clean: clean.channels, noisy: noisy.channels,
+        corrected: corrected.channels, rate: clean.rate, names: clean.names)
+
+    print("cleaning score — \(score.label)")
+    print("  ---------------------------------------------------------------")
+    print(String(format: "  removed variance fraction   %.4f   (run-time metric, no truth)", score.removedVarianceFraction))
+    print(String(format: "  residual error fraction     %.4f   (truth: what is still wrong)", score.residualErrorFraction))
+    print(String(format: "  artifact reduction fraction %.4f   (1 = perfect, <0 = worse)", score.artifactReductionFraction))
+    print(String(format: "  corrected SNR               %.3f   vs uncorrected %.3f", score.correctedSNR, score.uncorrectedSNR))
+    print(String(format: "  spectral distortion (dB)    %.2f", score.correctedSpectralDistortionDbRMS))
+
+    if let path = arguments.string("json") {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(
+            positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+        try encoder.encode(score).write(to: URL(fileURLWithPath: path))
+        print("\nWrote \(path)")
+    }
+}
+
+// MARK: - score-preservation (did a cleaner keep the real brain transients?)
+
+func runScorePreservation(_ arguments: Arguments) throws {
+    try arguments.validate(known: ["clean", "corrected", "transients", "json"])
+    guard let cleanPath = arguments.string("clean") else {
+        throw SimulateError.usage("score-preservation needs --clean <clean.mff>")
+    }
+    guard let correctedPath = arguments.string("corrected") else {
+        throw SimulateError.usage("score-preservation needs --corrected <file.mff>")
+    }
+    guard let transientsPath = arguments.string("transients") else {
+        throw SimulateError.usage("score-preservation needs --transients <truth.json> from generate --write-transients")
+    }
+    // No padding: transient onset times are absolute from t = 0.
+    let clean = try loadChannels(cleanPath, padSeconds: 0)
+    let corrected = try loadChannels(correctedPath, padSeconds: 0)
+    guard clean.channels.count == corrected.channels.count, abs(clean.rate - corrected.rate) < 1e-6 else {
+        throw SimulateError.io("clean and corrected differ in channel count or rate")
+    }
+    let episodes = try JSONDecoder().decode(
+        [BrainTransientTruth].self, from: Data(contentsOf: URL(fileURLWithPath: transientsPath)))
+    let rate = clean.rate
+
+    // Per-event: how much of the transient survived cleaning, on its strongest
+    // channel. 1 = preserved exactly, 0 = flattened, <0 = distorted past removal.
+    func variance(_ x: ArraySlice<Double>) -> Double {
+        guard !x.isEmpty else { return 0 }
+        let mean = x.reduce(0, +) / Double(x.count)
+        return x.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(x.count)
+    }
+    var byType: [String: [Double]] = [:]
+    for event in episodes {
+        let channel = event.strongestChannel
+        guard channel < clean.channels.count else { continue }
+        let start = Int((event.onsetSeconds * rate).rounded())
+        let end = min(clean.channels[channel].count, start + Int((event.durationSeconds * rate).rounded()))
+        guard start >= 0, end > start, end <= corrected.channels[channel].count else { continue }
+        let cleanWindow = clean.channels[channel][start..<end]
+        let correctedWindow = corrected.channels[channel][start..<end]
+        let errors = zip(cleanWindow, correctedWindow).map { $0 - $1 }[...]
+        let cleanVar = variance(cleanWindow)
+        let preserved = cleanVar > 1e-12 ? 1 - variance(errors) / cleanVar : 1
+        byType[event.type, default: []].append(preserved)
+    }
+
+    func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
+    print("brain-transient preservation — \(episodes.count) events")
+    print("  (1 = kept intact, 0 = flattened, <0 = distorted; a wavelet reducer that")
+    print("   oversmooths scores low, especially on the sharpest types)")
+    print("  ---------------------------------------------------------------")
+    var overall: [Double] = []
+    for type in byType.keys.sorted() {
+        let v = byType[type] ?? []
+        overall += v
+        print(String(format: "  %-12@  %5.3f   (%d events)", type as NSString, mean(v), v.count))
+    }
+    print(String(format: "  %-12@  %5.3f", "overall" as NSString, mean(overall)))
+
+    if let path = arguments.string("json") {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let payload = byType.mapValues { mean($0) }
+        try encoder.encode(payload).write(to: URL(fileURLWithPath: path))
+        print("\nWrote \(path)")
+    }
+}
+
+// MARK: - score-mixing (ICA unmixing quality)
+
+/// Amari performance index of an estimated unmixing against the true mixing.
+/// P = |W · A| (sources × sources); the index is 0 when P is a permutation-and-
+/// scaling of the identity (perfect separation) and grows as sources leak into
+/// each other. The standard two-sided form (Amari, Cichocki & Yang, 1996).
+func amariIndex(mixing: [[Double]], unmixing: [[Double]]) -> Double {
+    // mixing A: channels(m) × sources(n). unmixing W: sources(n) × channels(m).
+    let m = mixing.count
+    guard m > 0 else { return .infinity }
+    let n = mixing[0].count
+    guard unmixing.count == n, unmixing.allSatisfy({ $0.count == m }), n > 0 else { return .infinity }
+
+    // P = W A, n × n.
+    var product = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
+    for i in 0..<n {
+        for j in 0..<n {
+            var sum = 0.0
+            for k in 0..<m { sum += unmixing[i][k] * mixing[k][j] }
+            product[i][j] = abs(sum)
+        }
+    }
+    var rowTerm = 0.0
+    for i in 0..<n {
+        let rowMax = product[i].max() ?? 0
+        guard rowMax > 1e-30 else { continue }
+        rowTerm += product[i].reduce(0, +) / rowMax - 1
+    }
+    var colTerm = 0.0
+    for j in 0..<n {
+        var colSum = 0.0, colMax = 0.0
+        for i in 0..<n { colSum += product[i][j]; colMax = max(colMax, product[i][j]) }
+        guard colMax > 1e-30 else { continue }
+        colTerm += colSum / colMax - 1
+    }
+    return (rowTerm + colTerm) / (2 * Double(n))
+}
+
+func runScoreMixing(_ arguments: Arguments) throws {
+    try arguments.validate(known: ["true-mixing", "unmixing", "json"])
+    guard let mixingPath = arguments.string("true-mixing") else {
+        throw SimulateError.usage("score-mixing needs --true-mixing <A.json> (channels × sources)")
+    }
+    guard let unmixingPath = arguments.string("unmixing") else {
+        throw SimulateError.usage("score-mixing needs --unmixing <W.json> (sources × channels)")
+    }
+    func loadMatrix(_ path: String) throws -> [[Double]] {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        return try JSONDecoder().decode([[Double]].self, from: data)
+    }
+    let mixing = try loadMatrix(mixingPath)
+    let unmixing = try loadMatrix(unmixingPath)
+    let index = amariIndex(mixing: mixing, unmixing: unmixing)
+    print("ICA unmixing quality")
+    print("  ---------------------------------------------------------------")
+    print(String(format: "  Amari index   %.4f   (0 = perfect separation, higher = more source leakage)",
+                 index))
+    if let path = arguments.string("json") {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(["amariIndex": index]).write(to: URL(fileURLWithPath: path))
+        print("\nWrote \(path)")
+    }
+}
+
+// MARK: - evaluate-retention
+
+/// "Can I save this data?" — the user-facing question for blink cleaning. For an
+/// ERP experiment where blinks contaminate some trials, it compares three
+/// strategies against the true ERP (scored off the clean recording the same way):
+///   * reject       — drop contaminated trials, average the survivors.
+///   * keep-dirty   — average every trial uncorrected (blink bias).
+///   * clean & keep — correct then keep every trial (more trials, lower variance
+///                    IFF the correction didn't bias the component).
+/// The built-in correction is Gratton–Coles VEOG regression; the metric is the
+/// ERP-average SNR (cleanliness), the peak bias, and the trials kept.
+func runEvaluateRetention(_ arguments: Arguments) throws {
+    try arguments.validate(known: [
+        "seeds", "blinks", "erp-trials", "channels", "rate", "source-burstiness", "output"])
+    let seedCount = try arguments.int("seeds") ?? 20
+    guard seedCount > 0 else { throw SimulateError.usage("--seeds must be positive") }
+
+    var base = SimulationConfig.default
+    base.eegGenerationModel = .dipole
+    base.recordingReference = .average
+    base.gradientEnabled = false
+    base.bcgEnabled = false
+    base.channelCount = try arguments.int("channels") ?? 32
+    base.samplingRate = try arguments.double("rate") ?? 250
+    var erp = ERPConfig()
+    if let trials = try arguments.int("erp-trials") { erp.trialCount = trials }
+    base.erp = erp
+    base.blinksPerMinute = try arguments.double("blinks") ?? 20
+    if let value = try arguments.double("source-burstiness") {
+        base.nonGaussianSources = NonGaussianSourceModel(burstiness: value)
+    }
+    base.durationSeconds = erp.startSeconds + Double(erp.trialCount) * erp.interStimulusIntervalSeconds + 5
+
+    // Reject uses the paper's artifact thresholds; keep-dirty and clean-and-keep
+    // accept every trial, which is the whole point of correcting.
+    var acceptAll = ERPEvaluationThresholds.paper
+    acceptAll.peakToPeakMicrovolts = .infinity
+    acceptAll.gradientMicrovoltsPerSample = .infinity
+
+    struct Row { var accepted: [Double] = []; var snr: [Double] = []; var ampBias: [Double] = []; var latencyBias: [Double] = [] }
+    var reject = Row(), keepDirty = Row(), cleanKeep = Row()
+    var contaminated: [Double] = []
+    var completed = 0
+
+    for seedIndex in 0..<seedCount {
+        var config = base
+        config.seed = UInt64(seedIndex + 1)
+        let montage = Montage.standard(count: config.channelCount)
+
+        var eeg = try DipoleEEGGenerator.generate(config: config, montage: montage)
+        guard let erpInjection = try ERPGenerator.inject(into: &eeg.channels, config: config, montage: montage),
+              !erpInjection.componentSources.isEmpty else { continue }
+        var clean = eeg.channels
+        EEGReferencing.apply(.average, to: &clean)
+
+        var noisy = eeg.channels
+        var ocularSource = GaussianSource(seed: SimulationSeedStreams.ocular(base: config.seed))
+        let ocular = OcularArtifactModel.inject(into: &noisy, config: config, montage: montage, source: &ocularSource)
+        EEGReferencing.apply(.average, to: &noisy)
+
+        // Gratton–Coles: regress the VEOG out of every channel.
+        var veog = ocular.veog
+        let veogMean = veog.reduce(0, +) / Double(max(1, veog.count))
+        for index in veog.indices { veog[index] -= veogMean }
+        let veogVar = veog.reduce(0) { $0 + $1 * $1 }
+        var cleaned = noisy
+        if veogVar > 1e-12 {
+            for channel in cleaned.indices {
+                let count = min(cleaned[channel].count, veog.count)
+                var cov = 0.0
+                let chMean = cleaned[channel].prefix(count).reduce(0, +) / Double(max(1, count))
+                for i in 0..<count { cov += (cleaned[channel][i] - chMean) * veog[i] }
+                let beta = cov / veogVar
+                for i in 0..<count { cleaned[channel][i] -= beta * veog[i] }
+            }
+        }
+
+        let onsets = erpInjection.trials.map(\.onsetSeconds)
+        let conditions = erpInjection.trials.map(\.condition)
+        let topographies = erpInjection.componentSources.map(\.topography)
+        let nominal = erpInjection.componentSources.map(\.nominalPeakLatencySeconds).min() ?? 0.3
+        let fwhmStart = nominal - 0.02, fwhmEnd = nominal + 0.02
+        func evaluate(_ data: [[Double]], thresholds: ERPEvaluationThresholds) -> ERPEvaluationResult? {
+            ERPEvaluation.evaluate(
+                channels: data, samplingRate: config.samplingRate, onsets: onsets,
+                conditions: conditions, scoringCondition: "target", modelTopographies: topographies,
+                fwhmStartSeconds: fwhmStart, fwhmEndSeconds: fwhmEnd, thresholds: thresholds)
+        }
+        guard let truth = evaluate(clean, thresholds: acceptAll),
+              let rej = evaluate(noisy, thresholds: .paper),
+              let dirty = evaluate(noisy, thresholds: acceptAll),
+              let kept = evaluate(cleaned, thresholds: acceptAll) else { continue }
+
+        func record(_ r: ERPEvaluationResult, into row: inout Row) {
+            row.accepted.append(Double(r.acceptedTrials))
+            row.snr.append(r.signalToNoise)
+            row.ampBias.append(r.peakAmplitudeMicrovolts - truth.peakAmplitudeMicrovolts)
+            row.latencyBias.append((r.peakLatencySeconds - truth.peakLatencySeconds) * 1000)
+        }
+        record(rej, into: &reject); record(dirty, into: &keepDirty); record(kept, into: &cleanKeep)
+        contaminated.append(Double(dirty.candidateTrials - rej.acceptedTrials))
+        completed += 1
+    }
+
+    guard completed > 0 else { throw SimulateError.usage("no seeds produced a scorable ERP") }
+    func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
+    func sd(_ v: [Double]) -> Double {
+        guard v.count > 1 else { return 0 }
+        let m = mean(v); return (v.reduce(0.0) { $0 + ($1 - m) * ($1 - m) } / Double(v.count - 1)).squareRoot()
+    }
+    print("ERP trial-retention — \(completed) seeds, \(base.blinksPerMinute) blinks/min, target trials")
+    print("  ~\(String(format: "%.0f", mean(contaminated))) of \(base.erp?.trialCount ?? 0) trials contaminated by a blink")
+    print("  strategy       trials kept     avg SNR      peak bias (µV)   latency bias (ms)")
+    print("  --------------------------------------------------------------------------------")
+    func line(_ name: String, _ r: Row) {
+        print(String(format: "  %-13@  %5.1f          %5.2f        %+6.2f           %+6.1f",
+            name as NSString, mean(r.accepted), mean(r.snr), mean(r.ampBias), mean(r.latencyBias)))
+    }
+    line("reject", reject); line("keep-dirty", keepDirty); line("clean & keep", cleanKeep)
+    let trialsSaved = mean(cleanKeep.accepted) - mean(reject.accepted)
+    let snrGain = mean(cleanKeep.snr) - mean(reject.snr)
+    let biasCost = abs(mean(cleanKeep.ampBias)) - abs(mean(reject.ampBias))
+    print("")
+    print(String(format: "  clean-and-keep saved %.1f trials vs reject, SNR %+.2f, extra peak bias %+.2f µV.",
+        trialsSaved, snrGain, biasCost))
+    print("  Interpretation: keeping cleaned trials wins when it lifts SNR without adding peak bias.")
+
+    if let path = arguments.string("output") {
+        var rows = ["strategy,trials_kept_mean,snr_mean,snr_sd,peak_bias_uv_mean,peak_bias_uv_sd,latency_bias_ms_mean"]
+        func csvRow(_ name: String, _ r: Row) -> String {
+            [name, String(format: "%.3f", mean(r.accepted)), String(format: "%.4f", mean(r.snr)),
+             String(format: "%.4f", sd(r.snr)), String(format: "%.4f", mean(r.ampBias)),
+             String(format: "%.4f", sd(r.ampBias)), String(format: "%.4f", mean(r.latencyBias))].joined(separator: ",")
+        }
+        rows.append(csvRow("reject", reject)); rows.append(csvRow("keep-dirty", keepDirty)); rows.append(csvRow("clean-and-keep", cleanKeep))
+        try (rows.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        print("\nWrote \(path)")
+    }
+}
+
 func runSourceScore(_ arguments: Arguments) throws {
     try arguments.validate(known: ["truth", "estimated", "recovered", "pad-seconds", "json"])
     guard let truthPath = arguments.string("truth") else {
@@ -3748,6 +4307,14 @@ do {
         try runEvaluateSurrogateGrid(arguments)
     case "score":
         try runScore(arguments)
+    case "score-cleaning":
+        try runScoreCleaning(arguments)
+    case "evaluate-retention":
+        try runEvaluateRetention(arguments)
+    case "score-mixing":
+        try runScoreMixing(arguments)
+    case "score-preservation":
+        try runScorePreservation(arguments)
     case "score-sources":
         try runSourceScore(arguments)
     case "score-events":

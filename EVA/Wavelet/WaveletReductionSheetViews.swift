@@ -120,6 +120,7 @@ extension WaveformView {
         // Interpolated targets are reconstructed from cleaned donors after this
         // stage, so their original samples must not participate in OBS/SSP.
         let excludedChannels = channels.bad.union(channels.interpolated.keys)
+        let availableBandwidthHz = filter.output == nil ? nil : filter.lowPassCutoff
         let (progressContinuation, progressTask) = ProgressBridge.make { progress in
             artifactVM.cleaningProgress = progress
         }
@@ -132,7 +133,8 @@ extension WaveformView {
                     ArtifactCleaner.cleanedSignal(
                         from: signal,
                         artifacts: artifacts,
-                        excluding: excludedChannels
+                        excluding: excludedChannels,
+                        availableBandwidthHz: availableBandwidthHz
                     ) { progress in
                         progressContinuation.yield(progress)
                     }

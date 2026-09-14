@@ -19,6 +19,77 @@ When defining an artifact, consider:
 
 EVA includes several cleaning approaches, including regression, OBS, SSP/PCA, and averaging-based methods. Preview the result before applying a cleaning step.
 
+Threshold detection and ICA are independent. **Eye Blink** and **Eye Movement**
+can remain enabled while you run or review **ICA…**; applying an ICA removal
+automatically reruns the enabled threshold detectors on the updated signal.
+
+## Movement Artifact PCA (MAAC-3)
+
+Choose **Artifacts > Movement Artifact (PCA)…** to open the MAAC-3 movement
+detection sheet. Choose **Analyze Movement** to run temporal PCA separately
+within each analysis range, apply an oblique Promax rotation, and identify
+factors whose channel back-projection exceeds the configured peak-to-peak
+threshold (200 µV by default). Review the affected ranges, then choose **Add
+Movement Markers**. EVA adds one duration-bearing `MOV` marker per affected
+range and creates a **MAAC Movement** definition for **Clean Artifacts**.
+
+The default **Automatic** boundary mode uses stored epoch boundaries when the
+recording contains them. For continuous recordings it falls back to
+non-overlapping one-second windows, including a shorter final window. The
+detection sheet can force either mode and change the window length, threshold,
+Promax power, and maximum factor count. These settings are saved with the
+definition so its markers and later correction use the same configuration.
+
+Adding markers closes the detection sheet; it does not open or run **Clean
+Artifacts**. When you are ready, open **Clean Artifacts** yourself. The **MAAC
+Movement** row is already set to **MAAC-3 Movement PCA**. Applying it reruns the
+saved analysis and subtracts the selected movement factors while leaving bad
+and unselected channels unchanged. MAAC-3 is intentionally unavailable for
+averaged data.
+
+## Muscle Artifact BSS-CCA (MAAC-4)
+
+Choose **Artifacts > Muscle Artifact (BSS-CCA)…** to open MAAC-4's detection
+and review sheet. EVA separates sources by canonical correlation between the
+multichannel signal and its one-sample-delayed copy. Muscle-like sources have
+relatively low temporal autocorrelation and relatively high high-frequency
+power; no samples are changed during this analysis step.
+
+Automatic range selection uses stored epoch boundaries when present. Otherwise
+it uses 10-second continuous windows with 50% overlap and crossfades the removed
+contributions at window boundaries. The CCA operator is estimated near 250 Hz
+for efficiency, then applied to the native-rate samples. Bad, already
+interpolated, and unselected EEG channels are unchanged, and PNS channels are
+not part of the EEG matrix.
+
+Choose **Analyze Muscle** to review the suggestions. The descriptive progress
+panel reports the current CCA/spectral stage, ranges and samples completed,
+flagged and skipped ranges, component counts, throughput, and estimated time
+remaining. The default classifier marks a component when its mean 15–30 Hz
+power divided by its mean 1–15 Hz power is at least 1/7, following De Vos et
+al. You can edit the bands, ratio, analysis rate, and windowing.
+
+Each affected range appears in the review list. Use its scope button or the
+**Previous**, **Next**, and **Show in Waveform** controls to center and highlight
+the full interval, then check or uncheck its components. Overrides are stored
+by range and component, so applying or replaying the same definition is
+deterministic. If upstream ICA/ICLabel results exist, the panel shows its Muscle
+labels as a QC cross-check only; ICLabel never prevents or forces BSS-CCA
+removal.
+
+**Add Muscle Markers** adds duration-bearing `EMG` markers and a **MAAC Muscle**
+definition, then closes the detection sheet. It does not open or run **Clean
+Artifacts**. Open that sheet yourself when you are ready to preview and apply
+the saved BSS-CCA decisions.
+
+MAAC-4 requires an unaveraged signal whose available sampling bandwidth covers
+the configured EMG band. EVA refuses insufficient Nyquist bandwidth and warns
+when an active low-pass has already attenuated part of that band. In standalone
+Clean Artifacts use, definitions run in the order shown. EVA's full-MAAC
+ordering mode instead guarantees that movement correction runs before muscle
+correction; the future one-click MAAC preset will select that mode across the
+complete pipeline.
+
 Check whether:
 
 - The artifact is reduced.
@@ -130,6 +201,10 @@ The panel reports what each run fitted: how many beats were accepted, how many c
 ### References
 
 Dien, J. (2024). Multi-Algorithm Artifact Correction (MAAC) procedure part one: Algorithm and example. *Biological Psychology, 188*, 108775. https://doi.org/10.1016/j.biopsycho.2024.108775
+
+De Clercq, W., Vergult, A., Vanrumste, B., Van Paesschen, W., & Van Huffel, S. (2006). Canonical correlation analysis applied to remove muscle artifacts from the electroencephalogram. *IEEE Transactions on Biomedical Engineering, 53*(12), 2583-2587. https://doi.org/10.1109/TBME.2006.879459
+
+De Vos, M., Riès, S., Vanderperren, K., Vanrumste, B., Alario, F.-X., Van Huffel, S., & Burle, B. (2010). Removal of muscle artifacts from EEG recordings of spoken language production. *Neuroinformatics, 8*(2), 135-150. https://doi.org/10.1007/s12021-010-9071-0
 
 Semlitsch, H. V., Anderer, P., Schuster, P., & Presslich, O. (1986). A solution for reliable and valid reduction of ocular artifacts, applied to the P300 ERP. *Psychophysiology, 23*(6), 695-703. https://doi.org/10.1111/j.1469-8986.1986.tb00696.x
 

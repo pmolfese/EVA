@@ -1,0 +1,5 @@
+axis,value,seeds,corrected_snr_mean,corrected_snr_sd,uncorrected_snr_mean,uncorrected_snr_sd,clean_distortion_db_mean,clean_distortion_db_sd,removed_variance_mean,accepted_beat_fraction_mean,nearest_source_mm_mean
+correction-scalp-radius,0.08,30,2.079702,0.758668,1.255144,0.054120,14.302931,0.910890,0.569263,0.394363,16.905432
+correction-scalp-radius,0.09,30,2.079702,0.758668,1.255144,0.054120,14.302931,0.910890,0.569263,0.394363,15.552495
+correction-scalp-radius,0.1,30,2.079702,0.758668,1.255144,0.054120,14.302931,0.910890,0.569263,0.394363,13.798547
+correction-scalp-radius,0.11,30,2.079702,0.758668,1.255144,0.054120,14.302931,0.910890,0.569263,0.394363,12.718539

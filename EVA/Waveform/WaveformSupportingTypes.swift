@@ -1334,18 +1334,6 @@ enum ArtifactTemplateChannelScope: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-enum ArtifactDetectionMethod: String, CaseIterable, Identifiable {
-    case threshold = "Threshold"
-    case template = "Template"
-    case ica = "ICA"
-
-    var id: String { rawValue }
-
-    /// Methods the user can pick directly. `.template` is entered implicitly by
-    /// drawing a selection and defining a template, so it is not offered here.
-    static var selectableCases: [ArtifactDetectionMethod] { [.threshold, .ica] }
-}
-
 /// `nonisolated` so the pipeline layer can read it without a main-actor hop —
 /// `HistoryStepSummary` renders a recorded `segmentField` off the view.
 nonisolated enum PSASegmentField: String, CaseIterable, Identifiable {

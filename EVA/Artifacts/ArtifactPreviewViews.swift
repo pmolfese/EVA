@@ -1629,6 +1629,7 @@ struct ArtifactCleaningPreview: View {
     }
 
     private var previewHeight: CGFloat {
+        if artifact.isMovementPCADefinition || artifact.isMuscleBSSCCADefinition { return 190 }
         if artifact.isCorneoRetinalDefinition { return 390 }
         return artifact.topography != nil && layout != nil ? 540 : 285
     }
@@ -1713,6 +1714,36 @@ struct ArtifactCleaningPreview: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                }
+            } else if artifact.isMovementPCADefinition,
+                      let metrics = previewData?.continuousRemovalMetrics {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Whole-signal removal")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        metricChip(title: "Removed peak", value: Self.microvoltString(metrics.removedPeakMicrovolts), reduction: nil)
+                        metricChip(title: "Removed RMS", value: Self.microvoltString(metrics.removedRMSMicrovolts), reduction: nil)
+                    }
+                    Text("MAAC-3 evaluates and removes factors within each epoch independently; an event-locked average would hide that epoch-specific behavior.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else if artifact.isMuscleBSSCCADefinition,
+                      let metrics = previewData?.continuousRemovalMetrics {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Whole-signal removal")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        metricChip(title: "Removed peak", value: Self.microvoltString(metrics.removedPeakMicrovolts), reduction: nil)
+                        metricChip(title: "Removed RMS", value: Self.microvoltString(metrics.removedRMSMicrovolts), reduction: nil)
+                    }
+                    Text("MAAC-4 estimates BSS-CCA sources per stored epoch or overlapped continuous window. Reviewable spectral suggestions determine which source back-projections are removed.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } else if isLoadingPreview {
                 loadingPreview(title: "Average Waveform", height: 110)
@@ -1933,7 +1964,7 @@ struct ArtifactCleaningPreview: View {
             afterAverage: afterAverage,
             artifact: artifact
         )
-        let continuousMetrics: ArtifactCleaningContinuousRemovalMetrics? = artifact.isCorneoRetinalDefinition
+        let continuousMetrics: ArtifactCleaningContinuousRemovalMetrics? = (artifact.isCorneoRetinalDefinition || artifact.isMovementPCADefinition || artifact.isMuscleBSSCCADefinition)
             ? afterSignal.flatMap {
                 Self.continuousRemovalMetrics(
                     before: beforeSignal,

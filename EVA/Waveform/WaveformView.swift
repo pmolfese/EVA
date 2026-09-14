@@ -356,6 +356,10 @@ struct WaveformView: View {
     @State var saccadicSpike: SaccadicSpikeViewModel
     // Dedicated MAAC-2 continuous corneo-retinal dipole workflow.
     @State var corneoRetinal: CorneoRetinalViewModel
+    // Dedicated MAAC-3 movement detection and marker-review workflow.
+    @State var movementPCA: MovementPCAViewModel
+    // Dedicated MAAC-4 muscle BSS-CCA detection and component-review workflow.
+    @State var muscleBSSCCA: MuscleBSSCCAViewModel
     // Wavelet artifact explorer domain, extracted into an L4 store.
     @State var waveletExplorer: WaveletArtifactExplorerViewModel
     // ICA decomposition + component removal, extracted into an L4 store. See
@@ -710,6 +714,8 @@ struct WaveformView: View {
         _template = State(wrappedValue: ArtifactTemplateViewModel(store: store))
         _saccadicSpike = State(wrappedValue: SaccadicSpikeViewModel(store: store))
         _corneoRetinal = State(wrappedValue: CorneoRetinalViewModel(store: store))
+        _movementPCA = State(wrappedValue: MovementPCAViewModel(store: store))
+        _muscleBSSCCA = State(wrappedValue: MuscleBSSCCAViewModel(store: store))
         _ica = State(wrappedValue: ICAViewModel(store: store))
         _epoching = State(wrappedValue: EpochingViewModel(store: store))
         _singleTrial = State(wrappedValue: SingleTrialAnalysisViewModel(store: store))
@@ -1350,7 +1356,9 @@ struct WaveformView: View {
             signalEvents: EventTrackEventSignature(events: signal.events),
             userMarkers: userMarkers,
             artifactEvents: EventTrackEventSignature(
-                events: artifactVM.events + (corneoRetinal.result?.blinkEvents ?? [])
+                events: artifactVM.events
+                    + (corneoRetinal.result?.blinkEvents ?? [])
+                    + muscleBSSCCA.detectedEvents
             ),
             definedArtifacts: template.definedArtifacts.map {
                 WaveformDefinedArtifactSignature(
@@ -1400,6 +1408,9 @@ struct WaveformView: View {
         for event in corneoRetinal.result?.blinkEvents ?? [] where seenIDs.insert(event.id).inserted {
             events.append(event)
         }
+        for event in muscleBSSCCA.detectedEvents where seenIDs.insert(event.id).inserted {
+            events.append(event)
+        }
         for event in artifactVM.events where seenIDs.insert(event.id).inserted {
             events.append(event)
         }
@@ -1447,6 +1458,9 @@ struct WaveformView: View {
                 : max(artifact.windowSizeSeconds, defaultWindowSeconds)
         }
         if corneoRetinal.result?.blinkEvents.contains(where: { $0.id == event.id }) == true {
+            return max(event.durationSeconds ?? 0, defaultWindowSeconds)
+        }
+        if muscleBSSCCA.detectedEvents.contains(where: { $0.id == event.id }) {
             return max(event.durationSeconds ?? 0, defaultWindowSeconds)
         }
         if artifactVM.events.contains(where: { $0.id == event.id }) {
@@ -1524,6 +1538,11 @@ struct WaveformView: View {
         .onChange(of: processingChainSignature, initial: true) { _, _ in
             recordProcessingHistory()
         }
+        // A PCA-S refusal changes no signal, so the signature above stays put.
+        // Its own trigger mints the recorded-refusal node one step back.
+        .onChange(of: bcg.surrogateRefusalToken) { _, _ in
+            mintPendingRefusal()
+        }
         // B3: one `.sheet(item:)` in place of 18 chained `.sheet(isPresented:)`.
         // Presentation is still driven by the same per-VM booleans — they are
         // derived into `activeSheet` rather than each owning a modifier. See
@@ -1539,13 +1558,6 @@ struct WaveformView: View {
         }
         .overlay(alignment: .top) { replayBanner() }
         .overlay(alignment: .top) { reDerivingBanner }
-        .onChange(of: artifactVM.detectionMethod) { _, method in
-            if method == .ica {
-                DispatchQueue.main.async {
-                    openICASheet(for: base)
-                }
-            }
-        }
         .task(id: artifactDetectionRequestID(for: continuousSignal)) {
             await updateArtifactEvents(for: continuousSignal)
         }
@@ -1740,6 +1752,58 @@ struct WaveformView: View {
                 }
                 .disabled(template.definedArtifacts.isEmpty)
 
+                Toggle("Show Applied Correction", isOn: Binding(
+                    get: { artifactVM.cleaningIsEnabled },
+                    set: { setArtifactCleaningEnabled($0) }
+                ))
+                .disabled(artifactVM.cleanedSignal == nil)
+                .help(artifactVM.cleanedSignal == nil
+                    ? "Apply artifact cleaning before toggling the corrected signal."
+                    : "Switch between the artifact-corrected signal and the uncorrected signal.")
+
+                Divider()
+
+                Toggle("Eye Blink", isOn: $detectsEyeBlinkArtifacts)
+                Toggle("Eye Movement", isOn: $detectsEyeMovementArtifacts)
+
+                Button("Threshold Settings…") {
+                    artifactVM.showsThresholdSheet = true
+                }
+                if !detectsEyeBlinkArtifacts, !detectsEyeMovementArtifacts {
+                    Text("Enable Eye Blink or Eye Movement above to detect.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
+
+                Button("ICA…") {
+                    openICASheet(for: base)
+                }
+                .help("Run or review ICA components. Threshold artifact detection remains enabled independently.")
+
+                Divider()
+
+                Button(ecg.isEnabled ? "Configure ECG / QRS Detection…" : "ECG / QRS Detection…") {
+                    openECGDetectionSheet(for: continuousSignal)
+                }
+                if ecg.isEnabled {
+                    Button("Turn Off ECG Detection") {
+                        ecg.isEnabled = false
+                        artifactVM.detectionRefreshToken += 1
+                    }
+                }
+                Button(bcg.detectsArtifacts ? "Configure BCG Detection…" : "BCG Detection…") {
+                    bcg.showsSheet = true
+                }
+                if bcg.detectsArtifacts {
+                    Button("Turn Off BCG Detection") {
+                        disableBCGDetection()
+                    }
+                }
+
+                Divider()
+
                 Button("Saccadic Spike Potential…") {
                     openSaccadicSpikeSheet(for: continuousSignal)
                 }
@@ -1747,6 +1811,21 @@ struct WaveformView: View {
                 Button("Corneo-Retinal Dipole…") {
                     openCorneoRetinalSheet(for: continuousSignal)
                 }
+
+                Button("Movement Artifact (PCA)…") {
+                    openMovementPCASheet(for: continuousSignal)
+                }
+                .disabled(continuousSignal.isAveraged)
+
+                Button("Muscle Artifact (BSS-CCA)…") {
+                    openMuscleBSSCCASheet(for: continuousSignal)
+                }
+                .disabled(continuousSignal.isAveraged || continuousSignal.samplingRate / 2 < MuscleBSSCCAConfiguration.default.emgBandHighHz)
+                .help(continuousSignal.isAveraged
+                      ? "MAAC-4 operates on single-trial or continuous data, not averages."
+                      : continuousSignal.samplingRate / 2 < MuscleBSSCCAConfiguration.default.emgBandHighHz
+                        ? "The signal's Nyquist bandwidth does not cover the default 15–30 Hz EMG classifier band."
+                        : "Analyze and review MAAC-4 muscle ranges before adding them to Clean Artifacts.")
 
                 Divider()
 
@@ -1772,74 +1851,6 @@ struct WaveformView: View {
                     revertWaveletReduction()
                 }
                 .disabled(wavelet.reducedSignal == nil)
-
-                Divider()
-
-                Toggle("Show Applied Correction", isOn: Binding(
-                    get: { artifactVM.cleaningIsEnabled },
-                    set: { setArtifactCleaningEnabled($0) }
-                ))
-                .disabled(artifactVM.cleanedSignal == nil)
-                .help(artifactVM.cleanedSignal == nil
-                    ? "Apply artifact cleaning before toggling the corrected signal."
-                    : "Switch between the artifact-corrected signal and the uncorrected signal.")
-
-                Divider()
-
-                Toggle("Eye Blink", isOn: $detectsEyeBlinkArtifacts)
-                Toggle("Eye Movement", isOn: $detectsEyeMovementArtifacts)
-                
-                Divider()
-                
-                Button(ecg.isEnabled ? "Configure ECG / QRS Detection…" : "ECG / QRS Detection…") {
-                    openECGDetectionSheet(for: continuousSignal)
-                }
-                if ecg.isEnabled {
-                    Button("Turn Off ECG Detection") {
-                        ecg.isEnabled = false
-                        artifactVM.detectionRefreshToken += 1
-                    }
-                }
-                Button(bcg.detectsArtifacts ? "Configure BCG Detection…" : "BCG Detection…") {
-                    bcg.showsSheet = true
-                }
-                if bcg.detectsArtifacts {
-                    Button("Turn Off BCG Detection") {
-                        disableBCGDetection()
-                    }
-                }
-
-                Divider()
-
-                Picker("Method", selection: $artifactVM.detectionMethod) {
-                    ForEach(ArtifactDetectionMethod.selectableCases) { method in
-                        Text(method.rawValue)
-                            .tag(method)
-                    }
-                }
-                .pickerStyle(.inline)
-
-                if artifactVM.detectionMethod == .threshold {
-                    Divider()
-                    Button("Threshold Settings…") {
-                        artifactVM.showsThresholdSheet = true
-                    }
-                    if !detectsEyeBlinkArtifacts, !detectsEyeMovementArtifacts {
-                        Text("Enable Eye Blink or Eye Movement above to detect.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                if artifactVM.detectionMethod == .ica {
-                    Divider()
-                    Button("Run / Review ICA…") {
-                        openICASheet(for: base)
-                    }
-                    Text("Inspect component maps and remove selected components.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             } label: {
                 ToolbarIcon(
                     name: "icon.artifacts",
@@ -2374,7 +2385,8 @@ struct WaveformView: View {
                     .comparisonCandidates(for: recording.id).count,
                 cacheSummary: recordingStore.processingHistory.snapshotBudgetSummary,
                 onTogglePinNode: { togglePin(EVAHistoryNodeID(hex: $0)) },
-                onRenameNode: { beginRenamingHistoryNode(EVAHistoryNodeID(hex: $0)) }
+                onRenameNode: { beginRenamingHistoryNode(EVAHistoryNodeID(hex: $0)) },
+                onDismissNode: { recordingStore.processingHistory.dismissNoOutput(EVAHistoryNodeID(hex: $0)) }
             )
         }
     }
@@ -2856,6 +2868,10 @@ struct WaveformView: View {
         saccadicSpike.detectionTask = nil
         corneoRetinal.analysisTask?.cancel()
         corneoRetinal.analysisTask = nil
+        movementPCA.analysisTask?.cancel()
+        movementPCA.analysisTask = nil
+        muscleBSSCCA.analysisTask?.cancel()
+        muscleBSSCCA.analysisTask = nil
         artifactIdentityRefreshTask?.cancel()
         artifactIdentityRefreshTask = nil
         historyReDeriveTask?.cancel()
@@ -2886,6 +2902,8 @@ struct WaveformView: View {
         template.resetForClose()
         saccadicSpike.resetForClose()
         corneoRetinal.resetForClose()
+        movementPCA.resetForClose()
+        muscleBSSCCA.resetForClose()
         wavelet.resetForClose()
         epoching.resetForClose()
         singleTrial.resetForClose()
@@ -3013,6 +3031,12 @@ struct WaveformView: View {
         saccadicSpike.definedArtifactID = nil
         corneoRetinal.result = nil
         corneoRetinal.definedArtifactID = nil
+        movementPCA.result = nil
+        movementPCA.statusMessage = nil
+        movementPCA.definedArtifactID = nil
+        muscleBSSCCA.result = nil
+        muscleBSSCCA.statusMessage = nil
+        muscleBSSCCA.definedArtifactID = nil
 
         // Status messages and progress.
         filter.statusMessage = nil

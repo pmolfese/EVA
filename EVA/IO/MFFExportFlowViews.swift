@@ -443,7 +443,7 @@ extension WaveformView {
         }
         // Threshold-based ocular detection is fully parameterized (no drawn
         // templates), so it is portable and replayable.
-        if artifactVM.detectionMethod == .threshold, detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts {
+        if detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts {
             var p: [String: String] = [
                 "eyeBlink": "\(detectsEyeBlinkArtifacts)",
                 "eyeMovement": "\(detectsEyeMovementArtifacts)"

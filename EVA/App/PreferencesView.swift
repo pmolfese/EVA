@@ -619,12 +619,6 @@ private struct ProcessingDefaultsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Artifact Detection") {
-                Picker("Default method", selection: $defaults.artifactDetectionDefaultMethod) {
-                    ForEach(ArtifactDetectionMethod.selectableCases) { Text($0.rawValue).tag($0) }
-                }
-            }
-
             Section {
                 Toggle("Estimate interpolated-channel health from neighbors", isOn: $defaults.interpolatedHealthFromNeighbors)
             } header: {

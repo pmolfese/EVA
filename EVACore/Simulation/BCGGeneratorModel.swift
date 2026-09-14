@@ -137,6 +137,13 @@ nonisolated enum BCGGeneratorModel {
             vesselPulsation(sensors: sensors, head: head, side: .right),
             headRotation(sensors: sensors, head: head)
         ]
+        // Spatial-rank knob: keep the first k generators. Fewer generators = lower
+        // true rank, which is what an OBS "keep top-k components" correction has to
+        // match. Default is all four, so the artifact is unchanged.
+        let activeCount = config.effectiveBCGActiveGeneratorCount
+        if activeCount < specifications.count {
+            specifications = Array(specifications.prefix(activeCount))
+        }
         let amplitudeScales = config.effectiveBCGGeneratorAmplitudeScales
         for index in specifications.indices {
             specifications[index].relativeAmplitude *= amplitudeScales[index]

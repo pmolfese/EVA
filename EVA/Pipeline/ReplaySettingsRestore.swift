@@ -68,12 +68,6 @@ nonisolated enum ReplaySettingsRestore {
         // `thresholdArtifactDetection`
         var detectsBlinks = false
         var detectsMovements = false
-        /// Whether the path asks for threshold detection at all. Only ever set
-        /// *true* by a path that names the step — a node without one leaves the
-        /// operator's chosen method alone, because a method with no detection
-        /// enabled produces no step either way and silently rewriting the
-        /// operator's choice would be a surprise.
-        var selectsThresholdMethod = false
 
         // `reference`, one per domain — see `Rereferencing` for why the two are
         // not the same operation.
@@ -110,7 +104,6 @@ nonisolated enum ReplaySettingsRestore {
             case .thresholdArtifactDetection:
                 result.detectsBlinks = step.parameters["eyeBlink"] == "true"
                 result.detectsMovements = step.parameters["eyeMovement"] == "true"
-                result.selectsThresholdMethod = true
 
             case .reference:
                 let scheme = Rereferencing.scheme(from: step.parameters)

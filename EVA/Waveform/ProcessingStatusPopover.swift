@@ -93,6 +93,7 @@ struct ProcessingStatusPopoverView: View {
     var cacheSummary: String = ""
     var onTogglePinNode: ((String) -> Void)?
     var onRenameNode: ((String) -> Void)?
+    var onDismissNode: ((String) -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -121,7 +122,8 @@ struct ProcessingStatusPopoverView: View {
                         comparableWindowCount: comparableWindowCount,
                         cacheSummary: cacheSummary,
                         onTogglePinNode: onTogglePinNode,
-                        onRenameNode: onRenameNode
+                        onRenameNode: onRenameNode,
+                        onDismissNode: onDismissNode
                     )
                 }
             }
@@ -370,6 +372,7 @@ struct HistoryTabView: View {
     var cacheSummary: String = ""
     var onTogglePinNode: ((String) -> Void)?
     var onRenameNode: ((String) -> Void)?
+    var onDismissNode: ((String) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -379,7 +382,8 @@ struct HistoryTabView: View {
                     onSelect: onSelectNode,
                     onFork: onForkNode,
                     onTogglePin: onTogglePinNode,
-                    onRename: onRenameNode
+                    onRename: onRenameNode,
+                    onDismiss: onDismissNode
                 )
                 .equatable()
             }

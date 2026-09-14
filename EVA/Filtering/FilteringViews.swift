@@ -673,7 +673,6 @@ extension WaveformView {
                 await runSurrogateCorrection(signal: surrogateBase)
 
             case .thresholdArtifactDetection:
-                artifactVM.detectionMethod = .threshold
                 detectsEyeBlinkArtifacts = params["eyeBlink"] == "true"
                 detectsEyeMovementArtifacts = params["eyeMovement"] == "true"
                 artifactVM.blinkThresholdConfig = .fromFlatParameters(params, prefix: "blink",

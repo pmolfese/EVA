@@ -278,6 +278,13 @@ final class ProcessingCore {
                     // batch that silently skipped the correction would emit a
                     // file whose own script claims it was corrected.
                     bcg.status = error.localizedDescription
+                    // Hand the history layer a recorded-refusal grade to hang one
+                    // step back (see `recordProcessingHistory`). Never persisted
+                    // and pruned on the next commit.
+                    let grade = (error as? BCGSurrogateError).map(PCASRunGrade.grade(refusal:))
+                        ?? StepQuality(grade: .poor, summary: error.localizedDescription, metrics: [])
+                    bcg.surrogatePendingRefusal = (grade, step.parameters)
+                    bcg.surrogateRefusalToken &+= 1
                     return Result(signal: current, remainingSteps: Array(steps[index...]))
                 }
 
@@ -375,7 +382,8 @@ final class ProcessingCore {
                 let outcome = ArtifactCleaner.cleanedSignal(
                     from: current,
                     artifacts: artifacts,
-                    excluding: store.channels.bad.union(store.channels.interpolated.keys)
+                    excluding: store.channels.bad.union(store.channels.interpolated.keys),
+                    availableBandwidthHz: filter.output == nil ? nil : filter.lowPassCutoff
                 )
                 ArtifactCleaningCore.commit(
                     cleanedSignal: outcome.signal,
@@ -444,7 +452,6 @@ final class ProcessingCore {
                 }
 
             case .thresholdArtifactDetection:
-                artifactVM.detectionMethod = .threshold
                 artifactVM.blinkThresholdConfig = .fromFlatParameters(
                     step.parameters, prefix: "blink", base: artifactVM.blinkThresholdConfig)
                 artifactVM.movementThresholdConfig = .fromFlatParameters(

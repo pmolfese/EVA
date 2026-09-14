@@ -71,7 +71,6 @@ struct ProcessingCoreTests {
         let result = await core.applyAutoSteps(script, to: signal)
 
         #expect(result.remainingSteps.isEmpty)
-        #expect(core.artifactVM.detectionMethod == .threshold)
         #expect(core.artifactVM.blinkThresholdConfig.amplitudeMinMicrovolts == 60)
         // No transform step ran, so the signal passes through unchanged.
         #expect(result.signal?.data[0] == signal.data[0])

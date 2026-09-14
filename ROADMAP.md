@@ -31,7 +31,7 @@ Across sections, the ordered spine is unchanged:
 
 | Order | Milestone | Section | Status |
 |---:|---|---|---|
-| 1 | **SI-4 — Adversarial evaluation** | [§2 Processing & Cleaning](#2-processing--cleaning) | **NEXT** |
+| 1 | **SI-4 — Adversarial evaluation** | [§2 Processing & Cleaning](#2-processing--cleaning) | MEASURED FOR PCA-S; run-grade generalization NEXT |
 | 2 | **PB-1 — Batch/replay completion** | [§11 Batch, Replay & Provenance](#11-batch-replay--provenance) | NOT STARTED |
 | 3 | **MRI-1 — FASTR reliability and motion semantics** | [§4 MRI / fMRI](#4-mri--fmri-artifact-correction) | NOT STARTED |
 | 4 | **SI-5 — Ocular MSEC/PCA-S** | [§2 Processing & Cleaning](#2-processing--cleaning) | NOT STARTED |
@@ -39,10 +39,12 @@ Across sections, the ordered spine is unchanged:
 | 6 | **UI-1 / UX-1 — Display density, Figure Composer 2** | [§10 UI, Figures & Export](#10-ui-figures--export) | NOT STARTED |
 | 7 | **DEV-1 — Developer documentation** | [§13 Developer Documentation](#13-developer-documentation) | IN PROGRESS (DEV-1a, 1b done) |
 
-**SI-4 is what decides whether PCA-S is production-ready.** The method ships with
-defaults that are defensible rather than measured — the component-reliability
-gate in particular — and its operating envelope is unmeasured until the
-adversarial sweeps run.
+**SI-4 decided whether PCA-S is production-ready — and it now is (2026-09-12/13).**
+The operating envelope was measured (campaign in `docs/provenance/`), the
+component-reliability gate (0.9) was measured and kept, and the guardrails are
+surfaced through the Good/Watch/Poor run grade. The live thread is generalizing
+that measured-band treatment to the other cleaning methods (§ Processing
+run-grade).
 
 **Scheduled independently of that spine**, because each is self-contained and
 blocks nothing: the Rhythmicity Explorer's WTPL and burst milestones
@@ -145,16 +147,17 @@ envelope**, then reusing the validated engine for other artifact families.
 Method reference:
 [`docs/design/source-informed-correction.md`](docs/design/source-informed-correction.md).
 
-## SI-4 — Adversarial evaluation — **IN PROGRESS**
+## SI-4 — Adversarial evaluation — **MEASURED FOR PCA-S (2026-09-12/13)**
 
-SI-4 is a **measurement** milestone, not an infrastructure one: the head-model
-work and the `evaluate-surrogate` flags (`--seeds --offsets --sources --components
---brain-regularization --duration --channels --coordinates --rate --correction-head
---with-erp --json`) already exist. What remains is to run the adversarial campaign,
-report the full metric set, and turn the evidence into the refusal/warning
-thresholds the shipped code currently only *assumes* — `minimumAcceptedBeats = 10`
-and `minimumComponentReliability = 0.9` in `BCGSurrogateCorrection` are placeholders;
-geometry-missing is already a hard refusal. Three tracks (owner decisions 2026-08-30):
+SI-4 is a **measurement** milestone. For PCA-S it is essentially closed: the
+campaign ran, the thresholds are measured (not assumed), and the guardrails are
+surfaced via the run grade. The remaining open thread is **generalizing** the
+same measured-band treatment to the other cleaning methods (§ Processing
+run-grade). Original framing, for context: the `evaluate-surrogate` flags and
+head models already existed; what remained was to run the campaign, report the
+metric set, and turn the evidence into the refusal/warning thresholds the shipped
+code only *assumed* — `minimumAcceptedBeats = 10` and
+`minimumComponentReliability = 0.9`. Three tracks (owner decisions 2026-08-30):
 
 **Track 1 — tooling gaps — SHIPPED 2026-08-30:**
 
@@ -177,31 +180,36 @@ geometry-missing is already a hard refusal. Three tracks (owner decisions 2026-0
   ≤6 accepted beats makes PCA-S *hurt* (corrected SNR below uncorrected; removed-
   variance blows past 1.0) — Track 2/3 territory.
 
-**Track 2 — run the campaign (experiments):**
+**Track 2 — run the campaign — SHIPPED 2026-09-12.** Full 12-axis iterative-mode
+sweep (30 seeds/point), findings + CSVs in
+`docs/provenance/pca-s-adversarial-evaluation.md`.
+Headlines: accepted-beat count is the dominant driver (reliable benefit ~40+;
+≤30 sits at/below uncorrected); BCG morphology jitter is the physiological
+breakpoint (crosses below uncorrected at ~0.4 as beat acceptance collapses);
+electrode/co-registration mismatch breaks at ~10°; robust to channels (20–256),
+rate, sources, offset, skull ratio. The channel sweep showed **no montage-specific
+effect, so real HydroCel authoring stays deferred**. Also caught and fixed a
+harness/product default mismatch — the `evaluate-surrogate` family now defaults to
+`--pattern-search iterative` (what the app ships), not `paper`.
 
-- [ ] Sweep each axis with enough seeds — length, accepted beats, rank/morphology
-  jitter, component count, regularization, channels, rate, basis richness — plus the
-  independent head-model params. The channel sweep runs on the **built-in montage at
-  32/64/128/256** for the trend now; real HydroCel geometry stays deferred (below).
-- [ ] Record mean ± SD and the **breakpoint** per axis (where corrected stops beating
-  uncorrected, or ERP distortion exceeds a committed bound). Write the findings into
-  `docs/provenance/` and summarize here — like the head-mismatch finding already on
-  record.
-- [x] **Head-model mismatch (done):** `evaluate-surrogate --correction-head <name>`
-  builds the correction basis on a different standard head than the truth.
-  **Measured: PCA-S degrades gracefully** — an extreme 1:80→1:20 skull mismatch moves
-  broadband SNR ~25% but the correction still beats uncorrected (>1.8×), because the
-  brain basis spans most of sensor space. (Independent per-parameter versions are the
-  Track-1 head-model item above.)
+**Track 3 — evidence → guardrails — MEASURED, partly surfaced:**
 
-**Track 3 — evidence → guardrails (closes SI-4):**
-
-- [ ] Confirm or **recalibrate** `minimumAcceptedBeats` and
-  `minimumComponentReliability` from the data; add an **ill-conditioning guard**
-  (condition number of the regularized brain system) only if the sweeps show it
-  matters.
-- [ ] Surface the refusals/warnings as user-visible messages + provenance events,
-  with tests. Only then is PCA-S production-ready.
+- [x] **`minimumComponentReliability = 0.9` measured and confirmed** (regression
+  test `reliabilityGateSeparatesArtifactFromBrain`): 0.9 sits in the gap between
+  true-artifact components (≥0.956) and brain leakage (≤0.790). Keep.
+- [x] **`minimumAcceptedBeats` decision:** keep the hard-refuse floor at 10; 40 is
+  the good/watch boundary in the run grade (raising the refuse would block
+  legitimate short recordings).
+- [x] **Ill-conditioning guard measured and REJECTED:** the condition number of the
+  regularized brain system does not discriminate the electrode-mismatch failure at
+  the shipped regularization (its value is set by the ridge, not the mismatch);
+  **removed variance** tracks that failure instead and is the co-registration guard.
+- [x] **Refusals/warnings surfaced** for PCA-S via the Good/Watch/Poor **run grade**
+  (see § Processing run-grade below): the beat gate refuses (Poor no-output node),
+  removed variance ≥1.0 flags over-subtraction, reliability drives the grade. Bands
+  are in `PCASRunGrade` with tests.
+- [ ] Generalize the same measured-band treatment to the other cleaning steps
+  (gradient, ICA, wavelet, MAAC) — see § Processing run-grade.
 
 **Enabling head-model work (SI-1 shipped only one head model; the geometry
 sweeps above cannot run without a second and third).** These are shared
@@ -247,6 +255,80 @@ mismatch is expressible:
 **Exit:** the safe operating envelope and failure messages are measured. Only
 then call PCA-S production-ready or generalize it.
 
+## Processing run-grade (Good / Watch / Poor) — **PCA-S SHIPPED; generalization IN PROGRESS**
+
+A per-step quality grade, the process-side counterpart to channel/segment health:
+one headline `RunGrade` (good/watch/poor), a one-line summary, and the weighted
+metrics that produced it (`StepQuality`/`QualityMetric` in `EVA/Pipeline/`). Shown
+as a **pill** beside the history-rail node, expandable into a metric breakdown in
+the status popover; a **refusal mints a no-output node** one step back (inspectable,
+not navigable, session-only, right-click Dismiss, pruned on next commit).
+
+- [x] **PCA-S (BCG) grade shipped:** `PCASRunGrade` from the shipped report —
+  accepted beats (refuse <10, watch 10–40, good ≥40), component reliability (0.9,
+  measured), removed variance (good <0.6, watch 0.6–1.0, poor ≥1.0). Wired through
+  `EVAHistoryNode.quality` (persisted), the rail pill, the breakdown popover, and
+  the refusal path in `ProcessingCore`. Regression tests green.
+- [ ] **Generalize to the other cleaning steps.** Bands proposed but **not yet
+  measured** for: **gradient** (residual slice-rate comb + removed variance; needs
+  an `evaluate-gradient` campaign), **ICA** (ICLabel confidence + variance + Amari
+  in sim), **wavelet** (transient preservation — see finding below), **artifact
+  clean** (fraction touched), **MAAC** muscle (gamma preservation) and movement.
+- [x] **Wavelet: both presets measured (2026-09-13) → preset-specific guidance.**
+  The multi-artifact sweep (500 Hz, 120 s) ran the **hard/EEG (bior4.4)** and
+  **soft/ERP (coif4)** presets. Both remove spiky artifacts well (movement/pop
+  0.9–0.99, muscle ~0.9, blinks ~0.87). **Hard destroys sharp brain transients**
+  (~0–0.05 preserved). **Soft is ~5–15× gentler** (scale 1: K-complex 0.25, sharp
+  wave 0.33 preserved) while still removing artifacts — but it's a tradeoff, not a
+  free lunch (blink-removing thresholds keep only ~0.25–0.33 of transients; spindles
+  are the stubborn case). **Removed variance doesn't track transient loss within a
+  preset**, so wavelet still gets a **caution, not a pill**; the guidance is **use
+  soft/ERP on data with sharp brain features, avoid hard/EEG there**. Tables in
+  `docs/provenance/artifact-reduction-evaluation.md`.
+- [ ] **Follow-up:** measure ERP components (P300/N400 broad → likely safe; N170
+  intermediate; averaging protects) with `ERPGenerator`/`score-erp` to bound which
+  evoked responses wavelet can attenuate.
+- [ ] **W-ICA as a new `WaveletReductionMode` (component-space).** Wavelet-threshold
+  the ICA component timeseries and back-project (Castellanos & Makarov 2006; the
+  method 2018-HAPPE used before it moved to channel space). EVA has both halves
+  already — ICA/PICARD-O + `WaveletReducer` — so this is a mode, not an engine.
+  Hypothesis: isolating artifact into components first protects sharp brain
+  transients better than channel-space thresholding. **Gate on the measurement** —
+  add it only if `score-preservation` on seeded K-complexes/spindles shows it
+  actually preserves them.
+- [ ] **ICLabel-gated selective W-ICA (the interesting variant).** Instead of
+  thresholding *all* components (classic W-ICA) or *all* channels (current HAPPE),
+  use ICLabel (already shipped) to pick the artifact components — blink / eye /
+  muscle / heart — and wavelet-threshold **only those**, leaving neural components
+  untouched. This could be the best of both: no whole-component rejection (keeps
+  neural leakage, unlike ICA rejection) and no touching neural components (protects
+  K-complexes/spindles, unlike channel-space or all-component wavelet). Measure the
+  three approaches head-to-head on seeded transients + artifacts.
+- [ ] **MAAC-vs-HAPPE comparison (paper thread).** HAPPE+ER validated wavelet on a
+  simulated VEP with bias / SE / trial-rejection metrics — essentially our
+  `evaluate-retention` framing, on public data. Run channel-space wavelet, W-ICA,
+  ICLabel-gated W-ICA, and MAAC through the shared truth-backed harness across
+  evoked components AND sharp transients — the basis for a comparison paper. See
+  `docs/provenance/artifact-reduction-evaluation.md` § HAPPE papers.
+
+**Simulator evaluation toolkit (built 2026-09-12/13, `Tools/EVASimulate`).** The
+measurement substrate for all of the above — documented in
+`docs/provenance/artifact-reduction-evaluation.md`
+and the simulator manual page:
+
+- [x] `score-cleaning` — ties run-time removed-variance to truth (residual/SNR/
+  artifact-reduction), the per-method band calibrator.
+- [x] `evaluate-retention` — the ERP "can I save this data?" metric: reject vs
+  keep-dirty vs clean-and-keep, reporting trials kept, SNR, and peak/latency bias.
+- [x] Non-Gaussian sources (`--source-burstiness`) + `score-mixing` (Amari) —
+  honest ICA/BSS-CCA evaluation (Gaussian sources aren't separable).
+- [x] `--bcg-generators` — BCG spatial-rank knob for OBS.
+- [x] Sharp brain transients (`--brain-transients`) + `score-preservation` —
+  wavelet-oversmoothing substrate.
+- [x] `--emg-autocorrelation` — BSS-CCA muscle stressor.
+- [x] Calibration library reorg: heavy sweeps are env-gated (`EVA_CALIBRATION=1`)
+  and run via `scripts/calibrate.sh`, out of the default test suite; fast band/math
+  assertions stay as regressions.
 
 ### Later source-informed methods
 
@@ -389,7 +471,7 @@ interpolation (`EVA/Health`), threshold-based ocular blink/movement *detection*
 (`EyeArtifactThresholdDetector`, `EyeArtifactKind.blink`/`.movement`), a 60 Hz
 notch **and an adaptive CleanLine** (sliding-window sinusoid regression) line-
 noise mode (`EVA/Filtering`), and average rereferencing. So EVA already embodies
-the *philosophy* — and, as of this branch, already delivers **two** of the MAAC's
+the *philosophy* — and, as of this branch, already delivers **five** of the MAAC's
 own steps outright (see the status snapshot below).
 
 **Status snapshot (verified against the code, 2026-09-12):**
@@ -399,13 +481,13 @@ own steps outright (see the status snapshot below).
 | Blink | ICA | ✅ shipped — ICA + ICLabel "Eye" (`EVA/ICA`) |
 | **Saccadic spike (MAAC-1)** | spatial filter | ✅ **built, uncommitted on this branch** — `SaccadicSpikeCorrection.swift` + VM + views + help + 6 tests, replay-aware |
 | **Corneo-retinal dipole (MAAC-2)** | reverse-EMCP regression | ✅ **built, uncommitted on this branch** — dedicated continuous H→V regression, blink masking/interpolation, QC/help, replay-aware |
-| Movement (MAAC-3) | temporal PCA + Promax | ❌ open — Promax not implemented anywhere |
-| EMG (MAAC-4) | BSS-CCA | ❌ open — no CCA path |
+| Movement (MAAC-3) | temporal PCA + Promax | ✅ built — stored epochs or fixed continuous windows |
+| EMG (MAAC-4) | BSS-CCA | ✅ built — lagged CCA, spectral review, replay, simulator validation |
 | Mains (MAAC-5) | spectral / CleanLine | ✅ **shipped** — `adaptiveLineNoiseReduction` / `lineNoiseMode == .adaptiveCleanLine` |
 | Alpha (MAAC-6) | — | ❌ open — niche |
 | Orchestration (MAAC-7) | — | ❌ open — no MAAC pipeline preset |
 
-So the remaining genuine gaps are **MAAC-3, MAAC-4, MAAC-6, and MAAC-7**.
+So the remaining genuine gaps are **MAAC-6 and MAAC-7**.
 MAAC-1 (below) is kept for the record but is essentially done; MAAC-5 is marked
 shipped with only optional refinements. Blink correction (the MAAC's fourth
 matched algorithm) is already covered by the ICA + ICLabel "Eye" path — its only
@@ -520,7 +602,7 @@ frontal ERP effect. Correcting the CRD as a topography (rather than flattening
 the EOG channels) removes the artifact without striping genuine frontal EEG that
 lives in the EOG leads — the failure mode of the classic regression EMCP.
 
-## MAAC-3 — Movement artifact (per-epoch temporal PCA + Promax) — **NOT STARTED**
+## MAAC-3 — Movement artifact (per-epoch temporal PCA + Promax) — **COMPLETE (CORE)**
 
 Head/electrode movement is extremely **non-stationary**: its spatial *and*
 temporal signature differs every instance. That rules out regression (no
@@ -530,28 +612,44 @@ observations when the variables (here, time points) are highly correlated, and a
 one-second epoch's shared cross-channel time course is enough to capture a
 movement transient.
 
-- [ ] **Temporal PCA per epoch.** Variables = time points, observations =
+- [x] **Temporal PCA per epoch.** Variables = time points, observations =
   channels (the transpose of a spatial PCA). EVA's PCA/OBS covariance machinery
   (`ArtifactOBSStrategy.spatiotemporal` already builds channel×time bases) is
   the starting point; the new axis is per-epoch temporal decomposition.
-- [ ] **Promax oblique rotation** — the genuinely new numerical piece. Implement
+- [x] **Promax oblique rotation.** Implement
   Promax (Hendrickson & White, 1964): Varimax start, raise loadings to a power
   (κ≈3) to form the target, then oblique Procrustes to it. Allowing correlated
   factors is what lets a movement factor separate cleanly; an orthogonal
   rotation would smear it. Belongs in a shared linear-algebra spot (near the ICA
   sphering / SVD code) so ICA and future PCA-rotation work can reuse it.
-- [ ] **Back-project and threshold.** Back-project each rotated factor; delete
+- [x] **Back-project and threshold.** Back-project each rotated factor; delete
   any whose negative-to-positive peak amplitude exceeds ~200 µV. As a side
   benefit this also catches blinks and other transients that slipped past the
   earlier stages.
-- [ ] **New method/type** `.movementPCA` under a `.movement` artifact type,
+- [x] **New method/type** `.movementPCA` under a `.movement` artifact type,
   running epoch-wise inside the cleaning cascade (`ArtifactCleaningCore`).
+- [x] **Bounded parallel analysis with live progress.** Process independent
+  epochs/windows concurrently using EVA's shared CPU budget, preserve
+  deterministic range ordering during assembly, and report phase, ranges and
+  samples completed, workers, flagged/skipped ranges, removed factors,
+  throughput, elapsed time, and ETA in the MAAC-3 sheet.
+
+The dedicated **Artifacts > Movement Artifact (PCA)…** workflow opens a review
+sheet and defaults to automatic boundaries: it uses stored `EpochSegment`
+ranges when present and otherwise partitions continuous data into
+non-overlapping one-second windows (including a final short window). The sheet
+can force either mode and records the boundary mode, window length, threshold,
+Promax power, factor cap, and deterministic seed in replay provenance. Analysis
+creates duration-bearing `MOV` markers for affected ranges and a **MAAC
+Movement** definition. It then closes without launching **Clean Artifacts**;
+the user explicitly opens that sheet later and applies the preset **MAAC-3
+Movement PCA** treatment, which reruns the saved deterministic configuration.
 
 *Why it matters:* movement transients are the residual that defeats every
 stationary method; a per-epoch temporal PCA is the one tool that fits, and it
 doubles as a safety net for artifacts the matched stages missed.
 
-## MAAC-4 — EMG / high-frequency (BSS-CCA) — **NOT STARTED**
+## MAAC-4 — EMG / high-frequency (BSS-CCA) — **COMPLETE**
 
 High-frequency electromyographic (muscle) activity is broadband and poorly
 separated by ICA. The MAAC uses **blind source separation via canonical
@@ -560,15 +658,36 @@ correlation analysis** (De Vos et al., 2010), which orders components by
 autocorrelation (near-white), so the low-autocorrelation components can be
 dropped.
 
-- [ ] **BSS-CCA engine.** CCA between the signal and its one-sample delay yields
+- [x] **BSS-CCA engine.** CCA between the signal and its one-sample delay yields
   components ranked by autocorrelation; reconstruct after removing the
-  lowest-autocorrelation set. Self-contained linear algebra (generalized
-  eigenproblem on the two covariance matrices); De Vos et al. published
-  reference code to validate against.
-- [ ] **Wire as a late cleaning stage** after the ocular/movement steps, with a
-  user threshold on how many low-autocorrelation components to remove.
-- [ ] **Reuse EVA's ICLabel "Muscle" evidence** to gate/QC the BSS-CCA removal
-  where an ICA has already run, cross-checking the two muscle estimates.
+  spectrally classified set. EVA estimates the operator near 250 Hz, applies it
+  to native-rate samples, and overlap-adds continuous-window removals with a
+  smooth crossfade. The implementation is independent, using EVA's existing
+  eigensolver, SVD, downsampler, and Welch spectrum routines.
+- [x] **Wire as a late cleaning stage.** The dedicated
+  **Artifacts > Muscle Artifact (BSS-CCA)…** workflow is independently runnable.
+  Standalone cleaning preserves the user's definition order; the explicit
+  `.maac` ordering policy stably enforces SP → CRD → other artifact definitions
+  → movement → EMG for a future full-pipeline preset.
+- [x] **Automatic spectral suggestions with manual review.** Defaults reproduce
+  the De Vos 1–15 / 15–30 Hz mean-power ratio gate of 1/7. Bands, gate, analysis
+  rate, range mode, continuous window/overlap, and per-window component decisions
+  are editable and replayable. Detection now stays in a dedicated MAAC-4 sheet:
+  its descriptive progress display reports phase, windows and samples processed,
+  analyzed/flagged/skipped ranges, classified/selected components, throughput,
+  elapsed time, and ETA without applying a correction.
+- [x] **Waveform review before cleaning.** Every affected interval is exposed as
+  a duration-bearing `EMG` candidate. The review list supports direct waveform
+  centering, full-span highlighting, Previous/Next navigation, and deterministic
+  per-component include/exclude decisions. **Add Muscle Markers** stages the
+  reviewed definition for later use and closes MAAC-4 without opening or running
+  **Clean Artifacts**.
+- [x] **Reuse EVA's ICLabel "Muscle" evidence as QC only.** The options panel
+  reports upstream muscle labels when ICA has run, but never hard-gates BSS-CCA.
+- [x] **Guardrails and validation.** Averaged data and insufficient EMG bandwidth
+  are refused; bad, interpolated, unselected, non-finite, and PNS-only channels
+  are not altered. Deterministic tests cover analytic mixtures, manual overrides,
+  replay/provenance, ordering, and EVA simulator EMG truth.
 
 *Why it matters:* residual EMG inflates high-frequency and gamma-band power and
 is exactly the band where the saccadic spike also does damage — the two together
@@ -615,7 +734,7 @@ alpha (drowsiness/idling rhythm) that can dominate variance without being
 *Why it matters:* mainly for resting-state or drowsiness-prone datasets; called
 out for completeness against the MAAC's full step list, not as committed work.
 
-## MAAC-7 — MAAC orchestration (ordered auto-pipeline) — **NOT STARTED**
+## MAAC-7 — MAAC orchestration (ordered auto-pipeline) — **PARTIALLY STARTED**
 
 The individual milestones above are usable on their own through the drawn-
 template UI. This milestone assembles them into the MAAC's **automated, ordered
@@ -638,6 +757,8 @@ The MAAC order (Dien 2024, Fig. 2), on already-gradient-corrected data:
 - [ ] **Pipeline definition** — a MAAC preset that sequences the stages with the
   preliminary-blink-scan dependency, integrated with `ProcessingCore` /
   `HeadlessBatchProcessor` so it is replayable and appears in provenance.
+  The artifact-cleaning core now exposes a tested `.maac` ordering policy, but
+  the full cross-stage preset and its automatic dependencies remain open.
 - [ ] **Auto-templating** — each stage builds its own template from the session
   (or the shipped canonical file templates) with no manual drawing, matching the
   MAAC's one-click experience.
@@ -1487,10 +1608,50 @@ already showed is not a neutral pin.
 
 ##### Phases C-D — open
 
-- **C.** The second axis: `ArtifactCleaningMethod` × `ArtifactOBSStrategy` on the
-  BCG scenarios. The PCA-S row is now buildable — SI-3 shipped it as a
-  correction stage with portable settings in `eva.xml` — so the matrix can carry
-  it rather than declaring it dark.
+- **C. Headless BCG comparison: PCA-S versus OBS on identical waveforms.** The
+  numerical methods and truth-backed waveform scorer already exist. The missing
+  boundary is method-specific setup: an EVASimulate package contains `QRSd`
+  detected-beat events but deliberately contains no `eva_artifacts.json`, while
+  headless `artifactClean` correctly requires that recording-local payload before
+  it will run OBS. Implement the boundary in the comparison target, not in
+  EVASimulate:
+  - [ ] Add a versioned, stable-ID artifact recipe to
+    `ComparisonMatrix.Method` (`bcg`, `QRSd`, relative window, method, OBS
+    strategy, residual-PC count, taper/baseline/overlap settings), with strict
+    validation and no duplicated configuration in hand-authored step parameters.
+  - [ ] Add `SimulatedArtifactPayloadFactory`: read the target MFF's own `QRSd`
+    events, refuse a missing code, convert the requested asymmetric window to
+    centered `DefinedArtifact` events, construct `ArtifactReplayPayload`, and
+    derive the matching `artifactClean` provenance parameters. Do not use
+    `QRSt` except in an explicitly labelled oracle arm.
+  - [ ] Stage a private MFF copy per OBS arm and write `eva_artifacts.json` into
+    that copy. Never mutate the cached `sim_noisy.mff` shared by the uncorrected,
+    PCA-S, and OBS arms, and do not add a payload-override escape hatch to
+    `HeadlessBatchProcessor`.
+  - [ ] Make a requested but unapplied artifact correction fail loudly. An
+    empty `ArtifactCleaner` summary must yield an incomplete arm rather than an
+    unchanged recording labelled OBS; record effective strategy, events/windows,
+    sampled events, channels, components, and removed variance in the audit.
+  - [ ] Add a BCG-only matrix based on `bcg-generators.json` with
+    `--no-gradient`, paired `QRSd` input, uncorrected, shipped iterative PCA-S,
+    and Standard OBS arms. Predeclare one primary OBS configuration and sweep
+    residual component count separately; do not call an EVA configuration the
+    published method until its mean-plus-residual-PC convention is reconciled
+    explicitly with Niazy et al.
+  - [ ] Preserve each cell's full EVASimulate score JSON so per-band and
+    per-channel SNR, RMSE, correlation, power ratio, and spectral distortion
+    remain available even when the summary table stays broadband.
+  - [ ] Separate execution validity from scientific outcome. Missing payloads,
+    fallbacks, and no-op correction fail the arm; corrected SNR below
+    uncorrected is a result to report, especially in adversarial regimes, not a
+    harness failure.
+  - [ ] Pin recipe validation, `QRSd`-only selection, window equivalence,
+    payload round-trip, corpus immutability, missing-event/no-op failures,
+    interactive/headless parity, and a one-seed end-to-end OBS run before the
+    repeated-seed matrix.
+
+  The resumable engineering and publication plan, including the proposed first
+  matrix and analysis, is [`paper_plan_pca-s.md`](paper_plan_pca-s.md).
 - **D.** Reporting: a figure script, and the docs in
   `Tools/EVASimulate/README.md` and `docs/`.
 

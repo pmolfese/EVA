@@ -113,6 +113,22 @@ nonisolated struct EVAHistoryNode: Identifiable, Sendable, Codable, Hashable {
     /// never guessed from a hardcoded table of "expensive" stages.
     var computeCost: TimeInterval?
     var createdAt: Date = Date()
+    /// Run-quality grade for the step that produced this node, when the step
+    /// reports one (PCA-S today). A persisted annotation, like `computeCost`.
+    var quality: StepQuality?
+    /// A recorded refusal: the step ran, produced nothing usable, and left the
+    /// pointer at the parent (this node hangs one step below it). Session-only —
+    /// omitted from `CodingKeys` so it is never written to disk, and pruned on
+    /// the next commit — so it cannot become permanent. It is inspectable but
+    /// not navigable (there is no signal to stand on).
+    var isNoOutput: Bool = false
+
+    /// `isNoOutput` is deliberately absent: it must not serialize. Every other
+    /// stored property is listed, so synthesized `Codable` still covers them and
+    /// the new optional `quality` decodes as `nil` from files written before it.
+    enum CodingKeys: String, CodingKey {
+        case id, parent, step, payloadDigest, children, label, isPinned, computeCost, createdAt, quality
+    }
 
     var isRoot: Bool { parent == nil }
 
@@ -317,6 +333,10 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
             currentID = id
             return id
         }
+
+        // Committing a real step is "the user did something else": clear any
+        // recorded refusals, which are transient by design.
+        pruneNoOutputNodes()
 
         let node = EVAHistoryNode(
             id: id,
@@ -535,6 +555,55 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
         nodesByID[id]?.computeCost = seconds
     }
 
+    /// Sets a node's run-quality grade. Called after a step commits, once its
+    /// report is in hand — the same shape as `recordComputeCost`.
+    mutating func setQuality(_ quality: StepQuality, for id: EVAHistoryNodeID) {
+        nodesByID[id]?.quality = quality
+    }
+
+    // MARK: - Refusals (no-output nodes)
+
+    /// Records a step that ran and refused: it mints a child of the current node
+    /// carrying the refusal's grade, but **leaves the pointer where it is** — the
+    /// user stays one step back, and the refusal hangs below as an inspectable,
+    /// non-navigable marker. It is not content-addressed (each refusal is its own
+    /// node) and does not touch `lastVisitedChild`.
+    @discardableResult
+    mutating func recordRefusal(
+        _ step: EVAProcessingStep, quality: StepQuality, label: String? = nil
+    ) -> EVAHistoryNodeID {
+        let parentID = currentID
+        let id = EVAHistoryNodeID(hex: "noout-" + UUID().uuidString.lowercased())
+        var node = EVAHistoryNode(id: id, parent: parentID, step: step, payloadDigest: nil, label: label)
+        node.quality = quality
+        node.isNoOutput = true
+        nodesByID[id] = node
+        nodesByID[parentID]?.children.append(id)
+        return id
+    }
+
+    /// Removes one no-output node — the right-click "dismiss" path. A no-op on a
+    /// real node, so it can never delete committed work.
+    mutating func dismissNoOutput(_ id: EVAHistoryNodeID) {
+        guard nodesByID[id]?.isNoOutput == true else { return }
+        removeNoOutput(id)
+    }
+
+    /// Clears every recorded refusal. Called when a real step commits.
+    mutating func pruneNoOutputNodes() {
+        for id in nodesByID.filter({ $0.value.isNoOutput }).map(\.key) {
+            removeNoOutput(id)
+        }
+    }
+
+    private mutating func removeNoOutput(_ id: EVAHistoryNodeID) {
+        guard let parent = nodesByID[id]?.parent else {
+            nodesByID.removeValue(forKey: id); return
+        }
+        nodesByID[parent]?.children.removeAll { $0 == id }
+        nodesByID.removeValue(forKey: id)
+    }
+
     // MARK: - Codable
 
     // Hand-written so the persisted form is a flat, readable array of nodes
@@ -589,7 +658,12 @@ nonisolated struct EVAHistory: Sendable, Codable, Equatable {
         var queue = [rootID]
         while !queue.isEmpty {
             let id = queue.removeFirst()
-            guard let node = nodesByID[id] else { continue }
+            guard var node = nodesByID[id], !node.isNoOutput else { continue }
+            // No-output (refusal) nodes are session-only: drop them, and drop
+            // their ids from any parent's children so the file has no dangling
+            // reference. `isNoOutput` itself is not in `CodingKeys`, so a decoded
+            // node is always a real one.
+            node.children = node.children.filter { nodesByID[$0]?.isNoOutput == false }
             ordered.append(node)
             queue.append(contentsOf: node.children)
         }

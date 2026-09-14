@@ -264,10 +264,53 @@ suite clears artifact-removal and brain-preservation gates in both the
 artifact-dominated and brain-dominated regimes
 (`BCGSurrogateCorrectionTests`).
 
----
+## SI-4 — Adversarial evaluation of PCA-S — measured 2026-09-12/13
 
----
+The 0.5%/0.9 gate above was "not yet evidence-based" when SI-3 shipped; SI-4
+measured it. The 12-axis iterative-mode campaign (30 seeds/point) and the
+in-app reliability measurement are recorded in
+`docs/provenance/pca-s-adversarial-evaluation.md`.
 
+- **Accepted-beat count** is the dominant driver (reliable benefit ~40+; ≤30 at or
+  below uncorrected). **BCG morphology jitter** is the physiological breakpoint
+  (crosses below uncorrected at ~0.4 as beat acceptance collapses). **Electrode/
+  co-registration mismatch** breaks at ~10°. Robust to channels (20–256), rate,
+  brain-source count, basis offset ≤20 mm, and skull ratio — so **real HydroCel
+  authoring stays deferred** (no montage-specific effect).
+- **`minimumComponentReliability = 0.9` measured and kept:** it sits in the gap
+  between true-artifact components (≥0.956) and brain leakage (≤0.790), pinned by
+  `reliabilityGateSeparatesArtifactFromBrain`.
+- **Ill-conditioning guard measured and rejected:** the condition number is set by
+  the ridge, not the mismatch, so it can't discriminate the electrode failure;
+  removed variance does, and is the co-registration guard.
+- **Harness/product default aligned:** `evaluate-surrogate*` now default to
+  `--pattern-search iterative` (what the app ships).
+
+## Processing run-grade (Good/Watch/Poor) — PCA-S shipped 2026-09-13
+
+`StepQuality`/`RunGrade`/`QualityMetric` (`EVA/Pipeline/StepQuality.swift`), the
+process-side counterpart to channel/segment health, with `PCASRunGrade` the first
+producer. A grade pill sits beside the history-rail node, expands into a metric
+breakdown in the status popover, and a refusal mints a session-only, inspectable
+**no-output node** one step back (`EVAHistory.recordRefusal`, pruned on next
+commit, right-click Dismiss). Grade persists on `EVAHistoryNode.quality`. Bands:
+accepted beats (refuse <10 / watch 10–40 / good ≥40), reliability (0.9), removed
+variance (0.6 / 1.0). Tests: `PCASRunGradeTests` (band boundaries), the reliability
+separation, and the history suites — all green. Generalizing to gradient/ICA/
+wavelet/MAAC is open (ROADMAP § Processing run-grade).
+
+## Simulator artifact-reduction evaluation toolkit — built 2026-09-12/13
+
+Method-agnostic measurement substrate in `Tools/EVASimulate`, documented in
+`docs/provenance/artifact-reduction-evaluation.md`
+and the simulator manual: `score-cleaning` (run-time metric ↔ truth),
+`evaluate-retention` (ERP "can I save this data?"), non-Gaussian sources
+(`--source-burstiness`) + `score-mixing` (Amari, for ICA/BSS), `--bcg-generators`
+(spatial rank, for OBS), sharp brain transients (`--brain-transients`) +
+`score-preservation` (wavelet oversmoothing), `--emg-autocorrelation` (BSS-CCA
+stressor). Heavy calibrations are env-gated (`EVA_CALIBRATION=1`, `scripts/calibrate.sh`),
+kept out of the default suite; determinism baseline unchanged (all new generator
+knobs are Optional/nil-default). Self-test 111/111.
 
 ---
 

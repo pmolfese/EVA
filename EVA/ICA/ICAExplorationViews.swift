@@ -27,7 +27,6 @@ extension WaveformView {
         ica.componentCount = min(max(ica.componentCount, 1), signal.numberOfChannels)
         ica.downsampleRate = min(ica.downsampleRate, signal.samplingRate)
         ica.statusMessage = nil
-        artifactVM.detectionMethod = .ica
         ica.showsSheet = true
     }
 

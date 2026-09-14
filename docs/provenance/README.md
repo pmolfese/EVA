@@ -30,6 +30,8 @@ completed and the historical engines were deleted.
 | `simulation-forward-model.md` | Derivation record for `Tools/EVASimulate`, the ground-truth simulation harness the correction methods are measured against. |
 | `dirty-vs-clean-comparison.md` | Dirty-room audit note comparing the old and new implementations. Validation material, not implementation guidance. |
 | `method-comparison.md` | Design record and measured results for the method-comparison harness — what each correction method scores against simulated ground truth, and what those numbers do and do not support. |
+| `pca-s-adversarial-evaluation.md` | Measured results for the SI-4 Track-2 adversarial campaign against PCA-S BCG correction: per-axis operating envelope and breakpoints, the pattern-search default finding, and the Track-3 threshold implications. Raw CSVs in `data/pca-s-si4/`. |
+| `artifact-reduction-evaluation.md` | Design record for the method-agnostic cleaning-evaluation tools (`score-cleaning`, `evaluate-retention`, the non-Gaussian source model): what each measures, why removed variance alone cannot grade quality, and the ERP trial-retention framing. |
 
 `docs/dirty-room/` holds dirty-room notes that quote reference-toolbox internals.
 It is blocked by `.claude/hooks/block-dirty-room.sh` and must not be read during

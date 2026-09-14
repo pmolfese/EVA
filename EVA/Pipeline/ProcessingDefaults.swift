@@ -39,7 +39,6 @@ final class ProcessingDefaults {
         static let icaComponentCount = "icaComponentCount"
         static let bcgAutoSelectProxySet = "bcgAutoSelectProxySet"
         static let bcgDefaultMethodRaw = "bcgDefaultMethodRaw"
-        static let artifactDetectionDefaultMethodRaw = "artifactDetectionDefaultMethodRaw"
         static let ocularBlinkThresholdConfig = "ocularBlinkThresholdConfig"
         static let ocularMovementThresholdConfig = "ocularMovementThresholdConfig"
         static let ocularTopologyDefaultMigrationV2 = "ocularTopologyDefaultMigrationV2"
@@ -70,7 +69,6 @@ final class ProcessingDefaults {
         static let icaComponentCount = 20
         static let bcgAutoSelectProxySet = false
         static let bcgDefaultMethodRaw = "spatialPCA"
-        static let artifactDetectionDefaultMethodRaw = ArtifactDetectionMethod.threshold.rawValue
         static let ocularBlinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
         static let ocularMovementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
         static let gradientDefaultCategoryRaw = MRIGradientCategory.template.rawValue
@@ -271,16 +269,6 @@ final class ProcessingDefaults {
     }
 
     // MARK: Artifact-detection defaults
-    var artifactDetectionDefaultMethodRaw: String {
-        get { UserDefaults.standard.string(forKey: Keys.artifactDetectionDefaultMethodRaw) ?? Defaults.artifactDetectionDefaultMethodRaw }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.artifactDetectionDefaultMethodRaw) }
-    }
-    /// Typed convenience over `artifactDetectionDefaultMethodRaw`, for binding directly to a `Picker`.
-    var artifactDetectionDefaultMethod: ArtifactDetectionMethod {
-        get { ArtifactDetectionMethod(rawValue: artifactDetectionDefaultMethodRaw) ?? .threshold }
-        set { artifactDetectionDefaultMethodRaw = newValue.rawValue }
-    }
-
     var ocularBlinkThresholdConfig: EyeArtifactThresholdConfiguration {
         get {
             ocularThresholdConfig(
@@ -357,7 +345,6 @@ final class ProcessingDefaults {
             Keys.rhythmicityUsesGPU: Defaults.rhythmicityUsesGPU,
             Keys.timeFrequencyBands: (try? JSONEncoder().encode(Defaults.timeFrequencyBands)) ?? Data(),
             Keys.bcgDefaultMethodRaw: Defaults.bcgDefaultMethodRaw,
-            Keys.artifactDetectionDefaultMethodRaw: Defaults.artifactDetectionDefaultMethodRaw,
             Keys.ocularBlinkThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularBlinkThresholdConfig),
             Keys.ocularMovementThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularMovementThresholdConfig),
             Keys.interpolatedHealthFromNeighbors: Defaults.interpolatedHealthFromNeighbors,
@@ -414,7 +401,6 @@ final class ProcessingDefaults {
         icaComponentCount = Defaults.icaComponentCount
         bcgAutoSelectProxySet = Defaults.bcgAutoSelectProxySet
         bcgDefaultMethodRaw = Defaults.bcgDefaultMethodRaw
-        artifactDetectionDefaultMethodRaw = Defaults.artifactDetectionDefaultMethodRaw
         ocularBlinkThresholdConfig = Defaults.ocularBlinkThresholdConfig
         ocularMovementThresholdConfig = Defaults.ocularMovementThresholdConfig
         interpolatedHealthFromNeighbors = Defaults.interpolatedHealthFromNeighbors

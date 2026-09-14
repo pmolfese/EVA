@@ -16,11 +16,33 @@
 
 import SwiftUI
 
+/// Threshold eye/QRS detection owns only its own marker sources. Re-running it
+/// replaces those markers while preserving BCG, wavelet, and user-defined
+/// artifact events, allowing threshold detection and ICA/template workflows to
+/// remain active independently.
+nonisolated enum ArtifactDetectorEventMerger {
+    static func replacingAutomaticEvents(
+        in existing: [MFFEvent],
+        with detected: [MFFEvent]
+    ) -> [MFFEvent] {
+        let retained = existing.filter { !isAutomaticEvent($0) }
+        return (retained + detected).sorted { lhs, rhs in
+            if lhs.beginTimeSeconds != rhs.beginTimeSeconds {
+                return lhs.beginTimeSeconds < rhs.beginTimeSeconds
+            }
+            return lhs.id < rhs.id
+        }
+    }
+
+    static func isAutomaticEvent(_ event: MFFEvent) -> Bool {
+        event.sourceFile == EyeArtifactThresholdDetector.sourceFile
+            || event.sourceFile == RWaveDetector.sourceFile
+            || event.sourceFile.hasPrefix("\(RWaveDetector.sourceFile):")
+    }
+}
+
 extension WaveformView {
     // MARK: - Artifact detection
-
-
-
 
     var artifactsAreActive: Bool {
         detectsEyeBlinkArtifacts
@@ -156,28 +178,28 @@ extension WaveformView {
             "\(ecg.thresholdSD)",
             "\(ecg.minimumRRSeconds)",
             displayedPhysioSignal().map { physioRangeTaskID(for: $0) } ?? "noPNS",
-            artifactVM.detectionMethod.rawValue,
             "\(artifactVM.detectionRefreshToken)"
         ].joined(separator: "|")
     }
 
     @MainActor
     func updateArtifactEvents(for signal: MFFSignalData) async {
-        if artifactVM.detectionMethod == .template || artifactVM.detectionMethod == .ica {
-            artifactVM.isDetecting = false
-            return
-        }
-
-        guard (detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts || ecg.isEnabled), artifactVM.detectionMethod == .threshold else {
-            artifactVM.events = []
-            artifactVM.statusMessage = artifactsAreActive ? "Only threshold artifact detection is available." : nil
+        guard detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts || ecg.isEnabled else {
+            artifactVM.events = ArtifactDetectorEventMerger.replacingAutomaticEvents(
+                in: artifactVM.events,
+                with: []
+            )
+            artifactVM.statusMessage = nil
             artifactVM.isDetecting = false
             return
         }
 
         let ecgSources = ecg.isEnabled ? ecgDetectionSources(for: signal) : []
         if ecg.isEnabled, ecgSources.isEmpty, !detectsEyeBlinkArtifacts, !detectsEyeMovementArtifacts {
-            artifactVM.events = []
+            artifactVM.events = ArtifactDetectorEventMerger.replacingAutomaticEvents(
+                in: artifactVM.events,
+                with: []
+            )
             artifactVM.statusMessage = "Choose a PNS channel or EEG proxy channel for ECG detection."
             artifactVM.isDetecting = false
             return
@@ -249,7 +271,10 @@ extension WaveformView {
         switch outcome {
         case .completed(let detectedEvents):
             artifactVM.isDetecting = false
-            artifactVM.events = detectedEvents
+            artifactVM.events = ArtifactDetectorEventMerger.replacingAutomaticEvents(
+                in: artifactVM.events,
+                with: detectedEvents
+            )
             // A finished run is a verdict even when it found nothing — the
             // distinction Segment Health needs. Only the publishing path records
             // it: a cancelled or superseded run describes inputs that may

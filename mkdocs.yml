@@ -76,6 +76,7 @@ nav:
       - Open And Inspect A Recording: tutorials/open-and-inspect.md
       - Mark And Interpolate Bad Channels: tutorials/bad-channels.md
       - Filter, Epoch, And Average: tutorials/filter-epoch-average.md
+      - Explore Rhythmicity With Trials And Averages: tutorials/rhythmicity-trials-averages.md
       - Review Health Scores: tutorials/review-health-scores.md
   - Reference:
       - Supported Formats: reference/supported-formats.md

@@ -1,0 +1,5 @@
+axis,value,seeds,corrected_snr_mean,corrected_snr_sd,uncorrected_snr_mean,uncorrected_snr_sd,clean_distortion_db_mean,clean_distortion_db_sd,removed_variance_mean,accepted_beat_fraction_mean,nearest_source_mm_mean
+correction-skull-ratio,20,30,2.208747,0.855781,1.255144,0.054120,13.757618,0.815181,0.565022,0.394363,15.907357
+correction-skull-ratio,40,30,2.163972,0.809413,1.255144,0.054120,14.030528,0.866339,0.563206,0.394363,15.907357
+correction-skull-ratio,80,30,2.077205,0.757353,1.255144,0.054120,14.309743,0.911886,0.569509,0.394363,15.907357
+correction-skull-ratio,160,30,1.985701,0.712994,1.255144,0.054120,14.537011,0.941107,0.580419,0.394363,15.907357

@@ -63,9 +63,6 @@ struct ReplaySettingsRestoreTests {
         let eye = ReplaySettingsRestore.settings(for: [filterStep()])
         #expect(eye.detectsBlinks == false)
         #expect(eye.detectsMovements == false)
-        // The operator's chosen method is left alone — only a path that names
-        // the step asserts a method.
-        #expect(eye.selectsThresholdMethod == false)
     }
 
     @Test("An empty path — the root — derives detection off")
@@ -80,7 +77,6 @@ struct ReplaySettingsRestoreTests {
         )
         #expect(eye.detectsBlinks == false)
         #expect(eye.detectsMovements == true)
-        #expect(eye.selectsThresholdMethod == true)
     }
 
     private func baselineStep() -> EVAProcessingStep {

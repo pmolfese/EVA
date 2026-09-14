@@ -112,6 +112,13 @@ final class BCGDetectionViewModel {
     var isRunning = false
     var progress: Double?
     var status: String?
+    /// Set by `ProcessingCore` when a PCA-S run refuses: the Poor grade and the
+    /// step parameters, so the history layer can mint a recorded-refusal node
+    /// one step back and then clear this. Session-only; never persisted here.
+    var surrogatePendingRefusal: (quality: StepQuality, parameters: [String: String])?
+    /// Bumped alongside `surrogatePendingRefusal` so a view `.onChange` can mint
+    /// the refusal node: the tuple is not `Equatable`, but this token is.
+    var surrogateRefusalToken = 0
     var refinedTemplate: [Float]?
     var refinedKeptCount: Int?
     var isRefining = false

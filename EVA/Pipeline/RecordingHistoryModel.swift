@@ -212,6 +212,13 @@ final class RecordingHistoryModel {
         let id = history.currentID
         if snapshots[id] == nil { snapshotOrder.append(id) }
         snapshots[id] = snapshot
+        // Grade the step from the report it just produced and record it on the
+        // node, so the rail pill survives snapshot eviction and save/reload.
+        // Computed once, when the report is first in hand — the same shape as
+        // `recordComputeCost`.
+        if let report = snapshot.bcgSurrogateReport, history.node(id)?.quality == nil {
+            history.setQuality(PCASRunGrade.grade(from: report), for: id)
+        }
         evictSnapshotsBeyondBudget()
     }
 
@@ -330,6 +337,18 @@ final class RecordingHistoryModel {
     /// row shows no time at all until one exists (ROADMAP RW-1 item 7).
     func recordComputeCost(_ seconds: TimeInterval, for id: EVAHistoryNodeID) {
         history.recordComputeCost(seconds, for: id)
+    }
+
+    /// Hangs a recorded-refusal node one step below the current node without
+    /// moving the pointer. Session-only and pruned on the next commit.
+    func recordRefusal(_ step: EVAProcessingStep, quality: StepQuality) {
+        history.recordRefusal(step, quality: quality)
+    }
+
+    /// Dismisses a single recorded-refusal node — the right-click action. A
+    /// no-op on a real node, so it can never delete committed work.
+    func dismissNoOutput(_ id: EVAHistoryNodeID) {
+        history.dismissNoOutput(id)
     }
 
     func computeCost(for id: EVAHistoryNodeID) -> TimeInterval? {
@@ -549,7 +568,9 @@ final class RecordingHistoryModel {
                         .unavailableReason?.message,
                 rebuildSeconds: snapshots[node.id] == nil ? node.computeCost : nil,
                 depth: depth,
-                isOnCurrentPath: onPath.contains(node.id)
+                isOnCurrentPath: onPath.contains(node.id),
+                quality: node.quality,
+                isNoOutput: node.isNoOutput
             ))
             // Indent only at a fork. A linear history stays flat — indenting
             // every step would turn an ordinary session into a staircase.
@@ -665,4 +686,10 @@ nonisolated struct HistoryRailNode: Identifiable, Hashable, Sendable {
     /// nodes can occur in decoded legacy trees or explicit copied histories;
     /// ordinary recording-window replacement prunes an abandoned future.
     var isOnCurrentPath: Bool = true
+    /// Run-quality grade, when the step reports one. Drives the rail pill and the
+    /// status-popover breakdown. Nil for steps that do not grade themselves.
+    var quality: StepQuality?
+    /// A recorded refusal: inspectable, but not a place to stand. The rail dims
+    /// it, shows its Poor pill, and a click opens its breakdown without navigating.
+    var isNoOutput: Bool = false
 }

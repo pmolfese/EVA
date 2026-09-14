@@ -34,3 +34,6 @@ Before exporting, confirm:
 - The measurement window matches the component of interest.
 - Baseline choices are consistent.
 - Rejected or cleaned trials are handled consistently.
+
+For phase-persistence analysis and individualized frequency bands, continue with
+[Explore Rhythmicity With Trials And Averages](../tutorials/rhythmicity-trials-averages.md).

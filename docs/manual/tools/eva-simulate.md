@@ -658,6 +658,206 @@ alongside and applies to every run.
 
 ---
 
+## Evaluating source-informed BCG correction (PCA-S)
+
+`generate` / `score` measure any correction you can run through a file. Two extra
+subcommands measure **PCA-S** (the source-informed / Berg–Scherg BCG correction)
+directly and in memory, without writing MFFs, by generating clean + BCG-noisy
+recordings over many seeds, correcting them, and scoring against the clean truth.
+They are the workhorses behind the SI-4 adversarial evaluation.
+
+```bash
+# One condition, repeated over seeds, with the full metric set.
+Tools/EVASimulate/.build/eva-simulate evaluate-surrogate \
+  --seeds 30 --pattern-search iterative
+
+# Cross one axis and write an aggregated CSV — the campaign workhorse.
+Tools/EVASimulate/.build/eva-simulate evaluate-surrogate-grid \
+  --axis bcg-morphology-jitter --values 0,0.1,0.2,0.4,0.8 \
+  --seeds 30 --pattern-search iterative --output jitter.csv
+```
+
+`evaluate-surrogate-grid` axes: `duration`, `channels`, `rate`, `components`,
+`brain-regularization`, `sources`, `offset`, `max-beats`, `bcg-morphology-jitter`,
+`correction-scalp-radius`, `correction-skull-ratio`, `correction-electrode-jitter`.
+Every other option fixes the base condition. Each row reports corrected and
+uncorrected SNR (mean ± SD over seeds), clean distortion (dB), removed-variance
+fraction, and accepted-beat fraction.
+
+Read the two SNR columns together: **the bar to clear is the uncorrected column.**
+A corrected value below it means the correction hurt. A removed-variance fraction
+climbing toward or past 1.0 is a distortion signature, not a quality one.
+
+!!! note "`--pattern-search` defaults to `iterative`, the mode EVA ships"
+    `iterative` refines the artifact template from the average of accepted beats
+    and is what the EVA app corrects with, so it is the default here too. The only
+    alternative, `paper`, is the single-representative-beat method retained to
+    reproduce Rusiniak et al. (2022); at these settings it accepts a small fraction
+    of beats and its topographies point partly at brain, so PCA-S can land *below*
+    uncorrected — a comparison-arm artifact, not a bug in the shipped correction.
+    Pass `--pattern-search paper` only for an explicit paper-parity run.
+
+### Operating envelope of PCA-S (the important case)
+
+The SI-4 Track-2 campaign (2026-09-12; 30 seeds/point; iterative mode; full
+tables and raw CSVs in `docs/provenance/pca-s-adversarial-evaluation.md`) measured
+where PCA-S helps and where it stops. At the default condition PCA-S gains about
+**1.65×** broadband SNR (corrected 2.08 ± 0.76 vs uncorrected 1.26). The SD is
+about half the gain — a difference smaller than one SD is not a result.
+
+| Axis | Safe | Breaks / degrades |
+|---|---|---|
+| Accepted beats | ~40+ | ≤ ~30 beats → at or below uncorrected (the dominant driver) |
+| Recording length | ≥ 120 s | < 60 s (margin within one SD) |
+| BCG morphology variability | jitter ≤ 0.2 | ≥ 0.4 crosses below uncorrected; 0.8 fails |
+| Electrode/montage mismatch | ≤ 5° | ~10° co-registration error breaks it |
+| Artifact components | 3–4 (optimum ~3) | ≥ 6 removes brain signal |
+| Channels 20–256, rate, sources ≥ 29, basis offset ≤ 20 mm, skull ratio, scalp radius, regularization | robust | no breakpoint in range |
+
+!!! note "This is a native reimplementation, and its direction is sound"
+    The `evaluate-surrogate` operator (`SourceInformedSeparation`) reconstructs the
+    brain subspace; it is not a subtraction that could be sign-flipped. The
+    identical operator gains ~1.8× the moment it is fed good artifact topographies,
+    so where PCA-S underperforms the cause is upstream beat acceptance / template
+    quality, never a reversed correction.
+
+!!! warning "Simulator variance is narrower than a real subject's"
+    Every SD above is realization noise on one generator model. The only axis that
+    injects structural beat-to-beat variability — morphology jitter — is also the
+    axis that breaks PCA-S. Real BCG adds non-stationary morphology, respiration
+    coupling, movement-locked amplitude changes, and electrode drift that this
+    harness does not model, so these safe zones are necessary, not sufficient. Treat
+    a passing simulation as a floor on the failure rate, not a ceiling.
+
+---
+
+## Evaluating artifact reduction (any method)
+
+PCA-S has its own harness above. These three tools are method-agnostic — they
+measure *any* cleaning step against ground truth, and they exist because
+"removed variance" is not a quality score on its own (the source of
+`CleaningVarianceAccount` says exactly that). Each answers a different honest
+question.
+
+### `score-cleaning` — what a run-time number means
+
+A live correction can compute how much variance it removed *without* truth. This
+ties that number to the truth so a Good/Watch/Poor band can be set on it, per
+method.
+
+```bash
+eva-simulate generate --output ~/sc --no-gradient --with-bcg --duration 120
+eva-simulate correct --input ~/sc/sim_noisy.mff --output ~/sc/sim_corrected.mff \
+  --assume-standard-montage
+eva-simulate score-cleaning --clean ~/sc/sim_clean.mff --noisy ~/sc/sim_noisy.mff \
+  --corrected ~/sc/sim_corrected.mff
+```
+
+It reports `removed_variance_fraction` (run-time, no truth) beside
+`residual_error_fraction`, corrected/uncorrected SNR, and
+`artifact_reduction_fraction` (1 = perfect, 0 = did nothing, **negative = made it
+worse**). Correlating removed-variance against artifact-reduction across many runs
+is how a band gets calibrated: a high removed-variance with a negative reduction
+is a method deleting brain, not artifact.
+
+### `evaluate-retention` — "can I save this data?"
+
+The user-facing question for blink cleaning is rarely "how much artifact came
+out" — it is "can I keep these hard-won trials instead of throwing them away." For
+an ERP experiment where blinks contaminate some trials, this compares three
+strategies against the true ERP:
+
+| Strategy | What it does |
+| --- | --- |
+| reject | drop contaminated trials, average the survivors — unbiased, but fewer trials |
+| keep-dirty | average every trial uncorrected — more trials, but blink bias |
+| clean & keep | correct then keep every trial — the win, *if* the correction didn't bias the component |
+
+```bash
+eva-simulate evaluate-retention --seeds 20 --blinks 150
+```
+
+It reports trials kept, ERP-average SNR, and peak amplitude/latency bias per
+strategy (built-in cleaner: Gratton–Coles VEOG regression). The result is
+regime-dependent, which is the point: at light contamination, rejecting is cheap
+and regression can *add* bias; at heavy contamination, clean-and-keep saves many
+trials and lowers bias. Cleaning wins only when it lifts SNR without biasing the
+peak — and the harness will tell you when it doesn't.
+
+!!! note "For removal-only methods, the question becomes detection"
+    A technique that flags rather than corrects doesn't save trials directly; the
+    honest test is whether threshold-based artifact detection still catches what
+    it should afterward. Use `score-events` (detection vs truth) before and after.
+
+### `--source-burstiness` — honest sources for ICA and BSS
+
+The paper EEG is band-limited **Gaussian**, which is close to pathological for
+methods that separate sources by statistics: ICA is only identifiable when at
+most one source is Gaussian, and BSS-CCA relies on a non-Gaussian marginal. So
+evaluating ICA on the default sources would measure the simulator, not the method.
+
+`--source-burstiness <0–1>` (dipole model only) makes the sources bursty and
+super-Gaussian via a slow amplitude envelope — band-preserving and RMS-preserving,
+so amplitudes and SNR are unchanged and only the *shape* of the distribution
+moves. `0` is the exact Gaussian paper model, so scenarios that omit it are
+byte-identical.
+
+```bash
+eva-simulate generate --output ~/ica --eeg-model dipole --source-burstiness 0.8
+```
+
+### `score-mixing` — ICA unmixing quality
+
+Scores an estimated unmixing matrix against the true source mixing with the Amari
+performance index (0 = perfect separation, higher = source leakage). Export the
+true mixing from a dipole recording, run your ICA, then score its unmixing:
+
+```bash
+eva-simulate generate --output ~/ica --eeg-model dipole --source-burstiness 0.8 \
+  --write-mixing ~/ica/A.json
+# ...run ICA, save its unmixing W as sources × channels JSON...
+eva-simulate score-mixing --true-mixing ~/ica/A.json --unmixing ~/ica/W.json
+```
+
+Only meaningful on non-Gaussian sources — hence the `--source-burstiness`.
+
+### `--bcg-generators` — spatial rank for OBS
+
+`--bcg-generators <1–4>` (generators BCG model) sets how many physical generators
+are active, and so the artifact's spatial rank. An OBS-style correction keeps the
+top-k principal components of the beat-aligned epochs, so varying the true rank is
+how you find where it keeps too few (residual left) or too many (brain eaten).
+
+### `score-preservation` — did a cleaner keep the real brain transients?
+
+A wavelet reducer that thresholds transient coefficients will happily delete a
+real K-complex or sharp wave — oversmoothing. The only way to catch it is to seed
+genuine sharp *brain* features and check they survived. `--brain-transients
+<per-min>` adds K-complexes, spindles and sharp waves to the clean EEG (they're
+brain, not artifact — central-maximal, with per-event truth), and
+`score-preservation` reports how much of each survived, per type.
+
+```bash
+eva-simulate generate --output ~/wav --eeg-model dipole --brain-transients 20 \
+  --write-transients ~/wav/T.json
+# ...run the wavelet reducer, save its output...
+eva-simulate score-preservation --clean ~/wav/sim_clean.mff \
+  --corrected ~/wav/reduced.mff --transients ~/wav/T.json
+```
+
+1 = kept intact, 0 = flattened, negative = distorted. A reducer that oversmooths
+scores low, most visibly on the sharpest type (sharp waves).
+
+### `--emg-autocorrelation` — the BSS-CCA muscle stressor
+
+BSS-CCA separates muscle from brain by *autocorrelation*: surface EMG is broadband
+(low autocorrelation), brain is not. `--emg-autocorrelation <0–0.99>` colors the
+EMG carrier (AR-1) toward brain-like autocorrelation, so the separation can be
+pushed until it fails — with brain gamma present, that failure shows up as gamma
+lost from the cleaned data (`score`'s per-band SNR). Default off (broadband).
+
+---
+
 ## Recipes for teaching
 
 With `--demo`:

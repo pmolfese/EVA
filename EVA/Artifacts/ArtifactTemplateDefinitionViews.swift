@@ -40,6 +40,9 @@ extension WaveformView {
 
     func inferredArtifactType(name: String, eventCode: String) -> DefinedArtifactType {
         let text = "\(name) \(eventCode)".lowercased()
+        if text.contains("muscle") || text.contains("emg") {
+            return .muscle
+        }
         if text.contains("saccadic spike") || text.contains("sacc-sp") || text.contains("spike potential") {
             return .saccadicSpike
         }
@@ -60,6 +63,8 @@ extension WaveformView {
         case .ocular: return "AOC"
         case .saccadicSpike: return "ASP"
         case .corneoRetinal: return "CRD"
+        case .movement: return "MOV"
+        case .muscle: return "EMG"
         case .ecg: return "ECG"
         case .bcg: return "BCG"
         case .other: return "AOT"
@@ -154,7 +159,6 @@ extension WaveformView {
         template.result = nil
         template.lastScanSignature = nil
         template.selectedChannel = nil
-        artifactVM.detectionMethod = .template
         template.showsSheet = true
     }
 
@@ -300,7 +304,7 @@ extension WaveformView {
                     help: "Used by Clean Artifacts to group ocular, ECG, BCG, and other artifact definitions."
                 )
                 Picker("Type", selection: $template.type) {
-                    ForEach(DefinedArtifactType.allCases.filter { $0 != .corneoRetinal }) { type in
+                    ForEach(DefinedArtifactType.allCases.filter { $0 != .corneoRetinal && $0 != .movement && $0 != .muscle }) { type in
                         Text(type.rawValue).tag(type)
                     }
                 }
@@ -1629,14 +1633,22 @@ extension WaveformView {
                                 .help("Delete this artifact definition.")
                                 .frame(width: 24)
 
-                                if artifact.isCorneoRetinalDefinition {
-                                    Text(DefinedArtifactType.corneoRetinal.rawValue)
+                                if artifact.isCorneoRetinalDefinition || artifact.isMovementPCADefinition || artifact.isMuscleBSSCCADefinition {
+                                    Text(artifact.isMuscleBSSCCADefinition
+                                         ? DefinedArtifactType.muscle.rawValue
+                                         : artifact.isMovementPCADefinition
+                                            ? DefinedArtifactType.movement.rawValue
+                                            : DefinedArtifactType.corneoRetinal.rawValue)
                                         .font(.callout)
                                         .frame(width: 150, alignment: .leading)
-                                        .help("MAAC-2 is a dedicated whole-recording correction, so its artifact type is fixed.")
+                                        .help(artifact.isMuscleBSSCCADefinition
+                                              ? "MAAC-4 is a dedicated window/epoch-wise correction, so its artifact type is fixed."
+                                              : artifact.isMovementPCADefinition
+                                                ? "MAAC-3 is a dedicated epoch-wise correction, so its artifact type is fixed."
+                                                : "MAAC-2 is a dedicated whole-recording correction, so its artifact type is fixed.")
                                 } else {
                                     Picker("Type", selection: $artifact.type) {
-                                        ForEach(DefinedArtifactType.allCases.filter { $0 != .corneoRetinal }) { type in
+                                        ForEach(DefinedArtifactType.allCases.filter { $0 != .corneoRetinal && $0 != .movement && $0 != .muscle }) { type in
                                             Text(type.rawValue).tag(type)
                                         }
                                     }
@@ -1648,9 +1660,13 @@ extension WaveformView {
                                     Text(artifact.name)
                                         .font(.callout.weight(.medium))
                                         .lineLimit(1)
-                                    Text(artifact.isCorneoRetinalDefinition
-                                         ? "\(artifact.eventCount) blink-mask spans · CRD"
-                                         : "\(artifact.eventCount) events · \(artifact.eventCode)")
+                                    Text(artifact.isMuscleBSSCCADefinition
+                                         ? muscleBSSCCARangeSummary(artifact, signal: signal)
+                                         : artifact.isMovementPCADefinition
+                                            ? movementPCARangeSummary(artifact, signal: signal)
+                                         : artifact.isCorneoRetinalDefinition
+                                            ? "\(artifact.eventCount) blink-mask spans · CRD"
+                                            : "\(artifact.eventCount) events · \(artifact.eventCode)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -1720,6 +1736,16 @@ extension WaveformView {
                 && template.definedArtifacts[index].type != .corneoRetinal {
                 template.definedArtifacts[index].type = .corneoRetinal
             }
+            for index in template.definedArtifacts.indices
+            where template.definedArtifacts[index].isMovementPCADefinition
+                && template.definedArtifacts[index].type != .movement {
+                template.definedArtifacts[index].type = .movement
+            }
+            for index in template.definedArtifacts.indices
+            where template.definedArtifacts[index].isMuscleBSSCCADefinition
+                && template.definedArtifacts[index].type != .muscle {
+                template.definedArtifacts[index].type = .muscle
+            }
         }
     }
 
@@ -1744,6 +1770,17 @@ extension WaveformView {
                     artifact: artifact,
                     signal: signal,
                     reportCache: $template.obsVarianceReportCache,
+                    onSettingsChange: clearAppliedArtifactCleaning
+                )
+            }
+
+            if artifact.wrappedValue.cleaningMethod == .bssCCA {
+                MuscleBSSCCAOptionsButton(
+                    artifact: artifact,
+                    signal: signal,
+                    excludedChannels: channels.bad.union(channels.interpolated.keys),
+                    activeLowPassHz: filter.output == nil ? nil : filter.lowPassCutoff,
+                    icaMuscleComponentCount: upstreamICAMuscleComponentCount,
                     onSettingsChange: clearAppliedArtifactCleaning
                 )
             }
@@ -1783,7 +1820,11 @@ extension WaveformView {
         ArtifactCleaningMethod.allCases.filter {
             ($0 != .spikeTemplate || artifact.type == .saccadicSpike)
                 && ($0 != .corneoRetinalRegression || artifact.isCorneoRetinalDefinition)
+                && ($0 != .movementPCA || artifact.isMovementPCADefinition)
+                && ($0 != .bssCCA || artifact.isMuscleBSSCCADefinition)
                 && (!artifact.isCorneoRetinalDefinition || $0 == .doNothing || $0 == .corneoRetinalRegression)
+                && (!artifact.isMovementPCADefinition || $0 == .doNothing || $0 == .movementPCA)
+                && (!artifact.isMuscleBSSCCADefinition || $0 == .doNothing || $0 == .bssCCA)
         }
     }
 
@@ -1795,6 +1836,8 @@ extension WaveformView {
         SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
         SP Spatial Filter: the MAAC saccadic-spike specialization; fits and subtracts the saved canonical scalp map inside confirmed short SP windows.
         MAAC-2 CRD Regression: estimates continuous horizontal and vertical eye-position scalp maps from HEOG/VEOG, then removes them in sequence while interpolating the predictor through blink spans.
+        MAAC-3 Movement PCA: runs temporal PCA + Promax independently in stored epochs, or in one-second blocks for continuous recordings, and removes factor back-projections over the peak-to-peak threshold.
+        MAAC-4 BSS-CCA: separates low-autocorrelation muscle sources with one-sample-lag CCA and suggests removals from the editable EMG/EEG spectral-power ratio. Component choices are reviewable and replayable.
         MAS/MAR: local (moving-window) median template — robust to an occasional distorted event; MAR additionally scales the template by a least-squares fit.
         wAAS/wAAR: exponentially weighted template (Goldman 2000); Options defaults to AMRI global weighting, where every valid event contributes by decay^distance, and wAAR additionally scales the template by a least-squares fit.
 
@@ -1812,7 +1855,10 @@ extension WaveformView {
         let detail = progress.detail.map { " · \($0)" } ?? ""
         switch progress.phase {
         case .preparing:
-            return "Setting up \(artifactPosition)\(progress.artifactName) (\(progress.artifactTotal) events) with \(progress.method.rawValue)\(detail)"
+            let workLabel = progress.method == .movementPCA || progress.method == .bssCCA
+                ? "epoch-wise"
+                : "\(progress.artifactTotal) events"
+            return "Setting up \(artifactPosition)\(progress.artifactName) (\(workLabel)) with \(progress.method.rawValue)\(detail)"
         case .cleaning:
             let current = min(progress.artifactCompleted, progress.artifactTotal)
             let overall = progress.total > progress.artifactTotal

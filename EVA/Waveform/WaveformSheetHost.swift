@@ -46,6 +46,8 @@ enum ActiveRecordingSheet: String, Identifiable, CaseIterable, Sendable {
     case artifactCleaning
     case saccadicSpike
     case corneoRetinal
+    case movementPCA
+    case muscleBSSCCA
     case ecgDetection
     case eyeArtifactThreshold
     case bcgDetection
@@ -82,6 +84,8 @@ extension WaveformView {
         if artifactVM.showsCleaningSheet { return .artifactCleaning }
         if saccadicSpike.showsSheet { return .saccadicSpike }
         if corneoRetinal.showsSheet { return .corneoRetinal }
+        if movementPCA.showsSheet { return .movementPCA }
+        if muscleBSSCCA.showsSheet { return .muscleBSSCCA }
         if ecg.showsSheet { return .ecgDetection }
         if artifactVM.showsThresholdSheet { return .eyeArtifactThreshold }
         if bcg.showsSheet { return .bcgDetection }
@@ -129,6 +133,16 @@ extension WaveformView {
         case .artifactCleaning: artifactVM.showsCleaningSheet = false
         case .saccadicSpike: saccadicSpike.showsSheet = false
         case .corneoRetinal: corneoRetinal.showsSheet = false
+        case .movementPCA:
+            movementPCA.analysisTask?.cancel()
+            movementPCA.analysisTask = nil
+            movementPCA.isAnalyzing = false
+            movementPCA.showsSheet = false
+        case .muscleBSSCCA:
+            muscleBSSCCA.analysisTask?.cancel()
+            muscleBSSCCA.analysisTask = nil
+            muscleBSSCCA.isAnalyzing = false
+            muscleBSSCCA.showsSheet = false
         case .ecgDetection: ecg.showsSheet = false
         case .eyeArtifactThreshold: artifactVM.showsThresholdSheet = false
         case .bcgDetection: bcg.showsSheet = false
@@ -182,6 +196,12 @@ extension WaveformView {
 
         case .corneoRetinal:
             corneoRetinalSheet(for: continuousSignal)
+
+        case .movementPCA:
+            movementPCASheet(for: continuousSignal)
+
+        case .muscleBSSCCA:
+            muscleBSSCCASheet(for: continuousSignal)
 
         case .ecgDetection:
             ecgDetectionSheet(for: continuousSignal)

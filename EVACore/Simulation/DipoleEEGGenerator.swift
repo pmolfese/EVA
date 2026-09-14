@@ -141,6 +141,16 @@ nonisolated enum DipoleEEGGenerator {
                 let amplitude = band.amplitudeMicrovolts ?? 0
                 for sample in signal.indices { signal[sample] *= amplitude }
             }
+            if let nonGaussian = config.nonGaussianSources {
+                // Derive an independent, deterministic envelope seed from the
+                // source's own seed so the shaping is reproducible per source.
+                NonGaussianSourceModel.shape(
+                    &signal, model: nonGaussian, samplingRate: config.samplingRate,
+                    seed: sources[index].seed &+ 0x9E37_79B9_7F4A_7C15)
+                sources[index].scenarioRole = appending(
+                    sources[index].scenarioRole,
+                    String(format: "non-Gaussian source (burstiness %.2f)", nonGaussian.burstiness))
+            }
             timecourses.append(signal)
         }
 

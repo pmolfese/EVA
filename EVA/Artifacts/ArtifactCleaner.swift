@@ -30,6 +30,8 @@ enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable 
     case ocular = "Ocular Artifact"
     case saccadicSpike = "Saccadic Spike Potential"
     case corneoRetinal = "Corneo-Retinal Dipole"
+    case movement = "Movement Artifact"
+    case muscle = "Muscle Artifact"
     case ecg = "ECG Artifact"
     case bcg = "BCG Artifact"
     case other = "Other"
@@ -51,7 +53,7 @@ enum DefinedArtifactType: String, CaseIterable, Identifiable, Codable, Sendable 
         switch self {
         case .bcg, .ecg: return 0.25
         case .saccadicSpike: return 0.10
-        case .ocular, .corneoRetinal: return 0.35
+        case .ocular, .corneoRetinal, .movement, .muscle: return 0.35
         case .other: return 0.25
         }
     }
@@ -81,6 +83,10 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
     case spikeTemplate = "SP Spatial Filter"
     /// MAAC-2 continuous horizontal-then-vertical reverse-EMCP regression.
     case corneoRetinalRegression = "MAAC-2 CRD Regression"
+    /// MAAC-3 per-epoch temporal PCA with an oblique Promax rotation.
+    case movementPCA = "MAAC-3 Movement PCA"
+    /// MAAC-4 lagged BSS-CCA with spectral component classification.
+    case bssCCA = "MAAC-4 BSS-CCA"
     /// Median Artifact Subtraction — local (moving-window) median template.
     case mas = "MAS"
     /// Median Artifact Regression — MAS template, least-squares scaled before subtracting.
@@ -293,6 +299,12 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
     /// Blink spans are estimation masks for MAAC-2, not artifact events to be
     /// rejected during epoching, so they are stored separately from `events`.
     var corneoRetinalBlinkEvents: [MFFEvent]? = nil
+    /// Present only for definitions created by the dedicated MAAC-3 workflow.
+    /// Optional so artifact payloads written before MAAC-3 remain decodable.
+    var movementPCAConfiguration: MovementPCAConfiguration? = nil
+    /// Present only for definitions created by the dedicated MAAC-4 workflow.
+    /// Optional so artifact payloads written before MAAC-4 remain decodable.
+    var muscleBSSCCAConfiguration: MuscleBSSCCAConfiguration? = nil
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
 
@@ -307,6 +319,18 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
         type == .corneoRetinal
             || cleaningMethod == .corneoRetinalRegression
             || corneoRetinalConfiguration != nil
+    }
+
+    nonisolated var isMovementPCADefinition: Bool {
+        type == .movement
+            || cleaningMethod == .movementPCA
+            || movementPCAConfiguration != nil
+    }
+
+    nonisolated var isMuscleBSSCCADefinition: Bool {
+        type == .muscle
+            || cleaningMethod == .bssCCA
+            || muscleBSSCCAConfiguration != nil
     }
 
     mutating func preserveCleaningSettings(from previous: DefinedArtifact) {
@@ -334,6 +358,8 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
         corneoRetinalConfiguration = previous.corneoRetinalConfiguration
         corneoRetinalChannelSelection = previous.corneoRetinalChannelSelection
         corneoRetinalBlinkEvents = previous.corneoRetinalBlinkEvents
+        movementPCAConfiguration = previous.movementPCAConfiguration
+        muscleBSSCCAConfiguration = previous.muscleBSSCCAConfiguration
     }
 }
 
@@ -419,6 +445,34 @@ extension DefinedArtifact {
             params[key("corneoRetinal.upperVEOG")] = integerList(selection.upperVEOGIndices, oneBased: true)
             params[key("corneoRetinal.lowerVEOG")] = integerList(selection.lowerVEOGIndices, oneBased: true)
             params[key("corneoRetinal.analysisChannels")] = integerList(selection.analysisIndices, oneBased: true)
+        }
+
+        if let configuration = movementPCAConfiguration {
+            params[key("movementPCA.rangeMode")] = configuration.rangeMode.rawValue
+            params[key("movementPCA.continuousWindowSeconds")] = fixed(configuration.continuousWindowSeconds)
+            params[key("movementPCA.amplitudeThresholdMicrovolts")] = fixed(configuration.amplitudeThresholdMicrovolts)
+            params[key("movementPCA.promaxPower")] = fixed(configuration.promaxPower)
+            params[key("movementPCA.maximumFactorCount")] = "\(configuration.maximumFactorCount)"
+            params[key("movementPCA.seed")] = "\(configuration.seed)"
+        }
+
+        if let configuration = muscleBSSCCAConfiguration {
+            params[key("muscleBSSCCA.rangeMode")] = configuration.rangeMode.rawValue
+            params[key("muscleBSSCCA.continuousWindowSeconds")] = fixed(configuration.continuousWindowSeconds)
+            params[key("muscleBSSCCA.continuousOverlapFraction")] = fixed(configuration.continuousOverlapFraction)
+            params[key("muscleBSSCCA.analysisSamplingRate")] = fixed(configuration.analysisSamplingRate)
+            params[key("muscleBSSCCA.eegBandLowHz")] = fixed(configuration.eegBandLowHz)
+            params[key("muscleBSSCCA.eegBandHighHz")] = fixed(configuration.eegBandHighHz)
+            params[key("muscleBSSCCA.emgBandLowHz")] = fixed(configuration.emgBandLowHz)
+            params[key("muscleBSSCCA.emgBandHighHz")] = fixed(configuration.emgBandHighHz)
+            params[key("muscleBSSCCA.minimumEMGToEEGPowerRatio")] = fixed(configuration.minimumEMGToEEGPowerRatio)
+            params[key("muscleBSSCCA.componentOverrides")] = configuration.componentOverrides
+                .sorted {
+                    ($0.rangeStartSample, $0.componentIndex, $0.removes ? 1 : 0)
+                        < ($1.rangeStartSample, $1.componentIndex, $1.removes ? 1 : 0)
+                }
+                .map { "\($0.rangeStartSample):\($0.componentIndex):\($0.removes ? 1 : 0)" }
+                .joined(separator: ",")
         }
 
         let eventDurations = sortedEvents.map { event in
@@ -520,6 +574,14 @@ struct ArtifactCleaningProgress: Sendable {
         guard total > 0 else { return 0 }
         return Double(completed) / Double(total)
     }
+}
+
+/// Standalone artifact cleaning is intentionally replayed in the order the
+/// user defined it. A future/full MAAC pipeline can opt into the canonical
+/// relative order without changing existing projects or ad-hoc workflows.
+enum ArtifactCleaningOrdering: String, Codable, Sendable {
+    case asDefined
+    case maac
 }
 
 nonisolated enum ArtifactCleaner {
@@ -692,13 +754,18 @@ nonisolated enum ArtifactCleaner {
         from signal: MFFSignalData,
         artifacts: [DefinedArtifact],
         excluding badChannels: Set<Int>,
+        ordering: ArtifactCleaningOrdering = .asDefined,
+        availableBandwidthHz: Double? = nil,
         progress: (@Sendable (ArtifactCleaningProgress) -> Void)? = nil
     ) -> (signal: MFFSignalData, summaries: [ArtifactCleaningSummary]) {
         var data = signal.data
         var summaries: [ArtifactCleaningSummary] = []
-        let artifactsToClean = artifacts.filter {
+        let artifactsToClean = orderedArtifacts(artifacts, ordering: ordering).filter {
             $0.cleaningMethod.removesArtifact
-                && (!$0.events.isEmpty || $0.cleaningMethod == .corneoRetinalRegression)
+                && (!$0.events.isEmpty
+                    || $0.cleaningMethod == .corneoRetinalRegression
+                    || $0.cleaningMethod == .movementPCA
+                    || $0.cleaningMethod == .bssCCA)
         }
         let artifactCount = artifactsToClean.count
         let totalEvents = artifactsToClean.reduce(0) { $0 + max($1.eventCount, 1) }
@@ -786,6 +853,25 @@ nonisolated enum ArtifactCleaner {
                     data: &data,
                     excluding: badChannels
                 )
+            case .movementPCA:
+                reportSetupProgress("Running temporal PCA + Promax independently within each epoch")
+                channelCount = applyMovementPCA(
+                    artifact: artifact,
+                    signal: signal,
+                    data: &data,
+                    excluding: badChannels,
+                    finalizingProgress: reportFinalizingProgress
+                )
+            case .bssCCA:
+                reportSetupProgress("Estimating lagged CCA sources and reviewing their spectra")
+                channelCount = applyMuscleBSSCCA(
+                    artifact: artifact,
+                    signal: signal,
+                    data: &data,
+                    excluding: badChannels,
+                    availableBandwidthHz: availableBandwidthHz,
+                    finalizingProgress: reportFinalizingProgress
+                )
             case .mas, .mar, .waas, .waar:
                 reportSetupProgress("Building local (moving-window) artifact templates")
                 channelCount = applyLocalTemplate(
@@ -839,6 +925,124 @@ nonisolated enum ArtifactCleaner {
             referenceState: signal.referenceState
         )
         return (cleaned, summaries)
+    }
+
+    static func orderedArtifacts(
+        _ artifacts: [DefinedArtifact],
+        ordering: ArtifactCleaningOrdering
+    ) -> [DefinedArtifact] {
+        guard ordering == .maac else { return artifacts }
+        func priority(_ method: ArtifactCleaningMethod) -> Int {
+            switch method {
+            case .spikeTemplate: return 10
+            case .corneoRetinalRegression: return 20
+            case .movementPCA: return 40
+            case .bssCCA: return 50
+            default: return 30
+            }
+        }
+        return artifacts.enumerated()
+            .sorted {
+                let left = priority($0.element.cleaningMethod)
+                let right = priority($1.element.cleaningMethod)
+                return left == right ? $0.offset < $1.offset : left < right
+            }
+            .map(\.element)
+    }
+
+    private static func applyMovementPCA(
+        artifact: DefinedArtifact,
+        signal: MFFSignalData,
+        data: inout [[Float]],
+        excluding badChannels: Set<Int>,
+        finalizingProgress: (String) -> Void
+    ) -> Int {
+        // MAAC-3 is a single-trial cleanup. Applying it to an ERP/category
+        // average would decompose the evoked response itself and is therefore
+        // refused rather than silently treating the average as continuous.
+        guard !signal.isAveraged else {
+            finalizingProgress("Skipped: movement PCA is not applied to averaged data")
+            return 0
+        }
+        let configuration = artifact.movementPCAConfiguration ?? .default
+        let selectedChannels = Set(artifact.selectedChannelIndices.filter(data.indices.contains))
+        let excludedChannels: Set<Int>
+        if selectedChannels.isEmpty {
+            excludedChannels = badChannels
+        } else {
+            excludedChannels = badChannels.union(data.indices.filter { !selectedChannels.contains($0) })
+        }
+        do {
+            let result = try MovementPCACorrector.correct(
+                data: data,
+                samplingRate: signal.samplingRate,
+                epochSegments: signal.epochSegments,
+                configuration: configuration,
+                excluding: excludedChannels
+            )
+            let diagnostics = result.diagnostics
+            finalizingProgress(
+                "\(diagnostics.removedFactorCount) factor(s) removed from \(diagnostics.affectedEpochCount) of \(diagnostics.analyzedEpochCount) epoch(s)"
+            )
+            guard diagnostics.removedFactorCount > 0 else { return 0 }
+            data = result.correctedData
+            return data.indices.count(where: { !excludedChannels.contains($0) })
+        } catch {
+            finalizingProgress("Skipped: \(error.localizedDescription)")
+            return 0
+        }
+    }
+
+    private static func applyMuscleBSSCCA(
+        artifact: DefinedArtifact,
+        signal: MFFSignalData,
+        data: inout [[Float]],
+        excluding badChannels: Set<Int>,
+        availableBandwidthHz: Double?,
+        finalizingProgress: (String) -> Void
+    ) -> Int {
+        guard !signal.isAveraged else {
+            finalizingProgress("Skipped: muscle BSS-CCA is not applied to averaged data")
+            return 0
+        }
+        let configuration = artifact.muscleBSSCCAConfiguration ?? .default
+        if let availableBandwidthHz,
+           availableBandwidthHz < configuration.emgBandHighHz {
+            finalizingProgress(
+                String(
+                    format: "Skipped: muscle BSS-CCA needs bandwidth through %.1f Hz, but the active signal is limited to %.1f Hz",
+                    configuration.emgBandHighHz,
+                    availableBandwidthHz
+                )
+            )
+            return 0
+        }
+        let selectedChannels = Set(artifact.selectedChannelIndices.filter(data.indices.contains))
+        let excludedChannels: Set<Int>
+        if selectedChannels.isEmpty {
+            excludedChannels = badChannels
+        } else {
+            excludedChannels = badChannels.union(data.indices.filter { !selectedChannels.contains($0) })
+        }
+        do {
+            let result = try MuscleBSSCCACorrector.correct(
+                data: data,
+                samplingRate: signal.samplingRate,
+                epochSegments: signal.epochSegments,
+                configuration: configuration,
+                excluding: excludedChannels
+            )
+            let diagnostics = result.diagnostics
+            finalizingProgress(
+                "\(diagnostics.removedComponentCount) component(s) removed from \(diagnostics.affectedWindowCount) of \(diagnostics.analyzedWindowCount) window(s)"
+            )
+            guard diagnostics.removedComponentCount > 0 else { return 0 }
+            data = result.correctedData
+            return data.indices.count(where: { !excludedChannels.contains($0) })
+        } catch {
+            finalizingProgress("Skipped: \(error.localizedDescription)")
+            return 0
+        }
     }
 
     // MARK: - Methods
