@@ -181,10 +181,64 @@ wavelet provenance is unaffected.
   one HAPPE 2018 explicitly flagged as untested pathological waveforms. So: wavelet
   preserves broad evoked ERPs (their result) **and** attenuates sharp transients,
   hard especially (our result). Same operation, different signal classes.
-- **Paper thread.** This is a constructive extension of HAPPE+ER into the
+- **When W-ICA was removed, and why (HAPPE 2.0 / HAPPILEE, Lopez et al. 2022,
+  NeuroImage 260:119390, §4.1).** HAPPE 1.0 used W-ICA; **HAPPE 2.0 replaced it with
+  per-channel wavelet-thresholding — no ICA.** The stated driver was **low-density
+  EEG**: ICA's component count scales with channels, so few-channel configs can't
+  segregate artifact from neural (their test: ICA on 5 channels rejected *all*
+  components on 5 files; waveleting was density-agnostic). Secondary: ICA must reject
+  a whole component (losing neural signal) or pair with segment rejection; wavelet is
+  reproducible and fast.
+- **The clue for our paper — a measured counterexample.** HAPPE 2.0 justifies
+  wavelet partly by claiming it removes artifact "without disturbing the underlying
+  neural signal at those timepoints" and "preserv[es] brain signal in high
+  frequencies" (citing Krishnaveni et al. 2006, blinks-in-low-freq). That holds for
+  ongoing/oscillatory content and broad ERPs — **but not for sharp transient
+  morphology**: a K-complex/sharp wave *is* high-frequency neural signal at a
+  timepoint, and channel-space wavelet removes it with the artifact (our preservation
+  ≈ 0 on hard). So the v1→v2 switch, sound for low-density developmental ERP work,
+  carries an unmeasured cost for sharp brain features — exactly the pathological-
+  waveform case HAPPE 2018 flagged as untested.
+- **Paper thread.** This is a constructive extension of HAPPE+ER/HAPPILEE into the
   sharp-transient regime they left for future work, on shared, truth-backed,
   simulation-based terms (they publish the simulated VEP + `generateERPs`) — the
   basis for a MAAC-vs-HAPPE comparison. Not a rebuttal.
+
+## Threshold scope: Global vs Local windowing (EVA vs HAPPE)
+
+EVA's `WaveletReductionConfiguration.thresholdWindowSeconds` controls how the
+per-level noise threshold is estimated per channel:
+
+- **Global (`= 0`, the default):** one threshold per level from the whole
+  recording's coefficients — a single robust statistic per level per channel. This
+  is the HAPPE-equivalent behavior (matching `wdenoise`'s documented level-dependent
+  estimate) and is what the parity in [`happe-wavelet-parity.md`](happe-wavelet-parity.md)
+  and the oversmoothing calibration used.
+- **Local (`> 0`, e.g. 30 s):** re-estimates each level's threshold in overlapping
+  windows of that length, so a quiet stretch and a noisy stretch each get their own
+  noise floor. This is an **EVA extension HAPPE does not have** — HAPPE uses one
+  global threshold per channel/level.
+
+**UI:** exposed in the plain wavelet reduction sheet
+(`WaveformView.waveletReductionSettingsColumn`, "Threshold scope"): a Global/Local
+toggle plus an editable seconds field (defaults to 30 s on switching to Local, since
+2026-09-13); the interactive Wavelet Explorer uses Local. The underlying field is a
+free `Double`, so any window length is expressible in config and in the calibration
+harness.
+
+**Why it matters for the finding / paper.** Local re-estimation changes how a sharp
+transient is treated, and the direction is not obvious: a K-complex sitting in an
+otherwise-quiet 30 s window lowers that window's noise floor → the transient towers
+even higher above threshold → *more* aggressively removed; but a window where the
+transient dominates raises the floor → possibly more sparing. This is untested and
+is a clean axis to add to the wavelet sweep — and a point of differentiation from
+HAPPE (which is Global-only), worth reporting either way.
+
+**To test:** (1) re-run the wavelet oversmoothing/artifact calibration with
+`thresholdWindowSeconds` swept (0 = HAPPE-equivalent, 10 / 30 / 60 s) alongside the
+hard/soft × threshold-scale grid, on both sharp transients and broad ERP components;
+(2) compare Local vs HAPPE's Global default directly on the shared simulated VEP +
+sharp-transient scenario.
 
 ## EMG carrier autocorrelation (`--emg-autocorrelation`)
 

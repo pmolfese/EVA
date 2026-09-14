@@ -303,7 +303,25 @@ not navigable, session-only, right-click Dismiss, pruned on next commit).
   untouched. This could be the best of both: no whole-component rejection (keeps
   neural leakage, unlike ICA rejection) and no touching neural components (protects
   K-complexes/spindles, unlike channel-space or all-component wavelet). Measure the
-  three approaches head-to-head on seeded transients + artifacts.
+  three approaches head-to-head on seeded transients + artifacts. Precedent: current
+  HAPPE already does ICLabel-based component selection for muscle ("muscIL", run after
+  the channel-space wavelet per its changelog) — it selects muscle ICs but handles them
+  as a separate step; the variant here wavelet-thresholds the selected artifact ICs
+  instead of removing them wholesale. (HAPPE removed W-ICA-on-components in the 1.0→2.0
+  transition, Lopez et al. 2022 — its "General" changelog starts 9/2/2022, already
+  post-W-ICA.)
+- [ ] **Threshold scope (Global vs Local windowing) as a calibration axis.** EVA
+  already exposes Global / Local-30 s in the reduction sheet (`thresholdWindowSeconds`;
+  Global = HAPPE-equivalent, Local = an EVA extension HAPPE lacks). Sweep it (0 / 10 /
+  30 / 60 s) in the wavelet calibration against sharp transients AND broad ERP
+  components, and compare Local vs HAPPE's Global default on the shared simulated-VEP
+  + transient scenario — the effect on sharp transients is untested and is a
+  differentiator from HAPPE. See `docs/provenance/artifact-reduction-evaluation.md`
+  § Threshold scope.
+  - [x] **Window length now user-configurable (2026-09-13).** The reduction sheet's
+    "Threshold scope" control is a Global/Local toggle plus an editable seconds field
+    (defaults to 30 s when switched to Local), replacing the fixed Global/Local-30 s
+    picker (`WaveformView.waveletReductionSettingsColumn`). Builds green.
 - [ ] **MAAC-vs-HAPPE comparison (paper thread).** HAPPE+ER validated wavelet on a
   simulated VEP with bias / SE / trial-rejection metrics — essentially our
   `evaluate-retention` framing, on public data. Run channel-space wavelet, W-ICA,
