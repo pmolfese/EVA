@@ -904,7 +904,7 @@
 				CODE_SIGN_ENTITLEMENTS = EVA/EVA.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20260908;
+				CURRENT_PROJECT_VERSION = 20260920;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -919,7 +919,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.8;
+				MARKETING_VERSION = 0.1.9;
 				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -943,7 +943,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20260908;
+				CURRENT_PROJECT_VERSION = 20260920;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -967,7 +967,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.8;
+				MARKETING_VERSION = 0.1.9;
 				OTHER_SWIFT_FLAGS = "-Xcc -DACCELERATE_NEW_LAPACK";
 				PRODUCT_BUNDLE_IDENTIFIER = gov.nih.nimh.cmn.eva;
 				PRODUCT_NAME = "$(TARGET_NAME)";

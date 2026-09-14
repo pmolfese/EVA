@@ -47,7 +47,7 @@
 import Accelerate
 import Foundation
 
-enum ICAMethod: String, Codable, Sendable, CaseIterable, Identifiable {
+nonisolated enum ICAMethod: String, Codable, Sendable, CaseIterable, Identifiable {
     case picard
     case picardO
     case fastICA

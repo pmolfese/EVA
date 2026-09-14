@@ -13,6 +13,7 @@ script, and each writes its binary into its own `.build` directory.
 | Tool | Use it when you want to |
 | --- | --- |
 | [EVA Simulate](eva-simulate.md) | Generate synthetic EEG with known ground truth — for teaching, for testing a correction method, or for benchmarking. |
+| [W-ICA Campaign](wica-campaign.md) | Compare ICA rejection, selective/all-component W-ICA, hybrid routing, and channel wavelets against simulator truth. |
 | [Method Comparison](method-comparison.md) | Measure every correction method EVA offers against simulated ground truth and get a table — which method is better, and by how much. |
 | [EVA BIDS](eva-bids.md) | Convert recordings between MFF and BIDS-EEG, or check a BIDS-EEG dataset before importing it. |
 | [EVA Helper](eva-helper.md) | Batch-apply gradient and carbon-wire-loop correction to simultaneous EEG/fMRI recordings without opening the app. |

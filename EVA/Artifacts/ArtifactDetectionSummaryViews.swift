@@ -52,9 +52,22 @@ extension WaveformView {
             || !template.definedArtifacts.isEmpty
             || waveletExplorer.isRunning
             || artifactVM.cleanedSignal != nil
+            || wica.cleanedSignal != nil
     }
 
     var artifactHelpText: String {
+        if wica.isAnalyzing || wica.isApplying {
+            return "W-ICA (experimental)\n\(wica.statusMessage ?? "Processing ICA components…")"
+        }
+
+        if wica.cleanedSignal != nil, !wica.isEnabled {
+            return "W-ICA (experimental)\nApplied result hidden for comparison."
+        }
+
+        if wica.cleanedSignal != nil {
+            return "W-ICA (experimental)\n\(wica.statusMessage ?? "Component-space wavelet reduction applied.")"
+        }
+
         if waveletExplorer.isRunning {
             return "Wavelet artifact explorer\n\(waveletExplorer.statusTitle.nilIfEmpty ?? "Scanning wavelet artifact evidence...")"
         }

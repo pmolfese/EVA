@@ -155,6 +155,25 @@ K-complexes worst; broad low-frequency P300/N400 largely safe, and single-trial
 averaging protects them further; N170 intermediate). Put numbers on that ordering
 with `ERPGenerator`/`score-erp`.
 
+### Experimental W-ICA result (2026-09-14)
+
+The first end-to-end seeded fixture now runs EVA's Picard-O ICA, ICLabel, wavelet
+thresholding in component space, and back-projection. On 20-channel, 250 Hz dipole
+EEG with non-Gaussian neural sources, physiological sharp brain transients, and
+blinks, classic all-component W-ICA retained **0.752 / 0.738 / 0.754** of
+K-complex / spindle / sharp-wave variance while removing **0.654** of blink
+variance. Channel-space hard wavelets retained effectively **zero** transient
+variance while removing **0.666** of blink variance. This is the preservation
+advantage the candidate needed to demonstrate.
+
+The ICLabel-selected subset retained **0.997 / 0.988 / 1.000** of the brain
+events, but blink removal was **-0.269**: on this fixture the classifier chose
+four components labeled Muscle rather than isolating the ocular source. Selective
+W-ICA therefore remains an inspectable/manual option, not an automatic promise.
+One seed is not a performance claim; expand to multiple seeds, densities, artifact
+mixtures, and real fixtures before removing the Experimental label. Full output:
+[`eva-wica-preservation.txt`](data/wavelet-calibration/eva-wica-preservation.txt).
+
 ### How this sits against the HAPPE papers (2026-09-13)
 
 Reviewed HAPPE (Gabard-Durnam et al., 2018) and HAPPE+ER (Monachino et al., 2022)

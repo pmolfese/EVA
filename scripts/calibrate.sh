@@ -9,12 +9,14 @@
 # Usage:
 #   scripts/calibrate.sh                 # all calibrations
 #   scripts/calibrate.sh wavelet         # just the wavelet oversmoothing sweep
+#   scripts/calibrate.sh wica            # just W-ICA preservation/removal
 #
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 CONTAINER="$HOME/Library/Containers/gov.nih.nimh.cmn.eva/Data/tmp"
+RUNNER_TMP="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)"
 DEST="$REPO/docs/provenance/data"
 WHICH="${1:-all}"
 
@@ -32,9 +34,13 @@ run_test() {
 
 copy_out() { # container-filename  dest-subdir
     local name="$1" sub="$2"
-    if [ -f "$CONTAINER/$name" ]; then
+    local source="$CONTAINER/$name"
+    if [ ! -f "$source" ] && [ -n "$RUNNER_TMP" ] && [ -f "$RUNNER_TMP/$name" ]; then
+        source="$RUNNER_TMP/$name"
+    fi
+    if [ -f "$source" ]; then
         mkdir -p "$DEST/$sub"
-        cp "$CONTAINER/$name" "$DEST/$sub/$name"
+        cp "$source" "$DEST/$sub/$name"
         echo "==> Wrote $DEST/$sub/$name"
         cat "$DEST/$sub/$name"
     else
@@ -45,6 +51,11 @@ copy_out() { # container-filename  dest-subdir
 if [ "$WHICH" = "all" ] || [ "$WHICH" = "wavelet" ]; then
     run_test "WaveletOversmoothingMeasurementTests"
     copy_out "eva-wavelet-oversmoothing.txt" "wavelet-calibration"
+fi
+
+if [ "$WHICH" = "all" ] || [ "$WHICH" = "wica" ]; then
+    run_test "WICAPreservationMeasurementTests"
+    copy_out "eva-wica-preservation.txt" "wavelet-calibration"
 fi
 
 echo "==> Done"

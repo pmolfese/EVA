@@ -86,6 +86,7 @@ nav:
   - Command-Line Tools:
       - Tools Overview: tools/index.md
       - EVA Simulate: tools/eva-simulate.md
+      - W-ICA Campaign: tools/wica-campaign.md
       - Method Comparison: tools/method-comparison.md
       - EVA BIDS: tools/eva-bids.md
       - EVA Helper: tools/eva-helper.md

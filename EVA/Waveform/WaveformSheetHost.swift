@@ -53,6 +53,7 @@ enum ActiveRecordingSheet: String, Identifiable, CaseIterable, Sendable {
     case bcgDetection
     case waveletExplorer
     case waveletReduction
+    case wica
     case ica
     case replayConfig
     case channelInspector
@@ -91,6 +92,7 @@ extension WaveformView {
         if bcg.showsSheet { return .bcgDetection }
         if waveletExplorer.showsSheet { return .waveletExplorer }
         if wavelet.showsSheet { return .waveletReduction }
+        if wica.showsSheet { return .wica }
         if ica.showsSheet { return .ica }
         if replay.showsConfigPane { return .replayConfig }
         if showsChannelInspector { return .channelInspector }
@@ -148,6 +150,9 @@ extension WaveformView {
         case .bcgDetection: bcg.showsSheet = false
         case .waveletExplorer: waveletExplorer.showsSheet = false
         case .waveletReduction: wavelet.showsSheet = false
+        case .wica:
+            wica.cancel()
+            wica.showsSheet = false
         case .ica: ica.showsSheet = false
         case .replayConfig: replay.showsConfigPane = false
         case .channelInspector: showsChannelInspector = false
@@ -178,6 +183,7 @@ extension WaveformView {
         _ sheet: ActiveRecordingSheet,
         base: MFFSignalData,
         cleaningBase: MFFSignalData,
+        wicaInput: MFFSignalData,
         waveletInput: MFFSignalData,
         continuousSignal: MFFSignalData
     ) -> some View {
@@ -229,6 +235,9 @@ extension WaveformView {
 
         case .waveletReduction:
             waveletReductionSheet(input: waveletInput)
+
+        case .wica:
+            wicaSheet(for: wicaInput)
 
         case .ica:
             icaSheet(for: base)

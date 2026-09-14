@@ -395,6 +395,9 @@ struct WaveformView: View {
     // Wavelet artifact reduction pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
     @State var wavelet: WaveletReductionViewModel
+    // Experimental component-space wavelet stage. Kept distinct from ordinary
+    // ICA removal because W-ICA thresholds activations instead of rejecting ICs.
+    @State var wica: WICAViewModel
     // B4: status and physio display state now live on `recordingStore.status` /
     // `recordingStore.physio`.
     var channelStatusIsError: Bool {
@@ -723,6 +726,7 @@ struct WaveformView: View {
         _rhythmicityExplorer = State(wrappedValue: RhythmicityExplorerViewModel(store: store))
         _filter = State(wrappedValue: FilterViewModel(store: store))
         _wavelet = State(wrappedValue: WaveletReductionViewModel(store: store))
+        _wica = State(wrappedValue: WICAViewModel())
         _gradient = State(wrappedValue: GradientViewModel(store: store))
         _chanHealth = State(wrappedValue: ChannelHealthViewModel(store: store))
         _segHealth = State(wrappedValue: SegmentHealthViewModel(store: store))
@@ -772,7 +776,10 @@ struct WaveformView: View {
                 let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
                 // Wavelet reduction stage: computed from `processed`, applied
                 // before interpolation. Toggleable and revertible like cleaning.
-                let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? processed) : processed
+                let wicaStage = wica.isEnabled && wica.outputInputRevision == processed.dataRevision
+                    ? (wica.cleanedSignal ?? processed)
+                    : processed
+                let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? wicaStage) : wicaStage
                 // `content(...)` is called from exactly ONE call site — not
                 // branched on `interpolationSnapshot.isEmpty` — because an
                 // if/else here would be a structural-identity change the
@@ -800,7 +807,8 @@ struct WaveformView: View {
                     for: epoching.epochedSignal ?? continuousSignal,
                     base: base,
                     cleaningBase: preArtifact,
-                    waveletInput: processed,
+                    wicaInput: processed,
+                    waveletInput: wicaStage,
                     continuousSignal: continuousSignal
                 )
                 .task(id: resolutionKey) {
@@ -1474,6 +1482,7 @@ struct WaveformView: View {
         for signal: MFFSignalData,
         base: MFFSignalData,
         cleaningBase: MFFSignalData,
+        wicaInput: MFFSignalData,
         waveletInput: MFFSignalData,
         continuousSignal: MFFSignalData
     ) -> some View {
@@ -1500,7 +1509,7 @@ struct WaveformView: View {
             if displayMode == .averages {
                 averagesToolbar(for: signal)
             } else {
-                controls(for: signal, base: base, waveletInput: waveletInput, continuousSignal: continuousSignal)
+                controls(for: signal, base: base, wicaInput: wicaInput, waveletInput: waveletInput, continuousSignal: continuousSignal)
             }
 
             Divider()
@@ -1552,6 +1561,7 @@ struct WaveformView: View {
                 sheet,
                 base: base,
                 cleaningBase: cleaningBase,
+                wicaInput: wicaInput,
                 waveletInput: waveletInput,
                 continuousSignal: continuousSignal
             )
@@ -1696,7 +1706,7 @@ struct WaveformView: View {
         return String(Int((value / 100).rounded() * 100))
     }
 
-    private func controls(for signal: MFFSignalData, base: MFFSignalData, waveletInput: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
+    private func controls(for signal: MFFSignalData, base: MFFSignalData, wicaInput: MFFSignalData, waveletInput: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
         HStack(spacing: 16) {
             toolbarScaleControls()
 
@@ -1833,6 +1843,35 @@ struct WaveformView: View {
                     openWaveletArtifactExplorer(for: continuousSignal)
                 }
                 .disabled(waveletExplorer.isRunning)
+
+                Divider()
+
+                Button("W-ICA (Experimental)…") {
+                    openWICASheet(for: wicaInput)
+                }
+                .disabled(wica.isAnalyzing || wica.isApplying || wicaInput.isAveraged)
+                .help("Fit ICA, inspect ICLabel evidence, then wavelet-threshold all or selected component activations.")
+
+                Toggle("Show W-ICA", isOn: Binding(
+                    get: { wica.isEnabled },
+                    set: { enabled in
+                        wica.isEnabled = enabled
+                        wavelet.clearResults()
+                        invalidateInterpolations()
+                        invalidateEpochsForSignalChange()
+                    }
+                ))
+                    .disabled(wica.cleanedSignal == nil)
+
+                Button("Revert W-ICA") {
+                    wica.revert()
+                    wavelet.clearResults()
+                    invalidateInterpolations()
+                    invalidateEpochsForSignalChange()
+                }
+                .disabled(wica.cleanedSignal == nil)
+
+                Divider()
 
                 Button("Wavelet Reduction…") {
                     openWaveletReductionSheet(input: waveletInput)
@@ -2836,6 +2875,7 @@ struct WaveformView: View {
     }
 
     private func cancelInFlightRecordingTasks() {
+        wica.cancel()
         waveletExplorerTask?.cancel()
         waveletExplorerTask = nil
         topographyTask?.cancel()
@@ -2905,6 +2945,7 @@ struct WaveformView: View {
         movementPCA.resetForClose()
         muscleBSSCCA.resetForClose()
         wavelet.resetForClose()
+        wica.resetForClose()
         epoching.resetForClose()
         singleTrial.resetForClose()
         bcg.resetForClose()
