@@ -20,6 +20,9 @@ struct WICACampaignTests {
         var artifact: String
         var severity: String
         var seed: UInt64
+        var channelCount: Int
+        var durationSeconds: Double
+        var mixingFraction: Double
         var icaMethod: String
         var method: String
         var artifactReduction: Double
@@ -35,6 +38,72 @@ struct WICACampaignTests {
         var topArtifactEnergyFraction: Double
     }
 
+    private struct RoutingRow {
+        var artifact: String
+        var severity: String
+        var seed: UInt64
+        var channelCount: Int
+        var mixingFraction: Double
+        var component: Int
+        var predictedLabel: String
+        var confidence: Double
+        var brainProbability: Double
+        var muscleProbability: Double
+        var eyeProbability: Double
+        var heartProbability: Double
+        var lineNoiseProbability: Double
+        var channelNoiseProbability: Double
+        var otherProbability: Double
+        var artifactEnergyFraction: Double
+        var sourceEnergyFraction: Double
+        var artifactPurity: Double
+    }
+
+    private struct CellResult {
+        var rows: [Row]
+        var routing: [RoutingRow]
+    }
+
+    private struct Fixture {
+        var artifact: Artifact
+        var severity: String
+        var seed: UInt64
+        var channelCount: Int
+        var durationSeconds: Double
+        var sourceCount: Int
+        var mixingFraction: Double
+        var rate: Double
+        var clean: [[Double]]
+        var artifactLayer: [[Float]]
+        var signal: MFFSignalData
+        var transientTruth: BrainTransientInjection
+        var montage: Montage
+    }
+
+    private struct CampaignSettings {
+        var seedCount: Int
+        var channelCounts: [Int]
+        var durationSeconds: Double
+        var sourceCount: Int
+
+        static func read(seedVariable: String) -> CampaignSettings {
+            let environment = ProcessInfo.processInfo.environment
+            let seedCount = max(1, Int(environment[seedVariable] ?? "10") ?? 10)
+            let channels = (environment["EVA_WICA_CHANNELS"] ?? "64,128,256")
+                .split(separator: ",")
+                .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                .filter { $0 >= 64 }
+            return CampaignSettings(
+                seedCount: seedCount,
+                channelCounts: channels.isEmpty ? [64, 128, 256] : channels,
+                durationSeconds: max(
+                    60, Double(environment["EVA_WICA_DURATION_SECONDS"] ?? "120") ?? 120
+                ),
+                sourceCount: max(8, Int(environment["EVA_WICA_SOURCE_COUNT"] ?? "20") ?? 20)
+            )
+        }
+    }
+
     private static var isEnabled: Bool {
         ProcessInfo.processInfo.environment["EVA_WICA_CAMPAIGN"] == "1"
     }
@@ -43,46 +112,51 @@ struct WICACampaignTests {
         ProcessInfo.processInfo.environment["EVA_WICA_ICA_CAMPAIGN"] == "1"
     }
 
+    private static var mixedCampaignIsEnabled: Bool {
+        ProcessInfo.processInfo.environment["EVA_WICA_MIXED_CAMPAIGN"] == "1"
+    }
+
     @Test func simulatorCampaign() async throws {
         guard Self.isEnabled else {
             print("WICACampaignTests: set EVA_WICA_CAMPAIGN=1 to run. Skipping.")
             return
         }
 
-        let environment = ProcessInfo.processInfo.environment
-        let seedCount = max(1, Int(environment["EVA_WICA_CAMPAIGN_SEEDS"] ?? "10") ?? 10)
+        let settings = CampaignSettings.read(seedVariable: "EVA_WICA_CAMPAIGN_SEEDS")
         let severities = [("low", 0.5), ("medium", 1.0), ("high", 2.0)]
         let baseSeed: UInt64 = 20_260_821
         var rows: [Row] = []
+        var routing: [RoutingRow] = []
 
-        print("=== W-ICA simulator campaign: \(seedCount) seeds × 3 artifacts × 3 severities ===")
-        for artifact in Artifact.allCases {
-            for (severity, scale) in severities {
-                for seedOffset in 0..<seedCount {
-                    let seed = baseSeed + UInt64(seedOffset)
-                    let command = Self.simulatorCommand(
-                        artifact: artifact, severity: severity, scale: scale, seed: seed
-                    )
-                    print("\n+ \(command)")
-                    rows += try Self.runCell(
-                        artifact: artifact, severity: severity, scale: scale, seed: seed
-                    )
+        print("=== High-density W-ICA baseline: \(settings.seedCount) seeds × 3 artifacts × 3 severities × \(settings.channelCounts) channels ===")
+        for channelCount in settings.channelCounts {
+            for artifact in Artifact.allCases {
+                for (severity, scale) in severities {
+                    for seedOffset in 0..<settings.seedCount {
+                        let seed = baseSeed + UInt64(seedOffset)
+                        let command = Self.simulatorCommand(
+                            artifact: artifact, severity: severity, scale: scale, seed: seed,
+                            channelCount: channelCount,
+                            durationSeconds: settings.durationSeconds,
+                            sourceCount: settings.sourceCount
+                        )
+                        print("\n+ \(command)")
+                        let cell = try Self.runCell(
+                            artifact: artifact, severity: severity, scale: scale, seed: seed,
+                            channelCount: channelCount,
+                            durationSeconds: settings.durationSeconds,
+                            sourceCount: settings.sourceCount
+                        )
+                        rows += cell.rows
+                        routing += cell.routing
+                        try Self.writeBaselineSnapshot(
+                            rows: rows, routing: routing, settings: settings
+                        )
+                    }
                 }
             }
         }
-
-        let csv = Self.csv(rows)
-        let report = Self.report(rows, seedCount: seedCount)
-        let temporary = FileManager.default.temporaryDirectory
-        try csv.write(
-            to: temporary.appendingPathComponent("eva-wica-campaign.csv"),
-            atomically: true, encoding: .utf8
-        )
-        try report.write(
-            to: temporary.appendingPathComponent("eva-wica-campaign.md"),
-            atomically: true, encoding: .utf8
-        )
-        print("\n\(report)")
+        print("\n\(Self.report(rows, seedCount: settings.seedCount))")
     }
 
     @Test func compareICAAlgorithms() async throws {
@@ -91,66 +165,120 @@ struct WICACampaignTests {
             return
         }
 
-        let environment = ProcessInfo.processInfo.environment
-        let seedCount = max(
-            1, Int(environment["EVA_WICA_ICA_CAMPAIGN_SEEDS"] ?? "10") ?? 10
-        )
+        let settings = CampaignSettings.read(seedVariable: "EVA_WICA_ICA_CAMPAIGN_SEEDS")
         let algorithms: [ICAMethod] = [.picard, .picardO, .fastICA]
         let baseSeed: UInt64 = 20_260_821
         var rows: [Row] = []
         var failures: [String] = []
 
-        print("=== Paired ICA comparison: \(seedCount) seeds × 3 artifacts × 3 algorithms ===")
-        for artifact in Artifact.allCases {
-            for seedOffset in 0..<seedCount {
-                let seed = baseSeed + UInt64(seedOffset)
-                let command = Self.simulatorCommand(
-                    artifact: artifact, severity: "medium", scale: 1, seed: seed
-                )
-                print("\n+ \(command)")
-                for algorithm in algorithms {
-                    print("+ EVA ICA --method \(algorithm.rawValue) --components 20 --fit-rate 100 --max-iterations 250")
-                    do {
-                        rows += try Self.runCell(
-                            artifact: artifact,
-                            severity: "medium",
-                            scale: 1,
-                            seed: seed,
-                            icaMethod: algorithm
+        print("=== Paired high-density ICA comparison: \(settings.seedCount) seeds × 3 artifacts × 3 algorithms × \(settings.channelCounts) channels ===")
+        for channelCount in settings.channelCounts {
+            for artifact in Artifact.allCases {
+                for seedOffset in 0..<settings.seedCount {
+                    let seed = baseSeed + UInt64(seedOffset)
+                    let command = Self.simulatorCommand(
+                        artifact: artifact, severity: "medium", scale: 1, seed: seed,
+                        channelCount: channelCount,
+                        durationSeconds: settings.durationSeconds,
+                        sourceCount: settings.sourceCount
+                    )
+                    print("\n+ \(command)")
+                    let fixture = try Self.makeFixture(
+                        artifact: artifact,
+                        severity: "medium",
+                        scale: 1,
+                        seed: seed,
+                        channelCount: channelCount,
+                        durationSeconds: settings.durationSeconds,
+                        sourceCount: settings.sourceCount,
+                        mixingFraction: 0
+                    )
+                    for algorithm in algorithms {
+                        print("+ EVA ICA --method \(algorithm.rawValue) --components \(channelCount) --fit-rate 100 --max-iterations 250")
+                        do {
+                            rows += try Self.runCell(
+                                artifact: artifact,
+                                severity: "medium",
+                                scale: 1,
+                                seed: seed,
+                                channelCount: channelCount,
+                                durationSeconds: settings.durationSeconds,
+                                sourceCount: settings.sourceCount,
+                                comparisonOnly: true,
+                                icaMethod: algorithm,
+                                preparedFixture: fixture
+                            ).rows
+                        } catch {
+                            let failure = "\(artifact.rawValue),\(channelCount),\(seed),\(algorithm.rawValue): \(error)"
+                            failures.append(failure)
+                            print("!! \(failure)")
+                        }
+                        try Self.writeAlgorithmSnapshot(
+                            rows: rows, failures: failures, settings: settings
                         )
-                    } catch {
-                        let failure = "\(artifact.rawValue),\(seed),\(algorithm.rawValue): \(error)"
-                        failures.append(failure)
-                        print("!! \(failure)")
                     }
                 }
             }
         }
-
-        let temporary = FileManager.default.temporaryDirectory
-        try Self.csv(rows).write(
-            to: temporary.appendingPathComponent("eva-wica-ica-algorithms.csv"),
-            atomically: true,
-            encoding: .utf8
-        )
         let report = Self.algorithmReport(
-            rows, failures: failures, seedCount: seedCount
-        )
-        try report.write(
-            to: temporary.appendingPathComponent("eva-wica-ica-algorithms.md"),
-            atomically: true,
-            encoding: .utf8
+            rows, failures: failures, seedCount: settings.seedCount
         )
         print("\n\(report)")
     }
 
-    private static func runCell(
+    @Test func mixedComponentCampaign() async throws {
+        guard Self.mixedCampaignIsEnabled else {
+            print("WICACampaignTests: set EVA_WICA_MIXED_CAMPAIGN=1 to run mixed-component fixtures. Skipping.")
+            return
+        }
+        let settings = CampaignSettings.read(seedVariable: "EVA_WICA_MIXED_CAMPAIGN_SEEDS")
+        let fractions = [0.35, 0.65, 0.90]
+        let baseSeed: UInt64 = 20_260_821
+        var rows: [Row] = []
+        var routing: [RoutingRow] = []
+
+        print("=== Mixed-component campaign: \(settings.seedCount) seeds × 3 artifacts × 3 mixing fractions × \(settings.channelCounts) channels ===")
+        for channelCount in settings.channelCounts {
+            for artifact in Artifact.allCases {
+                for mixingFraction in fractions {
+                    for seedOffset in 0..<settings.seedCount {
+                        let seed = baseSeed + UInt64(seedOffset)
+                        print("\n+ " + Self.simulatorCommand(
+                            artifact: artifact, severity: "medium", scale: 1, seed: seed,
+                            channelCount: channelCount,
+                            durationSeconds: settings.durationSeconds,
+                            sourceCount: settings.sourceCount
+                        ) + " # neural-topography-mix=\(mixingFraction)")
+                        let cell = try Self.runCell(
+                            artifact: artifact, severity: "medium", scale: 1, seed: seed,
+                            channelCount: channelCount,
+                            durationSeconds: settings.durationSeconds,
+                            sourceCount: settings.sourceCount,
+                            mixingFraction: mixingFraction,
+                            includeSoftThresholds: true
+                        )
+                        rows += cell.rows
+                        routing += cell.routing
+                        try Self.writeMixedSnapshot(
+                            rows: rows, routing: routing, settings: settings
+                        )
+                    }
+                }
+            }
+        }
+        print("\n\(Self.mixedReport(rows, seedCount: settings.seedCount))")
+    }
+
+    private static func makeFixture(
         artifact: Artifact,
         severity: String,
         scale: Double,
         seed: UInt64,
-        icaMethod: ICAMethod = .fastICA
-    ) throws -> [Row] {
+        channelCount: Int,
+        durationSeconds: Double,
+        sourceCount: Int,
+        mixingFraction: Double
+    ) throws -> Fixture {
         let rate = 200.0
         var config = SimulationConfig.default
         config.seed = seed
@@ -159,9 +287,10 @@ struct WICACampaignTests {
         config.recordingReference = .average
         config.gradientEnabled = false
         config.bcgEnabled = false
-        config.channelCount = 20
+        config.channelCount = channelCount
         config.samplingRate = rate
-        config.durationSeconds = 24
+        config.durationSeconds = durationSeconds
+        config.dipoleSourceCount = min(sourceCount, max(1, channelCount - 1))
         config.brainTransients = BrainTransientConfig(
             ratePerMinute: 30, amplitudeMicrovolts: 150
         )
@@ -203,24 +332,81 @@ struct WICACampaignTests {
             _ = ChannelDefectModel.apply(to: &standard, config: config, source: &source)
             for channel in contaminated.indices {
                 for sample in contaminated[channel].indices {
-                    contaminated[channel][sample] += scale * (standard[channel][sample] - clean[channel][sample])
+                    contaminated[channel][sample] += scale
+                        * (standard[channel][sample] - clean[channel][sample])
                 }
             }
         }
 
-        let artifactLayer = zip(contaminated, clean).map { noisy, reference in
+        var artifactLayer = zip(contaminated, clean).map { noisy, reference in
             zip(noisy, reference).map { Float($0 - $1) }
         }
-        let signal = SyntheticSignal.make(
-            contaminated.map { $0.map(Float.init) }, samplingRate: rate
+        if mixingFraction > 0,
+           let neuralMap = eeg.sourceSpace?.leadField.matrixMicrovoltsPerNanoampereMeter
+                .map({ $0.first ?? 0 }) {
+            artifactLayer = spatiallyMixedArtifactLayer(
+                artifactLayer, neuralMap: neuralMap, fraction: mixingFraction
+            )
+            contaminated = zip(clean, artifactLayer).map { reference, artifact in
+                zip(reference, artifact).map { $0 + Double($1) }
+            }
+        }
+        return Fixture(
+            artifact: artifact,
+            severity: severity,
+            seed: seed,
+            channelCount: channelCount,
+            durationSeconds: durationSeconds,
+            sourceCount: config.dipoleSourceCount,
+            mixingFraction: mixingFraction,
+            rate: rate,
+            clean: clean,
+            artifactLayer: artifactLayer,
+            signal: SyntheticSignal.make(
+                contaminated.map { $0.map(Float.init) }, samplingRate: rate
+            ),
+            transientTruth: transientTruth,
+            montage: montage
         )
+    }
+
+    private static func runCell(
+        artifact: Artifact,
+        severity: String,
+        scale: Double,
+        seed: UInt64,
+        channelCount: Int = 64,
+        durationSeconds: Double = 120,
+        sourceCount: Int = 20,
+        mixingFraction: Double = 0,
+        includeSoftThresholds: Bool = false,
+        comparisonOnly: Bool = false,
+        icaMethod: ICAMethod = .fastICA,
+        preparedFixture: Fixture? = nil
+    ) throws -> CellResult {
+        let fixture = try preparedFixture ?? Self.makeFixture(
+            artifact: artifact,
+            severity: severity,
+            scale: scale,
+            seed: seed,
+            channelCount: channelCount,
+            durationSeconds: durationSeconds,
+            sourceCount: sourceCount,
+            mixingFraction: mixingFraction
+        )
+        let rate = fixture.rate
+        let clean = fixture.clean
+        let artifactLayer = fixture.artifactLayer
+        let signal = fixture.signal
+        let transientTruth = fixture.transientTruth
+        let montage = fixture.montage
 
         let fitStart = Date()
         let decomposition = try ICAArtifactDetector.fit(
             signal: signal,
             configuration: ICAConfiguration(
                 method: icaMethod,
-                componentCount: config.channelCount,
+                componentCount: channelCount,
                 varianceThreshold: 0.99999,
                 averageReference: true,
                 downsampleRate: 100,
@@ -251,12 +437,41 @@ struct WICACampaignTests {
         let pure = Set(oracleSelected.filter { energy.purity[$0, default: 0] >= 0.80 })
         let mixed = oracleSelected.subtracting(pure)
         let totalArtifactEnergy = energy.artifactContribution.reduce(0, +)
+        let totalSourceEnergy = energy.sourceContribution.reduce(0, +)
         let topArtifactEnergyFraction = totalArtifactEnergy > 1e-12
             ? (energy.artifactContribution.max() ?? 0) / totalArtifactEnergy
             : 0
         let labelRecall = totalArtifactEnergy > 1e-12
             ? labelSelected.reduce(0) { $0 + energy.artifactContribution[$1] } / totalArtifactEnergy
             : 0
+        let routingRows = (0..<decomposition.componentCount).map { component in
+            let suggestion = suggestions[component] ?? ICAComponentSuggestion(
+                label: "Other", confidence: 0, reason: "No classifier result"
+            )
+            let probabilities = suggestion.probabilities
+            return RoutingRow(
+                artifact: artifact.rawValue,
+                severity: severity,
+                seed: seed,
+                channelCount: channelCount,
+                mixingFraction: mixingFraction,
+                component: component + 1,
+                predictedLabel: Self.baseLabel(suggestion.label),
+                confidence: suggestion.confidence,
+                brainProbability: probabilities["Brain", default: 0],
+                muscleProbability: probabilities["Muscle", default: 0],
+                eyeProbability: probabilities["Eye", default: 0],
+                heartProbability: probabilities["Heart", default: 0],
+                lineNoiseProbability: probabilities["Line Noise", default: 0],
+                channelNoiseProbability: probabilities["Channel Noise", default: 0],
+                otherProbability: probabilities["Other", default: 0],
+                artifactEnergyFraction: totalArtifactEnergy > 1e-12
+                    ? energy.artifactContribution[component] / totalArtifactEnergy : 0,
+                sourceEnergyFraction: totalSourceEnergy > 1e-12
+                    ? energy.sourceContribution[component] / totalSourceEnergy : 0,
+                artifactPurity: energy.purity[component, default: 0]
+            )
+        }
 
         var wavelet = WaveletReductionMode.continuousEEG
             .defaultConfiguration(samplingRate: rate)
@@ -269,14 +484,16 @@ struct WICACampaignTests {
         )
 
         var outputs: [(String, MFFSignalData, Set<Int>)] = [
-            ("uncorrected", signal, []),
-            ("channel-wavelet", WaveletReducer.reduce(
+            ("uncorrected", signal, [])
+        ]
+        if !comparisonOnly {
+            outputs.append(("channel-wavelet", WaveletReducer.reduce(
                 signal: signal,
                 channelIndices: Array(0..<signal.numberOfChannels),
                 configuration: wavelet
-            ).cleaned, [])
-        ]
-        if !labelSelected.isEmpty {
+            ).cleaned, []))
+        }
+        if !comparisonOnly, !labelSelected.isEmpty {
             outputs.append((
                 "ica-reject-iclabel",
                 ICAArtifactDetector.cleanedSignal(
@@ -292,21 +509,24 @@ struct WICACampaignTests {
             ),
             oracleSelected
         ))
-        outputs.append((
-            "wica-all",
-            try WICAProcessor.reduce(
-                signal: signal,
-                decomposition: decomposition,
-                componentIndices: Set(0..<decomposition.componentCount),
-                configuration: wica
-            ).cleaned,
-            Set(0..<decomposition.componentCount)
-        ))
-        for thresholdScale in [0.25, 0.50, 1.00] {
+        let thresholdScales = comparisonOnly ? [0.25] : [0.25, 0.50, 1.00]
+        if !comparisonOnly {
+            outputs.append((
+                "wica-all",
+                try WICAProcessor.reduce(
+                    signal: signal,
+                    decomposition: decomposition,
+                    componentIndices: Set(0..<decomposition.componentCount),
+                    configuration: wica
+                ).cleaned,
+                Set(0..<decomposition.componentCount)
+            ))
+        }
+        for thresholdScale in thresholdScales {
             var configuration = wica
             configuration.wavelet.thresholdScale = thresholdScale
             let suffix = String(format: "t%03d", Int((100 * thresholdScale).rounded()))
-            if !labelSelected.isEmpty {
+            if !comparisonOnly, !labelSelected.isEmpty {
                 outputs.append((
                     "wica-iclabel-\(suffix)",
                     try WICAProcessor.reduce(
@@ -329,27 +549,70 @@ struct WICACampaignTests {
                 oracleSelected
             ))
         }
+        if includeSoftThresholds, !comparisonOnly {
+            for thresholdScale in [0.25, 0.50, 1.00] {
+                var configuration = wica
+                configuration.wavelet.thresholdRule = .soft
+                configuration.wavelet.thresholdScale = thresholdScale
+                let suffix = String(format: "t%03d", Int((100 * thresholdScale).rounded()))
+                outputs.append((
+                    "wica-oracle-soft-\(suffix)",
+                    try WICAProcessor.reduce(
+                        signal: signal,
+                        decomposition: decomposition,
+                        componentIndices: oracleSelected,
+                        configuration: configuration
+                    ).cleaned,
+                    oracleSelected
+                ))
+            }
+        }
 
-        var hybrid = signal
-        if !mixed.isEmpty {
-            var hybridConfiguration = wica
-            hybridConfiguration.wavelet.thresholdScale = 0.50
-            hybrid = try WICAProcessor.reduce(
-                signal: hybrid,
-                decomposition: decomposition,
-                componentIndices: mixed,
-                configuration: hybridConfiguration
-            ).cleaned
+        if !comparisonOnly {
+            var hybrid = signal
+            if !mixed.isEmpty {
+                var hybridConfiguration = wica
+                hybridConfiguration.wavelet.thresholdScale = 0.50
+                hybrid = try WICAProcessor.reduce(
+                    signal: hybrid,
+                    decomposition: decomposition,
+                    componentIndices: mixed,
+                    configuration: hybridConfiguration
+                ).cleaned
+            }
+            if !pure.isEmpty {
+                hybrid = ICAArtifactDetector.cleanedSignal(
+                    from: hybrid,
+                    activationSignal: signal,
+                    decomposition: decomposition,
+                    excluding: pure
+                )
+            }
+            outputs.append(("hybrid-oracle", hybrid, pure.union(mixed)))
         }
-        if !pure.isEmpty {
-            hybrid = ICAArtifactDetector.cleanedSignal(
-                from: hybrid,
-                activationSignal: signal,
-                decomposition: decomposition,
-                excluding: pure
-            )
+        if includeSoftThresholds, !comparisonOnly {
+            var softHybrid = signal
+            if !mixed.isEmpty {
+                var configuration = wica
+                configuration.wavelet.thresholdRule = .soft
+                configuration.wavelet.thresholdScale = 0.50
+                softHybrid = try WICAProcessor.reduce(
+                    signal: softHybrid,
+                    decomposition: decomposition,
+                    componentIndices: mixed,
+                    configuration: configuration
+                ).cleaned
+            }
+            if !pure.isEmpty {
+                softHybrid = ICAArtifactDetector.cleanedSignal(
+                    from: softHybrid,
+                    activationSignal: signal,
+                    decomposition: decomposition,
+                    excluding: pure
+                )
+            }
+            outputs.append(("hybrid-oracle-soft", softHybrid, pure.union(mixed)))
         }
-        outputs.append(("hybrid-oracle", hybrid, pure.union(mixed)))
 
         let noisyMSE = Self.mse(signal.data, clean)
         let cellRows = outputs.map { name, output, selected -> Row in
@@ -358,6 +621,9 @@ struct WICACampaignTests {
                 artifact: artifact.rawValue,
                 severity: severity,
                 seed: seed,
+                channelCount: channelCount,
+                durationSeconds: durationSeconds,
+                mixingFraction: mixingFraction,
                 icaMethod: icaMethod.rawValue,
                 method: name,
                 artifactReduction: noisyMSE > 1e-12 ? 1 - correctedMSE / noisyMSE : 0,
@@ -386,12 +652,12 @@ struct WICACampaignTests {
             decomposition.finalChange, topArtifactEnergyFraction, labelRecall
         ))
         print(summary)
-        return cellRows
+        return CellResult(rows: cellRows, routing: routingRows)
     }
 
     private static func componentArtifactEnergy(
         _ artifact: [[Float]], decomposition: ICADecomposition
-    ) -> (artifactContribution: [Double], purity: [Int: Double]) {
+    ) -> (artifactContribution: [Double], sourceContribution: [Double], purity: [Int: Double]) {
         let decimation = max(1, decomposition.decimation)
         var downsampled = artifact.map {
             decimation > 1 ? Downsampler.windowedSincDecimated($0, by: decimation) : $0
@@ -410,6 +676,7 @@ struct WICACampaignTests {
             }
         }
         var contributions = [Double](repeating: 0, count: decomposition.componentCount)
+        var sourceContributions = [Double](repeating: 0, count: decomposition.componentCount)
         var purity: [Int: Double] = [:]
         for component in 0..<decomposition.componentCount {
             var projected = [Double](repeating: 0, count: count)
@@ -428,9 +695,10 @@ struct WICACampaignTests {
                 return total + row[component] * row[component]
             }
             contributions[component] = artifactVariance * mapNorm
+            sourceContributions[component] = sourceVariance * mapNorm
             purity[component] = min(1, artifactVariance / max(sourceVariance, 1e-12))
         }
-        return (contributions, purity)
+        return (contributions, sourceContributions, purity)
     }
 
     private static func componentsAccountingFor(
@@ -512,12 +780,83 @@ struct WICACampaignTests {
         values.sorted().map { String($0 + 1) }.joined(separator: "+")
     }
 
+    private static func baseLabel(_ label: String) -> String {
+        ["Brain", "Muscle", "Eye", "Heart", "Line Noise", "Channel Noise", "Other"]
+            .first(where: { label.hasPrefix($0) }) ?? label
+    }
+
+    /// Rotates a controlled fraction of the artifact layer onto the first
+    /// neural source's scalp map. At high fractions the neural source and the
+    /// artifact share a sensor-space direction, so ICA cannot separate them by
+    /// a different topography. The layer is rescaled to preserve its original
+    /// pooled RMS, holding artifact severity constant across the mixing sweep.
+    private static func spatiallyMixedArtifactLayer(
+        _ artifact: [[Float]], neuralMap: [Double], fraction: Double
+    ) -> [[Float]] {
+        guard let sampleCount = artifact.first?.count,
+              sampleCount > 0,
+              artifact.count == neuralMap.count else { return artifact }
+        let clamped = min(max(fraction, 0), 1)
+        let anchor = artifact.indices.max { left, right in
+            variance(artifact[left].map(Double.init)[...])
+                < variance(artifact[right].map(Double.init)[...])
+        } ?? 0
+        let mapNorm = neuralMap.reduce(0) { $0 + $1 * $1 }.squareRoot()
+        guard mapNorm > 1e-12 else { return artifact }
+        let normalizedMap = neuralMap.map { $0 / mapNorm }
+        let carrier = artifact[anchor].map(Double.init)
+        var aligned = artifact.indices.map { channel in
+            carrier.map { Float($0 * normalizedMap[channel]) }
+        }
+        func rms(_ matrix: [[Float]]) -> Double {
+            let count = matrix.reduce(0) { $0 + $1.count }
+            guard count > 0 else { return 0 }
+            let squares = matrix.reduce(0.0) { total, row in
+                total + row.reduce(0.0) { $0 + Double($1) * Double($1) }
+            }
+            return (squares / Double(count)).squareRoot()
+        }
+        let originalRMS = rms(artifact)
+        let alignedRMS = rms(aligned)
+        guard originalRMS > 1e-12, alignedRMS > 1e-12 else { return artifact }
+        let alignedScale = originalRMS / alignedRMS
+        for channel in aligned.indices {
+            for sample in aligned[channel].indices {
+                aligned[channel][sample] *= Float(alignedScale)
+            }
+        }
+        let originalWeight = (1 - clamped).squareRoot()
+        let alignedWeight = clamped.squareRoot()
+        var result = artifact
+        for channel in result.indices {
+            for sample in 0..<sampleCount {
+                result[channel][sample] = Float(originalWeight) * artifact[channel][sample]
+                    + Float(alignedWeight) * aligned[channel][sample]
+            }
+        }
+        let resultRMS = rms(result)
+        let finalScale = resultRMS > 1e-12 ? originalRMS / resultRMS : 1
+        for channel in result.indices {
+            for sample in result[channel].indices {
+                result[channel][sample] *= Float(finalScale)
+            }
+        }
+        return result
+    }
+
     private static func simulatorCommand(
-        artifact: Artifact, severity: String, scale: Double, seed: UInt64
+        artifact: Artifact,
+        severity: String,
+        scale: Double,
+        seed: UInt64,
+        channelCount: Int,
+        durationSeconds: Double,
+        sourceCount: Int
     ) -> String {
         let common = "Tools/EVASimulate/.build/eva-simulate generate --output $OUT "
             + "--prefix \(artifact.rawValue)-\(severity)-\(seed) --seed \(seed) "
-            + "--channels 20 --rate 200 --duration 24 --eeg-model dipole "
+            + "--channels \(channelCount) --rate 200 --duration \(Int(durationSeconds)) "
+            + "--eeg-model dipole --sources \(sourceCount) "
             + "--source-burstiness 0.8 --brain-transients 30 "
             + "--brain-transient-amplitude 150 --no-gradient --no-bcg"
         switch artifact {
@@ -532,15 +871,32 @@ struct WICACampaignTests {
     }
 
     private static func csv(_ rows: [Row]) -> String {
-        let header = "artifact,severity,seed,ica_method,method,artifact_reduction,rmse_uv,transient_preservation,components,label_artifact_energy_recall,ica_seconds,ica_iterations,ica_final_change,decomposition_components,oracle_components,top_artifact_energy_fraction"
+        let header = "artifact,severity,seed,channels,duration_seconds,mixing_fraction,ica_method,method,artifact_reduction,rmse_uv,transient_preservation,components,label_artifact_energy_recall,ica_seconds,ica_iterations,ica_final_change,decomposition_components,oracle_components,top_artifact_energy_fraction"
         let body = rows.map {
-            String(format: "%@,%@,%llu,%@,%@,%.8f,%.8f,%.8f,%@,%.8f,%.5f,%d,%.12g,%d,%d,%.8f",
-                   $0.artifact, $0.severity, $0.seed, $0.icaMethod, $0.method,
+            String(format: "%@,%@,%llu,%d,%.3f,%.3f,%@,%@,%.8f,%.8f,%.8f,%@,%.8f,%.5f,%d,%.12g,%d,%d,%.8f",
+                   $0.artifact, $0.severity, $0.seed, $0.channelCount,
+                   $0.durationSeconds, $0.mixingFraction, $0.icaMethod, $0.method,
                    $0.artifactReduction, $0.rmse, $0.transientPreservation,
                    $0.components, $0.labelArtifactEnergyRecall,
                    $0.icaSeconds, $0.icaIterations, $0.icaFinalChange,
                    $0.decompositionComponentCount, $0.oracleComponentCount,
                    $0.topArtifactEnergyFraction)
+        }
+        return ([header] + body).joined(separator: "\n") + "\n"
+    }
+
+    private static func routingCSV(_ rows: [RoutingRow]) -> String {
+        let header = "artifact,severity,seed,channels,mixing_fraction,component,predicted_label,confidence,p_brain,p_muscle,p_eye,p_heart,p_line_noise,p_channel_noise,p_other,artifact_energy_fraction,source_energy_fraction,artifact_purity"
+        let body = rows.map {
+            String(
+                format: "%@,%@,%llu,%d,%.3f,%d,%@,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f",
+                $0.artifact, $0.severity, $0.seed, $0.channelCount,
+                $0.mixingFraction, $0.component, $0.predictedLabel, $0.confidence,
+                $0.brainProbability, $0.muscleProbability, $0.eyeProbability,
+                $0.heartProbability, $0.lineNoiseProbability,
+                $0.channelNoiseProbability, $0.otherProbability,
+                $0.artifactEnergyFraction, $0.sourceEnergyFraction, $0.artifactPurity
+            )
         }
         return ([header] + body).joined(separator: "\n") + "\n"
     }
@@ -551,18 +907,20 @@ struct WICACampaignTests {
             "",
             "\(seedCount) seeds per artifact × severity cell. Higher artifact reduction and transient preservation are better; lower RMSE is better.",
             "",
-            "| Artifact | Severity | Method | Reduction | RMSE µV | Transient preservation |",
-            "| --- | --- | --- | ---: | ---: | ---: |"
+            "| Channels | Artifact | Severity | Method | Reduction | RMSE µV | Transient preservation |",
+            "| ---: | --- | --- | --- | ---: | ---: | ---: |"
         ]
-        let groups = Dictionary(grouping: rows) { "\($0.artifact)|\($0.severity)|\($0.method)" }
+        let groups = Dictionary(grouping: rows) {
+            "\($0.channelCount)|\($0.artifact)|\($0.severity)|\($0.method)"
+        }
         for key in groups.keys.sorted() {
             guard let group = groups[key], let first = group.first else { continue }
             func mean(_ value: (Row) -> Double) -> Double {
                 group.reduce(0) { $0 + value($1) } / Double(group.count)
             }
             lines.append(String(
-                format: "| %@ | %@ | %@ | %+.3f | %.3f | %.3f |",
-                first.artifact, first.severity, first.method,
+                format: "| %d | %@ | %@ | %@ | %+.3f | %.3f | %.3f |",
+                first.channelCount, first.artifact, first.severity, first.method,
                 mean { $0.artifactReduction },
                 mean { $0.rmse },
                 mean { $0.transientPreservation }
@@ -577,17 +935,21 @@ struct WICACampaignTests {
         var lines = [
             "# ICA algorithm comparison for W-ICA",
             "",
-            "Paired medium-severity fixtures: \(seedCount) seeds × blink/EMG/pop. Values are mean ± sample SD across successful fits.",
+            "Paired medium-severity fixtures: \(seedCount) seeds × blink/EMG/pop × 64/128/256 channels. Values are mean ± sample SD across successful fits.",
             "",
-            "| Artifact | ICA | Fits | Seconds | Iterations | At cap | Final change | ICs | Top-IC artifact energy | Oracle ICs | ICLabel recall | Oracle reject reduction | W-ICA .25 reduction |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+            "| Channels | Artifact | ICA | Fits | Seconds | Iterations | At cap | Final change | ICs | Top-IC artifact energy | Oracle ICs | ICLabel recall | Oracle reject reduction | W-ICA .25 reduction |",
+            "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
         ]
         let representative = rows.filter { $0.method == "ica-reject-oracle" }
-        let groups = Dictionary(grouping: representative) { "\($0.artifact)|\($0.icaMethod)" }
+        let groups = Dictionary(grouping: representative) {
+            "\($0.channelCount)|\($0.artifact)|\($0.icaMethod)"
+        }
         for key in groups.keys.sorted() {
             guard let group = groups[key], let first = group.first else { continue }
             let rowLookup = Dictionary(grouping: rows.filter {
-                $0.artifact == first.artifact && $0.icaMethod == first.icaMethod
+                $0.channelCount == first.channelCount
+                    && $0.artifact == first.artifact
+                    && $0.icaMethod == first.icaMethod
             }) { "\($0.seed)|\($0.method)" }
             func pairedMean(_ method: String, _ value: (Row) -> Double) -> Double {
                 let values = group.compactMap { baseline in
@@ -606,7 +968,8 @@ struct WICACampaignTests {
             }
             let atCap = group.filter { $0.icaIterations >= 250 }.count
             lines.append(String(
-                format: "| %@ | %@ | %d | %@ | %@ | %d (%.0f%%) | %@ | %@ | %@ | %@ | %@ | %+.3f | %+.3f |",
+                format: "| %d | %@ | %@ | %d | %@ | %@ | %d (%.0f%%) | %@ | %@ | %@ | %@ | %@ | %+.3f | %+.3f |",
+                first.channelCount,
                 first.artifact,
                 first.icaMethod,
                 group.count,
@@ -630,5 +993,142 @@ struct WICACampaignTests {
             lines += failures.map { "- `\($0)`" }
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func mixedReport(_ rows: [Row], seedCount: Int) -> String {
+        let included = Set([
+            "uncorrected", "ica-reject-iclabel", "ica-reject-oracle",
+            "wica-oracle-t050", "wica-oracle-soft-t050",
+            "hybrid-oracle", "hybrid-oracle-soft"
+        ])
+        var lines = [
+            "# High-density mixed-component W-ICA campaign",
+            "",
+            "\(seedCount) seeds per channel × artifact × mixing cell. Mixing is the fraction of artifact spatial power aligned to a known neural-source topography.",
+            "",
+            "| Channels | Artifact | Mixing | Method | Reduction | RMSE µV | Transient preservation | ICLabel recall |",
+            "| ---: | --- | ---: | --- | ---: | ---: | ---: | ---: |"
+        ]
+        let filtered = rows.filter { included.contains($0.method) }
+        let groups = Dictionary(grouping: filtered) {
+            "\($0.channelCount)|\($0.artifact)|\($0.mixingFraction)|\($0.method)"
+        }
+        for key in groups.keys.sorted() {
+            guard let group = groups[key], let first = group.first else { continue }
+            func mean(_ value: (Row) -> Double) -> Double {
+                group.reduce(0) { $0 + value($1) } / Double(group.count)
+            }
+            lines.append(String(
+                format: "| %d | %@ | %.2f | %@ | %+.3f | %.3f | %.3f | %.3f |",
+                first.channelCount, first.artifact, first.mixingFraction, first.method,
+                mean { $0.artifactReduction }, mean { $0.rmse },
+                mean { $0.transientPreservation }, mean { $0.labelArtifactEnergyRecall }
+            ))
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func routingReport(_ rows: [RoutingRow], seedCount: Int) -> String {
+        var lines = [
+            "# ICLabel routing calibration",
+            "",
+            "Truth-weighted routing over \(seedCount) seeds per cell. Recall is selected artifact energy; selected source energy estimates how broadly the policy acts; selected purity is source-energy-weighted artifact purity.",
+            "",
+            "| Channels | Artifact | Mixing | Target probability | Gate | Artifact recall | Selected source energy | Selected purity |",
+            "| ---: | --- | ---: | --- | ---: | ---: | ---: | ---: |"
+        ]
+        let groups = Dictionary(grouping: rows) {
+            "\($0.channelCount)|\($0.artifact)|\($0.mixingFraction)"
+        }
+        for key in groups.keys.sorted() {
+            guard let group = groups[key], let first = group.first else { continue }
+            let target: String
+            let probability: (RoutingRow) -> Double
+            switch first.artifact {
+            case "blink": target = "Eye"; probability = { $0.eyeProbability }
+            case "emg": target = "Muscle"; probability = { $0.muscleProbability }
+            default: target = "Channel Noise"; probability = { $0.channelNoiseProbability }
+            }
+            let fitCount = max(1, Set(group.map { "\($0.seed)|\($0.severity)" }).count)
+            for threshold in [0.10, 0.25, 0.50, 0.75, 0.90] {
+                let selected = group.filter { probability($0) >= threshold }
+                let recall = selected.reduce(0) { $0 + $1.artifactEnergyFraction }
+                    / Double(fitCount)
+                let selectedSource = selected.reduce(0) { $0 + $1.sourceEnergyFraction }
+                    / Double(fitCount)
+                let purityWeight = selected.reduce(0) { $0 + $1.sourceEnergyFraction }
+                let purity = purityWeight > 1e-12
+                    ? selected.reduce(0) {
+                        $0 + $1.artifactPurity * $1.sourceEnergyFraction
+                    } / purityWeight
+                    : 0
+                lines.append(String(
+                    format: "| %d | %@ | %.2f | %@ | %.2f | %.3f | %.3f | %.3f |",
+                    first.channelCount, first.artifact, first.mixingFraction,
+                    target, threshold, recall, selectedSource, purity
+                ))
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func writeBaselineSnapshot(
+        rows: [Row], routing: [RoutingRow], settings: CampaignSettings
+    ) throws {
+        let temporary = FileManager.default.temporaryDirectory
+        try csv(rows).write(
+            to: temporary.appendingPathComponent("eva-wica-density-baseline.csv"),
+            atomically: true, encoding: .utf8
+        )
+        try report(rows, seedCount: settings.seedCount).write(
+            to: temporary.appendingPathComponent("eva-wica-density-baseline.md"),
+            atomically: true, encoding: .utf8
+        )
+        try routingCSV(routing).write(
+            to: temporary.appendingPathComponent("eva-wica-density-routing.csv"),
+            atomically: true, encoding: .utf8
+        )
+        try routingReport(routing, seedCount: settings.seedCount).write(
+            to: temporary.appendingPathComponent("eva-wica-density-routing.md"),
+            atomically: true, encoding: .utf8
+        )
+    }
+
+    private static func writeAlgorithmSnapshot(
+        rows: [Row], failures: [String], settings: CampaignSettings
+    ) throws {
+        let temporary = FileManager.default.temporaryDirectory
+        try csv(rows).write(
+            to: temporary.appendingPathComponent("eva-wica-density-ica-algorithms.csv"),
+            atomically: true, encoding: .utf8
+        )
+        try algorithmReport(
+            rows, failures: failures, seedCount: settings.seedCount
+        ).write(
+            to: temporary.appendingPathComponent("eva-wica-density-ica-algorithms.md"),
+            atomically: true, encoding: .utf8
+        )
+    }
+
+    private static func writeMixedSnapshot(
+        rows: [Row], routing: [RoutingRow], settings: CampaignSettings
+    ) throws {
+        let temporary = FileManager.default.temporaryDirectory
+        try csv(rows).write(
+            to: temporary.appendingPathComponent("eva-wica-density-mixed.csv"),
+            atomically: true, encoding: .utf8
+        )
+        try mixedReport(rows, seedCount: settings.seedCount).write(
+            to: temporary.appendingPathComponent("eva-wica-density-mixed.md"),
+            atomically: true, encoding: .utf8
+        )
+        try routingCSV(routing).write(
+            to: temporary.appendingPathComponent("eva-wica-density-mixed-routing.csv"),
+            atomically: true, encoding: .utf8
+        )
+        try routingReport(routing, seedCount: settings.seedCount).write(
+            to: temporary.appendingPathComponent("eva-wica-density-mixed-routing.md"),
+            atomically: true, encoding: .utf8
+        )
     }
 }

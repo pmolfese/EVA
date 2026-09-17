@@ -7,45 +7,59 @@ ICA solution than another and keeps the normal test suite fast.
 
 ## Run it
 
-From the repository root, run the two-seed pilot first:
+Scientific W-ICA campaigns use 64, 128, and 256 channels. Counts below 64 are
+reserved for unit tests and historical smoke results; they are not campaign
+evidence. Recordings are 120 seconds long and contain 20 independent dipole
+sources by default, providing 12,000 samples at the 100 Hz ICA fit rate.
 
-```bash
-scripts/evaluate-wica-campaign.sh --quick
-```
-
-If the pilot completes and its cells contain plausible scores, run the primary
-10-seed campaign:
-
-```bash
-scripts/evaluate-wica-campaign.sh
-```
-
-Or choose a larger replication count:
-
-```bash
-scripts/evaluate-wica-campaign.sh --seeds 20
-```
-
-To compare the three practical ICA engines on paired medium-severity fixtures:
+From the repository root, run the two-seed solver pilot first:
 
 ```bash
 scripts/compare-wica-ica-algorithms.sh --quick
-scripts/compare-wica-ica-algorithms.sh
 ```
 
-This holds the simulated samples fixed across Picard, Picard-O, and FastICA and
-reports runtime, iterations, final convergence change, component count,
-artifact-energy concentration, ICLabel recall, and downstream rejection/W-ICA
-scores. Its outputs are `.wica-campaign/eva-wica-ica-algorithms.{md,csv}`.
+Then run the two-seed baseline and mixed-component pilots:
+
+```bash
+scripts/evaluate-wica-campaign.sh --quick
+scripts/evaluate-wica-mixed-campaign.sh --quick
+```
+
+The full 10-seed baseline and mixed-component campaigns are:
+
+```bash
+scripts/evaluate-wica-campaign.sh
+scripts/evaluate-wica-mixed-campaign.sh
+```
+
+All scripts accept explicit protocol overrides for focused diagnosis:
+
+```bash
+scripts/evaluate-wica-campaign.sh --seeds 3 --channels 128,256 --duration 180 --sources 24
+```
+
+The solver pilot holds each in-memory fixture fixed across Picard, Picard-O, and
+FastICA and reports runtime, iterations, final convergence change, component
+count, artifact-energy concentration, ICLabel recall, and downstream
+rejection/W-ICA scores. Its outputs are
+`.wica-campaign/eva-wica-density-ica-algorithms.{md,csv}`.
 
 The script prints each build/test command before executing it. During the test,
 it also prints the equivalent `eva-simulate generate` command for every seed,
 artifact, and severity. Results are copied to:
 
 ```text
-.wica-campaign/eva-wica-campaign.md
-.wica-campaign/eva-wica-campaign.csv
+.wica-campaign/eva-wica-density-baseline.md
+.wica-campaign/eva-wica-density-baseline.csv
+.wica-campaign/eva-wica-density-routing.md
+.wica-campaign/eva-wica-density-routing.csv
+.wica-campaign/eva-wica-density-mixed.md
+.wica-campaign/eva-wica-density-mixed.csv
 ```
+
+Reports are atomically checkpointed after every fit. The copy into
+`.wica-campaign/` occurs when the script completes; during a run, the current
+checkpoint lives in EVA's app-container temporary directory.
 
 The campaign calls the simulator models in-process rather than reading the MFF
 files produced by those printed commands. That is deliberate: it retains the
@@ -58,7 +72,8 @@ printed command annotates that scale in a shell comment.
 
 ## Experimental design
 
-The primary grid is 10 seeds × three severities × three artifact classes:
+The primary baseline grid is 10 seeds × three channel densities × three
+severities × three artifact classes:
 
 | Artifact | Low | Medium | High |
 | --- | ---: | ---: | ---: |
@@ -66,13 +81,22 @@ The primary grid is 10 seeds × three severities × three artifact classes:
 | EMG burst | 25 µV | 50 µV | 100 µV |
 | Electrode pop | 0.5× | 1× | 2× |
 
-Each 24-second recording contains 20 average-referenced channels, non-Gaussian
-dipole sources, and planted brain transients. Scanner gradient and BCG artifacts
-are disabled so the campaign measures one artifact class at a time. ICA uses
-20 requested components, 100 Hz analysis data, and at most 250 iterations. The
-first recorded campaign used Picard-O; after the paired solver comparison,
-subsequent fixture campaigns default to FastICA for equivalent quality at
-substantially lower runtime. This does not change EVA's general ICA default.
+Each 120-second recording contains 64, 128, or 256 average-referenced channels,
+20 non-Gaussian dipole sources, and planted brain transients. Above 41 channels,
+EVASimulate uses its deterministic evenly spaced synthetic spiral rather than
+claiming a commercial montage. Scanner gradient and BCG artifacts are disabled
+so the campaign measures one artifact class at a time. ICA requests up to the
+channel count, retains the dimensions needed for 99.999% PCA variance, uses
+100 Hz analysis data, and runs at most 250 iterations. The first historical
+20-channel campaign used Picard-O; subsequent high-density campaigns default to
+FastICA. This does not change EVA's general ICA default.
+
+The mixed-component grid uses medium artifact severity and aligns 0.35, 0.65,
+or 0.90 of artifact spatial power with a known neural-source topography while
+preserving artifact RMS. This deliberately violates the clean spatial
+separation that otherwise makes full component rejection an easy winner. It
+adds soft-threshold W-ICA and soft-hybrid arms to the ordinary hard-threshold
+policies.
 
 Every fitted decomposition is evaluated with these arms:
 

@@ -1,6 +1,5 @@
 #!/bin/bash
-# Paired Picard/Picard-O/FastICA comparison on W-ICA simulator fixtures.
-# Prints every substantive command before running it.
+# High-density mixed-component rejection/W-ICA/hybrid comparison.
 
 set -euo pipefail
 
@@ -15,9 +14,7 @@ SOURCES=20
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --quick) SEEDS=2; shift ;;
-        --seeds)
-            if [ "$#" -lt 2 ]; then echo "--seeds needs a positive integer" >&2; exit 2; fi
-            SEEDS="$2"; shift 2 ;;
+        --seeds) SEEDS="$2"; shift 2 ;;
         --channels) CHANNELS="$2"; shift 2 ;;
         --duration) DURATION="$2"; shift 2 ;;
         --sources) SOURCES="$2"; shift 2 ;;
@@ -31,7 +28,6 @@ if ! [[ "$SEEDS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 cd "$REPO"
-
 run() {
     printf '+'
     printf ' %q' "$@"
@@ -42,18 +38,18 @@ run() {
 run xcodebuild build-for-testing -project EVA.xcodeproj -scheme EVA \
     -destination platform=macOS -quiet
 
-echo "The test prints each simulator fixture command and ICA configuration."
-run env TEST_RUNNER_EVA_WICA_ICA_CAMPAIGN=1 \
-    TEST_RUNNER_EVA_WICA_ICA_CAMPAIGN_SEEDS="$SEEDS" \
+echo "The test prints each simulator fixture and checkpoints reports after every fit."
+run env TEST_RUNNER_EVA_WICA_MIXED_CAMPAIGN=1 \
+    TEST_RUNNER_EVA_WICA_MIXED_CAMPAIGN_SEEDS="$SEEDS" \
     TEST_RUNNER_EVA_WICA_CHANNELS="$CHANNELS" \
     TEST_RUNNER_EVA_WICA_DURATION_SECONDS="$DURATION" \
     TEST_RUNNER_EVA_WICA_SOURCE_COUNT="$SOURCES" \
     xcodebuild test-without-building -project EVA.xcodeproj -scheme EVA \
-    -destination platform=macOS \
-    -only-testing:EVATests/WICACampaignTests
+    -destination platform=macOS -only-testing:EVATests/WICACampaignTests
 
 run mkdir -p "$DESTINATION"
-for name in eva-wica-density-ica-algorithms.csv eva-wica-density-ica-algorithms.md; do
+for name in eva-wica-density-mixed.csv eva-wica-density-mixed.md \
+    eva-wica-density-mixed-routing.csv eva-wica-density-mixed-routing.md; do
     if [ ! -f "$CONTAINER/$name" ]; then
         echo "Expected report was not written: $CONTAINER/$name" >&2
         exit 1
@@ -62,6 +58,9 @@ for name in eva-wica-density-ica-algorithms.csv eva-wica-density-ica-algorithms.
 done
 
 echo "Results:"
-echo "  $DESTINATION/eva-wica-density-ica-algorithms.md"
-echo "  $DESTINATION/eva-wica-density-ica-algorithms.csv"
-run cat "$DESTINATION/eva-wica-density-ica-algorithms.md"
+echo "  $DESTINATION/eva-wica-density-mixed.md"
+echo "  $DESTINATION/eva-wica-density-mixed.csv"
+echo "  $DESTINATION/eva-wica-density-mixed-routing.md"
+echo "  $DESTINATION/eva-wica-density-mixed-routing.csv"
+run cat "$DESTINATION/eva-wica-density-mixed.md"
+run cat "$DESTINATION/eva-wica-density-mixed-routing.md"
