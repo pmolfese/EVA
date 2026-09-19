@@ -1830,8 +1830,16 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
 
     // Electrode geometry, which MFFWriter cannot synthesize because it normally
     // copies it from the source package a simulation does not have.
-    try MontageWriter.writeLayoutFiles(montage: montage, to: cleanURL)
-    try MontageWriter.writeLayoutFiles(montage: montage, to: noisyURL)
+    try MontageWriter.writeLayoutFiles(
+        montage: montage,
+        scalpRadiusMeters: config.sphericalHeadModel.scalpRadiusMeters,
+        to: cleanURL
+    )
+    try MontageWriter.writeLayoutFiles(
+        montage: montage,
+        scalpRadiusMeters: config.sphericalHeadModel.scalpRadiusMeters,
+        to: noisyURL
+    )
 
     if let impedances {
         try ImpedanceModel.writeInfoXML(impedances: impedances, to: cleanURL)

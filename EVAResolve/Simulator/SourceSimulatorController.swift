@@ -1263,7 +1263,11 @@ final class SourceSimulatorController {
             signal: signal, segments: [], kind: .continuous,
             to: url, preserveSourceFileInfo: false
         )
-        try MontageWriter.writeLayoutFiles(montage: montage, to: url)
+        try MontageWriter.writeLayoutFiles(
+            montage: montage,
+            scalpRadiusMeters: headModel.scalpRadiusMeters,
+            to: url
+        )
     }
 
     /// The truth sidecar: active dipoles (position / orientation / activations),

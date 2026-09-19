@@ -55,4 +55,21 @@ struct EGISensorXMLParserTests {
         #expect(parsed.sensors.contains { $0.type == 0 })
         #expect(parsed.sensors.allSatisfy { $0.z != nil })
     }
+
+    @Test func simulatedCoordinatesUseEGICentimeters() {
+        let radiusMeters = 0.092
+        let xml = MontageWriter.coordinatesXML(
+            montage: Montage.standard(count: 20),
+            scalpRadiusMeters: radiusMeters
+        )
+        let parsed = try! #require(
+            EGISensorXMLParser.parse(data: Data(xml.utf8), requiresZ: true)
+        )
+        let expectedCentimeters = radiusMeters * 100
+        for sensor in parsed.sensors where sensor.type == 0 {
+            let z = try! #require(sensor.z)
+            let radius = sqrt(sensor.x * sensor.x + sensor.y * sensor.y + z * z)
+            #expect(abs(radius - expectedCentimeters) < 1e-5)
+        }
+    }
 }

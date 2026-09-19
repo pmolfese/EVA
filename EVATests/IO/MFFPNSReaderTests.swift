@@ -89,5 +89,16 @@ struct MFFPNSReaderTests {
         #expect(recovered.channelNames == pns.channelNames)
         #expect(recovered.positiveUpFlags == pns.positiveUpFlags)
         #expect(recovered.data == pns.data)
+
+        // External readers dispatch on the exact namespaced root and expect
+        // the standard PNSSet container/units, not EVA's permissive flat form.
+        let pnsSet = try String(
+            contentsOf: output.appendingPathComponent("pnsSet.xml"),
+            encoding: .utf8
+        )
+        #expect(pnsSet.contains("xmlns=\"http://www.egi.com/pnsSet_mff\""))
+        #expect(pnsSet.contains("<sensors>"))
+        #expect(pnsSet.components(separatedBy: "<unit>uV</unit>").count - 1 == pns.numberOfChannels)
+        #expect(!pnsSet.contains("<type>PNS</type>"))
     }
 }

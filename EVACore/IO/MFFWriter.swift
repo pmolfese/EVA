@@ -189,7 +189,7 @@ nonisolated enum MFFWriter {
 
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
-<dataInfo>
+<dataInfo xmlns="http://www.egi.com/info_n_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <generalInformation>
     <fileDataType>
       <PNSData/>
@@ -218,25 +218,40 @@ nonisolated enum MFFWriter {
         var body = ""
         for index in 0..<pns.numberOfChannels {
             let name = (names != nil && index < names!.count) ? names![index] : "PNS \(index + 1)"
-            let positiveUpXML: String
-            if let flags = pns.positiveUpFlags, flags.indices.contains(index) {
-                let value = flags[index] ? "true" : "false"
-                positiveUpXML = "    <positiveUp>\(value)</positiveUp>\n"
-            } else {
-                positiveUpXML = ""
-            }
+            let positiveUp = pns.positiveUpFlags.flatMap {
+                $0.indices.contains(index) ? $0[index] : nil
+            } ?? true
             body += """
-  <sensor>
-    <number>\(index)</number>
-    <name>\(xmlEscape(name))</name>
-    <type>PNS</type>
-\(positiveUpXML)  </sensor>
+    <sensor>
+      <name>\(xmlEscape(name))</name>
+      <number>\(index)</number>
+      <unit>uV</unit>
+      <psgType>0</psgType>
+      <mapping>\(index + 1)</mapping>
+      <samplingRate>0</samplingRate>
+      <sensorType>\(xmlEscape(name))</sensorType>
+      <highpass>0</highpass>
+      <lowpass>0</lowpass>
+      <notch>0</notch>
+      <groupNumber>1</groupNumber>
+      <gain>1</gain>
+      <defaultDisplayAmplitude>100</defaultDisplayAmplitude>
+      <highpassDisplay>0</highpassDisplay>
+      <lowpassDisplay>0</lowpassDisplay>
+      <notchDisplay>0</notchDisplay>
+      <color>0.0000,0.0000,0.0000,1.0000</color>
+      <positiveUp>\(positiveUp ? "true" : "false")</positiveUp>
+    </sensor>
 """
         }
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
-<PNSSet xmlns="http://www.egi.com/pns_mff">
-\(body)</PNSSet>
+<PNSSet xmlns="http://www.egi.com/pnsSet_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <name>EVA PNS Set</name>
+  <ampSeries>400</ampSeries>
+  <sensors>
+\(body)  </sensors>
+</PNSSet>
 """
         try xml.write(to: packageURL.appendingPathComponent("pnsSet.xml"), atomically: true, encoding: .utf8)
     }
@@ -348,7 +363,7 @@ nonisolated enum MFFWriter {
 
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
-<dataInfo>
+<dataInfo xmlns="http://www.egi.com/info_n_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <generalInformation>
     <fileDataType>
       <EEG/>
@@ -556,8 +571,9 @@ nonisolated enum MFFWriter {
         }
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
-<eventTrack>
+<eventTrack xmlns="http://www.egi.com/event_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <name>EVA Export</name>
+  <trackType>EVNT</trackType>
 \(body)</eventTrack>
 """
         try xml.write(to: packageURL.appendingPathComponent("Events_EVA.xml"), atomically: true, encoding: .utf8)
@@ -586,23 +602,33 @@ nonisolated enum MFFWriter {
         // type-0 <sensor> per channel (mne/io/egi/egimff.py:_read_mff_header),
         // counted against the signal's channel count. Use channel names when
         // available, otherwise generic E{n}.
+        //
+        // Two things a reader actually enforces, both easy to get wrong by
+        // eyeballing a hand-written sample instead of a real file: mffpy's
+        // `SensorLayout.sensors` does `self.find('sensors')` and iterates it —
+        // the <sensor> elements MUST be wrapped in a <sensors> container, not
+        // siblings of <name> — and every EGI XML file needs its namespace
+        // declared (`{http://www.egi.com/sensorLayout_mff}sensorLayout`) or
+        // mffpy's tag-based parser registry never matches it at all.
         let names = signal.channelNames
         var body = ""
         for index in 0..<signal.numberOfChannels {
             let name = (names != nil && index < names!.count) ? names![index] : "E\(index + 1)"
             body += """
-  <sensor>
-    <number>\(index + 1)</number>
-    <name>\(xmlEscape(name))</name>
-    <type>0</type>
-  </sensor>
+    <sensor>
+      <number>\(index + 1)</number>
+      <name>\(xmlEscape(name))</name>
+      <type>0</type>
+    </sensor>
 """
         }
         let xml = """
 <?xml version="1.0" encoding="UTF-8"?>
-<sensorLayout>
+<sensorLayout xmlns="http://www.egi.com/sensorLayout_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <name>EVA Export</name>
-\(body)</sensorLayout>
+  <sensors>
+\(body)  </sensors>
+</sensorLayout>
 """
         try xml.write(to: destination, atomically: true, encoding: .utf8)
     }

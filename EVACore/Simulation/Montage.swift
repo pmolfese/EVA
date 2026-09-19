@@ -256,11 +256,15 @@ nonisolated enum MontageWriter {
     /// anything that selects channels by location come up empty. Writing both
     /// files here, after the package exists, gets the geometry in without
     /// changing app code.
-    static func writeLayoutFiles(montage: Montage, to packageURL: URL) throws {
+    static func writeLayoutFiles(
+        montage: Montage,
+        scalpRadiusMeters: Double = SphericalHeadModel.classicThreeShell.scalpRadiusMeters,
+        to packageURL: URL
+    ) throws {
         try sensorLayoutXML(montage: montage)
             .write(to: packageURL.appendingPathComponent("sensorLayout.xml"),
                    atomically: true, encoding: .utf8)
-        try coordinatesXML(montage: montage)
+        try coordinatesXML(montage: montage, scalpRadiusMeters: scalpRadiusMeters)
             .write(to: packageURL.appendingPathComponent("coordinates.xml"),
                    atomically: true, encoding: .utf8)
     }
@@ -290,19 +294,39 @@ nonisolated enum MontageWriter {
 
             """
         }
+        // The namespace and the <sensors> wrapper both matter: mffpy's tag
+        // registry keys on the namespaced root
+        // (`{http://www.egi.com/sensorLayout_mff}sensorLayout`), and
+        // `SensorLayout.sensors` does `self.find('sensors')` before iterating
+        // — <sensor> elements as direct siblings of <name> parse under EVA's
+        // own (namespace-agnostic) reader but not under mffpy/MNE.
         return """
         <?xml version="1.0" encoding="UTF-8"?>
-        <sensorLayout>
+        <sensorLayout xmlns="http://www.egi.com/sensorLayout_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
           <name>\(escaped(montage.name))</name>
-        \(body)</sensorLayout>
+          <sensors>
+        \(body)  </sensors>
+        </sensorLayout>
         """
     }
 
     /// True 3D positions, which EVA uses for spherical-spline interpolation.
-    static func coordinatesXML(montage: Montage) -> String {
+    static func coordinatesXML(
+        montage: Montage,
+        scalpRadiusMeters: Double = SphericalHeadModel.classicThreeShell.scalpRadiusMeters
+    ) -> String {
+        // EGI stores coordinates in centimetres. `Montage.position` is a unit
+        // vector, so scale it to the simulated scalp before serializing. MNE
+        // converts these values back to metres when it builds the DigMontage.
+        let scalpRadiusCentimeters = scalpRadiusMeters * 100
         var body = ""
         for (index, electrode) in montage.electrodes.enumerated() {
-            let position = electrode.position
+            let unitPosition = electrode.position
+            let position = (
+                x: unitPosition.x * scalpRadiusCentimeters,
+                y: unitPosition.y * scalpRadiusCentimeters,
+                z: unitPosition.z * scalpRadiusCentimeters
+            )
             body += """
               <sensor>
                 <number>\(index + 1)</number>
@@ -315,12 +339,24 @@ nonisolated enum MontageWriter {
 
             """
         }
+        // mffpy's `Coordinates.sensors` does
+        // `self.find('sensors', self.find('sensorLayout'))` — the sensors have
+        // to be nested inside a <sensorLayout><sensors> pair, not siblings of
+        // a bare <sensorLayout>NAME</sensorLayout> text element, and the root
+        // needs the coordinates_mff namespace or mffpy's registry never
+        // matches the tag. EVA's own reader (EGISensorXMLParser) is a flat
+        // XMLParser delegate that only reacts to <sensor>/<number>/<x>/<y>/<z>
+        // regardless of nesting, so it accepted both shapes — this only ever
+        // broke external readers.
         return """
         <?xml version="1.0" encoding="UTF-8"?>
-        <coordinates>
-          <name>\(escaped(montage.name))</name>
-          <sensorLayout>\(escaped(montage.name))</sensorLayout>
-        \(body)</coordinates>
+        <coordinates xmlns="http://www.egi.com/coordinates_mff" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+          <sensorLayout>
+            <name>\(escaped(montage.name))</name>
+            <sensors>
+        \(body)    </sensors>
+          </sensorLayout>
+        </coordinates>
         """
     }
 
