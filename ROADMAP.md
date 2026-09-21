@@ -1369,17 +1369,27 @@ a bottom drawer — good for skimming many fits, worse for careful raw-vs-PCA QC
 ---
 
 
-## R6 — FEM: **import from DUNEuro** (long term)
+## R6 — FEM from DUNEuro: **READER AVAILABLE; FORWARD INTEGRATION PENDING**
 
 Same decision as R3, one step further out. Writing a hex-FEM solver, a 6-tissue
 segmentation and an anisotropy pipeline is a multi-year project that SimBio/DUNEuro and
 SimNIBS have already done under free licenses; EVA's contribution is not a better
 solver.
 
-- [ ] **Import a DUNEuro transfer matrix / lead field** for a source space the user
-  defines outside EVA (`.npy` / `.mat` / DUNEuro's own output plus a source-position
-  file). This is R3.7's precomputed-lead-field importer, generalized — build it once,
-  and BEM-from-anywhere and FEM-from-DUNEuro both arrive through the same door.
+**Repository note (2026-09-21):** the owner confirms that EVA already has the ability
+to read FEM models produced by DUNEuro. Before beginning R6 or the EVASimulate
+anatomical-forward work below, locate that existing entry point and its fixtures, then
+update this older checklist to describe what is actually shipped. Do not build a second
+DUNEuro reader. The remaining simulator task is to adapt the imported FEM operator to
+the common forward interface and preserve its fixed-source-space constraints and
+provenance.
+
+- [x] **Read FEM models produced by DUNEuro.** Owner-confirmed existing capability;
+  AF-0 must locate and document its current implementation and fixture because this
+  older roadmap section predates it.
+- [ ] Adapt the imported DUNEuro transfer operator / lead field and source space to
+  R3.4's common `ForwardOperator`, shared with precomputed BEM lead fields. Do not
+  create a second reader or a DUNEuro-specific simulation engine.
 - [ ] Carry FEM provenance (tissue set, conductivities, anisotropy, solver settings) as
   opaque metadata into every result and export, so a FEM result is never mistaken for a
   BEM or sphere result.
@@ -1451,6 +1461,319 @@ These are what make the tool trustworthy; every item below should preserve them.
 4. **Self-test anything that could silently stop working.** A harness that
    quietly stops reproducing the phenomenon it studies is worse than no harness,
    because everything it emits still looks like evidence.
+
+---
+
+## EVASimulate anatomical forward models and composable neural scenes — **NOT STARTED**
+
+This is the highest-value expansion after the current EEG-fMRI benchmark work. It
+closes EVASimulate's two largest gaps relative to general-purpose simulators such as
+SEREEGA without giving up EVA's stronger identity: a complete generate → contaminate →
+process → score harness.
+
+Treat this as one program, not two independent features:
+
+> Make EVASimulate consume a general forward operator, then make its neural scene a
+> collection of sources and activations resolved through that operator.
+
+The intended boundary is:
+
+```text
+SimulationScenario
+├── recording/acquisition
+│   ├── duration, rate, reference
+│   └── gradient, BCG, ocular, EMG, defects…
+├── forwardModel
+│   ├── analytic sphere / ellipsoid
+│   ├── imported MNE BEM solution
+│   └── imported lead field: MNE / OpenMEEG / DUNEuro FEM
+├── experiment
+│   ├── conditions
+│   └── event schedules
+└── neuralScene
+    └── components[]
+        ├── spatial source
+        │   ├── point dipole
+        │   ├── imported-grid source
+        │   ├── atlas/ROI selection
+        │   └── distributed patch
+        └── activations[]
+            ├── band-limited background
+            ├── ERP
+            ├── ERSP/ERD
+            ├── supplied time series
+            └── later: connected AR network
+```
+
+Neural activity passes through the chosen forward operator. Gradient, BCG, ocular,
+muscle and recording-defect models retain their existing acquisition/sensor-space
+semantics, and the two sides meet at the simulator's existing additive/reference
+boundary.
+
+### AF-0 — Audit and freeze the existing import contracts
+
+Do this before adding another importer. The code and historical roadmap currently tell
+an inconsistent story: `BEMGeometry` and `BEMSolution` exist; R3.3 still describes the
+MNE BEM evaluator as unfinished; the owner confirms DUNEuro FEM read support already
+exists, while the older R6 checklist still calls it future work.
+
+- [ ] Locate the current DUNEuro/FEM entry point and its validation fixture. Record
+  whether it returns geometry plus a transfer operator or a fixed source-space lead
+  field, and what it carries for source positions/orientations, electrode names,
+  coordinate frames, units and solver/tissue provenance.
+- [ ] Confirm the exact MNE routes: geometry-only BEM, an evaluable MNE
+  linear-collocation solution, and a precomputed `-fwd.fif` lead field. Keep the
+  OpenMEEG distinction explicit: its BEM geometry is readable, but its packed
+  symmetric solution requires libOpenMEEG; a precomputed forward operator is the
+  portable route.
+- [ ] Update R3/R6 and the developer architecture page to name the real shipped APIs
+  and fixtures. Remove stale "future" language rather than adding parallel code.
+
+**Exit:** one small capability table and one committed fixture per existing import
+route. Every later milestone names the adapter it reuses.
+
+### AF-1 — One forward-operator contract
+
+EVASimulate currently calls `SphericalForwardModel` directly from dipole and ERP
+generation. Replace those direct dependencies with R3.4's common operator contract.
+
+- [ ] Add `ForwardOperator`, returning the existing `ForwardLeadField` vocabulary and
+  exposing electrode order, coordinate frame, reference behavior, model provenance
+  and its source-domain capability.
+- [ ] Distinguish **continuous operators**, which can evaluate an arbitrary valid
+  dipole, from **fixed-catalog operators**, whose source positions and orientations
+  were fixed when an external tool exported the lead field.
+- [ ] Adapt the analytic sphere and ellipsoid first and require sample-identical
+  output from all existing simulator scenarios.
+- [ ] Add adapters for EVA's generation-side BEM, imported MNE BEM solutions, and
+  imported precomputed lead fields from MNE/OpenMEEG/DUNEuro.
+- [ ] Cache lead fields by model, montage, reference and resolved source set. Large
+  imported matrices and BEM solutions should remain mapped or single precision where
+  the existing readers permit it.
+- [ ] Make unsupported operations explicit. A fixed FEM grid must not silently accept
+  an arbitrary coordinate, continuous source motion or a changed montage.
+
+**Exit:** sphere and ellipsoid run through the common contract with unchanged outputs;
+each imported model reports whether it supports continuous placement or only its
+catalog.
+
+### AF-2 — Evaluate imported MNE BEM solutions
+
+If AF-0 finds that only deserialization is complete, finish R3.3 rather than creating a
+simulator-specific evaluator.
+
+- [ ] Project electrodes onto the scalp and build reusable barycentric interpolation
+  rows over the hit triangles.
+- [ ] Evaluate the infinite-medium potential of each dipole at the BEM vertices and
+  contract it with the imported solution in one batched matrix operation.
+- [ ] State head/MRI frames and metre units once. Require the head↔MRI transform when
+  the imported geometry needs it.
+- [ ] Produce µV/(nA·m) and apply average/infinity reference identically to the
+  analytic forward models.
+- [ ] Match the committed MNE reference gains below 0.1% relative error and add
+  failure fixtures for missing transforms, wrong frames, solution/geometry mismatch,
+  unsupported OpenMEEG solutions and electrode mismatch.
+
+**Exit:** an imported MNE BEM solution can generate an arbitrary valid point dipole
+through the same interface used by the sphere.
+
+### AF-3 — Normalize DUNEuro FEM and other precomputed lead fields
+
+DUNEuro belongs behind a general imported-operator representation, not a second
+simulation engine. Reuse its existing reader and normalize the result to:
+
+- [ ] Gain matrix, electrode names/order, source positions, fixed/free orientations,
+  coordinate frame, units and native reference.
+- [ ] Optional atlas/region labels when the exported source space carries them.
+- [ ] Opaque provenance for DUNEuro version, tissues, conductivities, anisotropy and
+  solver settings. EVA need not interpret every field, but it must not discard them.
+- [ ] Deterministic channel reordering when names provide an exact bijection; otherwise
+  fail instead of guessing.
+- [ ] Explicit fixed-grid behavior for all consumers. Interpolation between FEM grid
+  nodes is deferred until it has a scientifically justified policy.
+
+**Exit:** projection of a fixed source set reproduces an external DUNEuro fixture, and
+missing frame/unit/orientation metadata is rejected clearly.
+
+### AF-4 — Portable forward-model assets in simulation scenarios
+
+Do not place a large BEM solution or FEM gain matrix inside scenario JSON.
+
+- [ ] Add a versioned `forwardModel` descriptor that can select an analytic model, an
+  `.evahead` package, an imported BEM solution or an imported lead-field asset.
+- [ ] Resolve relative asset paths from the scenario directory, as measured gradient
+  templates and coordinate files already do.
+- [ ] Extend Simulator Studio staging so the sandboxed CLI receives every model,
+  transform, montage and source-space file required by the scenario.
+- [ ] Record model type, solver, subject/model identifier, source file names, frames,
+  units, reference, electrode mapping and source-domain restrictions in truth. Follow
+  the roadmap's priority guardrail: use existing determinism facilities and do not
+  make new content-hash infrastructure a prerequisite.
+- [ ] Preserve relocatability: moving a scenario together with its referenced asset
+  directory must not change its interpretation.
+
+**Exit:** a reviewed scenario can select an imported anatomical operator and run from
+the CLI and Simulator Studio without absolute-path assumptions.
+
+### AF-5 — Wire anatomical operators through EVASimulate
+
+- [ ] Pass a resolved `ForwardOperator` into dipole background and ERP generation;
+  remove direct spherical calls from those paths.
+- [ ] Use the same operator for source-space truth, free/oriented gain export and true
+  mixing-matrix export.
+- [ ] Keep acquisition artifacts separate unless a model explicitly needs head
+  geometry. Do not accidentally turn gradient pickup or channel defects into neural
+  sources.
+- [ ] Define capability behavior for ocular dipoles, BCG generators and source motion.
+  Initially reject source motion on a fixed imported grid rather than inventing an
+  interpolation rule.
+- [ ] Add the first vertical-slice scenario: the same fixed source/time course through
+  an analytic sphere, imported MNE BEM and imported DUNEuro FEM, producing ordinary
+  MFF recordings and complete truth sidecars.
+
+**Exit:** forward-model choice changes the physical projection but not the recording,
+artifact or scoring contracts.
+
+### AF-6 — Anatomical mismatch campaigns
+
+- [ ] Extend SI-4 beyond perturbed spheres: generate with BEM and invert with sphere;
+  generate with FEM and invert with BEM or sphere; generate with subject anatomy and
+  invert with a population template.
+- [ ] Make forward-model mismatch a first-class sweep/grid axis for source recovery
+  and source-informed artifact correction.
+- [ ] Every result must name generation and analysis operators separately, including
+  solver provenance and reference.
+
+**Exit:** EVASimulate can quantify the cost of the inverse crime rather than merely
+avoiding it in prose.
+
+### NS-1 — Schema v2 with an optional neural scene
+
+Do not rewrite the Grouiller and current dipole paths in place.
+
+- [ ] Add an optional `neuralScene` containing stable-ID components; each component
+  has one spatial source, one or more activations and an explicit calibration policy.
+- [ ] If `neuralScene` is absent, execute the current generator unchanged. Existing
+  schema-v1 scenarios and determinism baselines must remain byte-identical.
+- [ ] Version the scenario schema deliberately and provide a migration/export path
+  only after the new representation reproduces current dipole and ERP cases.
+- [ ] Keep scenario order from controlling randomness: seed namespaces derive from
+  stable component/activation IDs and parameter scope, not array position.
+
+**Exit:** a schema-v2 scene can coexist with every reviewed legacy scenario without
+changing old evidence.
+
+### NS-2 — Spatial source specifications
+
+- [ ] `point`: coordinate plus orientation; requires a continuous operator.
+- [ ] `catalogSource`: stable source ID from an imported fixed source space.
+- [ ] `patch`: multiple source locations with normalized weights and shared or
+  independent activation, allowing a genuine distributed source.
+- [ ] `atlasRegion`: deterministic selection from labeled imported source space.
+- [ ] Resolve all selectors before waveform synthesis and write the realized
+  positions, orientations, weights and catalog/region IDs into truth.
+- [ ] If a model has no atlas metadata, make atlas selection unavailable. Do not infer
+  labels from nearest coordinates.
+
+**Exit:** point, imported-grid and distributed sources project through every compatible
+operator, and incompatible source/operator combinations fail during validation.
+
+### NS-3 — Experiment timing shared by all activations
+
+- [ ] Add conditions, event streams, blocks, trial counts, ISI/onset distributions,
+  omissions and covariates as one experiment layer.
+- [ ] Activations refer to named event streams rather than independently generating
+  trial order and timing.
+- [ ] Preserve the current ERP factor-isolated random streams while generalizing the
+  mechanism to other activation types.
+
+**Exit:** an ERP and ERSP on different components can share the exact same target event
+schedule, and truth records the schedule once.
+
+### NS-4 — Composable activation engine
+
+Implement the smallest useful general set first:
+
+- [ ] **Band/noise:** white/pink/brown and band-limited stochastic activity, including
+  optional non-Gaussian burstiness.
+- [ ] **ERP:** multi-peak analytic waveforms, measured-template input and the current
+  latency/amplitude/skew/omission controls.
+- [ ] **ERSP/ERD:** narrow- or broadband carriers; event-related burst or suppression;
+  taper, baseline level, phase and amplitude modulation.
+- [ ] **Data:** external continuous or per-trial time series with declared sampling
+  rate, units and resampling policy.
+- [ ] Sum multiple activation signals at one component before projection. Permit a
+  patch to share one activation across its sources or use independent activations.
+- [ ] Every renderer emits its realized time course/trial truth, seed namespace,
+  units, calibration and event attribution.
+
+**Exit:** a scenario can express the important SEREEGA-style source × activation
+composition while still producing EVASimulate's clean/noisy twins and scores.
+
+### NS-5 — General parameter variability
+
+- [ ] Add reusable fixed, normal, log-normal, uniform, categorical and linear-trend
+  specifications instead of another one-off jitter field for every activation.
+- [ ] Declare variation scope: per trial/event, block, subject or component. Continuous
+  stochastic processes remain their own explicit model rather than masquerading as
+  per-trial draws.
+- [ ] Derive random streams from stable IDs and parameter names so reordering or adding
+  an unrelated component cannot reroll existing components.
+- [ ] Use the same vocabulary in `generate-group` where it can replace specialized
+  between-subject fields without losing the explicit group estimand.
+
+**Exit:** habituation, learning trends and trial/subject variability can be expressed
+without adding a new configuration property for every study.
+
+### NS-6 — Directed connectivity, after the scene foundation
+
+- [ ] Add AR/MVAR activation networks whose nodes name component activations, with
+  explicit order, coefficient matrices and innovation covariance.
+- [ ] Reject unstable systems and retain realized coefficients/innovations in truth.
+- [ ] Include null, unidirectional, bidirectional and common-driver scenarios.
+- [ ] Add direction/lag scoring only after generation is validated independently.
+
+**Exit:** EVASimulate can benchmark connectivity recovery against known directed
+source networks. This is deliberately after ERP/ERSP/data and must not delay them.
+
+### Delivery order and gates
+
+1. AF-0 import audit.
+2. AF-1 common operator with unchanged analytic output.
+3. AF-2/AF-3 anatomical vertical slice through MNE BEM and DUNEuro FEM.
+4. AF-4/AF-5 scenario assets and complete simulator wiring.
+5. NS-1/NS-2 neural-scene and spatial-source foundation.
+6. NS-3/NS-4 experiment, ERP, ERSP and external-data activations.
+7. NS-5 general variability and Simulator Studio editors after the JSON/CLI contract
+   is stable.
+8. AF-6 mismatch campaigns.
+9. NS-6 connectivity.
+
+Non-negotiable gates:
+
+- [ ] Existing schema-v1 scenarios and determinism baselines remain unchanged.
+- [ ] Sphere output through `ForwardOperator` is sample-identical to the current path.
+- [ ] MNE BEM and DUNEuro fixtures meet their external-reference tolerances.
+- [ ] Channel, coordinate-frame, unit, orientation and reference mismatches cannot
+  silently proceed.
+- [ ] Fixed-grid models reject unsupported arbitrary placement and motion.
+- [ ] Truth is sufficient to reconstruct the projected neural contribution and names
+  the generation operator separately from any inverse/correction operator.
+- [ ] Component reordering and unrelated additions do not perturb existing random
+  streams.
+- [ ] Existing correction, event, ERP, PAC, ICA and source scorers remain independent
+  of which compatible forward operator generated the recording.
+
+First-release definition of done:
+
+> An EVASimulate scenario can select a subject-specific MNE BEM or DUNEuro FEM,
+> define several point or distributed neural components with ERP, ERSP or supplied
+> activations, generate a normal continuous MFF with the full EEG-fMRI artifact stack,
+> and retain enough truth to score the result.
+
+Explicitly deferred from that release: building BEM/FEM anatomy from MRI inside EVA,
+interpolating arbitrary dipoles within a fixed FEM grid, a visual activation-network
+editor, dynamic cortical propagation and biophysical neural-mass models.
 
 ---
 
