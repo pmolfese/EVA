@@ -101,4 +101,40 @@ struct MFFPNSReaderTests {
         #expect(pnsSet.components(separatedBy: "<unit>uV</unit>").count - 1 == pns.numberOfChannels)
         #expect(!pnsSet.contains("<type>PNS</type>"))
     }
+
+    @Test func writerDoesNotInventPolarityFlagsForUnflaggedPNS() throws {
+        // A PNS signal with no <positiveUp> metadata must read back as nil.
+        // Defaulting to "true" on write turned nil into all-true on every
+        // round trip and broke exact PNS preservation in the pipeline
+        // regression corpus (PipelineRegressionTests.cleanAverageReferenceControlDoesNoHarm).
+        let source = Fixtures.url("example_3.mff")
+        let reader = MFFReader()
+        let eeg = try reader.loadSignal(from: source)
+        let flagged = try #require(try reader.loadPNSSignal(from: source))
+        let pns = MFFSignalData(
+            signalURL: flagged.signalURL,
+            signalType: flagged.signalType,
+            numberOfChannels: flagged.numberOfChannels,
+            samplingRate: flagged.samplingRate,
+            duration: flagged.duration,
+            recordingStartTime: flagged.recordingStartTime,
+            events: [],
+            data: flagged.data,
+            channelNames: flagged.channelNames,
+            positiveUpFlags: nil
+        )
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-pns-noflags-\(UUID().uuidString).mff")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        try MFFWriter.write(
+            signal: eeg, pnsSignal: pns, segments: [], kind: .continuous,
+            to: output, preserveSourceFileInfo: false
+        )
+        let recovered = try #require(try reader.loadPNSSignal(from: output))
+
+        #expect(recovered.positiveUpFlags == nil)
+        #expect(recovered.channelNames == pns.channelNames)
+        #expect(recovered.data == pns.data)
+    }
 }

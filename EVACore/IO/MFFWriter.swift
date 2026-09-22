@@ -218,9 +218,17 @@ nonisolated enum MFFWriter {
         var body = ""
         for index in 0..<pns.numberOfChannels {
             let name = (names != nil && index < names!.count) ? names![index] : "PNS \(index + 1)"
-            let positiveUp = pns.positiveUpFlags.flatMap {
-                $0.indices.contains(index) ? $0[index] : nil
-            } ?? true
+            // Only emit <positiveUp> when the signal carries a flag for this
+            // channel. Defaulting to true would invent metadata: a source with
+            // no flags reads back as nil, and writing "true" makes every
+            // round trip turn nil into all-true. The element is optional to
+            // EGI readers (mffpy, MNE), so omitting it keeps the file valid.
+            let positiveUpXML: String
+            if let flags = pns.positiveUpFlags, flags.indices.contains(index) {
+                positiveUpXML = "\n      <positiveUp>\(flags[index] ? "true" : "false")</positiveUp>"
+            } else {
+                positiveUpXML = ""
+            }
             body += """
     <sensor>
       <name>\(xmlEscape(name))</name>
@@ -239,8 +247,7 @@ nonisolated enum MFFWriter {
       <highpassDisplay>0</highpassDisplay>
       <lowpassDisplay>0</lowpassDisplay>
       <notchDisplay>0</notchDisplay>
-      <color>0.0000,0.0000,0.0000,1.0000</color>
-      <positiveUp>\(positiveUp ? "true" : "false")</positiveUp>
+      <color>0.0000,0.0000,0.0000,1.0000</color>\(positiveUpXML)
     </sensor>
 """
         }
