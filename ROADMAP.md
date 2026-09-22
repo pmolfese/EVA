@@ -1142,14 +1142,16 @@ only real math R3 still owns.
 
 ### R3.4 `ForwardOperator` protocol and wiring *(kept from the old R3.4)*
 
-- [ ] `ForwardOperator` with `leadField(sources:) -> ForwardLeadField`, adopted by
-  spherical, ellipsoidal, our icosphere BEM, and `BEMSolutionForwardModel` — so dipole
-  fit, inverse imaging and the simulator are head-model-agnostic.
+- [x] `ForwardOperator` (AF-1, 2026-09-22), adopted by spherical, ellipsoidal, our
+  icosphere BEM and a fixed-catalog precomputed operator. The simulator runs through
+  it. Still open: `BEMSolutionForwardModel` (R3.3), and moving dipole fit (Source
+  window Fit mode) and R4 onto it.
 - [ ] Head-model picker wherever a forward is chosen (Source Simulator, Fit mode, R4),
   with the chosen model's provenance carried into every result and export. A result
   produced under an imported subject BEM must say so, next to one produced under a
   sphere.
-- [ ] Lead-field cache keyed by (head model id, montage, reference, source set).
+- [x] Lead-field cache keyed by (head model id, montage, reference, source set):
+  `ForwardLeadFieldCache` (AF-1). Not yet used by any consumer.
 
 ### R3.5 Validation  *(reference fixtures built 2026-09-06)*
 
@@ -1220,8 +1222,12 @@ only real math R3 still owns.
   which, in the UI, per consumer — an imported lead field is not a drop-in for a
   solution and must not silently behave like one.
 - [ ] Solve on imported surfaces with our own BEM (R3.1 geometry → `BEMForwardModel`)
-  for users who have surfaces but no MNE install. Cheap to expose once R3.1 lands;
-  label it as our constant-element solver, not MNE's.
+  for users who have surfaces but no MNE install. Label it as our constant-element
+  solver, not MNE's. *AF-0 (2026-09-22): this is not just a matter of exposing it.*
+  `BEMForwardModel.solveSurfacePotentials` builds its own concentric icospheres from a
+  `ForwardHeadModel`, so it first has to accept arbitrary `BEMGeometry` meshes
+  (non-spherical centroids and electrode projection instead of angular
+  nearest-centroid).
 
 ---
 
@@ -1369,27 +1375,25 @@ a bottom drawer — good for skimming many fits, worse for careful raw-vs-PCA QC
 ---
 
 
-## R6 — FEM from DUNEuro: **READER AVAILABLE; FORWARD INTEGRATION PENDING**
+## R6 — FEM from DUNEuro: **NOT STARTED**
 
 Same decision as R3, one step further out. Writing a hex-FEM solver, a 6-tissue
 segmentation and an anisotropy pipeline is a multi-year project that SimBio/DUNEuro and
 SimNIBS have already done under free licenses; EVA's contribution is not a better
 solver.
 
-**Repository note (2026-09-21):** the owner confirms that EVA already has the ability
-to read FEM models produced by DUNEuro. Before beginning R6 or the EVASimulate
-anatomical-forward work below, locate that existing entry point and its fixtures, then
-update this older checklist to describe what is actually shipped. Do not build a second
-DUNEuro reader. The remaining simulator task is to adapt the imported FEM operator to
-the common forward interface and preserve its fixed-source-space constraints and
-provenance.
+**Correction (AF-0, 2026-09-22):** an earlier note (2026-09-21) recorded a DUNEuro
+reader as already shipped. The AF-0 audit found none: there is no FEM or DUNEuro code
+on any branch, and the owner confirmed it. EVA cannot read DUNEuro output today.
+DUNEuro therefore comes in through R3.7's plain-matrix lead-field import (gain plus
+source positions exported from `duneuropy`), not through a DUNEuro-specific reader.
 
-- [x] **Read FEM models produced by DUNEuro.** Owner-confirmed existing capability;
-  AF-0 must locate and document its current implementation and fixture because this
-  older roadmap section predates it.
-- [ ] Adapt the imported DUNEuro transfer operator / lead field and source space to
-  R3.4's common `ForwardOperator`, shared with precomputed BEM lead fields. Do not
-  create a second reader or a DUNEuro-specific simulation engine.
+- [ ] **Read DUNEuro output** by way of R3.7's generic lead-field import. This needs a
+  small `duneuropy` export recipe in `Tools/forward-compare` and one committed
+  fixture. Build no reader that understands DUNEuro's internal formats.
+- [ ] Adapt the imported DUNEuro lead field and source space to R3.4's common
+  `ForwardOperator`, shared with precomputed BEM lead fields. Create no
+  DUNEuro-specific simulation engine.
 - [ ] Carry FEM provenance (tissue set, conductivities, anisotropy, solver settings) as
   opaque metadata into every result and export, so a FEM result is never mistaken for a
   BEM or sphere result.
@@ -1510,48 +1514,73 @@ muscle and recording-defect models retain their existing acquisition/sensor-spac
 semantics, and the two sides meet at the simulator's existing additive/reference
 boundary.
 
-### AF-0 — Audit and freeze the existing import contracts
+### AF-0 — Audit and freeze the existing import contracts — **COMPLETE (2026-09-22)**
 
-Do this before adding another importer. The code and historical roadmap currently tell
-an inconsistent story: `BEMGeometry` and `BEMSolution` exist; R3.3 still describes the
-MNE BEM evaluator as unfinished; the owner confirms DUNEuro FEM read support already
-exists, while the older R6 checklist still calls it future work.
+- [x] Locate the DUNEuro/FEM entry point. **None exists.** There is no FEM or DUNEuro
+  code on any branch (owner confirmed). R6 has been corrected, and DUNEuro now enters
+  through R3.7's generic lead-field import (see AF-3).
+- [x] Confirm the exact MNE routes (table below). The OpenMEEG distinction holds:
+  geometry is readable, but the packed symmetric solution is declined by name.
+- [x] Update R3/R6 to name the real APIs. The developer page
+  (`docs/developers/subsystems/evacore.md`) was already accurate and needed no change.
 
-- [ ] Locate the current DUNEuro/FEM entry point and its validation fixture. Record
-  whether it returns geometry plus a transfer operator or a fixed source-space lead
-  field, and what it carries for source positions/orientations, electrode names,
-  coordinate frames, units and solver/tissue provenance.
-- [ ] Confirm the exact MNE routes: geometry-only BEM, an evaluable MNE
-  linear-collocation solution, and a precomputed `-fwd.fif` lead field. Keep the
-  OpenMEEG distinction explicit: its BEM geometry is readable, but its packed
-  symmetric solution requires libOpenMEEG; a precomputed forward operator is the
-  portable route.
-- [ ] Update R3/R6 and the developer architecture page to name the real shipped APIs
-  and fixtures. Remove stale "future" language rather than adding parallel code.
+**Capability table** (fixtures live in `EVATests/Fixtures/Resolve/Forward/` unless
+noted, and all come from `Tools/forward-compare/make_forward_fixtures.py`):
 
-**Exit:** one small capability table and one committed fixture per existing import
-route. Every later milestone names the adapter it reuses.
+| Route | Reads | Evaluates a lead field | Entry point | Fixture / test |
+|---|---|---|---|---|
+| MNE geometry `-bem.fif` | ✅ with quality gates | ❌ (see "EVA's own BEM" row) | `BEMGeometry.readFIF` | `{fsaverage,sphere}-ico2-bem.fif` · `BEMImportTests` |
+| OpenMEEG geometry `.geom`/`.cond` + `.tri`/`.off`/`.bnd` | ✅ | ❌ | `OpenMEEGGeometry.readGeometry` | written in-test (round trip), no committed `.geom` |
+| MNE linear-collocation solution `-bem-sol-mne.fif` | ✅ matrix, multipliers, per-shell blocks (outer first) | ❌ — **R3.3 open, no consumer** | `BEMSolution.readFIF` | `*-bem-sol-mne.fif` + `forward_reference.json` (MNE gain, 12 dipoles × 32 electrodes, infinity ref) |
+| OpenMEEG solution inside `-bem-sol-openmeeg.fif` | geometry only; solution declined by name | never (needs libOpenMEEG) | `BEMSolution.readFIF` throws `unsupportedSolver` | `*-bem-sol-openmeeg.fif` |
+| MNE forward `-fwd.fif` | ❌ classified only (Quick Look kind) | ❌ — R3.7 | `FIFDocument.Kind.forwardSolution` | none |
+| Plain gain matrix + positions (`.npy`/`.mat`/TSV) | ❌ | ❌ — R3.7 | — | none |
+| DUNEuro FEM | ❌ | ❌ — R6 via R3.7 | — | none |
+| EVA's own BEM (generation side) | n/a | ✅ but **only concentric icosphere shells built from a `ForwardHeadModel`**; it cannot take imported surfaces; electrodes use nearest-centroid interpolation | `BEMForwardModel.leadField` | EVASimulate `SelfTest` only |
+| Analytic sphere | n/a | ✅ | `SphericalForwardModel.leadField`; the simulator reaches it through one overload taking `SphericalHeadModel` in `EVACore/Simulation/SimulationForwardDomain.swift` | SelfTest + determinism baselines |
+| Affine ellipsoid | n/a | ✅ | `EllipsoidalForwardModel.leadField`; simulator adapter `SimulatedEllipsoidModel.leadField` exists, but only SelfTest calls it, and scenarios cannot select it (`SimulationConfig` has only `sphericalHeadModel`) | SelfTest |
 
-### AF-1 — One forward-operator contract
+**What this means for later milestones.** AF-1's sphere seam is the
+`SphericalForwardModel.leadField(head: SphericalHeadModel, …)` overload, which has
+direct callers in `ERPGenerator` (2), `DipoleEEGGenerator` (2), `SingleDipoleFit`,
+and EVASimulate's `SurrogateSeparation` and `SelfTest`. AF-2 is exactly R3.3, since
+deserialization is complete and evaluation is not. AF-3 has no reader to reuse and
+depends on R3.7. The generic lead-field import has to land before any DUNEuro work.
 
-EVASimulate currently calls `SphericalForwardModel` directly from dipole and ERP
-generation. Replace those direct dependencies with R3.4's common operator contract.
+### AF-1 — One forward-operator contract — **COMPLETE (2026-09-22)**
 
-- [ ] Add `ForwardOperator`, returning the existing `ForwardLeadField` vocabulary and
-  exposing electrode order, coordinate frame, reference behavior, model provenance
-  and its source-domain capability.
-- [ ] Distinguish **continuous operators**, which can evaluate an arbitrary valid
-  dipole, from **fixed-catalog operators**, whose source positions and orientations
-  were fixed when an external tool exported the lead field.
-- [ ] Adapt the analytic sphere and ellipsoid first and require sample-identical
-  output from all existing simulator scenarios.
-- [ ] Add adapters for EVA's generation-side BEM, imported MNE BEM solutions, and
-  imported precomputed lead fields from MNE/OpenMEEG/DUNEuro.
-- [ ] Cache lead fields by model, montage, reference and resolved source set. Large
-  imported matrices and BEM solutions should remain mapped or single precision where
-  the existing readers permit it.
-- [ ] Make unsupported operations explicit. A fixed FEM grid must not silently accept
-  an arbitrary coordinate, continuous source motion or a changed montage.
+`EVACore/Core/Forward/ForwardOperator.swift`; tests in
+`EVATests/Core/ForwardOperatorTests.swift`. On the simulator side,
+`SimulationForwardModel` (in `EVACore/Simulation/SimulationForwardDomain.swift`) owns
+electrode placement, because the scenario montage is unit directions and each analytic
+head puts them on its own scalp. It dispatches every generator lead field through the
+protocol. `SimulationConfig.forwardModel` is always `.sphere(sphericalHeadModel)` for
+now, and scenario JSON does not change (selecting an operator is AF-4/AF-5).
+
+- [x] `ForwardOperator` returns `ForwardLeadField` and exposes `provenance`
+  (`ForwardModelProvenance`: kind, name, opaque `details`), `frame` and `sourceDomain`.
+  Electrode order is the caller's `OrderedElectrodes` order. The reference is
+  requested per call.
+- [x] `ForwardSourceDomain.continuous` vs `.fixedCatalog`.
+- [x] `SphericalForwardOperator` and `EllipsoidalForwardOperator`, with
+  `verifyConvergence` carried on the operator. **All 8 scenarios are byte-identical**
+  to a fresh HEAD build, and 111/111 `eva-simulate selftest` checks pass.
+  `ERPGenerator`, `DipoleEEGGenerator`, `SingleDipoleFit` and `SurrogateSeparation`
+  no longer name a solver. The legacy `SphericalForwardModel`/`EllipsoidalForwardModel`
+  simulator overloads remain as thin wrappers over `SimulationForwardModel`.
+- [x] `ConcentricBEMForwardOperator` (EVA's generation-side BEM) and
+  `PrecomputedLeadFieldOperator`, the fixed-catalog target that R3.7's `-fwd.fif` and
+  plain-matrix readers will build. It matches channels by exact name in any order,
+  projects any orientation from free columns, converts infinity → average, and
+  refuses average → infinity.
+- [ ] An imported MNE BEM *solution* adapter. This is AF-2 / R3.3.
+- [x] `ForwardLeadFieldCache`, keyed by (operator, electrodes, dipoles, reference).
+  *Not yet wired into any consumer*, because simulator runs build only a few fields.
+  It becomes worth using with dipole-fit grids and imported operators. Keeping
+  imported matrices mapped or in single precision is left for R3.7's reader.
+- [x] Unsupported operations are explicit: a catalog operator throws for an unknown
+  source, a source moved more than 1 µm, a changed montage, or an unrecoverable
+  reference, and never interpolates.
 
 **Exit:** sphere and ellipsoid run through the common contract with unchanged outputs;
 each imported model reports whether it supports continuous placement or only its
@@ -1580,7 +1609,9 @@ through the same interface used by the sphere.
 ### AF-3 — Normalize DUNEuro FEM and other precomputed lead fields
 
 DUNEuro belongs behind a general imported-operator representation, not a second
-simulation engine. Reuse its existing reader and normalize the result to:
+simulation engine. AF-0 found **no existing DUNEuro reader**, so this milestone is
+built on R3.7's `-fwd.fif` and plain-matrix lead-field import, with DUNEuro as one
+producer of that format. Normalize every imported lead field to:
 
 - [ ] Gain matrix, electrode names/order, source positions, fixed/free orientations,
   coordinate frame, units and native reference.

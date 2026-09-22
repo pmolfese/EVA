@@ -312,22 +312,9 @@ extension SphericalForwardModel {
         terms: Int,
         verifyConvergence: Bool = false
     ) throws -> LeadField {
-        let shared = try leadField(
-            head: head.forwardModel,
-            electrodes: montage.forwardElectrodes(head: head),
-            dipoles: sources.map(\.forwardDipole),
-            reference: reference.forwardReference,
-            harmonicTerms: terms,
-            verifyConvergence: verifyConvergence
-        )
-        return LeadField(
-            channelNames: shared.electrodeNames,
-            sourceIDs: shared.dipoleIDs,
-            reference: reference,
-            freeOrientationMatrixMicrovoltsPerNanoampereMeter:
-                shared.freeMicrovoltsPerNanoampereMeter,
-            matrixMicrovoltsPerNanoampereMeter:
-                shared.orientedMicrovoltsPerNanoampereMeter
+        try SimulationForwardModel.sphere(head).leadField(
+            montage: montage, sources: sources, reference: reference,
+            terms: terms, verifyConvergence: verifyConvergence
         )
     }
 
@@ -410,33 +397,74 @@ extension EllipsoidalForwardModel {
         terms: Int,
         verifyConvergence: Bool = false
     ) throws -> LeadField {
-        let head = ellipsoid.forwardModel
-        // Place electrodes on the ellipsoid scalp: scale the unit montage
-        // directions by the per-axis semi-axes, centred on the head.
-        let semiAxes = head.scalpSemiAxesMeters
-        let electrodes = OrderedElectrodes(
-            names: montage.channelNames,
-            positionsMeters: montage.positions.map {
-                SIMD3<Double>(
-                    $0.x * semiAxes.x + head.sphere.centerMeters.x,
-                    $0.y * semiAxes.y + head.sphere.centerMeters.y,
-                    $0.z * semiAxes.z + head.sphere.centerMeters.z
-                )
-            }
+        try SimulationForwardModel.ellipsoid(ellipsoid).leadField(
+            montage: montage, sources: sources, reference: reference,
+            terms: terms, verifyConvergence: verifyConvergence
         )
-        let shared = try leadField(
-            ellipsoid: head,
-            electrodes: electrodes,
-            dipoles: sources.map { source in
-                ForwardDipole(
-                    id: source.id,
-                    positionMeters: source.positionMeters.forwardSIMD,
-                    orientationUnit: source.orientation.forwardSIMD
-                )
-            },
-            reference: reference.forwardReference,
-            harmonicTerms: terms,
-            verifyConvergence: verifyConvergence
+    }
+}
+
+// MARK: - Generation-side forward model (AF-1)
+
+/// The head model a simulation *generates* through. Every simulator lead field
+/// goes through here, and from here through EVA's common `ForwardOperator`
+/// contract, so the generators never name a solver. The one thing kept on this
+/// side is electrode placement: the scenario montage is a set of unit
+/// directions, and each analytic head puts them on its own scalp.
+nonisolated enum SimulationForwardModel: Sendable, Equatable {
+    case sphere(SphericalHeadModel)
+    case ellipsoid(SimulatedEllipsoidModel)
+
+    /// The shared operator for this head at the given series truncation.
+    func forwardOperator(terms: Int, verifyConvergence: Bool = false) -> any ForwardOperator {
+        switch self {
+        case .sphere(let head):
+            return SphericalForwardOperator(
+                head: head.forwardModel, harmonicTerms: terms, verifyConvergence: verifyConvergence
+            )
+        case .ellipsoid(let ellipsoid):
+            return EllipsoidalForwardOperator(
+                ellipsoid: ellipsoid.forwardModel, harmonicTerms: terms,
+                verifyConvergence: verifyConvergence
+            )
+        }
+    }
+
+    /// Physical electrode positions: the unit montage placed on this head's scalp.
+    func electrodes(for montage: Montage) -> OrderedElectrodes {
+        switch self {
+        case .sphere(let head):
+            return montage.forwardElectrodes(head: head)
+        case .ellipsoid(let ellipsoid):
+            // Scale the unit montage directions by the per-axis semi-axes,
+            // centred on the head.
+            let head = ellipsoid.forwardModel
+            let semiAxes = head.scalpSemiAxesMeters
+            let center = head.sphere.centerMeters
+            return OrderedElectrodes(
+                names: montage.channelNames,
+                positionsMeters: montage.positions.map {
+                    SIMD3<Double>(
+                        $0.x * semiAxes.x + center.x,
+                        $0.y * semiAxes.y + center.y,
+                        $0.z * semiAxes.z + center.z
+                    )
+                }
+            )
+        }
+    }
+
+    func leadField(
+        montage: Montage,
+        sources: [SimulatedSource],
+        reference: EEGReference,
+        terms: Int,
+        verifyConvergence: Bool = false
+    ) throws -> LeadField {
+        let shared = try forwardOperator(terms: terms, verifyConvergence: verifyConvergence).leadField(
+            electrodes: electrodes(for: montage),
+            dipoles: sources.map(\.forwardDipole),
+            reference: reference.forwardReference
         )
         return LeadField(
             channelNames: shared.electrodeNames,
@@ -448,4 +476,10 @@ extension EllipsoidalForwardModel {
                 shared.orientedMicrovoltsPerNanoampereMeter
         )
     }
+}
+
+extension SimulationConfig {
+    /// The generation-side head model. Scenarios can only select a sphere today;
+    /// choosing another operator in scenario JSON is AF-4/AF-5.
+    nonisolated var forwardModel: SimulationForwardModel { .sphere(sphericalHeadModel) }
 }

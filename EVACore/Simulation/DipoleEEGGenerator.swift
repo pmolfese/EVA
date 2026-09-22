@@ -174,8 +174,7 @@ nonisolated enum DipoleEEGGenerator {
             )
         }
 
-        let leadField = try SphericalForwardModel.leadField(
-            head: config.sphericalHeadModel,
+        let leadField = try config.forwardModel.leadField(
             montage: montage,
             sources: sources,
             reference: config.effectiveRecordingReference,
@@ -413,8 +412,7 @@ nonisolated enum DipoleEEGGenerator {
                 * (sources[0].positionMeters - center).norm
         endSource.orientation = sources[0].orientation.rotated(around: axis, radians: radians).normalized()
         endSource.scenarioRole = "motion endpoint"
-        let endField = try SphericalForwardModel.leadField(
-            head: config.sphericalHeadModel,
+        let endField = try config.forwardModel.leadField(
             montage: montage,
             sources: [endSource],
             reference: config.effectiveRecordingReference,

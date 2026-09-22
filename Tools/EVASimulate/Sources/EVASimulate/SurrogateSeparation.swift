@@ -264,8 +264,8 @@ nonisolated enum SurrogateSeparation {
                 scenarioRole: "brain surrogate basis"
             )
         }
-        let field = try SphericalForwardModel.leadField(
-            head: head, montage: montage, sources: sources,
+        let field = try SimulationForwardModel.sphere(head).leadField(
+            montage: montage, sources: sources,
             reference: reference, terms: terms
         )
         return SurrogateBrainModel(

@@ -1975,8 +1975,8 @@ nonisolated enum SingleDipoleFit {
                 rmsMomentNanoampereMeters: 1
             )
         }
-        guard let leadField = try? SphericalForwardModel.leadField(
-            head: head, montage: montage, sources: sims,
+        guard let leadField = try? SimulationForwardModel.sphere(head).leadField(
+            montage: montage, sources: sims,
             reference: reference, terms: harmonicTerms
         ) else { return nil }
         return leadField.freeOrientationMatrixMicrovoltsPerNanoampereMeter

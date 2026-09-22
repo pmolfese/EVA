@@ -13,14 +13,14 @@
 import Foundation
 
 /// One conductive shell in a concentric spherical head model.
-nonisolated struct ForwardHeadShell: Codable, Sendable, Equatable {
+nonisolated struct ForwardHeadShell: Codable, Sendable, Hashable {
     var name: String
     var radiusMeters: Double
     var conductivitySiemensPerMeter: Double
 }
 
 /// App-neutral physical geometry for a concentric spherical forward model.
-nonisolated struct ForwardHeadModel: Codable, Sendable, Equatable {
+nonisolated struct ForwardHeadModel: Codable, Sendable, Hashable {
     var name: String
     var centerMeters: SIMD3<Double>
     /// Innermost to outermost. Dipoles must lie inside the first shell.
@@ -165,13 +165,13 @@ nonisolated struct ForwardHeadModel: Codable, Sendable, Equatable {
 }
 
 /// Physical electrode locations in authoritative row order.
-nonisolated struct OrderedElectrodes: Codable, Sendable, Equatable {
+nonisolated struct OrderedElectrodes: Codable, Sendable, Hashable {
     var names: [String]
     var positionsMeters: [SIMD3<Double>]
 }
 
 /// A fixed-orientation current dipole. Moment time series are applied later.
-nonisolated struct ForwardDipole: Codable, Sendable, Equatable, Identifiable {
+nonisolated struct ForwardDipole: Codable, Sendable, Hashable, Identifiable {
     var id: String
     var positionMeters: SIMD3<Double>
     var orientationUnit: SIMD3<Double>

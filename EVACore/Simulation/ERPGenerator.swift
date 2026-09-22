@@ -89,8 +89,8 @@ nonisolated enum ERPGenerator {
             )
         }
         let source = makeSource(config: config)
-        let field = try SphericalForwardModel.leadField(
-            head: config.sphericalHeadModel, montage: montage, sources: [source],
+        let field = try config.forwardModel.leadField(
+            montage: montage, sources: [source],
             reference: config.effectiveRecordingReference, terms: config.leadFieldTerms
         )
         var topography = field.matrixMicrovoltsPerNanoampereMeter.map { $0[0] }
@@ -337,8 +337,8 @@ nonisolated enum ERPGenerator {
             let source = try makePlacedSource(
                 component: component, index: componentIndex, config: config
             )
-            let field = try SphericalForwardModel.leadField(
-                head: config.sphericalHeadModel, montage: montage, sources: [source],
+            let field = try config.forwardModel.leadField(
+                montage: montage, sources: [source],
                 reference: config.effectiveRecordingReference, terms: config.leadFieldTerms,
                 // Placement is arbitrary now, so the run-level convergence check
                 // no longer covers this source (roadmap 4.5a).
