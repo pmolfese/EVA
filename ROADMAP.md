@@ -1570,17 +1570,18 @@ now, and scenario JSON does not change (selecting an operator is AF-4/AF-5).
   simulator overloads remain as thin wrappers over `SimulationForwardModel`.
 - [x] `ConcentricBEMForwardOperator` (EVA's generation-side BEM) and
   `PrecomputedLeadFieldOperator`, the fixed-catalog target that R3.7's `-fwd.fif` and
-  plain-matrix readers will build. It matches channels by exact name in any order,
-  projects any orientation from free columns, converts infinity → average, and
-  refuses average → infinity.
+  plain-matrix readers will build. It matches channels by exact name and catalog
+  position in any order, projects any orientation from free columns, converts
+  infinity → average, and refuses average → infinity.
 - [ ] An imported MNE BEM *solution* adapter. This is AF-2 / R3.3.
-- [x] `ForwardLeadFieldCache`, keyed by (operator, electrodes, dipoles, reference).
+- [x] `ForwardLeadFieldCache`, keyed by a lightweight operator identity plus
+  (electrodes, dipoles, reference), without hashing imported dense gain matrices.
   *Not yet wired into any consumer*, because simulator runs build only a few fields.
   It becomes worth using with dipole-fit grids and imported operators. Keeping
   imported matrices mapped or in single precision is left for R3.7's reader.
 - [x] Unsupported operations are explicit: a catalog operator throws for an unknown
-  source, a source moved more than 1 µm, a changed montage, or an unrecoverable
-  reference, and never interpolates.
+  source, a source moved more than 1 µm, a changed or moved montage, malformed
+  numeric input, or an unrecoverable reference, and never interpolates.
 
 **Exit:** sphere and ellipsoid run through the common contract with unchanged outputs;
 each imported model reports whether it supports continuous placement or only its

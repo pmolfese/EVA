@@ -116,7 +116,7 @@ struct ForwardOperatorTests {
         return try PrecomputedLeadFieldOperator(
             provenance: ForwardModelProvenance(kind: .importedLeadField, name: "test export"),
             frame: .head,
-            electrodeNames: electrodes.names,
+            electrodes: electrodes,
             sources: dipoles,
             freeMicrovoltsPerNanoampereMeter: exported.freeMicrovoltsPerNanoampereMeter,
             nativeReference: native
@@ -174,6 +174,19 @@ struct ForwardOperatorTests {
         #expect(throws: ForwardOperatorError.electrodeSetMismatch(missing: ["Cz"], unexpected: ["back"])) {
             _ = try catalog().leadField(electrodes: partial, dipoles: dipoles, reference: .infinity)
         }
+
+        var movedPositions = electrodes.positionsMeters
+        movedPositions[0].x += 0.002
+        let moved = OrderedElectrodes(names: electrodes.names, positionsMeters: movedPositions)
+        #expect {
+            _ = try catalog().leadField(
+                electrodes: moved, dipoles: dipoles, reference: .infinity
+            )
+        } throws: { error in
+            guard case .electrodePositionMismatch(let name, let distance) =
+                    error as? ForwardOperatorError else { return false }
+            return name == "front" && abs(distance - 0.002) < 1e-12
+        }
     }
 
     @Test func catalogCannotUndoAnAverageReference() throws {
@@ -186,8 +199,69 @@ struct ForwardOperatorTests {
         #expect(throws: ForwardOperatorError.self) {
             _ = try PrecomputedLeadFieldOperator(
                 provenance: ForwardModelProvenance(kind: .importedLeadField, name: "bad"),
-                frame: .head, electrodeNames: ["a", "b"], sources: dipoles,
+                frame: .head,
+                electrodes: OrderedElectrodes(
+                    names: ["a", "b"], positionsMeters: [.zero, SIMD3(0, 0, 0.085)]
+                ),
+                sources: dipoles,
                 freeMicrovoltsPerNanoampereMeter: [[0, 0, 0]], nativeReference: .infinity
+            )
+        }
+
+        var nonFiniteGain = [[Double]](
+            repeating: [Double](repeating: 0, count: 3 * dipoles.count),
+            count: electrodes.names.count
+        )
+        nonFiniteGain[0][0] = .nan
+        #expect(throws: ForwardOperatorError.self) {
+            _ = try PrecomputedLeadFieldOperator(
+                provenance: ForwardModelProvenance(kind: .importedLeadField, name: "bad"),
+                frame: .head, electrodes: electrodes, sources: dipoles,
+                freeMicrovoltsPerNanoampereMeter: nonFiniteGain,
+                nativeReference: .infinity
+            )
+        }
+
+        #expect(throws: ForwardOperatorError.self) {
+            _ = try PrecomputedLeadFieldOperator(
+                provenance: ForwardModelProvenance(kind: .importedLeadField, name: "bad"),
+                frame: .head, electrodes: electrodes, sources: dipoles,
+                freeMicrovoltsPerNanoampereMeter: [[Double]](
+                    repeating: [Double](repeating: 0, count: 3 * dipoles.count),
+                    count: electrodes.names.count
+                ),
+                nativeReference: .infinity,
+                positionToleranceMeters: .nan
+            )
+        }
+    }
+
+    @Test func catalogRejectsMalformedRequests() throws {
+        let op = try catalog()
+
+        let mismatched = OrderedElectrodes(
+            names: electrodes.names,
+            positionsMeters: Array(electrodes.positionsMeters.dropLast())
+        )
+        #expect(throws: ForwardOperatorError.self) {
+            _ = try op.leadField(
+                electrodes: mismatched, dipoles: dipoles, reference: .infinity
+            )
+        }
+
+        var nonUnit = dipoles[0]
+        nonUnit.orientationUnit = SIMD3(0, 0, 2)
+        #expect(throws: ForwardOperatorError.self) {
+            _ = try op.leadField(
+                electrodes: electrodes, dipoles: [nonUnit], reference: .infinity
+            )
+        }
+
+        var nonFinite = dipoles[0]
+        nonFinite.orientationUnit = SIMD3(.nan, 0, 1)
+        #expect(throws: ForwardOperatorError.self) {
+            _ = try op.leadField(
+                electrodes: electrodes, dipoles: [nonFinite], reference: .infinity
             )
         }
     }
@@ -196,16 +270,28 @@ struct ForwardOperatorTests {
 
     @Test func cacheReturnsTheSameFieldAndKeysOnEveryInput() throws {
         let cache = ForwardLeadFieldCache()
-        let op = SphericalForwardOperator(head: .classicThreeShell, harmonicTerms: 40)
+        let op: any ForwardOperator = SphericalForwardOperator(
+            head: .classicThreeShell, harmonicTerms: 40
+        )
         let first = try cache.leadField(op, electrodes: electrodes, dipoles: dipoles, reference: .average)
         let second = try cache.leadField(op, electrodes: electrodes, dipoles: dipoles, reference: .average)
         #expect(first == second)
         #expect(cache.hits == 1 && cache.misses == 1)
 
         _ = try cache.leadField(op, electrodes: electrodes, dipoles: dipoles, reference: .infinity)
-        var deeper = op
-        deeper.harmonicTerms = 41
+        let deeper: any ForwardOperator = SphericalForwardOperator(
+            head: .classicThreeShell, harmonicTerms: 41
+        )
         _ = try cache.leadField(deeper, electrodes: electrodes, dipoles: dipoles, reference: .average)
         #expect(cache.hits == 1 && cache.misses == 3)
+
+        let imported: any ForwardOperator = try catalog()
+        _ = try cache.leadField(
+            imported, electrodes: electrodes, dipoles: dipoles, reference: .average
+        )
+        _ = try cache.leadField(
+            imported, electrodes: electrodes, dipoles: dipoles, reference: .average
+        )
+        #expect(cache.hits == 2 && cache.misses == 4)
     }
 }
