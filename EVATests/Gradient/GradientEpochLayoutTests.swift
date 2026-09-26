@@ -159,4 +159,34 @@ struct GradientEpochLayoutTests {
         #expect(layout.samplesAfter == 400)
         #expect(layout.upsampledSampleCount == 1600)
     }
+
+    // MARK: - Closing sample
+
+    @Test func aRecordingEndingOnePeriodAfterItsLastTriggerLacksOnlyTheClosingSample() throws {
+        let exact = try build(triggers: [0, 100, 200], sampleCount: 300)
+        #expect(exact.lacksOnlyClosingSample)
+        #expect(exact.windowStart(of: 2) == nil)
+
+        let extended = exact.extended(bySamples: 1, upsampleFactor: 1)
+        #expect(extended.windowStart(of: 2) == 200)
+        #expect(extended.triggers == exact.triggers)
+        #expect(extended.period == exact.period)
+        #expect(extended.length == exact.length)
+        #expect(!extended.lacksOnlyClosingSample)
+    }
+
+    @Test func theClosingSampleIsFoundOnTheUpsampledAxisToo() throws {
+        let exact = try build(triggers: [0, 100, 200], sampleCount: 300, upsample: 4)
+        #expect(exact.lacksOnlyClosingSample)
+        let extended = exact.extended(bySamples: 1, upsampleFactor: 4)
+        #expect(extended.upsampledSampleCount == 301 * 4)
+        #expect(extended.windowStart(of: 2) == 800)
+    }
+
+    @Test func aRecordingWithATailOrStoppingMidEpochIsNotShortOnlyOfTheClosingSample() throws {
+        let withTail = try build(triggers: [0, 100, 200], sampleCount: 350)
+        #expect(!withTail.lacksOnlyClosingSample)
+        let midEpoch = try build(triggers: [0, 100, 200], sampleCount: 290)
+        #expect(!midEpoch.lacksOnlyClosingSample)
+    }
 }

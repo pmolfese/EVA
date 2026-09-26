@@ -50,13 +50,27 @@ struct GradientRunGradeMeasurementTests {
     private struct Perturbation: Sendable {
         var triggerJitterSamples = 0
         var droppedTriggerFraction = 0.0
+        /// Zero-pad the synthetic slice template before the simulator's
+        /// anti-alias filter. That filter works on the template's own window, so
+        /// unpadded it leaves the waveform starting and ending off zero — a step
+        /// at every slice that aliases into the recording. Padded, the recorded
+        /// artifact is band-limited and a sub-sample shift can represent it.
+        var zeroPaddedTemplate = false
     }
 
     private func makeRecording(_ config: SimulationConfig, _ perturbation: Perturbation) throws -> Recording {
         let montage = Montage.standard(count: config.channelCount)
         let eeg = try DipoleEEGGenerator.generate(config: config, montage: montage)
         var noisy = eeg.channels
-        let injection = GradientArtifactModel.inject(into: &noisy, config: config, montage: montage, template: nil)
+        var template: HighRateTemplate?
+        if perturbation.zeroPaddedTemplate {
+            let synthetic = GradientArtifactModel.syntheticTemplate(config: config)
+            let padSeconds = 0.03
+            let zeros = [Double](repeating: 0, count: Int(padSeconds * synthetic.rate))
+            template = HighRateTemplate(samples: zeros + synthetic.samples + zeros, rate: synthetic.rate,
+                                        leadInSeconds: synthetic.leadInSeconds + padSeconds)
+        }
+        let injection = GradientArtifactModel.inject(into: &noisy, config: config, montage: montage, template: template)
         var triggers = injection.quantizedVolumeOnsetsSeconds.map { Int(($0 * config.samplingRate).rounded()) }
 
         // Deterministic marker damage: an LCG seeded from the config seed.
@@ -248,6 +262,8 @@ struct GradientRunGradeMeasurementTests {
         conditions.append(("FASTR radius", "15 clk0", { $0.clockOffsetMicrosecondsPerSecond = 0 }, Perturbation(), [Self.fastr("FASTR r15", radius: 15)]))
         conditions.append(("FASTR alignment", "off", { $0.clockOffsetMicrosecondsPerSecond = 1500 }, Perturbation(),
                            [Self.fastr("FASTR no-align", align: false)]))
+        var padded = Perturbation(); padded.zeroPaddedTemplate = true
+        conditions.append(("sim template", "padded", { _ in }, padded, engines))
 
         // Every (condition, seed) is independent, so the grid runs across
         // cores; a progress line per finished job lands in the temp dir so a

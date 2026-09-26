@@ -66,6 +66,38 @@ nonisolated struct GradientEpochLayout: Sendable {
         return start
     }
 
+    /// Whether some epoch's unshifted window runs past the recording by exactly
+    /// one sample.
+    ///
+    /// A window includes the trigger at each end, so its closing sample is the
+    /// next epoch's trigger. After the final volume there is no next epoch, and a
+    /// recording that stops one period after the last trigger — a scan recorded
+    /// with no tail — never contains that sample.
+    var lacksOnlyClosingSample: Bool {
+        (0..<count).contains { index in
+            let start = triggers[index] - samplesBefore
+            return start >= 0 && start + length == upsampledSampleCount + 1
+        }
+    }
+
+    /// The same epoch grid over a recording `samples` longer, at the original
+    /// sampling rate. Only which windows fit changes; triggers, period, and
+    /// window geometry do not.
+    func extended(bySamples samples: Int, upsampleFactor: Int) -> GradientEpochLayout {
+        GradientEpochLayout(
+            triggers: triggers,
+            volumeIndex: volumeIndex,
+            slicePosition: slicePosition,
+            period: period,
+            samplesBefore: samplesBefore,
+            samplesAfter: samplesAfter,
+            slicesPerVolume: slicesPerVolume,
+            volumeCount: volumeCount,
+            upsampledSampleCount: upsampledSampleCount + samples * max(1, upsampleFactor),
+            epochByVolumeAndSlice: epochByVolumeAndSlice
+        )
+    }
+
     /// Builds the epoch grid.
     ///
     /// - Volume triggers are sorted, de-duplicated, and clipped to the recording.

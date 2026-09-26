@@ -43,32 +43,42 @@ median). One axis at a time from the paper's rig (152 µs/s clock offset, 10 %
 slow amplitude modulation): clock offset 0–5000 µs/s, modulation 0–0.6,
 anti-alias filter off, 250/1000 Hz, marker jitter 1–50 samples, 5–20 % of
 markers dropped, FASTR donors 1–15/side, FASTR alignment off, FASTR with a
-15-sample search radius, and clock-synced runs at 500 Hz and 1 kHz.
-126 runs, 2520 channel pairs.
+15-sample search radius, clock-synced runs at 500 Hz and 1 kHz, and the
+simulator's slice template zero-padded before its anti-alias filter (see
+Engine findings). 132 runs, 2640 channel pairs.
+
+The table was re-run after the FASTR alignment fix (ROADMAP MRI-1) on
+2026-09-26; the pre-fix table is in git history. Only FASTR rows changed.
 
 ### Findings
 
 - **The simulator's gradient problem is hard.** At 500 Hz without clock sync,
   every engine leaves a residual far above the brain (truth p90 in the hundreds
-  to thousands). Only clock-synced local-median correction reached the brain's
-  own scale (truth 0.17–0.23). This matches the literature's advice — sync the
-  clocks and sample fast — and it means the grade will read Poor for most
-  unsynchronised low-rate recordings. That is the honest reading of this
-  simulator; whether real scanners are as harsh is the open question (a measured
-  template via `--gradient-template` would settle it).
+  to thousands). Clock-synced runs reach the brain's own scale with FASTR (truth
+  0.13 at 500 Hz, 0.21 at 1 kHz) and local-median (0.17, 0.23). This matches the
+  literature's advice — sync the clocks and sample fast — and it means the grade
+  will read Poor for most unsynchronised low-rate recordings on this simulator.
+  Part of that harshness is the simulator's own: its slice template is not
+  band-limited (Engine findings), and with it zero-padded FASTR reaches truth
+  60 at 500 Hz without clock sync. Whether real scanners are as harsh is still
+  the open question (a measured template via `--gradient-template` would settle
+  it, once the template edge problem is fixed).
 - **The locked-residual metric is a classifier, not an estimator.** It
   saturates near 1 once residue dominates while truth spans 1–10⁵, so rank
-  correlation is poor (Spearman −0.42 run-level). As a separator it is clean:
+  correlation is poor (Spearman −0.10 run-level; −0.42 before the FASTR fix).
+  As a separator it is clean:
 
-  | metric ≥ τ | flags truth-poor (≥ 1) | flags the 4 non-poor runs |
+  | metric ≥ τ | flags truth-poor (≥ 1) | flags the 8 non-poor runs |
   |---:|---:|---:|
-  | 0.05 | 122/122 | 3/4 |
-  | 0.08 | 121/122 | 0/4 |
-  | 0.10 | 121/122 | 0/4 |
-  | 0.30 | 116/122 | 0/4 |
-  | 0.50 | 104/122 | 0/4 |
+  | 0.05 | 124/124 | 7/8 |
+  | 0.08 | 123/124 | 0/8 |
+  | 0.10 | 123/124 | 0/8 |
+  | 0.30 | 118/124 | 0/8 |
+  | 0.50 | 102/124 | 0/8 |
 
-  **Bands: Good < 0.10, Watch 0.10–0.30, Poor ≥ 0.30.**
+  **Bands: Good < 0.10, Watch 0.10–0.30, Poor ≥ 0.30** — unchanged by the
+  re-run. The non-poor runs are now the four clock-synced FASTR runs as well as
+  the four local-median ones; the highest of them reads 0.078.
 - **Its blind spot is residue not locked to the given markers** — grossly
   jittered markers (50 samples: Allen 0.26, local 0.10) and aliased artifact
   (anti-alias off: FASTR 0.18). **Removed variance covers exactly those cases:**
@@ -77,7 +87,7 @@ markers dropped, FASTR donors 1–15/side, FASTR alignment off, FASTR with a
   2.1–4.3 (subtracting a template where there was no artifact).
   **Bands: Poor < 0.90 or ≥ 1.05, else Good** — no Watch band, because nothing
   in the data distinguishes one.
-- **The in-band (≤ 40 Hz) metric separates worse** (at 0.10: 113/122 poor, 2/4
+- **The in-band (≤ 40 Hz) metric separates worse** (at 0.10: 110/124 poor, 4/8
   non-poor flagged) — Allen IAR's ANC stage leaves residue whose low-frequency
   part is not phase-locked (modulation 0.3/0.6 read 0.000–0.001 in-band against a
   truth of 10³). Reported for context, not graded.
@@ -94,11 +104,49 @@ markers dropped, FASTR donors 1–15/side, FASTR alignment off, FASTR with a
 
 ### Engine findings (filed under ROADMAP MRI-1)
 
-- FASTR's alignment search radius (`period / 20`) exceeds the slice period on
-  volume epochs, so it slips by a whole slice (±37 samples at 500 Hz) and
-  leaves ~35 samples per epoch edge uncorrected. Bounding the radius to 15
-  samples did not by itself fix FASTR here (truth still ~10³), so the slip is
-  not the only cost.
+- **FASTR alignment — fixed 2026-09-26.** Three separate things left residue,
+  not one:
+  1. *The slip.* The default search radius (`period / 20`, capped at 64)
+     exceeded the slice period on volume epochs, so epochs locked onto the
+     neighbouring slice (±37 samples at 500 Hz) and ~35 samples per epoch edge
+     were left uncorrected. The default is now capped below half the lag at
+     which the reference epoch first correlates ≥ 0.5 with itself again — the
+     slice period on volume epochs, giving 18 at 500 Hz. Slice-level epochs and
+     artifacts that do not repeat keep the period bound.
+  2. *A final epoch one sample short.* A window includes the next epoch's
+     trigger, so a recording that stops exactly one TR after its last trigger
+     (every clock-synced simulation) lacks the final window's closing sample.
+     The aligner then pushed that epoch 2–3 samples off its artifact to make it
+     fit. That single epoch was the whole of FASTR's synced residue (truth 93 →
+     0.13 at 500 Hz, 230 → 0.21 at 1 kHz). The corrector now repeats the last
+     sample in exactly that case and crops it from the output.
+  3. *A biased sub-sample estimate.* A parabola through Pearson correlations at
+     whole-sample lags missed the true phase by 0.09 samples (SD) on this sharp
+     artifact. The offset is now the peak of the cross-correlation interpolated
+     with the corrector's own fractional-delay kernel, and the second-pass
+     reference is built from sub-sample-aligned epochs: 0.018 samples on the
+     simulator's template, 0.004 on a band-limited one.
+
+  Bounding the radius alone (the old `FASTR r15` row) did not help because (2)
+  and (3) were still there. After the fix the drifting-clock rows barely move at
+  500 Hz (baseline 1254 → 1322) — that is the simulator's floor, next item: with
+  the *true* phases supplied, FASTR on the simulator's template still reads
+  ~1300. At 1 kHz it halves (243 → 128). One row moved the wrong way and is
+  unexplained on two seeds: 2 donors/side, 1398 → 1825.
+- **The simulator's slice template is not band-limited** (EVACore
+  `GradientArtifactModel.antiAliasedTemplate`). The FFT low-pass is applied to
+  the template's own window, so the filtered waveform starts at +0.28 and ends
+  at −0.34 of peak-to-peak — against `HighRateTemplate`'s own rule that a
+  template start and end at zero. Those steps leave 1.5 % of its energy above
+  the output Nyquist, which aliases: shifting one simulated volume onto another
+  by its exact sub-sample phase leaves ~5 % of the artifact's energy even with
+  a 64-lobe sinc. Zero-padding the template by 30 ms before filtering (the `sim
+  template padded` row) brings FASTR to truth 60 at 500 Hz; Allen IAR and
+  local-median stay in the thousands, since neither shifts on a sub-sample grid.
+  A `--gradient-template` goes through the same filter.
+- **FASTR's 8-lobe fractional delay is the next limit** on a band-limited
+  artifact: 24 lobes took the padded-template case from ~59 to ~23 in a CPU-only
+  experiment. The Metal kernels hard-code 16 taps, so this needs both backends.
 - The local-template engine leaves the last sample of each TR epoch uncorrected
   at 1 kHz.
 - Allen IAR over-subtracts with missing markers and underperforms local-median

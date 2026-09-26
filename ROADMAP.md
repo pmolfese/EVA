@@ -286,8 +286,10 @@ not navigable, session-only, right-click Dismiss, pruned on next commit).
     ones. Removed variance Poor < 0.90 or ≥ 1.05, covering the residual metric's
     blind spot (misplaced markers, aliased artifact). Coverage ≥ 0.98 / < 0.90 is
     a structural rule. Finding: at 500 Hz without clock sync every engine leaves
-    residue far above the brain, so such recordings will read Poor. Three engine
-    defects filed under MRI-1.
+    residue far above the brain, so such recordings will read Poor — partly the
+    simulator's template, which is not band-limited (MRI-1). Three engine
+    defects filed under MRI-1; the FASTR alignment one is fixed (2026-09-26),
+    bringing clock-synced FASTR to the brain's scale. Bands unchanged on re-run.
   - **ICA** (`ICARunGrade`): removing a component ICLabel calls Brain (p ≥ 0.5)
     is Poor, ≥ 0.25 Watch; κ = samples/n² below 20 is Watch. Both are
     conventions — the κ campaign was a **null result** (blink isolation equally
@@ -858,16 +860,36 @@ correction is untrustworthy.
 - [ ] Investigate FASTR's low non-artifact correlation (~0.5–0.7 versus AAS
   >0.85), including alpha-scaling and interpolation/decimation effects.
 - [ ] Add `aff12` affine-motion decomposition to the motion panel.
-- [ ] **FASTR alignment slips by a whole slice on volume epochs** (found by the
-  gradient run-grade campaign, 2026-09-26). `GradientEpochAligner.defaultSearchRadius`
-  is `period / 20` — 75 samples for a 3 s TR at 500 Hz, twice the 36.6-sample
-  slice period — so with volume-level epochs (the view model's default
-  `slicesPerVolume = 1`) the correlation search locks onto the neighbouring
-  slice, whose non-integer offset happens to match the sub-sample phase better.
-  Diagnostics show shifts of ±37 samples, and ~35 samples at each epoch edge are
-  left uncorrected (output == input). Bound the radius below half the slice
-  period when slices are known, or search sub-sample phase without leaving the
-  slice. Numbers: `docs/provenance/run-grade-calibration.md` § Gradient.
+- [x] **FASTR alignment slips by a whole slice on volume epochs — FIXED
+  2026-09-26.** The default search radius (`period / 20`) reached the
+  neighbouring slice on volume epochs; it is now capped below half the lag at
+  which the reference epoch first repeats (the slice period; 18 samples at
+  500 Hz), in `GradientEpochAligner.defaultSearchRadius(referenceSignal:layout:)`.
+  Two other defects were hiding behind it: a final epoch short only of its
+  closing sample (a recording ending one TR after its last trigger) was pushed
+  off its artifact by the aligner — now padded by one repeated sample and
+  cropped — and the parabolic sub-sample estimate was biased (0.09 → 0.018
+  samples SD, now read from the sinc-interpolated cross-correlation). Clock-synced
+  FASTR truth: 93 → 0.13 (500 Hz), 230 → 0.21 (1 kHz), level with local-median.
+  Unsynced 500 Hz is unchanged (~1300) because that is the simulator's floor,
+  next item. Numbers: `docs/provenance/run-grade-calibration.md` § Gradient →
+  Engine findings.
+- [ ] **Simulator gradient template is not band-limited** (EVACore
+  `GradientArtifactModel.antiAliasedTemplate`, found 2026-09-26). The FFT
+  low-pass runs on the template's own window, so the result starts at +0.28 and
+  ends at −0.34 of peak-to-peak, breaking `HighRateTemplate`'s start-and-end-at-zero
+  rule; 1.5 % of its energy sits above the output Nyquist and aliases. Even with
+  exact sub-sample phases FASTR cannot get below truth ~1300 at 500 Hz on it;
+  zero-padded by 30 ms before filtering, FASTR reaches 60. Fix by padding (or
+  tapering) before the filter. Moves every simulated gradient recording, so
+  re-baseline `Tools/EVASimulate/determinism-baseline.txt` and re-run the
+  gradient calibration and method comparisons afterwards. `--gradient-template`
+  inputs go through the same filter.
+- [ ] **FASTR fractional delay: 8 Lanczos lobes limit a band-limited artifact.**
+  24 lobes took the padded-template case from truth ~59 to ~23 (CPU-only
+  experiment). The Metal kernels hard-code 16 taps (`delayTaps + epoch * 16`,
+  `tap - 7`), so widening it needs both backends and the parity suite. Related to
+  the low non-artifact correlation item above.
 - [ ] **Local-template engine leaves the last sample of every TR epoch
   uncorrected at 1 kHz** (synced clocks; that phase carries ~190× the typical
   error). Likely an epoch-length rounding off-by-one in `correctGradient`.
@@ -2093,7 +2115,9 @@ depends on artifact *shape*. A small library of real templates — gradient
 artifacts from different scanners and sequences, BCG at different field strengths
 — with provenance for each, would let a result be stated as "on a measured 3T
 GE-EPI template" rather than "on our modelled waveform." `--gradient-template`
-already accepts one; what is missing is the library and a BCG equivalent.
+already accepts one; what is missing is the library and a BCG equivalent. A
+loaded template goes through the same anti-alias filter as the synthetic one,
+which currently leaves it off zero at its edges (MRI-1).
 
 **Effort:** small in code, larger in data collection and permission.
 
