@@ -379,15 +379,21 @@ final class ProcessingCore {
                 // drawn on. See `ArtifactReplayPayload`.
                 let artifacts = artifactPayload.artifacts(rederivedAgainst: current)
                 template.definedArtifacts = artifacts
+                let excludedFromCleaning = store.channels.bad.union(store.channels.interpolated.keys)
                 let outcome = ArtifactCleaner.cleanedSignal(
                     from: current,
                     artifacts: artifacts,
-                    excluding: store.channels.bad.union(store.channels.interpolated.keys),
+                    excluding: excludedFromCleaning,
                     availableBandwidthHz: filter.output == nil ? nil : filter.lowPassCutoff
                 )
                 ArtifactCleaningCore.commit(
                     cleanedSignal: outcome.signal,
                     summaries: outcome.summaries,
+                    metrics: ArtifactCleanRunMetrics.measure(
+                        original: current.data, cleaned: outcome.signal.data,
+                        artifacts: artifacts, summaries: outcome.summaries,
+                        excludedChannels: excludedFromCleaning
+                    ),
                     statusMessage: "Cleaned \(outcome.summaries.count) artifact(s).",
                     artifactVM: artifactVM,
                     template: template,

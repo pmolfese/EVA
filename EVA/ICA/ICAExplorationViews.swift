@@ -775,6 +775,7 @@ extension WaveformView {
             // that only this caller has.
             ICAComponentRemoval.commit(
                 cleaned: cleaned,
+                metrics: ICARunMetrics(decomposition: decomposition, maxIterations: ica.maxIterations),
                 ica: ica,
                 artifactVM: artifactVM,
                 template: template,

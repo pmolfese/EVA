@@ -216,13 +216,36 @@ final class RecordingHistoryModel {
         // node, so the rail pill survives snapshot eviction and save/reload.
         // Computed once, when the report is first in hand — the same shape as
         // `recordComputeCost`.
-        if let report = snapshot.bcgSurrogateReport, history.node(id)?.quality == nil {
-            history.setQuality(PCASRunGrade.grade(from: report), for: id)
+        if let node = history.node(id), node.quality == nil,
+           let quality = Self.quality(for: node.step, in: snapshot) {
+            history.setQuality(quality, for: id)
         }
         evictSnapshotsBeyondBudget()
     }
 
     func snapshot(for id: EVAHistoryNodeID) -> PipelineSnapshot? { snapshots[id] }
+
+    /// The run grade for the step that produced a node, from the stage report
+    /// its snapshot carries.
+    ///
+    /// Keyed on the node's own operation, not on which reports happen to be
+    /// present: a snapshot carries every upstream stage's report, so a filter
+    /// applied after PCA-S still holds the PCA-S report and must not inherit
+    /// its grade.
+    static func quality(for step: EVAProcessingStep?, in snapshot: PipelineSnapshot) -> StepQuality? {
+        switch step?.operation {
+        case .bcgCorrection:
+            return snapshot.bcgSurrogateReport.map(PCASRunGrade.grade(from:))
+        case .mriGradientCorrection:
+            return snapshot.gradientRunMetrics.map(GradientRunGrade.grade(from:))
+        case .icaClean:
+            return snapshot.icaRunMetrics.map(ICARunGrade.grade(from:))
+        case .artifactClean:
+            return snapshot.artifactRunMetrics.map(ArtifactCleanRunGrade.grade(from:))
+        default:
+            return nil
+        }
+    }
 
     private func discardSnapshots(for removed: Set<EVAHistoryNodeID>) {
         guard !removed.isEmpty else { return }

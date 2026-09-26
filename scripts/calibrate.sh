@@ -10,6 +10,9 @@
 #   scripts/calibrate.sh                 # all calibrations
 #   scripts/calibrate.sh wavelet         # just the wavelet oversmoothing sweep
 #   scripts/calibrate.sh wica            # just W-ICA preservation/removal
+#   scripts/calibrate.sh gradient        # gradient run-grade residual vs truth
+#   scripts/calibrate.sh ica             # ICA data sufficiency vs decomposition quality
+#   scripts/calibrate.sh artifact        # artifact-clean touched fraction vs harm
 #
 set -euo pipefail
 
@@ -56,6 +59,22 @@ fi
 if [ "$WHICH" = "all" ] || [ "$WHICH" = "wica" ]; then
     run_test "WICAPreservationMeasurementTests"
     copy_out "eva-wica-preservation.txt" "wavelet-calibration"
+fi
+
+if [ "$WHICH" = "all" ] || [ "$WHICH" = "gradient" ]; then
+    run_test "GradientRunGradeMeasurementTests"
+    copy_out "eva-gradient-run-grade.txt" "gradient-calibration"
+    copy_out "eva-gradient-run-grade.csv" "gradient-calibration"
+fi
+
+if [ "$WHICH" = "all" ] || [ "$WHICH" = "ica" ]; then
+    run_test "ICARunGradeMeasurementTests"
+    copy_out "eva-ica-run-grade.txt" "ica-calibration"
+fi
+
+if [ "$WHICH" = "all" ] || [ "$WHICH" = "artifact" ]; then
+    run_test "ArtifactCleanRunGradeMeasurementTests"
+    copy_out "eva-artifact-clean-run-grade.txt" "artifact-clean-calibration"
 fi
 
 echo "==> Done"

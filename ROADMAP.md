@@ -31,7 +31,7 @@ Across sections, the ordered spine is unchanged:
 
 | Order | Milestone | Section | Status |
 |---:|---|---|---|
-| 1 | **SI-4 — Adversarial evaluation** | [§2 Processing & Cleaning](#2-processing--cleaning) | MEASURED FOR PCA-S; run-grade generalization NEXT |
+| 1 | **SI-4 — Adversarial evaluation** | [§2 Processing & Cleaning](#2-processing--cleaning) | MEASURED; run grades shipped for PCA-S, gradient, ICA, artifact clean; MAAC deferred |
 | 2 | **PB-1 — Batch/replay completion** | [§11 Batch, Replay & Provenance](#11-batch-replay--provenance) | NOT STARTED |
 | 3 | **MRI-1 — FASTR reliability and motion semantics** | [§4 MRI / fMRI](#4-mri--fmri-artifact-correction) | NOT STARTED |
 | 4 | **SI-5 — Ocular MSEC/PCA-S** | [§2 Processing & Cleaning](#2-processing--cleaning) | NOT STARTED |
@@ -42,9 +42,12 @@ Across sections, the ordered spine is unchanged:
 **SI-4 decided whether PCA-S is production-ready — and it now is (2026-09-12/13).**
 The operating envelope was measured (campaign in `docs/provenance/`), the
 component-reliability gate (0.9) was measured and kept, and the guardrails are
-surfaced through the Good/Watch/Poor run grade. The live thread is generalizing
-that measured-band treatment to the other cleaning methods (§ Processing
-run-grade).
+surfaced through the Good/Watch/Poor run grade. That measured-band treatment
+now also grades gradient correction, ICA removal, and drawn-artifact cleaning
+(2026-09-26, `docs/provenance/run-grade-calibration.md`); MAAC grades wait on
+the MAAC adoption decision. What remains under SI-4 is follow-up measurement
+(§ Processing run-grade), so the owner can decide whether to close it and move
+the spine to PB-1.
 
 **Scheduled independently of that spine**, because each is self-contained and
 blocks nothing: the Rhythmicity Explorer's WTPL and burst milestones
@@ -208,8 +211,9 @@ harness/product default mismatch — the `evaluate-surrogate` family now default
   (see § Processing run-grade below): the beat gate refuses (Poor no-output node),
   removed variance ≥1.0 flags over-subtraction, reliability drives the grade. Bands
   are in `PCASRunGrade` with tests.
-- [ ] Generalize the same measured-band treatment to the other cleaning steps
-  (gradient, ICA, wavelet, MAAC) — see § Processing run-grade.
+- [x] Generalized the measured-band treatment to gradient, ICA, and artifact
+  clean (2026-09-26); wavelet keeps its caution; MAAC deferred — see
+  § Processing run-grade.
 
 **Enabling head-model work (SI-1 shipped only one head model; the geometry
 sweeps above cannot run without a second and third).** These are shared
@@ -255,7 +259,7 @@ mismatch is expressible:
 **Exit:** the safe operating envelope and failure messages are measured. Only
 then call PCA-S production-ready or generalize it.
 
-## Processing run-grade (Good / Watch / Poor) — **PCA-S SHIPPED; generalization IN PROGRESS**
+## Processing run-grade (Good / Watch / Poor) — **PCA-S, gradient, ICA, artifact clean SHIPPED; MAAC DEFERRED**
 
 A per-step quality grade, the process-side counterpart to channel/segment health:
 one headline `RunGrade` (good/watch/poor), a one-line summary, and the weighted
@@ -269,11 +273,41 @@ not navigable, session-only, right-click Dismiss, pruned on next commit).
   measured), removed variance (good <0.6, watch 0.6–1.0, poor ≥1.0). Wired through
   `EVAHistoryNode.quality` (persisted), the rail pill, the breakdown popover, and
   the refusal path in `ProcessingCore`. Regression tests green.
-- [ ] **Generalize to the other cleaning steps.** Bands proposed but **not yet
-  measured** for: **gradient** (residual slice-rate comb + removed variance; needs
-  an `evaluate-gradient` campaign), **ICA** (ICLabel confidence + variance + Amari
-  in sim), **wavelet** (transient preservation — see finding below), **artifact
-  clean** (fraction touched), **MAAC** muscle (gamma preservation) and movement.
+- [x] **Generalized to gradient, ICA, and artifact clean (2026-09-26).** Each
+  measured with an env-gated campaign (`scripts/calibrate.sh gradient|ica|artifact`)
+  on EVA's real engines against simulator truth; results, band derivations, and
+  what each grade cannot see in `docs/provenance/run-grade-calibration.md`. Graded
+  nodes are keyed on the node's own step (`RecordingHistoryModel.quality(for:in:)`),
+  which also fixed a latent bug: every node after a PCA-S step inherited the
+  PCA-S pill because the snapshot still carried its report.
+  - **Gradient** (`GradientRunGrade`): TR-locked residual share (variance across
+    epochs at each TR phase, above its flat floor; p90 over channels) Good < 0.10,
+    Watch < 0.30, Poor ≥ 0.30 — flags 121/122 truth-poor runs and none of the good
+    ones. Removed variance Poor < 0.90 or ≥ 1.05, covering the residual metric's
+    blind spot (misplaced markers, aliased artifact). Coverage ≥ 0.98 / < 0.90 is
+    a structural rule. Finding: at 500 Hz without clock sync every engine leaves
+    residue far above the brain, so such recordings will read Poor. Three engine
+    defects filed under MRI-1.
+  - **ICA** (`ICARunGrade`): removing a component ICLabel calls Brain (p ≥ 0.5)
+    is Poor, ≥ 0.25 Watch; κ = samples/n² below 20 is Watch. Both are
+    conventions — the κ campaign was a **null result** (blink isolation equally
+    clean from κ ≈ 4 to 150) and ICLabel cannot be calibrated on synthetic data.
+    Convergence is reported, not graded (the default 1e-12 tolerance caps almost
+    every fit, with no measured cost).
+  - **Artifact clean** (`ArtifactCleanRunGrade`): touched fraction Watch ≥ 20 %,
+    no Poor band — cleaning beat the dirty data at every density (4–8×) but
+    distorts ~30–50 % of the brain inside rewritten windows. OBS/SSP with fewer
+    than 20 events is Watch (6 events: 1.1× gain; 20: 4×).
+- [ ] **MAAC run grades — DEFERRED (owner, 2026-09-26)** until MAAC adoption
+  itself is decided. Proposed: gamma preservation for BSS-CCA muscle correction
+  and an equivalent for movement PCA, each needing its own campaign. Until then,
+  a cleaning run that includes a continuous MAAC method reports its touched
+  fraction without grading it.
+- [ ] **Follow-ups the campaigns left open:** ICA κ against weak / near-Gaussian
+  sources (the regime the 20 × n² rule is about); artifact clean with real
+  (non-oracle) detection; gradient against a measured scanner template
+  (`--gradient-template`) to check whether real data is as harsh as the
+  simulator's.
 - [x] **Wavelet: both presets measured (2026-09-13) → preset-specific guidance.**
   The multi-artifact sweep (500 Hz, 120 s) ran the **hard/EEG (bior4.4)** and
   **soft/ERP (coif4)** presets. Both remove spiky artifacts well (movement/pop
@@ -824,6 +858,24 @@ correction is untrustworthy.
 - [ ] Investigate FASTR's low non-artifact correlation (~0.5–0.7 versus AAS
   >0.85), including alpha-scaling and interpolation/decimation effects.
 - [ ] Add `aff12` affine-motion decomposition to the motion panel.
+- [ ] **FASTR alignment slips by a whole slice on volume epochs** (found by the
+  gradient run-grade campaign, 2026-09-26). `GradientEpochAligner.defaultSearchRadius`
+  is `period / 20` — 75 samples for a 3 s TR at 500 Hz, twice the 36.6-sample
+  slice period — so with volume-level epochs (the view model's default
+  `slicesPerVolume = 1`) the correlation search locks onto the neighbouring
+  slice, whose non-integer offset happens to match the sub-sample phase better.
+  Diagnostics show shifts of ±37 samples, and ~35 samples at each epoch edge are
+  left uncorrected (output == input). Bound the radius below half the slice
+  period when slices are known, or search sub-sample phase without leaving the
+  slice. Numbers: `docs/provenance/run-grade-calibration.md` § Gradient.
+- [ ] **Local-template engine leaves the last sample of every TR epoch
+  uncorrected at 1 kHz** (synced clocks; that phase carries ~190× the typical
+  error). Likely an epoch-length rounding off-by-one in `correctGradient`.
+- [ ] **Allen IAR over-subtracts when TR markers are missing** (removed variance
+  2–4 with 5–20 % of markers dropped — it subtracts a template where there is no
+  artifact) and does worse than local-median when clocks are synced (98 %
+  coverage; residual ~850× brain vs ~4×). The run grade now flags the first as
+  Poor; the engine should refuse or skip rather than subtract.
 
 **Exit:** motion-dependent correction refuses unsafe inputs, unreliable regions
 round-trip into PSA, and signal attenuation is explained or bounded.

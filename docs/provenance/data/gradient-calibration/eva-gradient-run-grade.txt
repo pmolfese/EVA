@@ -1,0 +1,102 @@
+=== gradient run grade: TR-locked residual vs truth (20 ch, TR 3 s, 150 s, 500 Hz) ===
+truth = var(corrected − clean)/var(clean) over the scan; metric = TR-locked residual share (p90 over channels)
+
+truth/metric are broadband unless marked ≤40 (after a 40 Hz low-pass); implied = m/(1−m), the metric's own estimate of the truth ratio
+
+axis               value  engine          truthP90 metP90 implied | ≤40 truthP90 metP90 implied | removed  coverage
+baseline           -      FASTR            1254.490  0.951  19.219 |   544.788  0.983  56.395 | 0.9796   1.000
+baseline           -      Allen IAR        4501.616  0.893   8.311 |   286.566  0.418   0.717 | 0.7672   1.000
+baseline           -      Local median     5740.306  0.921  11.681 |   198.524  0.960  23.980 | 0.8700   1.000
+clock µs/s         0      FASTR              78.132  0.919  11.364 |    22.830  0.814   4.373 | 1.0026   1.000
+clock µs/s         0      Allen IAR         851.192  0.462   0.857 |   711.635  0.146   0.171 | 1.0209   0.980
+clock µs/s         0      Local median        3.864  0.369   0.586 |     3.195  0.127   0.145 | 1.0035   1.000
+clock µs/s         500    FASTR            1207.848  0.958  23.038 |   544.556  0.982  55.060 | 0.9784   1.000
+clock µs/s         500    Allen IAR        4688.064  0.858   6.046 |   319.827  0.420   0.725 | 0.7516   1.000
+clock µs/s         500    Local median     4994.002  0.911  10.271 |   162.650  0.956  21.936 | 0.8562   1.000
+clock µs/s         1500   FASTR            1110.477  0.966  28.513 |   571.065  0.981  51.431 | 0.9866   1.000
+clock µs/s         1500   Allen IAR        4447.464  0.894   8.441 |   351.859  0.311   0.452 | 0.7676   1.000
+clock µs/s         1500   Local median     4423.133  0.930  13.316 |   147.493  0.959  23.502 | 0.8579   1.000
+clock µs/s         5000   FASTR            1294.105  0.977  42.880 |  1021.968  0.970  32.775 | 1.0174   1.000
+clock µs/s         5000   Allen IAR        5552.993  0.837   5.149 |   333.790  0.293   0.414 | 0.7274   1.000
+clock µs/s         5000   Local median     6331.175  0.896   8.656 |   165.798  0.961  24.748 | 0.8280   1.000
+slow modulation    0.0    FASTR            1189.967  0.952  19.687 |   515.612  0.986  71.854 | 0.9787   1.000
+slow modulation    0.0    Allen IAR        4147.641  0.923  11.969 |   137.571  0.932  13.758 | 0.7697   1.000
+slow modulation    0.0    Local median     5459.741  0.923  11.944 |   184.962  0.987  78.339 | 0.8681   1.000
+slow modulation    0.3    FASTR            1436.299  0.937  14.947 |   632.420  0.946  17.622 | 0.9850   1.000
+slow modulation    0.3    Allen IAR        6095.090  0.723   2.605 |  1426.477  0.001   0.001 | 0.7323   1.000
+slow modulation    0.3    Local median     6463.116  0.917  11.094 |   250.691  0.811   4.301 | 0.8647   1.000
+slow modulation    0.6    FASTR            1843.018  0.907   9.792 |   839.569  0.856   5.940 | 0.9859   1.000
+slow modulation    0.6    Allen IAR       10698.864  0.483   0.935 |  5240.995  0.000   0.000 | 0.6487   1.000
+slow modulation    0.6    Local median     7978.976  0.907   9.716 |   381.018  0.568   1.315 | 0.8558   1.000
+anti-alias         off    FASTR           53391.841  0.179   0.219 | 50711.489  0.170   0.205 | 0.6360   1.000
+anti-alias         off    Allen IAR       100635.814  0.481   0.928 | 102699.525  0.608   1.551 | 0.1594   1.000
+anti-alias         off    Local median    139847.194  0.754   3.061 | 145115.175  0.707   2.419 | 0.0389   1.000
+rate Hz            250    FASTR            2322.963  0.932  13.712 |  1541.580  0.978  44.177 | 1.0085   1.000
+rate Hz            250    Allen IAR        7869.498  0.781   3.565 |   806.684  0.450   0.820 | 0.7825   1.000
+rate Hz            250    Local median    13657.024  0.844   5.419 |   744.438  0.962  25.069 | 0.8882   1.000
+rate Hz            1000   FASTR             243.409  0.967  28.905 |     3.848  0.663   1.966 | 0.9610   1.000
+rate Hz            1000   Allen IAR        1717.355  0.978  44.725 |    20.142  0.319   0.469 | 0.7812   1.000
+rate Hz            1000   Local median     2372.052  0.987  78.360 |    10.765  0.818   4.505 | 0.9066   1.000
+marker jitter smp  1      FASTR            1218.043  0.947  17.981 |   520.276  0.983  56.272 | 0.9797   1.000
+marker jitter smp  1      Allen IAR       10835.992  0.876   7.068 |   531.780  0.492   0.968 | 0.4251   1.000
+marker jitter smp  1      Local median    13469.673  0.886   7.782 |   569.732  0.958  22.892 | 0.5280   1.000
+marker jitter smp  3      FASTR            1229.832  0.941  15.821 |   487.814  0.981  51.180 | 0.9788   1.000
+marker jitter smp  3      Allen IAR       12691.674  0.857   5.993 |  1274.274  0.709   2.441 | 0.3483   1.000
+marker jitter smp  3      Local median    16467.746  0.866   6.487 |  1975.508  0.905   9.580 | 0.4413   1.000
+marker jitter smp  10     FASTR            1383.940  0.882   7.486 |   633.220  0.941  15.964 | 0.9849   1.000
+marker jitter smp  10     Allen IAR       16484.323  0.634   1.732 |  4710.467  0.670   2.028 | 0.3693   1.000
+marker jitter smp  10     Local median    19792.189  0.728   2.677 |  4879.857  0.835   5.069 | 0.2123   1.000
+marker jitter smp  50     FASTR            1458.819  0.739   2.831 |   701.466  0.838   5.174 | 0.9839   1.000
+marker jitter smp  50     Allen IAR       16786.475  0.256   0.344 |  4811.739  0.420   0.724 | 0.2831   1.000
+marker jitter smp  50     Local median    20116.304  0.101   0.113 |  6088.880  0.057   0.060 | 0.1103   1.000
+dropped markers    0.05   FASTR            4250.453  0.815   4.394 |  3022.059  0.674   2.065 | 1.0235   1.000
+dropped markers    0.05   Allen IAR       33058.711  0.805   4.119 | 28980.561  0.809   4.248 | 2.0961   1.000
+dropped markers    0.05   Local median     8122.730  0.895   8.500 |  2680.533  0.511   1.043 | 0.9339   1.000
+dropped markers    0.20   FASTR            9666.518  0.440   0.787 |  7504.815  0.130   0.150 | 1.0709   1.000
+dropped markers    0.20   Allen IAR       80722.217  0.805   4.134 | 76508.611  0.807   4.190 | 4.2858   1.000
+dropped markers    0.20   Local median    13170.617  0.774   3.422 |  7252.783  0.016   0.016 | 0.9989   1.000
+FASTR donors/side  1      FASTR            1816.329  0.944  16.724 |   596.839  0.987  74.026 | 0.9698   1.000
+FASTR donors/side  2      FASTR            1397.700  0.946  17.673 |   555.575  0.986  68.226 | 0.9781   1.000
+FASTR donors/side  15     FASTR            1167.407  0.950  19.141 |   538.639  0.979  47.020 | 0.9786   1.000
+synced             clk0 m FASTR              92.653  0.954  20.526 |    25.222  0.950  19.185 | 0.9973   1.000
+synced             clk0 m Allen IAR         967.377  0.491   0.963 |   792.411  0.193   0.239 | 1.0164   0.980
+synced             clk0 m Local median        0.165  0.052   0.054 |     0.153  0.054   0.057 | 0.9998   1.000
+synced 1 kHz       clk0 m FASTR             229.930  0.981  52.119 |     2.839  0.653   1.883 | 0.9870   1.000
+synced 1 kHz       clk0 m Allen IAR         206.068  0.678   2.109 |    89.288  0.231   0.301 | 0.9893   0.980
+synced 1 kHz       clk0 m Local median        0.232  0.070   0.075 |     0.348  0.146   0.170 | 0.9994   1.000
+FASTR radius       15     FASTR r15        1727.481  0.900   8.968 |   113.071  0.964  26.463 | 0.8894   1.000
+FASTR radius       15 clk FASTR r15         455.398  0.981  52.330 |    29.015  0.838   5.171 | 0.9941   1.000
+FASTR alignment    off    FASTR no-align   4112.957  0.922  11.879 |   141.242  0.800   3.994 | 0.7806   1.000
+
+Spearman(metric, truth) broadband: per channel -0.250 (n=2520), per run p90 -0.422 (n=126)
+Spearman(metric, truth) ≤40 Hz:    per channel 0.063 (n=2520), per run p90 -0.122 (n=126)
+
+Broadband — run level (truth p90: good < 0.1, watch 0.1–1, poor ≥ 1):
+  metric≥τ   flags truth-poor   flags truth-watch   flags truth-good
+   0.02      122/122              4/4                 n/a  
+   0.05      122/122              3/4                 n/a  
+   0.08      121/122              0/4                 n/a  
+   0.10      121/122              0/4                 n/a  
+   0.15      120/122              0/4                 n/a  
+   0.20      118/122              0/4                 n/a  
+   0.30      116/122              0/4                 n/a  
+   0.40      113/122              0/4                 n/a  
+   0.50      104/122              0/4                 n/a  
+   0.60      104/122              0/4                 n/a  
+   0.70      100/122              0/4                 n/a  
+   0.80       86/122              0/4                 n/a  
+
+≤40 Hz — run level (truth p90: good < 0.1, watch 0.1–1, poor ≥ 1):
+  metric≥τ   flags truth-poor   flags truth-watch   flags truth-good
+   0.02      117/122              4/4                 n/a  
+   0.05      116/122              3/4                 n/a  
+   0.08      114/122              2/4                 n/a  
+   0.10      113/122              2/4                 n/a  
+   0.15      109/122              0/4                 n/a  
+   0.20      104/122              0/4                 n/a  
+   0.30      100/122              0/4                 n/a  
+   0.40       94/122              0/4                 n/a  
+   0.50       86/122              0/4                 n/a  
+   0.60       81/122              0/4                 n/a  
+   0.70       75/122              0/4                 n/a  
+   0.80       66/122              0/4                 n/a  

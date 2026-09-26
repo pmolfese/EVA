@@ -100,6 +100,11 @@ final class GradientViewModel {
     /// package and the Details disclosure in the sheet.
     var auditLogLines: [String] = []
 
+    /// Truth-free quality numbers for the last run, graded into the history
+    /// rail's pill by `GradientRunGrade`. `nil` before a run, or when the
+    /// triggers left fewer than two measurable TR epochs.
+    var runMetrics: GradientRunMetrics?
+
     // MARK: Run state
     var isProcessing = false
     var progress = 0.0
@@ -297,12 +302,14 @@ final class GradientViewModel {
         correctedSignal = nil
         correctedPNSSignal = nil
         auditLogLines = []
+        runMetrics = nil
     }
 
     func resetForClose() {
         correctedSignal = nil
         correctedPNSSignal = nil
         auditLogLines = []
+        runMetrics = nil
         isProcessing = false
         progress = 0
         operationProgress = nil
@@ -754,6 +761,7 @@ final class GradientViewModel {
 
         do {
             let sourceData = signal.data
+            let sourceRate = signal.samplingRate
             let worker = Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
                 let corrected = try run(sourceData, trSamples) { fraction in
@@ -772,7 +780,15 @@ final class GradientViewModel {
                     correctedPNSData = nil
                 }
                 try Task.checkCancellation()
-                return (corrected.channels, correctedPNSData, corrected.report)
+                let metrics = GradientRunMetricsCalculator.measure(
+                    input: sourceData,
+                    output: corrected.channels,
+                    triggers: trSamples,
+                    samplingRate: sourceRate,
+                    correctedEpochs: corrected.correctedEpochs,
+                    totalEpochs: corrected.totalEpochs
+                )
+                return (corrected.channels, correctedPNSData, corrected.report, metrics)
             }
             let result = try await withTaskCancellationHandler(
                 operation: { try await worker.value },
@@ -792,6 +808,17 @@ final class GradientViewModel {
             updateFinalizingProgress()
 
             auditLogLines = result.2
+            runMetrics = result.3
+            if let metrics = result.3 {
+                auditLogLines.append(
+                    "\(Self.operation) quality: residualP90="
+                    + String(format: "%.4f", metrics.residualFractionP90)
+                    + ", residualMedian=" + String(format: "%.4f", metrics.residualFractionMedian)
+                    + (metrics.inBandResidualFractionP90.map { ", inBandResidualP90=" + String(format: "%.4f", $0) } ?? "")
+                    + ", removedVariance=" + String(format: "%.4f", metrics.removedVarianceFraction)
+                    + ", correctedEpochs=\(metrics.correctedEpochs)/\(metrics.totalEpochs)"
+                )
+            }
             // Which motion file this correction actually ran with, and — if the
             // parameters were restored from a step that named a different one —
             // that the two disagree. An export whose motion input silently
@@ -852,7 +879,9 @@ final class GradientViewModel {
     /// actor's state off-actor.
     private func correctionClosure(
         samplingRate: Double
-    ) -> @Sendable ([[Float]], [Int], @escaping (Double) -> Void) throws -> (channels: [[Float]], report: [String]) {
+    ) -> @Sendable ([[Float]], [Int], @escaping (Double) -> Void) throws -> (
+        channels: [[Float]], report: [String], correctedEpochs: Int, totalEpochs: Int
+    ) {
         switch method.engine {
         case .sliceTemplate:
             let config = sliceTemplateConfig()
@@ -865,7 +894,10 @@ final class GradientViewModel {
                     samplingRate: samplingRate,
                     progress: progress
                 )
-                return (result.channels, Self.report(for: result.diagnostics, method: label))
+                return (
+                    result.channels, Self.report(for: result.diagnostics, method: label),
+                    result.diagnostics.correctedEpochCount, result.diagnostics.epochs.count
+                )
             }
 
         case .averageTemplate:
@@ -879,7 +911,10 @@ final class GradientViewModel {
                     samplingRate: samplingRate,
                     progress: progress
                 )
-                return (result.channels, Self.report(for: result.diagnostics, method: label))
+                return (
+                    result.channels, Self.report(for: result.diagnostics, method: label),
+                    result.diagnostics.correctedEpochCount, result.diagnostics.epochs.count
+                )
             }
 
         case .localTemplate:
@@ -898,9 +933,11 @@ final class GradientViewModel {
                     configuration: config
                 )
                 progress(1)
+                let skipped = result.eventSummaries.filter { $0.skippedReason != nil }.count
                 return (
                     result.cleanedChannels,
-                    Self.report(for: result.eventSummaries, method: label, correlationFloor: floor)
+                    Self.report(for: result.eventSummaries, method: label, correlationFloor: floor),
+                    result.eventSummaries.count - skipped, result.eventSummaries.count
                 )
             }
         }

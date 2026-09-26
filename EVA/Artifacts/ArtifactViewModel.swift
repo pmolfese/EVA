@@ -102,6 +102,9 @@ final class ArtifactViewModel {
     var cleaningSummaries: [ArtifactCleaningSummary] = []
     var cleaningProgress: ArtifactCleaningProgress?
     var cleanedSignal: MFFSignalData?
+    /// Quality numbers for the cleaning that produced `cleanedSignal`, graded
+    /// into the history rail's pill by `ArtifactCleanRunGrade`.
+    var runMetrics: ArtifactCleanRunMetrics?
     var cleaningIsEnabled = true
 
     var isCleaningActive: Bool { cleanedSignal != nil }
@@ -122,6 +125,7 @@ final class ArtifactViewModel {
         cleaningSummaries = []
         cleaningProgress = nil
         cleanedSignal = nil
+        runMetrics = nil
         cleaningIsEnabled = true
     }
 }

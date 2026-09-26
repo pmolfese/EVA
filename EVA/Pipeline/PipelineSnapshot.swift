@@ -58,6 +58,9 @@ struct PipelineSnapshot {
     // Stage outputs, in canonical chain order.
     var gradientSignal: MFFSignalData?
     var gradientPNSSignal: MFFSignalData?
+    /// The gradient run's quality numbers. Restored with the signal so the
+    /// grade a node shows describes the correction that produced it.
+    var gradientRunMetrics: GradientRunMetrics?
     var bcgSignal: MFFSignalData?
     /// Which correction produced `bcgSignal`, and what it fitted.
     ///
@@ -69,11 +72,13 @@ struct PipelineSnapshot {
     var bcgSurrogateReport: BCGSurrogateReport?
     var bcgSurrogateAuditLogLines: [String] = []
     var icaSignal: MFFSignalData?
+    var icaRunMetrics: ICARunMetrics?
     var filterOutput: MFFSignalData?
     var filterPNSOutput: MFFSignalData?
     var waveletSignal: MFFSignalData?
     var waveletIsEnabled: Bool = false
     var artifactCleanedSignal: MFFSignalData?
+    var artifactRunMetrics: ArtifactCleanRunMetrics?
     var artifactCleaningIsEnabled: Bool = true
     /// The artifact definitions that produced `artifactCleanedSignal`.
     ///
@@ -143,16 +148,19 @@ enum PipelineSnapshotting {
         PipelineSnapshot(
             gradientSignal: gradient.correctedSignal,
             gradientPNSSignal: gradient.correctedPNSSignal,
+            gradientRunMetrics: gradient.runMetrics,
             bcgSignal: bcg.correctedSignal,
             bcgAppliedCorrection: bcg.appliedCorrection,
             bcgSurrogateReport: bcg.surrogateReport,
             bcgSurrogateAuditLogLines: bcg.surrogateAuditLogLines,
             icaSignal: ica.cleanedSignal,
+            icaRunMetrics: ica.runMetrics,
             filterOutput: filter.output,
             filterPNSOutput: filter.pnsOutput,
             waveletSignal: wavelet.reducedSignal,
             waveletIsEnabled: wavelet.isEnabled,
             artifactCleanedSignal: artifactVM.cleanedSignal,
+            artifactRunMetrics: artifactVM.runMetrics,
             artifactCleaningIsEnabled: artifactVM.cleaningIsEnabled,
             definedArtifacts: template.definedArtifacts,
             epochedSignal: epoching.epochedSignal,
@@ -193,16 +201,19 @@ enum PipelineSnapshotting {
     ) {
         gradient.correctedSignal = snapshot.gradientSignal
         gradient.correctedPNSSignal = snapshot.gradientPNSSignal
+        gradient.runMetrics = snapshot.gradientRunMetrics
         bcg.correctedSignal = snapshot.bcgSignal
         bcg.appliedCorrection = snapshot.bcgAppliedCorrection
         bcg.surrogateReport = snapshot.bcgSurrogateReport
         bcg.surrogateAuditLogLines = snapshot.bcgSurrogateAuditLogLines
         ica.cleanedSignal = snapshot.icaSignal
+        ica.runMetrics = snapshot.icaRunMetrics
         filter.output = snapshot.filterOutput
         filter.pnsOutput = snapshot.filterPNSOutput
         wavelet.reducedSignal = snapshot.waveletSignal
         wavelet.isEnabled = snapshot.waveletIsEnabled
         artifactVM.cleanedSignal = snapshot.artifactCleanedSignal
+        artifactVM.runMetrics = snapshot.artifactRunMetrics
         artifactVM.cleaningIsEnabled = snapshot.artifactCleaningIsEnabled
         template.definedArtifacts = snapshot.definedArtifacts
 

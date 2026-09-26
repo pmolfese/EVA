@@ -130,7 +130,7 @@ extension WaveformView {
         artifactCleaningTask = Task {
             await processingQueue.run("Artifact Cleaning") { [self] in
                 let worker = Task.detached(priority: .userInitiated) {
-                    ArtifactCleaner.cleanedSignal(
+                    let outcome = ArtifactCleaner.cleanedSignal(
                         from: signal,
                         artifacts: artifacts,
                         excluding: excludedChannels,
@@ -138,8 +138,14 @@ extension WaveformView {
                     ) { progress in
                         progressContinuation.yield(progress)
                     }
+                    let metrics = ArtifactCleanRunMetrics.measure(
+                        original: signal.data, cleaned: outcome.signal.data,
+                        artifacts: artifacts, summaries: outcome.summaries,
+                        excludedChannels: excludedChannels
+                    )
+                    return (outcome, metrics)
                 }
-                let outcome = await withTaskCancellationHandler(
+                let (outcome, metrics) = await withTaskCancellationHandler(
                     operation: {
                         await worker.value
                     },
@@ -169,6 +175,7 @@ extension WaveformView {
                 ArtifactCleaningCore.commit(
                     cleanedSignal: outcome.signal,
                     summaries: outcome.summaries,
+                    metrics: metrics,
                     statusMessage: artifactCleaningSummaryText(outcome.summaries),
                     artifactVM: artifactVM,
                     template: template,

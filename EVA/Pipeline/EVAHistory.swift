@@ -114,7 +114,8 @@ nonisolated struct EVAHistoryNode: Identifiable, Sendable, Codable, Hashable {
     var computeCost: TimeInterval?
     var createdAt: Date = Date()
     /// Run-quality grade for the step that produced this node, when the step
-    /// reports one (PCA-S today). A persisted annotation, like `computeCost`.
+    /// reports one (PCA-S, gradient, ICA, artifact clean). A persisted
+    /// annotation, like `computeCost`.
     var quality: StepQuality?
     /// A recorded refusal: the step ran, produced nothing usable, and left the
     /// pointer at the parent (this node hangs one step below it). Session-only —

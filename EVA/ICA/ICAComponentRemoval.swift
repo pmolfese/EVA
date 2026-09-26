@@ -65,6 +65,7 @@ enum ICAComponentRemoval {
         let cleaned = try await ICAReplay.apply(to: signal, payload: payload)
         commit(
             cleaned: cleaned,
+            metrics: metrics(for: payload, signal: signal, maxIterations: ica.maxIterations),
             ica: ica,
             artifactVM: artifactVM,
             template: template,
@@ -83,6 +84,7 @@ enum ICAComponentRemoval {
     /// paths run *this*, which is the part that was diverging.
     static func commit(
         cleaned: MFFSignalData,
+        metrics: ICARunMetrics?,
         ica: ICAViewModel,
         artifactVM: ArtifactViewModel,
         template: ArtifactTemplateViewModel,
@@ -91,6 +93,7 @@ enum ICAComponentRemoval {
         store: RecordingStore
     ) {
         ica.cleanedSignal = cleaned
+        ica.runMetrics = metrics
         PipelineInvalidation.appliedArtifactCleaning(artifactVM: artifactVM, template: template)
         // Detection ran against the pre-removal signal, so its events describe
         // samples that no longer exist.
@@ -100,6 +103,23 @@ enum ICAComponentRemoval {
             epoching: epoching, segHealth: segHealth, selection: store.selection
         )
         PipelineInvalidation.interpolations(store: store)
+    }
+
+    /// Run metrics for a replayed removal. A payload rebuilds only what
+    /// reconstruction needs, so the fitted sample count comes from the signal
+    /// (at the payload's decimation) and the removed components' labels from
+    /// the saved detail; ICLabel probabilities are not carried.
+    static func metrics(for payload: ICAReplayPayload, signal: MFFSignalData, maxIterations: Int) -> ICARunMetrics {
+        var decomposition = payload.decomposition
+        for detail in payload.excludedComponentDetail {
+            decomposition.labels[detail.index] = detail.label
+        }
+        let samples = (signal.data.first?.count ?? 0) / max(1, payload.decimation)
+        return ICARunMetrics(
+            decomposition: decomposition,
+            maxIterations: maxIterations,
+            analysisSampleCount: samples > 0 ? samples : nil
+        )
     }
 
     /// The payload for the removal currently staged in `ica`, or `nil` when

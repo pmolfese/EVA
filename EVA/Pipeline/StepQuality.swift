@@ -15,9 +15,10 @@
 //  shows the grade as a pill beside a node; the status popover expands it into
 //  the metric breakdown, exactly as channel health does per channel.
 //
-//  Generic on purpose (SI-4 Track 3): only PCA-S produces a grade today
-//  (`PCASRunGrade`), but filtering, ICA, and wavelet reduction are the intended
-//  next producers, so the type carries no BCG-specific vocabulary.
+//  Generic on purpose (SI-4 Track 3): producers are `PCASRunGrade`,
+//  `GradientRunGrade`, `ICARunGrade`, and `ArtifactCleanRunGrade`, and
+//  `RecordingHistoryModel.quality(for:in:)` picks one by the node's own step,
+//  so the type carries no method-specific vocabulary.
 //
 
 import Foundation

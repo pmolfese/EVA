@@ -32,6 +32,7 @@ completed and the historical engines were deleted.
 | `method-comparison.md` | Design record and measured results for the method-comparison harness — what each correction method scores against simulated ground truth, and what those numbers do and do not support. |
 | `pca-s-adversarial-evaluation.md` | Measured results for the SI-4 Track-2 adversarial campaign against PCA-S BCG correction: per-axis operating envelope and breakpoints, the pattern-search default finding, and the Track-3 threshold implications. Raw CSVs in `data/pca-s-si4/`. |
 | `artifact-reduction-evaluation.md` | Design record for the method-agnostic cleaning-evaluation tools (`score-cleaning`, `evaluate-retention`, the non-Gaussian source model): what each measures, why removed variance alone cannot grade quality, and the ERP trial-retention framing. |
+| `run-grade-calibration.md` | Measured results behind the Good/Watch/Poor run grades for gradient correction, ICA removal, and drawn-artifact cleaning: the truth-free number each grades on, what it was checked against, where the band edges came from, and the engine defects the gradient campaign surfaced. Raw tables in `data/{gradient,ica,artifact-clean}-calibration/`. |
 
 `docs/dirty-room/` holds dirty-room notes that quote reference-toolbox internals.
 It is blocked by `.claude/hooks/block-dirty-room.sh` and must not be read during
