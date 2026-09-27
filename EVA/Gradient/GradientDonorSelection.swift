@@ -32,8 +32,9 @@ nonisolated enum GradientDonorSelection {
     /// strategy is to avoid averaging across motion *events*. `allParameters`
     /// delegates to EVA's existing `MotionParameters.framewiseDisplacement`
     /// (Power et al. 2012) so there is a single definition in the codebase;
-    /// `translationOnly` is the translation terms of that same sum. Volume 0
-    /// has no predecessor and is defined as 0.
+    /// `translationOnly` is the translation terms of that same L1 sum, and
+    /// `translationSpeed` is their Euclidean norm (Moosmann et al. 2009, Eq. 5).
+    /// Volume 0 has no predecessor and is defined as 0.
     static func motionMagnitudes(
         motion: [MotionSample],
         metric: GradientMotionMetric,
@@ -43,15 +44,18 @@ nonisolated enum GradientDonorSelection {
         case .allParameters:
             let parameters = MotionParameters(samples: motion, sourceName: "")
             return parameters.framewiseDisplacement(radiusMm: radiusMm)
-        case .translationOnly:
+        case .translationOnly, .translationSpeed:
             guard motion.count > 1 else { return [Double](repeating: 0, count: motion.count) }
             var magnitudes = [Double](repeating: 0, count: motion.count)
             for i in 1..<motion.count {
                 let current = motion[i]
                 let previous = motion[i - 1]
-                magnitudes[i] = abs(current.dS - previous.dS)
-                    + abs(current.dL - previous.dL)
-                    + abs(current.dP - previous.dP)
+                let dS = current.dS - previous.dS
+                let dL = current.dL - previous.dL
+                let dP = current.dP - previous.dP
+                magnitudes[i] = metric == .translationSpeed
+                    ? (dS * dS + dL * dL + dP * dP).squareRoot()
+                    : abs(dS) + abs(dL) + abs(dP)
             }
             return magnitudes
         }

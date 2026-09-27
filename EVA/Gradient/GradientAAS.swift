@@ -197,7 +197,7 @@ nonisolated enum GradientAAS {
             upsampleFactor = max(1, factor)
         }
 
-        let layout = try GradientEpochLayout.build(
+        var layout = try GradientEpochLayout.build(
             volumeTriggers: volumeTriggers,
             sampleCount: sampleCount,
             slicesPerVolume: config.epochUnit == .slice ? max(1, config.slicesPerVolume) : 1,
@@ -205,9 +205,24 @@ nonisolated enum GradientAAS {
             relativeTriggerPosition: config.relativeTriggerPosition
         )
 
-        let workingChannels = upsampleFactor > 1
-            ? channels.map { GradientSincResampler.upsample($0, factor: upsampleFactor) }
+        // A recording that stops one period after its last trigger lacks only
+        // the final window's closing sample (the next trigger, never recorded).
+        // Without it the whole final TR was left uncorrected — every sample of
+        // it still carrying the full artifact — which is what made Allen IAR
+        // read ~100× worse than local-median on clock-synced data (ROADMAP
+        // MRI-1, 2026-09-26). Same remedy as `GradientTemplateCorrector`: repeat
+        // the last sample once, correct, and crop it from the output.
+        let closingPadding = layout.lacksOnlyClosingSample ? 1 : 0
+        if closingPadding > 0 {
+            layout = layout.extended(bySamples: closingPadding, upsampleFactor: upsampleFactor)
+        }
+        let paddedChannels = closingPadding > 0
+            ? channels.map { $0 + [Float](repeating: $0[sampleCount - 1], count: closingPadding) }
             : channels
+
+        let workingChannels = upsampleFactor > 1
+            ? paddedChannels.map { GradientSincResampler.upsample($0, factor: upsampleFactor) }
+            : paddedChannels
         let workingRate = samplingRate * Double(upsampleFactor)
         let representative = 0
 
@@ -380,7 +395,9 @@ nonisolated enum GradientAAS {
         if upsampleFactor > 1 {
             output = correctedWorking.map { downsample($0, factor: upsampleFactor, targetCount: sampleCount) }
         } else {
-            output = correctedWorking
+            output = closingPadding > 0
+                ? correctedWorking.map { Array($0.prefix(sampleCount)) }
+                : correctedWorking
         }
 
         return GradientCorrectionResult(
@@ -396,7 +413,8 @@ nonisolated enum GradientAAS {
                 epochs: diagnostics.sorted { $0.epoch < $1.epoch },
                 obsComponentCounts: [],
                 ancAppliedChannels: ancApplied,
-                warnings: warnings
+                warnings: warnings,
+                upsampleFactor: upsampleFactor
             )
         )
     }

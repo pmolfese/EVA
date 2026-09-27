@@ -51,10 +51,12 @@ struct GradientRunGradeMeasurementTests {
         var triggerJitterSamples = 0
         var droppedTriggerFraction = 0.0
         /// Zero-pad the synthetic slice template before the simulator's
-        /// anti-alias filter. That filter works on the template's own window, so
-        /// unpadded it leaves the waveform starting and ending off zero — a step
-        /// at every slice that aliases into the recording. Padded, the recorded
-        /// artifact is band-limited and a sub-sample shift can represent it.
+        /// anti-alias filter. This is how the 2026-09-26 defect was measured:
+        /// the filter then worked on the template's own window, leaving a step
+        /// at every slice that aliased. The model now pads by itself
+        /// (`GradientArtifactModel.antiAliasMarginSeconds`), so this row only
+        /// adds more silence and should read the same as the baseline; kept so
+        /// the recorded "sim template padded" row stays reproducible.
         var zeroPaddedTemplate = false
     }
 

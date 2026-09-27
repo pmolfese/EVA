@@ -112,4 +112,54 @@ struct ReplayControllerTests {
         c.cancel()
         #expect(await task.value == .cancel)
     }
+
+    // MARK: - Abandoning a run (Skip File / Cancel must not export)
+
+    /// Cancelling at a paused gate breaks the loop; the loop must then abandon
+    /// the run rather than fall through to finish-and-export.
+    @Test func cancelAtAGateAbandonsTheRun() async {
+        let c = ReplayController()
+        c.configure(script: script([.filter]), sourceName: "src")
+        #expect(!c.shouldAbandon(taskCancelled: false))
+        let task = Task { await c.gate(.awaitingReview(index: 0), banner: nil) }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        c.cancel()
+        #expect(await task.value == .cancel)
+        #expect(c.shouldAbandon(taskCancelled: false))
+    }
+
+    /// Cancel pressed while a step is running has no waiter. It used to sit in
+    /// the buffer until a gate that a script with no further gate never
+    /// reached — and the run exported as if nothing had been pressed.
+    @Test func cancelWithNoWaiterStillAbandonsTheRun() {
+        let c = ReplayController()
+        c.configure(script: script([.filter, .segment]), sourceName: "src")
+        c.cancel()
+        #expect(c.shouldAbandon(taskCancelled: false))
+    }
+
+    @Test func skipAndProceedDoNotAbandon() async {
+        let c = ReplayController()
+        c.configure(script: script([.filter]), sourceName: "src")
+        c.resume(.skip)
+        _ = await c.gate(.awaitingReview(index: 0), banner: nil)
+        c.resume(.proceed)
+        #expect(!c.shouldAbandon(taskCancelled: false))
+        #expect(c.shouldAbandon(taskCancelled: true))
+    }
+
+    /// The flag belongs to one run: the next file's configure (a batch reuses
+    /// nothing, but Copy Processing can be re-run in one window) and a reset
+    /// both clear it.
+    @Test func aNewRunStartsUncancelled() {
+        let c = ReplayController()
+        c.configure(script: script([.filter]), sourceName: "src")
+        c.cancel()
+        c.configure(script: script([.filter]), sourceName: "src")
+        #expect(!c.shouldAbandon(taskCancelled: false))
+
+        c.cancel()
+        c.reset()
+        #expect(!c.shouldAbandon(taskCancelled: false))
+    }
 }

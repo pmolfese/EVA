@@ -52,7 +52,7 @@ extension WaveformView {
         let motionAlignmentOK = mriMotionAlignmentOK(selectedCount: selectedCount)
         let spacing = trSpacingInfo(for: signal)
         let canApply = signal != nil && !gradient.isProcessing && (selectedCount ?? 0) >= 2
-            && (gradient.method != .moosmann || motionUsable)
+            && gradient.missingRequiredMotion == nil
             && motionAlignmentOK
             && spacing.hasEnoughTriggers && spacing.isEvenlySpaced
 
@@ -202,8 +202,11 @@ extension WaveformView {
             }
 
             // Optional motion-censoring for every method except Moosmann, which
-            // censors intrinsically, so the toggle is hidden there.
-            if motionLoaded, !gradient.method.usesMotion {
+            // censors intrinsically, so the toggle is hidden there. Also shown
+            // when a restored step turned it on with no motion loaded, so the
+            // operator can turn it off rather than being stuck with a disabled
+            // Apply (`missingRequiredMotion`).
+            if motionLoaded || gradient.excludeHighMotion, !gradient.method.usesMotion {
                 Toggle(isOn: $gradient.excludeHighMotion) {
                     Text("Exclude high-motion TRs")
                         .font(.caption)
@@ -216,6 +219,15 @@ extension WaveformView {
                     .font(.caption)
                     .help("Apply the selected MRI gradient artifact correction to physio/PNS channels using the same TR markers.")
             }
+
+            Toggle(isOn: Binding(
+                get: { gradient.unreliablePolicy == .markEvents },
+                set: { gradient.unreliablePolicy = $0 ? .markEvents : .reportOnly }
+            )) {
+                Text("Mark unreliable spans as events")
+                    .font(.caption)
+            }
+            .help("Stretches the correction could not be trusted on — epochs left uncorrected with no usable donors or an empty template, or corrected from donors taken across a motion event — become \(GradientCoverage.unreliableEventCode) events with their duration. Normal edge TRs are never marked. PSA can reject epochs that overlap them. Off: reported in the run details only.")
 
             mriMethodOptions()
 
@@ -467,8 +479,8 @@ extension WaveformView {
         if !motionAlignmentOK, let motion = gradient.motionParameters, let selectedCount {
             return "Motion file has \(motion.count) TRs, but \(trimmedMarkerCount(total: selectedCount)) \(gradient.trMarkerCode) markers are selected after trimming."
         }
-        if gradient.method == .moosmann, !motionUsable {
-            return "Moosmann requires a motion file. Load one via Configure Motion… to enable Apply."
+        if let missing = gradient.missingRequiredMotion {
+            return missing
         }
         return "Apply \(gradient.method.label) gradient artifact removal."
     }

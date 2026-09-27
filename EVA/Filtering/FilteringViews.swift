@@ -591,6 +591,9 @@ extension WaveformView {
         let actions = replay.plannedActions()
 
         loop: for (actionOrdinal, action) in actions.enumerated() {
+            // A cancel pressed while the previous step was running had no gate
+            // to resolve; stop here rather than starting the next step.
+            if replay.shouldAbandon(taskCancelled: Task.isCancelled) { break loop }
             let params = replay.parameters(forStep: action.stepIndex)
             replay.state = .running(index: action.stepIndex)
             let stepName = ReplayStepDisplay.label(for: action.operation)
@@ -614,18 +617,38 @@ extension WaveformView {
             switch action.operation {
             case .mriGradientCorrection:
                 gradient.apply(parameters: params)
-                if action.gate == .review {
+                // A step that needs motion pauses even when it was not set to
+                // review: the operator is the only source of the 1D file
+                // (ROADMAP MRI-1).
+                let needsMotion = gradient.missingRequiredMotion != nil
+                if action.gate == .review || needsMotion {
                     gradient.showsPopover = true
                     let decision = await replay.gate(.awaitingReview(index: action.stepIndex),
-                        banner: .init(title: "Review MRI Gradient Correction",
-                                      detail: "Adjust TR-skip, motion, or window in the panel, then Apply.",
-                                      showsSkip: true, progress: nil))
+                        banner: needsMotion
+                            ? .init(title: "Motion File Needed",
+                                    detail: "This step uses \(gradient.method.label) motion data. Load the recording's 1D file with Configure Motion…, then Continue — or Skip the step.",
+                                    showsSkip: true, progress: nil)
+                            : .init(title: "Review MRI Gradient Correction",
+                                    detail: "Adjust TR-skip, motion, or window in the panel, then Apply.",
+                                    showsSkip: true, progress: nil))
                     gradient.showsPopover = false
                     switch decision {
                     case .cancel: break loop
                     case .skip: continue loop
                     case .proceed: break
                     }
+                }
+                if let missing = gradient.missingRequiredMotion {
+                    // Continue without the file: stop, rather than correct as
+                    // a different method or carry on uncorrected.
+                    gradient.statusMessage = missing
+                    gradient.statusIsError = true
+                    replay.banner = nil
+                    replay.state = .cancelled
+                    if batch.isActive, batch.matches(recording: recording) {
+                        batch.completeCurrent(.needsInput)
+                    }
+                    return
                 }
                 await applyGradientCorrection(to: rawSignal)
 
@@ -787,7 +810,10 @@ extension WaveformView {
             }
         }
 
-        if Task.isCancelled {
+        // `.cancel` from a gate breaks the loop too, and must not fall through to
+        // finish-and-export: Skip File used to write a partially processed file
+        // and record the job as Done.
+        if replay.shouldAbandon(taskCancelled: Task.isCancelled) {
             replay.banner = nil
             replay.state = .cancelled
             if batch.isActive, batch.matches(recording: recording) {

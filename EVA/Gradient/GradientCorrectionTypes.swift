@@ -90,10 +90,30 @@ nonisolated enum GradientTemplateScaling: String, CaseIterable, Identifiable, Se
     }
 }
 
-/// Which rigid-body terms contribute to a volume's motion magnitude.
+/// Which rigid-body terms contribute to a volume's motion magnitude, and how.
+///
+/// All three are volume-to-volume *changes* — the question is always "did the
+/// head move between these two volumes", never "where is the head" — and all
+/// three define volume 0 as 0. They differ in which terms enter and in how the
+/// terms are combined, and the difference is not cosmetic: at the same
+/// threshold they flag different volumes (MRI-1, settled 2026-09-26).
+///
+/// - `translationSpeed` is the published RP-informed definition (Moosmann et
+///   al. 2009, Eq. 5): the Euclidean norm of the translation change. The paper
+///   uses translations only and a threshold of 0.3 mm.
+/// - `translationOnly` is EVA's earlier translation metric: the same three
+///   differences summed as absolute values (an L1 norm), so it is never smaller
+///   than `translationSpeed` and is up to √3 times larger for a diagonal move.
+///   Kept, and still the default, because existing scripts name it and changing
+///   what they flag silently would change their output.
+/// - `allParameters` is framewise displacement (Power et al. 2012) over all six
+///   terms, rotations as arc length on a sphere of the configured radius.
 nonisolated enum GradientMotionMetric: String, CaseIterable, Identifiable, Sendable {
-    /// Translations only.
+    /// Translations only, as an L1 sum of absolute changes.
     case translationOnly
+    /// Translations only, as the Euclidean norm of the change — Moosmann et al.
+    /// (2009) Eq. 5.
+    case translationSpeed
     /// Translations plus rotations, with rotations converted to arc length on a
     /// sphere of the configured radius.
     case allParameters
@@ -102,15 +122,27 @@ nonisolated enum GradientMotionMetric: String, CaseIterable, Identifiable, Senda
 
     var label: String {
         switch self {
-        case .translationOnly: return "Translation Only"
-        case .allParameters: return "All Six Parameters"
+        case .translationOnly: return "Translation (sum)"
+        case .translationSpeed: return "Translation Speed"
+        case .allParameters: return "All Six (FD)"
+        }
+    }
+
+    /// Axis/label text for the per-volume series this metric produces.
+    var seriesLabel: String {
+        switch self {
+        case .translationOnly: return "Translation change, summed (mm)"
+        case .translationSpeed: return "Translation speed (mm/volume)"
+        case .allParameters: return "Framewise Displacement (mm)"
         }
     }
 
     var help: String {
         switch self {
         case .translationOnly:
-            return "Sum the absolute volume-to-volume change in the three translation terms. Rotations are ignored, which keeps the metric in millimetres of head displacement without assuming a head radius."
+            return "Sum of the absolute volume-to-volume changes in the three translations (L1). Rotations are ignored. Never smaller than Translation Speed — up to √3× larger for a diagonal move — so the same threshold flags more volumes."
+        case .translationSpeed:
+            return "Euclidean length of the volume-to-volume translation change, √(Δx²+Δy²+Δz²) — the published RP-informed definition (Moosmann et al. 2009, Eq. 5), which used a 0.3 mm threshold. Rotations are ignored."
         case .allParameters:
             return "Framewise displacement over all six rigid-body terms (Power et al. 2012), with rotations converted to arc length on a sphere of the configured radius. More sensitive to nodding and rolling."
         }
@@ -405,6 +437,10 @@ nonisolated struct GradientCorrectionDiagnostics: Sendable {
     /// reference carried no usable variance.
     let ancAppliedChannels: Set<Int>
     let warnings: [GradientCorrectionWarning]
+    /// The factor `triggers`, `period`, `samplesBefore` and `samplesAfter` are
+    /// scaled by — they are on the upsampled axis. Needed to place an epoch on
+    /// the recording's own axis (`GradientCoverage`).
+    var upsampleFactor: Int = 1
 
     var correctedEpochCount: Int { epochs.filter(\.corrected).count }
 }

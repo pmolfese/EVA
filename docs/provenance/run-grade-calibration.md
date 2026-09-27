@@ -7,10 +7,14 @@ edges came from. Evidence, not specification: the bands live in code
 (`GradientRunGrade`, `ICARunGrade`, `ArtifactCleanRunGrade`) with regression
 tests pinning them.
 
-- **Date:** 2026-09-26
+- **Date:** 2026-09-26; FASTR C5 follow-up 2026-09-27
 - **Harness:** env-gated EVATests calibrations run by `scripts/calibrate.sh
   <gradient|ica|artifact>`; each drives EVA's real engines on EVACore simulator
-  data, in parallel across cores. Raw tables in `docs/provenance/data/*-calibration/`.
+  data, in parallel across cores. C5 uses the separately gated
+  `FASTRC5EvaluationTests`; its acquisition and recommendation follow-ups used
+  temporary gated evaluation harnesses and retained CSV outputs rather than an
+  application entry point. Raw tables are in
+  `docs/provenance/data/*-calibration/`.
 - **Caveat carried from the PCA-S campaign:** these measure against a
   simulator's truth. Real inter-subject and non-stationary variability is wider,
   and the synthetic gradient waveform is EVA's own model, not a measured one.
@@ -91,6 +95,36 @@ The table was re-run after the FASTR alignment fix (ROADMAP MRI-1) on
   non-poor flagged) — Allen IAR's ANC stage leaves residue whose low-frequency
   part is not phase-locked (modulation 0.3/0.6 read 0.000–0.001 in-band against a
   truth of 10³). Reported for context, not graded.
+- **Re-run after the simulator's template was band-limited (2026-09-26, ROADMAP
+  MRI-1).** The template is now padded before its anti-alias filter (Engine
+  findings, below), which removes the simulator's own floor: baseline FASTR
+  truth p90 fell from the thousands to 54 at 500 Hz and 9 at 1 kHz; synced
+  FASTR 1.4 (500 Hz) and 0.22 (1 kHz). Allen IAR and local-median barely move —
+  they cannot shift by a sub-sample. The metric now tracks truth: Spearman
+  run-level 0.47 broadband / 0.68 ≤ 40 Hz (per channel 0.54 / 0.81), against
+  −0.10 / −0.11 before. The campaign has 128 truth-poor runs and 4 in the Watch
+  range (0.1–1), still none truth-good:
+
+  | metric ≥ τ | flags truth-poor (≥ 1) | flags the 4 truth-watch runs |
+  |---:|---:|---:|
+  | 0.05 | 127/128 | 4/4 |
+  | 0.08 | 127/128 | 1/4 |
+  | 0.10 | 127/128 | 0/4 |
+  | 0.30 | 121/128 | 0/4 |
+  | 0.50 | 117/128 | 0/4 |
+
+  **Bands kept: Good < 0.10, Watch 0.10–0.30, Poor ≥ 0.30.** The ≤ 40 Hz metric
+  still separates worse (at 0.10: 87/90 poor, 35/42 watch flagged). Removed
+  variance still separates as before: runs that corrected well removed
+  ≥ 0.999; Allen IAR with jittered markers (10, 50 samples) now removes 61 and
+  211 — a template subtracted where the artifact was not — and with dropped
+  markers 0.84–0.87, Poor either way. Data:
+  `data/gradient-calibration/eva-gradient-run-grade.{txt,csv}`. The earlier
+  numbers in this section are kept as the record of the pre-fix campaign.
+  Re-run again the same day after Allen IAR stopped leaving the final TR
+  uncorrected (ROADMAP MRI-1): its synced truth fell 268 → 3.8 at 500 Hz and
+  124 → 39 at 1 kHz, clock-offset-0 truth 220 → 7.8, coverage 0.98 → 1.00. The
+  band tables did not move.
 - **Design traps met on the way, kept here so they are not re-tried:**
   - *Projecting onto span{A, A′}* (template and derivative) fails: at EEG
     sampling rates the residue is sub-sample spike jitter and uncorrected edge
@@ -144,19 +178,328 @@ The table was re-run after the FASTR alignment fix (ROADMAP MRI-1) on
   template padded` row) brings FASTR to truth 60 at 500 Hz; Allen IAR and
   local-median stay in the thousands, since neither shifts on a sub-sample grid.
   A `--gradient-template` goes through the same filter.
-- **FASTR's 8-lobe fractional delay is the next limit** on a band-limited
-  artifact: 24 lobes took the padded-template case from ~59 to ~23 in a CPU-only
-  experiment. The Metal kernels hard-code 16 taps, so this needs both backends.
+- **FASTR's 8-lobe fractional delay is a limit on volume epochs at 1×
+  upsampling**, not a general FASTR limit. The original CPU experiment used the
+  calibration harness's default `GradientCorrectionConfig` (one slice, 1×) and
+  took the padded-template case from ~59 to ~23 with 24 lobes. C4/C5 later
+  reproduced the volume benefit but found that 24 lobes worsens slice epochs;
+  see the C5 ablation below. The Metal kernels hard-code 16 taps, so any change
+  still needs both backends.
 - The local-template engine leaves the last sample of each TR epoch uncorrected
   at 1 kHz.
 - Allen IAR over-subtracts with missing markers and underperforms local-median
   on synced clocks.
 
-### Not measured
+### FASTR C5 brain-signal ablation (2026-09-27)
 
-Over-removal of brain (an aggressive OBS stage): it leaves nothing TR-locked and
-removes ~1.0 of the variance, so it grades Good. Nothing truth-free in the
-corrected scan separates removed brain from removed artifact.
+The C5 campaign ran the real CPU FASTR engine twice for every configuration:
+once on clean dipole EEG carrying MRI triggers but **no** MRI artifact, and once
+on the same EEG with the simulator's band-limited gradient artifact. A perfect
+brain-only run has truth 0, correlation 1 and beta 1. Conditions: deterministic
+single seed, 500 Hz, 60 s, 8 channels, TR 3 s, 41 slices, 152 µs/s clock drift,
+10 % slow modulation, four donors on each side. Volume mode used 1× unless the
+row says otherwise; slice mode used 5×, the best point in the preceding
+1/2/4/5/10 factor sweep. Values below are channel medians. Raw table:
+`data/gradient-calibration/eva-fastr-c5-ablation.csv`.
+
+| configuration | clean truth | clean r / beta | artifact truth | artifact r |
+|---|---:|---:|---:|---:|
+| volume, temporal baseline | 0.067 | 0.969 / 0.963 | 6.95 | 0.421 |
+| volume, 5× | 0.102 | 0.957 / 0.966 | 26.33 | 0.230 |
+| slice, temporal baseline | 0.078 | 0.977 / 1.123 | 35.65 | 0.237 |
+| slice, correlation, default threshold | 0.195 | 0.919 / 0.980 | 4.15 | 0.506 |
+| slice, correlation, permissive threshold | 0.547 | 0.695 / 0.522 | 4.11 | 0.507 |
+| slice, temporal + OBS | 0.296 | 0.855 / 0.786 | 0.60 | 0.867 |
+| slice, temporal + ANC | 0.323 | 0.832 / 0.740 | 7.73 | 0.467 |
+| slice, permissive correlation + ANC | 0.737 | 0.576 / 0.417 | 1.70 | 0.672 |
+
+Measured explanation:
+
+- **The low artifact-present correlation is predominantly residual artifact,
+  not interpolation erasing the brain.** The baseline brain-only correlations
+  are 0.97–0.98 while their artifact-present counterparts are 0.24–0.42. FASTR
+  is not a no-op on clean EEG—it changes 6.7–7.8 % of brain variance—but that
+  bounded distortion is much smaller than the residual in the failing runs.
+- **Sub-sample alignment is necessary, not the cause.** With it disabled,
+  artifact truth is 786 in volume mode and 666 in slice mode; integer-only
+  alignment reads 691 and 45.8. The corresponding clean runs change 5–8 % of
+  brain variance, approximately the baseline. The sub-sample stage is what
+  makes the artifact tractable.
+- **Template scaling does not explain the low correlation.** Volume artifact
+  truth is 6.95 drift-tracked, 7.09 unscaled and 7.11 least-squares. Slice
+  temporal is 35.65, 34.72 and 35.23. Scaling changes clean-signal safety more
+  than artifact removal: in volume mode clean truth is 0.067 drift-tracked,
+  0.186 unscaled and 0.104 least-squares.
+- **Upsampling has opposite mode-dependent effects.** Volume truth jumps 6.95
+  → 26.33 at 5×. For correlation-ranked slice epochs the earlier factor sweep
+  improved truth 28.3 → 16.8 → 5.45 → 4.19 at 1/2/4/5×, with no further gain
+  at 10×. “Slice versus volume” therefore cannot be evaluated while also
+  changing the upsample factor.
+- **Correlation ranking finds artifact-compatible donors but can select brain.**
+  On artifact data, the default and permissive thresholds both reach truth
+  ~4.1. On clean EEG the default changes 19.5 % of brain variance; admitting
+  every candidate changes 54.7 %, with beta 0.52. The raw epoch waveform is not
+  a safe donor-ranking signal when artifact evidence is weak.
+- **OBS and ANC trade artifact for brain rather than resolving the deficit.**
+  Slice OBS is the best artifact score (truth 0.60, r 0.87) but changes 29.6 %
+  of clean variance and attenuates beta to 0.79. ANC improves artifact scores
+  but changes 25–32 % of clean variance on the volume/temporal baselines and
+  73.7 % after permissive correlation ranking. On the volume artifact run OBS
+  selected zero components and changed nothing, while its clean run still
+  changed 52 %—the residual-energy floor is not an artifact-presence gate.
+- **Rounding slice triggers before upsampling is secondary and factor-dependent.**
+  At 5×, constructing triggers directly on the high-rate grid worsened temporal
+  truth 35.65 → 43.22 and default-correlation truth 4.15 → 4.92, with no clean
+  benefit. An exploratory 10× run moved correlation truth 4.22 → 3.41. This is
+  not the missing fix and should not be changed without a factor-by-factor
+  parity campaign.
+
+Proposed fix and acceptance work, not yet implemented:
+
+1. Add an independent **artifact-present confidence gate** before
+   correlation-ranked donation, OBS and ANC. Trigger presence alone is not
+   evidence that an artifact reference is informative. Below the gate, skip the
+   aggressive stage and report the fallback.
+2. Evaluate a shared, same-slice donor strategy based on alignment phase or a
+   robust cross-channel artifact reference, rather than ranking each channel's
+   raw EEG waveform. It must improve artifact truth without exceeding the
+   temporal baseline's clean-signal bound.
+3. Turn the brain-only run into an acceptance test: initially require median
+   clean truth ≤ 0.10 and r ≥ 0.95 for a default configuration, then validate
+   that bound on multiple seeds and injected ERP/oscillation fixtures before
+   treating it as normative.
+4. Keep OBS and ANC optional until that gate exists. Do not make permissive
+   correlation ranking the slice default despite its artifact-present score.
+
+### FASTR C5 follow-up: duration, sampling rate and slice timing (2026-09-27)
+
+This follow-up separates **artifact removal** from the brain-safety scores
+above. Unless stated otherwise it runs one artifact-only channel from the same
+band-limited simulator through the Metal backend at 500 Hz, 40 slices, plain
+correlation-ranked donors, four requested donors on each side and 5× internal
+upsampling. The number below is residual artifact energy divided by input
+artifact energy; lower is better. It is not the C5 brain-normalized truth
+metric, and an excellent value does not establish brain safety. Complete raw
+tables are `eva-fastr-next-acquisition-grid.csv`,
+`eva-fastr-next-rate-factor.csv`, `eva-fastr-next-timing-oracle.csv`,
+`eva-fastr-next-artifact-only.csv`, `eva-fastr-next-donors.csv`,
+`eva-fastr-next-retention.csv` and `eva-fastr-next-delay.csv` in
+`data/gradient-calibration/`.
+
+#### Recording length: count volumes, not minutes
+
+| TR (s) | 30 s | 60 s | 120 s | 300 s | 600 s |
+|---:|---:|---:|---:|---:|---:|
+| 0.50 | .04638 | .04453 | .04790 | .04805 | .04826 |
+| 1.00 | .00553 | .00175 | .000454 | .000389 | .000391 |
+| 1.50 | .01248 | .00394 | .00114 | .000372 | .000346 |
+| 2.00 | .01673 | .00517 | .00172 | .000709 | .000293 |
+| 2.25 | .01380 | .00502 | .00175 | .000670 | .000349 |
+| 2.50 | .03650 | .02614 | .02383 | .02254 | .02220 |
+| 2.75 | .10513 | .08996 | .08522 | .08370 | .08294 |
+| 3.00 | .02534 | .00801 | .00256 | .000664 | .000307 |
+
+The hard data minimum is much smaller than the useful one. Correlation ranking
+can operate with the target plus four qualifying same-slice volumes; a full
+eight-donor template needs nine usable volumes. Temporal and volume modes use a
+fixed-size nearest-neighbour pool, so once that pool exists extra recording
+length does not improve their template. Correlation ranking is different:
+more volumes enlarge the pool from which the best same-slice donors are chosen.
+
+For phase-compatible geometries, the large gain continues to roughly 100
+volumes. TR 1 s is effectively flat by 120 volumes, and TR 1.5 s changes only
+7% from 200 to 400 volumes. The TR 2–3 s cases still improve between the last
+two tested points, however, so this sweep does **not** prove a universal plateau
+at 200 volumes. A defensible development recommendation is therefore at least
+100 usable volumes and preferably about 200 for evaluating correlation-ranked
+slice FASTR. At TR 3 s, 200 volumes is the full ten minutes; at TR 2 s, ten
+minutes supplies 300. This is an evaluation target, not yet a refusal threshold
+for shorter recordings.
+
+The TR 0.5 s / 40-slice row was a parameterisation error, not a demonstrated
+short-TR limit: it treated 40 anatomical slices as 40 sequential acquisitions.
+An explicit multiband follow-up used the number of simultaneous acquisition
+groups instead. With exact group timing and fractional alignment, TR 0.5 s left
+only .000127/.000191/.000243/.000265/.000341 residual for MB
+1/2/4/5/8 (40/20/10/8/5 groups). Supplying 40 anatomical slices to the same
+engine left .00698–.06439. At TR 2 s the error was worse: true group timing
+left .00074–.00112, while the anatomical-slice interpretation reached .325.
+FASTR therefore needs actual acquisition-group timing (BIDS `SliceTiming`,
+sequence metadata or an explicit array), not anatomical slice count.
+
+#### Recorded rate versus internal upsampling
+
+At TR 3 s the compact sampling-rate sweep compared 20, 100 and 200 volumes.
+Factors were chosen to put low-rate recordings near a 2–2.5 kHz internal grid,
+while 5 kHz stayed at 1×:
+
+| recorded rate / factor | 20 volumes | 100 volumes | 200 volumes |
+|---|---:|---:|---:|
+| 250 Hz / 10× | .00505 | .000521 | .000465 |
+| 500 Hz / 5× | .00769 | .000729 | .000321 |
+| 1 kHz / 2× | .01704 | .000648 | .000460 |
+| 2 kHz / 1× | .02752 | .000469 | .000161 |
+| 5 kHz / 1× | .01261 | .000356 | .000108 |
+
+There is no separate minimum-TR rule emerging for each recorded rate: the
+dominant knee is still donor count, near 100–200 volumes in this experiment.
+Nor are equal effective rates interchangeable; interpolation phase and epoch
+geometry matter. On the same 40-volume, 500 Hz recording, 1/2/5/10× left
+.00541/.00560/.00256/.00129 residual while runtime rose
+.32/.77/3.78/14.12 s. Thus 5× captures most of the useful gain; 10× roughly
+halves the remaining artifact at almost four times the 5× runtime. On
+artifact-only **volume** epochs, 1/2/4/5/10× left
+.397/.118/.0515/.0328/.0207, confirming that upsampling itself helps volume
+subtraction. The earlier full-EEG 5× volume regression was therefore an
+interaction with template/brain handling, not evidence that interpolation
+cannot represent the artifact.
+
+#### Slice count exposed a timing-grid/alignment defect
+
+Slice performance is not monotonic in slice count. Examples at ten minutes are
+TR 1 s / 45 slices = .02634 while 20, 32, 40 and 50 slices are approximately
+.00028–.00046; TR 2 s / 30 and 32 slices = .05955 and .02219 while 20, 40 and
+50 slices are approximately .00029–.00035; TR 3 s / 45 slices = .05957 while
+the other requested counts are approximately .00031–.00033. Extra data does
+not remove these failures.
+
+The requested high-rate-grid experiment confirms a real rounding defect. At
+120 seconds, constructing nominal slice positions before the final high-rate
+rounding changed TR 1 s / 45 slices / 5× from .02677 to .000596, TR 2 s / 30
+slices / 5× from .06092 to .00131, TR 2.75 s / 40 slices / 5× from .08522 to
+.00250, and TR 3 s / 45 slices / 5× from .06245 to .00241. Supplying the
+simulator's exact slice positions gave similar or slightly better results.
+
+The apparent second defect was an evaluation confound. The timing-oracle
+harness above used integer-only alignment; its residuals match the integer-only
+rows in the confirmation run. Repeating the five formerly failing geometries
+for 120 s with exact positions **and fractional alignment** reduced every case
+below .00055: TR 2 s / 30 slices / 10× fell .000798 → .000158, TR 2 s / 32
+slices / 5× .001345 → .000274, TR 2.25 s / 40 slices / 10× .001037 → .000154,
+TR 2.5 s / 40 slices / 5× .001793 → .000380, and TR 3 s / 45 slices / 10×
+.001276 → .000262. Raw rows:
+`data/gradient-calibration/eva-fastr-recommend-duration-confirmation.csv`.
+
+The 60 s stage isolation explains why. Rounded slice positions can make the
+integer aligner choose p90 shifts of 3–10 high-rate samples and can make the
+residual *worse* than no alignment. Exact timing collapses that to 0–1 sample;
+the fractional stage then lowers the residual another 3–8×. For example, TR 2
+s / 30 slices / 10× moved from .12094 (rounded, fractional) to .000391 (exact,
+fractional); TR 3 s / 45 slices / 10× moved .12069 → .00121. Drift-tracked
+scaling consistently beat unscaled templates. The proposed engine fix is now
+one coherent change: represent supplied or rational acquisition positions on
+the upsampled grid, and keep fractional alignment enabled. Widening the
+Lanczos kernel is not the first-line fix.
+
+#### More donors plateau only for a stationary artifact
+
+The ten-minute window sweep separates recording length from donor locality. On
+the stationary simulation, widening the correlation search from ±8 to ±240
+same-slice volumes improved residual monotonically, .00332 → .000206. With a
+single gain regime change, the optimum was ±16–32 (.00087); ±120–240 was more
+than twice as bad. With phase changes, the knee was approximately ±64
+(.000919), after which it was flat. With combined gain and phase changes, ±16
+was best globally (.00250) and in the worst quarter (.00927); ±64 degraded to
+.00694 globally and .02751 in the worst quarter.
+
+Thus “ten minutes” is useful coverage, not a reason to use all ten minutes as
+one donor pool. About 100–200 usable volumes remains a good stationary
+evaluation target, but production selection should be regime-local or adaptive
+to motion/phase/gain changes. A fixed ±240-volume window is not a safe default.
+
+#### Brain-safety bound tightened: evaluate SNR and ERP transfer shape
+
+Paired-signal tests subtract the corrected no-signal baseline from the
+corrected signal-present run. Non-TR-locked transients were retained reasonably
+in artifact-present runs (r .93–.95, beta .99–1.03), although clean-only runs
+show donor-switching sensitivity. A deliberately repeated 1.5 s ERP is the
+important counterexample: slice temporal donors retained r .84 / beta .76,
+whereas plain correlation ranking retained only r .31–.33 / beta .12–.13 and
+same-slice/squared variants could nearly erase it. This makes the earlier
+artifact-only correlation results an upper bound on removal, not a candidate
+default. The artifact-present confidence gate and independent brain-safety
+acceptance test remain required.
+
+Finally, the existing 8-lobe delay round-trip is effectively transparent below
+0.3 cycles/sample, reaches relative MSE .0021 at 0.4 cycles/sample for a
+half-sample round trip, and rises to .139 at 0.45 cycles/sample. That localizes
+the wider-kernel opportunity to near-Nyquist content and supports evaluating
+estimation and application kernels separately rather than widening every slice
+path.
+
+The follow-up ERP sweep used exact acquisition timing and compared temporal
+versus correlation-ranked slice donors. For a 1.5 s ERP exactly locked to half
+of the 3 s TR, correlation ranking retained only 18–20% of amplitude across
+representative P50, N100, N170, P200, N200, P300, N400 and P600 shapes. Shape
+correlation was often deceptively high (.87–1.00), while the corrected-average
+SNR (12.2–13.3 dB) was approximately the no-ERP false-positive SNR
+(12.28 dB). In other words, the apparent ERP-sized feature was mostly the
+background/residual after the real ERP had been removed.
+
+| shape | temporal beta, locked | correlation beta, locked | correlation beta, detuned + jittered |
+|---|---:|---:|---:|
+| P50 | 1.087 | .198 | 1.003 |
+| N100 | 1.089 | .190 | 1.023 |
+| N170 | 1.033 | .186 | 1.029 |
+| P200 | .996 | .180 | 1.032 |
+| N200 | .916 | .191 | 1.038 |
+| P300 | .692 | .180 | 1.046 |
+| N400 | .574 | .182 | 1.047 |
+| P600 | .455 | .180 | 1.063 |
+
+Detuning the schedule to 1.47 s and adding onset/latency/amplitude jitter
+largely protected correlation-ranked ERPs (beta 1.00–1.06), but that does not
+make the method safe: real paradigms can be scanner-synchronised. Temporal
+donors avoided the comb-like erasure but increasingly attenuated and narrowed
+broad late components: locked beta fell from about 1.09 for P50/N100 to .69,
+.57 and .45 for P300/N400/P600. The P600 retained only .62 of absolute area.
+Raw component rows:
+`data/gradient-calibration/eva-fastr-recommend-erp-components.csv`.
+
+Real-data validation should therefore report at least (1) corrected ERP SNR,
+(2) the same-window false-positive SNR from trigger-matched no-event or
+permuted averages, (3) amplitude transfer/beta, (4) peak latency, (5)
+half-height width and (6) signed/absolute area. A high waveform correlation is
+not sufficient. Early narrow peaks need sample-level latency and peak checks;
+broad P300/N400/P600-like responses need area and width checks because they can
+retain a recognisable outline while losing most of their effect size.
+
+#### Simulator coverage and recommended extensions
+
+The simulator can already express every named component in this follow-up.
+`ERPConfig.components` accepts any number of explicitly placed components with
+independent source position/orientation, latency, width, Gaussian, biphasic or
+measured waveform, target/standard amplitude ratio, latency jitter and
+amplitude jitter. The shipped scenarios include bilateral N100 and an oddball
+N100 + P300 complex. P50, N170, P200/N200, N400 and P600 are currently
+constructible parameters, not validated named presets.
+
+Recommended simulator work, in priority order:
+
+1. Add provenance-backed JSON ERP-complex presets with ranges rather than a
+   hard-coded physiological enum: auditory P50/N1/P2/N2, visual P1/N170/P2,
+   oddball N1/P2/N2/P3a/P3b, semantic N400 and late P600 complexes.
+2. Allow component-by-condition latency, amplitude, source/topography and more
+   than the current target/standard contrast. Add correlated component jitter,
+   trial-to-trial covariance and subject-level hierarchical variation.
+3. Model habituation, refractory/sequence effects and overlapping responses;
+   the present components sum linearly and share one trial schedule.
+4. Add explicit acquisition groups, multiband factor, arbitrary/interleaved
+   slice-timing arrays and BIDS `SliceTiming` import to the gradient model.
+5. Add nonstationary artifact regimes (motion-driven phase/gain steps,
+   time-varying clock drift and group-specific waveforms) rather than relying
+   only on one smoothly modulated rank-one template.
+6. Generate one high-rate master recording and anti-aliased decimations for
+   sampling-rate comparisons, and emit per-component event-average/topography
+   truth plus the SNR/shape metrics above.
+
+### Remaining limitation
+
+The simulator supplies clean truth; a real corrected recording does not.
+TR-locked residual and removed variance can identify many artifact failures but
+cannot, by themselves, distinguish correctly removed artifact from
+trigger-correlated brain. The clean-signal acceptance test is therefore a
+development gate, not a new run-grade metric.
 
 ## ICA (`ICARunGrade`)
 

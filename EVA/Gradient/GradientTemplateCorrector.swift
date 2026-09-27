@@ -545,7 +545,8 @@ nonisolated enum GradientTemplateCorrector {
                 epochs: epochDiagnostics.sorted { $0.epoch < $1.epoch },
                 obsComponentCounts: obsComponentCounts,
                 ancAppliedChannels: ancAppliedChannels,
-                warnings: warnings
+                warnings: warnings,
+                upsampleFactor: factor
             )
         )
     }

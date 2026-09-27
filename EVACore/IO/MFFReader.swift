@@ -494,6 +494,17 @@ extension MFFEvent {
         onsetTimeSeconds + (durationSeconds ?? 0)
     }
 
+    /// Whether any part of this event falls inside `[startSeconds, endSeconds]`,
+    /// both ends inclusive.
+    ///
+    /// Interval overlap, not "does it start inside": a 400 ms blink that began
+    /// 100 ms before an epoch still covers the epoch's first 300 ms (ROADMAP
+    /// MRI-1, adopted for all artifact rejection 2026-09-26). An event with no
+    /// duration is a point, so this reduces to the old start-inside test.
+    nonisolated func overlaps(startSeconds: Double, endSeconds: Double) -> Bool {
+        onsetTimeSeconds <= endSeconds && endTimeSeconds >= startSeconds
+    }
+
     /// The interval the event covers, or `nil` when it records no duration and
     /// is therefore a point in time rather than a span.
     nonisolated var spanSeconds: ClosedRange<Double>? {

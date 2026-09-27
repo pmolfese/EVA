@@ -27,6 +27,10 @@ import Foundation
 /// All sample indices are on the **upsampled** axis — i.e. already multiplied by
 /// the configured upsample factor.
 nonisolated struct GradientEpochLayout: Sendable {
+    /// A trigger interval longer than this multiple of the median is treated as
+    /// one or more missing markers. Shared with `GradientCoverage`.
+    static let missingTriggerGapFactor = 1.5
+
     /// Epoch trigger positions, ascending, on the upsampled sample axis.
     let triggers: [Int]
     /// Volume index each epoch belongs to, 0-based.
@@ -128,9 +132,20 @@ nonisolated struct GradientEpochLayout: Sendable {
         var lookup: [Int: Int] = [:]
         triggers.reserveCapacity(volumes.count * slices)
 
-        var previousInterval = volumes[1] - volumes[0]
+        // A gap much longer than the typical TR is a missing marker, not a long
+        // volume: the scanner does not change its TR mid-run. Subdividing the
+        // gap would place every slice of that volume at the wrong spacing, so
+        // such a volume is sliced on the median TR instead and the TRs whose
+        // markers are missing are left uncovered (and reported as such — see
+        // `GradientCoverage.missingTriggerGaps`). ROADMAP MRI-1, 2026-09-26.
+        let volumeIntervals = zip(volumes, volumes.dropFirst()).map { $1 - $0 }.sorted()
+        let typicalInterval = volumeIntervals[volumeIntervals.count / 2]
+        func sliced(_ interval: Int) -> Int {
+            Double(interval) > Self.missingTriggerGapFactor * Double(typicalInterval) ? typicalInterval : interval
+        }
+        var previousInterval = sliced(volumes[1] - volumes[0])
         for v in volumes.indices {
-            let interval = v + 1 < volumes.count ? volumes[v + 1] - volumes[v] : previousInterval
+            let interval = v + 1 < volumes.count ? sliced(volumes[v + 1] - volumes[v]) : previousInterval
             if v + 1 < volumes.count { previousInterval = interval }
             guard interval > 0 else { continue }
 

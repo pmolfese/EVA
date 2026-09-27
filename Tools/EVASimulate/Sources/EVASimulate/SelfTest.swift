@@ -118,15 +118,29 @@ nonisolated enum SelfTest {
             // exactly on the trigger cannot subtract that part, and the leftover
             // puts a floor under the residual that has nothing to do with the
             // clock drift this check is measuring. Real correctors pad for the
-            // same reason.
-            let padSeconds = 0.004
+            // same reason. The pad is the template's own anti-alias margin: the
+            // band-limited slice rings for that long on either side (ROADMAP
+            // MRI-1, 2026-09-26; it was 4 ms while the filter ran on the bare
+            // window and cut the ringing off).
+            let padSeconds = GradientArtifactModel.antiAliasMarginSeconds
             let corrected = averageArtifactSubtraction(
                 channels: noisy,
                 onsetsSeconds: injection.volumeOnsetsSeconds.map { $0 - padSeconds },
                 epochSamples: epochSamples,
                 samplingRate: config.samplingRate
             )
-            return (eeg.channels, corrected, config)
+            // Scored over the interior volumes only. The first volume has no
+            // predecessor ringing into it and the last no successor, so their
+            // epochs differ from every other one by a few tens of ms of ringing
+            // — which, at 7000 µV against ~11 µV of EEG, is enough to swamp the
+            // clock-drift effect this check measures. Same reason as the
+            // pre-scan above.
+            let onsets = injection.volumeOnsetsSeconds
+            guard onsets.count >= 4 else { return (eeg.channels, corrected, config) }
+            let lower = Int(((onsets[1] - padSeconds) * config.samplingRate).rounded(.down))
+            let upper = Int(((onsets[onsets.count - 1] - padSeconds) * config.samplingRate).rounded(.down))
+            let interior = max(0, lower)..<min(upper, eeg.channels[0].count)
+            return (eeg.channels.map { Array($0[interior]) }, corrected.map { Array($0[interior]) }, config)
         }
 
         let locked = gradientOnlyRun(clockOffset: 0)
@@ -137,7 +151,9 @@ nonisolated enum SelfTest {
             samplingRate: locked.config.samplingRate
         )
         // With the artifact cancelling exactly, the only residual is the EEG the
-        // template averaged in: std(EEG)/sqrt(N), so SNR should sit at sqrt(N).
+        // template averaged in: std(EEG)/sqrt(N), so SNR should sit at sqrt(N) —
+        // N being every volume, since all of them built the template even though
+        // only the interior ones are scored.
         let ceiling = Double(locked.config.volumeCount).squareRoot()
         outcomes.append(Outcome(
             name: "Locked clocks: template subtraction cancels the artifact exactly",
@@ -220,7 +236,12 @@ nonisolated enum SelfTest {
         let templates: [(String, HighRateTemplate)] = [
             ("BCG", BCGArtifactModel.waveformTemplate(config: templateConfig)),
             ("blink", OcularArtifactModel.blinkTemplate(config: templateConfig)),
-            ("gradient slice", GradientArtifactModel.syntheticTemplate(config: templateConfig))
+            ("gradient slice", GradientArtifactModel.syntheticTemplate(config: templateConfig)),
+            // What is actually injected. The raw slice passed this check while
+            // the anti-aliased one — filtered on its bare window — started and
+            // ended at a third of its peak-to-peak (ROADMAP MRI-1, 2026-09-26).
+            ("anti-aliased gradient slice", GradientArtifactModel.antiAliasedTemplate(
+                GradientArtifactModel.syntheticTemplate(config: templateConfig), config: templateConfig))
         ]
         for (name, template) in templates {
             outcomes.append(Outcome(

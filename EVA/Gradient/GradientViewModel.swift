@@ -64,6 +64,19 @@ enum GradientDonorRanking: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// What a gradient run does with the stretches of data it could not correct
+/// reliably (ROADMAP MRI-1). Serialized as `unreliableEvents`, so a replay marks
+/// — or deliberately does not mark — the same spans the original run did.
+enum GradientUnreliablePolicy: String, CaseIterable, Identifiable, Sendable {
+    /// Write each merged span as a duration-bearing `MRI_GRAD_UNRELIABLE`
+    /// event on the corrected signal, where PSA can reject on it.
+    case markEvents = "mark"
+    /// Report the spans in the run details and audit log only.
+    case reportOnly = "report"
+
+    var id: String { rawValue }
+}
+
 @MainActor
 @Observable
 final class GradientViewModel {
@@ -104,6 +117,11 @@ final class GradientViewModel {
     /// rail's pill by `GradientRunGrade`. `nil` before a run, or when the
     /// triggers left fewer than two measurable TR epochs.
     var runMetrics: GradientRunMetrics?
+
+    /// Per-epoch/per-volume coverage of the last run: what was corrected, what
+    /// sat at the recording's edge, and what could not be trusted. `nil` before
+    /// a run. See `GradientCoverage`.
+    var coverage: GradientCoverage?
 
     // MARK: Run state
     var isProcessing = false
@@ -245,6 +263,28 @@ final class GradientViewModel {
     var motionRadiusMm = 50.0
     var motionMetric = GradientMotionMetric.translationOnly
 
+    /// Whether unreliable spans become `MRI_GRAD_UNRELIABLE` events. On by
+    /// default: marking them costs nothing, and PSA decides separately whether
+    /// to reject on them.
+    var unreliablePolicy = GradientUnreliablePolicy.markEvents
+
+    /// Why this configuration cannot run, when it needs a motion file and none
+    /// is loaded — Moosmann always, any other method when "Exclude high-motion
+    /// TRs" is on. `nil` when nothing is missing.
+    ///
+    /// A refusal, not a fallback (ROADMAP MRI-1, owner 2026-09-26). Without
+    /// motion, Moosmann quietly became moving-average FASTR and censoring
+    /// quietly censored nothing, while the step written to `eva.xml` still named
+    /// the method and the switch — a run the file did not describe. Motion
+    /// cannot be found automatically: the operator supplies the 1D file.
+    var missingRequiredMotion: String? {
+        let needsMotion = method.usesMotion || excludeHighMotion
+        guard needsMotion, (motionParameters?.count ?? 0) < 2 else { return nil }
+        return method.usesMotion
+            ? "\(method.label) needs this recording's motion file. Load it with Configure Motion… before applying."
+            : "“Exclude high-motion TRs” is on but no motion file is loaded. Load one with Configure Motion…, or turn the option off."
+    }
+
     // MARK: TR-marker alignment
     var skipStart = 0
     var skipEnd = 0
@@ -303,6 +343,7 @@ final class GradientViewModel {
         correctedPNSSignal = nil
         auditLogLines = []
         runMetrics = nil
+        coverage = nil
     }
 
     func resetForClose() {
@@ -310,6 +351,7 @@ final class GradientViewModel {
         correctedPNSSignal = nil
         auditLogLines = []
         runMetrics = nil
+        coverage = nil
         isProcessing = false
         progress = 0
         operationProgress = nil
@@ -579,6 +621,7 @@ final class GradientViewModel {
         params["skipEnd"] = "\(skipEnd)"
         params["appliesToPNS"] = "\(appliesToPNS)"
         params["excludeHighMotion"] = "\(excludeHighMotion)"
+        params["unreliableEvents"] = unreliablePolicy.rawValue
         return params
     }
 
@@ -674,6 +717,9 @@ final class GradientViewModel {
         if let v = p["skipEnd"].flatMap(Int.init) { skipEnd = v }
         if let v = p["appliesToPNS"] { appliesToPNS = (v == "true") }
         if let v = p["excludeHighMotion"] { excludeHighMotion = (v == "true") }
+        if let v = p["unreliableEvents"].flatMap(GradientUnreliablePolicy.init(rawValue:)) {
+            unreliablePolicy = v
+        }
     }
 
     // MARK: - Apply (the transform itself)
@@ -726,7 +772,13 @@ final class GradientViewModel {
         pnsSignal: MFFSignalData?,
         onApplied: @escaping () -> Void
     ) async {
+        if let missingRequiredMotion {
+            statusMessage = missingRequiredMotion
+            statusIsError = true
+            return
+        }
         let trSamples = trimmedTRMarkers(in: signal)
+        let allTRCount = signal.events.filter { $0.code == trMarkerCode }.count
         let pnsInput = appliesToPNS ? pnsSignal : nil
         let pnsTRSamples = pnsInput.map {
             trimmedTRMarkers(in: signal, samplingRate: $0.samplingRate)
@@ -788,7 +840,7 @@ final class GradientViewModel {
                     correctedEpochs: corrected.correctedEpochs,
                     totalEpochs: corrected.totalEpochs
                 )
-                return (corrected.channels, correctedPNSData, corrected.report, metrics)
+                return (corrected.channels, correctedPNSData, corrected.report, metrics, corrected.coverage)
             }
             let result = try await withTaskCancellationHandler(
                 operation: { try await worker.value },
@@ -808,7 +860,20 @@ final class GradientViewModel {
             updateFinalizingProgress()
 
             auditLogLines = result.2
-            runMetrics = result.3
+            var coverage = result.4
+            coverage.addMissingTriggerGaps(triggers: trSamples, sampleCount: signal.data.first?.count ?? 0)
+            if allTRCount > skipStart + skipEnd {
+                coverage.trimmedLeadingVolumes = skipStart
+                coverage.trimmedTrailingVolumes = skipEnd
+            }
+            self.coverage = coverage
+            var metrics = result.3
+            metrics?.edgeEpochs = coverage.epochCount(.edge)
+            metrics?.unreliableEpochs = coverage.epochs.filter(\.status.isUnreliable).count
+            metrics?.coverageNotes = coverage.runNotes.isEmpty ? nil : coverage.runNotes
+            runMetrics = metrics
+            auditLogLines.append(contentsOf: coverage.auditLogLines(
+                operation: Self.operation, samplingRate: signal.samplingRate))
             if let metrics = result.3 {
                 auditLogLines.append(
                     "\(Self.operation) quality: residualP90="
@@ -851,7 +916,12 @@ final class GradientViewModel {
                     stageName: Self.operation
                 )
             )
-            correctedSignal = signal.replacingSamples(result.0)
+            let unreliableEvents = unreliablePolicy == .markEvents
+                ? coverage.unreliableEvents(samplingRate: signal.samplingRate)
+                : []
+            correctedSignal = signal.replacingSamples(result.0).replacingEvents(
+                GradientCoverage.replacingUnreliableEvents(in: signal.events, with: unreliableEvents)
+            )
             if let pnsInput, let correctedPNSData = result.1 {
                 correctedPNSSignal = pnsInput.replacingSamples(correctedPNSData, signalTypeSuffix: "MRI")
             } else {
@@ -880,7 +950,8 @@ final class GradientViewModel {
     private func correctionClosure(
         samplingRate: Double
     ) -> @Sendable ([[Float]], [Int], @escaping (Double) -> Void) throws -> (
-        channels: [[Float]], report: [String], correctedEpochs: Int, totalEpochs: Int
+        channels: [[Float]], report: [String], correctedEpochs: Int, totalEpochs: Int,
+        coverage: GradientCoverage
     ) {
         switch method.engine {
         case .sliceTemplate:
@@ -896,7 +967,12 @@ final class GradientViewModel {
                 )
                 return (
                     result.channels, Self.report(for: result.diagnostics, method: label),
-                    result.diagnostics.correctedEpochCount, result.diagnostics.epochs.count
+                    result.diagnostics.correctedEpochCount, result.diagnostics.epochs.count,
+                    GradientCoverage.from(
+                        diagnostics: result.diagnostics,
+                        sampleCount: channels.first?.count ?? 0,
+                        usesMotionInformedDonors: config.templateScheme == .motionInformed
+                    )
                 )
             }
 
@@ -913,7 +989,9 @@ final class GradientViewModel {
                 )
                 return (
                     result.channels, Self.report(for: result.diagnostics, method: label),
-                    result.diagnostics.correctedEpochCount, result.diagnostics.epochs.count
+                    result.diagnostics.correctedEpochCount, result.diagnostics.epochs.count,
+                    GradientCoverage.from(
+                        diagnostics: result.diagnostics, sampleCount: channels.first?.count ?? 0)
                 )
             }
 
@@ -937,7 +1015,11 @@ final class GradientViewModel {
                 return (
                     result.cleanedChannels,
                     Self.report(for: result.eventSummaries, method: label, correlationFloor: floor),
-                    result.eventSummaries.count - skipped, result.eventSummaries.count
+                    result.eventSummaries.count - skipped, result.eventSummaries.count,
+                    GradientCoverage.from(
+                        localSummaries: result.eventSummaries,
+                        triggers: triggers,
+                        sampleCount: channels.first?.count ?? 0)
                 )
             }
         }

@@ -32,8 +32,8 @@ Across sections, the ordered spine is unchanged:
 | Order | Milestone | Section | Status |
 |---:|---|---|---|
 | 1 | **SI-4 — Adversarial evaluation** | [§2 Processing & Cleaning](#2-processing--cleaning) | MEASURED; run grades shipped for PCA-S, gradient, ICA, artifact clean; MAAC deferred |
-| 2 | **PB-1 — Batch/replay completion** | [§11 Batch, Replay & Provenance](#11-batch-replay--provenance) | NOT STARTED |
-| 3 | **MRI-1 — FASTR reliability and motion semantics** | [§4 MRI / fMRI](#4-mri--fmri-artifact-correction) | NOT STARTED |
+| 2 | **PB-1 — Batch/replay completion** | [§11 Batch, Replay & Provenance](#11-batch-replay--provenance) | PLANNED 2026-09-26, parked for MRI-1 |
+| 3 | **MRI-1 — FASTR reliability and motion semantics** | [§4 MRI / fMRI](#4-mri--fmri-artifact-correction) | IN PROGRESS (motion safety, coverage, provenance, PSA done 2026-09-26; engine defects + UI next) |
 | 4 | **SI-5 — Ocular MSEC/PCA-S** | [§2 Processing & Cleaning](#2-processing--cleaning) | NOT STARTED |
 | 5 | **TW-4 / TW-5 — Trial diagnostics and exclusions** | [§5 Trial-wise](#5-epoching-averaging--trial-wise) | IN PROGRESS |
 | 6 | **UI-1 / UX-1 — Display density, Figure Composer 2** | [§10 UI, Figures & Export](#10-ui-figures--export) | NOT STARTED |
@@ -844,21 +844,103 @@ Nine gradient-correction engines ship and have been measured head-to-head
 semantics: what the correction does when motion data is missing or the
 correction is untrustworthy.
 
-## MRI-1 — FASTR reliability and motion semantics — **NOT STARTED**
+## MRI-1 — FASTR reliability and motion semantics — **IN PROGRESS (A + B done 2026-09-26)**
 
-- [ ] Decide and document strict Bergen translation-speed versus EVA full-FD
-  semantics for Moosmann; expose the alternative explicitly.
-- [ ] Add real explanation popovers for MRI-gradient options.
-- [ ] Serialize motion metric and unreliable-epoch policy; pause/stop when motion
-  is required but unavailable unless a resolver is configured.
-- [ ] Return per-volume coverage diagnostics and distinguish normal edge TRs
-  from correction fallback/failure.
-- [ ] Emit duration-bearing `MRI_GRAD_UNRELIABLE` provenance events by default
-  for genuinely unreliable corrections.
-- [ ] Add PSA rejection for unreliable MRI correction and use interval overlap,
-  not event-start-only tests.
-- [ ] Investigate FASTR's low non-artifact correlation (~0.5–0.7 versus AAS
-  >0.85), including alpha-scaling and interpolation/decimation effects.
+Worked in four groups: A motion semantics and safety, B coverage → provenance →
+PSA (both done), then C engine defects and D UI, to be worked through with the
+owner.
+
+- [x] **Motion metric semantics — done 2026-09-26.** Moosmann et al. 2009 Eq. 5
+  defines motion as translation *speed*, √(Δx² + Δy² + Δz²), thresholded at
+  0.3 mm, translations only. EVA's `translationOnly` is the L1 sum of the same
+  differences (up to √3× larger). Added `GradientMotionMetric.translationSpeed`
+  as a third, named metric; `translationOnly` stays the default so existing
+  scripts flag the same volumes. The Motion sheet's plot, flagged count, and
+  slider now follow the selected metric — they read all-six FD whatever the
+  picker said. Documented in `docs/provenance/fastr-functional-spec.md`,
+  including the one paper rule not adopted (closely spaced events: the paper
+  keeps only the larger as a barrier).
+- [ ] Add real explanation popovers for MRI-gradient options. *(D)*
+- [x] **Motion-required refusal and unreliable-epoch policy — done 2026-09-26.**
+  `GradientViewModel.missingRequiredMotion`: Moosmann, or any method with
+  "Exclude high-motion TRs" on, refuses to run without a motion file. Interactive
+  Apply is disabled with the reason; windowed replay pauses on a "Motion File
+  Needed" gate and stops the file (batch: Needs Input) if Continue is pressed
+  without one; headless stops at the step. Headless also now stops when the
+  gradient run itself failed, instead of carrying the uncorrected signal on.
+  **No resolver** (owner): the operator supplies the 1D file; EVA does not
+  search for one. The policy is serialized as `unreliableEvents = mark|report`;
+  the metric was already serialized.
+- [ ] **Follow-up: attach per-file side inputs to a batch** (motion 1D files
+  first) so a motion-dependent script can run in batch. Owner, 2026-09-26: "ponder
+  a way to add files to be used in the batch alongside the MFF". Until then a
+  batch with such a step stops each file at it.
+- [x] **Per-volume coverage — done 2026-09-26.** `GradientCoverage` classifies
+  every epoch corrected / edge / watch / unreliable / failed from the engines'
+  existing diagnostics (no engine change, no parity question), rolls up per
+  volume, and reports skip-start/skip-end trims separately. Edge epochs no
+  longer count against the run grade's coverage.
+- [x] **`MRI_GRAD_UNRELIABLE` events — done 2026-09-26.** On by default.
+  Unreliable = uncorrected with no eligible donors or an empty template, donors
+  taken across a motion barrier, a local-template target skipped for too few
+  donors (owner-agreed list). Benign fallbacks (rejected scale, correlation
+  fallback) and run-level notes (motion file padded/truncated, Moosmann with no
+  supra-threshold motion) grade **Watch** in the pill but are not events. Spans
+  merge, carry duration and reasons, and a re-run replaces them.
+- [x] **PSA rejection and interval overlap — done 2026-09-26.**
+  `skipUnreliableMRI` (default on; absent in an older `segment` step means off,
+  so old scripts rebuild the same epochs) adds an "MRI correction unreliable"
+  rejection group, interactive and headless. **All** artifact rejection now
+  tests interval overlap (`MFFEvent.overlaps`) rather than event start —
+  accepted by the owner as a deliberate change to PSA results; point events
+  behave exactly as before.
+- [x] **FASTR low brain correlation / C5 ablation — MEASURED 2026-09-27,
+  SAFETY FIX PROPOSED.** Brain-only and artifact-present runs toggled
+  upsampling, template scaling, alignment, sub-sample shifting, OBS and ANC in
+  volume and slice mode. The low artifact-present r is mainly residue: clean
+  baselines retain r 0.97–0.98 while artifact baselines read 0.24–0.42, with
+  clean truth distortion 0.067–0.078. Alignment is necessary (turning it off
+  sends artifact truth to 666–786); scaling barely changes artifact truth.
+  Slice correlation ranking reaches truth 4.15 / r 0.51, but changes 19.5 % of
+  clean variance at the default threshold and 54.7 % when made permissive.
+  Slice OBS reaches truth 0.60 / r 0.87 but changes 29.6 % of clean variance;
+  ANC has the same unsafe tradeoff. Proposed fix: an independent
+  artifact-present confidence gate before correlation ranking, OBS and ANC,
+  followed by a shared phase- or cross-channel-artifact-based same-slice donor
+  strategy. Initial development bound: clean truth ≤ 0.10 and r ≥ 0.95 for a
+  default configuration. OBS/ANC stay optional and permissive correlation must
+  not become the slice default. Full table and interpretation:
+  `docs/provenance/run-grade-calibration.md` § FASTR C5; raw data:
+  `docs/provenance/data/gradient-calibration/eva-fastr-c5-ablation.csv`.
+- [x] **C5 acquisition-length / rate / slice-grid follow-up — MEASURED
+  2026-09-27, TIMING/ALIGNMENT DEFECT BOUNDED.** The requested 0.5–3 s TR, 30 s–10
+  min, volume/20/30/32/40/45/50-slice and 250/500/1000/2000/5000 Hz grids are
+  complete. Correlation-ranked slice FASTR has a hard minimum of five usable
+  volumes (nine for all eight requested donors), but the measured artifact-only
+  knee is much later: about 100 volumes, with ~200 the safer evaluation target.
+  TR 1 s was flat by 120 volumes; TR 1.5 s was nearly flat by 200; the 2–3 s
+  cases still improved at the ten-minute boundary, so no universal 200-volume
+  plateau is claimed. Volume/temporal modes have a fixed donor pool and receive
+  no comparable benefit from more TRs. Sampling rate has no independent
+  minimum in this grid; donor count dominates, while 5× generally captures most
+  of the 500 Hz upsampling benefit and 10× costs ~4× more than 5× for about half
+  the remaining artifact. Slice-count failures are arithmetic, not monotonic:
+  e.g. ten-minute TR 2 s residual is .0596 at 30 slices and .000293 at 40.
+  Retaining slice positions until the high-rate grid changes TR 2 s / 30 slices
+  / 5× from .0609 to .00131. The remaining factor-specific failures were an
+  integer-only evaluation confound: exact timing plus fractional alignment put
+  all five targeted 120 s confirmations below .00055 residual at both 5× and
+  10×. Proposed engine fix: accept actual acquisition-group timing (including
+  multiband), preserve rational positions until the upsampled grid and keep
+  fractional alignment enabled. A ten-minute donor pool helps only while the
+  artifact is stationary: stationary residual improved through ±240 volumes,
+  but combined phase/gain steps were best at ±16 and degraded 2.8× by ±64, so
+  selection must be regime-local/adaptive. Repeated-ERP retention rejects
+  correlation ranking as a default: half-TR-locked P50–P600 shapes retained
+  only 18–20% amplitude even when shape r was .87–1.00 and corrected-average
+  SNR matched the no-ERP false-positive SNR. Full interpretation and raw CSVs:
+  `docs/provenance/run-grade-calibration.md` § FASTR C5 follow-up and
+  `docs/provenance/data/gradient-calibration/eva-fastr-{next,recommend}-*.csv`.
 - [ ] Add `aff12` affine-motion decomposition to the motion panel.
 - [x] **FASTR alignment slips by a whole slice on volume epochs — FIXED
   2026-09-26.** The default search radius (`period / 20`) reached the
@@ -874,30 +956,85 @@ correction is untrustworthy.
   Unsynced 500 Hz is unchanged (~1300) because that is the simulator's floor,
   next item. Numbers: `docs/provenance/run-grade-calibration.md` § Gradient →
   Engine findings.
-- [ ] **Simulator gradient template is not band-limited** (EVACore
-  `GradientArtifactModel.antiAliasedTemplate`, found 2026-09-26). The FFT
-  low-pass runs on the template's own window, so the result starts at +0.28 and
-  ends at −0.34 of peak-to-peak, breaking `HighRateTemplate`'s start-and-end-at-zero
-  rule; 1.5 % of its energy sits above the output Nyquist and aliases. Even with
-  exact sub-sample phases FASTR cannot get below truth ~1300 at 500 Hz on it;
-  zero-padded by 30 ms before filtering, FASTR reaches 60. Fix by padding (or
-  tapering) before the filter. Moves every simulated gradient recording, so
-  re-baseline `Tools/EVASimulate/determinism-baseline.txt` and re-run the
-  gradient calibration and method comparisons afterwards. `--gradient-template`
-  inputs go through the same filter.
-- [ ] **FASTR fractional delay: 8 Lanczos lobes limit a band-limited artifact.**
-  24 lobes took the padded-template case from truth ~59 to ~23 (CPU-only
-  experiment). The Metal kernels hard-code 16 taps (`delayTaps + epoch * 16`,
-  `tap - 7`), so widening it needs both backends and the parity suite. Related to
-  the low non-artifact correlation item above.
-- [ ] **Local-template engine leaves the last sample of every TR epoch
-  uncorrected at 1 kHz** (synced clocks; that phase carries ~190× the typical
-  error). Likely an epoch-length rounding off-by-one in `correctGradient`.
-- [ ] **Allen IAR over-subtracts when TR markers are missing** (removed variance
-  2–4 with 5–20 % of markers dropped — it subtracts a template where there is no
-  artifact) and does worse than local-median when clocks are synced (98 %
-  coverage; residual ~850× brain vs ~4×). The run grade now flags the first as
-  Poor; the engine should refuse or skip rather than subtract.
+- [x] **Simulator gradient template is not band-limited — FIXED 2026-09-26.**
+  `GradientArtifactModel.antiAliasedTemplate` now filters the template padded
+  with 30 ms of silence each side (`antiAliasMarginSeconds`), keeps the margin,
+  tapers its outer 10 ms to zero, and moves the lead-in with it. Edge value < 1 %
+  of peak (was +0.28 / −0.34), energy above the output Nyquist < 0.1 % (was
+  1.5 %). Median truth residual, 90 s at 152 µs/s drift: FASTR 178 → 7.4 at
+  500 Hz and 17 → 1.3 at 1 kHz; local median and Allen IAR barely move (they
+  cannot shift by a sub-sample). Determinism baseline re-recorded (all 8
+  scenarios have gradient on); simulator self-test now also checks the injected
+  (anti-aliased) template, and its locked-clock check pads by the new margin and
+  scores interior volumes. Gradient calibration re-run the same day: bands kept
+  (Good < 0.10 flags 127/128 truth-poor runs, Poor ≥ 0.30 flags 121/128), and
+  the metric now tracks truth (Spearman 0.03 → 0.54 broadband, 0.10 → 0.81
+  ≤ 40 Hz) — `docs/provenance/run-grade-calibration.md` § Gradient. Note the
+  filter is zero-phase, so the modelled artifact rings ~30 ms *before* each
+  slice — right for an amplifier whose linear-phase decimation filter's delay
+  is corrected (EGI does this), not for a causal analog one.
+- [x] **FASTR fractional delay: wider Lanczos kernel — MEASURED 2026-09-26, NOT
+  ADOPTED.** CPU, 150 s at 152 µs/s drift, 4 donors/side, median across 8
+  channels (truth = var(corrected − clean)/var(clean); r = correlation with clean):
+
+  | configuration | 8 lobes | 24 lobes |
+  |---|---|---|
+  | 500 Hz, volume epochs | truth 6.3, r 0.44, 4.8 s | 2.2, r 0.64, 10.4 s |
+  | 1 kHz, volume epochs | 1.16, r 0.75, 12.8 s | 0.63, r 0.83, 24.1 s |
+  | 500 Hz, 41 slices, ×10 upsample | **29.5**, r 0.26, 49 s | **43.7**, r 0.22, 102 s |
+
+  A large win on volume epochs at 2× the CPU time, but a loss on slice epochs —
+  the configuration FASTR is normally run in. Extracting each epoch with real
+  samples beyond its window before the delay (instead of edge-clamping inside
+  it) changed nothing (2.2 → 2.1; slices 43.6), so window-edge clamping at
+  extraction is not the cause. Not shipped: that apparent 5× slice deficit
+  compares temporal-neighbour slice epochs at 10× with volume epochs at 1×;
+  C5 subsequently showed that donor policy and upsampling, not slice geometry
+  alone, dominate the difference. The original lead was that the layout
+  places slice triggers at `round(slice × interval / slices)` on the *original*
+  sample grid before upsampling, so with ×10 upsampling every slice trigger is
+  off by up to half an original sample and alignment has to recover it. C5's
+  timing oracle confirmed that lead for several geometries. Its apparent
+  factor-specific failures with exact positions used integer-only alignment;
+  the fractional confirmation put every targeted case below .00055 residual.
+  The 8-lobe
+  round trip is near-transparent through 0.3 cycles/sample and fails mainly
+  near Nyquist (relative MSE .139 at 0.45 cycles/sample, half-sample round trip),
+  so estimation and application kernels should be separated before any global
+  widening. The Metal kernels still hard-code 16 taps; widening needs both
+  backends and the parity suite.
+- [x] **Local-template "last sample of every TR epoch" — RE-DIAGNOSED
+  2026-09-26: not an engine defect.** Folded by TR phase over interior epochs the
+  residual is flat (worst phase 0.6× brain variance at 500 Hz and 1 kHz, old and
+  new simulator template alike). The outlier is **only the final TR epoch**:
+  every donor epoch ends with the next volume's pre-trigger content (the old
+  template's wrapped ringing; now the zero-phase filter's pre-ringing), and the
+  final epoch has no next volume — one sample at 2264× brain with the old
+  template, the last ~15 samples with the new one. Averaged into the fold, that
+  one epoch read as "~190× at the last phase of every TR". Every template method
+  shares this edge; real data sees it only in the last few ms of the scan.
+  No code change. **Closed by the owner 2026-09-26.**
+- [x] **Allen IAR and missing TR markers — FIXED 2026-09-26 (re-diagnosed).**
+  On the band-limited simulator Allen IAR no longer over-subtracts with dropped
+  markers (removed variance 0.84–0.87), so the over-subtraction was the old
+  template's aliasing. Two real defects remained, both fixed:
+  - **The final TR of a recording that stops with the scan was never
+    corrected.** One sample short of its closing sample, the final window fell
+    out of bounds and the whole TR kept its full artifact — that alone made
+    Allen IAR read ~100× worse than local-median on clock-synced data (truth 268
+    vs 1.3). `GradientAAS` now pads by one repeated sample and crops, like
+    `GradientTemplateCorrector`. Recalibrated: synced truth 268 → 3.8 (500 Hz),
+    124 → 39 (1 kHz), coverage 0.98 → 1.00; grade bands unchanged. Allen IAR
+    at synced 1 kHz is still ~170× local-median (39 vs 0.23) — unexplained.
+  - **Missing markers went unreported.** Every engine corrects the TR after each
+    marker it has, so the TRs whose markers are missing kept their artifact with
+    no epoch to report on. A trigger interval > 1.5× the median now becomes a
+    `missingTrigger` stretch in `GradientCoverage` → an `MRI_GRAD_UNRELIABLE`
+    span and a Watch note in the pill (owner: correct what it can, mark the
+    gaps, warn). And `GradientEpochLayout` slices a volume before a missing
+    marker on the median TR instead of subdividing the whole gap.
+  - Allen IAR with *jittered* markers still over-subtracts badly (removed
+    variance 61 at 10 samples, 211 at 50); it grades Poor. Not addressed.
 
 **Exit:** motion-dependent correction refuses unsafe inputs, unreliable regions
 round-trip into PSA, and signal attenuation is explained or bounded.
@@ -1792,6 +1929,9 @@ operator, and incompatible source/operator combinations fail during validation.
   trial order and timing.
 - [ ] Preserve the current ERP factor-isolated random streams while generalizing the
   mechanism to other activation types.
+- [ ] Add sequence/repetition state for habituation, refractoriness and nonlinear
+  overlap instead of assuming every component is a linearly summed response to the
+  same memoryless trial schedule.
 
 **Exit:** an ERP and ERSP on different components can share the exact same target event
 schedule, and truth records the schedule once.
@@ -1804,6 +1944,14 @@ Implement the smallest useful general set first:
   optional non-Gaussian burstiness.
 - [ ] **ERP:** multi-peak analytic waveforms, measured-template input and the current
   latency/amplitude/skew/omission controls.
+- [ ] Ship provenance-backed JSON complexes (with parameter ranges, not a closed
+  physiological enum): auditory P50/N1/P2/N2, visual P1/N170/P2, oddball
+  N1/P2/N2/P3a/P3b, semantic N400 and late P600. Existing bilateral N100 and
+  N100+P300 scenarios are starting fixtures; the other names are currently only
+  manually expressible component parameters.
+- [ ] Permit per-condition component latency, amplitude and source/topography, more
+  than target/standard, correlated component jitter/amplitude and subject-level
+  hierarchical variability.
 - [ ] **ERSP/ERD:** narrow- or broadband carriers; event-related burst or suppression;
   taper, baseline level, phase and amplitude modulation.
 - [ ] **Data:** external continuous or per-trial time series with declared sampling
@@ -3191,17 +3339,83 @@ Neither belongs inside the artifact-correction milestone.
 The batch/replay suite and the REWIND history graph are operational and hardened
 (RW-1 closed 2026-08-27). What remains are usability edges.
 
-## PB-1 — Processing and batch completion — **NOT STARTED**
+## PB-1 — Processing and batch completion — **NOT STARTED (planned 2026-09-26)**
 
 The suite is operational; these are deferred usability edges, not prerequisites
-for ordinary batch work.
+for ordinary batch work. Planned 2026-09-26 and parked in favour of MRI-1; the
+plan below records what the code does today and the proposed design, so it can
+be picked up without re-deriving it.
 
-- [ ] **Partial-then-resume:** run a portable prefix headlessly, then load its
-  partially processed signal into a fresh windowed session for decision steps.
-- [ ] **Skip all decisions:** optional per-file policy that drops unsupported
-  decision steps rather than making the entire script windowed.
+**What drives a batch windowed today.** Headless runs only when no included step
+would pause; a file that then needs a human is marked Needs Input and nothing is
+written. In practice the windowed path is forced by gradient's "Review" tick (on
+by default), Review Each mode, a PCA-S step when some file lacks beats or
+coordinates, and a recorded `trialExclusion`. ICA and artifact cleaning are either
+`.skip` (no sidecar) or `.resolvedFromPayload`, so they never pause a batch.
+Windowed batch replays the *whole* script in each file's window, slow steps
+(FASTR, PCA-S) included, so the operator waits between decisions.
+
+Items, in the order they should be built (smallest and most independent first):
+
 - [ ] **Setup compatibility preflight:** inspect chosen files before execution;
   runtime protection already exists in both batch paths.
+  - Cheap per-file inspection off the main thread, re-run when the file list
+    changes: channel count and sampling rate from the first `signal1.bin` header
+    block (new `MFFReader` helper — no sample data), events from `Events*.xml`.
+  - Split `ReplayCompatibility.check` into a light-target form plus the existing
+    `MFFSignalData` convenience; runtime semantics unchanged.
+  - Setup sheet: per-file warning icon listing each flagged step and the
+    consequence per path (headless stops the file at that step → Needs Input;
+    windowed leaves the step out for that file), a summary line, and "Remove
+    flagged files". Warns, does not block Start.
+  - Fix found in passing: removing a file (✕ / Clear) does not call
+    `reclassifySteps()`, so a "from this file's own record" label can go stale.
+    Re-classify after each inspection instead.
+- [ ] **Skip all decisions:** optional per-file policy that drops unsupported
+  decision steps rather than making the entire script windowed.
+  - Setup-sheet checkbox, shown only when the script has a decision step.
+  - Evaluated per file with that file's own `ReplayPayloadAvailability`: a file
+    with beats + coordinates keeps PCA-S, one without drops it, and the audit log
+    records `dropped <op>: <reason> (skip-decisions policy)`.
+  - With it on, decision steps no longer force windowed; review pauses and
+    Review Each still do.
+  - Exempt: channel decisions (the setup tick is already the answer) and
+    `trialExclusion` (`ProcessingCore` already applies only keys this file
+    resolves and excludes nothing otherwise). One pure function owns the rule.
+- [ ] **Partial-then-resume:** run a portable prefix headlessly, then load its
+  partially processed signal into a fresh windowed session for decision steps.
+  - Phase 1 (unattended): per file, run the leading ungated steps via
+    `ProcessingCore` and write `<output>/partial/<name>.mff` with an `eva.xml`
+    of the steps applied. Phase 2 (windowed): open each partial and replay only
+    the remaining steps.
+  - **Prefix restricted to gradient, PCA-S, and ICA resolved from the file's own
+    sidecar.** Those produce the base signal every later window step reads
+    (`ica ?? bcg ?? gradient ?? raw`), so the window behaves identically. Going
+    further breaks parity — e.g. a prefixed filter leaves the window's wavelet
+    step without the filter band it reads for `analysisBand`, and
+    threshold-detection settings are not restored from an on-disk prefix. These
+    are also the slow steps, so this captures the time saving.
+  - Resume: when an input's own `eva.xml` exactly matches the leading included
+    steps of the batch script (same restricted op set), skip those steps rather
+    than applying them twice. Makes "stop, later re-run on `partial/`" work.
+  - Final output: `eva.xml` = prefix + remaining steps; carry the partial's ICA
+    sidecar and its gradient/PCA-S audit-log lines.
+  - Only helps when there is a prefix: gradient's Review tick defaults on, and a
+    paused gradient means an empty prefix. The sheet should say which steps run
+    in the background first.
+  - Tests: classification/policy, resume matching, preflight on light targets,
+    and a byte-parity run of prefix-then-remainder against one full run.
+  - **Open decisions (owner):** (1) two-phase (all prefixes, then all decisions —
+    proposed) vs per-file interleaved vs pipelined background prefix; (2) keep
+    partials (proposed — they are the resume point, roughly input-sized each) vs
+    delete after each file's final export succeeds.
+- [ ] **Export drops the on-disk prefix (provenance gap, found 2026-09-26).**
+  Re-exporting any reopened processed file writes only *this session's* steps to
+  `eva.xml` (`currentProcessingScript()` is built from the view models), though
+  the History rail shows `onDiskPrefix + live`. Partial-then-resume needs the
+  batch paths fixed; whether the interactive export should also write
+  `onDiskPrefix + live` (and carry on-disk payloads for prefix steps) is an owner
+  decision.
 
 
 ## REPORTS — typed per-recording quality/provenance report — **DEFERRED**

@@ -189,13 +189,32 @@ Inputs:
 
 Behavior:
 
-1. If no motion is supplied, return no motion-informed donors and let the caller
-   fall back to temporal neighbors.
+1. If no motion is supplied, return no motion-informed donors. At the engine
+   level the caller falls back to temporal neighbors; at the application level
+   (`GradientViewModel.missingRequiredMotion`, ROADMAP MRI-1, 2026-09-26) a
+   Moosmann run — or any run with "Exclude high-motion TRs" on — refuses to
+   start without a motion file, and replay/batch stop at that step. The
+   operator supplies the 1D file; EVA does not search for one.
 2. If motion has fewer rows than volumes because dummy scans were dropped,
    front-pad with zero-motion rows so rows align to volume indices.
-3. Compute a per-volume motion magnitude. EVA supports:
-   - translation-only displacement
-   - all-parameter displacement with rotations scaled by a configurable radius
+3. Compute a per-volume motion magnitude — always the volume-to-volume change,
+   volume 0 defined as 0. EVA supports three metrics, named explicitly because
+   at one threshold they flag different volumes:
+   - `translationSpeed` — the published RP-informed definition (Moosmann et
+     al. 2009, Eq. 5): d_j = √(Δx² + Δy² + Δz²) over the translations only. The
+     paper thresholded it at d₀ = 0.3 mm.
+   - `translationOnly` — EVA's earlier translation metric: |Δx| + |Δy| + |Δz|
+     (L1). Never smaller than `translationSpeed`, up to √3× larger for a
+     diagonal move. Remains the default so existing scripts keep flagging the
+     volumes they did.
+   - `allParameters` — framewise displacement over all six terms (Power et al.
+     2012), rotations as arc length on a sphere of configurable radius.
+
+   Known difference from the paper, not adopted: when two supra-threshold
+   events are closer together than the donor count, the paper keeps only the
+   larger as a barrier; EVA treats every flagged volume as a barrier and, when a
+   segment is too short, takes donors across it and records
+   `donorsCrossedMotionBarrier` (an `MRI_GRAD_UNRELIABLE` span — see Coverage).
 4. Mark volumes whose motion magnitude exceeds the threshold as high-motion.
 5. High-motion volumes are corrected but excluded as donors.
 6. For each target volume, select low-motion donor volumes near the target while
@@ -354,6 +373,37 @@ Requirements:
   the user-facing scientific intent.
 - Diagnostics should be designed from the start, even if not all are exposed in
   the first UI.
+
+## Coverage and Unreliable Spans
+
+Added 2026-09-26 (ROADMAP MRI-1). Built by `GradientCoverage` from the
+diagnostics every engine already returns, so it adds no engine decision and no
+CPU/GPU parity question. Each epoch gets one status:
+
+| Status | Meaning | Source |
+|---|---|---|
+| corrected | template subtracted from normal donors | — |
+| edge | window runs past the recording; uncorrected by construction | `epochOutOfBounds`, local `outsideRecording` |
+| watch | corrected through a benign documented fallback | `templateScaleRejected`, `correlationDonorsFellBack` |
+| unreliable | corrected, but from donors taken across a motion event | `donorsCrossedMotionBarrier` |
+| failed | uncorrected for a reason other than the edge | `noEligibleDonors`, `degenerateTemplate`, local `insufficientDonors` / `noTemplateSamples` / `noCorrelatedDonors` |
+
+Volumes trimmed with skip-start/skip-end are reported separately; like edges,
+they are normal and never flagged. A volume's status is the worst of its slice
+epochs.
+
+Unreliable and failed epochs whose windows touch merge into spans. By default
+(`unreliableEvents = mark`) each span is written onto the corrected signal as
+an onset-anchored `MRI_GRAD_UNRELIABLE` event carrying its duration and
+reasons; `report` keeps them in the audit log only. A re-run replaces the
+previous run's spans. PSA rejects epochs that overlap a span when
+`skipUnreliableMRI` is on (default on; absent from a pre-2026-09-26 `segment`
+step means off, so older scripts rebuild the same epochs).
+
+The run grade excludes edge epochs from the coverage denominator and grades any
+unreliable span, or a run-level note (a motion file front-padded or truncated to
+fit, a Moosmann run that found no supra-threshold motion), Watch — never Poor on
+its own, since no band for it has been measured.
 
 ## Edge Cases
 

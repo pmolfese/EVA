@@ -78,9 +78,25 @@ nonisolated struct GradientRunMetrics: Codable, Sendable, Equatable, Hashable {
     var correctedEpochs: Int
     var totalEpochs: Int
     var gradedChannelCount: Int
+    /// Epochs uncorrected only because their window runs past the recording —
+    /// normal, and excluded from the coverage denominator (ROADMAP MRI-1).
+    /// Optional, like every field added after the first release: a history
+    /// entry written before it must still decode. `nil` reads as 0.
+    var edgeEpochs: Int?
+    /// Epochs inside `MRI_GRAD_UNRELIABLE` spans: left uncorrected for a
+    /// reason other than the edge, or corrected from donors across a motion
+    /// event.
+    var unreliableEpochs: Int?
+    /// Run-level conditions worth a look (a motion file that did not line up
+    /// with the volumes, a Moosmann run that found no motion to act on).
+    var coverageNotes: [String]?
 
+    /// Share of the epochs a correction could reach that it did. Edge epochs
+    /// are not in the denominator: counting them made a recording that simply
+    /// stopped mid-volume look like a partial failure.
     var correctedEpochFraction: Double {
-        totalEpochs > 0 ? Double(correctedEpochs) / Double(totalEpochs) : 1
+        let gradable = totalEpochs - (edgeEpochs ?? 0)
+        return gradable > 0 ? Double(correctedEpochs) / Double(gradable) : 1
     }
 }
 
@@ -291,11 +307,12 @@ nonisolated enum GradientRunGrade {
 
     /// TR-locked residual share (broadband, p90 across channels) below which
     /// the correction left no residue worth mentioning. Every simulated run
-    /// whose true residual stayed below the brain's own variance read ≤ 0.07;
-    /// at 0.10 the metric flagged 121 of 122 runs whose residual exceeded it.
+    /// whose true residual stayed below the brain's own variance read < 0.10;
+    /// at 0.10 the metric flagged 127 of 128 runs whose residual exceeded it
+    /// (re-run 2026-09-26 on the band-limited simulator template).
     static let residualGoodCeiling = 0.10
-    /// At or above this, residue dominates what is left (116 of 122 truth-poor
-    /// runs, none of the good ones).
+    /// At or above this, residue dominates what is left (121 of 128 truth-poor
+    /// runs, none of the others).
     static let residualPoorFloor = 0.30
     /// Removed-variance fraction below which the artifact was largely left in
     /// place: every simulated run that corrected well removed ≥ 0.999, every
@@ -303,7 +320,8 @@ nonisolated enum GradientRunGrade {
     static let removedVariancePoorCeiling = 0.90
     /// At or above this the run removed more than the recording carried — a
     /// template subtracted where there was no artifact (Allen IAR with dropped
-    /// markers reached 2–4).
+    /// markers reached 2–4 on the pre-2026-09-26 simulator, and with jittered
+    /// markers 61–211 after it).
     static let removedVariancePoorFloor = 1.05
     /// Corrected-epoch fraction at or above which coverage is complete enough.
     static let coverageGoodFloor = 0.98
@@ -352,15 +370,30 @@ nonisolated enum GradientRunGrade {
 
     private static func coverageMetric(_ m: GradientRunMetrics) -> QualityMetric {
         let fraction = m.correctedEpochFraction
-        let grade: RunGrade
+        let edge = m.edgeEpochs ?? 0
+        let gradable = m.totalEpochs - edge
+        let unreliable = m.unreliableEpochs ?? 0
+        let notes = m.coverageNotes ?? []
+        var grade: RunGrade
         if fraction < coveragePoorCeiling { grade = .poor }
         else if fraction < coverageGoodFloor { grade = .watch }
         else { grade = .good }
-        let left = m.totalEpochs - m.correctedEpochs
-        let tail = left > 0 ? " — \(left) left uncorrected (see the run details)." : "."
-        return QualityMetric(
-            name: "Epoch coverage", grade: grade,
-            detail: "\(m.correctedEpochs) of \(m.totalEpochs) epochs corrected\(tail)")
+        // Any span marked unreliable, or a run-level note, is worth a look even
+        // when the fraction is fine — one bad volume in a thousand is exactly
+        // what a fraction hides. Never Poor on its own: those bands are not
+        // measured (owner, 2026-09-26).
+        if grade == .good, unreliable > 0 || !notes.isEmpty { grade = .watch }
+
+        let left = gradable - m.correctedEpochs
+        var detail = "\(m.correctedEpochs) of \(gradable) epochs corrected"
+        if edge > 0 { detail += " (\(edge) at the recording's edge, not counted)" }
+        if left > 0 { detail += "; \(left) left uncorrected" }
+        if unreliable > 0 {
+            detail += "; \(unreliable) epoch\(unreliable == 1 ? "" : "s") marked \(GradientCoverage.unreliableEventCode)"
+        }
+        if !notes.isEmpty { detail += "; " + notes.joined(separator: "; ") }
+        detail += left > 0 || unreliable > 0 ? " (see the run details)." : "."
+        return QualityMetric(name: "Epoch coverage", grade: grade, detail: detail)
     }
 
     private static func summary(_ overall: RunGrade, _ metrics: [QualityMetric]) -> String {

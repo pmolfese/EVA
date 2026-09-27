@@ -202,6 +202,10 @@ final class EpochingViewModel {
     var skipIfContainsArtifact = true
     var skipEyeBlinks = true
     var skipEyeMovements = true
+    /// Rejects epochs overlapping an `MRI_GRAD_UNRELIABLE` span — a stretch the
+    /// gradient correction could not be trusted on (ROADMAP MRI-1). Under the
+    /// same `skipIfContainsArtifact` switch and rejection window as the rest.
+    var skipUnreliableMRI = true
     /// Drives the popover listing which artifact kinds to reject on.
     var showsArtifactRejectionOptions = false
     /// Restricts rejection to a sub-window of the epoch instead of the whole
@@ -502,6 +506,7 @@ final class EpochingViewModel {
             "average": "\(averageOnApply)",
             "skipEyeBlinks": "\(skipEyeBlinks)",
             "skipEyeMovements": "\(skipEyeMovements)",
+            "skipUnreliableMRI": "\(skipUnreliableMRI)",
             "skipArtifacts": "\(skipIfContainsArtifact)",
             "skipLabeledBad": "\(skipIfLabeledBad)",
             "interpolateBadChannelsPerEpoch": "\(interpolatesBadChannelsPerEpoch)"
@@ -578,6 +583,11 @@ final class EpochingViewModel {
         if let v = p["average"] { averageOnApply = (v == "true") }
         if let v = p["skipEyeBlinks"] { skipEyeBlinks = (v == "true") }
         if let v = p["skipEyeMovements"] { skipEyeMovements = (v == "true") }
+        // Absent means off, not "leave as is": a segment step written before
+        // this key existed ran with no MRI rejection, and replaying it must
+        // build the same epochs even when today's gradient step now marks
+        // unreliable spans.
+        skipUnreliableMRI = p["skipUnreliableMRI"] == "true"
         if let v = p["skipArtifacts"] { skipIfContainsArtifact = (v == "true") }
         // Absent keys mean "not limited", matching how `parameters` only writes
         // them when the limit is on.

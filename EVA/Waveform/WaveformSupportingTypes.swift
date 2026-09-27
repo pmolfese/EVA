@@ -962,9 +962,8 @@ nonisolated struct PSABuildJob: Sendable {
                     endSeconds = min(endSeconds, anchorTimeSeconds + window.upperBound)
                 }
                 let matchedLabels = startSeconds > endSeconds ? [] : artifactRejectionGroups.compactMap { label, events -> String? in
-                    events.contains { artifact in
-                        artifact.beginTimeSeconds >= startSeconds && artifact.beginTimeSeconds <= endSeconds
-                    } ? label : nil
+                    events.contains { $0.overlaps(startSeconds: startSeconds, endSeconds: endSeconds) }
+                        ? label : nil
                 }
                 if !matchedLabels.isEmpty {
                     skippedArtifacts += 1
