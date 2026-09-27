@@ -62,4 +62,11 @@ final class PendingWindowForks {
     func claim() -> Payload? {
         queue.isEmpty ? nil : queue.removeFirst()
     }
+
+    /// Packages a fork will open once its window claims it — so closing the
+    /// source window in the meantime does not delete a temporary package out
+    /// from under the fork (see `TemporaryFileSweeper.removeCombinedPackage`).
+    var pendingPackageURLs: [URL] {
+        queue.map(\.packageURL)
+    }
 }

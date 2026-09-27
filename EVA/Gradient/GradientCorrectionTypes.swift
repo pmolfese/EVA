@@ -163,6 +163,29 @@ nonisolated enum GradientOBSMode: Sendable, Equatable {
 
 // MARK: - Configuration
 
+/// Timing of the distinct slice-acquisition groups within one scanner volume.
+///
+/// In simultaneous multi-slice (multiband) imaging, several anatomical slices
+/// are acquired at the same instant. FASTR therefore needs one artifact epoch
+/// per acquisition *time*, not one per image slice. Explicit offsets support
+/// scanner sidecars without forcing those times back onto the original EEG
+/// sample grid.
+nonisolated enum GradientAcquisitionSchedule: Sendable, Equatable {
+    /// Equally spaced acquisition groups within each TR.
+    case uniform(groupsPerVolume: Int)
+    /// Group starts expressed as fractions of the current TR, in `[0, 1)`.
+    case offsetsFractionOfTR([Double])
+    /// Group starts in seconds after each volume trigger.
+    case offsetsSeconds([Double])
+
+    var groupsPerVolume: Int {
+        switch self {
+        case .uniform(let count): return count
+        case .offsetsFractionOfTR(let offsets), .offsetsSeconds(let offsets): return offsets.count
+        }
+    }
+}
+
 nonisolated struct GradientCorrectionConfig: Sendable {
 
     // Epoch geometry
@@ -170,7 +193,14 @@ nonisolated struct GradientCorrectionConfig: Sendable {
     /// Internal upsample factor. 1 disables upsampling entirely.
     var upsampleFactor: Int = 1
     /// Slices per volume. 1 means volume-level epochs.
+    ///
+    /// Retained for source and replay compatibility. When
+    /// `acquisitionSchedule` is present, its acquisition-group count is used
+    /// instead.
     var numberOfSlices: Int = 1
+    /// Acquisition times within each volume. `nil` preserves the historical
+    /// equally-spaced `numberOfSlices` behaviour.
+    var acquisitionSchedule: GradientAcquisitionSchedule? = nil
     /// Where the trigger sits inside its artifact epoch, as a fraction of the
     /// epoch. 0 puts the whole window after the trigger.
     var relativeTriggerPosition: Double = 0

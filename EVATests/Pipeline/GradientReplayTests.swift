@@ -27,7 +27,13 @@ struct GradientReplayTests {
         a.trMarkerCode = "TR"
         a.donorVolumes = 7
         a.slicesPerVolume = 5
+        a.acquisitionTimingMode = .jsonSidecar
+        a.jsonAcquisitionSchedule = .offsetsFractionOfTR([0, 0.2, 0.6])
+        a.acquisitionTimingSourceName = "protocol.json"
+        a.multibandFactor = 2
+        a.acquisitionGroupCount = 3
         a.upsampleFactor = 2
+        a.synchronizationProfile = .custom
         a.alignmentEnabled = true
         a.subSampleAlignment = false
         a.templateScaling = .leastSquares
@@ -60,7 +66,11 @@ struct GradientReplayTests {
         #expect(b.trMarkerCode == "TR")
         #expect(b.donorVolumes == 7)
         #expect(b.slicesPerVolume == 5)
+        #expect(b.acquisitionTimingMode == .jsonSidecar)
+        #expect(b.effectiveAcquisitionSchedule == .offsetsFractionOfTR([0, 0.2, 0.6]))
+        #expect(b.acquisitionTimingSourceName == "protocol.json")
         #expect(b.upsampleFactor == 2)
+        #expect(b.synchronizationProfile == .custom)
         #expect(!b.subSampleAlignment)
         #expect(b.templateScaling == .leastSquares)
         #expect(b.templateScaleSmoothingEpochs == 21)

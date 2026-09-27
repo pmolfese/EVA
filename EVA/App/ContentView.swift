@@ -196,6 +196,9 @@ struct ContentView: View {
         ))
         .background(WindowAccessor(
             hasRecording: recording != nil,
+            isTemporaryRecording: recording.map {
+                TemporaryFileSweeper.isCombinedPackage($0.packageURL)
+            } ?? false,
             onConfirmedClose: closeRecording,
             onBecomeMain: publishChannelSetContextForThisWindow
         ))
@@ -224,6 +227,15 @@ struct ContentView: View {
             ChannelsWindowModel.shared.removeRecording(id: recording.id)
         }
         recording?.tearDownForClose()
+        if let recording {
+            // A combined recording exists only in `tmp`; once no window (and
+            // no fork on its way to one) shows it, nothing can reach it again.
+            TemporaryFileSweeper.removeCombinedPackage(
+                recording.packageURL,
+                unlessReferencedBy: OpenRecordingRegistry.shared.recordings.map(\.packageURL)
+                    + PendingWindowForks.shared.pendingPackageURLs
+            )
+        }
         recording = nil
         claimedForkSeed = nil
         openError = nil
@@ -515,6 +527,9 @@ struct ContentView: View {
 /// broken scheme for another. Unverified without a relaunch test of its own.
 struct WindowAccessor: NSViewRepresentable {
     var hasRecording: Bool = false
+    /// The recording exists only in `tmp` (a combined recording), so closing
+    /// discards the recording itself, not just unexported processing.
+    var isTemporaryRecording: Bool = false
     var onConfirmedClose: (() -> Void)? = nil
     /// Called whenever this window becomes the app's main window — see
     /// `WaveformView.publishChannelSetContext()` for why: it's what makes the
@@ -528,6 +543,7 @@ struct WindowAccessor: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.hasRecording = hasRecording
+        context.coordinator.isTemporaryRecording = isTemporaryRecording
         context.coordinator.onConfirmedClose = onConfirmedClose
         context.coordinator.onBecomeMain = onBecomeMain
         DispatchQueue.main.async {
@@ -549,6 +565,7 @@ struct WindowAccessor: NSViewRepresentable {
     /// re-evaluate" uncertainty.
     final class Coordinator: NSObject, NSWindowDelegate {
         var hasRecording = false
+        var isTemporaryRecording = false
         var onConfirmedClose: (() -> Void)?
         var onBecomeMain: (() -> Void)?
         private weak var originalDelegate: NSWindowDelegate?
@@ -596,7 +613,9 @@ struct WindowAccessor: NSViewRepresentable {
         private func showDiscardSheet(for window: NSWindow) {
             let alert = NSAlert()
             alert.messageText = "Discard unsaved work?"
-            alert.informativeText = "Closing this recording will discard any processing that has not been exported. This cannot be undone."
+            alert.informativeText = isTemporaryRecording
+                ? "This combined recording has not been saved anywhere. Closing it will delete it, along with any processing that has not been exported. This cannot be undone."
+                : "Closing this recording will discard any processing that has not been exported. This cannot be undone."
             alert.alertStyle = .warning
             alert.addButton(withTitle: "Discard")
             alert.addButton(withTitle: "Cancel")

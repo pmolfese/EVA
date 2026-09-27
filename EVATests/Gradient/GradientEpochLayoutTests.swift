@@ -160,6 +160,47 @@ struct GradientEpochLayoutTests {
         #expect(layout.upsampledSampleCount == 1600)
     }
 
+    @Test func uniformGroupsRoundOnlyOnTheUpsampledGrid() throws {
+        let layout = try GradientEpochLayout.build(
+            volumeTriggers: [0, 1000],
+            sampleCount: 2100,
+            acquisitionSchedule: .uniform(groupsPerVolume: 3),
+            samplingRate: 1000,
+            upsampleFactor: 10,
+            relativeTriggerPosition: 0
+        )
+
+        #expect(layout.triggers == [0, 3333, 6667, 10000, 13333, 16667])
+        #expect(layout.period == 3333 || layout.period == 3334)
+    }
+
+    @Test func explicitFractionalGroupOffsetsArePlacedOnTheInternalGrid() throws {
+        let layout = try GradientEpochLayout.build(
+            volumeTriggers: [0, 100],
+            sampleCount: 220,
+            acquisitionSchedule: .offsetsFractionOfTR([0, 0.25, 0.75]),
+            samplingRate: 1000,
+            upsampleFactor: 4,
+            relativeTriggerPosition: 0
+        )
+
+        #expect(layout.triggers == [0, 100, 300, 400, 500, 700])
+        #expect(layout.slicePosition == [0, 1, 2, 0, 1, 2])
+    }
+
+    @Test func explicitSecondOffsetsUseTheRecordingSamplingRate() throws {
+        let layout = try GradientEpochLayout.build(
+            volumeTriggers: [0, 500],
+            sampleCount: 1100,
+            acquisitionSchedule: .offsetsSeconds([0, 0.125, 0.375]),
+            samplingRate: 500,
+            upsampleFactor: 2,
+            relativeTriggerPosition: 0
+        )
+
+        #expect(layout.triggers == [0, 125, 375, 1000, 1125, 1375])
+    }
+
     // MARK: - Closing sample
 
     @Test func aRecordingEndingOnePeriodAfterItsLastTriggerLacksOnlyTheClosingSample() throws {

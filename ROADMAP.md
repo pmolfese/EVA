@@ -895,7 +895,7 @@ owner.
   accepted by the owner as a deliberate change to PSA results; point events
   behave exactly as before.
 - [x] **FASTR low brain correlation / C5 ablation — MEASURED 2026-09-27,
-  SAFETY FIX PROPOSED.** Brain-only and artifact-present runs toggled
+  FIRST TIMING FIX IMPLEMENTED; SAFETY FIX PROPOSED.** Brain-only and artifact-present runs toggled
   upsampling, template scaling, alignment, sub-sample shifting, OBS and ANC in
   volume and slice mode. The low artifact-present r is mainly residue: clean
   baselines retain r 0.97–0.98 while artifact baselines read 0.24–0.42, with
@@ -930,17 +930,41 @@ owner.
   / 5× from .0609 to .00131. The remaining factor-specific failures were an
   integer-only evaluation confound: exact timing plus fractional alignment put
   all five targeted 120 s confirmations below .00055 residual at both 5× and
-  10×. Proposed engine fix: accept actual acquisition-group timing (including
-  multiband), preserve rational positions until the upsampled grid and keep
-  fractional alignment enabled. A ten-minute donor pool helps only while the
+  10×. Proposed engine fix: accept a multiband factor or actual
+  acquisition-group timing, and preserve rational positions until the
+  upsampled grid. In the scanner-slaved zero-drift follow-up, no alignment was
+  best by default: at 1 kHz integer ±1 was identical to none in all nine
+  geometries and fractional alignment worsened residual 1.4–7.2×; at 500 Hz
+  integer ±1 helped two single-band cases and fractional never beat it. Keep
+  bounded fractional alignment for unsynchronised/drifting profiles, not the
+  EGI-slaved default. A ten-minute donor pool helps only while the
   artifact is stationary: stationary residual improved through ±240 volumes,
   but combined phase/gain steps were best at ±16 and degraded 2.8× by ±64, so
   selection must be regime-local/adaptive. Repeated-ERP retention rejects
   correlation ranking as a default: half-TR-locked P50–P600 shapes retained
   only 18–20% amplitude even when shape r was .87–1.00 and corrected-average
-  SNR matched the no-ERP false-positive SNR. Full interpretation and raw CSVs:
+  SNR matched the no-ERP false-positive SNR. A slaved-clock phase sweep supports
+  a Watch when first-four-harmonic TR-phase concentration is ≥ .8 (measured
+  beta ≤ .33), while explicitly warning that weaker concentration can still
+  attenuate a regular ERP. First metadata iteration: total slices + multiband
+  factor, manual group count, or JSON timing. Add best-effort NIfTI timing
+  import as a second iteration with an inferred-schedule preview and ambiguity
+  confirmation. **Implemented 2026-09-27:** FASTR now distinguishes anatomical
+  slices from acquisition groups, accepts all three first-iteration timing
+  inputs, preserves rational uniform positions until the internal upsampled
+  grid, defaults to a scanner-slaved ±1 integer/no-fractional alignment profile,
+  and round-trips the resolved timing through processing provenance. Full
+  interpretation and raw CSVs:
   `docs/provenance/run-grade-calibration.md` § FASTR C5 follow-up and
   `docs/provenance/data/gradient-calibration/eva-fastr-{next,recommend}-*.csv`.
+- [ ] **ERP-phase Watch action.** When an event code has strong low-order
+  TR-phase concentration, offer a temporal-neighbour comparison run and show
+  the two corrected ERP averages side by side: peak/area ratio, waveform shape
+  correlation, and gradient residual/SNR. Do not silently switch methods: the
+  phase sweep recovered beta ~1.00–1.22 with temporal donors where correlation
+  ranking approached zero, but other broad-component simulations show that
+  temporal donors are not universally neutral. At study-design time, recommend
+  event-to-TR phase jitter as the stronger prevention.
 - [ ] Add `aff12` affine-motion decomposition to the motion panel.
 - [x] **FASTR alignment slips by a whole slice on volume epochs — FIXED
   2026-09-26.** The default search radius (`period / 20`) reached the
@@ -991,9 +1015,11 @@ owner.
   compares temporal-neighbour slice epochs at 10× with volume epochs at 1×;
   C5 subsequently showed that donor policy and upsampling, not slice geometry
   alone, dominate the difference. The original lead was that the layout
-  places slice triggers at `round(slice × interval / slices)` on the *original*
-  sample grid before upsampling, so with ×10 upsampling every slice trigger is
-  off by up to half an original sample and alignment has to recover it. C5's
+  placed slice triggers at `round(slice × interval / slices)` on the *original*
+  sample grid before upsampling, so with ×10 upsampling every slice trigger was
+  off by up to half an original sample and alignment had to recover it.
+  **Fixed 2026-09-27:** the normalized acquisition-group layout now rounds only
+  after projection onto the internal high-rate grid. C5's
   timing oracle confirmed that lead for several geometries. Its apparent
   factor-specific failures with exact positions used integer-only alignment;
   the fractional confirmation put every targeted case below .00055 residual.

@@ -386,10 +386,40 @@ residual *worse* than no alignment. Exact timing collapses that to 0–1 sample;
 the fractional stage then lowers the residual another 3–8×. For example, TR 2
 s / 30 slices / 10× moved from .12094 (rounded, fractional) to .000391 (exact,
 fractional); TR 3 s / 45 slices / 10× moved .12069 → .00121. Drift-tracked
-scaling consistently beat unscaled templates. The proposed engine fix is now
-one coherent change: represent supplied or rational acquisition positions on
-the upsampled grid, and keep fractional alignment enabled. Widening the
-Lanczos kernel is not the first-line fix.
+scaling consistently beat unscaled templates. The engine fix begins by
+representing supplied or rational acquisition positions on the upsampled grid.
+Whether alignment should then run depends on synchronization; the slaved-clock
+confirmation below supersedes a universal “fractional alignment on” rule.
+Widening the Lanczos kernel is not the first-line fix.
+
+#### Scanner-slaved confirmation: group count is enough for uniform timing
+
+A focused zero-clock-drift experiment treated each EGI volume marker as the
+anchor for one repeated, uniformly spaced acquisition-group schedule. Forty
+anatomical slices were tested as single-band and MB 4/8 (40/10/5 acquisition
+groups), at TR 0.5/2/3 s and 500/1000 Hz. Supplying total slices plus multiband
+factor is therefore sufficient for this common case; an explicit timing array
+is needed only for a nonuniform schedule.
+
+Once exact group positions were used, **no alignment was the appropriate
+slaved-clock default**. At 1 kHz, no alignment and the ±1-internal-sample
+integer search were identical in all nine geometries. Fractional refinement
+increased residual 1.4–7.2×, albeit from already small baselines. At 500 Hz,
+the integer search helped two single-band geometries and was otherwise a no-op;
+fractional refinement never beat integer-only. A gate based on increased epoch
+correlation selected fractional alignment in every case, including those where
+subtraction worsened, so correlation improvement is not a sufficient safety
+gate. Raw rows:
+`data/gradient-calibration/eva-fastr-slaved-alignment.csv`.
+
+Recommended profiles are consequently:
+
+- scanner-slaved + known schedule: no alignment by default; optional ±1
+  internal-sample integer diagnostic/correction;
+- unsynchronised or demonstrably drifting clocks: bounded integer plus
+  fractional alignment;
+- unexpectedly large shifts in the slaved profile: warn about incorrect
+  acquisition metadata or synchronization rather than silently following them.
 
 #### More donors plateau only for a stationary artifact
 
@@ -464,6 +494,30 @@ not sufficient. Early narrow peaks need sample-level latency and peak checks;
 broad P300/N400/P600-like responses need area and width checks because they can
 retain a recognisable outline while losing most of their effect size.
 
+The slaved-clock phase sweep tested exact TR, half-TR, third-TR and two-thirds-TR
+schedules plus graded jitter/detuning at 500 and 1000 Hz. Correlation-ranked
+templates retained approximately zero ERP amplitude for every exact low-order
+relationship. Using the maximum circular concentration over the first four TR
+harmonics, concentration ≥ .8 bounded the measured retained beta to ≤ .33.
+This supports a high-confidence **Watch** pill for strongly phase-concentrated
+event codes. It is not a safe/un-safe classifier: lower concentration still
+allowed 15–32% attenuation in some deterministic schedules. The pill should
+therefore describe demonstrated risk, not promise that an unflagged design is
+protected. Raw rows:
+`data/gradient-calibration/eva-fastr-slaved-erp-phase.csv`.
+
+The Watch can offer a useful next action rather than only an alarm: **compare
+with temporal-neighbour donors** and show the two corrected ERP averages side by
+side. In this phase sweep, temporal donors retained beta approximately 1.00–1.22
+where correlation-ranked donors were near zero for exact low-order TR
+relationships. That is evidence for a diagnostic rerun, not an automatic winner:
+other simulations found temporal donors can still attenuate or amplify a broad
+late component. The comparison should therefore report peak/area retention
+between the two corrected averages, waveform correlation, and the gradient
+residual/SNR trade-off. For data collection that has not yet occurred, jittering
+event-to-TR phase remains the stronger remedy; software cannot reconstruct an
+ERP already absorbed into an artifact template with certainty.
+
 #### Simulator coverage and recommended extensions
 
 The simulator can already express every named component in this follow-up.
@@ -485,13 +539,26 @@ Recommended simulator work, in priority order:
 3. Model habituation, refractory/sequence effects and overlapping responses;
    the present components sum linearly and share one trial schedule.
 4. Add explicit acquisition groups, multiband factor, arbitrary/interleaved
-   slice-timing arrays and BIDS `SliceTiming` import to the gradient model.
+   slice-timing arrays and generic JSON timing import to the gradient model
+   (accept BIDS-style `SliceTiming` later, but do not require a BIDS dataset).
+   Manual total-slices + multiband-factor input and JSON timing import are the
+   first iteration. Best-effort NIfTI header/extension import is a second
+   iteration: preview the inferred groups and require confirmation when the
+   header does not resolve multiband timing.
 5. Add nonstationary artifact regimes (motion-driven phase/gain steps,
    time-varying clock drift and group-specific waveforms) rather than relying
    only on one smoothly modulated rank-one template.
 6. Generate one high-rate master recording and anti-aliased decimations for
    sampling-rate comparisons, and emit per-component event-average/topography
    truth plus the SNR/shape metrics above.
+
+Implementation note (2026-09-27): recommendation 4's first iteration is now in
+the FASTR-family engine and UI. Uniform group positions are rounded only after
+projection onto the internal upsampled grid; users can supply total slices plus
+multiband factor, a direct group count, or JSON offsets in seconds/fractions of
+TR. The scanner-slaved profile uses a ±1 internal-grid integer search and turns
+fractional alignment off. NIfTI inference and the ERP-phase Watch remain later
+iterations.
 
 ### Remaining limitation
 

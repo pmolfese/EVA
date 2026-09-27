@@ -172,7 +172,7 @@ final class ProcessingDefaults {
         }
     }
 
-    /// Preferred method within the FASTR family.
+    /// Preferred method within the Slice-Based family.
     var gradientDefaultFASTRMethod: MRIGradientMethod {
         get {
             let stored = UserDefaults.standard.string(forKey: Keys.gradientDefaultFASTRMethodRaw)

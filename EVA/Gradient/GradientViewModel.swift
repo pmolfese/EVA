@@ -64,6 +64,60 @@ enum GradientDonorRanking: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// How FASTR obtains the distinct acquisition times within one TR.
+enum GradientAcquisitionTimingMode: String, CaseIterable, Identifiable, Sendable {
+    case slicesAndMultiband
+    case acquisitionGroupCount
+    case jsonSidecar
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .slicesAndMultiband: return "Slices + MB"
+        case .acquisitionGroupCount: return "Group count"
+        case .jsonSidecar: return "JSON"
+        }
+    }
+}
+
+/// Alignment defaults keyed to how the EEG and scanner clocks were acquired.
+enum GradientSynchronizationProfile: String, CaseIterable, Identifiable, Sendable {
+    case scannerSlaved
+    case independentClocks
+    case custom
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .scannerSlaved: return "Scanner-slaved"
+        case .independentClocks: return "Independent clocks"
+        case .custom: return "Custom"
+        }
+    }
+}
+
+private struct GradientAcquisitionTimingDocument: Decodable {
+    var totalSlices: Int?
+    var multibandFactor: Int?
+    var acquisitionGroupCount: Int?
+    var acquisitionGroupOffsetsSeconds: [Double]?
+    var acquisitionGroupOffsetsFractionOfTR: [Double]?
+    var sliceTiming: [Double]?
+    var multibandAccelerationFactor: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case totalSlices
+        case multibandFactor
+        case acquisitionGroupCount
+        case acquisitionGroupOffsetsSeconds
+        case acquisitionGroupOffsetsFractionOfTR
+        case sliceTiming = "SliceTiming"
+        case multibandAccelerationFactor = "MultibandAccelerationFactor"
+    }
+}
+
 /// What a gradient run does with the stretches of data it could not correct
 /// reliably (ROADMAP MRI-1). Serialized as `unreliableEvents`, so a replay marks
 /// — or deliberately does not mark — the same spans the original run did.
@@ -144,6 +198,7 @@ final class GradientViewModel {
     var showsSafetyHelp = false
     var showsMotionConfig = false
     var showsRunDetails = false
+    var showsAcquisitionTimingImporter = false
 
     // MARK: Shared parameters
     var appliesToPNS = true
@@ -167,6 +222,11 @@ final class GradientViewModel {
     var trMarkerCode = "TREV"
     var method = MRIGradientMethod.allenIAR
     var slicesPerVolume = 1
+    var acquisitionTimingMode = GradientAcquisitionTimingMode.slicesAndMultiband
+    var multibandFactor = 1
+    var acquisitionGroupCount = 1
+    var jsonAcquisitionSchedule: GradientAcquisitionSchedule?
+    var acquisitionTimingSourceName: String?
     /// Where the trigger sits inside its artifact epoch, as a fraction.
     var relativeTriggerPosition = 0.0
     var computeBackend = GradientComputeBackend.cpu
@@ -175,6 +235,7 @@ final class GradientViewModel {
     var alignmentEnabled = true
     var subSampleAlignment = true
     var upsampleFactor = 1
+    var synchronizationProfile = GradientSynchronizationProfile.scannerSlaved
 
     // MARK: Template scaling (FASTR family)
     var templateScaling = GradientTemplateScaling.driftTracking
@@ -337,6 +398,157 @@ final class GradientViewModel {
         }
     }
 
+    /// The timing schedule FASTR will actually use. Simultaneously acquired
+    /// multiband slices share one group and therefore one artifact epoch.
+    var effectiveAcquisitionSchedule: GradientAcquisitionSchedule? {
+        switch acquisitionTimingMode {
+        case .slicesAndMultiband:
+            guard slicesPerVolume >= 1, multibandFactor >= 1 else { return nil }
+            return .uniform(
+                groupsPerVolume: (slicesPerVolume + multibandFactor - 1) / multibandFactor
+            )
+        case .acquisitionGroupCount:
+            guard acquisitionGroupCount >= 1 else { return nil }
+            return .uniform(groupsPerVolume: acquisitionGroupCount)
+        case .jsonSidecar:
+            return jsonAcquisitionSchedule
+        }
+    }
+
+    var effectiveAcquisitionGroupCount: Int {
+        effectiveAcquisitionSchedule?.groupsPerVolume ?? 0
+    }
+
+    /// Nil means the selected timing source is complete and internally valid.
+    var acquisitionTimingValidationMessage: String? {
+        guard method.isFASTR else { return nil }
+        if acquisitionTimingMode == .slicesAndMultiband {
+            if slicesPerVolume < 1 { return "Total slices must be at least 1." }
+            if multibandFactor < 1 { return "Multiband factor must be at least 1." }
+        }
+        if acquisitionTimingMode == .acquisitionGroupCount, acquisitionGroupCount < 1 {
+            return "Acquisition group count must be at least 1."
+        }
+        guard let schedule = effectiveAcquisitionSchedule else {
+            return "Import a JSON timing sidecar before applying."
+        }
+        switch schedule {
+        case .uniform(let count):
+            return count >= 1 ? nil : "Acquisition group count must be at least 1."
+        case .offsetsFractionOfTR(let offsets):
+            guard !offsets.isEmpty,
+                  offsets.allSatisfy({ $0.isFinite && $0 >= 0 && $0 < 1 }),
+                  zip(offsets, offsets.dropFirst()).allSatisfy({ $0 < $1 }) else {
+                return "JSON fractional offsets must be increasing values from 0 up to, but not including, 1."
+            }
+        case .offsetsSeconds(let offsets):
+            guard !offsets.isEmpty,
+                  offsets.allSatisfy({ $0.isFinite && $0 >= 0 }),
+                  zip(offsets, offsets.dropFirst()).allSatisfy({ $0 < $1 }) else {
+                return "JSON offsets in seconds must be non-negative and strictly increasing."
+            }
+        }
+        return nil
+    }
+
+    /// Applies a small, human-readable JSON timing sidecar. Explicit offsets
+    /// take precedence over count metadata; supplying both offset units is an
+    /// error because their relationship cannot be inferred safely.
+    func applyAcquisitionTimingJSON(data: Data, sourceName: String) throws {
+        let document = try JSONDecoder().decode(GradientAcquisitionTimingDocument.self, from: data)
+        let secondsSources = [
+            document.acquisitionGroupOffsetsSeconds,
+            document.sliceTiming
+        ].compactMap { $0 }
+        if secondsSources.count > 1 ||
+            (!secondsSources.isEmpty && document.acquisitionGroupOffsetsFractionOfTR != nil) {
+            throw GradientCorrectionError.invalidConfiguration(
+                "JSON must provide one timing array, in seconds or fractions of TR"
+            )
+        }
+
+        let candidateSlices = document.totalSlices ?? document.sliceTiming?.count ?? slicesPerVolume
+        let candidateMB = document.multibandFactor
+            ?? document.multibandAccelerationFactor
+            ?? multibandFactor
+        guard candidateSlices >= 1 else {
+            throw GradientCorrectionError.invalidConfiguration("totalSlices must be at least 1")
+        }
+        guard candidateMB >= 1 else {
+            throw GradientCorrectionError.invalidConfiguration("multibandFactor must be at least 1")
+        }
+
+        let candidateMode: GradientAcquisitionTimingMode
+        let candidateJSONSchedule: GradientAcquisitionSchedule?
+        var candidateGroupCount = acquisitionGroupCount
+        if let rawOffsets = secondsSources.first {
+            // Standard SliceTiming lists one value per anatomical slice, so
+            // simultaneous multiband slices repeat an offset. FASTR needs the
+            // distinct acquisition instants in chronological order.
+            let offsets = document.sliceTiming != nil
+                ? Array(Set(rawOffsets)).sorted()
+                : rawOffsets
+            guard !offsets.isEmpty,
+                  offsets.allSatisfy({ $0.isFinite && $0 >= 0 }),
+                  zip(offsets, offsets.dropFirst()).allSatisfy({ $0 < $1 }) else {
+                throw GradientCorrectionError.invalidConfiguration(
+                    "timing offsets in seconds must be finite, non-negative, and strictly increasing"
+                )
+            }
+            candidateJSONSchedule = .offsetsSeconds(offsets)
+            candidateMode = .jsonSidecar
+        } else if let offsets = document.acquisitionGroupOffsetsFractionOfTR {
+            guard !offsets.isEmpty,
+                  offsets.allSatisfy({ $0.isFinite && $0 >= 0 && $0 < 1 }),
+                  zip(offsets, offsets.dropFirst()).allSatisfy({ $0 < $1 }) else {
+                throw GradientCorrectionError.invalidConfiguration(
+                    "fractional timing offsets must be finite, strictly increasing, and in [0, 1)"
+                )
+            }
+            candidateJSONSchedule = .offsetsFractionOfTR(offsets)
+            candidateMode = .jsonSidecar
+        } else if let count = document.acquisitionGroupCount {
+            guard count >= 1 else {
+                throw GradientCorrectionError.invalidConfiguration("acquisitionGroupCount must be at least 1")
+            }
+            candidateGroupCount = count
+            candidateJSONSchedule = jsonAcquisitionSchedule
+            candidateMode = .acquisitionGroupCount
+        } else if document.totalSlices != nil || document.multibandFactor != nil
+                    || document.multibandAccelerationFactor != nil {
+            candidateJSONSchedule = jsonAcquisitionSchedule
+            candidateMode = .slicesAndMultiband
+        } else {
+            throw GradientCorrectionError.invalidConfiguration(
+                "JSON contains no recognized acquisition timing fields"
+            )
+        }
+
+        slicesPerVolume = candidateSlices
+        multibandFactor = candidateMB
+        acquisitionGroupCount = candidateGroupCount
+        jsonAcquisitionSchedule = candidateJSONSchedule
+        acquisitionTimingMode = candidateMode
+        acquisitionTimingSourceName = sourceName
+    }
+
+    func handleAcquisitionTimingImport(_ result: Result<URL, Error>) {
+        do {
+            let url = try result.get()
+            let hasAccess = url.startAccessingSecurityScopedResource()
+            defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
+            try applyAcquisitionTimingJSON(
+                data: Data(contentsOf: url),
+                sourceName: url.lastPathComponent
+            )
+            statusMessage = "Loaded acquisition timing from \(url.lastPathComponent)."
+            statusIsError = false
+        } catch {
+            statusMessage = "Could not load acquisition timing: \(error.localizedDescription)"
+            statusIsError = true
+        }
+    }
+
     /// Clears the corrected outputs and run state (used by "Remove Correction").
     func clearResults() {
         correctedSignal = nil
@@ -392,7 +604,10 @@ final class GradientViewModel {
     /// Config for the FASTR family.
     private func sliceTemplateConfig() -> GradientCorrectionConfig {
         var config = GradientCorrectionConfig()
-        config.numberOfSlices = max(1, slicesPerVolume)
+        let acquisitionSchedule = effectiveAcquisitionSchedule
+            ?? .uniform(groupsPerVolume: 1)
+        config.acquisitionSchedule = acquisitionSchedule
+        config.numberOfSlices = max(1, acquisitionSchedule.groupsPerVolume)
         config.relativeTriggerPosition = min(max(relativeTriggerPosition, 0), 1)
         // Summed straight back into `requestedDonorCount`, which is all the
         // FASTR family ever reads.
@@ -400,8 +615,20 @@ final class GradientViewModel {
         config.averagingWindowAfter = donorSplit.after
         config.upsampleFactor = max(1, upsampleFactor)
 
-        config.alignmentEnabled = alignmentEnabled
-        config.subSampleAlignment = alignmentEnabled && subSampleAlignment
+        switch synchronizationProfile {
+        case .scannerSlaved:
+            config.alignmentEnabled = true
+            config.subSampleAlignment = false
+            config.alignmentSearchRadius = 1
+        case .independentClocks:
+            config.alignmentEnabled = true
+            config.subSampleAlignment = true
+            config.alignmentSearchRadius = nil
+        case .custom:
+            config.alignmentEnabled = alignmentEnabled
+            config.subSampleAlignment = alignmentEnabled && subSampleAlignment
+            config.alignmentSearchRadius = nil
+        }
 
         config.templateScaling = templateScaling
         config.templateScaleSmoothingEpochs = max(1, templateScaleSmoothingEpochs)
@@ -554,9 +781,38 @@ final class GradientViewModel {
             params["slices"] = "\(slicesPerVolume)"
         }
         if method.isFASTR {
+            params["acquisitionTimingMode"] = acquisitionTimingMode.rawValue
+            params["multibandFactor"] = "\(multibandFactor)"
+            params["acquisitionGroupCount"] = "\(acquisitionGroupCount)"
+            if acquisitionTimingMode == .jsonSidecar, let jsonAcquisitionSchedule {
+                switch jsonAcquisitionSchedule {
+                case .uniform(let count):
+                    params["acquisitionOffsetsUnit"] = "uniform"
+                    params["acquisitionOffsets"] = "\(count)"
+                case .offsetsFractionOfTR(let offsets):
+                    params["acquisitionOffsetsUnit"] = "fractionOfTR"
+                    params["acquisitionOffsets"] = offsets.map { String(format: "%.9g", $0) }.joined(separator: ",")
+                case .offsetsSeconds(let offsets):
+                    params["acquisitionOffsetsUnit"] = "seconds"
+                    params["acquisitionOffsets"] = offsets.map { String(format: "%.9g", $0) }.joined(separator: ",")
+                }
+            }
+            if let acquisitionTimingSourceName {
+                params["acquisitionTimingSource"] = acquisitionTimingSourceName
+            }
             params["upsampleFactor"] = "\(upsampleFactor)"
-            params["alignment"] = "\(alignmentEnabled)"
-            params["subSample"] = "\(subSampleAlignment)"
+            params["synchronizationProfile"] = synchronizationProfile.rawValue
+            switch synchronizationProfile {
+            case .scannerSlaved:
+                params["alignment"] = "true"
+                params["subSample"] = "false"
+            case .independentClocks:
+                params["alignment"] = "true"
+                params["subSample"] = "true"
+            case .custom:
+                params["alignment"] = "\(alignmentEnabled)"
+                params["subSample"] = "\(subSampleAlignment)"
+            }
             params["templateScaling"] = templateScaling.rawValue
             params["scaleSmoothingEpochs"] = "\(templateScaleSmoothingEpochs)"
             params["scaleMinimum"] = String(format: "%.4f", templateScaleMinimum)
@@ -657,7 +913,36 @@ final class GradientViewModel {
         if let v = p["backend"].flatMap(GradientComputeBackend.init(rawValue:)) { computeBackend = v }
         if let v = p["slices"].flatMap(Int.init) { slicesPerVolume = v }
 
+        if let v = p["acquisitionTimingMode"].flatMap(GradientAcquisitionTimingMode.init(rawValue:)) {
+            acquisitionTimingMode = v
+        }
+        if let v = p["multibandFactor"].flatMap(Int.init) { multibandFactor = v }
+        if let v = p["acquisitionGroupCount"].flatMap(Int.init) { acquisitionGroupCount = v }
+        if let unit = p["acquisitionOffsetsUnit"], let encoded = p["acquisitionOffsets"] {
+            let values = encoded.split(separator: ",").compactMap { Double($0) }
+            switch unit {
+            case "uniform":
+                if let count = values.first.map(Int.init), count >= 1 {
+                    jsonAcquisitionSchedule = .uniform(groupsPerVolume: count)
+                }
+            case "fractionOfTR":
+                jsonAcquisitionSchedule = .offsetsFractionOfTR(values)
+            case "seconds":
+                jsonAcquisitionSchedule = .offsetsSeconds(values)
+            default:
+                break
+            }
+        }
+        if let v = p["acquisitionTimingSource"] { acquisitionTimingSourceName = v }
+
         if let v = p["upsampleFactor"].flatMap(Int.init) { upsampleFactor = v }
+        if let v = p["synchronizationProfile"].flatMap(GradientSynchronizationProfile.init(rawValue:)) {
+            synchronizationProfile = v
+        } else if p["alignment"] != nil || p["subSample"] != nil {
+            // Preserve runs written before synchronization profiles existed:
+            // their explicit booleans described custom alignment behaviour.
+            synchronizationProfile = .custom
+        }
         if let v = p["alignment"] { alignmentEnabled = (v == "true") }
         if let v = p["subSample"] { subSampleAlignment = (v == "true") }
         if let v = p["templateScaling"].flatMap(GradientTemplateScaling.init(rawValue:)) {
@@ -772,6 +1057,11 @@ final class GradientViewModel {
         pnsSignal: MFFSignalData?,
         onApplied: @escaping () -> Void
     ) async {
+        if let acquisitionTimingValidationMessage {
+            statusMessage = acquisitionTimingValidationMessage
+            statusIsError = true
+            return
+        }
         if let missingRequiredMotion {
             statusMessage = missingRequiredMotion
             statusIsError = true
@@ -1045,7 +1335,12 @@ final class GradientViewModel {
 
     private func summaryMessage(usesGPU: Bool, hasPNS: Bool) -> String {
         var parts: [String] = ["\(trMarkerCode) markers"]
-        if method.supportsSliceEpochs, slicesPerVolume > 1 {
+        if method.isFASTR, effectiveAcquisitionGroupCount > 1 {
+            parts.append("\(effectiveAcquisitionGroupCount) acquisition groups/TR")
+            if acquisitionTimingMode == .slicesAndMultiband {
+                parts.append("\(slicesPerVolume) slices, MB\(multibandFactor)")
+            }
+        } else if method.supportsSliceEpochs, slicesPerVolume > 1 {
             parts.append("\(slicesPerVolume) slices/volume")
         }
         switch method.engine {

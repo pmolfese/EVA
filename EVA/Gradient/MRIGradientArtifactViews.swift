@@ -18,6 +18,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 extension WaveformView {
     // MARK: - MRI gradient artifact removal
@@ -53,6 +54,7 @@ extension WaveformView {
         let spacing = trSpacingInfo(for: signal)
         let canApply = signal != nil && !gradient.isProcessing && (selectedCount ?? 0) >= 2
             && gradient.missingRequiredMotion == nil
+            && gradient.acquisitionTimingValidationMessage == nil
             && motionAlignmentOK
             && spacing.hasEnoughTriggers && spacing.isEvenlySpaced
 
@@ -70,7 +72,7 @@ extension WaveformView {
                         Image(systemName: "questionmark.circle")
                     }
                     .buttonStyle(.plain)
-                    .help("About AAS vs FASTR and references")
+                    .help("About Template vs Slice-Based methods and references")
                     .popover(isPresented: $gradient.showsMethodHelp, arrowEdge: .trailing) {
                         mriMethodHelp()
                     }
@@ -80,7 +82,7 @@ extension WaveformView {
                 // dropdown is the variant within that family.
                 Picker("Family", selection: gradient.categoryBinding) {
                     ForEach(MRIGradientCategory.allCases) { category in
-                        Text(category.rawValue).tag(category)
+                        Text(category.label).tag(category)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -182,17 +184,21 @@ extension WaveformView {
             }
 
             if gradient.method.supportsSliceEpochs {
-                HStack {
-                    Text("Slices / volume")
-                        .font(.caption)
-                        .frame(width: 96, alignment: .leading)
-                    TextField("Slices", value: $gradient.slicesPerVolume, format: .number)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                    Stepper("", value: $gradient.slicesPerVolume, in: 1...128)
-                        .labelsHidden()
+                if gradient.method.isFASTR {
+                    mriFASTRAcquisitionTiming()
+                } else {
+                    HStack {
+                        Text("Slices / volume")
+                            .font(.caption)
+                            .frame(width: 96, alignment: .leading)
+                        TextField("Slices", value: $gradient.slicesPerVolume, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Stepper("", value: $gradient.slicesPerVolume, in: 1...128)
+                            .labelsHidden()
+                    }
+                    .help("Number of fMRI slices per volume. Each TR interval is split into this many equal slice epochs.")
                 }
-                .help("Number of fMRI slices per volume. Each TR interval is split into this many equal slice epochs.")
             }
 
             let motionLoaded = (gradient.motionParameters?.count ?? 0) >= 2
@@ -307,6 +313,12 @@ extension WaveformView {
         }
         .padding(16)
         .frame(width: 420)
+        .fileImporter(
+            isPresented: $gradient.showsAcquisitionTimingImporter,
+            allowedContentTypes: [.json]
+        ) { result in
+            gradient.handleAcquisitionTimingImport(result)
+        }
         .onAppear {
             // Default to TREV when present; otherwise fall back to the most
             // common event code so the picker always shows a valid selection.
@@ -363,7 +375,7 @@ extension WaveformView {
             Stepper("", value: clampedValue, in: 0...maximum)
                 .labelsHidden()
         }
-        .help("Trim \(title.lowercased()) \(gradient.trMarkerCode) markers before running AAS/FASTR correction.")
+        .help("Trim \(title.lowercased()) \(gradient.trMarkerCode) markers before running gradient correction.")
     }
 
     func trimmedMarkerCount(total: Int) -> Int {
@@ -482,10 +494,85 @@ extension WaveformView {
         if let missing = gradient.missingRequiredMotion {
             return missing
         }
+        if let timing = gradient.acquisitionTimingValidationMessage {
+            return timing
+        }
         return "Apply \(gradient.method.label) gradient artifact removal."
     }
 
     // MARK: - Small control rows
+
+    @ViewBuilder
+    func mriFASTRAcquisitionTiming() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Slice Acquisition Timing")
+                .font(.caption.weight(.semibold))
+
+            HStack(spacing: 6) {
+                Text("Timing source")
+                    .font(.caption)
+                    .frame(width: 96, alignment: .leading)
+                Picker("Timing source", selection: $gradient.acquisitionTimingMode) {
+                    ForEach(GradientAcquisitionTimingMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 150, alignment: .leading)
+            }
+
+            switch gradient.acquisitionTimingMode {
+            case .slicesAndMultiband:
+                mriIntRow(
+                    "Total slices",
+                    value: $gradient.slicesPerVolume,
+                    range: 1...512,
+                    help: "Total anatomical slices in each reconstructed fMRI volume."
+                )
+                mriIntRow(
+                    "Multiband factor",
+                    value: $gradient.multibandFactor,
+                    range: 1...64,
+                    help: "Slices acquired simultaneously. EVA uses ceil(total slices / multiband factor) distinct acquisition times per TR."
+                )
+
+            case .acquisitionGroupCount:
+                mriIntRow(
+                    "Groups / TR",
+                    value: $gradient.acquisitionGroupCount,
+                    range: 1...512,
+                    help: "Number of distinct slice-acquisition times in each TR. Use this when the scanner protocol already reports acquisition groups directly."
+                )
+
+            case .jsonSidecar:
+                HStack(spacing: 8) {
+                    Button("Import JSON…") {
+                        gradient.showsAcquisitionTimingImporter = true
+                    }
+                    if let name = gradient.acquisitionTimingSourceName {
+                        Text(name)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .help("Import acquisitionGroupOffsetsSeconds or acquisitionGroupOffsetsFractionOfTR. Standard SliceTiming and MultibandAccelerationFactor keys are also accepted without requiring a BIDS dataset. A sidecar may instead provide acquisitionGroupCount, or totalSlices plus multibandFactor.")
+            }
+
+            if gradient.effectiveAcquisitionGroupCount > 0 {
+                Text("\(gradient.effectiveAcquisitionGroupCount) distinct acquisition groups per TR")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let message = gradient.acquisitionTimingValidationMessage {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .help("Slice-based correction uses one epoch per distinct acquisition time. In multiband imaging, simultaneously acquired slices belong to one group rather than separate slice epochs.")
+    }
 
     /// Kept as small typed helpers rather than inline expressions: a popover
     /// with this many controls will otherwise blow the SwiftUI type-checker's
@@ -559,7 +646,7 @@ extension WaveformView {
     @ViewBuilder
     func mriSliceTemplateOptions() -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("FASTR Options")
+            Text("Slice-Based Options")
                 .font(.caption.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 4) {
@@ -587,13 +674,37 @@ extension WaveformView {
                 .frame(width: 220, alignment: .leading)
             }
 
-            Toggle("Epoch alignment", isOn: $gradient.alignmentEnabled)
-                .font(.caption)
-                .help("Search for a small per-epoch integer shift so triggers that do not land on the same sample of the artifact still average cleanly.")
-            if gradient.alignmentEnabled {
-                Toggle("Sub-sample alignment", isOn: $gradient.subSampleAlignment)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Clock synchronization")
                     .font(.caption)
-                    .help("Additionally estimate a fractional-sample offset per epoch and resample onto a shared sub-sample grid before averaging.")
+                Picker("Clock synchronization", selection: $gradient.synchronizationProfile) {
+                    ForEach(GradientSynchronizationProfile.allCases) { profile in
+                        Text(profile.label).tag(profile)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 220, alignment: .leading)
+
+                switch gradient.synchronizationProfile {
+                case .scannerSlaved:
+                    Text("Small ±1 internal-grid integer check; fractional alignment off.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                case .independentClocks:
+                    Text("Adaptive integer search plus fractional alignment for clocks that can drift.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                case .custom:
+                    Toggle("Epoch alignment", isOn: $gradient.alignmentEnabled)
+                        .font(.caption)
+                        .help("Search for a small per-epoch integer shift so triggers that do not land on the same sample of the artifact still average cleanly.")
+                    if gradient.alignmentEnabled {
+                        Toggle("Sub-sample alignment", isOn: $gradient.subSampleAlignment)
+                            .font(.caption)
+                            .help("Additionally estimate a fractional-sample offset per epoch and resample onto a shared sub-sample grid before averaging.")
+                    }
+                }
             }
 
             HStack(spacing: 6) {

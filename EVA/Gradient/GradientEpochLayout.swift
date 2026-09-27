@@ -16,7 +16,7 @@
 //
 //  Turns scanner volume triggers into the fixed-length artifact epochs that the
 //  template corrector operates on: optionally subdividing each volume interval
-//  into equal slice intervals, moving onto the internally upsampled sample axis,
+//  into acquisition groups, moving onto the internally upsampled sample axis,
 //  and deriving a nominal artifact period from the median trigger spacing.
 //
 
@@ -35,7 +35,8 @@ nonisolated struct GradientEpochLayout: Sendable {
     let triggers: [Int]
     /// Volume index each epoch belongs to, 0-based.
     let volumeIndex: [Int]
-    /// Slice position of each epoch within its volume, 0-based.
+    /// Acquisition-group position within its volume, 0-based. The legacy
+    /// `slicePosition` name is retained for diagnostic/replay compatibility.
     let slicePosition: [Int]
     /// Median spacing between adjacent epoch triggers: the nominal artifact period.
     let period: Int
@@ -43,7 +44,7 @@ nonisolated struct GradientEpochLayout: Sendable {
     let samplesBefore: Int
     /// Samples of the epoch window that follow the trigger.
     let samplesAfter: Int
-    /// Slices per volume this layout was built with.
+    /// Acquisition groups per volume. The legacy name is retained internally.
     let slicesPerVolume: Int
     /// Number of distinct volumes represented.
     let volumeCount: Int
@@ -54,7 +55,7 @@ nonisolated struct GradientEpochLayout: Sendable {
     var length: Int { samplesBefore + samplesAfter + 1 }
     var count: Int { triggers.count }
 
-    /// Epoch index for a given (volume, slice position), or nil when that
+    /// Epoch index for a given (volume, acquisition-group position), or nil when that
     /// combination fell outside the recording and no epoch was created.
     private let epochByVolumeAndSlice: [Int: Int]
 
@@ -108,7 +109,7 @@ nonisolated struct GradientEpochLayout: Sendable {
     /// - Fewer than two usable triggers is an error: no artifact period can be
     ///   established.
     /// - With `slicesPerVolume > 1`, each volume interval is divided into that
-    ///   many equal parts. The final volume has no successor, so it reuses the
+    ///   many equal acquisition groups. The final volume has no successor, so it reuses the
     ///   preceding interval; slice triggers past the end of the recording are
     ///   dropped rather than clamped.
     static func build(
@@ -118,7 +119,56 @@ nonisolated struct GradientEpochLayout: Sendable {
         upsampleFactor: Int,
         relativeTriggerPosition: Double
     ) throws -> GradientEpochLayout {
-        let slices = max(1, slicesPerVolume)
+        try build(
+            volumeTriggers: volumeTriggers,
+            sampleCount: sampleCount,
+            acquisitionSchedule: .uniform(groupsPerVolume: slicesPerVolume),
+            samplingRate: 1,
+            upsampleFactor: upsampleFactor,
+            relativeTriggerPosition: relativeTriggerPosition
+        )
+    }
+
+    /// Builds an epoch grid from a normalized acquisition-group schedule.
+    ///
+    /// Positions are rounded only after they have been projected onto the
+    /// internally upsampled grid. This matters for slice/group periods that are
+    /// fractional at the recording's native sampling rate: rounding first and
+    /// multiplying afterwards discards exactly the timing resolution that
+    /// upsampling was meant to provide.
+    static func build(
+        volumeTriggers: [Int],
+        sampleCount: Int,
+        acquisitionSchedule: GradientAcquisitionSchedule,
+        samplingRate: Double,
+        upsampleFactor: Int,
+        relativeTriggerPosition: Double
+    ) throws -> GradientEpochLayout {
+        let slices = acquisitionSchedule.groupsPerVolume
+        guard slices >= 1 else {
+            throw GradientCorrectionError.invalidConfiguration("acquisition schedule must contain at least one group")
+        }
+        guard samplingRate.isFinite, samplingRate > 0 else {
+            throw GradientCorrectionError.invalidConfiguration("samplingRate must be positive")
+        }
+        switch acquisitionSchedule {
+        case .uniform:
+            break
+        case .offsetsFractionOfTR(let offsets):
+            guard offsets.allSatisfy({ $0.isFinite && $0 >= 0 && $0 < 1 }),
+                  zip(offsets, offsets.dropFirst()).allSatisfy({ $0 < $1 }) else {
+                throw GradientCorrectionError.invalidConfiguration(
+                    "fractional acquisition offsets must be finite, strictly increasing, and in [0, 1)"
+                )
+            }
+        case .offsetsSeconds(let offsets):
+            guard offsets.allSatisfy({ $0.isFinite && $0 >= 0 }),
+                  zip(offsets, offsets.dropFirst()).allSatisfy({ $0 < $1 }) else {
+                throw GradientCorrectionError.invalidConfiguration(
+                    "acquisition offsets in seconds must be finite, non-negative, and strictly increasing"
+                )
+            }
+        }
         let factor = max(1, upsampleFactor)
 
         let volumes = Array(Set(volumeTriggers.filter { $0 >= 0 && $0 < sampleCount })).sorted()
@@ -149,12 +199,28 @@ nonisolated struct GradientEpochLayout: Sendable {
             if v + 1 < volumes.count { previousInterval = interval }
             guard interval > 0 else { continue }
 
-            for slice in 0..<slices {
-                let offset = (Double(slice) * Double(interval) / Double(slices)).rounded()
-                let position = volumes[v] + Int(offset)
-                guard position < sampleCount else { continue }
+            let offsets: [Double]
+            switch acquisitionSchedule {
+            case .uniform:
+                offsets = (0..<slices).map { Double($0) * Double(interval) / Double(slices) }
+            case .offsetsFractionOfTR(let fractions):
+                offsets = fractions.map { $0 * Double(interval) }
+            case .offsetsSeconds(let seconds):
+                offsets = seconds.map { $0 * samplingRate }
+                guard offsets.last.map({ $0 < Double(interval) }) ?? false else {
+                    throw GradientCorrectionError.invalidConfiguration(
+                        "acquisition offsets must fall before the next volume trigger"
+                    )
+                }
+            }
+
+            for (slice, offset) in offsets.enumerated() {
+                let position = Int(
+                    (Double(volumes[v]) * Double(factor) + offset * Double(factor)).rounded()
+                )
+                guard position < sampleCount * factor else { continue }
                 lookup[v * slices + slice] = triggers.count
-                triggers.append(position * factor)
+                triggers.append(position)
                 volumeIndex.append(v)
                 slicePosition.append(slice)
             }
@@ -170,6 +236,9 @@ nonisolated struct GradientEpochLayout: Sendable {
         var spacings: [Int] = []
         spacings.reserveCapacity(triggers.count - 1)
         for i in 1..<triggers.count { spacings.append(triggers[i] - triggers[i - 1]) }
+        guard spacings.allSatisfy({ $0 > 0 }) else {
+            throw GradientCorrectionError.degenerateEpochGeometry
+        }
         spacings.sort()
         let period = spacings[spacings.count / 2]
         guard period >= 2 else { throw GradientCorrectionError.degenerateEpochGeometry }

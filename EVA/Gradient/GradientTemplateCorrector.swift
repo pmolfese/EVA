@@ -76,7 +76,7 @@ nonisolated enum GradientTemplateCorrector {
         guard config.upsampleFactor >= 1 else {
             throw GradientCorrectionError.invalidConfiguration("upsampleFactor must be at least 1")
         }
-        guard config.numberOfSlices >= 1 else {
+        guard config.acquisitionSchedule != nil || config.numberOfSlices >= 1 else {
             throw GradientCorrectionError.invalidConfiguration("numberOfSlices must be at least 1")
         }
         guard (0...1).contains(config.relativeTriggerPosition) else {
@@ -84,10 +84,13 @@ nonisolated enum GradientTemplateCorrector {
         }
 
         let factor = config.upsampleFactor
+        let acquisitionSchedule = config.acquisitionSchedule
+            ?? .uniform(groupsPerVolume: config.numberOfSlices)
         var layout = try GradientEpochLayout.build(
             volumeTriggers: volumeTriggers,
             sampleCount: sampleCount,
-            slicesPerVolume: config.numberOfSlices,
+            acquisitionSchedule: acquisitionSchedule,
+            samplingRate: samplingRate,
             upsampleFactor: factor,
             relativeTriggerPosition: config.relativeTriggerPosition
         )

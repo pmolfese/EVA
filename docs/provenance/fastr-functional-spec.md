@@ -54,7 +54,7 @@ Historical toolboxes to cite, but not inspect during clean implementation:
 - Do not reproduce an old MATLAB toolbox user interface.
 - Do not emulate random behavior unless explicitly requested by an option.
 - Do not require slice triggers in the file; EVA may synthesize slice epochs by
-  subdividing volume intervals when the number of slices is known.
+  subdividing volume intervals when the number of acquisition groups is known.
 - Do not implement arbitrary BERGEN weighting-matrix editing in EVA Core for the
   first clean implementation.
 
@@ -68,7 +68,10 @@ The implementation receives:
 - `samplingRate`: samples per second before any internal upsampling.
 - `config`:
   - `upsampleFactor`: integer >= 1.
-  - `numberOfSlices`: integer >= 1. A value of 1 means volume-level epochs.
+  - `acquisitionSchedule`: optional uniform acquisition-group count, offsets as
+    fractions of TR, or offsets in seconds. When absent, `numberOfSlices`
+    remains the backward-compatible uniform group count; 1 means volume-level
+    epochs. Anatomical slice count is not the group count in multiband imaging.
   - `relativeTriggerPosition`: fraction in [0, 1] locating the trigger within
     an artifact epoch.
   - `averagingWindowBefore` and `averagingWindowAfter`, or a symmetric window
@@ -101,10 +104,17 @@ outputs, even if the first implementation returns only corrected data:
 
 1. Sort volume triggers.
 2. Reject input with fewer than two volume triggers.
-3. If `numberOfSlices > 1`, divide each volume interval into equal slice
-   intervals and create synthetic slice-epoch triggers. Do not create triggers
-   beyond the data length.
-4. Upsample internally by `upsampleFactor`.
+3. Resolve the schedule of distinct acquisition groups within each volume.
+   Uniform timing may be supplied directly as a group count or derived as
+   `ceil(totalSlices / multibandFactor)`. Explicit JSON offsets may be fractions
+   of TR or seconds after the volume trigger. A standalone JSON sidecar may also
+   use `SliceTiming` and `MultibandAccelerationFactor`; a surrounding BIDS
+   dataset is not required, and duplicate simultaneous slice times collapse to
+   distinct acquisition groups.
+4. Project the volume anchor and group offsets onto the internally upsampled
+   axis, and round only once there. Never round group positions on the native
+   EEG grid and then multiply by `upsampleFactor`. Do not create triggers beyond
+   the data length.
 5. Compute the median interval between adjacent epoch triggers on the upsampled
    axis. Use this interval as the nominal artifact period.
 6. Define each artifact epoch as a fixed-length window around its trigger:
@@ -120,6 +130,11 @@ The implementation should support two alignment stages:
   improves similarity to a reference artifact shape.
 - Optional fractional-sample alignment: apply a sub-sample phase shift to reduce
   residual timing mismatch after integer alignment.
+
+The default scanner-slaved profile uses only a ±1-sample search on the internal
+grid and disables fractional alignment. A separate independent-clock profile
+enables the adaptive integer search and fractional refinement; replayed older
+parameter blocks with explicit alignment booleans map to a custom profile.
 
 Clean-room implementation guidance:
 

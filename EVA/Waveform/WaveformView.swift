@@ -58,7 +58,7 @@ enum MRIGradientEngine {
 }
 
 /// The top-level split the MRI sheet presents: whole-epoch template methods on
-/// one side, slice-epoch FASTR-family methods on the other.
+/// one side, slice-based methods on the other.
 ///
 /// This is a user-facing grouping, not an engine boundary — the Template tab
 /// spans two engines — because the distinction that matters when choosing is
@@ -66,9 +66,17 @@ enum MRIGradientEngine {
 /// residual".
 enum MRIGradientCategory: String, CaseIterable, Identifiable {
     case template = "Template"
+    // Keep the persisted raw value stable; `label` is the user-facing name.
     case fastr = "FASTR"
 
     var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .template: return "Template"
+        case .fastr: return "Slice-Based"
+        }
+    }
 
     /// Methods offered in the picker: everything in this family that is not
     /// retired. A retired method still exists and still runs — a replay file
