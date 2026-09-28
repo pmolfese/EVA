@@ -18,15 +18,23 @@
 //  much of the recording it rewrote. `ArtifactCleanRunGradeMeasurementTests`
 //  (docs/provenance/run-grade-calibration.md § Artifact clean) found:
 //
-//    * cleaning beats leaving the artifact at every density tested — 4–8× less
-//      error even with 90 % of the recording touched — so there is no point at
-//      which a run becomes Poor;
+//    * with oracle / high-purity events, cleaning beats leaving the artifact at
+//      every density tested; with real threshold detection, false events can
+//      instead damage clean brain, but the tested false-positive regime crossed
+//      the 20 % touched Watch boundary. No Poor band was justified;
 //    * but inside the windows it rewrites, 30–50 % of the brain's variance is
 //      distorted, so the error it leaves grows with the touched fraction and
 //      crosses a tenth of the brain's variance at 20–35 % touched. Watch from
 //      20 %;
 //    * pooled-basis methods (OBS, SSP/PCA) need events to estimate the basis:
-//      6 events barely helped (1.1× less error), 20 did (4×). Watch below 20.
+//      6 weak oracle events barely helped (1.1× less error), 20 did (4×).
+//      Watch below 20, while recognizing that count cannot establish event purity.
+//
+//  These are process / exposure metrics, not a detector grade. In the real-
+//  detection follow-up the shipped 150 µV threshold missed nearly all 100 µV
+//  simulated blinks, producing a low touched fraction despite high residual
+//  artifact. Detection coverage needs EOG or manually labelled truth and cannot
+//  be inferred from how little a cleaner changed.
 //
 //  The continuous MAAC corrections (corneo-retinal regression, movement PCA,
 //  BSS-CCA) touch every sample by design, so for a run that includes one the
@@ -112,7 +120,7 @@ nonisolated enum ArtifactCleanRunGrade {
 
     /// Touched fraction at or above which the grade reads Watch.
     static let touchedWatchFloor = 0.20
-    /// Events below which a pooled-basis method's basis is poorly estimated.
+    /// Events below which a pooled-basis method has limited support for its basis.
     static let pooledBasisEventWatchFloor = 20
 
     static func grade(from m: ArtifactCleanRunMetrics) -> StepQuality {
@@ -122,7 +130,7 @@ nonisolated enum ArtifactCleanRunGrade {
             metrics.append(QualityMetric(
                 name: "Events for OBS/SSP", grade: grade,
                 detail: "\(events) event\(events == 1 ? "" : "s") behind the shared basis"
-                    + (grade == .good ? "." : " — below \(pooledBasisEventWatchFloor), the basis is poorly estimated and cleaning helps little.")))
+                    + (grade == .good ? "." : " — below \(pooledBasisEventWatchFloor), the shared basis has limited event support.")))
         }
         let overall = metrics.filter(\.reached).map(\.grade).max() ?? .good
         metrics.append(QualityMetric(
@@ -147,8 +155,8 @@ nonisolated enum ArtifactCleanRunGrade {
         let f = m.touchedFraction
         let grade: RunGrade = f >= touchedWatchFloor ? .watch : .good
         let tail = grade == .good
-            ? "."
-            : " — cleaning still beats leaving the artifact, but it distorts some of the brain signal wherever it rewrites, and that now adds up."
+            ? ". This measures repair exposure, not whether the detector found every artifact."
+            : " — a large share was rewritten; accumulated brain distortion or detector false positives may now matter."
         return QualityMetric(
             name: name, grade: grade,
             detail: String(format: "%.0f%% of the recording (%d events)", 100 * f, m.eventCount) + tail)

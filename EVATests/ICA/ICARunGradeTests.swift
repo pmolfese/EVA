@@ -69,7 +69,8 @@ struct ICARunGradeTests {
         }
         #expect(g(ICARunGrade.kappaGoodFloor) == .good)
         #expect(g(ICARunGrade.kappaGoodFloor - 0.5) == .watch)
-        // No Poor band: the campaign found no harm down to κ ≈ 4.
+        // No Poor band: the weak-source campaign found unreliable separation,
+        // not demonstrated destructive cleaning, below the Watch boundary.
         #expect(g(1) == .watch)
     }
 

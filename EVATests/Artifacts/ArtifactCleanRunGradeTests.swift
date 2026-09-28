@@ -55,7 +55,7 @@ struct ArtifactCleanRunGradeTests {
         func g(_ f: Double) -> RunGrade { ArtifactCleanRunGrade.grade(from: metrics(touched: f)).grade }
         #expect(g(ArtifactCleanRunGrade.touchedWatchFloor - 1e-6) == .good)
         #expect(g(ArtifactCleanRunGrade.touchedWatchFloor) == .watch)
-        // No Poor band: cleaning beat the dirty data even at 90 % touched.
+        // No Poor band: tested harm did not justify one, but a large exposure is Watch.
         #expect(g(0.95) == .watch)
     }
 

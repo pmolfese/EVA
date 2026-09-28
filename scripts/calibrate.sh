@@ -70,11 +70,13 @@ fi
 if [ "$WHICH" = "all" ] || [ "$WHICH" = "ica" ]; then
     run_test "ICARunGradeMeasurementTests"
     copy_out "eva-ica-run-grade.txt" "ica-calibration"
+    copy_out "eva-ica-run-grade.csv" "ica-calibration"
 fi
 
 if [ "$WHICH" = "all" ] || [ "$WHICH" = "artifact" ]; then
     run_test "ArtifactCleanRunGradeMeasurementTests"
     copy_out "eva-artifact-clean-run-grade.txt" "artifact-clean-calibration"
+    copy_out "eva-artifact-clean-run-grade.csv" "artifact-clean-calibration"
 fi
 
 echo "==> Done"

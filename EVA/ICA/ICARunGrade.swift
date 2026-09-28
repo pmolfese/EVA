@@ -20,11 +20,14 @@
 //      replay) a removed component *labelled* Brain grades Watch.
 //    * data per component — κ = analysis samples / components², Watch below
 //      the published 20 × n² rule of thumb (Onton & Makeig 2006). Also a
-//      convention: the campaign (`ICARunGradeMeasurementTests`,
-//      docs/provenance/run-grade-calibration.md § ICA) found EVA's Picard
-//      isolated a blink just as cleanly at κ ≈ 4 as at κ ≈ 150, so there is no
-//      evidence for a Poor band — and none that the rule is wrong for weaker,
-//      less non-Gaussian sources, which the campaign did not test.
+//      measured guardrail: the first campaign found EVA's Picard isolated a
+//      strong blink just as cleanly at κ ≈ 4 as at κ ≈ 150. The follow-up
+//      campaign (`ICARunGradeMeasurementTests`,
+//      docs/provenance/run-grade-calibration.md § ICA) crossed κ, source
+//      Gaussianity and blink strength; weak 10 µV blinks became unstable below
+//      κ ≈ 20 while 30–100 µV blinks remained easy. That supports Watch below
+//      20, but not Poor: the observed failure was unreliable separation of a
+//      weak source, not demonstrated destructive cleaning.
 //
 //  Reported, not graded:
 //
@@ -95,7 +98,8 @@ nonisolated enum ICARunGrade {
 
     // MARK: Bands
 
-    /// κ below which the grade reads Watch (the 20 × n² convention).
+    /// κ below which the grade reads Watch (the measured weak-source boundary,
+    /// consistent with the 20 × n² convention).
     static let kappaGoodFloor = 20.0
     /// Removed-component Brain probability at or above which ICLabel reads the
     /// component as brain (poor), and the lower edge of "worth a look".

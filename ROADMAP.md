@@ -291,23 +291,43 @@ not navigable, session-only, right-click Dismiss, pruned on next commit).
     defects filed under MRI-1; the FASTR alignment one is fixed (2026-09-26),
     bringing clock-synced FASTR to the brain's scale. Bands unchanged on re-run.
   - **ICA** (`ICARunGrade`): removing a component ICLabel calls Brain (p ≥ 0.5)
-    is Poor, ≥ 0.25 Watch; κ = samples/n² below 20 is Watch. Both are
-    conventions — the κ campaign was a **null result** (blink isolation equally
-    clean from κ ≈ 4 to 150) and ICLabel cannot be calibrated on synthetic data.
-    Convergence is reported, not graded (the default 1e-12 tolerance caps almost
-    every fit, with no measured cost).
+    is Poor, ≥ 0.25 Watch; κ = samples/n² below 20 is Watch. ICLabel remains a
+    convention because it cannot be calibrated on synthetic labels. The expanded
+    180-run κ × source-Gaussianity × blink-strength campaign now supports the κ
+    Watch: 10 µV blinks were unstable below κ ≈ 20, while 30–100 µV blinks were
+    insensitive to data volume. No Poor band was justified. Convergence is
+    reported, not graded (capped and converged fits had comparable truth scores).
   - **Artifact clean** (`ArtifactCleanRunGrade`): touched fraction Watch ≥ 20 %,
-    no Poor band — cleaning beat the dirty data at every density (4–8×) but
-    distorts ~30–50 % of the brain inside rewritten windows. OBS/SSP with fewer
-    than 20 events is Watch (6 events: 1.1× gain; 20: 4×).
+    no Poor band. Oracle/high-purity events gave 4–8× gains, but the real-
+    detection follow-up showed that false events can damage clean brain; the
+    tested false-positive regime crossed the 20 % Watch boundary. This is a
+    repair-exposure grade, not proof that detection was complete. OBS/SSP with
+    fewer than 20 events remains Watch for limited basis support (event count
+    cannot establish purity).
 - [ ] **MAAC run grades — DEFERRED (owner, 2026-09-26)** until MAAC adoption
   itself is decided. Proposed: gamma preservation for BSS-CCA muscle correction
   and an equivalent for movement PCA, each needing its own campaign. Until then,
   a cleaning run that includes a continuous MAAC method reports its touched
   fraction without grading it.
-- [ ] **Follow-ups the campaigns left open:** ICA κ against weak / near-Gaussian
-  sources (the regime the 20 × n² rule is about); artifact clean with real
-  (non-oracle) detection; gradient against a measured scanner template
+- [x] **ICA weak / near-Gaussian follow-up measured (2026-09-28):** crossed four
+  data volumes, Gaussian/near-Gaussian/bursty neural sources, 10/30/100 µV blinks
+  and five seeds (180 runs). Weak-blink removal was unstable below κ ≈ 20 and
+  plateaued above it; stronger sources stayed easy. Keep Watch below 20, with no
+  Poor band. Raw rows and interpretation are in `docs/provenance/data/ica-calibration/`
+  and `docs/provenance/run-grade-calibration.md` § ICA.
+- [x] **Artifact clean with real detection measured (2026-09-28):** 144
+  end-to-end cleaner evaluations crossed clean controls, 3–100 blinks/min,
+  shipped/sensitive detector thresholds, 100/200 µV blink amplitudes, OBS,
+  SSP/PCA, MAS and wavelet. The shipped 150 µV detector was precise but had
+  1.8 % recall at 100 µV and 80.9 % at 200 µV; a 50 µV threshold reached
+  99.6 % recall but produced 17.5 false events/min on clean EEG. Keep the current
+  numeric bands, but treat them as cleaning exposure / estimator-support
+  cautions, not detection-quality evidence. Raw rows and interpretation are in
+  `docs/provenance/data/artifact-clean-calibration/` and
+  `docs/provenance/run-grade-calibration.md` § Artifact clean.
+- [ ] **Follow-ups the campaigns left open:** calibrate ocular detection on
+  EOG- or manually labelled real recordings (needed for a detector-quality
+  grade); test gradient correction against a measured scanner template
   (`--gradient-template`) to check whether real data is as harsh as the
   simulator's.
 - [x] **Wavelet: both presets measured (2026-09-13) → preset-specific guidance.**
@@ -2004,6 +2024,83 @@ composition while still producing EVASimulate's clean/noisy twins and scores.
 
 **Exit:** habituation, learning trends and trial/subject variability can be expressed
 without adding a new configuration property for every study.
+
+#### Paradigm expansion within NS-3–NS-5
+
+This is not a separate implementation track and must not jump ahead of the AF-first
+delivery order below. It gives NS-3, NS-4 and NS-5 concrete scientific acceptance
+cases. In particular, do not extract or rewrite the schema-v1 `ERPGenerator` merely to
+share code: when `neuralScene` is absent, the reviewed target/standard path and all
+existing fingerprints remain unchanged. The general experiment path belongs to schema
+v2 and projects through the operator and scene abstractions established by AF-5 and
+NS-1/NS-2.
+
+Keep three responsibilities distinct:
+
+```text
+experiment / event scheduler
+        -> realized event state and history
+        -> component activations and response modifiers
+        -> forward projection, acquisition artifacts and recording defects
+```
+
+- [ ] Give every realized event a stable ID, named stream, onset/duration, condition,
+  event code, block, typed stimulus factors and numeric covariates. Factors such as
+  frequency, duration, intensity, laterality and congruency are data, not new Swift
+  properties for every paradigm.
+- [ ] Start with reusable `explicit`, randomized, constrained-randomized, block,
+  roving, sequence-grammar and periodic schedulers. Permit external TSV/CSV/BIDS event
+  schedules with declared units and validation. Constraints must cover minimum standard
+  runs, maximum run length, exact condition counts and counterbalancing without hidden
+  rejection loops that make seeds hard to interpret.
+- [ ] Derive scheduler and modifier streams from stable event-stream, activation and
+  parameter IDs. Adding or reordering an unrelated condition, component or activation
+  must not reroll an existing schedule or response.
+- [ ] Keep a component's spatial generator fixed. If conditions recruit different
+  locations, model them as distinct stable components selecting the same event stream;
+  do not make source identity silently change by condition. True source motion remains
+  an explicit operator-capability question.
+- [ ] Add composable response modifiers for refractory interval, repetition/run length,
+  change magnitude, transition probability or surprise, block context, previous-trial
+  state, linear habituation/learning and continuous covariates. Each modifier records
+  its input state and realized amplitude/latency contribution in truth.
+- [ ] Generalize estimands beyond `target-minus-standard`: named waveform or window
+  contrasts, regression coefficients, adaptation/learning slopes, sequence effects,
+  topographic/source effects, ERSP power and inter-trial phase coherence. Preserve the
+  current `erpTrials`, `erpComponents` and group target-minus-standard fields as the
+  legacy compatibility view rather than replacing them.
+- [ ] Write the realized experiment schedule once in truth. Each activation then records
+  event attribution, base response, modifiers, final parameters and emitted source time
+  course, sufficient to reconstruct its projected neural contribution.
+
+The first reviewed acceptance corpus should be an auditory mismatch-negativity family
+with matched acquisition, ongoing EEG and artifact realizations:
+
+1. constrained classical oddball;
+2. many-standards or equiprobable control;
+3. roving standard;
+4. local/global or omission sequence; and
+5. a null control with physical stimulus differences but no prediction-error component.
+
+Represent auditory N1, stimulus-specific adaptation, MMN, P3a and (when task-relevant)
+P3b as separately identifiable components or activations. Score both the observable
+condition contrasts and the injected mechanism-specific effects. The corpus must be
+able to distinguish recovery of prediction error from recovery of adaptation or a
+physical stimulus difference; a generic deviant-minus-standard peak alone does not
+meet the exit criterion.
+
+After that vertical slice, add reviewed scenario families without adding one-off
+architecture: P50 paired-pulse gating; visual P1/N1/N170 and face repetition/inversion;
+Go/No-Go and conflict N2/P3; response-locked ERN/Pe and readiness/LRP; semantic N400 and
+P600; recognition-memory old/new effects; feedback-related negativity/reward positivity;
+and SSVEP, auditory steady-state, phase-reset and ERD/ERS designs. These are scenario and
+validation backlog items on the same scheduler × activation × modifier vocabulary, not
+new physiological enums.
+
+**Exit:** the MMN corpus is deterministic and fully reconstructable from truth; one
+event stream can drive ERP and time-frequency activations; declared condition, run-length,
+surprise and subject-level effects are scoreable; and schema-v1 scenario outputs remain
+byte-identical.
 
 ### NS-6 — Directed connectivity, after the scene foundation
 

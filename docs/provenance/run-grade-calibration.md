@@ -579,35 +579,52 @@ development gate, not a new run-grade metric.
    ICLabel labels synthetic sources unreliably (the W-ICA fixture had it call
    the ocular source Muscle), so it cannot be calibrated on this simulator.
 2. **Data per component** — κ = analysis samples / components². Watch below
-   20 (the Onton & Makeig 2006 rule of thumb). **Also a convention** — see
-   the null result below.
+   20. The weak-source follow-up below supports this as a measured Watch
+   boundary, consistent with the Onton & Makeig 2006 rule of thumb.
 
 Reported, not graded: convergence (iterations vs the cap) and removed variance.
 
 ### Campaign
 
-EVA's Picard, 125 Hz analysis rate, on seeded dipole EEG with non-Gaussian
-(bursty) sources and 16 blinks/min; 20 and 32 channels; durations chosen for κ
-≈ 4–150; 3 seeds. The source count was set to n − 4 so brain plus ocular
-sources fill the rank of average-referenced data — at the simulator's default
-of 7 sources, PCA trims every decomposition to the true rank and every run is
-data-rich, which is the first attempt's (discarded) result. The removed
-component was chosen by **oracle** (best correlation with the true ocular
-signal), so the numbers describe the decomposition, not the labeller.
+The first campaign ran EVA's Picard at 125 Hz on seeded dipole EEG with bursty
+sources and 16 blinks/min: 20 and 32 channels, κ ≈ 4–150 and 3 seeds. It used a
+100 µV blink. The source count was set to n − 4 so brain plus ocular sources
+fill the rank of average-referenced data — at the simulator's default of 7
+sources, PCA trims every decomposition to the true rank and every run is
+data-rich, which is the first attempt's (discarded) result.
+
+The 2026-09-28 follow-up held the 20-channel geometry fixed and crossed four
+requested data volumes (realized κ means ≈ 11, 19–21, 37–43 and 74–86), three
+neural-source regimes (Gaussian; modestly super-Gaussian, mean excess kurtosis
+about 4–10; strongly bursty), 10/30/100 µV blinks, and five seeds: 180 fits.
+The removed component was chosen by **oracle** (best correlation with the true
+ocular signal), so both campaigns measure decomposition quality rather than
+classification. Raw rows are in
+`data/ica-calibration/eva-ica-run-grade.csv`; the formatted table and grouped
+means are in `eva-ica-run-grade.txt` beside it.
 
 ### Findings
 
-- **Null result for κ.** The oracle component matched the blink at
-  |r| ≥ 0.993 from κ ≈ 4 to κ ≈ 150, and neither blink removal (0.64–0.80) nor
-  brain lost (0.06–0.37) tracked κ; both tracked each seed's ocular share. A
-  blink is ICA's easiest case — large and strongly non-Gaussian — so this says
-  the 20 × n² rule is not needed *for blinks*, and says nothing about weaker
-  sources (muscle, small cardiac, residual BCG). Hence Watch, not Poor, and the
-  band stays on the published convention.
-- **Convergence did not predict quality.** Most fits stopped at the 200
-  iteration cap even at tolerance 1e-7; the two conditions with both converged
-  and capped runs are confounded by seed. The app's default tolerance is 1e-12,
-  so grading the cap would flag nearly every run on no evidence.
+- **κ matters for a weak source.** For the 10 µV blink, mean removal in the
+  Gaussian-background control rose from 0.023 at realized κ ≈ 11 to 0.571 at
+  κ ≈ 19 and 0.664 at κ ≈ 37; the modestly super-Gaussian background rose from
+  0.376 to 0.643 and 0.681. Results plateaued above the current boundary. The
+  exact numbers include occasional negative removal at low κ, meaning the
+  selected component made ocular error worse rather than correcting it.
+- **Strong sources remain easy.** Across source regimes the 30 µV blink stayed
+  near 0.73–0.77 removal and the 100 µV blink near 0.77–0.78 from the smallest
+  through largest data volume. This reproduces the original campaign's null
+  result and explains it: a large, strongly non-Gaussian artifact does not need
+  20 × n² samples to be identifiable.
+- **Keep Watch below 20, with no Poor band.** The current boundary separates the
+  unstable weak-source regime from the plateau and is consistent with the
+  published convention. The failure is a risk of missing or poorly isolating a
+  weak source, not evidence that every low-κ removal destroys brain; refusal or
+  a Poor grade would overstate the result.
+- **Convergence still did not predict quality.** Within matched durations,
+  converged and capped fits had similar removal and brain-loss means. Strongly
+  bursty backgrounds frequently reached the 200-iteration cap without worse
+  truth scores, so the cap remains reported rather than graded.
 - **Oracle removal of one component takes 0.64–0.80 of the ocular artifact and
   removes brain worth 0.06–0.37 of the brain's variance.** The eye model spans
   more than one dimension; a single-component removal is a partial correction
@@ -615,8 +632,10 @@ signal), so the numbers describe the decomposition, not the labeller.
 
 ### Not measured
 
-Weak or less non-Gaussian artifact sources vs κ; ICLabel accuracy on real data
-(which is where the Removed-components band actually does its work).
+ICLabel accuracy on real data (which is where the Removed-components band
+actually does its work); weak non-ocular sources such as muscle, cardiac and
+residual BCG. The measured weak-blink result supports the generic data-volume
+Watch, but does not claim those source families have identical behavior.
 
 ## Artifact clean (`ArtifactCleanRunGrade`)
 
@@ -634,10 +653,21 @@ Reported, not graded: removed variance.
 
 ### Campaign
 
-Oracle blink events (true onsets, 0.8 s windows) at 3–100 blinks/min; OBS
-(2 components), MAS, per-event wavelet; 20 channels, 250 Hz, 120 s, 2 seeds.
-`err = var(· − clean) / var(clean)`; brain lost = the part of each change that
-was not artifact, inside touched samples.
+Two campaigns use the same truth metrics: `err = var(· − clean) /
+var(clean)`; brain lost = the part of each change that was not artifact, inside
+touched samples.
+
+1. **Oracle cleaner campaign:** true blink onsets (0.8 s windows) at 3–100
+   blinks/min; OBS (2 components), MAS, per-event wavelet; 20 channels, 250 Hz,
+   120 s, 2 seeds.
+2. **Real-detection campaign (2026-09-28):** the noisy signal went through the
+   production `EyeArtifactThresholdDetector`, and only its peak-anchored events
+   were passed to OBS, SSP/PCA, MAS and per-event wavelet. The 144 cleaner
+   evaluations crossed 0/3/10/20/50/100 blinks/min, two seeds, and three
+   amplitude/threshold conditions: 100 µV blinks with 50 and 150 µV detector
+   thresholds, plus 200 µV blinks with the shipped 150 µV threshold. Signals
+   were 20-channel 10-20, 250 Hz, 60 s. A detection matched truth when its peak
+   was within 250 ms of the simulated blink peak (~onset + 120 ms).
 
 | method | touched | err before | err after | gain | brain lost |
 |---|---:|---:|---:|---:|---:|
@@ -652,27 +682,64 @@ was not artifact, inside touched samples.
 | Wavelet | 0.46 | 1.02 | 0.241 | 4.2 | 0.233 |
 | Wavelet | 0.73 | 1.66 | 0.395 | 4.2 | 0.388 |
 
+Real detector performance, pooled across nonzero-density runs (clean false
+events are the mean count in a 60 s zero-blink control):
+
+| blink / threshold | precision | recall | clean false events |
+|---|---:|---:|---:|
+| 100 / 150 µV (shipped) | 1.000 | 0.018 | 0.0 |
+| 200 / 150 µV (shipped) | 1.000 | 0.809 | 0.0 |
+| 100 / 50 µV (sensitive) | 0.737 | 0.996 | 17.5 |
+
+The 50 µV clean controls crossed the touched Watch boundary and created
+brain-normalized error despite having no artifact to remove:
+
+| method | touched | error after |
+|---|---:|---:|
+| OBS | 0.257 | 0.357 |
+| SSP/PCA | 0.257 | 0.557 |
+| MAS | 0.215 | 0.123 |
+| Wavelet | 0.215 | 0.141 |
+
+Raw rows are in
+`data/artifact-clean-calibration/eva-artifact-clean-run-grade.csv`; grouped
+means are in `eva-artifact-clean-run-grade.txt` beside it.
+
 ### Findings
 
-- **Cleaning beats keeping the artifact at every density** — 4–8× less error
-  even with 90 % of the recording touched. There is no touched fraction at
-  which the run becomes harmful relative to not cleaning, so no Poor band.
+- **Cleaning beats keeping the artifact only when its events are sufficiently
+  real.** Oracle events gave the original 4–8× gains. With the precise 200 /
+  150 µV detector, gains were 2.35–19.4× across methods and densities. With
+  the sensitive detector, false positives made sparse cleaning worse than the
+  dirty signal (minimum gains: OBS 0.21, SSP/PCA 0.11, MAS 0.38, wavelet 0.52)
+  and damaged clean controls.
 - **The residual error is almost all brain distortion, and it scales with the
   touched fraction:** inside rewritten windows ~30 % (OBS, MAS) to ~50 %
   (wavelet) of the brain's variance is distorted. On the same truth scale as the
   gradient grade (error < 0.1 of brain variance = good), the error crosses 0.1
   at 20–35 % touched depending on method → **Watch from 20 %**, the
-  method-agnostic lower edge. It never reached the ≥ 1 "poor" line (max 0.40).
-- **OBS needs events.** With ~6 events (3 blinks/min) OBS cut the error only
-  1.1×; with ~20 it cut it 4×. MAS and wavelet, which do not pool a basis, were
-  fine at 6. → **Watch below 20 events** for OBS/SSP. Two points, so the edge is
-  "where it was measured to work", not a fitted threshold.
+  method-agnostic lower edge. The real-detection clean controls validate that
+  warning as an exposure / false-positive caution. Tested clean-control harm
+  stayed below the ≥ 1 "poor" truth line, so there is still no supported Poor
+  band.
+- **Keep Watch below 20 events for OBS/SSP, but weaken the claim.** In the
+  oracle campaign ~6 weak events gave OBS only 1.1× gain while ~20 gave 4×.
+  Real detection showed that strong, pure events can work below 20, while 20+
+  impure events can fail. Event count measures estimator support, not event
+  purity, so the boundary is a conservative caution rather than a guarantee.
+- **Touched fraction is not a detector-quality metric.** The shipped 150 µV
+  setting was precise, but its recall changed from 0.018 at 100 µV to 0.809 at
+  200 µV. At 100 µV the cleaner touched almost nothing while leaving almost
+  all artifact behind. The pill must therefore describe repair exposure, not
+  successful detection or residual cleanliness.
 
 ### Not measured
 
-Real (non-oracle) detection, where missed and false events change both the
-touched fraction and the harm; regression and SSP/PCA directly; the MAAC
-continuous methods (deferred).
+Detector precision/recall on EOG- or manually labelled real recordings; other
+detector configurations, net geometries and artifact families; regression; the
+MAAC continuous methods (deferred). The synthetic threshold contrast exposes
+the precision/recall tradeoff but does not establish a universal ocular
+threshold for human recordings.
 
 ## MAAC — deferred
 
