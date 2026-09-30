@@ -78,6 +78,9 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
     case regression = "Regress"
     case obs = "OBS"
     case sspPCA = "SSP/PCA"
+    /// Source-informed PCA-S using a user-selected BCG exemplar and the exact
+    /// detected matches selected in Define Artifact.
+    case pcaS = "PCA-S"
     /// MAAC saccadic-spike spatial filter: least-squares amplitude of one
     /// canonical scalp map, subtracted only inside confirmed ~24 ms events.
     case spikeTemplate = "SP Spatial Filter"
@@ -305,6 +308,15 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
     /// Present only for definitions created by the dedicated MAAC-4 workflow.
     /// Optional so artifact payloads written before MAAC-4 remain decodable.
     var muscleBSSCCAConfiguration: MuscleBSSCCAConfiguration? = nil
+    /// Portable PCA-S parameters for a BCG definition. Optional preserves
+    /// decoding of artifact sidecars written before manual-exemplar PCA-S.
+    var pcaSSettings: BCGSurrogateSettings? = nil
+    /// Fitted result from the most recent application. This is provenance;
+    /// replay refits from this definition's events and portable settings.
+    var pcaSReport: BCGSurrogateReport? = nil
+    /// Versioned exemplar and matching parameters captured when this definition
+    /// was accepted. Persisted with the exact events in `eva_artifacts.json`.
+    var savedTemplate: SavedArtifactTemplate? = nil
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
 
@@ -334,7 +346,17 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
     }
 
     mutating func preserveCleaningSettings(from previous: DefinedArtifact) {
-        cleaningMethod = previous.cleaningMethod
+        // Crossing the BCG boundary is a method-family change, not an ordinary
+        // re-scan. A newly BCG-typed definition must enter PCA-S with the new
+        // defined-exemplar settings instead of inheriting (for example) OBS;
+        // leaving BCG likewise must not retain an ineligible PCA-S selection.
+        if type == .bcg, previous.type != .bcg {
+            cleaningMethod = .pcaS
+        } else if type != .bcg, previous.type == .bcg, previous.cleaningMethod == .pcaS {
+            // Keep the method chosen by the new definition's normal defaults.
+        } else {
+            cleaningMethod = previous.cleaningMethod
+        }
         obsStrategy = previous.obsStrategy
         obsPCAComponentCount = previous.obsPCAComponentCount
         obsEdgeTaperSeconds = previous.obsEdgeTaperSeconds
@@ -360,6 +382,9 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
         corneoRetinalBlinkEvents = previous.corneoRetinalBlinkEvents
         movementPCAConfiguration = previous.movementPCAConfiguration
         muscleBSSCCAConfiguration = previous.muscleBSSCCAConfiguration
+        if type == .bcg, previous.type == .bcg {
+            pcaSSettings = previous.pcaSSettings ?? pcaSSettings
+        }
     }
 }
 
@@ -473,6 +498,38 @@ extension DefinedArtifact {
                 }
                 .map { "\($0.rangeStartSample):\($0.componentIndex):\($0.removes ? 1 : 0)" }
                 .joined(separator: ",")
+        }
+
+        if let settings = pcaSSettings {
+            for (parameter, value) in settings.parameters {
+                params[key("pcaS.\(parameter)")] = value
+            }
+        }
+        if let report = pcaSReport {
+            params[key("pcaS.acceptedBeatCount")] = "\(report.acceptedBeatCount)"
+            params[key("pcaS.candidateBeatCount")] = "\(report.candidateBeatCount)"
+            params[key("pcaS.artifactComponentCount")] = "\(report.artifactComponentCount)"
+            params[key("pcaS.componentReliabilities")] = report.artifactComponentReliabilities
+                .map(fixed).joined(separator: ",")
+            params[key("pcaS.removedVarianceFraction")] = fixed(report.removedVarianceFraction)
+        }
+        if let savedTemplate {
+            params[key("definitionSchemaVersion")] = "\(savedTemplate.schemaVersion)"
+            params[key("exemplarStartSeconds")] = fixed(savedTemplate.exemplarStartSeconds)
+            params[key("exemplarEndSeconds")] = fixed(savedTemplate.exemplarEndSeconds)
+            params[key("matchThreshold")] = fixed(savedTemplate.matching.threshold)
+            params[key("matchMergeWindowSeconds")] = fixed(savedTemplate.matching.mergeWindowSeconds)
+            params[key("matchWaveformStretchRange")] = fixed(savedTemplate.matching.waveformStretchRange)
+            if let trajectory = savedTemplate.trajectory {
+                params[key("trajectoryShiftSeconds")] = fixed(trajectory.shiftSeconds)
+                params[key("trajectoryScaleRange")] = fixed(trajectory.scaleRange)
+                params[key("trajectoryGFPWeighted")] = "\(trajectory.gfpWeighted)"
+                params[key("trajectoryExcludedFrameCount")] = "\(trajectory.excludedFrameCount)"
+            }
+            params[key("eventSampleIndices")] = sortedEvents.map {
+                String(Int(($0.beginTimeSeconds * savedTemplate.sourceSamplingRate).rounded()))
+            }.joined(separator: ",")
+            params[key("eventTimeAnchors")] = sortedEvents.map(\.timeAnchor.rawValue).joined(separator: ",")
         }
 
         let eventDurations = sortedEvents.map { event in
@@ -836,6 +893,11 @@ nonisolated enum ArtifactCleaner {
                     finalizingProgress: reportFinalizingProgress,
                     eventProgress: reportEventProgress
                 )
+            case .pcaS:
+                // PCA-S awaits the shared zero-phase filter and therefore runs
+                // through `ArtifactCleaningExecutor`. This synchronous engine
+                // intentionally does not grow a second implementation.
+                channelCount = 0
             case .spikeTemplate:
                 reportSetupProgress("Preparing canonical saccadic-spike spatial filter")
                 channelCount = SaccadicSpikeSpatialFilter.apply(

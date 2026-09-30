@@ -194,6 +194,9 @@ rate, sources, offset, skull ratio. The channel sweep showed **no montage-specif
 effect, so real HydroCel authoring stays deferred**. Also caught and fixed a
 harness/product default mismatch — the `evaluate-surrogate` family now defaults to
 `--pattern-search iterative` (what the app ships), not `paper`.
+The truth-backed app fixture now also pins the coordinate-frame edge case directly:
+free-orientation basis-column sign flips leave the operator invariant, while a
+correction-only anterior/posterior (`Y`) reflection drops SNR from 8.151 to 4.780.
 
 **Track 3 — evidence → guardrails — MEASURED, partly surfaced:**
 
@@ -410,26 +413,29 @@ These remain grouped with the shared scientific rationale, but their execution
 slots are the ones in the milestone table: SI-5 follows MRI-1; SI-6 through SI-8
 follow the Trial-wise milestones.
 
-#### SI-3a — Manual / by-eye BCG exemplar — **NOT STARTED**
+#### SI-3a — Manual / by-eye BCG exemplar — **IN PROGRESS (highlighted path implemented 2026-09-29)**
 
 A near-term addition to shipped PCA-S, and a prerequisite shape for SI-5's
-ocular calibration (user-provided exemplars → same engine). Today BCG
-topography discovery always begins from detected beats
-(`BCGSurrogateTopographies.components(beatSeconds:)`); when there is no ECG
-channel — and the synthesized/virtual-ECG detectors are not trusted for a
-given recording — the user has no way to assert the artifact directly. The
-brain-basis and operator halves are unchanged; this is a new discovery
-front-end only.
+ocular calibration (user-provided exemplars → same engine). The highlighted path
+now starts in **Define Artifact**: choosing type BCG switches to a trajectory
+template with shift/stretch wiggle, EVA scans for matching complexes, and the
+reviewed matches become the exact PCA-S epochs in **Clean Artifacts**. This path
+does not require an ECG channel. The brain-basis and operator halves are unchanged;
+this is a discovery front-end onto the shipped PCA-S engine.
 
 - [ ] **Hand-marked beats**: let the user click BCG peaks in the waveform view
   and feed those times into the existing pipeline unchanged (smallest path).
-- [ ] **Highlighted exemplar window**: let the user drag a selection over one
+- [x] **Highlighted exemplar window**: let the user drag a selection over one
   clear BCG complex and use that window as the template/correlation-search seed,
   bypassing beat detection — the truest analogue to the paper's manual
   representative-beat step. Add as a new `BCGArtifactPatternSearch` case
-  (e.g. `.manualExemplar`) alongside `.paper`/`.iterative`.
-- [ ] Record the manual provenance in `eva.xml` and the audit log so a manual
-  correction replays exactly rather than re-deriving from criteria.
+  (`.reviewedExemplar`) alongside `.paper`/`.iterative`. Defaults: Pearson 0.60,
+  shift ±50 ms, stretch ±10%, GFP-weighted trajectory; all remain editable before
+  scanning.
+- [x] Record the manual provenance in `eva_artifacts.json`, `eva.xml`, and the
+  audit log: versioned exemplar/match parameters, exact event samples/anchors,
+  portable PCA-S settings, and fitted report. Replay uses the stored reviewed
+  events without silently thresholding them a second time.
 
 **Exit:** a recording with no usable ECG can be corrected from a user-defined
 BCG exemplar, with the manual selection recorded as replayable provenance.

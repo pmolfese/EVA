@@ -393,12 +393,17 @@ final class ProcessingCore {
                 let artifacts = artifactPayload.artifacts(rederivedAgainst: current)
                 template.definedArtifacts = artifacts
                 let excludedFromCleaning = store.channels.bad.union(store.channels.interpolated.keys)
-                let outcome = ArtifactCleaner.cleanedSignal(
+                let outcome = await ArtifactCleaningExecutor.cleanedSignal(
                     from: current,
                     artifacts: artifacts,
                     excluding: excludedFromCleaning,
+                    geometry: electrodeGeometry,
                     availableBandwidthHz: filter.output == nil ? nil : filter.lowPassCutoff
                 )
+                for index in template.definedArtifacts.indices {
+                    let id = template.definedArtifacts[index].id
+                    template.definedArtifacts[index].pcaSReport = outcome.pcaSReports[id]
+                }
                 ArtifactCleaningCore.commit(
                     cleanedSignal: outcome.signal,
                     summaries: outcome.summaries,
@@ -407,7 +412,9 @@ final class ProcessingCore {
                         artifacts: artifacts, summaries: outcome.summaries,
                         excludedChannels: excludedFromCleaning
                     ),
-                    statusMessage: "Cleaned \(outcome.summaries.count) artifact(s).",
+                    statusMessage: outcome.failures.isEmpty
+                        ? "Cleaned \(outcome.summaries.count) artifact(s)."
+                        : "Cleaned \(outcome.summaries.count) artifact(s); \(outcome.failures.count) failed.",
                     artifactVM: artifactVM,
                     template: template,
                     epoching: epoching,

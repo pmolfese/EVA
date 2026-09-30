@@ -119,7 +119,7 @@ struct GradientRunGradeTests {
 
     @Test func residualBandEdges() {
         func grade(_ v: Double) -> RunGrade? {
-            GradientRunGrade.grade(from: metrics(p90: v)).metrics.first { $0.name == "Residual artifact" }?.grade
+            GradientRunGrade.grade(from: metrics(p90: v)).metrics.first { $0.name == "Scanner-locked residue" }?.grade
         }
         #expect(grade(GradientRunGrade.residualGoodCeiling - 1e-6) == .good)
         #expect(grade(GradientRunGrade.residualGoodCeiling) == .watch)

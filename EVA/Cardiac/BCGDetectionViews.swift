@@ -1201,7 +1201,7 @@ extension WaveformView {
                     explanation: "How the representative BCG pattern is chosen before beats are averaged. Paper follows the publication: one representative beat, then a single correlation pass. Iterative starts from the all-beat average and refines twice, which judges each beat against the artifact rather than against one noisy example."
                 )
                 Picker("Pattern search", selection: $bcg.surrogateSettings.patternSearch) {
-                    ForEach(BCGArtifactPatternSearch.allCases) { mode in
+                    ForEach(BCGArtifactPatternSearch.allCases.filter { $0 != .reviewedExemplar }) { mode in
                         Text(mode.label).tag(mode)
                     }
                 }
@@ -1841,8 +1841,12 @@ extension WaveformView {
         let samplingRate = signal.samplingRate
 
         bcg.isRunning = true
-        bcg.progress = nil
-        bcg.status = "Building the surrogate model…"
+        bcg.progress = 0
+        bcg.status = "Preparing PCA-S…"
+        let (progressContinuation, progressTask) = ProgressBridge.make { (update: BCGSurrogateProgress) in
+            bcg.progress = update.fraction
+            bcg.status = update.detail
+        }
 
         do {
             let worker = Task.detached(priority: .userInitiated) {
@@ -1854,12 +1858,18 @@ extension WaveformView {
                     channelNames: names,
                     beatSeconds: beats,
                     settings: settings
-                )
+                ) { update in
+                    progressContinuation.yield(update)
+                }
             }
             let output = try await withTaskCancellationHandler(
                 operation: { try await worker.value },
-                onCancel: { worker.cancel() }
+                onCancel: {
+                    worker.cancel()
+                    progressContinuation.finish()
+                }
             )
+            await ProgressBridge.finishAndWait(progressContinuation, task: progressTask)
             guard !Task.isCancelled, sessionID == recordingSessionID else {
                 bcg.isRunning = false
                 bcg.progress = nil
@@ -1886,6 +1896,7 @@ extension WaveformView {
             invalidateDownstreamOfBaseSignalChange()
             bcg.showsSheet = false
         } catch {
+            await ProgressBridge.finishAndWait(progressContinuation, task: progressTask)
             guard sessionID == recordingSessionID else { return }
             bcg.status = "⚠ \(error.localizedDescription)"
         }

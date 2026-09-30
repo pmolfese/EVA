@@ -53,6 +53,10 @@ import Foundation
 
 /// How the representative BCG pattern is chosen before beat averaging.
 nonisolated enum BCGArtifactPatternSearch: String, Codable, Sendable, CaseIterable, Identifiable {
+    /// The caller already performed the pattern search and supplied the selected
+    /// set of exemplar matches. PCA-S uses those exact epochs rather than
+    /// silently accepting or rejecting them a second time.
+    case reviewedExemplar
     /// The published procedure: one representative beat, then a single
     /// correlation pass over the candidates.
     case paper
@@ -64,6 +68,7 @@ nonisolated enum BCGArtifactPatternSearch: String, Codable, Sendable, CaseIterab
 
     nonisolated var label: String {
         switch self {
+        case .reviewedExemplar: return "Defined exemplar matches"
         case .paper: return "Paper (single representative beat)"
         case .iterative: return "Iterative (refine from the average)"
         }
@@ -116,6 +121,23 @@ nonisolated enum BCGSurrogateTopographies {
         beatSeconds: [Double],
         settings: BCGSurrogateSettings
     ) async -> BCGArtifactComponents? {
+        await components(
+            channels: channels.map { $0.map(Float.init) },
+            samplingRate: samplingRate,
+            beatSeconds: beatSeconds,
+            settings: settings
+        )
+    }
+
+    /// Float-native entry point for recordings. Keeping the full scan in its
+    /// stored precision avoids a Double→Float→Double round trip and roughly two
+    /// extra recording-sized allocations before the short beat epochs are cut.
+    static func components(
+        channels: [[Float]],
+        samplingRate: Double,
+        beatSeconds: [Double],
+        settings: BCGSurrogateSettings
+    ) async -> BCGArtifactComponents? {
         guard !channels.isEmpty, !beatSeconds.isEmpty, samplingRate > 0 else { return nil }
         // EVA's own filter, not a private one: the band that defines the
         // template is a filtering decision, and a second implementation of
@@ -125,14 +147,14 @@ nonisolated enum BCGSurrogateTopographies {
         // relative to the beats it was cut on; the IIR path is already
         // forward-backward.
         guard let filtered = try? await EEGSignalFilter.bandPass(
-            channels: channels.map { $0.map(Float.init) },
+            channels: channels,
             samplingRate: samplingRate,
             lowCutoff: settings.bandLowHz,
             highCutoff: settings.bandHighHz,
             highPassFamily: .iir,
             lowPassFamily: .iir,
             iirDesign: .butterworth
-        ).map({ $0.map(Double.init) }) else { return nil }
+        ) else { return nil }
         guard let first = filtered.first, !first.isEmpty else { return nil }
         let sampleCount = first.count
         let offset = Int((settings.windowStartSeconds * samplingRate).rounded())
@@ -145,7 +167,9 @@ nonisolated enum BCGSurrogateTopographies {
         for beat in beatSeconds.sorted() {
             let start = Int((beat * samplingRate).rounded()) + offset
             guard start >= 0, start + length <= sampleCount else { continue }
-            epochs.append(filtered.map { Array($0[start..<(start + length)]) })
+            epochs.append(filtered.map { channel in
+                channel[start..<(start + length)].map(Double.init)
+            })
         }
         guard epochs.count >= 2 else { return nil }
 
@@ -169,6 +193,11 @@ nonisolated enum BCGSurrogateTopographies {
         let accepted: [[[Double]]]
         let representativeBeatIndex: Int?
         switch settings.patternSearch {
+        case .reviewedExemplar:
+            accepted = epochs
+            template = average(epochs)
+            representativeBeatIndex = nil
+
         case .paper:
             // The publication chooses the representative beat manually. An
             // unattended run needs a deterministic rule, so use the

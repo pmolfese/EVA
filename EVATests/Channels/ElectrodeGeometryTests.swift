@@ -24,6 +24,20 @@ struct ElectrodeGeometryTests {
 
         #expect(!geometry.positions.isEmpty)
         #expect(!geometry.name.isEmpty)
+        let reference = try! #require(geometry.reference)
+        #expect(reference.channelIndex == 256)
+        #expect(!reference.name.isEmpty)
+        #expect(geometry.positions[256] == nil)
+
+        // A 256-row signal omitted the declared acquisition reference, while
+        // a 257-row signal recorded it and therefore needs its coordinates.
+        let omittedReference = geometry.includingReference(forChannelCount: 256)
+        #expect(omittedReference.positions.count == 256)
+        #expect(omittedReference.positions[256] == nil)
+        let recordedReference = geometry.includingReference(forChannelCount: 257)
+        #expect(recordedReference.positions.count == 257)
+        #expect(recordedReference.positions[256] == reference.position)
+        #expect(recordedReference.channelNames[256] == reference.name)
         // Every position is projected onto the unit sphere.
         for (_, v) in geometry.positions {
             #expect(abs(simd_length(v) - 1) < 1e-9)

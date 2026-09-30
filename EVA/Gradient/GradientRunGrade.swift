@@ -354,8 +354,12 @@ nonisolated enum GradientRunGrade {
         if value >= residualPoorFloor { grade = .poor }
         else if value >= residualGoodCeiling { grade = .watch }
         else { grade = .good }
-        let worst = m.worstChannel.map { String(format: "; worst channel %d at %.0f%%", $0 + 1, 100 * m.residualFractionMax) } ?? ""
-        let inBand = m.inBandResidualFractionP90.map { String(format: "; %.0f%% below 40 Hz", 100 * $0) } ?? ""
+        let worst = m.worstChannel.map {
+            String(format: "; worst channel %d: %.0f%%", $0 + 1, 100 * m.residualFractionMax)
+        } ?? ""
+        let inBand = m.inBandResidualFractionP90.map {
+            String(format: ". Below 40 Hz: %.0f%%", 100 * $0)
+        } ?? ""
         let tail: String
         switch grade {
         case .good: tail = "."
@@ -363,9 +367,13 @@ nonisolated enum GradientRunGrade {
         case .poor: tail = " — much of what is left is still gradient artifact."
         }
         return QualityMetric(
-            name: "Residual artifact", grade: grade,
-            detail: String(format: "%.0f%% of the corrected scan is locked to the TR (90th pct. of %d channels)",
-                           100 * value, m.gradedChannelCount) + worst + inBand + tail)
+            name: "Scanner-locked residue", grade: grade,
+            detail: String(
+                format: "Broadband: %.0f%% of the corrected signal's remaining energy repeats at the scanner TR (90th percentile across %d channels)",
+                100 * value,
+                m.gradedChannelCount
+            ) + worst + inBand + tail
+        )
     }
 
     private static func coverageMetric(_ m: GradientRunMetrics) -> QualityMetric {
@@ -404,7 +412,7 @@ nonisolated enum GradientRunGrade {
             let reasons = metrics.filter { $0.grade == .watch }.map(\.name.localizedLowercase)
             return "Corrected, but worth a look (" + reasons.joined(separator: ", ") + ")."
         case .poor:
-            return "Gradient artifact remains. Check the TR marker and slice count; without clock sync, sub-sample jitter leaves residue at any setting."
+            return "Scanner-locked gradient residue remains. Check the TR marker and slice count; without clock sync, sub-sample jitter leaves residue at any setting."
         }
     }
 }

@@ -121,6 +121,7 @@ extension WaveformView {
         // stage, so their original samples must not participate in OBS/SSP.
         let excludedChannels = channels.bad.union(channels.interpolated.keys)
         let availableBandwidthHz = filter.output == nil ? nil : filter.lowPassCutoff
+        let geometry = electrodeGeometry
         let (progressContinuation, progressTask) = ProgressBridge.make { progress in
             artifactVM.cleaningProgress = progress
         }
@@ -130,10 +131,11 @@ extension WaveformView {
         artifactCleaningTask = Task {
             await processingQueue.run("Artifact Cleaning") { [self] in
                 let worker = Task.detached(priority: .userInitiated) {
-                    let outcome = ArtifactCleaner.cleanedSignal(
+                    let outcome = await ArtifactCleaningExecutor.cleanedSignal(
                         from: signal,
                         artifacts: artifacts,
                         excluding: excludedChannels,
+                        geometry: geometry,
                         availableBandwidthHz: availableBandwidthHz
                     ) { progress in
                         progressContinuation.yield(progress)
@@ -168,6 +170,10 @@ extension WaveformView {
                     }
                     return
                 }
+                for index in template.definedArtifacts.indices {
+                    let id = template.definedArtifacts[index].id
+                    template.definedArtifacts[index].pcaSReport = outcome.pcaSReports[id]
+                }
                 // Pipeline half shared with anything else that lands a cleaning
                 // result; the task handles, progress bridge, session guard,
                 // replay gate, and preview precompute below stay here because
@@ -176,7 +182,10 @@ extension WaveformView {
                     cleanedSignal: outcome.signal,
                     summaries: outcome.summaries,
                     metrics: metrics,
-                    statusMessage: artifactCleaningSummaryText(outcome.summaries),
+                    statusMessage: artifactCleaningSummaryText(
+                        outcome.summaries,
+                        failures: outcome.failures
+                    ),
                     artifactVM: artifactVM,
                     template: template,
                     epoching: epoching,
@@ -227,6 +236,17 @@ extension WaveformView {
     }
 
     func artifactCleaningSummaryText(_ summaries: [ArtifactCleaningSummary]) -> String {
+        artifactCleaningSummaryText(summaries, failures: [:])
+    }
+
+    func artifactCleaningSummaryText(
+        _ summaries: [ArtifactCleaningSummary],
+        failures: [UUID: String]
+    ) -> String {
+        if let failure = failures.values.first {
+            let prefix = summaries.isEmpty ? "No cleanup was applied." : "Some cleanup was applied."
+            return "\(prefix) PCA-S: \(failure)"
+        }
         guard !summaries.isEmpty else {
             return "No artifact cleanup was applied."
         }

@@ -168,6 +168,43 @@ All fMRI gradient-removal methods assume regularly spaced scanner markers and a 
 - Load motion parameters before using Moosmann or high-motion donor exclusion.
 - Record method settings in your analysis notes, especially donor windows, motion threshold, OBS, ANC, and template scaling.
 
+### Understanding The MR Correction Rating
+
+After an MRI gradient-correction step, the history rail shows a **Good**,
+**Watch**, or **Poor** pill. This is a rating of that correction run, not a
+general rating of the participant or the EEG. Open the pill to see the three
+measurements that produced it. The overall rating is the worst of the three:
+one Poor measurement makes the run Poor, and otherwise one Watch measurement
+makes it Watch.
+
+| Measurement | Good | Watch | Poor | What it means |
+| --- | ---: | ---: | ---: | --- |
+| Scanner-locked residue | Below 10% | 10% to below 30% | 30% or more | The share of the corrected signal's remaining broadband energy that still repeats at the scanner TR. EVA calculates this per channel and grades the 90th percentile, so residue in a minority of channels is not hidden by a clean median. |
+| Removed variance | 0.90 to below 1.05 | No Watch band | Below 0.90 or at least 1.05 | `var(input − output) / var(input)` over the scan. Too little means much of the scanner artifact was left behind; a value at or above 1.05 means the subtraction removed more variance than the input carried, consistent with a template being applied at the wrong times. |
+| Epoch coverage | 98% or more | 90% to below 98% | Below 90% | The fraction of correctable TR epochs the selected method actually corrected. A partial final epoch at the recording edge is excluded. Unreliable spans or run-level warnings can change an otherwise Good coverage result to Watch. |
+
+The residue breakdown also reports **Below 40 Hz**. That is the same
+scanner-lock check after a 40 Hz low-pass and estimates how much repeating
+residue reaches common EEG analysis bands. It is context only and does not
+change the rating; the broadband value is the graded measurement. For example,
+“Broadband: 100%” and “Below 40 Hz: 15%” means the run is Poor because nearly
+all remaining broadband energy repeats with the scanner, although much of that
+residue lies above 40 Hz.
+
+The rating does not use clean ground truth. In particular, it cannot prove that
+brain activity was preserved: an over-aggressive correction can remove brain
+along with the artifact and leave little scanner-locked residue. The residue
+measurement also follows the TR markers supplied to the correction, so badly
+misplaced or jittered markers can hide scanner locking; the removed-variance
+measurement catches many, but not every, such failure. Treat the pill as a
+quality-control warning and inspect the waveform, timing markers, slice count,
+and acquisition clock synchronization before accepting a Poor run.
+
+The thresholds were measured against EVA's simulated clean signal and gradient
+artifact, not a library of real scanner recordings. The derivation, validation
+counts, known blind spots, and retained raw campaign data are documented in
+[Run-Grade Calibration: Gradient](https://github.com/pmolfese/EVA/blob/main/docs/provenance/run-grade-calibration.md#gradient-gradientrungrade).
+
 ## Ballistocardiogram Correction
 
 The pulse artifact is corrected separately from the gradient artifact, in the BCG panel. EVA offers detection-plus-cleaning methods, carbon-wire-loop (CWL) regression, and surrogate-source separation (PCA-S).

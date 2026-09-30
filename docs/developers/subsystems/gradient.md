@@ -27,6 +27,7 @@ reduce the residual; `GradientViewModel` orchestrates it. `GradientEpochAligner`
 | `GradientSincResampler.swift` | Sinc resampling used for sub-sample template alignment. |
 | `GradientFilters.swift` | Biquad filters used inside the gradient pipeline. |
 | `GradientCorrectionTypes.swift` | The shared config/result/diagnostics vocabulary (`GradientCorrectionConfig`, `GradientCorrectionResult`, warnings). |
+| `GradientRunGrade.swift` | Truth-free post-run measurements and Good/Watch/Poor thresholds for scanner-locked residue, removed variance, and epoch coverage. The user-facing scale is documented in the [artifact guide](../../manual/user-guide/artifacts.md#understanding-the-mr-correction-rating); calibration evidence is in [run-grade calibration](../../provenance/run-grade-calibration.md#gradient-gradientrungrade). |
 | `GradientAcceleration.swift` | Compute-backend plumbing: batch plans, device buffers, `GradientBackend` protocol, `GradientCPUBackend`, parallelism. |
 | `GradientMetalBackend.swift` | GPU (Metal) implementation of the template/Gram/residual kernels. |
 | `LocalTemplateMetalBackend.swift` | GPU backend for the local-template corrector. |

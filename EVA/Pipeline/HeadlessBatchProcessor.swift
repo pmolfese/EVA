@@ -108,7 +108,8 @@ enum HeadlessBatchProcessor {
             bcg: core.bcg,
             epoching: core.epoching,
             channels: store.channels,
-            cleaningVariance: store.cleaningVariance
+            cleaningVariance: store.cleaningVariance,
+            artifacts: core.template.definedArtifacts
         )
         // The script written out is the one handed in *plus* the channel
         // decisions this run made — PSA's globally-bad escalation can mark and

@@ -474,6 +474,128 @@ struct BCGSurrogateCorrectionTests {
         #expect(first.report == second.report)
     }
 
+    /// Define Artifact already performed the template match and the user
+    /// selected that event set. PCA-S must not silently run a second threshold
+    /// over it; even an impossible correlation threshold is ignored in this
+    /// mode and every in-bounds supplied epoch is retained.
+    @Test func reviewedExemplarUsesEverySuppliedEpochWithoutRematching() async throws {
+        let fixture = try makeFixture()
+        var settings = BCGSurrogateSettings.default
+        settings.patternSearch = .reviewedExemplar
+        settings.correlationThreshold = 2.0
+
+        let components = try #require(await BCGSurrogateTopographies.components(
+            channels: fixture.noisy.map { $0.map(Double.init) },
+            samplingRate: samplingRate,
+            beatSeconds: fixture.beats,
+            settings: settings
+        ))
+
+        #expect(components.patternSearch == .reviewedExemplar)
+        #expect(components.candidateBeatCount == fixture.beats.count)
+        #expect(components.acceptedBeatCount == fixture.beats.count)
+        #expect(components.representativeBeatIndex == nil)
+    }
+
+    /// End-to-end contract for the route used by both the Clean Artifacts UI
+    /// and replay: a BCG definition hands its exact detected event centers to
+    /// PCA-S, receives a fitted report, and records a cleaning summary.
+    @MainActor
+    @Test func artifactCleaningExecutorRunsManualExemplarPCAS() async throws {
+        let fixture = try makeFixture()
+        let signal = SyntheticSignal.make(fixture.noisy, samplingRate: samplingRate)
+        let events = fixture.beats.enumerated().map { index, time in
+            MFFEvent(
+                id: "reviewed-bcg-\(index)",
+                code: "BCG",
+                beginTimeSeconds: time,
+                rawBeginTime: String(format: "%.6f", time),
+                sourceFile: "Trajectory 60%",
+                timeAnchor: .center
+            )
+        }
+        var settings = BCGSurrogateSettings.default
+        settings.patternSearch = .reviewedExemplar
+        let artifact = DefinedArtifact(
+            type: .bcg,
+            name: "Reviewed BCG",
+            eventCode: "BCG",
+            events: events,
+            selectedChannelIndices: Array(0..<channelCount),
+            windowSizeSeconds: 0.7,
+            average: nil,
+            topography: nil,
+            cleaningMethod: .pcaS,
+            pcaSSettings: settings
+        )
+
+        let outcome = await ArtifactCleaningExecutor.cleanedSignal(
+            from: signal,
+            artifacts: [artifact],
+            excluding: [],
+            geometry: fixture.geometry
+        )
+
+        let report = try #require(outcome.pcaSReports[artifact.id])
+        #expect(outcome.failures.isEmpty)
+        #expect(outcome.summaries.count == 1)
+        #expect(outcome.summaries[0].method == .pcaS)
+        #expect(report.patternSearch == BCGArtifactPatternSearch.reviewedExemplar.rawValue)
+        #expect(report.acceptedBeatCount == events.count)
+        #expect(outcome.signal.data != signal.data)
+    }
+
+    /// A front/back reflection is not a harmless dipole-direction sign change:
+    /// it builds the surrogate basis in the wrong coordinate frame.  Keep this
+    /// sensitivity check beside the truth-backed fixture so a future importer,
+    /// coregistration path, or simulator convention cannot silently negate Y.
+    @Test func frontBackReflectedCorrectionGeometryIsDetectedAsMismatch() async throws {
+        let fixture = try makeFixture()
+        let rows = Array(0..<channelCount)
+        let matched = try await BCGSurrogateCorrection.correct(
+            data: fixture.noisy,
+            samplingRate: samplingRate,
+            correctedRows: rows,
+            geometry: fixture.geometry,
+            channelNames: nil,
+            beatSeconds: fixture.beats
+        )
+        let reflectedPositions = fixture.geometry.positions.mapValues { position in
+            SIMD3<Double>(position.x, -position.y, position.z)
+        }
+        let reflectedGeometry = ElectrodeGeometry(
+            name: "Synthetic cap (Y reflected)",
+            positions: reflectedPositions,
+            channelNames: fixture.geometry.channelNames
+        )
+        let reflected = try await BCGSurrogateCorrection.correct(
+            data: fixture.noisy,
+            samplingRate: samplingRate,
+            correctedRows: rows,
+            geometry: reflectedGeometry,
+            channelNames: nil,
+            beatSeconds: fixture.beats
+        )
+
+        let matchedSNR = broadbandSNR(clean: fixture.clean, corrected: matched.data)
+        let reflectedSNR = broadbandSNR(clean: fixture.clean, corrected: reflected.data)
+        let operatorDifference = zip(matched.operatorMatrix, reflected.operatorMatrix).reduce(0.0) {
+            partial, pair in
+            partial + zip(pair.0, pair.1).reduce(0.0) {
+                $0 + ($1.0 - $1.1) * ($1.0 - $1.1)
+            }
+        }.squareRoot()
+
+        print(String(format:
+            "PCA-S Y-reflection check: matched SNR %.3f, reflected SNR %.3f, operator difference %.3f",
+            matchedSNR, reflectedSNR, operatorDifference
+        ))
+
+        #expect(operatorDifference > 1e-3, "Y reflection left the fitted operator unchanged")
+        #expect(reflectedSNR < matchedSNR * 0.9,
+                "Y reflection was not detectably worse: matched \(matchedSNR), reflected \(reflectedSNR)")
+    }
+
     // MARK: - Reliability-threshold measurement (SI-4 Track 3)
 
     /// The three orthonormal spatial patterns the artifact is built from — the

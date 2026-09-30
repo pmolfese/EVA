@@ -77,6 +77,62 @@ struct SourceInformedOperatorTests {
         }
     }
 
+    /// Production recordings are wider than one BLAS packing block. Pin the
+    /// boundary so the accelerated path cannot silently transpose or offset the
+    /// second block while the tiny algebra tests above continue to pass.
+    @Test func blockedApplicationMatchesDirectProductAcrossBoundary() throws {
+        let sourceInformedOperator = try SourceInformedSeparation.makeOperator(
+            brainBasis: brainBasis,
+            artifactTopographies: [artifact],
+            brainRegularization: 0.02
+        )
+        let sampleCount = 16_401
+        let probe = (0..<4).map { channel in
+            (0..<sampleCount).map { sample in
+                sin(Double(sample + 3 * channel) * 0.001) + Double(channel) * 0.2
+            }
+        }
+        let output = try SourceInformedSeparation.apply(sourceInformedOperator, to: probe)
+
+        for sample in [0, 16_383, 16_384, sampleCount - 1] {
+            for row in sourceInformedOperator.matrix.indices {
+                let expected = sourceInformedOperator.matrix[row].enumerated().reduce(0.0) {
+                    $0 + $1.element * probe[$1.offset][sample]
+                }
+                #expect(abs(output[row][sample] - expected) < 1e-10)
+            }
+        }
+    }
+
+    /// A free-orientation regional source is a three-column subspace, not an
+    /// arrow whose sign carries anatomical meaning.  Reversing any of those
+    /// columns must therefore leave the sensor-space PCA-S operator unchanged.
+    /// This catches an implementation that accidentally starts treating a
+    /// displayed dipole direction as a signed physical constraint.
+    @Test func operatorIsInvariantToBrainBasisDirectionFlips() throws {
+        let baseline = try SourceInformedSeparation.makeOperator(
+            brainBasis: brainBasis,
+            artifactTopographies: [artifact],
+            brainRegularization: 0.02
+        )
+        let directionFlipped = brainBasis.map { row in
+            row.enumerated().map { column, value in
+                column.isMultiple(of: 2) ? -value : value
+            }
+        }
+        let flipped = try SourceInformedSeparation.makeOperator(
+            brainBasis: directionFlipped,
+            artifactTopographies: [artifact],
+            brainRegularization: 0.02
+        )
+
+        for row in baseline.matrix.indices {
+            for column in baseline.matrix[row].indices {
+                #expect(abs(baseline.matrix[row][column] - flipped.matrix[row][column]) < 1e-12)
+            }
+        }
+    }
+
     @Test func constructionRejectsMalformedAndDegenerateInputs() {
         #expect(throws: SourceInformedOperatorError.emptyBrainBasis) {
             _ = try SourceInformedSeparation.makeOperator(

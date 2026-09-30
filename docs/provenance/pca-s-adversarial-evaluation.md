@@ -141,6 +141,26 @@ while truth stays on the real one:
 Safe to ~5° (typical digitization error), broken by ~10°. **There is no guard for
 this today** — a Track-3 candidate (an ill-conditioning / co-registration check).
 
+### Anterior/posterior reflection sanity check (2026-09-29)
+
+The app's truth-backed PCA-S fixture now distinguishes two superficially similar
+"direction flips":
+
+- Negating free-orientation brain-basis columns leaves the fitted sensor-space
+  operator invariant to numerical precision. A displayed dipole arrow has no
+  meaningful sign in this model because every regional location contributes all
+  three orientation columns.
+- Reflecting only the correction electrode geometry across Y (anterior ↔
+  posterior), while leaving the truth geometry unchanged, changes the operator
+  (Frobenius difference 3.345) and drops corrected broadband SNR from **8.151 to
+  4.780** on the deterministic fixture.
+
+This is a regression guard for importer/coregistration convention mistakes, not
+an anatomical-localization claim. EVA's 3D convention remains +x right, +y
+anterior, +z vertex; the Y negation used by `sensorLayout.xml` is confined to its
+2D screen-layout conversion and must not enter `coordinates.xml` or the forward
+model.
+
 ### Artifact components — non-monotone, optimum ~3
 
 | components | corrected | removed var |

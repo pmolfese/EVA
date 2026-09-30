@@ -553,7 +553,8 @@ extension WaveformView {
     func currentProcessingAuditLogLines() -> [String] {
         ProcessingAuditLog.lines(
             gradient: gradient, bcg: bcg, epoching: epoching, channels: channels,
-            cleaningVariance: recordingStore.cleaningVariance
+            cleaningVariance: recordingStore.cleaningVariance,
+            artifacts: template.definedArtifacts
         )
     }
 

@@ -248,6 +248,17 @@ extension WaveformView {
             if newType != .ocular, template.topographyScanStyle != .windowed {
                 template.topographyScanStyle = .windowed
             }
+            if newType == .bcg {
+                // Manual-exemplar PCA-S starts with the full evolving scalp
+                // pattern, not a single channel or one static scalp map.
+                template.definitionPanel = .topography
+                template.topographyMode = .trajectory
+                template.topographyMetric = .pearson
+                template.threshold = 0.60
+                template.trajectoryShiftSeconds = 0.05
+                template.trajectoryScaleRange = 0.10
+                template.trajectoryGFPWeighted = true
+            }
         }
         .onChange(of: template.name) { _, _ in
             scheduleDefinedArtifactIdentityRefresh()
@@ -1403,9 +1414,15 @@ extension WaveformView {
             windowSizeSeconds: configuration.windowSizeSeconds,
             average: result.templateAverage,
             topography: source == .topography ? result.topographyReference : nil,
-            cleaningMethod: isContinuousSourced ? .regression : (source == .topography ? .sspPCA : .obs),
+            cleaningMethod: template.type == .bcg
+                ? .pcaS
+                : (isContinuousSourced ? .regression : (source == .topography ? .sspPCA : .obs)),
             obsStrategy: source == .topography ? .topographyAligned : .standard,
             usesVariableEventDuration: isContinuousSourced,
+            pcaSSettings: template.type == .bcg
+                ? manualExemplarPCASSettings(windowSeconds: configuration.windowSizeSeconds)
+                : nil,
+            savedTemplate: savedArtifactTemplateForDefinition(from: result),
             appliedMethod: nil,
             cleanedAt: nil
         )
@@ -1421,6 +1438,26 @@ extension WaveformView {
         invalidateOBSVarianceCache(for: artifact.id)
         template.definedArtifactID = artifact.id
         clearAppliedArtifactCleaning()
+    }
+
+    func manualExemplarPCASSettings(windowSeconds: Double) -> BCGSurrogateSettings {
+        var settings = BCGSurrogateSettings.default
+        settings.patternSearch = .reviewedExemplar
+        let halfWindow = max(windowSeconds, 0.02) / 2
+        settings.windowStartSeconds = -halfWindow
+        settings.windowEndSeconds = halfWindow
+        return settings
+    }
+
+    /// Captures the current scan controls with the detector's versioned JSON
+    /// payload. `result.savedTemplate` is produced by the common waveform scan;
+    /// trajectory controls live in the topography panel and are attached here.
+    func savedArtifactTemplateForDefinition(
+        from result: ArtifactTemplateDetectionResult
+    ) -> SavedArtifactTemplate {
+        var saved = result.savedTemplate
+        saved.trajectory = savedArtifactTemplateTrajectory()
+        return saved
     }
 
     /// Debounces `refreshDefinedArtifactIdentity()` behind the Name/Event Code
@@ -1633,28 +1670,10 @@ extension WaveformView {
                                 .help("Delete this artifact definition.")
                                 .frame(width: 24)
 
-                                if artifact.isCorneoRetinalDefinition || artifact.isMovementPCADefinition || artifact.isMuscleBSSCCADefinition {
-                                    Text(artifact.isMuscleBSSCCADefinition
-                                         ? DefinedArtifactType.muscle.rawValue
-                                         : artifact.isMovementPCADefinition
-                                            ? DefinedArtifactType.movement.rawValue
-                                            : DefinedArtifactType.corneoRetinal.rawValue)
-                                        .font(.callout)
-                                        .frame(width: 150, alignment: .leading)
-                                        .help(artifact.isMuscleBSSCCADefinition
-                                              ? "MAAC-4 is a dedicated window/epoch-wise correction, so its artifact type is fixed."
-                                              : artifact.isMovementPCADefinition
-                                                ? "MAAC-3 is a dedicated epoch-wise correction, so its artifact type is fixed."
-                                                : "MAAC-2 is a dedicated whole-recording correction, so its artifact type is fixed.")
-                                } else {
-                                    Picker("Type", selection: $artifact.type) {
-                                        ForEach(DefinedArtifactType.allCases.filter { $0 != .corneoRetinal && $0 != .movement && $0 != .muscle }) { type in
-                                            Text(type.rawValue).tag(type)
-                                        }
-                                    }
-                                    .labelsHidden()
-                                    .frame(width: 150)
-                                }
+                                Text(artifact.type.rawValue)
+                                    .font(.callout)
+                                    .frame(width: 150, alignment: .leading)
+                                    .help("Artifact type is set in Define Artifact. BCG is the gateway that makes PCA-S available here.")
 
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(artifact.name)
@@ -1774,6 +1793,33 @@ extension WaveformView {
                 )
             }
 
+            if artifact.wrappedValue.cleaningMethod == .pcaS {
+                let missingGeometry = surrogateMissingGeometryChannels(for: signal)
+                let hasCompleteGeometry = missingGeometry.isEmpty && electrodeGeometry != nil
+                let minimumMatches = artifact.wrappedValue.pcaSSettings?.minimumAcceptedBeats
+                    ?? BCGSurrogateSettings.default.minimumAcceptedBeats
+                let hasEnoughMatches = artifact.wrappedValue.eventCount >= minimumMatches
+                let isReady = hasCompleteGeometry && hasEnoughMatches
+                let readinessText: String = if !hasCompleteGeometry {
+                    "Coordinates needed"
+                } else if !hasEnoughMatches {
+                    "\(artifact.wrappedValue.eventCount) detected matches · \(minimumMatches) needed"
+                } else {
+                    "\(artifact.wrappedValue.eventCount) detected matches ready"
+                }
+                Label(
+                    readinessText,
+                    systemImage: isReady ? "checkmark.circle" : "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(isReady ? Color.secondary : Color.orange)
+                .help(
+                    isReady
+                        ? "PCA-S is ready to use these exact detected BCG matches. The checkmark means the match-count and coordinate requirements are met; it does not mean the matches were manually reviewed."
+                        : "PCA-S requires at least \(minimumMatches) detected BCG matches and coordinates for every corrected channel."
+                )
+            }
+
             if artifact.wrappedValue.cleaningMethod == .bssCCA {
                 MuscleBSSCCAOptionsButton(
                     artifact: artifact,
@@ -1822,6 +1868,7 @@ extension WaveformView {
                 && ($0 != .corneoRetinalRegression || artifact.isCorneoRetinalDefinition)
                 && ($0 != .movementPCA || artifact.isMovementPCADefinition)
                 && ($0 != .bssCCA || artifact.isMuscleBSSCCADefinition)
+                && ($0 != .pcaS || artifact.type == .bcg)
                 && (!artifact.isCorneoRetinalDefinition || $0 == .doNothing || $0 == .corneoRetinalRegression)
                 && (!artifact.isMovementPCADefinition || $0 == .doNothing || $0 == .movementPCA)
                 && (!artifact.isMuscleBSSCCADefinition || $0 == .doNothing || $0 == .bssCCA)
@@ -1834,6 +1881,7 @@ extension WaveformView {
         Regress: subtracts the average artifact waveform; useful as a historical/simple comparison.
         OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; Options includes topography-aware OBS strategies.
         SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
+        PCA-S: BCG only. Builds source-informed artifact topographies from the exact detected matches selected in Define Artifact, then reconstructs the brain-model portion of the full recording. Requires complete 3D channel coordinates and at least 10 usable matches.
         SP Spatial Filter: the MAAC saccadic-spike specialization; fits and subtracts the saved canonical scalp map inside confirmed short SP windows.
         MAAC-2 CRD Regression: estimates continuous horizontal and vertical eye-position scalp maps from HEOG/VEOG, then removes them in sequence while interpolating the predictor through blink spans.
         MAAC-3 Movement PCA: runs temporal PCA + Promax independently in stored epochs, or in one-second blocks for continuous recordings, and removes factor back-projections over the peak-to-peak threshold.
@@ -1864,7 +1912,7 @@ extension WaveformView {
             let overall = progress.total > progress.artifactTotal
                 ? " · \(progress.completed) of \(progress.total) overall"
                 : ""
-            return "Cleaning \(current) of \(progress.artifactTotal) \(artifactPosition)\(progress.artifactName) events with \(progress.method.rawValue)\(overall)"
+            return "Cleaning \(current) of \(progress.artifactTotal) \(artifactPosition)\(progress.artifactName) events with \(progress.method.rawValue)\(overall)\(detail)"
         case .finalizing:
             return "Finalizing \(artifactPosition)\(progress.artifactName) with \(progress.method.rawValue)\(detail)"
         }

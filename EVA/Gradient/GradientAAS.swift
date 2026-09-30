@@ -216,6 +216,7 @@ nonisolated enum GradientAAS {
         if closingPadding > 0 {
             layout = layout.extended(bySamples: closingPadding, upsampleFactor: upsampleFactor)
         }
+        let finalizedLayout = layout
         let paddedChannels = closingPadding > 0
             ? channels.map { $0 + [Float](repeating: $0[sampleCount - 1], count: closingPadding) }
             : channels
@@ -270,11 +271,11 @@ nonisolated enum GradientAAS {
             // each time it is someone's donor. With a donor window of eight that
             // was nine passes over the same samples; the values are identical
             // either way, so this is pure redundancy.
-            var epochCache = [[Float]?](repeating: nil, count: layout.count)
-            for epoch in 0..<layout.count {
-                guard let epochStart = layout.windowStart(of: epoch) else { continue }
+            var epochCache = [[Float]?](repeating: nil, count: finalizedLayout.count)
+            for epoch in 0..<finalizedLayout.count {
+                guard let epochStart = finalizedLayout.windowStart(of: epoch) else { continue }
                 epochCache[epoch] = preprocess(
-                    Array(channel[epochStart..<(epochStart + layout.length)]),
+                    Array(channel[epochStart..<(epochStart + finalizedLayout.length)]),
                     mode: config.detrendMode
                 )
             }
@@ -283,12 +284,12 @@ nonisolated enum GradientAAS {
             var artifact = [Float](repeating: 0, count: channel.count)
 
             for plan in plans {
-                guard let start = layout.windowStart(of: plan.epoch) else {
+                guard let start = finalizedLayout.windowStart(of: plan.epoch) else {
                     warnings.append(.epochOutOfBounds(epoch: plan.epoch))
                     if channelIndex == representative {
                         diagnostics.append(diagnostic(
                             epoch: plan.epoch,
-                            layout: layout,
+                            layout: finalizedLayout,
                             donors: [],
                             corrected: false
                         ))
@@ -300,7 +301,7 @@ nonisolated enum GradientAAS {
                     if channelIndex == representative {
                         diagnostics.append(diagnostic(
                             epoch: plan.epoch,
-                            layout: layout,
+                            layout: finalizedLayout,
                             donors: [],
                             corrected: false
                         ))
@@ -322,7 +323,7 @@ nonisolated enum GradientAAS {
                     continue
                 }
 
-                let length = vDSP_Length(layout.length)
+                let length = vDSP_Length(finalizedLayout.length)
                 template.withUnsafeBufferPointer { source in
                     artifact.withUnsafeMutableBufferPointer { destination in
                         let slot = destination.baseAddress! + start
@@ -343,7 +344,7 @@ nonisolated enum GradientAAS {
                 if channelIndex == representative {
                     diagnostics.append(diagnostic(
                         epoch: plan.epoch,
-                        layout: layout,
+                        layout: finalizedLayout,
                         donors: plan.donorIndices,
                         corrected: true
                     ))
@@ -353,7 +354,7 @@ nonisolated enum GradientAAS {
             if config.anc {
                 let cutoff = GradientANC.cutoffHz(
                     policy: config.ancHighPass,
-                    epochPeriodSamples: max(1, layout.period),
+                    epochPeriodSamples: max(1, finalizedLayout.period),
                     samplingRate: workingRate
                 )
                 let anc = GradientANC.apply(

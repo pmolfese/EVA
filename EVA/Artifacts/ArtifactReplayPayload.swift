@@ -59,7 +59,9 @@ import Foundation
 /// take the others down with it.
 nonisolated struct ArtifactReplayPayload: Codable, Sendable {
     static let fileName = "eva_artifacts.json"
-    static let currentSchemaVersion = 1
+    /// v2 adds the manual-exemplar PCA-S method, portable surrogate settings,
+    /// and the saved versioned exemplar/matching definition.
+    static let currentSchemaVersion = 2
 
     var schemaVersion: Int = ArtifactReplayPayload.currentSchemaVersion
     var createdAt: Date = Date()
@@ -87,6 +89,7 @@ nonisolated struct ArtifactReplayPayload: Codable, Sendable {
             // re-stamps them from the summaries it actually produces.
             stripped.appliedMethod = nil
             stripped.cleanedAt = nil
+            stripped.pcaSReport = nil
             return stripped
         }
     }

@@ -75,6 +75,7 @@
 //  same reference, which is the thing that must never be fudged.
 //
 
+import Accelerate
 import Foundation
 
 /// The head model PCA-S builds its surrogate brain basis on. Only the analytic
@@ -316,6 +317,15 @@ nonisolated enum BCGSurrogateError: LocalizedError, Equatable, Sendable {
     }
 }
 
+/// Coarse scientific phases plus a real completion fraction for the two UI
+/// entry points that run PCA-S. Model construction has several very different
+/// costs; reporting them separately prevents a long full-recording matrix pass
+/// from looking like the small beat template is still being built.
+nonisolated struct BCGSurrogateProgress: Sendable, Equatable {
+    var fraction: Double
+    var detail: String
+}
+
 nonisolated enum BCGSurrogateCorrection {
 
     /// Name of this stage's `CleaningVarianceAccount`, fixed by ROADMAP SI-3 so
@@ -355,7 +365,8 @@ nonisolated enum BCGSurrogateCorrection {
         channelNames: [String]?,
         beatSeconds: [Double],
         settings: BCGSurrogateSettings = .default,
-        head headOverride: ForwardHeadModel? = nil
+        head headOverride: ForwardHeadModel? = nil,
+        progress: (@Sendable (BCGSurrogateProgress) -> Void)? = nil
     ) async throws -> Output {
         // The head model comes from the replayable settings; an explicit override
         // is honored for tests and callers that need to pin a specific geometry.
@@ -373,6 +384,11 @@ nonisolated enum BCGSurrogateCorrection {
         guard missing.isEmpty else {
             throw BCGSurrogateError.missingGeometry(missingChannelNumbers: missing)
         }
+
+        progress?(BCGSurrogateProgress(
+            fraction: 0.01,
+            detail: "Preparing \(rows.count) channels and \(beatSeconds.count) detected matches"
+        ))
 
         let electrodes = OrderedElectrodes(
             names: rows.map { row in
@@ -392,7 +408,17 @@ nonisolated enum BCGSurrogateCorrection {
             }
         )
 
-        let subset = rows.map { data[$0].map(Double.init) }
+        // Preserve the recording's native Float storage through template
+        // filtering. Only the short beat epochs need Double precision; the old
+        // full-scan Double→Float→Double round trip consumed gigabytes here.
+        let subset = rows.map { data[$0] }
+        progress?(BCGSurrogateProgress(
+            fraction: 0.03,
+            detail: String(
+                format: "Filtering detected matches in %.1f–%.1f Hz and fitting the artifact template",
+                settings.bandLowHz, settings.bandHighHz
+            )
+        ))
         guard let components = await BCGSurrogateTopographies.components(
             channels: subset,
             samplingRate: samplingRate,
@@ -408,8 +434,20 @@ nonisolated enum BCGSurrogateCorrection {
             )
         }
 
+        progress?(BCGSurrogateProgress(
+            fraction: 0.25,
+            detail: "Fitted \(components.topographies.count) reliable artifact component"
+                + (components.topographies.count == 1 ? "" : "s")
+                + " from \(components.acceptedBeatCount) matches"
+        ))
+
         let basis: SurrogateBrainBasis
         do {
+            progress?(BCGSurrogateProgress(
+                fraction: 0.28,
+                detail: "Building \(settings.regionalSourceCount)-source brain basis "
+                    + "for \(rows.count) electrodes (\(settings.harmonicTerms) harmonics)"
+            ))
             basis = try SurrogateBrainModel.basis(
                 head: head,
                 electrodes: electrodes,
@@ -423,6 +461,10 @@ nonisolated enum BCGSurrogateCorrection {
 
         let separation: SourceInformedOperator
         do {
+            progress?(BCGSurrogateProgress(
+                fraction: 0.40,
+                detail: "Fitting the \(basis.columnCount)-column brain/artifact separation operator"
+            ))
             separation = try SourceInformedSeparation.makeOperator(
                 brainBasis: basis.matrix,
                 artifactTopographies: components.topographies,
@@ -435,19 +477,73 @@ nonisolated enum BCGSurrogateCorrection {
         // Average reference over the corrected subset, so the operator and the
         // data it multiplies describe the same reference. See the file header.
         let sampleCount = subset.first?.count ?? 0
-        var averageReferenced = subset
+        progress?(BCGSurrogateProgress(
+            fraction: 0.46,
+            detail: "Average-referencing \(rows.count) channels across \(sampleCount) samples"
+        ))
+        var averageReferenced = subset.map { $0.map(Double.init) }
         var commonMode = [Double](repeating: 0, count: sampleCount)
-        for sample in 0..<sampleCount {
-            var sum = 0.0
-            for channel in subset.indices { sum += subset[channel][sample] }
-            let mean = sum / Double(subset.count)
-            commonMode[sample] = mean
-            for channel in averageReferenced.indices { averageReferenced[channel][sample] -= mean }
+        let vectorLength = vDSP_Length(sampleCount)
+        commonMode.withUnsafeMutableBufferPointer { sum in
+            for channel in averageReferenced.indices {
+                averageReferenced[channel].withUnsafeBufferPointer { source in
+                    vDSP_vaddD(
+                        sum.baseAddress!, 1,
+                        source.baseAddress!, 1,
+                        sum.baseAddress!, 1,
+                        vectorLength
+                    )
+                }
+                if channel.isMultiple(of: 8) || channel + 1 == averageReferenced.count {
+                    progress?(BCGSurrogateProgress(
+                        fraction: 0.46 + 0.05 * Double(channel + 1) / Double(averageReferenced.count),
+                        detail: "Computing the full-recording average reference · "
+                            + "\(channel + 1) of \(averageReferenced.count) channels"
+                    ))
+                }
+            }
+
+            var divisor = Double(averageReferenced.count)
+            vDSP_vsdivD(
+                sum.baseAddress!, 1,
+                &divisor,
+                sum.baseAddress!, 1,
+                vectorLength
+            )
+        }
+        commonMode.withUnsafeBufferPointer { mean in
+            for channel in averageReferenced.indices {
+                averageReferenced[channel].withUnsafeMutableBufferPointer { signal in
+                    // vDSP subtraction is B − A: signal − common mean.
+                    vDSP_vsubD(
+                        mean.baseAddress!, 1,
+                        signal.baseAddress!, 1,
+                        signal.baseAddress!, 1,
+                        vectorLength
+                    )
+                }
+                if channel.isMultiple(of: 8) || channel + 1 == averageReferenced.count {
+                    progress?(BCGSurrogateProgress(
+                        fraction: 0.51 + 0.05 * Double(channel + 1) / Double(averageReferenced.count),
+                        detail: "Removing the common reference · "
+                            + "\(channel + 1) of \(averageReferenced.count) channels"
+                    ))
+                }
+            }
         }
 
         let reconstructed: [[Double]]
         do {
-            reconstructed = try SourceInformedSeparation.apply(separation, to: averageReferenced)
+            reconstructed = try SourceInformedSeparation.apply(
+                separation,
+                to: averageReferenced
+            ) { fraction in
+                progress?(BCGSurrogateProgress(
+                    fraction: 0.56 + 0.32 * fraction,
+                    detail: "Reconstructing the full recording with Accelerate · "
+                        + "\(Int((100 * fraction).rounded()))%"
+                ))
+            }
         } catch {
             throw BCGSurrogateError.operatorFailed(error.localizedDescription)
         }
@@ -468,6 +564,13 @@ nonisolated enum BCGSurrogateCorrection {
                 channel[sample] = Float(Double(channel[sample]) - removed)
             }
             corrected[row] = channel
+            if index.isMultiple(of: 8) || index + 1 == rows.count {
+                progress?(BCGSurrogateProgress(
+                    fraction: 0.88 + 0.11 * Double(index + 1) / Double(rows.count),
+                    detail: "Writing corrected channels and measuring removed variance · "
+                        + "\(index + 1) of \(rows.count)"
+                ))
+            }
         }
 
         let report = BCGSurrogateReport(
@@ -492,6 +595,7 @@ nonisolated enum BCGSurrogateCorrection {
             reference: basis.reference.rawValue,
             removedVarianceFraction: originalSquares > 0 ? removedSquares / originalSquares : 0
         )
+        progress?(BCGSurrogateProgress(fraction: 1, detail: report.summary))
         return Output(data: corrected, report: report, operatorMatrix: separation.matrix)
     }
 }
