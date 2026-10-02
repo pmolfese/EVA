@@ -38,12 +38,14 @@ nonisolated enum NIfTIQuickLookReader {
         try source.skip(header.voxelOffset - bytesAlreadyRead)
         let slices = try extractCenterSlices(header: header, source: source)
         let window = NIfTIIntensityWindow.make(header: header, slices: slices)
+        let displayMode = NIfTIDisplayMode.make(url: url, header: header, slices: slices)
         let byteSize = ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
         return NIfTIPreviewModel(
             url: url,
             header: header,
             slices: slices,
             intensityWindow: window,
+            displayMode: displayMode,
             byteSize: byteSize,
             isCompressed: compressed
         )

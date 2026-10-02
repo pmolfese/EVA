@@ -64,7 +64,11 @@ private struct NIfTIMontageView: View {
     @ViewBuilder
     private func slicePanel(at index: Int) -> some View {
         if model.slices.indices.contains(index) {
-            NIfTISlicePanel(slice: model.slices[index], window: model.intensityWindow)
+            NIfTISlicePanel(
+                slice: model.slices[index],
+                window: model.intensityWindow,
+                displayMode: model.displayMode
+            )
         } else {
             Color(white: 0.06)
         }
@@ -84,23 +88,39 @@ private struct NIfTIMontageView: View {
             }
             Text(model.dimensionsText)
                 .font(.system(.title3, design: .rounded, weight: .semibold))
-            Text("Display window")
+            Text(model.displayMode.isLabelMap ? "Categorical labels" : "Display window")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            LinearGradient(
-                colors: [.black, .white],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(height: 10)
-            .clipShape(RoundedRectangle(cornerRadius: 2))
-            HStack {
-                Text(formatted(model.intensityWindow.minimum))
-                Spacer()
-                Text(formatted(model.intensityWindow.maximum))
+            if model.displayMode.isLabelMap {
+                HStack(spacing: 2) {
+                    ForEach(1..<13, id: \.self) { label in
+                        let color = NIfTISliceRenderer.color(forLabel: Int64(label))
+                        Color(red: Double(color.red) / 255,
+                              green: Double(color.green) / 255,
+                              blue: Double(color.blue) / 255)
+                    }
+                }
+                .frame(height: 10)
+                .clipShape(RoundedRectangle(cornerRadius: 2))
+                Text("\(model.displayMode.labelCount ?? 0) nonzero labels in preview")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            } else {
+                LinearGradient(
+                    colors: [.black, .white],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(height: 10)
+                .clipShape(RoundedRectangle(cornerRadius: 2))
+                HStack {
+                    Text(formatted(model.intensityWindow.minimum))
+                    Spacer()
+                    Text(formatted(model.intensityWindow.maximum))
+                }
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
             }
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(.secondary)
             Spacer()
             Text(model.header.affine.map { "Orientation from \($0.source)" } ?? "Native voxel orientation")
                 .font(.caption)
@@ -120,14 +140,19 @@ private struct NIfTIMontageView: View {
 struct NIfTISlicePanel: View {
     let slice: NIfTISlice
     let window: NIfTIIntensityWindow
+    var displayMode: NIfTIDisplayMode = .intensity
 
     var body: some View {
         ZStack {
             Color(white: 0.025)
-            if let image = NIfTISliceRenderer.image(for: slice, window: window) {
+            if let image = NIfTISliceRenderer.image(
+                for: slice,
+                window: window,
+                displayMode: displayMode
+            ) {
                 Image(decorative: image, scale: 1)
                     .resizable()
-                    .interpolation(.high)
+                    .interpolation(displayMode.isLabelMap ? .none : .high)
                     .aspectRatio(slice.physicalAspectRatio, contentMode: .fit)
                     .padding(18)
             }
@@ -180,6 +205,7 @@ private struct NIfTIMetadataContent: View {
                     NIfTIBadge(text: model.header.version.displayName)
                     if model.isCompressed { NIfTIBadge(text: "Gzip") }
                     if model.header.volumeCount > 1 { NIfTIBadge(text: "4D") }
+                    if model.displayMode.isLabelMap { NIfTIBadge(text: "Atlas / labels") }
                 }
             }
 
@@ -202,6 +228,9 @@ private struct NIfTIMetadataContent: View {
                 }
                 if model.header.effectiveSlope != 1 || model.header.effectiveIntercept != 0 {
                     row("Scaling", "×\(short(model.header.effectiveSlope)) + \(short(model.header.effectiveIntercept))")
+                }
+                if model.displayMode.isLabelMap {
+                    row("Rendering", model.displayMode.wasInferred ? "Categorical (inferred)" : "Categorical")
                 }
             }
 

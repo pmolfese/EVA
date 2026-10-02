@@ -179,13 +179,78 @@ struct NIfTIQuickLookReaderTests {
         }
     }
 
+    @Test func labelIntentSelectsCategoricalRendering() throws {
+        let fixture = NIfTITestFixture.make(
+            version: .one,
+            order: .littleEndian,
+            type: .int16,
+            dimensions: [4, 3, 2],
+            intentCode: 1002
+        )
+        try withFixture(fixture, extension: "nii") { url in
+            let model = try NIfTIQuickLookReader.read(from: url)
+            #expect(model.displayMode == .labels(labelCount: 18, inferred: false))
+            let image = try #require(NIfTISliceRenderer.image(
+                for: model.slices[0],
+                window: model.intensityWindow,
+                displayMode: model.displayMode
+            ))
+            #expect(image.bitsPerPixel == 24)
+            #expect(image.colorSpace?.model == .rgb)
+            #expect(!image.shouldInterpolate)
+        }
+    }
+
+    @Test func infersAtlasFromDiscreteValuesAndFilename() throws {
+        let fixture = NIfTITestFixture.make(
+            version: .one,
+            order: .littleEndian,
+            type: .int16,
+            dimensions: [4, 3, 2]
+        )
+        try withFixture(fixture, extension: "nii", stem: "subject_atlas") { url in
+            let model = try NIfTIQuickLookReader.read(from: url)
+            guard case .labels(let count, let inferred) = model.displayMode else {
+                Issue.record("Expected inferred categorical rendering")
+                return
+            }
+            #expect(count == 18)
+            #expect(inferred)
+        }
+    }
+
+    @Test func doesNotInferLabelsFromFractionalSamples() throws {
+        let fixture = NIfTITestFixture.make(
+            version: .one,
+            order: .littleEndian,
+            type: .float32,
+            dimensions: [4, 3, 2],
+            slope: 0.5
+        )
+        try withFixture(fixture, extension: "nii", stem: "subject_atlas") { url in
+            let model = try NIfTIQuickLookReader.read(from: url)
+            #expect(model.displayMode == .intensity)
+        }
+    }
+
+    @Test func categoricalColorsAreStableAndReserveZeroForBackground() {
+        let background = NIfTISliceRenderer.color(forLabel: 0)
+        let first = NIfTISliceRenderer.color(forLabel: 17)
+        let repeated = NIfTISliceRenderer.color(forLabel: 17)
+        let second = NIfTISliceRenderer.color(forLabel: 18)
+        #expect(background.red == 0 && background.green == 0 && background.blue == 0)
+        #expect(first.red == repeated.red && first.green == repeated.green && first.blue == repeated.blue)
+        #expect(first.red != second.red || first.green != second.green || first.blue != second.blue)
+    }
+
     private func withFixture(
         _ data: Data,
         extension pathExtension: String,
+        stem: String = "eva-nifti-\(UUID().uuidString)",
         body: (URL) throws -> Void
     ) throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("eva-nifti-\(UUID().uuidString).\(pathExtension)")
+            .appendingPathComponent("\(stem).\(pathExtension)")
         try data.write(to: url, options: .atomic)
         defer { try? FileManager.default.removeItem(at: url) }
         try body(url)
@@ -233,6 +298,7 @@ private enum NIfTITestFixture {
         dimensions: [Int],
         slope: Double = 1,
         intercept: Double = 0,
+        intentCode: Int = 0,
         sform: [[Double]]? = nil
     ) -> Data {
         precondition((3...4).contains(dimensions.count))
@@ -248,6 +314,7 @@ private enum NIfTITestFixture {
             }
             writeUInt16(type.code, into: &data, at: 70, order: order)
             writeUInt16(type.bitCount, into: &data, at: 72, order: order)
+            writeUInt16(UInt16(bitPattern: Int16(intentCode)), into: &data, at: 68, order: order)
             for index in 0..<8 { writeFloat32(index == 0 ? 1 : Float(index), into: &data, at: 76 + index * 4, order: order) }
             writeFloat32(352, into: &data, at: 108, order: order)
             writeFloat32(Float(slope), into: &data, at: 112, order: order)
@@ -266,6 +333,7 @@ private enum NIfTITestFixture {
             data.replaceSubrange(4..<12, with: [0x6e, 0x2b, 0x32, 0, 0x0d, 0x0a, 0x1a, 0x0a])
             writeUInt16(type.code, into: &data, at: 12, order: order)
             writeUInt16(type.bitCount, into: &data, at: 14, order: order)
+            writeUInt32(UInt32(bitPattern: Int32(intentCode)), into: &data, at: 504, order: order)
             writeUInt64(UInt64(dimensions.count), into: &data, at: 16, order: order)
             for (index, value) in dimensions.enumerated() {
                 writeUInt64(UInt64(value), into: &data, at: 24 + index * 8, order: order)
