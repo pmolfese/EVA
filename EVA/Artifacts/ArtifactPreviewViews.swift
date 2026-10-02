@@ -775,6 +775,311 @@ struct ArtifactOBSOptionsButton: View {
     }
 }
 
+struct ArtifactPCASOptionsButton: View {
+    @Binding var artifact: DefinedArtifact
+    let currentSignal: MFFSignalData
+    let hasBroadbandInput: Bool
+    let rWaveCount: Int
+    let hasCompleteGeometry: Bool
+    let onSettingsChange: () -> Void
+
+    @State private var showsOptions = false
+
+    var body: some View {
+        Button("Options...") {
+            showsOptions = true
+        }
+        .font(.caption)
+        .sheet(isPresented: $showsOptions) {
+            ArtifactPCASOptionsSheet(
+                artifact: $artifact,
+                currentSignal: currentSignal,
+                hasBroadbandInput: hasBroadbandInput,
+                rWaveCount: rWaveCount,
+                hasCompleteGeometry: hasCompleteGeometry,
+                onSettingsChange: onSettingsChange
+            )
+        }
+    }
+}
+
+struct ArtifactPCASOptionsSheet: View {
+    @Binding var artifact: DefinedArtifact
+    let currentSignal: MFFSignalData
+    let hasBroadbandInput: Bool
+    let rWaveCount: Int
+    let hasCompleteGeometry: Bool
+    let onSettingsChange: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    private var settings: BCGSurrogateSettings {
+        artifact.pcaSSettings ?? .default
+    }
+
+    private var selectedBeatCount: Int {
+        settings.beatSource == .rWaves ? rWaveCount : artifact.eventCount
+    }
+
+    private var isReady: Bool {
+        hasCompleteGeometry
+            && selectedBeatCount >= settings.minimumAcceptedBeats
+            && (settings.inputSource != .broadband || hasBroadbandInput)
+    }
+
+    private func settingBinding<Value>(
+        _ keyPath: WritableKeyPath<BCGSurrogateSettings, Value>
+    ) -> Binding<Value> {
+        Binding {
+            settings[keyPath: keyPath]
+        } set: { value in
+            var updated = settings
+            updated[keyPath: keyPath] = value
+            artifact.pcaSSettings = updated
+            artifact.pcaSReport = nil
+            onSettingsChange()
+        }
+    }
+
+    private var beatSourceBinding: Binding<BCGSurrogateBeatSource> {
+        Binding {
+            settings.beatSource
+        } set: { source in
+            guard source != .rWaves || rWaveCount > 0 else { return }
+            var updated = settings
+            updated.beatSource = source
+            if source == .rWaves, updated.patternSearch == .reviewedExemplar {
+                updated.patternSearch = .iterative
+            }
+            artifact.pcaSSettings = updated
+            artifact.pcaSReport = nil
+            onSettingsChange()
+        }
+    }
+
+    private var lowBandBinding: Binding<Double> {
+        Binding {
+            settings.bandLowHz
+        } set: { value in
+            var updated = settings
+            updated.bandLowHz = min(max(value, 0.1), max(updated.bandHighHz - 0.5, 0.1))
+            artifact.pcaSSettings = updated
+            artifact.pcaSReport = nil
+            onSettingsChange()
+        }
+    }
+
+    private var highBandBinding: Binding<Double> {
+        Binding {
+            settings.bandHighHz
+        } set: { value in
+            var updated = settings
+            let nyquist = max(currentSignal.samplingRate / 2 - 0.1, 1)
+            updated.bandHighHz = min(max(value, updated.bandLowHz + 0.5), nyquist)
+            artifact.pcaSSettings = updated
+            artifact.pcaSReport = nil
+            onSettingsChange()
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("PCA-S Options")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Label(
+                    isReady ? "Ready" : "Needs input",
+                    systemImage: isReady ? "checkmark.circle" : "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(isReady ? Color.secondary : Color.orange)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    GroupBox("Inputs") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Picker("Fit topographies from", selection: settingBinding(\.inputSource)) {
+                                ForEach(BCGSurrogateInputSource.allCases) { source in
+                                    Text(source.label).tag(source)
+                                }
+                            }
+                            Text(settings.inputSource == .broadband
+                                 ? "Fits the 1–20 Hz artifact evidence from the pre-filter signal, then applies the spatial operator to the current Clean Artifacts signal. The active temporal filter is preserved."
+                                 : "Fits and applies PCA-S using the signal currently entering Clean Artifacts. Use this when the active filter already contains the BCG morphology you want to model.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            if settings.inputSource == .broadband && !hasBroadbandInput {
+                                Label("Broadband pre-filter data is not available in this workflow.", systemImage: "exclamationmark.triangle")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            }
+
+                            Divider()
+
+                            Picker("Beat anchors", selection: beatSourceBinding) {
+                                Text("Defined BCG matches (\(artifact.eventCount))")
+                                    .tag(BCGSurrogateBeatSource.artifactEvents)
+                                Text(rWaveCount > 0
+                                     ? "Detected R-waves (\(rWaveCount))"
+                                     : "Detected R-waves (run ECG detection first)")
+                                    .tag(BCGSurrogateBeatSource.rWaves)
+                                    .disabled(rWaveCount == 0)
+                            }
+
+                            if settings.beatSource == .rWaves {
+                                HStack {
+                                    Text("R-wave → BCG lag")
+                                    Spacer()
+                                    TextField(
+                                        "Seconds",
+                                        value: settingBinding(\.rWaveLagSeconds),
+                                        format: .number.precision(.fractionLength(3))
+                                    )
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 80)
+                                    Text("s")
+                                        .foregroundStyle(.secondary)
+                                }
+                                Text("The lag shifts electrical R-wave anchors to the expected mechanical BCG complex before epochs are cut.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Label(
+                                "\(selectedBeatCount) anchors selected · \(settings.minimumAcceptedBeats) required",
+                                systemImage: selectedBeatCount >= settings.minimumAcceptedBeats
+                                    ? "checkmark.circle" : "exclamationmark.triangle"
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(selectedBeatCount >= settings.minimumAcceptedBeats ? Color.secondary : Color.orange)
+
+                            Label(
+                                hasCompleteGeometry ? "Complete 3D channel coordinates" : "Complete 3D coordinates required",
+                                systemImage: hasCompleteGeometry ? "checkmark.circle" : "exclamationmark.triangle"
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(hasCompleteGeometry ? Color.secondary : Color.orange)
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    GroupBox("Artifact model") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("Template band")
+                                Spacer()
+                                TextField("Low", value: lowBandBinding, format: .number.precision(.fractionLength(1)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 64)
+                                Text("–")
+                                TextField("High", value: highBandBinding, format: .number.precision(.fractionLength(1)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 64)
+                                Text("Hz")
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Picker("Pattern search", selection: settingBinding(\.patternSearch)) {
+                                ForEach(BCGArtifactPatternSearch.allCases) { mode in
+                                    Text(mode.label).tag(mode)
+                                }
+                            }
+
+                            HStack {
+                                Text("Beat match")
+                                Slider(value: settingBinding(\.correlationThreshold), in: 0.2...0.95)
+                                Text(settings.correlationThreshold, format: .number.precision(.fractionLength(2)))
+                                    .monospacedDigit()
+                                    .frame(width: 38)
+                            }
+                            .disabled(settings.patternSearch == .reviewedExemplar)
+
+                            HStack {
+                                Text("Component reliability")
+                                Slider(value: settingBinding(\.minimumComponentReliability), in: 0.3...0.99)
+                                Text(settings.minimumComponentReliability, format: .number.precision(.fractionLength(2)))
+                                    .monospacedDigit()
+                                    .frame(width: 38)
+                            }
+
+                            Stepper(
+                                "Minimum accepted beats: \(settings.minimumAcceptedBeats)",
+                                value: settingBinding(\.minimumAcceptedBeats),
+                                in: 4...100
+                            )
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    GroupBox("Source separation") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Picker("Head model", selection: settingBinding(\.headModel)) {
+                                ForEach(BCGSurrogateHeadModel.allCases) { model in
+                                    Text(model.displayName).tag(model)
+                                }
+                            }
+                            Text(settings.headModel.summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            Stepper(
+                                "Regional sources: \(settings.regionalSourceCount)",
+                                value: settingBinding(\.regionalSourceCount),
+                                in: 8...60
+                            )
+
+                            HStack {
+                                Text("Brain regularization")
+                                Slider(value: settingBinding(\.brainRegularization), in: 0.002...0.1)
+                                Text(settings.brainRegularization, format: .number.precision(.fractionLength(3)))
+                                    .monospacedDigit()
+                                    .frame(width: 46)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    if let report = artifact.pcaSReport {
+                        GroupBox("Last run") {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(report.summary)
+                                Text("Reliability: " + report.artifactComponentReliabilities
+                                    .map { String(format: "%.2f", $0) }.joined(separator: ", "))
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 620, height: 720)
+        .onAppear {
+            if artifact.pcaSSettings == nil {
+                artifact.pcaSSettings = .default
+            }
+            if settings.beatSource == .rWaves, rWaveCount == 0 {
+                var updated = settings
+                updated.beatSource = .artifactEvents
+                artifact.pcaSSettings = updated
+            }
+        }
+    }
+}
+
 struct ArtifactLocalTemplateOptionsButton: View {
     @Binding var artifact: DefinedArtifact
     let onSettingsChange: () -> Void

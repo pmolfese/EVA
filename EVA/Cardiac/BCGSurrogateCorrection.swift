@@ -133,12 +133,55 @@ nonisolated enum BCGSurrogateHeadModel: String, Codable, Sendable, CaseIterable,
     }
 }
 
+/// Which signal supplies the beat-locked evidence used to fit PCA-S.
+///
+/// The fitted PCA-S operator is spatial, so a broadband fit can still be
+/// applied to the signal currently entering Clean Artifacts without bypassing
+/// the user's active temporal filter.
+nonisolated enum BCGSurrogateInputSource: String, Codable, Sendable, CaseIterable, Identifiable {
+    case currentFiltered
+    case broadband
+
+    nonisolated var id: String { rawValue }
+
+    nonisolated var label: String {
+        switch self {
+        case .currentFiltered: return "Current filtered data"
+        case .broadband: return "Broadband pre-filter data"
+        }
+    }
+}
+
+/// Event anchors used to cut the beat-locked PCA-S epochs.
+nonisolated enum BCGSurrogateBeatSource: String, Codable, Sendable, CaseIterable, Identifiable {
+    case artifactEvents
+    case rWaves
+
+    nonisolated var id: String { rawValue }
+
+    nonisolated var label: String {
+        switch self {
+        case .artifactEvents: return "Defined BCG matches"
+        case .rWaves: return "Detected R-waves"
+        }
+    }
+}
+
 /// Portable PCA-S settings. Everything here travels in `eva.xml`; nothing here
 /// is fitted to a particular recording.
 nonisolated struct BCGSurrogateSettings: Codable, Sendable, Equatable {
     /// The surrogate brain basis's head model. Portable and replayable.
     var headModel: BCGSurrogateHeadModel = .classicThreeShell
     var patternSearch: BCGArtifactPatternSearch = .iterative
+    /// Signal used to fit artifact topographies. The resulting spatial operator
+    /// is applied to the current Clean Artifacts signal in either mode.
+    var inputSource: BCGSurrogateInputSource = .currentFiltered
+    /// Normally use the exact BCG matches stored on the artifact definition.
+    /// R-wave fallback is opt-in and is available only when ECG detection has
+    /// actually produced R-wave events for this recording.
+    var beatSource: BCGSurrogateBeatSource = .artifactEvents
+    /// Mechanical delay added when R-waves are used as epoch anchors.
+    var rWaveLagSeconds: Double = 0.300
     /// Beat-locked template window, relative to each detected beat.
     var windowStartSeconds: Double = -0.1
     var windowEndSeconds: Double = 0.6
@@ -172,6 +215,9 @@ nonisolated struct BCGSurrogateSettings: Codable, Sendable, Equatable {
         [
             "surrogateHeadModel": headModel.rawValue,
             "surrogatePatternSearch": patternSearch.rawValue,
+            "surrogateInputSource": inputSource.rawValue,
+            "surrogateBeatSource": beatSource.rawValue,
+            "surrogateRWaveLagSeconds": String(format: "%.6f", rWaveLagSeconds),
             "surrogateWindowStartSeconds": String(format: "%.6f", windowStartSeconds),
             "surrogateWindowEndSeconds": String(format: "%.6f", windowEndSeconds),
             "surrogateBandLowHz": String(format: "%.6f", bandLowHz),
@@ -199,6 +245,13 @@ nonisolated struct BCGSurrogateSettings: Codable, Sendable, Equatable {
         if let value = p["surrogatePatternSearch"].flatMap(BCGArtifactPatternSearch.init(rawValue:)) {
             patternSearch = value
         }
+        if let value = p["surrogateInputSource"].flatMap(BCGSurrogateInputSource.init(rawValue:)) {
+            inputSource = value
+        }
+        if let value = p["surrogateBeatSource"].flatMap(BCGSurrogateBeatSource.init(rawValue:)) {
+            beatSource = value
+        }
+        if let value = p["surrogateRWaveLagSeconds"].flatMap(Double.init) { rWaveLagSeconds = value }
         if let value = p["surrogateWindowStartSeconds"].flatMap(Double.init) { windowStartSeconds = value }
         if let value = p["surrogateWindowEndSeconds"].flatMap(Double.init) { windowEndSeconds = value }
         if let value = p["surrogateBandLowHz"].flatMap(Double.init) { bandLowHz = value }
@@ -290,6 +343,7 @@ nonisolated enum BCGSurrogateError: LocalizedError, Equatable, Sendable {
     case tooFewAcceptedBeats(accepted: Int, required: Int)
     case noArtifactComponents
     case tooFewChannels(found: Int, required: Int)
+    case incompatibleFittingSignal
     case operatorFailed(String)
 
     var errorDescription: String? {
@@ -311,6 +365,8 @@ nonisolated enum BCGSurrogateError: LocalizedError, Equatable, Sendable {
             return "No artifact component carried enough of the beat template's variance to be used."
         case .tooFewChannels(let found, let required):
             return "PCA-S needs at least \(required) good EEG channels; \(found) are available."
+        case .incompatibleFittingSignal:
+            return "The selected PCA-S fitting signal does not match the current data's channels, sample count, or sampling rate."
         case .operatorFailed(let message):
             return "The source-informed operator could not be built: \(message)"
         }
@@ -359,6 +415,7 @@ nonisolated enum BCGSurrogateCorrection {
     ///   - beatSeconds: detected beat times, from EVA's existing detectors.
     static func correct(
         data: [[Float]],
+        fittingData: [[Float]]? = nil,
         samplingRate: Double,
         correctedRows: [Int],
         geometry: ElectrodeGeometry?,
@@ -371,11 +428,22 @@ nonisolated enum BCGSurrogateCorrection {
         // The head model comes from the replayable settings; an explicit override
         // is honored for tests and callers that need to pin a specific geometry.
         let head = headOverride ?? settings.headModel.forwardHeadModel
-        let rows = correctedRows.filter { data.indices.contains($0) }.sorted()
+        let fittingData = fittingData ?? data
+        let rows = correctedRows.filter {
+            data.indices.contains($0) && fittingData.indices.contains($0)
+        }.sorted()
         guard rows.count >= minimumChannelCount else {
             throw BCGSurrogateError.tooFewChannels(found: rows.count, required: minimumChannelCount)
         }
         guard !beatSeconds.isEmpty else { throw BCGSurrogateError.noBeats }
+
+        let targetSampleCount = rows.first.map { data[$0].count } ?? 0
+        guard targetSampleCount > 0,
+              rows.allSatisfy({ data[$0].count == targetSampleCount }),
+              rows.allSatisfy({ fittingData[$0].count == targetSampleCount })
+        else {
+            throw BCGSurrogateError.incompatibleFittingSignal
+        }
 
         guard let geometry else {
             throw BCGSurrogateError.missingGeometry(missingChannelNumbers: [])
@@ -411,7 +479,7 @@ nonisolated enum BCGSurrogateCorrection {
         // Preserve the recording's native Float storage through template
         // filtering. Only the short beat epochs need Double precision; the old
         // full-scan Double→Float→Double round trip consumed gigabytes here.
-        let subset = rows.map { data[$0] }
+        let fittingSubset = rows.map { fittingData[$0] }
         progress?(BCGSurrogateProgress(
             fraction: 0.03,
             detail: String(
@@ -420,7 +488,7 @@ nonisolated enum BCGSurrogateCorrection {
             )
         ))
         guard let components = await BCGSurrogateTopographies.components(
-            channels: subset,
+            channels: fittingSubset,
             samplingRate: samplingRate,
             beatSeconds: beatSeconds,
             settings: settings
@@ -476,12 +544,13 @@ nonisolated enum BCGSurrogateCorrection {
 
         // Average reference over the corrected subset, so the operator and the
         // data it multiplies describe the same reference. See the file header.
-        let sampleCount = subset.first?.count ?? 0
+        let applicationSubset = rows.map { data[$0] }
+        let sampleCount = applicationSubset.first?.count ?? 0
         progress?(BCGSurrogateProgress(
             fraction: 0.46,
             detail: "Average-referencing \(rows.count) channels across \(sampleCount) samples"
         ))
-        var averageReferenced = subset.map { $0.map(Double.init) }
+        var averageReferenced = applicationSubset.map { $0.map(Double.init) }
         var commonMode = [Double](repeating: 0, count: sampleCount)
         let vectorLength = vDSP_Length(sampleCount)
         commonMode.withUnsafeMutableBufferPointer { sum in

@@ -554,7 +554,9 @@ private struct ProcessingDefaultsView: View {
             Section("BCG") {
                 Toggle("Auto-select proxy channel set on open", isOn: $defaults.bcgAutoSelectProxySet)
                 Picker("Default method", selection: $defaults.bcgDefaultMethod) {
-                    ForEach(BCGDetectionMethod.allCases) { Text($0.tabLabel).tag($0) }
+                    ForEach(BCGDetectionMethod.allCases.filter { $0 != .surrogatePCAS }) {
+                        Text($0.tabLabel).tag($0)
+                    }
                 }
             }
 

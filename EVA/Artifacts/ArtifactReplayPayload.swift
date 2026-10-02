@@ -60,8 +60,9 @@ import Foundation
 nonisolated struct ArtifactReplayPayload: Codable, Sendable {
     static let fileName = "eva_artifacts.json"
     /// v2 adds the manual-exemplar PCA-S method, portable surrogate settings,
-    /// and the saved versioned exemplar/matching definition.
-    static let currentSchemaVersion = 2
+    /// and the saved versioned exemplar/matching definition. v3 adds PCA-S
+    /// fitting-signal and beat-anchor source selection.
+    static let currentSchemaVersion = 3
 
     var schemaVersion: Int = ArtifactReplayPayload.currentSchemaVersion
     var createdAt: Date = Date()

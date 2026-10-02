@@ -22,18 +22,31 @@ nonisolated enum ArtifactCleaningExecutor {
         artifacts: [DefinedArtifact],
         excluding excludedChannels: Set<Int>,
         geometry: ElectrodeGeometry?,
+        broadbandSource: MFFSignalData? = nil,
+        rWaveTimes: [Double] = [],
         ordering: ArtifactCleaningOrdering = .asDefined,
         availableBandwidthHz: Double? = nil,
         progress: (@Sendable (ArtifactCleaningProgress) -> Void)? = nil
     ) async -> ArtifactCleaningExecutionResult {
         let ordered = ArtifactCleaner.orderedArtifacts(artifacts, ordering: ordering).filter {
-            $0.cleaningMethod.removesArtifact
-                && (!$0.events.isEmpty
+            let settings = $0.pcaSSettings ?? .default
+            let hasPCASAnchors = $0.cleaningMethod == .pcaS
+                && settings.beatSource == .rWaves
+                && !rWaveTimes.isEmpty
+            return $0.cleaningMethod.removesArtifact
+                && (!$0.events.isEmpty || hasPCASAnchors
                     || $0.cleaningMethod == .corneoRetinalRegression
                     || $0.cleaningMethod == .movementPCA
                     || $0.cleaningMethod == .bssCCA)
         }
-        let totalEvents = ordered.reduce(0) { $0 + max($1.eventCount, 1) }
+        func workloadCount(for artifact: DefinedArtifact) -> Int {
+            let settings = artifact.pcaSSettings ?? .default
+            if artifact.cleaningMethod == .pcaS, settings.beatSource == .rWaves {
+                return max(rWaveTimes.count, 1)
+            }
+            return max(artifact.eventCount, 1)
+        }
+        let totalEvents = ordered.reduce(0) { $0 + workloadCount(for: $1) }
         var completedEvents = 0
         var current = signal
         var summaries: [ArtifactCleaningSummary] = []
@@ -42,7 +55,7 @@ nonisolated enum ArtifactCleaningExecutor {
 
         for (index, artifact) in ordered.enumerated() {
             guard !Task.isCancelled else { break }
-            let artifactTotal = max(artifact.eventCount, 1)
+            let artifactTotal = workloadCount(for: artifact)
             let completedBeforeArtifact = completedEvents
 
             if artifact.cleaningMethod != .pcaS {
@@ -91,16 +104,40 @@ nonisolated enum ArtifactCleaningExecutor {
             }
 
             var settings = artifact.pcaSSettings ?? BCGSurrogateSettings.default
-            settings.patternSearch = .reviewedExemplar
             let halfWindow = max(artifact.windowSizeSeconds, 0.02) / 2
             settings.windowStartSeconds = -halfWindow
             settings.windowEndSeconds = halfWindow
-            let eventTimes = artifact.events.map(\.centerTimeSeconds).sorted()
+            let eventTimes: [Double]
+            switch settings.beatSource {
+            case .artifactEvents:
+                eventTimes = artifact.events.map(\.centerTimeSeconds).sorted()
+            case .rWaves:
+                eventTimes = rWaveTimes.map { $0 + settings.rWaveLagSeconds }.sorted()
+            }
+            guard !eventTimes.isEmpty else {
+                failures[artifact.id] = BCGSurrogateError.noBeats.localizedDescription
+                continue
+            }
             let correctedRows = current.data.indices.filter { !excludedChannels.contains($0) }
+
+            let fittingData: [[Float]]
+            switch settings.inputSource {
+            case .currentFiltered:
+                fittingData = current.data
+            case .broadband:
+                guard let broadbandSource,
+                      broadbandSource.samplingRate == current.samplingRate
+                else {
+                    failures[artifact.id] = BCGSurrogateError.incompatibleFittingSignal.localizedDescription
+                    continue
+                }
+                fittingData = broadbandSource.data
+            }
 
             do {
                 let output = try await BCGSurrogateCorrection.correct(
                     data: current.data,
+                    fittingData: fittingData,
                     samplingRate: current.samplingRate,
                     correctedRows: correctedRows,
                     geometry: geometry,

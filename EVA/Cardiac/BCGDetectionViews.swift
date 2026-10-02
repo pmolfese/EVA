@@ -19,6 +19,13 @@
 
 import SwiftUI
 
+/// PCA-S consumes already detected events and is configured/applied in Clean
+/// Artifacts. Keep its enum case for stored history while removing it from the
+/// detector-facing choices.
+private let visibleBCGDetectionMethods = BCGDetectionMethod.allCases.filter {
+    $0 != .surrogatePCAS
+}
+
 private struct BCGParameterLabel: View {
     let title: String
     let explanation: String
@@ -91,7 +98,7 @@ private struct BCGMethodOverviewHelpButton: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    ForEach(BCGDetectionMethod.allCases) { method in
+                    ForEach(visibleBCGDetectionMethods) { method in
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
                                 Text(method.tabLabel)
@@ -144,7 +151,12 @@ extension WaveformView {
     // MARK: - BCG Detection sheet
 
     @ViewBuilder
-    func bcgDetectionSheet(for signal: MFFSignalData, selection: ClosedRange<Int>?) -> some View {
+    func bcgDetectionSheet(
+        for signal: MFFSignalData,
+        correctionSignal: MFFSignalData? = nil,
+        selection: ClosedRange<Int>?
+    ) -> some View {
+        let pcaSInput = correctionSignal ?? signal
         VStack(alignment: .leading, spacing: 0) {
             // Header
             VStack(alignment: .leading, spacing: 4) {
@@ -165,7 +177,7 @@ extension WaveformView {
 
             // Method tab strip
             Picker("Method", selection: $bcg.method) {
-                ForEach(BCGDetectionMethod.allCases) { method in
+                ForEach(visibleBCGDetectionMethods) { method in
                     Text(method.tabLabel).tag(method)
                 }
             }
@@ -259,6 +271,40 @@ extension WaveformView {
                                     .frame(width: 70)
                                 Text("s")
                                     .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Toggle(isOn: $bcg.estimatesWindowFromPattern) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Estimate window from repeating pattern")
+                                        .font(.caption)
+                                    Text("After finding beat anchors, measure the interval that repeats across odd and even beats. The Window field remains the fallback and can be edited before the next run.")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+
+                            if let estimate = bcg.durationEstimate {
+                                let startMilliseconds = estimate.startOffsetSeconds * 1000
+                                let endMilliseconds = estimate.endOffsetSeconds * 1000
+                                Label(
+                                    String(
+                                        format: "Suggested span: %+.0f to %+.0f ms · %d ms · %d beats · confidence %.2f",
+                                        startMilliseconds,
+                                        endMilliseconds,
+                                        Int((estimate.durationSeconds * 1000).rounded()),
+                                        estimate.contributingBeatCount,
+                                        estimate.confidence
+                                    ),
+                                    systemImage: "waveform.path.ecg"
+                                )
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.green)
+                                .fixedSize(horizontal: false, vertical: true)
+                            } else if bcg.estimatesWindowFromPattern {
+                                Text("The estimate appears after detection when at least six in-bounds beats repeat reliably; otherwise EVA keeps the Window value above.")
+                                    .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
 
@@ -410,13 +456,13 @@ extension WaveformView {
                 }
                 if bcg.method == .surrogatePCAS {
                     let beats = surrogateBeatTimes()
-                    let missingGeometry = !surrogateMissingGeometryChannels(for: signal).isEmpty
+                    let missingGeometry = !surrogateMissingGeometryChannels(for: pcaSInput).isEmpty
                         || electrodeGeometry == nil
                     Button("Correct PCA-S") {
                         bcgTask?.cancel()
                         let sessionID = recordingSessionID
                         bcgTask = Task {
-                            await runSurrogateCorrection(signal: signal)
+                            await runSurrogateCorrection(signal: pcaSInput)
                             if !Task.isCancelled, sessionID == recordingSessionID {
                                 bcgTask = nil
                             }
@@ -463,7 +509,7 @@ extension WaveformView {
             .padding(20)
         }
         // Wide enough for the method picker's intrinsic width. A `.segmented`
-        // picker neither wraps nor compresses, so its nine labels set a hard
+        // picker neither wraps nor compresses, so its labels set a hard
         // floor on this sheet — at 720 the content overflowed and the sheet
         // window clipped it symmetrically at both edges. Adding a tenth method
         // means checking this number again.
@@ -471,6 +517,11 @@ extension WaveformView {
         .disabled(bcg.isRunning || bcg.isRefining)
         .task(id: bcgDetectionPreviewRequestID(for: signal, selection: selection)) {
             await refreshBCGDetectionEstimate(for: signal, selection: selection)
+        }
+        .onAppear {
+            if bcg.method == .surrogatePCAS {
+                bcg.method = .periodicity
+            }
         }
     }
 
@@ -500,7 +551,7 @@ extension WaveformView {
                     .gridCellUnsizedAxes(.horizontal)
                     .gridCellColumns(4)
 
-                ForEach(BCGDetectionMethod.allCases) { method in
+                ForEach(visibleBCGDetectionMethods) { method in
                     GridRow {
                         Text(method.tabLabel).font(.caption2)
                         if let result = bcg.algorithmResults[method] {
@@ -627,7 +678,7 @@ extension WaveformView {
             of: (BCGDetectionMethod, BCGAlgorithmResult?).self,
             returning: [BCGDetectionMethod: BCGAlgorithmResult].self
         ) { group in
-            for method in BCGDetectionMethod.allCases where !method.isDirectCorrection {
+            for method in visibleBCGDetectionMethods where !method.isDirectCorrection {
                 group.addTask(priority: .utility) {
                     guard let times = await BCGDetectionPreviewEstimator.eventTimes(
                         method: method,
@@ -1339,6 +1390,7 @@ extension WaveformView {
         bcg.status = "Detecting…"
         bcg.refinedTemplate = nil
         bcg.refinedKeptCount = nil
+        bcg.durationEstimate = nil
 
         // Restrict to a channel set when one is selected (GFP-based methods).
         let restrictedIndices: [Int]? = bcg.channelSetID.flatMap { id in
@@ -1374,8 +1426,9 @@ extension WaveformView {
         // detector does not guarantee that its CPU work leaves MainActor. Run
         // the complete algorithm path on an explicit worker instead; only the
         // event/status publication below belongs on the UI actor.
+        let shouldEstimateWindow = bcg.estimatesWindowFromPattern
         let detectionWorker = Task.detached(priority: .userInitiated) {
-            await BCGDetectionPreviewEstimator.eventTimes(
+            let times = await BCGDetectionPreviewEstimator.eventTimes(
                 method: method,
                 channels: channels,
                 samplingRate: sr,
@@ -1385,8 +1438,16 @@ extension WaveformView {
                 configuration: configuration,
                 hemisphericChannels: hemisphericChannels
             ) ?? []
+            let estimate = shouldEstimateWindow
+                ? await BCGDurationEstimator.estimate(
+                    channels: channels,
+                    samplingRate: sr,
+                    beatSeconds: times
+                )
+                : nil
+            return (times: times, estimate: estimate)
         }
-        let times = await withTaskCancellationHandler(
+        let detection = await withTaskCancellationHandler(
             operation: {
                 await detectionWorker.value
             },
@@ -1402,6 +1463,17 @@ extension WaveformView {
             }
             return
         }
+        let times = detection.times
+        let durationEstimate = detection.estimate
+        bcg.durationEstimate = durationEstimate
+        if let durationEstimate {
+            bcg.windowSeconds = durationEstimate.durationSeconds
+            // Events below are shifted to the inferred interval's midpoint, so
+            // PCA-S consumes an exactly equivalent symmetric epoch.
+            let halfWindow = durationEstimate.durationSeconds / 2
+            bcg.surrogateSettings.windowStartSeconds = -halfWindow
+            bcg.surrogateSettings.windowEndSeconds = halfWindow
+        }
         let code    = bcg.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
         let useCode = code.isEmpty ? BCGDetector.eventCode : code
 
@@ -1409,18 +1481,22 @@ extension WaveformView {
             times: times,
             idPrefix: "bcg-\(method.rawValue)",
             code: useCode,
-            windowSeconds: bcg.windowSeconds
+            windowSeconds: bcg.windowSeconds,
+            durationEstimate: durationEstimate
         )
 
         let nonBCG = artifactVM.events.filter { $0.sourceFile != BCGDetector.sourceFile }
         artifactVM.events = (nonBCG + newEvents).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
 
+        let windowStatus = durationEstimate.map {
+            "  ·  \(Int(($0.durationSeconds * 1000).rounded())) ms window"
+        } ?? ""
         if let estBPM = estimatedBPM(from: times) {
-            bcg.status = "✓ \(newEvents.count) events  ·  ~\(String(format: "%.0f", estBPM)) BPM"
+            bcg.status = "✓ \(newEvents.count) events  ·  ~\(String(format: "%.0f", estBPM)) BPM\(windowStatus)"
         } else {
             bcg.status = newEvents.isEmpty
                 ? "No events detected — try lowering the threshold or check channel selection."
-                : "✓ \(newEvents.count) events"
+                : "✓ \(newEvents.count) events\(windowStatus)"
         }
 
         bcg.detectsArtifacts = !newEvents.isEmpty
@@ -1445,7 +1521,7 @@ extension WaveformView {
         let sessionID = recordingSessionID
         let existingTimes = artifactVM.events
             .filter { $0.sourceFile == BCGDetector.sourceFile }
-            .map { $0.beginTimeSeconds }
+            .map(\.centerTimeSeconds)
         guard !existingTimes.isEmpty else { return }
 
         let channels = signal.data
@@ -1476,11 +1552,26 @@ extension WaveformView {
 
         let useCode = bcg.eventCode.trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty ? BCGDetector.eventCode : bcg.eventCode
+        let durationEstimate = bcg.estimatesWindowFromPattern
+            ? await BCGDurationEstimator.estimate(
+                channels: channels,
+                samplingRate: sr,
+                beatSeconds: newTimes
+            )
+            : nil
+        bcg.durationEstimate = durationEstimate
+        if let durationEstimate {
+            bcg.windowSeconds = durationEstimate.durationSeconds
+            let halfWindow = durationEstimate.durationSeconds / 2
+            bcg.surrogateSettings.windowStartSeconds = -halfWindow
+            bcg.surrogateSettings.windowEndSeconds = halfWindow
+        }
         let newEvents = BCGDetector.makeEvents(
             times: newTimes,
             idPrefix: "bcg-refined",
             code: useCode,
-            windowSeconds: bcg.windowSeconds
+            windowSeconds: bcg.windowSeconds,
+            durationEstimate: durationEstimate
         )
 
         let nonBCG = artifactVM.events.filter { $0.sourceFile != BCGDetector.sourceFile }
@@ -1491,7 +1582,10 @@ extension WaveformView {
 
         let total = existingTimes.count
         let bpmStr = estimatedBPM(from: newTimes).map { String(format: "  ·  ~%.0f BPM", $0) } ?? ""
-        bcg.status = "✓ Refined: \(keptCount)/\(total) beats kept → \(newEvents.count) events\(bpmStr)"
+        let windowStatus = durationEstimate.map {
+            "  ·  \(Int(($0.durationSeconds * 1000).rounded())) ms window"
+        } ?? ""
+        bcg.status = "✓ Refined: \(keptCount)/\(total) beats kept → \(newEvents.count) events\(bpmStr)\(windowStatus)"
         registerBCGDefinedArtifact(events: newEvents, eventCode: useCode)
         bcg.isRefining = false
     }
@@ -1797,7 +1891,7 @@ extension WaveformView {
         let code = bcg.beatEventCode
         let bcgBeats = artifactVM.events
             .filter { $0.code == code }
-            .map(\.beginTimeSeconds)
+            .map(\.centerTimeSeconds)
             .sorted()
         if !bcgBeats.isEmpty { return bcgBeats }
         return artifactVM.events
@@ -1835,7 +1929,28 @@ extension WaveformView {
         let beats = surrogateBeatTimes()
         let rows = surrogateCorrectedRows(for: signal)
         let geometry = electrodeGeometry
-        let settings = bcg.surrogateSettings
+        var settings = bcg.surrogateSettings
+        // When BCG detection has marked a reviewed common interval, fit PCA-S
+        // from that exact interval rather than reverting to its historical
+        // -100...+600 ms default. The event centers already include any
+        // asymmetric shift inferred relative to the original detector peaks.
+        let markedDurations = artifactVM.events
+            .filter {
+                $0.code == bcg.beatEventCode
+                    && $0.sourceFile == BCGDetector.sourceFile
+            }
+            .compactMap(\.durationSeconds)
+            .filter { $0 > 0 }
+            .sorted()
+        if !markedDurations.isEmpty {
+            let middle = markedDurations.count / 2
+            let duration = markedDurations.count.isMultiple(of: 2)
+                ? (markedDurations[middle - 1] + markedDurations[middle]) / 2
+                : markedDurations[middle]
+            settings.windowStartSeconds = -duration / 2
+            settings.windowEndSeconds = duration / 2
+            bcg.surrogateSettings = settings
+        }
         let sourceData = signal.data
         let names = signal.channelNames
         let samplingRate = signal.samplingRate

@@ -1621,8 +1621,22 @@ extension WaveformView {
         artifactVM.cleaningStatusMessage = message
     }
 
-    func artifactCleaningSheet(for signal: MFFSignalData) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+    func artifactCleaningSheet(
+        for signal: MFFSignalData,
+        broadbandSignal: MFFSignalData? = nil
+    ) -> some View {
+        let rWaveCount = artifactVM.events.filter { $0.code == RWaveDetector.eventCode }.count
+        let hasCompletePCASGeometry = electrodeGeometry != nil
+            && surrogateMissingGeometryChannels(for: signal).isEmpty
+        let hasUnavailablePCAS = template.definedArtifacts.contains { artifact in
+            guard artifact.cleaningMethod == .pcaS else { return false }
+            let settings = artifact.pcaSSettings ?? .default
+            let anchors = settings.beatSource == .rWaves ? rWaveCount : artifact.eventCount
+            return !hasCompletePCASGeometry
+                || anchors < settings.minimumAcceptedBeats
+                || (settings.inputSource == .broadband && broadbandSignal == nil)
+        }
+        return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Clean Artifacts")
                     .font(.title3.weight(.semibold))
@@ -1694,6 +1708,7 @@ extension WaveformView {
                                 artifactTreatmentControl(
                                     artifact: $artifact,
                                     signal: signal,
+                                    broadbandSignal: broadbandSignal,
                                     cleanedSignal: artifactVM.cleanedSignal,
                                     layout: recording.sensorLayout
                                 )
@@ -1736,10 +1751,14 @@ extension WaveformView {
                 .keyboardShortcut(.cancelAction)
 
                 Button("Apply") {
-                    applyArtifactCleaning(to: signal)
+                    applyArtifactCleaning(to: signal, broadbandSignal: broadbandSignal)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(artifactVM.isCleaning || !template.definedArtifacts.contains { $0.cleaningMethod.removesArtifact })
+                .disabled(
+                    artifactVM.isCleaning
+                        || hasUnavailablePCAS
+                        || !template.definedArtifacts.contains { $0.cleaningMethod.removesArtifact }
+                )
             }
         }
         .padding(.horizontal, 32)
@@ -1771,6 +1790,7 @@ extension WaveformView {
     func artifactTreatmentControl(
         artifact: Binding<DefinedArtifact>,
         signal: MFFSignalData,
+        broadbandSignal: MFFSignalData?,
         cleanedSignal: MFFSignalData?,
         layout: SensorLayout?
     ) -> some View {
@@ -1796,17 +1816,32 @@ extension WaveformView {
             if artifact.wrappedValue.cleaningMethod == .pcaS {
                 let missingGeometry = surrogateMissingGeometryChannels(for: signal)
                 let hasCompleteGeometry = missingGeometry.isEmpty && electrodeGeometry != nil
-                let minimumMatches = artifact.wrappedValue.pcaSSettings?.minimumAcceptedBeats
-                    ?? BCGSurrogateSettings.default.minimumAcceptedBeats
-                let hasEnoughMatches = artifact.wrappedValue.eventCount >= minimumMatches
-                let isReady = hasCompleteGeometry && hasEnoughMatches
+                let settings = artifact.wrappedValue.pcaSSettings ?? BCGSurrogateSettings.default
+                let minimumMatches = settings.minimumAcceptedBeats
+                let rWaveCount = artifactVM.events.filter { $0.code == RWaveDetector.eventCode }.count
+                let selectedBeatCount = settings.beatSource == .rWaves
+                    ? rWaveCount
+                    : artifact.wrappedValue.eventCount
+                let hasEnoughMatches = selectedBeatCount >= minimumMatches
+                let hasSelectedInput = settings.inputSource != .broadband || broadbandSignal != nil
+                let isReady = hasCompleteGeometry && hasEnoughMatches && hasSelectedInput
                 let readinessText: String = if !hasCompleteGeometry {
                     "Coordinates needed"
+                } else if !hasSelectedInput {
+                    "Broadband input unavailable"
                 } else if !hasEnoughMatches {
-                    "\(artifact.wrappedValue.eventCount) detected matches · \(minimumMatches) needed"
+                    "\(selectedBeatCount) \(settings.beatSource == .rWaves ? "R-waves" : "matches") · \(minimumMatches) needed"
                 } else {
-                    "\(artifact.wrappedValue.eventCount) detected matches ready"
+                    "\(selectedBeatCount) \(settings.beatSource == .rWaves ? "R-waves" : "matches") ready"
                 }
+                ArtifactPCASOptionsButton(
+                    artifact: artifact,
+                    currentSignal: signal,
+                    hasBroadbandInput: broadbandSignal != nil,
+                    rWaveCount: rWaveCount,
+                    hasCompleteGeometry: hasCompleteGeometry,
+                    onSettingsChange: clearAppliedArtifactCleaning
+                )
                 Label(
                     readinessText,
                     systemImage: isReady ? "checkmark.circle" : "exclamationmark.triangle"
@@ -1815,8 +1850,8 @@ extension WaveformView {
                 .foregroundStyle(isReady ? Color.secondary : Color.orange)
                 .help(
                     isReady
-                        ? "PCA-S is ready to use these exact detected BCG matches. The checkmark means the match-count and coordinate requirements are met; it does not mean the matches were manually reviewed."
-                        : "PCA-S requires at least \(minimumMatches) detected BCG matches and coordinates for every corrected channel."
+                        ? "PCA-S is ready to use the selected beat anchors and fitting signal. The checkmark means the count, input, and coordinate requirements are met; it does not mean the anchors were manually reviewed."
+                        : "PCA-S requires its selected fitting signal, at least \(minimumMatches) beat anchors, and coordinates for every corrected channel."
                 )
             }
 
@@ -1881,7 +1916,7 @@ extension WaveformView {
         Regress: subtracts the average artifact waveform; useful as a historical/simple comparison.
         OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; Options includes topography-aware OBS strategies.
         SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
-        PCA-S: BCG only. Builds source-informed artifact topographies from the exact detected matches selected in Define Artifact, then reconstructs the brain-model portion of the full recording. Requires complete 3D channel coordinates and at least 10 usable matches.
+        PCA-S: BCG only. Builds source-informed artifact topographies from defined BCG matches or detected R-waves, then applies the spatial operator to the signal entering Clean Artifacts. Options can fit the topographies from the current filtered signal or the broadband pre-filter signal. Requires complete 3D channel coordinates and enough usable anchors.
         SP Spatial Filter: the MAAC saccadic-spike specialization; fits and subtracts the saved canonical scalp map inside confirmed short SP windows.
         MAAC-2 CRD Regression: estimates continuous horizontal and vertical eye-position scalp maps from HEOG/VEOG, then removes them in sequence while interpolating the predictor through blink spans.
         MAAC-3 Movement PCA: runs temporal PCA + Promax independently in stored epochs, or in one-second blocks for continuous recordings, and removes factor back-projections over the peak-to-peak threshold.

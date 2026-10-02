@@ -57,6 +57,13 @@ final class BCGDetectionViewModel {
     var method = BCGDetectionMethod.periodicity
     var eventCode = "BCG"
     var windowSeconds = 0.700
+    /// When enabled, the detector's point-like beat anchors are followed by a
+    /// split-half recurrence pass that estimates the common BCG interval.
+    /// `windowSeconds` remains the editable fallback and records the accepted
+    /// estimate after a successful run.
+    var estimatesWindowFromPattern = true
+    /// Fitted to the current recording; never serialized as a portable setting.
+    var durationEstimate: BCGDurationEstimate?
     var thresholdSD = 2.5
 
     // MARK: Heart-rate / band parameters
@@ -136,6 +143,7 @@ final class BCGDetectionViewModel {
         status = nil
         refinedTemplate = nil
         refinedKeptCount = nil
+        durationEstimate = nil
         isRefining = false
         isEstimating = false
         algorithmResults = [:]
@@ -172,6 +180,7 @@ final class BCGDetectionViewModel {
             "method": method.rawValue,
             "eventCode": eventCode,
             "windowSeconds": String(format: "%.6f", windowSeconds),
+            "estimatesWindowFromPattern": "\(estimatesWindowFromPattern)",
             "thresholdSD": String(format: "%.6f", thresholdSD),
             "minHR": String(format: "%.6f", minHR),
             "maxHR": String(format: "%.6f", maxHR),

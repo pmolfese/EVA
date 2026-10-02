@@ -107,7 +107,10 @@ extension WaveformView {
         }
     }
 
-    func applyArtifactCleaning(to signal: MFFSignalData) {
+    func applyArtifactCleaning(
+        to signal: MFFSignalData,
+        broadbandSignal: MFFSignalData? = nil
+    ) {
         let artifacts = template.definedArtifacts
         guard artifacts.contains(where: { $0.cleaningMethod.removesArtifact }) else {
             restoreArtifactCleaning()
@@ -122,6 +125,10 @@ extension WaveformView {
         let excludedChannels = channels.bad.union(channels.interpolated.keys)
         let availableBandwidthHz = filter.output == nil ? nil : filter.lowPassCutoff
         let geometry = electrodeGeometry
+        let rWaveTimes = artifactVM.events
+            .filter { $0.code == RWaveDetector.eventCode }
+            .map(\.beginTimeSeconds)
+            .sorted()
         let (progressContinuation, progressTask) = ProgressBridge.make { progress in
             artifactVM.cleaningProgress = progress
         }
@@ -136,6 +143,8 @@ extension WaveformView {
                         artifacts: artifacts,
                         excluding: excludedChannels,
                         geometry: geometry,
+                        broadbandSource: broadbandSignal,
+                        rWaveTimes: rWaveTimes,
                         availableBandwidthHz: availableBandwidthHz
                     ) { progress in
                         progressContinuation.yield(progress)

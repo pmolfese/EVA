@@ -195,7 +195,7 @@ extension WaveformView {
             artifactTemplateSheet(for: continuousSignal)
 
         case .artifactCleaning:
-            artifactCleaningSheet(for: cleaningBase)
+            artifactCleaningSheet(for: cleaningBase, broadbandSignal: base)
 
         case .saccadicSpike:
             saccadicSpikeSheet(for: continuousSignal)
@@ -224,7 +224,16 @@ extension WaveformView {
             )
 
         case .bcgDetection:
-            bcgDetectionSheet(for: continuousSignal, selection: activeSelectionRange(in: continuousSignal))
+            // Detection follows what the user is viewing, but PCA-S is a base
+            // correction and must receive the pre-filter signal. Its private
+            // 1-20 Hz copy is only for fitting artifact topographies; the
+            // resulting spatial operator is applied broadband, after which the
+            // normal pipeline can rebuild the user's filter.
+            bcgDetectionSheet(
+                for: continuousSignal,
+                correctionSignal: base,
+                selection: activeSelectionRange(in: continuousSignal)
+            )
                 .onAppear {
                     autoSelectBCGProxySetIfEnabled(for: continuousSignal)
                     prepareCWLDefaults(pns: displayedPhysioSignal())

@@ -139,7 +139,10 @@ final class ProcessingDefaults {
     }
     /// Typed convenience over `bcgDefaultMethodRaw`, for binding directly to a `Picker`.
     var bcgDefaultMethod: BCGDetectionMethod {
-        get { BCGDetectionMethod(rawValue: bcgDefaultMethodRaw) ?? .spatialPCA }
+        get {
+            let method = BCGDetectionMethod(rawValue: bcgDefaultMethodRaw) ?? .spatialPCA
+            return method == .surrogatePCAS ? .spatialPCA : method
+        }
         set { bcgDefaultMethodRaw = newValue.rawValue }
     }
 

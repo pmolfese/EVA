@@ -545,6 +545,51 @@ struct BCGSurrogateCorrectionTests {
         #expect(outcome.signal.data != signal.data)
     }
 
+    /// Clean Artifacts can fit PCA-S from the broadband pre-filter signal while
+    /// applying the learned spatial operator to the current signal, and can use
+    /// real R-wave anchors only when the caller supplies them.
+    @MainActor
+    @Test func artifactCleaningExecutorSupportsBroadbandFitAndRWaveAnchors() async throws {
+        let fixture = try makeFixture()
+        let broadband = SyntheticSignal.make(fixture.noisy, samplingRate: samplingRate)
+        let currentData = fixture.noisy.map { channel in channel.map { $0 * 0.75 } }
+        let current = SyntheticSignal.make(currentData, samplingRate: samplingRate)
+
+        var settings = BCGSurrogateSettings.default
+        settings.inputSource = .broadband
+        settings.beatSource = .rWaves
+        settings.rWaveLagSeconds = 0.300
+        settings.patternSearch = .iterative
+        let artifact = DefinedArtifact(
+            type: .bcg,
+            name: "R-wave BCG",
+            eventCode: "BCG",
+            events: [],
+            selectedChannelIndices: Array(0..<channelCount),
+            windowSizeSeconds: 0.7,
+            average: nil,
+            topography: nil,
+            cleaningMethod: .pcaS,
+            pcaSSettings: settings
+        )
+
+        let outcome = await ArtifactCleaningExecutor.cleanedSignal(
+            from: current,
+            artifacts: [artifact],
+            excluding: [],
+            geometry: fixture.geometry,
+            broadbandSource: broadband,
+            rWaveTimes: fixture.beats.map { $0 - settings.rWaveLagSeconds }
+        )
+
+        let report = try #require(outcome.pcaSReports[artifact.id])
+        #expect(outcome.failures.isEmpty)
+        #expect(report.candidateBeatCount == fixture.beats.count)
+        #expect(outcome.signal.data.count == current.data.count)
+        #expect(outcome.signal.data.first?.count == current.data.first?.count)
+        #expect(outcome.signal.data != current.data)
+    }
+
     /// A front/back reflection is not a harmless dipole-direction sign change:
     /// it builds the surrogate basis in the wrong coordinate frame.  Keep this
     /// sensitivity check beside the truth-backed fixture so a future importer,
@@ -745,6 +790,9 @@ struct BCGSurrogateCorrectionTests {
     @Test func settingsRoundTripThroughParameters() {
         var settings = BCGSurrogateSettings.default
         settings.patternSearch = .paper
+        settings.inputSource = .broadband
+        settings.beatSource = .rWaves
+        settings.rWaveLagSeconds = 0.275
         settings.brainRegularization = 0.035
         settings.regionalSourceCount = 21
         settings.correlationThreshold = 0.72

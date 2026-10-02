@@ -30,6 +30,75 @@ struct BCGDetectorTests {
         #expect(try #require(events.first).centerTimeSeconds == 1.25)
     }
 
+    @Test func durationEstimateShiftsEventsToTheLearnedIntervalCenter() throws {
+        let estimate = BCGDurationEstimate(
+            startOffsetSeconds: -0.08,
+            endOffsetSeconds: 0.52,
+            contributingBeatCount: 20,
+            confidence: 0.8
+        )
+        let event = try #require(BCGDetector.makeEvents(
+            times: [2.0],
+            idPrefix: "estimated-bcg",
+            code: "BCG",
+            windowSeconds: 0.7,
+            durationEstimate: estimate
+        ).first)
+
+        #expect(event.timeAnchor == .center)
+        #expect(abs(event.beginTimeSeconds - 2.22) < 1e-12)
+        #expect(abs((event.durationSeconds ?? 0) - 0.60) < 1e-12)
+        #expect(abs(event.onsetTimeSeconds - 1.92) < 1e-12)
+        #expect(abs(event.endTimeSeconds - 2.52) < 1e-12)
+    }
+
+    @Test func durationEstimatorFindsTheRepeatingArtifactSupport() async throws {
+        let samplingRate = 250.0
+        let sampleCount = 5_500
+        let beats = stride(from: 1.0, through: 20.0, by: 1.0).map { $0 }
+        let weights: [Float] = [-1.0, -0.5, 0.35, 0.8]
+        var channels = weights.map { _ in [Float](repeating: 0, count: sampleCount) }
+
+        // A smooth, fixed-topography artifact running from -50 to +450 ms.
+        for beat in beats {
+            let anchor = Int((beat * samplingRate).rounded())
+            let first = Int((-0.05 * samplingRate).rounded())
+            let last = Int((0.45 * samplingRate).rounded())
+            for offset in first...last {
+                let phase = Double(offset - first) / Double(last - first)
+                let waveform = Float(sin(Double.pi * phase))
+                for channel in channels.indices {
+                    channels[channel][anchor + offset] += weights[channel] * waveform
+                }
+            }
+        }
+
+        let estimate = try #require(await BCGDurationEstimator.estimate(
+            channels: channels,
+            samplingRate: samplingRate,
+            beatSeconds: beats
+        ))
+
+        #expect(estimate.startOffsetSeconds > -0.15)
+        #expect(estimate.startOffsetSeconds < 0.03)
+        #expect(estimate.endOffsetSeconds > 0.38)
+        #expect(estimate.endOffsetSeconds < 0.55)
+        #expect(estimate.durationSeconds > 0.38)
+        #expect(estimate.durationSeconds < 0.68)
+        #expect(estimate.contributingBeatCount == beats.count)
+        #expect(estimate.confidence > 0.5)
+    }
+
+    @Test func durationEstimatorRefusesFlatData() {
+        let channels = (0..<4).map { _ in [Float](repeating: 0, count: 4_000) }
+        let beats = stride(from: 1.0, through: 12.0, by: 1.0).map { $0 }
+        #expect(BCGDurationEstimator.estimateFiltered(
+            channels: channels,
+            samplingRate: 250,
+            beatSeconds: beats
+        ) == nil)
+    }
+
 
     /// Builds channels carrying a spatially varying periodic "cardiac" pulse train
     /// (a narrow bump repeated every `periodSamples`) plus per-channel pseudo-random

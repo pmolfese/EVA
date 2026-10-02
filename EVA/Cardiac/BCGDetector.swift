@@ -564,24 +564,33 @@ nonisolated enum BCGDetector {
     }
 
     /// Creates the event records shared by initial and refined BCG detection.
-    /// BCG detector times identify the artifact peak (the center of the output
-    /// window), so each event carries the full centered window as its duration.
+    /// Without an estimate, detector times retain the historical peak-centred
+    /// window. With one, the point anchor is shifted to the learned interval's
+    /// midpoint and the event carries that interval's measured duration.
     static func makeEvents(
         times: [Double],
         idPrefix: String,
         code: String,
-        windowSeconds: Double
+        windowSeconds: Double,
+        durationEstimate: BCGDurationEstimate? = nil
     ) -> [MFFEvent] {
-        let duration = max(windowSeconds, 0)
+        let duration = max(durationEstimate?.durationSeconds ?? windowSeconds, 0)
+        let centerShift = durationEstimate?.centerOffsetSeconds ?? 0
         return times.enumerated().map { index, time in
-            MFFEvent(
-                id: "\(idPrefix)-\(index)-\(time)",
+            let eventTime = time + centerShift
+            return MFFEvent(
+                id: "\(idPrefix)-\(index)-\(eventTime)",
                 code: code,
-                beginTimeSeconds: time,
-                rawBeginTime: String(format: "%.4f", time),
+                beginTimeSeconds: eventTime,
+                rawBeginTime: String(format: "%.4f", eventTime),
                 sourceFile: sourceFile,
                 durationSeconds: duration,
-                timeAnchor: .peak
+                // A learned interval is generally asymmetric around the
+                // detector's extremum. Store its true midpoint so the event
+                // band and every downstream centered epoch cover the inferred
+                // onset and offset exactly. Manual windows retain the older
+                // peak-anchored convention.
+                timeAnchor: durationEstimate == nil ? .peak : .center
             )
         }
     }
