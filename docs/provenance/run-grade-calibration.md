@@ -271,6 +271,29 @@ Proposed fix and acceptance work, not yet implemented:
 4. Keep OBS and ANC optional until that gate exists. Do not make permissive
    correlation ranking the slice default despite its artifact-present score.
 
+#### Always-on brain-safety sentinels (2026-10-03)
+
+The first acceptance slice is now in the ordinary test suite as
+`GradientBrainSafetyRegressionTests`; unlike the C5 campaign, it is not gated by
+an environment variable. Three small deterministic tests pin only conclusions
+the existing evidence supports:
+
+1. production defaults remain temporal-neighbour donation with OBS and ANC off;
+2. the conservative temporal-template path stays inside the C5 development
+   bounds (clean truth error ≤ 0.10 and correlation ≥ 0.95) on one fixed,
+   non-epoch-locked engineering fixture; and
+3. a fixed-phase alternating event/control fixture preserves the known
+   counterexample: raw correlation ranking retains less than half the condition
+   difference preserved by temporal neighbours.
+
+The third test deliberately records a current hazard. When an artifact-evidence
+gate is implemented, it must be converted into an assertion that the gate chose
+the conservative path; an apparent algorithmic improvement is not grounds to
+weaken or delete it without reviewing ERP transfer. These are regression
+sentinels, not real-data validation and not clinical thresholds. Gate thresholds
+and production-default changes remain blocked on measured gradient/phantom and
+human evidence.
+
 ### FASTR C5 follow-up: duration, sampling rate and slice timing (2026-09-27)
 
 This follow-up separates **artifact removal** from the brain-safety scores

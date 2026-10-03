@@ -938,6 +938,12 @@ owner.
   not become the slice default. Full table and interpretation:
   `docs/provenance/run-grade-calibration.md` § FASTR C5; raw data:
   `docs/provenance/data/gradient-calibration/eva-fastr-c5-ablation.csv`.
+  **Acceptance slice shipped 2026-10-03:** three fast, always-on
+  `GradientBrainSafetyRegressionTests` now pin the conservative production
+  defaults, the temporal path's clean-signal development bound on a fixed
+  engineering fixture, and the known fixed-phase ERP counterexample. They do
+  not authorize a confidence threshold or default change; those remain blocked
+  on measured gradient/phantom and human data.
 - [x] **C5 acquisition-length / rate / slice-grid follow-up — MEASURED
   2026-09-27, TIMING/ALIGNMENT DEFECT BOUNDED.** The requested 0.5–3 s TR, 30 s–10
   min, volume/20/30/32/40/45/50-slice and 250/500/1000/2000/5000 Hz grids are
